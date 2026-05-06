@@ -14,7 +14,7 @@
     "test": "FORGE_HOME=$(mktemp -d -t forge-test-XXXXXX) node --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "better-sqlite3": "^11.5.0",
+    "better-sqlite3": "^11.10.0",
     "commander": "^12.1.0",
     "gray-matter": "^4.0.3"
   },
