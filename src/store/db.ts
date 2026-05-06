@@ -1,17 +1,29 @@
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
+import { existsSync } from "node:fs";
 import { DB_PATH, ensureForgeDirs } from "../util/paths.js";
 import { SCHEMA_SQL } from "./schema.js";
 
 let _db: DatabaseInstance | null = null;
 
-export function getDb(): DatabaseInstance {
+export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
   if (_db) return _db;
   ensureForgeDirs();
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.exec(SCHEMA_SQL);
+  // A read-only open on a non-existent file would fail. If no DB exists yet, fall through
+  // to a writable open so the schema gets created — read-only callers running on a fresh
+  // install will simply observe an empty DB.
+  const readOnly = opts?.readOnly === true && existsSync(DB_PATH);
+  const db = new Database(DB_PATH, readOnly ? { readonly: true } : undefined);
+  if (!readOnly) {
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
+    db.exec(SCHEMA_SQL);
+  }
+  // Wait up to 5s for a held write lock instead of failing immediately. Cheap insurance
+  // against contention between concurrent forge invocations (e.g. `status` while `next`
+  // is mid-flight). With WAL, readers don't block writers; this matters mostly for the
+  // small write window during commit.
+  db.pragma("busy_timeout = 5000");
   _db = db;
   return db;
 }

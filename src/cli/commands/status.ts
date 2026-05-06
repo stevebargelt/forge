@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { listRuns, getRun } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
+import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { loadWorkflow } from "../../spine/workflows.js";
 import { reconcileRun } from "../../spine/reconcile.js";
@@ -10,9 +11,13 @@ export function registerStatus(program: Command): void {
   program
     .command("status")
     .argument("[run-id]", "show one run, or omit to list all")
+    .option("--read-only", "open the DB read-only (skips reconcile; never blocks a running `forge next`)")
     .description("Show run status. Always works against whatever has been built so far.")
-    .action(async (runId?: string) => {
+    .action(async (runId: string | undefined, opts: { readOnly?: boolean }) => {
       ensureForgeDirs();
+      // --read-only opts out of reconcile and opens a read-only DB connection so we
+      // can't be blocked by a concurrent `forge next` even momentarily.
+      if (opts.readOnly) getDb({ readOnly: true });
       if (!runId) {
         const runs = listRuns();
         if (runs.length === 0) {
@@ -27,15 +32,17 @@ export function registerStatus(program: Command): void {
       const run = getRun(runId);
       if (!run) throw new Error(`Run not found: ${runId}`);
       // Reconcile orphaned running tasks before reporting — keeps `status` honest
-      // when an earlier `forge next` lost track of a docker child.
-      try {
-        const wf = await loadWorkflow(run.workflow);
-        const reconciled = reconcileRun(runId, wf).filter((r) => r.resolution !== "still_running");
-        if (reconciled.length > 0) {
-          console.log(`(reconciled ${reconciled.length} orphaned task(s) before reporting)`);
+      // when an earlier `forge next` lost track of a docker child. Skipped under --read-only.
+      if (!opts.readOnly) {
+        try {
+          const wf = await loadWorkflow(run.workflow);
+          const reconciled = reconcileRun(runId, wf).filter((r) => r.resolution !== "still_running");
+          if (reconciled.length > 0) {
+            console.log(`(reconciled ${reconciled.length} orphaned task(s) before reporting)`);
+          }
+        } catch {
+          // If the workflow can't load (deleted/renamed), skip reconciliation but still show status.
         }
-      } catch {
-        // If the workflow can't load (deleted/renamed), skip reconciliation but still show status.
       }
       console.log(`Run: ${run.title}  (${run.id})`);
       console.log(`Workflow: ${run.workflow}`);

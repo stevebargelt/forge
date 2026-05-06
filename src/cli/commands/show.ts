@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { getTask } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
+import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 
 export function registerShow(program: Command): void {
@@ -10,6 +11,8 @@ export function registerShow(program: Command): void {
     .description("Show full details of a task: package, result, verdicts")
     .action((taskId: string) => {
       ensureForgeDirs();
+      // Open the DB read-only so a concurrent `forge next` can't be blocked by us.
+      getDb({ readOnly: true });
       const t = getTask(taskId);
       if (!t) throw new Error(`Task not found: ${taskId}`);
       console.log(`Task ${t.id}`);
