@@ -1,0 +1,156 @@
+{
+  "status": "complete",
+  "report": "# Forge Codebase Assessment Report\n\n**Date:** 2026-05-06  \n**Lenses assessed:** architecture, code-quality, maintainability, security, testability, documentation, performance  \n**Note:** code-quality, security, and performance lenses found an empty `/workspace` and could not assess source. Findings below draw from architecture, maintainability, testability, and documentation lenses which operated on the actual codebase.\n\n---\n\n## Executive Summary\n\nForge is a well-architected TypeScript CLI orchestrator with a clean unidirectional dependency flow and a sound pipeline state-machine pattern. The high-level design is solid. However, the project has **zero automated tests** and the internal implementation has several structural properties that make it effectively untestable without significant refactoring: a module-level database singleton, hard-coded file-system paths, direct Docker subprocess coupling, and business logic embedded inside Commander `.action()` callbacks. These issues compound: until the testability blockers are resolved, the three high-severity maintainability issues (missing JSON.parse guards, oversized `spawn()` and `gate()` functions) cannot be safely refactored. Documentation is largely good but has two medium-severity gaps.\n\n---\n\n## Critical Findings\n\n### 1. No test infrastructure whatsoever\n**Lens:** testability | **Area:** test infrastructure\n\nThere is no test framework in `package.json` dependencies, no `*.test.ts` or `*.spec.ts` files anywhere in the repo, no test scripts, and no CI/CD configuration. `package.json` scripts contain only `typecheck` and `build`.\n\n**Recommendation:** Install Vitest (recommended for ESM/TypeScript). Add `\"test\": \"vitest\"` to `package.json`. Create a minimal test fixture before attempting any other refactoring — tests are the safety net for every other fix on this list.\n\n---\n\n### 2. Module-level DB singleton blocks test isolation\n**Lens:** testability | **Area:** database singleton / global mutable state\n\n`src/store/db.ts` exports a module-level `_db` variable initialized on first `getDb()` call. All 5 store modules (20+ call sites) call `getDb()` directly with no injection point. `DB_PATH` is hard-coded to `~/.forge/forge.db` — tests would read and write the real user database.\n\n**Recommendation:** Introduce an `IStore` interface and a `createStore(db)` factory. Inject the store into orchestration functions so tests can pass an in-memory SQLite database. Export a `resetDb()` or allow overriding `_db` for test setup/teardown.\n\n---\n\n### 3. Docker subprocess calls have no abstraction layer\n**Lens:** testability | **Area:** subprocess and Docker coupling\n\n`src/spine/spawn.ts` calls `cpSpawn('docker', args)` directly inside `runDocker()`. `src/util/creds.ts` calls `execFileSync('docker', [...])` for OAuth validation. No `IDockerRunner`/`IProcessRunner` interface or injectable abstraction exists, making unit tests impossible.\n\n**Recommendation:** Extract an `IDockerRunner`/`IProcessRunner` interface and inject it into `spawn()`, `ensureCreds()`, and `startSsoWatchdog()`. Provide a `MockDockerRunner` in tests that returns canned exit codes without invoking Docker.\n\n---\n\n### 4. All paths resolve to `~/.forge` at module-load time\n**Lens:** testability | **Area:** hard-coded file system paths\n\n`src/util/paths.ts` evaluates `FORGE_HOME` as a module-level constant exported to `DB_PATH`, `RUNS_DIR`, `AGENTS_DIR`, `CONSTRAINTS_DIR`. Tests cannot redirect I/O without mutating the real home directory and cannot run in parallel without cross-contaminating each other's state.\n\n**Recommendation:** Accept `FORGE_HOME` via an injectable `IConfig` object instead of module-level constants. Allow tests to point `FORGE_HOME` at a `tmp` directory.\n\n---\n\n### 5. Signal handlers registered at module load call `process.exit()`\n**Lens:** testability | **Area:** global process signal handlers\n\n`src/util/sso-watchdog.ts` attaches `process.on('SIGINT')` and `process.on('SIGTERM')` at module evaluation time, both calling `process.exit()`. Any import of this module in a test process permanently registers these handlers and can kill the test runner on teardown.\n\n**Recommendation:** Move signal handler registration to an explicit `setup()` function called only from the CLI entry point. Remove direct `process.exit()` calls from library code.\n\n---\n\n## High Findings\n\n### 6. `JSON.parse` called without error handling at 11 locations\n**Lens:** maintainability | **Area:** error-handling\n\n`src/store/runs.ts:23`, `src/store/tasks.ts:28,50`, `src/store/verdicts.ts:25`, `src/store/events.ts:29`, `src/cli/commands/new.ts:34` — all call `JSON.parse()` on database-sourced strings with no try-catch or validation. Malformed DB data causes unhandled exceptions with no context.\n\n**Recommendation:** Create a `safeJsonParse<T>(json: string, fallback?: T): T` utility wrapping all call sites.\n\n---\n\n### 7. `spawn()` handles 7+ responsibilities in ~72 lines\n**Lens:** maintainability | **Area:** function-complexity\n\n`src/spine/spawn.ts:22-93` performs credential setup, directory creation, file writes, Docker spawn, error parsing, JSON extraction with multiple fallback strategies, task state updates, and event logging in a single function with 6+ nesting levels. Effectively untestable in isolation.\n\n**Recommendation:** Decompose into `setupTaskDir()`, `spawnDockerContainer()`, `parseAgentResult()`, `handleTaskCompletion()`.\n\n---\n\n### 8. `gate()` handles six concerns in 111 lines\n**Lens:** maintainability | **Area:** function-complexity\n\n`src/spine/gate.ts:40-151` manages task validation, verdict aggregation, state transition logic, next-phase task creation, fanout derivation, and singularization all in one function.\n\n**Recommendation:** Extract `validateGateRequest()`, `executeGateDecision()`, `createFollowUpTasks()`. Move `deriveFanoutInputs()` and `singularize()` to a data/utility module.\n\n---\n\n### 9. Business logic, DB writes, file I/O, and subprocess calls interleaved in orchestration functions\n**Lens:** testability | **Area:** mixed concerns in orchestration functions\n\n`gate.ts` performs 8+ `getDb()`-dependent calls, loads workflow from disk, aggregates verdicts, and conditionally dispatches next-phase tasks — all in one 80-line async function. `next.ts` and `spawnRed.ts` exhibit the same pattern.\n\n**Recommendation:** Extract pure logic functions (`aggregateVerdicts`, `filterConstraints`, `buildDockerArgs`, `parseVerdict`) into separate modules. Separate orchestration from persistence: orchestrators should receive data, not call `getDb()`.\n\n---\n\n### 10. Workflows loaded via dynamic `import(pathToFileURL(...))` — impossible to mock\n**Lens:** testability | **Area:** dynamic workflow imports\n\n`src/spine/workflows.ts` constructs a `file://` URL from the resolved path and calls `await import(url)`. This requires compiled `.ts` files on disk at a hard-coded location and provides no workflow registry or injectable loader.\n\n**Recommendation:** Introduce a `WorkflowLoader` interface with a `loadWorkflow(name)` method. Production uses the dynamic-import implementation; tests use a `MapWorkflowLoader` backed by in-memory objects.\n\n---\n\n### 11. Non-deterministic IDs and timestamps throughout\n**Lens:** testability | **Area:** non-deterministic IDs and timestamps\n\n`src/util/ids.ts`: `shortId()` calls `randomBytes(3).toString('hex')`; `nowIso()` calls `new Date().toISOString()`. Called throughout `insertRun`, `insertTask`, and `createPhaseTasks`. Tests cannot assert on specific IDs or timestamps.\n\n**Recommendation:** Accept an optional `IdFactory`/`Clock` interface, or export the functions so they can be individually mocked via `vi.spyOn`.\n\n---\n\n### 12. CLI command handlers embed business logic inside `.action()` callbacks\n**Lens:** testability | **Area:** CLI command handlers embed business logic\n\n`src/cli/commands/new.ts`, `next.ts`, `gate.ts`, `show.ts`, `status.ts` all place validation, DB writes, file creation, and `console.log()` calls directly inside `.action()` callbacks with no separately exported handler functions.\n\n**Recommendation:** Extract each command's logic into a standalone async function (e.g., `runNewCommand(workflow, title, options, store)`) that accepts injected dependencies. The `.action()` callback becomes a thin adapter.\n\n---\n\n## Medium Findings\n\n### 13. Verdict aggregation rule hardcoded; cannot be customized per workflow or phase\n**Lens:** architecture | **Area:** Verdict Aggregation\n\n`spine/gate.ts` implements a single rule: pass if all reds pass; fail if any authoritative-fail; inconclusive otherwise. Workflow definitions have no `aggregationStrategy` field.\n\n**Recommendation:** Add an optional `aggregationStrategy` to `Phase` config (e.g., `'majority'`, `'any-pass'`, `'all-pass'`). Default to current behavior.\n\n---\n\n### 14. Row-to-object conversion pattern duplicated across three store modules\n**Lens:** maintainability | **Area:** duplication\n\n`src/store/runs.ts:15-25`, `src/store/tasks.ts:20-35`, `src/store/verdicts.ts:16-28` — identical structure: prepare query, `.all()`, `.map(rowTo*)` with same snake_case-to-camelCase + `JSON.parse` pattern.\n\n**Recommendation:** Extract a generic `rowMapper<T>()` utility or parameterized converter factory.\n\n---\n\n### 15. Phase task creation logic duplicated between `new.ts` and `next.ts`\n**Lens:** maintainability | **Area:** duplication\n\n`src/cli/commands/new.ts:59-80` and `src/spine/next.ts:89-127` both build task arrays from workflow phase definitions with different inline implementations. Divergence risks silent behavioral differences.\n\n**Recommendation:** Unify into `createInitialPhaseTasks(run, workflow, inputs?)` called from both paths.\n\n---\n\n### 16. Workflow definitions not schema-validated at load time\n**Lens:** maintainability | **Area:** type-safety\n\n`src/spine/workflows.ts:16-30` — `loadWorkflow()` checks `wf.phases` is an array but does not validate phase agents, gate types, reds config consistency, or fanout settings.\n\n**Recommendation:** Add Zod schema validation at `loadWorkflow()` entry. Startup errors are far easier to diagnose than runtime failures mid-run.\n\n---\n\n### 17. Task status state machine logic scattered across four spine modules\n**Lens:** maintainability | **Area:** coupling\n\n`markTaskRunning()`, `markTaskComplete()`, `markTaskFailed()`, `setTaskStatus()` in `src/store/tasks.ts:85-109`; callers in `dispatch.ts`, `spawnRed.ts`, `gate.ts`, `next.ts` each transition status independently with no central state machine. Adding a new status requires touching 5+ files.\n\n**Recommendation:** Consolidate into a `TaskStateManager` module that owns all valid transitions.\n\n---\n\n### 18. Credential and model resolution logic scattered across three modules\n**Lens:** maintainability | **Area:** coupling\n\n`src/util/creds.ts` (auth mode detection), `src/spine/spawn.ts:125-150` (docker env vars), `src/workflows/_agentRefs.ts:14-38` (model alias maps) — each holds part of agent environment configuration. Adding a new auth method requires changes in 3 files.\n\n**Recommendation:** Create `src/util/agent-setup.ts` consolidating credential detection, model resolution, and docker environment building.\n\n---\n\n### 19. `'retry-once'` variant in `failureMode` union is dead code\n**Lens:** maintainability | **Area:** naming\n\n`src/types/index.ts:29` declares `'fail-phase' | 'retry-once' | 'continue'` but `src/spine/dispatch.ts:31,67` only branches on `'fail-phase'` and else. `'retry-once'` is a dead type variant that misleads workflow authors.\n\n**Recommendation:** Remove `'retry-once'` from the union type or implement it.\n\n---\n\n### 20. `composeSystemPrompt` silently embeds error text into prompts on missing files\n**Lens:** maintainability | **Area:** error-handling\n\n`src/spine/composeSystemPrompt.ts:23-27` — `existsSync()` check falls back to `'[File not found: path]'` embedded in markdown sent to the agent rather than failing fast. Produces hard-to-diagnose agent behavior.\n\n**Recommendation:** Throw at compose time if a referenced file is missing.\n\n---\n\n### 21. Store accessors inconsistently handle 'not found'\n**Lens:** maintainability | **Area:** inconsistency\n\n`getRun()` returns `undefined`, `getTask()` returns `undefined`, but `verdictsForTask()` returns `[]`. Callers cannot distinguish 'task exists with no verdicts' from 'task does not exist'.\n\n**Recommendation:** Standardize: singular accessors always return `T | undefined`; collection accessors always return `T[]`. Document the convention.\n\n---\n\n### 22. Model IDs hardcoded in two maps with no central config\n**Lens:** maintainability | **Area:** configuration\n\n`src/workflows/_agentRefs.ts:15-28` — `DIRECT_MAP` and `BEDROCK_MAP` hardcode model strings like `'claude-haiku-4-5'` and `'us.anthropic.claude-haiku-4-5-20251001-v1:0'`. Updating a model requires edits here and in documentation.\n\n**Recommendation:** Move model maps to `config/models.json` or a dedicated `src/config/models.ts`.\n\n---\n\n### 23. Environment variable coupling in credential detection requires `process.env` mutation in tests\n**Lens:** testability | **Area:** environment variable coupling\n\n`src/util/creds.ts` reads `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_API_KEY`, `AWS_*`, `FORGE_CREDS_REFRESH`, `FORGE_OAUTH_VOLUME` directly at call sites without abstraction.\n\n**Recommendation:** Accept `env: Record<string, string|undefined> = process.env` parameter in `detectCredsMode()` and `ensureCreds()`.\n\n---\n\n### 24. Misnamed how-to file: `how-to-new-analysis.md` covers the investigation workflow\n**Lens:** documentation | **Area:** docs/how-to-new-analysis.md\n\nFile is named `how-to-new-analysis.md` but its H1 title is `# How-to: start an investigation workflow`. No 'analysis' workflow exists in the codebase.\n\n**Recommendation:** Rename to `how-to-start-investigation.md` (or `how-to-new-investigation.md`) and update cross-references in `README.md` and `CLAUDE.md`.\n\n---\n\n### 25. No user-facing how-to for the `codebase-assessment` workflow\n**Lens:** documentation | **Area:** docs/\n\n`src/workflows/codebase-assessment.ts` exists and is registered, but there is no `how-to-start-assessment.md`. The assessment workflow has non-obvious characteristics (scope → assess fanout → report) that a new user cannot infer from the README.\n\n**Recommendation:** Add `docs/how-to-start-assessment.md` covering the three phases, `--meta` lens specification, fanout behavior, and result locations.\n\n---\n\n## Low Findings\n\n- **[architecture]** SQLite is sole source of truth with no backup mechanism (`~/.forge/forge.db` — WAL mode reduces corruption risk but not accidental deletion). Add a `forge next`-triggered backup or document manual procedure.\n- **[architecture]** No live output during agent execution; users must poll. Add a `forge tail <run-id>` command using `fs.watch` or `tail -f`.\n- **[architecture]** Task failures are terminal with no retry logic. Add optional `retryOnFailure` count to `Phase` config.\n- **[architecture]** `model_calls` table defined in schema but never populated (`src/store/schema.ts`). Either populate from agent result or remove to reduce schema confusion.\n- **[architecture]** `singularize()` handles only three English plural forms (`ies→y`, `ses→s`, `s→empty`) with no documentation of limitations. Silent wrong output for gate key derivation is a subtle bug source.\n- **[maintainability]** `mostRedRole()` (`dispatch.ts:117-121`) name implies priority ranking but returns a sentinel for exclusion. Rename to `redRoleToExclude()` or `getRedExclusionSentinel()`.\n- **[maintainability]** Dynamic imports in `gate.ts:101,109,121` used as circular dependency workaround without documentation. Document or restructure to break the cycle structurally.\n- **[maintainability]** 8+ environment variable names scattered with no central registry: `FORGE_HOME`, `FORGE_OAUTH_VOLUME`, `FORGE_CREDS_REFRESH`, `FORGE_USE_LITELLM`, `FORGE_MODEL_*`, `CLAUDE_CODE_USE_BEDROCK`, `ANTHROPIC_API_KEY`. Create `src/config/env.ts`.\n- **[maintainability]** Incomplete `TODO` comments without owners or issue references in `src/util/creds.ts:6,60`.\n- **[maintainability]** CLI commands use three different output formatting approaches. Create `src/util/cli-output.ts`.\n- **[testability]** Several pure functions (`aggregateVerdicts`, `filterConstraints`, `parseVerdict`, `buildDockerArgs`) are buried in impure modules and not separately exported. Move to `src/logic/` to enable immediate unit testing.\n- **[documentation]** `learnings/patterns/` contains only a template — no actual patterns filed yet. File at least one entry after the first completed run to validate the template.\n- **[documentation]** `how-to-new-workflow.md` example (`code-review`) doesn't exist in the codebase; following it verbatim yields a typecheck error. Reorder steps so name registration precedes file creation.\n- **[documentation]** `forge auth` subcommands (status, logout, login) documented only in a parenthetical. Add a dedicated auth section covering all three commands, expected outputs, and remediation paths.\n\n---\n\n## Informational\n\n- **[architecture]** Well-layered TypeScript CLI with clean unidirectional dependency flow (`cli/ → spine/ → store/ + workflows/ + util/ → types/`). No circular imports detected. ~1,200 LOC total. Maintain strict layer boundaries as the project grows.\n- **[architecture]** Pipeline state-machine with adversarial blue-red agent pairs and event sourcing is a sound pattern. Consider XState if phase transitions grow more complex.\n- **[architecture]** Adding new workflows and agent roles is low-friction. Consider `forge scaffold workflow <name>` and `forge scaffold agent <role>` CLI subcommands to reduce onboarding friction further.\n- **[architecture]** Single-machine execution is appropriate for current personal-machine use case. The `spawn.ts` abstraction is the right seam if multi-machine execution becomes a goal.\n\n---\n\n## Recommended Remediation Order\n\n| Priority | Action | Rationale |\n|---|---|---|\n| 1 | Install Vitest; add test scripts | Everything else depends on this |\n| 2 | Introduce `IStore` interface + `createStore(db)` | Unblocks all DB-dependent tests |\n| 3 | Extract `IDockerRunner`; inject into `spawn()` | Unblocks spawn/gate tests |\n| 4 | Make `FORGE_HOME` injectable via `IConfig` | Eliminates home-dir contamination |\n| 5 | Move signal handlers to explicit `setup()` in CLI entry | Prevents test-runner crashes |\n| 6 | Add `safeJsonParse<T>()` + wrap all 11 call sites | Prevents unhandled exceptions from bad DB data |\n| 7 | Decompose `spawn()` and `gate()` | Reduces complexity; testable after steps 2–5 |\n| 8 | Add Zod validation to `loadWorkflow()` | Catches config errors at startup |\n| 9 | Fix documentation gaps (rename analysis→investigation how-to, add assessment how-to) | Low effort, high discoverability value |\n| 10 | Centralize model maps, env var registry, state machine | Ongoing maintainability |",
+  "prioritizedFindings": [
+    {
+      "severity": "critical",
+      "lens": "testability",
+      "summary": "No test framework, no test files, no test scripts, no CI/CD",
+      "evidence": "package.json has no test framework in dependencies (no jest/vitest/mocha). No *.test.ts or *.spec.ts files anywhere. package.json scripts contain only 'typecheck' and 'build'. No .github/workflows/ or any CI/CD configuration."
+    },
+    {
+      "severity": "critical",
+      "lens": "testability",
+      "summary": "Module-level DB singleton with no abstraction prevents test isolation",
+      "evidence": "src/store/db.ts exports a module-level _db variable. All 5 store modules (20+ call sites) call getDb() directly. DB_PATH hard-coded to ~/.forge/forge.db."
+    },
+    {
+      "severity": "critical",
+      "lens": "testability",
+      "summary": "Core spawn logic shells out to Docker with no abstraction, making unit tests impossible",
+      "evidence": "src/spine/spawn.ts calls cpSpawn('docker', args) directly inside runDocker(). src/util/creds.ts calls execFileSync('docker', [...]) for OAuth validation. No IDockerRunner interface."
+    },
+    {
+      "severity": "critical",
+      "lens": "testability",
+      "summary": "All paths resolve to ~/.forge at import time; tests cannot redirect I/O without mutating real home directory",
+      "evidence": "src/util/paths.ts evaluates FORGE_HOME as module-level constants exported to DB_PATH, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR."
+    },
+    {
+      "severity": "critical",
+      "lens": "testability",
+      "summary": "Signal handlers registered at module load time call process.exit(), making test processes unstable",
+      "evidence": "src/util/sso-watchdog.ts attaches process.on('SIGINT') and process.on('SIGTERM') at module evaluation time, both calling process.exit()."
+    },
+    {
+      "severity": "high",
+      "lens": "maintainability",
+      "summary": "JSON.parse called without error handling across 11 locations in store layer",
+      "evidence": "src/store/runs.ts:23, src/store/tasks.ts:28,50, src/store/verdicts.ts:25, src/store/events.ts:29, src/cli/commands/new.ts:34 — all call JSON.parse() on DB-sourced strings with no try-catch."
+    },
+    {
+      "severity": "high",
+      "lens": "maintainability",
+      "summary": "spawn() function handles 7+ distinct responsibilities in ~72 lines",
+      "evidence": "src/spine/spawn.ts:22-93 — single function performs credential setup, directory creation, file writes, docker spawn, error parsing, JSON extraction, task state updates, and event logging with 6+ nesting levels."
+    },
+    {
+      "severity": "high",
+      "lens": "maintainability",
+      "summary": "gate() function handles six distinct concerns in 111 lines",
+      "evidence": "src/spine/gate.ts:40-151 — manages task validation, verdict aggregation, state transition logic, next-phase task creation, fanout derivation, and singularization all in one function."
+    },
+    {
+      "severity": "high",
+      "lens": "testability",
+      "summary": "Business logic, DB writes, file I/O, and subprocess calls interleaved in single orchestration functions, preventing unit testing",
+      "evidence": "gate.ts performs 8+ getDb()-dependent calls, loads workflow from disk, aggregates verdicts, and dispatches next-phase tasks in one 80-line async function. next.ts and spawnRed.ts exhibit the same pattern."
+    },
+    {
+      "severity": "high",
+      "lens": "testability",
+      "summary": "Workflows loaded via dynamic import(pathToFileURL(...)) making them impossible to mock in unit tests",
+      "evidence": "src/spine/workflows.ts constructs a file:// URL and calls await import(url). Requires compiled .ts files on disk at hard-coded location. No workflow registry or injectable loader."
+    },
+    {
+      "severity": "high",
+      "lens": "testability",
+      "summary": "ID generation uses randomBytes() and timestamps use new Date(), making test assertions non-deterministic",
+      "evidence": "src/util/ids.ts: shortId() calls randomBytes(3).toString('hex'); nowIso() calls new Date().toISOString(). Called throughout insertRun, insertTask, createPhaseTasks."
+    },
+    {
+      "severity": "high",
+      "lens": "testability",
+      "summary": "CLI command handlers embed business logic inside .action() callbacks with no separately exported functions",
+      "evidence": "src/cli/commands/new.ts, next.ts, gate.ts, show.ts, status.ts all place validation, DB writes, file creation, and console.log() directly inside .action() callbacks."
+    },
+    {
+      "severity": "medium",
+      "lens": "architecture",
+      "summary": "Verdict aggregation rule hardcoded; cannot be customized per workflow or phase",
+      "evidence": "spine/gate.ts implements single rule: pass if all reds pass; fail if any authoritative-fail; inconclusive otherwise. Workflow definitions have no aggregationStrategy field."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Row-to-object conversion pattern duplicated across three store modules",
+      "evidence": "src/store/runs.ts:15-25, src/store/tasks.ts:20-35, src/store/verdicts.ts:16-28 — identical snake_case-to-camelCase + JSON.parse pattern."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Phase task creation logic duplicated between new.ts seed path and next.ts createPhaseTasks()",
+      "evidence": "src/cli/commands/new.ts:59-80 and src/spine/next.ts:89-127 both build task arrays from workflow phase definitions with different inline implementations."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Workflow definitions not schema-validated at load time",
+      "evidence": "src/spine/workflows.ts:16-30 — loadWorkflow() checks wf.phases is array but does not validate phase agents, gate types, reds config consistency, or fanout settings."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Task status state machine logic scattered across four spine modules",
+      "evidence": "markTaskRunning(), markTaskComplete(), markTaskFailed(), setTaskStatus() in src/store/tasks.ts:85-109; callers in dispatch.ts, spawnRed.ts, gate.ts, next.ts each transition status independently."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Credential and model resolution logic scattered across three separate modules",
+      "evidence": "src/util/creds.ts (auth mode detection), src/spine/spawn.ts:125-150 (docker env vars), src/workflows/_agentRefs.ts:14-38 (model alias maps)."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "'retry-once' variant in failureMode type union is dead code",
+      "evidence": "src/types/index.ts:29 declares 'fail-phase' | 'retry-once' | 'continue' but src/spine/dispatch.ts:31,67 only branches on 'fail-phase' and else."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "composeSystemPrompt silently embeds error text into prompts when files are missing",
+      "evidence": "src/spine/composeSystemPrompt.ts:23-27 — existsSync() check falls back to '[File not found: path]' string embedded in markdown sent to the agent rather than failing fast."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Store accessors inconsistently handle 'not found': some return undefined, some return empty array",
+      "evidence": "src/store/runs.ts getRun() returns undefined, src/store/tasks.ts getTask() returns undefined, src/store/verdicts.ts verdictsForTask() returns []."
+    },
+    {
+      "severity": "medium",
+      "lens": "maintainability",
+      "summary": "Model IDs hardcoded in two maps with no central configuration source",
+      "evidence": "src/workflows/_agentRefs.ts:15-28 — DIRECT_MAP and BEDROCK_MAP hardcode model strings like 'claude-haiku-4-5' and 'us.anthropic.claude-haiku-4-5-20251001-v1:0'."
+    },
+    {
+      "severity": "medium",
+      "lens": "testability",
+      "summary": "detectCredsMode() and ensureCreds() read process.env directly, requiring environment mutation in tests",
+      "evidence": "src/util/creds.ts reads CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_API_KEY, AWS_*, FORGE_CREDS_REFRESH, FORGE_OAUTH_VOLUME directly at call sites."
+    },
+    {
+      "severity": "medium",
+      "lens": "documentation",
+      "summary": "Filename 'how-to-new-analysis.md' does not match content — file covers investigation workflow",
+      "evidence": "File H1 title is '# How-to: start an investigation workflow'. No 'analysis' workflow exists in the codebase."
+    },
+    {
+      "severity": "medium",
+      "lens": "documentation",
+      "summary": "No user-facing how-to for the codebase-assessment workflow",
+      "evidence": "src/workflows/codebase-assessment.ts exists and is registered, but there is no how-to-start-assessment.md or equivalent."
+    }
+  ]
+}

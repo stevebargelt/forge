@@ -1,0 +1,59 @@
+import { getDb } from "./db.js";
+import type { Run, RunStatus, WorkflowName } from "../types/index.js";
+import { nowIso } from "../util/ids.js";
+
+type RunRow = {
+  id: string;
+  workflow: string;
+  title: string;
+  status: string;
+  created_at: string;
+  completed_at: string | null;
+  metadata: string | null;
+};
+
+function rowToRun(row: RunRow): Run {
+  return {
+    id: row.id,
+    workflow: row.workflow as WorkflowName,
+    title: row.title,
+    status: row.status as RunStatus,
+    createdAt: row.created_at,
+    completedAt: row.completed_at ?? undefined,
+    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+  };
+}
+
+export function insertRun(run: Run): void {
+  getDb()
+    .prepare(
+      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      run.id,
+      run.workflow,
+      run.title,
+      run.status,
+      run.createdAt,
+      run.completedAt ?? null,
+      run.metadata ? JSON.stringify(run.metadata) : null
+    );
+}
+
+export function getRun(id: string): Run | undefined {
+  const row = getDb().prepare(`SELECT * FROM runs WHERE id = ?`).get(id) as RunRow | undefined;
+  return row ? rowToRun(row) : undefined;
+}
+
+export function listRuns(): Run[] {
+  const rows = getDb().prepare(`SELECT * FROM runs ORDER BY created_at DESC`).all() as RunRow[];
+  return rows.map(rowToRun);
+}
+
+export function updateRunStatus(id: string, status: RunStatus): void {
+  const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
+  getDb()
+    .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
+    .run(status, completedAt, id);
+}

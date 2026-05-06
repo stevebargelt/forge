@@ -1,0 +1,30 @@
+{
+  "name": "forge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine",
+  "type": "module",
+  "bin": {
+    "forge": "./bin/forge"
+  },
+  "scripts": {
+    "forge": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p .",
+    "test": "FORGE_HOME=$(mktemp -d -t forge-test-XXXXXX) node --import tsx --test 'src/**/*.test.ts'"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "commander": "^12.1.0",
+    "gray-matter": "^4.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

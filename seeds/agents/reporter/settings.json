@@ -1,0 +1,4 @@
+{
+  "tools": ["read"],
+  "notes": "Reporter aggregates structured findings into a markdown report."
+}

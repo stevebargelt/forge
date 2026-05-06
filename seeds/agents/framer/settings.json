@@ -1,0 +1,4 @@
+{
+  "tools": ["read"],
+  "notes": "Framer is read-only; produces structured output, no file edits."
+}

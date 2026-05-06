@@ -1,0 +1,5 @@
+# Keep the build context tiny. Everything except the Dockerfile and the staged cert
+# is excluded; build.sh copies corp-root.pem into the context just before `docker build`.
+*
+!agent-dev-worker.Dockerfile
+!corp-root.pem

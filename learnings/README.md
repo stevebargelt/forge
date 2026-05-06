@@ -1,0 +1,43 @@
+# forge — learnings
+
+Architectural decisions and reusable patterns for forge. Captured at the moment of decision; consulted before re-litigating anything.
+
+This is the **forge repo's** corpus, not the vault. The vault corpus at `obsidian/stevieb-sgws/learnings/` is prior research that informed forge's design — read it, don't write to it. New decisions made during forge build belong here.
+
+## Structure
+
+```
+learnings/
+├── README.md                   — this file
+├── decisions/
+│   ├── _DECISION_TEMPLATE.md
+│   └── YYYY-MM-DD_<short-name>.md
+└── patterns/
+    ├── _PATTERN_TEMPLATE.md
+    └── YYYY-MM-DD_<short-name>.md
+```
+
+## Decisions index
+
+| ID | Date | Decision |
+|---|---|---|
+| FORGE-DEC-001 | 2026-05-06 | [better-sqlite3 over node:sqlite](decisions/2026-05-06_better-sqlite3-over-node-sqlite.md) |
+| FORGE-DEC-002 | 2026-05-06 | [Commander as the CLI framework](decisions/2026-05-06_commander-as-cli-framework.md) |
+| FORGE-DEC-003 | 2026-05-06 | [Module boundaries: cli / spine / store / types / util / workflows](decisions/2026-05-06_module-boundaries.md) |
+| FORGE-DEC-004 | 2026-05-06 | [Workflow definitions are TypeScript files](decisions/2026-05-06_workflow-as-typescript.md) |
+| FORGE-DEC-005 | 2026-05-06 | [tsx + bin/forge shim instead of compiled dist](decisions/2026-05-06_tsx-runtime-no-build-step.md) |
+| FORGE-DEC-006 | 2026-05-06 | [Inject corporate root CA into the agent image at build time](decisions/2026-05-06_corporate-tls-cert-injection.md) |
+| FORGE-DEC-007 | 2026-05-06 | [Three auth modes; OAuth via a docker volume, not a host file mount](decisions/2026-05-06_three-auth-modes-volume-oauth.md) |
+| FORGE-DEC-008 | 2026-05-06 | [Bedrock Claude 4.x requires cross-region inference profile IDs](decisions/2026-05-06_bedrock-claude-4-needs-inference-profile.md) |
+| FORGE-DEC-009 | 2026-05-06 | [Reconcile orphaned tasks at top of `forge next` and `status`](decisions/2026-05-06_reconcile-orphaned-tasks.md) |
+| FORGE-DEC-010 | 2026-05-06 | [Use Node's built-in `node:test` runner with `tsx`](decisions/2026-05-06_node-test-as-test-runner.md) |
+
+## Patterns index
+
+(none yet — will be filed after first real runs reveal patterns worth elevating)
+
+## When to file
+
+- **During build:** when you make a non-obvious architectural choice, write the ADR right then. Two minutes now is worth an hour of re-derivation later.
+- **After a run:** when a run reveals a reusable pattern (a prompt structure that worked, an agent handoff contract, a failure mode reds consistently catch), file a pattern.
+- **On revisit:** if you override a past decision, mark the old one `Superseded`, link the new one, note why conditions changed.

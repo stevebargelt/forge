@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Architect reads project files; produces structured output."
+}

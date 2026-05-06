@@ -1,0 +1,85 @@
+# How-to: add a new agent role
+
+An agent role is a directory under `~/.forge/agents/<role>/` with two files: `CLAUDE.md` (the base prompt; Tier 1 of `composeSystemPrompt`) and `settings.json` (Claude Code settings the agent uses).
+
+## Example: add a `security-reviewer` role
+
+You want a new role that reads a diff and produces a focused security verdict.
+
+### Step 1: create the dir and CLAUDE.md
+
+```bash
+mkdir -p ~/.forge/agents/security-reviewer
+```
+
+`~/.forge/agents/security-reviewer/CLAUDE.md`:
+
+```markdown
+# security-reviewer
+
+You read code diffs and identify security defects. You favor concrete evidence (file:line + quoted snippet) over abstract reasoning. Your container mount is read-only.
+
+## Output schema
+
+{
+  "status": "complete",
+  "verdict": "pass" | "fail" | "inconclusive",
+  "confidence": 0.0-1.0,
+  "findings": [
+    {"severity": "high"|"medium"|"low", "summary": "...", "evidence": "file:line", "hypothesis": "what would break"}
+  ],
+  "notes": "optional"
+}
+```
+
+This is the same schema as `red-wide` — security-reviewer is a specialized red.
+
+### Step 2: settings.json
+
+`~/.forge/agents/security-reviewer/settings.json`:
+
+```json
+{
+  "tools": ["read"],
+  "notes": "Read-only. The host enforces this with a :ro mount."
+}
+```
+
+In v0 this file is metadata for the operator; the actual tool restrictions are enforced at the docker mount level (`:ro`). When Claude Code adds richer settings file support, the contract is: `settings.json` is what gets passed via `--settings`.
+
+### Step 3: wire into a workflow
+
+Open the workflow file (e.g. `src/workflows/feature-design-needed.ts`) and add the role to a phase's `reds`:
+
+```ts
+{
+  name: "build",
+  agents: [agent("implementer", "spec-writer")],
+  reds: {
+    wide: agent("red-wide", "fast-orchestrator"),
+    narrow: agent("red-narrow", "fast-orchestrator"),
+    parallel: true,
+    authority: "authoritative",
+    gateOnVerdict: true,
+  },
+  // ... or replace red-wide entirely with security-reviewer for security-sensitive features
+}
+```
+
+You can also add the role as a blue agent in a fanout phase to run a focused security pass.
+
+### Step 4: test
+
+```bash
+npm run typecheck
+./bin/forge new feature-design-needed "test-security-reviewer" --prd /tmp/test.md
+./bin/forge next run-test-security-reviewer-<suffix> --project /tmp/test-project
+```
+
+Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed prompt looks right (Tier 1 base + any Tier 2 workflowAdditions + Tier 3 suggest constraints).
+
+## Notes
+
+- The agent's `model` (e.g. `"spec-writer"`, `"fast-orchestrator"`) is a logical alias resolved by LiteLLM. You don't pin a real model name in the workflow file — change the alias mapping in your LiteLLM config, the workflow re-routes automatically.
+- For an authoritative red role, set `redConfig.authority: "authoritative"` and `gateOnVerdict: true`. A `fail` verdict from that red will set the blue task to `blocked_by_red`.
+- Constraint files at `~/.forge/constraints/` filter into the agent's prompt by `roles:` frontmatter. To make a new constraint apply to your role, list `security-reviewer` in `roles:`.
