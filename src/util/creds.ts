@@ -1,9 +1,11 @@
 // Credential resolution and validation. Forge supports three auth modes for agents.
 // The mode is chosen by env var; per-spawn validation runs before every docker run.
 //
-//   bedrock           — CLAUDE_CODE_USE_BEDROCK=1 + AWS_* exported. Work default.
+//   bedrock           — CLAUDE_CODE_USE_BEDROCK=1 + AWS_PROFILE set. Work default.
+//                       The container reads SSO/STS state from a mounted ~/.aws (RO).
+//                       The host watchdog keeps the SSO cache fresh; see FORGE-DEC-013.
 //   anthropic-oauth   — OAuth-based, persisted in a named docker volume. Personal Mac default.
-//                       The volume is initialized once via `forge auth login` (TODO).
+//                       The volume is initialized once via `forge auth login`.
 //   anthropic-apikey  — ANTHROPIC_API_KEY env var. Escape hatch.
 //
 // The OAuth credential file lives on macOS in the Keychain, not in ~/.claude/.credentials.json,
@@ -13,6 +15,9 @@
 // agent run mounts the same volume read-only at /home/agent/.claude.
 
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export type CredsMode = "bedrock" | "anthropic-oauth" | "anthropic-apikey";
 
@@ -28,15 +33,24 @@ export function oauthVolumeName(): string {
   return process.env.FORGE_OAUTH_VOLUME ?? OAUTH_VOLUME_NAME;
 }
 
+// Path to the host AWS dir that bedrock-mode containers mount RO.
+export function awsConfigDir(): string {
+  return process.env.FORGE_AWS_DIR ?? join(homedir(), ".aws");
+}
+
 export function ensureCreds(): void {
   const mode = detectCredsMode();
   if (mode === "bedrock") {
-    for (const k of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]) {
-      if (!process.env[k]) {
-        throw new Error(
-          `Bedrock mode requires ${k}. Export AWS creds (e.g. \`. ./scripts/use-bedrock.sh\`) or unset CLAUDE_CODE_USE_BEDROCK.`
-        );
-      }
+    if (!process.env.AWS_PROFILE) {
+      throw new Error(
+        "Bedrock mode requires AWS_PROFILE. Source `. ./scripts/use-bedrock.sh` (or set AWS_PROFILE manually) or unset CLAUDE_CODE_USE_BEDROCK."
+      );
+    }
+    const dir = awsConfigDir();
+    if (!existsSync(dir)) {
+      throw new Error(
+        `Bedrock mode expects ${dir} to exist (mounted into agent containers RO). Run \`aws configure sso\` first, or set FORGE_AWS_DIR to point at your AWS config dir.`
+      );
     }
     const refresh = process.env.FORGE_CREDS_REFRESH;
     if (refresh) {

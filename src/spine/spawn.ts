@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
-import { ensureCreds, detectCredsMode, oauthVolumeName } from "../util/creds.js";
+import { ensureCreds, detectCredsMode, oauthVolumeName, awsConfigDir } from "../util/creds.js";
 import { logEvent } from "../store/events.js";
 import { markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 
@@ -148,6 +148,11 @@ type DockerArgsInput = {
   containerName: string;
 };
 
+// Exported for unit testing the credential/mount wiring. Not part of the public API.
+export function _buildDockerArgs(input: DockerArgsInput): string[] {
+  return buildDockerArgs(input);
+}
+
 function buildDockerArgs(input: DockerArgsInput): string[] {
   const projectMount = `${input.projectDir}:/project:${input.readOnlyProject ? "ro" : "rw"}`;
   // -i forwards stdin into the container so the task package piped from the host
@@ -157,11 +162,15 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   // Env vars + auth mounts depend on the resolved credentials mode.
   const mode = detectCredsMode();
   if (mode === "bedrock") {
+    // Profile-mount model (FORGE-DEC-013): pass AWS_PROFILE + AWS_REGION through and
+    // bind-mount ~/.aws read-only. The container's AWS SDK reads SSO cache + config
+    // from the mount on every Bedrock call, so a host-side watchdog refreshing the
+    // cache is enough to keep long-running containers authenticated. No env-var
+    // snapshot of STS tokens — those would go stale within an hour.
     args.push("-e", "CLAUDE_CODE_USE_BEDROCK=1");
-    for (const k of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION"]) {
-      const v = process.env[k];
-      if (v) args.push("-e", `${k}=${v}`);
-    }
+    args.push("-e", `AWS_PROFILE=${process.env.AWS_PROFILE}`);
+    if (process.env.AWS_REGION) args.push("-e", `AWS_REGION=${process.env.AWS_REGION}`);
+    args.push("-v", `${awsConfigDir()}:/home/agent/.aws:ro`);
   } else if (mode === "anthropic-apikey") {
     args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
   } else {
