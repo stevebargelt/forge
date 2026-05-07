@@ -33,6 +33,7 @@ End of 2026-05-07 session. Four prior backlog items closed (#26, #29, #30 + blue
 - `src/spine/spawn.ts`: forwards `PENCIL_CLI_KEY` to the designer image only (3 unit tests).
 - `src/cli/commands/new.ts`: `--brief` option + workflow name list updated.
 - `src/workflows/ui-design.ts` + `src/workflows/design-revise.ts`. Single-task design phases (no fanout) — coherence comes from `pencil --in <prior>.pen` chaining within one task.
+- **stream-json output mode for ALL agents** (not designer-specific). Surfaced when designer's first run hit the 5-min idle timeout: `claude --output-format json --print` buffers everything until the agent finishes — silent stdout for the entire run. With `--output-format stream-json --verbose --print`, Claude emits NDJSON in real time (system init, status, tool use, assistant text, then the final result envelope as the last line). The watchdog now sees continuous progress and only fires when the agent is genuinely stuck. The result envelope shape is unchanged, so `_readResultJson` works as-is; 4 new tests cover the NDJSON shape.
 **What's not in (deferred):**
 - Optional design phase on `feature-design-needed` (was task 10; deferred to its own follow-up after ui-design lands).
 - Live run + screenshots — staged as the dashboard-redesign test.
