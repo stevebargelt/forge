@@ -9,6 +9,7 @@ export type EventType =
   | "task.completed"
   | "task.failed"
   | "task.crashed"
+  | "task.idle_timeout"
   | "task.blocked_by_red"
   | "verdict.received"
   | "gate.decided";

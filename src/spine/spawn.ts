@@ -1,6 +1,7 @@
-import { spawn as cpSpawn } from "node:child_process";
+import { spawn as cpSpawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
 import { ensureCreds, detectCredsMode, oauthVolumeName } from "../util/creds.js";
@@ -14,10 +15,15 @@ export type SpawnOptions = {
   readOnlyProject: boolean; // true for red agents
   image?: string;            // default agent-dev-worker
   litellmUrl?: string;       // default http://host.docker.internal:4000
+  // Kill the container if no stdout for this many ms. Default 5min, override via
+  // FORGE_AGENT_IDLE_TIMEOUT_MS env. 0 disables.
+  idleTimeoutMs?: number;
 };
 
 const DEFAULT_IMAGE = "agent-dev-worker";
 const DEFAULT_LITELLM = "http://host.docker.internal:4000";
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const IDLE_TIMEOUT_EXIT_CODE = 137; // matches SIGKILL convention
 
 export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
   ensureCreds();
@@ -39,6 +45,10 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
   markTaskRunning(tp.taskId);
   logEvent("task.started", { runId: tp.runId, taskId: tp.taskId });
 
+  // Stable name lets us `docker kill <name>` from the idle watchdog without parsing IDs.
+  const containerName = `forge-${tp.taskId}`;
+  const idleTimeoutMs = resolveIdleTimeoutMs(opts.idleTimeoutMs);
+
   const dockerArgs = buildDockerArgs({
     claudeMdPath,
     packagePath,
@@ -49,10 +59,25 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
     litellmUrl: opts.litellmUrl ?? DEFAULT_LITELLM,
     model: opts.agentConfig.model,
     systemPrompt: tp.composedSystemPrompt,
+    containerName,
   });
 
-  const exitCode = await runDocker(dockerArgs, stderrPath, stdoutPath, packagePath);
+  const exitCode = await runDocker(dockerArgs, stderrPath, stdoutPath, packagePath, {
+    containerName,
+    idleTimeoutMs,
+  });
   const resultJson = readResultJson(resultPath) ?? readResultJson(stdoutPath);
+
+  if (exitCode === IDLE_TIMEOUT_EXIT_CODE && !resultJson) {
+    const error = `idle_timeout (no stdout for ${Math.round(idleTimeoutMs / 1000)}s)`;
+    markTaskFailed(tp.taskId, error);
+    logEvent("task.idle_timeout", {
+      runId: tp.runId,
+      taskId: tp.taskId,
+      payload: { idleTimeoutMs, containerName },
+    });
+    return { taskId: tp.taskId, status: "failed", output: undefined, error };
+  }
 
   if (exitCode !== 0 && !resultJson) {
     const stderr = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").slice(-4000) : "";
@@ -120,13 +145,14 @@ type DockerArgsInput = {
   litellmUrl: string;
   model: string;
   systemPrompt: string;
+  containerName: string;
 };
 
 function buildDockerArgs(input: DockerArgsInput): string[] {
   const projectMount = `${input.projectDir}:/project:${input.readOnlyProject ? "ro" : "rw"}`;
   // -i forwards stdin into the container so the task package piped from the host
   // reaches `claude --print`. Without -i the prompt is silently empty.
-  const args = ["run", "--rm", "-i"];
+  const args = ["run", "--rm", "-i", "--name", input.containerName];
 
   // Env vars + auth mounts depend on the resolved credentials mode.
   const mode = detectCredsMode();
@@ -173,23 +199,87 @@ function runDocker(
   args: string[],
   stderrPath: string,
   stdoutPath: string,
-  packagePath: string
+  packagePath: string,
+  watchdog: { containerName: string; idleTimeoutMs: number }
 ): Promise<number> {
   return new Promise((resolve) => {
     const proc = cpSpawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
     const errChunks: Buffer[] = [];
     const outChunks: Buffer[] = [];
+    let timedOut = false;
+
+    // Watchdog: kill the container if no stdout chunk arrives for idleTimeoutMs.
+    // Disabled when idleTimeoutMs <= 0.
+    const watcher =
+      watchdog.idleTimeoutMs > 0
+        ? startIdleWatchdog(proc.stdout, watchdog.idleTimeoutMs, () => {
+            timedOut = true;
+            const note = `\n[forge] killed by idle timeout: no stdout for ${Math.round(
+              watchdog.idleTimeoutMs / 1000
+            )}s. container=${watchdog.containerName}\n`;
+            errChunks.push(Buffer.from(note));
+            // Best-effort: ask the docker daemon to stop the named container. The host
+            // docker CLI will exit shortly after.
+            try {
+              spawnSync("docker", ["kill", watchdog.containerName], { stdio: "ignore" });
+            } catch {
+              // ignore — proc.kill below covers the docker CLI itself
+            }
+            proc.kill("SIGTERM");
+          })
+        : { stop: () => {} };
+
     proc.stderr.on("data", (d: Buffer) => errChunks.push(d));
     proc.stdout.on("data", (d: Buffer) => outChunks.push(d));
     proc.stdin.end(readFileSync(packagePath));
     const finish = (code: number) => {
+      watcher.stop();
       writeFileSync(stderrPath, Buffer.concat(errChunks));
       writeFileSync(stdoutPath, Buffer.concat(outChunks));
-      resolve(code);
+      resolve(timedOut ? IDLE_TIMEOUT_EXIT_CODE : code);
     };
     proc.on("close", (code) => finish(code ?? 1));
     proc.on("error", () => finish(1));
   });
+}
+
+// Exported for unit testing. Resets the idle timer on every chunk; calls onIdle once if
+// the gap between chunks (or between start and first chunk) exceeds idleTimeoutMs.
+export function startIdleWatchdog(
+  stream: Readable,
+  idleTimeoutMs: number,
+  onIdle: () => void
+): { stop: () => void } {
+  let fired = false;
+  let timer: NodeJS.Timeout = setTimeout(trigger, idleTimeoutMs);
+  function trigger() {
+    if (fired) return;
+    fired = true;
+    onIdle();
+  }
+  function reset() {
+    if (fired) return;
+    clearTimeout(timer);
+    timer = setTimeout(trigger, idleTimeoutMs);
+  }
+  stream.on("data", reset);
+  return {
+    stop: () => {
+      fired = true; // suppress any pending fire after the process exits cleanly
+      clearTimeout(timer);
+      stream.off("data", reset);
+    },
+  };
+}
+
+function resolveIdleTimeoutMs(explicit: number | undefined): number {
+  if (typeof explicit === "number") return explicit;
+  const env = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  if (env !== undefined) {
+    const n = Number(env);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return DEFAULT_IDLE_TIMEOUT_MS;
 }
 
 function readResultJson(path: string): unknown | undefined {
