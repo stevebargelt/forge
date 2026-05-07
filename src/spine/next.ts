@@ -123,7 +123,11 @@ export function createPhaseTasks(
   run: Run,
   workflow: Workflow,
   phaseName: string,
-  opts: { parentId?: string; perAgentInputs?: Array<Record<string, unknown>> } = {}
+  opts: {
+    parentId?: string;
+    perAgentInputs?: Array<Record<string, unknown>>;
+    commonInputs?: Record<string, unknown>;
+  } = {}
 ): Task[] {
   const phase = findPhase(workflow, phaseName);
   if (!phase) throw new Error(`Phase ${phaseName} not in workflow ${workflow.name}`);
@@ -135,10 +139,13 @@ export function createPhaseTasks(
   const upstream = collectUpstreamResults(workflow, run.id, phase.name);
 
   const inputsList = opts.perAgentInputs ?? [{}];
+  const common = opts.commonInputs ?? {};
   for (const inputs of inputsList) {
     for (const agent of phase.agents) {
       const taskId = newTaskId(phase.name);
-      const mergedInputs = upstream ? { ...inputs, upstream } : inputs;
+      const mergedInputs = upstream
+        ? { ...common, ...inputs, upstream }
+        : { ...common, ...inputs };
       const taskPackage: TaskPackage = {
         taskId,
         runId: run.id,

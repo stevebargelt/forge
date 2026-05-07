@@ -265,3 +265,51 @@ test("createPhaseTasks: explicit perAgentInputs are merged with upstream context
   assert.equal(created[0]!.taskPackage.inputs.claim, "c1");
   assert.equal(created[1]!.taskPackage.inputs.claim, "c2");
 });
+
+test("createPhaseTasks: commonInputs is merged into every created task", () => {
+  const wf = workflow();
+  // Two-claim fanout, with rejection metadata that should appear in BOTH tasks.
+  insertTask({
+    id: "frame-2",
+    runId: RUN.id,
+    phase: "frame",
+    agentRole: "framer",
+    status: "complete",
+    taskPackage: {
+      taskId: "frame-2",
+      runId: RUN.id,
+      phase: "frame",
+      role: "framer",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { claims: ["c1", "c2"] },
+    createdAt: "2026-05-06T00:00:00Z",
+  });
+
+  const created = createPhaseTasks(RUN, wf, "investigate", {
+    perAgentInputs: [{ claim: "c1" }, { claim: "c2" }],
+    commonInputs: { rejectedRationale: "out of scope", rejectedTaskId: "earlier-task" },
+  });
+  assert.equal(created.length, 2);
+  for (const t of created) {
+    assert.equal(t.taskPackage.inputs.rejectedRationale, "out of scope");
+    assert.equal(t.taskPackage.inputs.rejectedTaskId, "earlier-task");
+    assert.ok(t.taskPackage.inputs.claim, "per-agent input still present");
+    assert.ok(t.taskPackage.inputs.upstream, "upstream still injected");
+  }
+});
+
+test("createPhaseTasks: per-agent inputs win over commonInputs on key collision", () => {
+  const wf = workflow();
+  const created = createPhaseTasks(RUN, wf, "frame", {
+    perAgentInputs: [{ source: "specific" }],
+    commonInputs: { source: "common" },
+  });
+  assert.equal(created.length, 1);
+  assert.equal(
+    created[0]!.taskPackage.inputs.source,
+    "specific",
+    "per-agent input takes precedence"
+  );
+});

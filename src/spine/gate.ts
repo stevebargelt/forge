@@ -118,8 +118,14 @@ export async function gate(
     if (phase.onReject) {
       const np = findPhase(workflow, phase.onReject);
       if (np) {
+        // Propagate the rationale and a pointer to the rejected task so the remediation
+        // phase isn't working blind. Without this it would only see upstream results.
         nextTasks = (await import("./next.js")).createPhaseTasks(run, workflow, np.name, {
           parentId: taskId,
+          commonInputs: {
+            rejectedRationale: rationale ?? "",
+            rejectedTaskId: taskId,
+          },
         });
       }
     }
