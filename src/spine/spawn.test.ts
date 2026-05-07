@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startIdleWatchdog, _buildDockerArgs, _readResultJson } from "./spawn.js";
+import { startIdleWatchdog, _buildDockerArgs, _readResultJson, pickIdleTimeoutMs } from "./spawn.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -183,6 +183,40 @@ test("buildDockerArgs: non-designer image never forwards PENCIL_CLI_KEY", () => 
   const args = _buildDockerArgs(ARGS_INPUT_BASE); // image: agent-dev-worker
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
+});
+
+test("pickIdleTimeoutMs: designer image disables the watchdog (returns 0)", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "60000"; // even with an env override
+  try {
+    assert.equal(pickIdleTimeoutMs("agent-designer-worker", undefined), 0);
+    assert.equal(pickIdleTimeoutMs("agent-designer-worker", 99999), 0);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("pickIdleTimeoutMs: non-designer image uses the explicit value or env or default", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  try {
+    // Default when nothing set
+    assert.equal(pickIdleTimeoutMs("agent-dev-worker", undefined), 5 * 60 * 1000);
+    // Explicit overrides default
+    assert.equal(pickIdleTimeoutMs("agent-dev-worker", 12345), 12345);
+    // Env override applies for non-designer images
+    process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "30000";
+    assert.equal(pickIdleTimeoutMs("agent-dev-worker", undefined), 30000);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("buildDockerArgs: --include-partial-messages is passed to claude", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  assert.ok(args.includes("--include-partial-messages"), "claude argv should include --include-partial-messages so stdout flows during long thinking turns");
 });
 
 test("buildDockerArgs: bedrock without AWS_REGION still sets profile", () => {

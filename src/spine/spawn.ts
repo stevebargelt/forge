@@ -21,6 +21,7 @@ export type SpawnOptions = {
 };
 
 const DEFAULT_IMAGE = "agent-dev-worker";
+const DESIGNER_IMAGE = "agent-designer-worker";
 const DEFAULT_LITELLM = "http://host.docker.internal:4000";
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const IDLE_TIMEOUT_EXIT_CODE = 137; // matches SIGKILL convention
@@ -53,7 +54,7 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
 
   // Stable name lets us `docker kill <name>` from the idle watchdog without parsing IDs.
   const containerName = `forge-${tp.taskId}`;
-  const idleTimeoutMs = resolveIdleTimeoutMs(opts.idleTimeoutMs);
+  const idleTimeoutMs = pickIdleTimeoutMs(opts.image, opts.idleTimeoutMs);
 
   const dockerArgs = buildDockerArgs({
     taskDir: dir,
@@ -205,7 +206,7 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   // Designer image needs the Pencil CLI auth key. Only forward to the designer image
   // so the key isn't ambient on every container. Forge's caller is responsible for
   // having PENCIL_CLI_KEY in the host env (export, .env via shell, or future #47).
-  if (input.image === "agent-designer-worker" && process.env.PENCIL_CLI_KEY) {
+  if (input.image === DESIGNER_IMAGE && process.env.PENCIL_CLI_KEY) {
     args.push("-e", `PENCIL_CLI_KEY=${process.env.PENCIL_CLI_KEY}`);
   }
 
@@ -231,9 +232,14 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     // (e.g. Pencil's 1-5 min per-screen budget) survive the 5-min idle timeout.
     // The final line is the same {type:"result", result:"..."} envelope as --output-format=json,
     // so result-parsing in readResultJson is unchanged. --verbose is required for stream-json.
+    // --include-partial-messages emits intermediate chunks during long thinking turns,
+    // which keeps stdout flowing (and the watchdog asleep) even when the agent is
+    // mid-reasoning between tool calls. Without it, a multi-minute thinking turn
+    // produces zero stdout and the idle timeout fires.
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--print"
   );
   return args;
@@ -324,6 +330,18 @@ function resolveIdleTimeoutMs(explicit: number | undefined): number {
     if (Number.isFinite(n) && n >= 0) return n;
   }
   return DEFAULT_IDLE_TIMEOUT_MS;
+}
+
+// Designer tasks run watchdog-free: Pencil sessions and long thinking turns can
+// legitimately go minutes between stdout chunks. A false-positive kill costs more than
+// a (rare) stuck designer container. Other agents keep the default watchdog. Exported
+// for testing.
+export function pickIdleTimeoutMs(
+  image: string | undefined,
+  explicit: number | undefined
+): number {
+  if (image === DESIGNER_IMAGE) return 0;
+  return resolveIdleTimeoutMs(explicit);
 }
 
 // Exported for unit testing the envelope-parsing logic. Not part of the public API.
