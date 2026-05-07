@@ -83,7 +83,6 @@ export function registerNew(program: Command): void {
       console.log(`Workflow: ${wf.name}`);
       console.log(`Title:    ${title}`);
       console.log(`First phase: ${firstPhase.name} (${firstPhase.agents.length} task(s) seeded)`);
-      console.log("");
-      console.log(`Next: forge next ${runId}`);
+      console.log(`\nNext:\n  forge next ${runId} --project <path>`);
     });
 }
