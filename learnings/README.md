@@ -33,6 +33,7 @@ learnings/
 | FORGE-DEC-010 | 2026-05-06 | [Use Node's built-in `node:test` runner with `tsx`](decisions/2026-05-06_node-test-as-test-runner.md) |
 | FORGE-DEC-011 | 2026-05-06 | [Docker mount of project dir can corrupt native node binaries (gotcha + recovery)](decisions/2026-05-06_docker-mount-corrupts-native-binary.md) |
 | FORGE-DEC-012 | 2026-05-06 | [Optional read-only flag on the DB singleton + 5s busy_timeout](decisions/2026-05-06_read-only-db-connection-flag.md) |
+| FORGE-DEC-013 | 2026-05-06 | [Mount ~/.aws into bedrock containers + detached SSO watchdog](decisions/2026-05-06_profile-mount-and-detached-watchdog.md) |
 
 ## Patterns index
 
