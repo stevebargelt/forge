@@ -59,6 +59,13 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
       const phaseName = pending[0]!.phase;
       await dispatch(runId, phaseName, { projectDir: opts.projectDir });
       const refreshed = tasksForRun(runId).filter((t) => t.phase === phaseName);
+      // After dispatch, blue tasks usually land in awaiting_gate (human-gated phases) or
+      // blocked_by_red. Surface those terminal-for-this-tick statuses so the caller's hint
+      // points the user at `forge gate ...` rather than another `forge next ...`.
+      const postBlocked = refreshed.filter((t) => t.status === "blocked_by_red");
+      if (postBlocked.length > 0) return { kind: "blocked_by_red", tasks: postBlocked };
+      const postAwaiting = refreshed.filter((t) => t.status === "awaiting_gate");
+      if (postAwaiting.length > 0) return { kind: "awaiting_gate", tasks: postAwaiting };
       return { kind: "dispatched", phase: phaseName, tasks: refreshed };
     }
 
