@@ -4,7 +4,7 @@ This is the forge CLI repo. If you're a Claude Code session working in this dire
 
 ## What forge is
 
-A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch (vault: `obsidian/stevieb-sgws/Harness Spine Sketch.md`).
+A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.
 
 ## Conventions
 
