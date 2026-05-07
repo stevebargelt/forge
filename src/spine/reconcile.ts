@@ -51,12 +51,24 @@ function reconcileTask(task: Task, workflow: Workflow, allTasks: Task[]): Reconc
   const reportedStatus =
     typeof (parsed as { status?: unknown }).status === "string"
       ? ((parsed as { status: string }).status as string)
-      : "complete";
+      : undefined;
 
   if (reportedStatus === "failed") {
     const errMsg = (parsed as { error?: string }).error ?? "agent reported failure";
     markTaskFailed(task.id, errMsg, parsed);
     logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
+    return { taskId: task.id, resolution: "failed" };
+  }
+
+  if (reportedStatus !== "complete") {
+    // Same contract as spawn(): result without a recognized status is a failure, not
+    // a silent pass. Reconcile follows the same rule so orphaned tasks recovered later
+    // get the same treatment as live spawns.
+    const reason = reportedStatus
+      ? `reconcile: unrecognized_status:${reportedStatus}`
+      : "reconcile: missing_status";
+    markTaskFailed(task.id, reason, parsed);
+    logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true, reason } });
     return { taskId: task.id, resolution: "failed" };
   }
 

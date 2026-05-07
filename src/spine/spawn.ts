@@ -104,12 +104,29 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
   const reportedStatus =
     typeof (resultJson as { status?: unknown }).status === "string"
       ? ((resultJson as { status: string }).status as string)
-      : "complete";
+      : undefined;
+
   if (reportedStatus === "failed") {
     const errMsg = (resultJson as { error?: string }).error ?? "agent reported failure";
     markTaskFailed(tp.taskId, errMsg, resultJson);
     logEvent("task.failed", { runId: tp.runId, taskId: tp.taskId, payload: { error: errMsg } });
     return { taskId: tp.taskId, status: "failed", output: resultJson, error: errMsg };
+  }
+
+  if (reportedStatus !== "complete") {
+    // Missing or unrecognized status. Treated as failure rather than silently passed —
+    // a result without {status: "complete"} is a contract violation and previously masked
+    // real failures (e.g. agents that replied with prose instead of writing a JSON object).
+    const reason = reportedStatus
+      ? `unrecognized_status:${reportedStatus}`
+      : "missing_status";
+    markTaskFailed(tp.taskId, reason, resultJson);
+    logEvent("task.failed", {
+      runId: tp.runId,
+      taskId: tp.taskId,
+      payload: { reason, result: resultJson },
+    });
+    return { taskId: tp.taskId, status: "failed", output: resultJson, error: reason };
   }
 
   markTaskComplete(tp.taskId, resultJson);
@@ -291,6 +308,11 @@ function resolveIdleTimeoutMs(explicit: number | undefined): number {
   return DEFAULT_IDLE_TIMEOUT_MS;
 }
 
+// Exported for unit testing the envelope-parsing logic. Not part of the public API.
+export function _readResultJson(path: string): unknown | undefined {
+  return readResultJson(path);
+}
+
 function readResultJson(path: string): unknown | undefined {
   if (!existsSync(path)) return undefined;
   const raw = readFileSync(path, "utf8").trim();
@@ -314,7 +336,17 @@ function readResultJson(path: string): unknown | undefined {
       const innerLast = extractLastJsonBlock(inner) ?? inner.trim();
       const innerParsed = tryParseJson(innerLast);
       if (innerParsed) return innerParsed;
+      // Inner is a string but not JSON — the agent replied with prose instead of a result
+      // object. That's a contract violation; surface it as a clean failure with the agent's
+      // text preserved as diagnostic context (truncated).
+      return {
+        status: "failed",
+        error: "agent_replied_text",
+        agentText: inner.slice(0, 1000),
+      };
     }
+    // Envelope with no inner string at all — also a contract violation.
+    return { status: "failed", error: "agent_envelope_missing_inner_result" };
   }
   return parsed;
 }

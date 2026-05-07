@@ -1,7 +1,10 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import { startIdleWatchdog, _buildDockerArgs } from "./spawn.js";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startIdleWatchdog, _buildDockerArgs, _readResultJson } from "./spawn.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -192,3 +195,94 @@ function pickMount(args: string[], containerPath: string): string | undefined {
   }
   return undefined;
 }
+
+// ---------- readResultJson: envelope parsing + contract enforcement ----------
+
+let tmpResultDir: string;
+
+beforeEach(() => {
+  tmpResultDir = join(tmpdir(), `forge-result-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(tmpResultDir, { recursive: true });
+});
+
+afterEach(() => {
+  rmSync(tmpResultDir, { recursive: true, force: true });
+});
+
+function writeResult(name: string, content: string): string {
+  const path = join(tmpResultDir, name);
+  writeFileSync(path, content);
+  return path;
+}
+
+test("readResultJson: returns undefined for missing file", () => {
+  assert.equal(_readResultJson(join(tmpResultDir, "no-such-file.json")), undefined);
+});
+
+test("readResultJson: returns undefined for empty file", () => {
+  const p = writeResult("result.json", "");
+  assert.equal(_readResultJson(p), undefined);
+});
+
+test("readResultJson: passes through valid agent JSON object directly", () => {
+  const p = writeResult(
+    "result.json",
+    JSON.stringify({ status: "complete", findings: [{ severity: "high" }] })
+  );
+  const r = _readResultJson(p) as { status: string; findings: { severity: string }[] };
+  assert.equal(r.status, "complete");
+  assert.equal(r.findings[0]!.severity, "high");
+});
+
+test("readResultJson: unwraps claude envelope with valid inner JSON", () => {
+  const inner = JSON.stringify({ status: "complete", x: 42 });
+  const envelope = JSON.stringify({ type: "result", subtype: "success", is_error: false, result: inner });
+  const p = writeResult("stdout.log", envelope);
+  const r = _readResultJson(p) as { status: string; x: number };
+  assert.equal(r.status, "complete");
+  assert.equal(r.x, 42);
+});
+
+test("readResultJson: claude envelope with prose inner returns synthetic failure preserving text", () => {
+  const proseReply = "I cannot determine the scope of this task because no codebase was provided.";
+  const envelope = JSON.stringify({ type: "result", is_error: false, result: proseReply });
+  const p = writeResult("stdout.log", envelope);
+  const r = _readResultJson(p) as { status: string; error: string; agentText: string };
+  assert.equal(r.status, "failed", "should be marked failed, not silently passed");
+  assert.equal(r.error, "agent_replied_text");
+  assert.match(r.agentText, /cannot determine the scope/);
+});
+
+test("readResultJson: claude envelope with is_error=true surfaces as failed", () => {
+  const envelope = JSON.stringify({ type: "result", is_error: true, result: "rate limit exceeded" });
+  const p = writeResult("stdout.log", envelope);
+  const r = _readResultJson(p) as { status: string; error: string };
+  assert.equal(r.status, "failed");
+  assert.equal(r.error, "rate limit exceeded");
+});
+
+test("readResultJson: extracts JSON from prose-with-json-block in envelope inner", () => {
+  // claude sometimes wraps JSON in prose; the extractor pulls the last { ... } block.
+  const inner = "Here's my analysis:\n\n{\"status\": \"complete\", \"x\": 1}\n";
+  const envelope = JSON.stringify({ type: "result", is_error: false, result: inner });
+  const p = writeResult("stdout.log", envelope);
+  const r = _readResultJson(p) as { status: string; x: number };
+  assert.equal(r.status, "complete");
+  assert.equal(r.x, 1);
+});
+
+test("readResultJson: claude envelope with non-string inner returns synthetic failure", () => {
+  const envelope = JSON.stringify({ type: "result", is_error: false /* no result field */ });
+  const p = writeResult("stdout.log", envelope);
+  const r = _readResultJson(p) as { status: string; error: string };
+  assert.equal(r.status, "failed");
+  assert.equal(r.error, "agent_envelope_missing_inner_result");
+});
+
+test("readResultJson: bare JSON without status field passes through (status check happens upstream)", () => {
+  // readResultJson's job is parsing, not contract enforcement. The missing-status check
+  // lives in spawn() so it can also catch bare {} written directly to result.json.
+  const p = writeResult("result.json", JSON.stringify({ findings: [] }));
+  const r = _readResultJson(p) as { findings: unknown[] };
+  assert.deepEqual(r, { findings: [] });
+});
