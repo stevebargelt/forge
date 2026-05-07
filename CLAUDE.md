@@ -6,6 +6,12 @@ This is the forge CLI repo. If you're a Claude Code session working in this dire
 
 A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.
 
+## Session start: read BACKLOG.md
+
+`BACKLOG.md` at the repo root is the canonical task list. Read it on session entry. The "Notes for next session" prose at the top is the narrative handoff (what was just done, what to do next). The structured sections below — Active / In progress / Done — hold every open and recently-closed task with **sticky numbers** (e.g. `#33`, `#41`) that are referenced from commit messages and ADRs. New tasks always land in BACKLOG.md with the next sticky number; never renumber.
+
+The TaskCreate harness tool is for ephemeral within-session working state. The durable record is BACKLOG.md.
+
 ## Conventions
 
 - TypeScript with strict mode and `noUncheckedIndexedAccess`. Run `npm run typecheck` before committing source changes.
@@ -16,10 +22,10 @@ A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host
 - Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.
 - Default to no comments. Add a comment only when the WHY is non-obvious.
 
-## Auth modes (FORGE-DEC-007)
+## Auth modes (FORGE-DEC-007, updated by FORGE-DEC-013)
 
 Three modes, auto-selected by env at run time:
-- **bedrock**: `CLAUDE_CODE_USE_BEDROCK=1` + AWS_* env. Work default. Bedrock model IDs.
+- **bedrock**: `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_PROFILE` set. Containers mount `~/.aws` read-only and read SSO cache directly; STS env vars are NOT snapshotted. A detached host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh. Source `. ./scripts/use-bedrock.sh` to arm. See FORGE-DEC-013.
 - **anthropic-apikey**: `ANTHROPIC_API_KEY` set. Escape hatch.
 - **anthropic-oauth** (default): credentials live in docker volume `forge-claude-oauth`, populated by `forge auth login`. Personal-Mac default; supports Opus 4.7 via Claude Pro.
 
@@ -29,7 +35,7 @@ The vault's DEC-006 (host file mount) does NOT work on macOS — Claude Code sto
 
 ```
 src/
-├── cli/            CLI entry + commands (new, next, gate, show, status)
+├── cli/            CLI entry + commands (new, next, gate, show, status, auth, dashboard)
 ├── spine/          dispatch, next, spawn, spawnRed, gate, composeSystemPrompt, workflows, constraints
 ├── store/          SQLite schema + accessors per table
 ├── types/          Authoritative TypeScript types (matches the sketch)
