@@ -286,3 +286,67 @@ test("readResultJson: bare JSON without status field passes through (status chec
   const r = _readResultJson(p) as { findings: unknown[] };
   assert.deepEqual(r, { findings: [] });
 });
+
+// ---------- readResultJson: stream-json (NDJSON) shape ----------
+// `claude --output-format stream-json --verbose --print` emits NDJSON: one JSON
+// object per line, ending with a {type:"result", result:"..."} envelope identical
+// in shape to --output-format=json. The parser must pluck that last envelope and
+// unwrap the inner result string just like the single-blob case.
+
+test("readResultJson: stream-json — picks the trailing result envelope, unwraps inner JSON", () => {
+  const inner = JSON.stringify({ status: "complete", findings: [{ severity: "high" }] });
+  const ndjson = [
+    JSON.stringify({ type: "system", subtype: "init", session_id: "abc", tools: ["Read"] }),
+    JSON.stringify({ type: "system", subtype: "status", status: "requesting" }),
+    JSON.stringify({
+      type: "assistant",
+      message: { id: "m1", role: "assistant", content: [{ type: "text", text: "thinking..." }] },
+    }),
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: inner,
+      duration_ms: 4321,
+    }),
+  ].join("\n");
+  const p = writeResult("stdout.log", ndjson);
+  const r = _readResultJson(p) as { status: string; findings: { severity: string }[] };
+  assert.equal(r.status, "complete");
+  assert.equal(r.findings[0]!.severity, "high");
+});
+
+test("readResultJson: stream-json — is_error=true on the trailing envelope surfaces as failed", () => {
+  const ndjson = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "result", is_error: true, result: "rate limit exceeded" }),
+  ].join("\n");
+  const p = writeResult("stdout.log", ndjson);
+  const r = _readResultJson(p) as { status: string; error: string };
+  assert.equal(r.status, "failed");
+  assert.equal(r.error, "rate limit exceeded");
+});
+
+test("readResultJson: stream-json — prose inner on result envelope is a contract violation", () => {
+  const ndjson = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "result", is_error: false, result: "I couldn't write JSON because..." }),
+  ].join("\n");
+  const p = writeResult("stdout.log", ndjson);
+  const r = _readResultJson(p) as { status: string; error: string; agentText: string };
+  assert.equal(r.status, "failed");
+  assert.equal(r.error, "agent_replied_text");
+  assert.match(r.agentText, /couldn't write JSON/);
+});
+
+test("readResultJson: stream-json — extracts JSON from prose-wrapped inner result", () => {
+  const inner = "Here's the answer:\n\n{\"status\": \"complete\", \"x\": 1}\n";
+  const ndjson = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "result", is_error: false, result: inner }),
+  ].join("\n");
+  const p = writeResult("stdout.log", ndjson);
+  const r = _readResultJson(p) as { status: string; x: number };
+  assert.equal(r.status, "complete");
+  assert.equal(r.x, 1);
+});

@@ -214,8 +214,14 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     "--append-system-prompt",
     input.systemPrompt,
     "--dangerously-skip-permissions",
+    // stream-json over json: emits NDJSON in real time so the idle watchdog sees
+    // continuous stdout instead of nothing-until-done. Lets long-running tool calls
+    // (e.g. Pencil's 1-5 min per-screen budget) survive the 5-min idle timeout.
+    // The final line is the same {type:"result", result:"..."} envelope as --output-format=json,
+    // so result-parsing in readResultJson is unchanged. --verbose is required for stream-json.
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--print"
   );
   return args;
