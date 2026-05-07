@@ -24,7 +24,7 @@ export function registerGate(program: Command): void {
       if (result.nextTasks.length > 0) {
         console.log(`Created ${result.nextTasks.length} follow-up task(s):`);
         for (const t of result.nextTasks) console.log(`  - ${t.id} (${t.phase}/${t.agentRole})`);
-        console.log(`Next: forge next ${result.task.runId}`);
+        console.log(`\nNext:\n  forge next ${result.task.runId} --project <path>`);
       }
     });
 }

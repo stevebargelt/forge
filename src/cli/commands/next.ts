@@ -11,6 +11,7 @@ export function registerNext(program: Command): void {
     .action(async (runId: string, options) => {
       ensureForgeDirs();
       const result = await next(runId, { projectDir: options.project });
+      const projectArg = options.project ?? "<path>";
       switch (result.kind) {
         case "running":
           console.log(`Run ${runId}: ${result.tasks.length} task(s) running.`);
@@ -36,10 +37,11 @@ export function registerNext(program: Command): void {
           break;
         case "dispatched":
           console.log(`Run ${runId}: dispatched phase ${result.phase} (${result.tasks.length} tasks).`);
+          console.log(`\nNext:\n  forge next ${runId} --project ${projectArg}`);
           break;
         case "advanced":
           console.log(`Run ${runId}: advanced to phase ${result.phase} (${result.tasks.length} task(s) created).`);
-          console.log(`Next: forge next ${runId}`);
+          console.log(`\nNext:\n  forge next ${runId} --project ${projectArg}`);
           break;
         case "complete":
           console.log(`Run ${runId}: complete.`);
