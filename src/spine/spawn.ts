@@ -1,5 +1,5 @@
 import { spawn as cpSpawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
@@ -39,8 +39,14 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
 
   writeFileSync(claudeMdPath, tp.composedSystemPrompt);
   writeFileSync(packagePath, renderTaskPackageMarkdown(tp));
-  // Pre-create the result file so the bind mount has a target. Empty until agent writes.
+  // Pre-create result.json so reconcile / readResultJson have a stable path even if the
+  // agent never writes. Empty until the agent fills it.
   writeFileSync(resultPath, "");
+  // The whole task dir is mounted at /task so agents can create new files alongside
+  // package.md and result.json (designer drops .pen/.png here). The container's agent
+  // user is UID 1000; the host dir is owned by the host user. 0777 keeps the agent
+  // writable across host UIDs without forcing a chown.
+  chmodSync(dir, 0o777);
 
   markTaskRunning(tp.taskId);
   logEvent("task.started", { runId: tp.runId, taskId: tp.taskId });
@@ -50,9 +56,7 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
   const idleTimeoutMs = resolveIdleTimeoutMs(opts.idleTimeoutMs);
 
   const dockerArgs = buildDockerArgs({
-    claudeMdPath,
-    packagePath,
-    resultPath,
+    taskDir: dir,
     projectDir: opts.projectDir,
     readOnlyProject: opts.readOnlyProject,
     image: opts.image ?? DEFAULT_IMAGE,
@@ -153,9 +157,7 @@ function renderTaskPackageMarkdown(tp: TaskPackage): string {
 }
 
 type DockerArgsInput = {
-  claudeMdPath: string;
-  packagePath: string;
-  resultPath: string;
+  taskDir: string;
   projectDir: string;
   readOnlyProject: boolean;
   image: string;
@@ -207,10 +209,13 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     args.push("-e", `PENCIL_CLI_KEY=${process.env.PENCIL_CLI_KEY}`);
   }
 
-  // Mounts. CLAUDE.md is written to disk for audit but not mounted — the prompt is
-  // passed via --append-system-prompt on the argv.
-  args.push("-v", `${input.packagePath}:/task/package.md:ro`);
-  args.push("-v", `${input.resultPath}:/task/result.json`);
+  // Mount the task dir as a writable directory at /task so the agent can create new
+  // files (e.g. designer's .pen/.png artifacts) alongside the pre-created package.md
+  // and result.json. The host dir is per-task under ~/.forge/runs/<run>/<task>/, so any
+  // visible host-side files (CLAUDE.md, container.{stdout,stderr}.log) are intentional
+  // audit artifacts. The container UID (1000) needs write perms on the host dir;
+  // ensureTaskDirWritable() in the caller handles that.
+  args.push("-v", `${input.taskDir}:/task`);
   args.push("-v", projectMount);
 
   args.push(input.image);

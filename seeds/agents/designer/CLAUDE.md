@@ -37,19 +37,19 @@ Instead:
 3. **For every subsequent screen, pass `--in <anchor>.pen`** so Pencil reads the established style and inherits its palette/typography/spacing decisions.
 4. **Keep prompts focused on what's new** in each screen. Do not re-state colors, fonts, or general feel — the input file already carries those choices, and re-stating them can fight the input.
 
-Example flow for a 5-screen dashboard:
+Example flow for a 5-screen dashboard (note `--custom` — see "Picking the Pencil model" below):
 
 ```bash
 # Anchor screen — establishes the visual language
-pencil --out /task/runs.pen --export /task/runs.png --export-scale 2 \
+pencil --custom --out /task/runs.pen --export /task/runs.png --export-scale 2 \
        --prompt "Run list pane for forge dashboard. Shows active and recent runs."
 
 # Subsequent screens chain off the anchor
-pencil --in /task/runs.pen --out /task/tasks.pen --export /task/tasks.png \
+pencil --custom --in /task/runs.pen --out /task/tasks.pen --export /task/tasks.png \
        --export-scale 2 \
        --prompt "Task list pane shown to the right of the run list."
 
-pencil --in /task/runs.pen --out /task/task-detail.pen --export /task/task-detail.png \
+pencil --custom --in /task/runs.pen --out /task/task-detail.pen --export /task/task-detail.png \
        --export-scale 2 \
        --prompt "Generic task detail pane."
 
@@ -58,9 +58,26 @@ pencil --in /task/runs.pen --out /task/task-detail.pen --export /task/task-detai
 
 ## Where to write design files
 
-Write all `.pen` and `.png` files into `/task/` (your task's working dir). They'll be preserved in `~/.forge/runs/<run>/<task>/` on the host and visible in the dashboard. Do **not** write designs into `/project` — that's the user's source tree.
+Write all `.pen` and `.png` files into `/task/` (your task's working dir). The whole `/task` directory is bind-mounted from the host at `~/.forge/runs/<run>/<task>/` and is fully writable by you (UID 1000). Files you create here persist on the host after the container exits — the host dashboard reads from this same directory.
+
+**Do not** write designs to `/tmp` or anywhere else under `/`. Those locations are ephemeral container filesystem — your output disappears when the container exits and the next phase / human reviewer cannot see it. **Only `/task/` persists.**
+
+Do not write designs into `/project` either — that's the user's source tree.
 
 Use predictable, descriptive filenames so the human reviewer (and the export phase) can match files to screens: `runs.pen`, `tasks.pen`, `task-detail.pen`, etc.
+
+## Picking the Pencil model (important on Bedrock)
+
+Pencil's default model id may not exist in your provider — particularly on Bedrock, which requires cross-region inference profile IDs (e.g. `us.anthropic.claude-opus-4-7`) rather than the bare Anthropic-style ids Pencil defaults to. If Pencil reports a model-not-found error, pass **`--custom`** so Pencil uses the surrounding Claude Code environment's model resolution rather than its own defaults:
+
+```bash
+pencil --custom --out /task/runs.pen --export /task/runs.png \
+       --prompt "..."
+```
+
+`--custom` is safe to pass unconditionally — it just tells Pencil to inherit the model from your container's Claude config. Use it from the first call onward when running on Bedrock.
+
+If you're unsure which models Pencil sees, run `pencil --list-models` once at the start of your task and pick one explicitly with `--model <id>`.
 
 ## Prompt discipline
 

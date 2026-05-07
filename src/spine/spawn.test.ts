@@ -72,9 +72,7 @@ test("idle watchdog: only fires once even on long silence", async () => {
 // ---------- buildDockerArgs: credential mode wiring ----------
 
 const ARGS_INPUT_BASE = {
-  claudeMdPath: "/tmp/x/CLAUDE.md",
-  packagePath: "/tmp/x/package.md",
-  resultPath: "/tmp/x/result.json",
+  taskDir: "/tmp/x",
   projectDir: "/tmp/project",
   readOnlyProject: false,
   image: "agent-dev-worker",
@@ -157,6 +155,13 @@ test("buildDockerArgs: anthropic-oauth mode mounts the OAuth volume, no AWS env"
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.AWS_PROFILE, undefined);
   assert.equal(envPairs.CLAUDE_CODE_USE_BEDROCK, undefined);
+});
+
+test("buildDockerArgs: task dir is mounted as a writable directory at /task", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  const taskMount = pickMount(args, "/task");
+  assert.ok(taskMount, "should mount /task");
+  assert.equal(taskMount, "/tmp/x:/task", "should be a directory mount, no :ro flag");
 });
 
 test("buildDockerArgs: designer image forwards PENCIL_CLI_KEY when set", () => {
