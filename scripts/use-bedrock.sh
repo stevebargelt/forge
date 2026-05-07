@@ -36,7 +36,10 @@ if [ "$__forge_sourced" != "1" ]; then
 fi
 unset __forge_sourced
 
-set -e
+# Deliberately NOT using `set -e` here. This script is sourced into the user's
+# interactive shell — any `set -e` we enable would persist after sourcing and kill
+# the shell on the next typo. The exports below are tolerant of individual failures
+# (e.g. the identity check has its own `|| echo` fallback).
 
 # Resolve forge repo root from this script's location, so FORGE_SSO_WATCHDOG points at
 # an absolute path that survives `cd`-ing elsewhere.
