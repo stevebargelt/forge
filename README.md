@@ -1,6 +1,6 @@
 # forge
 
-A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Five commands: `new`, `next`, `gate`, `show`, `status`.
+A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `new`, `next`, `gate`, `show`, `status`, plus `auth` for personal-Mac OAuth and `dashboard` for the read-only web view.
 
 ## Prerequisites
 
@@ -23,6 +23,15 @@ npm install
 ```
 
 Full walkthrough: `docs/quick-start.md`.
+
+## Dashboard
+
+```bash
+./bin/forge dashboard            # default port 3737
+./bin/forge dashboard --port 8080
+```
+
+Open `http://127.0.0.1:3737`. Read-only web view of all runs, tasks, verdicts, and gate decisions backed by the same `~/.forge/forge.db` the CLI uses. Renders agent markdown reports as HTML. Safe to run alongside an active run — the dashboard opens the DB read-only and never blocks `forge next` (FORGE-DEC-012). Refresh the page to pick up new state; there are no live updates today.
 
 ## Where things live
 

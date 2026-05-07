@@ -31,12 +31,12 @@ Verify with `forge auth status`. To switch accounts, `forge auth logout` then `f
 
 ```bash
 aws sso login --profile adx-dev
-. ./scripts/use-bedrock.sh         # exports AWS_* and CLAUDE_CODE_USE_BEDROCK=1
+. ./scripts/use-bedrock.sh         # arms AWS_PROFILE + CLAUDE_CODE_USE_BEDROCK=1 + the SSO watchdog
 ```
 
-Sourcing (not running) the script is required so the env vars stay set in your shell. Re-source after `aws sso login` whenever your SSO session expires.
+Sourcing (not running) the script is required so the env vars stay set in your shell. The script does NOT snapshot STS env vars — agent containers read SSO state directly from a mounted `~/.aws` and a host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh in the background. See FORGE-DEC-013 for why.
 
-For runs longer than ~1h, set `FORGE_SSO_WATCHDOG=/path/to/run-sso-watchdog.sh` and forge starts it as a child process when a run begins.
+For multi-hour runs the watchdog refreshes silently every 5 minutes via the SSO refresh token — no browser pop unless your refresh token (typically days/weeks) has also expired. The watchdog auto-starts when forge dispatches a run and auto-stops when the run completes; PID is tracked at `~/.forge/sso-watchdog.pid`.
 
 ### API key (escape hatch)
 
@@ -122,3 +122,13 @@ The synthesize and recommend phases run the same way. After `recommend` complete
 ```
 
 shows the full task graph with verdicts. Output documents live at `~/.forge/runs/run-litellm-evaluation-96a1da/<task-id>/result.json`.
+
+## 8. Dashboard (optional)
+
+For a web view of one or more runs alongside the CLI:
+
+```bash
+./bin/forge dashboard            # default port 3737
+```
+
+Open `http://127.0.0.1:3737`. Read-only — the dashboard opens the DB read-only (FORGE-DEC-012) so it can run during an active `forge next` without contention. Useful for browsing per-task results, reading agent markdown reports as rendered HTML, and seeing verdicts side-by-side. Refresh the page to see new state; the dashboard does not auto-update today.
