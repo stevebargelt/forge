@@ -4,8 +4,9 @@ import { agent } from "./_agentRefs.js";
 // design-revise — for iterating on existing .pen files rather than starting cold.
 // Input shape (passed via --brief at `forge new`): a description of the changes wanted
 // plus paths to the existing .pen files (relative to /project or absolute on the host).
-// The designer reads those files, runs `pencil --in <existing>.pen` with the revision
-// prompt, and writes new .pen/.png files to /task/.
+// The designer drives `pencil interactive --in <existing>.pen --out <new>.pen` (MCP REPL
+// mode), reads the existing nodes via batch_get, applies edits via batch_design, and
+// writes new .pen/.png files to /task/.
 export const workflow: Workflow = {
   name: "design-revise",
   description: "Revise existing Pencil designs. Revise → human-review → export.",
@@ -15,7 +16,7 @@ export const workflow: Workflow = {
       agents: [agent("designer", "spec-writer", "agent-designer-worker")],
       gate: "human",
       workflowAdditions:
-        "inputs.brief contains the revision request and paths to existing .pen files. Use `pencil --in <existing>.pen` to apply the changes. Write the revised .pen and .png files into /task/. If multiple screens are being revised, keep them coherent by chaining --in. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
+        "inputs.brief contains the revision request and paths to existing .pen files. Drive `pencil interactive --in <existing>.pen --out <new>.pen` (MCP REPL mode — see the pencil-design skill) to apply the changes. DO NOT use `pencil --prompt` one-shot mode; it stalls on inner-Claude permission prompts in containers. Write the revised .pen and .png files into /task/. If multiple screens are being revised, keep them coherent by chaining --in. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
     },
     {
       name: "export",

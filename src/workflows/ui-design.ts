@@ -21,7 +21,7 @@ export const workflow: Workflow = {
       agents: [agent("designer", "spec-writer", "agent-designer-worker")],
       gate: "human",
       workflowAdditions:
-        "Generate all screens in this single task using the Pencil CLI. Anchor on the most representative screen first (no --in), then chain every subsequent screen with --in <anchor>.pen so the visual language is consistent. Write all .pen and .png files into /task/. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
+        "Generate all screens in this single task by driving `pencil interactive` (the MCP-tools REPL mode — see the pencil-design skill). DO NOT use `pencil --prompt` one-shot mode; it stalls on inner-Claude permission prompts in containers. Anchor on the most representative screen first (no --in), then chain every subsequent screen with `--in <anchor>.pen` so the visual language is consistent. Write all .pen and .png files into /task/. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
     },
     {
       name: "export",

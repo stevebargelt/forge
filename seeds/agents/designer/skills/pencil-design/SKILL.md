@@ -1,174 +1,151 @@
 ---
 name: pencil-design
 description: >
-  Create high-quality visual designs â€” websites, app screens, dashboards, slides, marketing materials, social media graphics â€” using the Pencil CLI tool. Use this skill whenever the user wants to create, generate, or visualize any kind of UI design, mockup, wireframe, layout, webpage, app screen, presentation slide, poster, banner, or marketing asset. Also use it when the user says things like "design me a...", "make a visual for...", "create a mockup of...", "what would X look like?", or wants to turn an idea into a visual. Even if the user doesn't mention "Pencil" or "design tool" explicitly â€” if they want something visual created, this is the skill to use.
+  Drive Pencil's interactive shell to create high-quality visual designs — websites, app screens, dashboards, slides, marketing materials. Use this skill whenever the user wants to create, generate, or visualize any kind of UI design, mockup, wireframe, layout, webpage, app screen, presentation slide, poster, banner, or marketing asset. Even if the user doesn't mention "Pencil" explicitly — if they want something visual created, this is the skill to use. This skill teaches the MCP-tools-via-stdin mode (`pencil interactive`), NOT the one-shot `pencil --prompt` mode (which uses an internal Claude that asks for permissions and stalls in automated environments).
 ---
 
-# Pencil Design
+# Pencil Design (interactive / MCP mode)
 
-Create professional visual designs from natural language descriptions using the Pencil CLI. Pencil is a headless design tool that generates `.pen` files (a structured JSON design format) and can export them as images.
+Drive Pencil's MCP tools directly through its interactive shell. **You** are the AI agent designing — Pencil exposes a programmatic tool surface (`batch_design`, `batch_get`, `get_screenshot`, `export_nodes`, etc.); your job is to call those tools to construct the design.
+
+## Why interactive mode, not `--prompt`
+
+The Pencil CLI ships two ways to invoke it:
+
+- ❌ **One-shot mode** (`pencil --prompt "design a login form" --out form.pen`) — Pencil's CLI internally spawns its own Claude session that interprets the prompt in natural language and runs MCP tools internally. **Do not use this in agent contexts.** That inner Claude has its own permission state and will stall waiting for permission prompts that the surrounding agent harness can't see.
+- ✅ **Interactive mode** (`pencil interactive --out form.pen`) — drops into a stdin-driven REPL where you call MCP tools directly as `tool_name({key: value})` expressions. No nested AI. You decide every operation.
+
+Always use interactive mode. Same MCP tool surface as Pencil's native MCP server — just delivered through stdin/stdout.
 
 ## Setup
 
-Before designing, make sure the Pencil CLI is available.
-
-### Check installation
+Verify the CLI is installed and authenticated. (Forge's designer image bakes both in.)
 
 ```bash
-which pencil || npx pencil version
+which pencil      # /usr/bin/pencil
+echo "${PENCIL_CLI_KEY:0:6}..."   # should be non-empty; forge spawn passes it through
 ```
 
-If `pencil` is not found, install it:
+If `PENCIL_CLI_KEY` isn't set in your environment, stop and surface the issue — do not try `pencil login` (interactive auth doesn't work in headless containers).
+
+## The basic invocation
 
 ```bash
-npm install -g @pencil.dev/cli
+pencil interactive --out /path/to/output.pen <<'EOF'
+get_editor_state({ include_schema: true })
+... (more tool calls)
+save()
+exit()
+EOF
 ```
 
-If global install fails due to permissions, install locally instead:
+To iterate on an existing design, also pass `--in`:
 
 ```bash
-npm install @pencil.dev/cli
+pencil interactive --in prior.pen --out new.pen <<'EOF'
+get_editor_state({ include_schema: true })
+batch_get()
+... (modify or extend)
+save()
+exit()
+EOF
 ```
 
-Then run it via `npx pencil` (or `./node_modules/.bin/pencil`) instead of `pencil`.
-You can learn about the available commands via the `pencil --help` command.
+**Important details:**
+- `--out` is required. `--in` is optional (omit for empty canvas).
+- One `pencil interactive` invocation per `.pen` file. Always end with `save()` then `exit()`.
+- The REPL prompt is `pencil > `. Each line of stdin is a tool call.
+- Don't pipe stdout through `tee` or similar — the REPL is interactive. To capture logs, redirect stderr instead: `pencil interactive ... 2>file.log <<'EOF' ... EOF`.
 
-### Authentication
+## The recommended workflow per screen
 
-#### Pencil user
+1. **`get_editor_state({ include_schema: true })`** — see the current document tree and the type schema for nodes you can create. Always do this first.
+2. **`get_guidelines()`** — list the design-system guides available (Lunaris and others). Then narrow with `get_guidelines({ category: "style", name: "Lunaris" })` to read the specifics.
+3. **`get_variables()`** — see the design tokens (colors, typography, spacing) defined in the document. Reuse these instead of hardcoding values.
+4. **`batch_get()` / `batch_get({ patterns: [{ reusable: true }] })`** — only when you opened with `--in`; finds existing nodes and reusable components to build on.
+5. **`find_empty_space_on_canvas({ width, height, padding, direction })`** — when adding a new artboard alongside existing ones.
+6. **`batch_design({ operations: '...' })`** — make changes. **Maximum 25 operations per call.** Split larger work into multiple calls organized by logical section (e.g. structure first, then header content, then main content).
+7. **`get_screenshot({ nodeId: "..." })`** — verify visually before exporting. You're a multimodal model; reading the screenshot tells you whether the design actually looks right.
+8. **`export_nodes({ nodeIds: [...], outputDir: "..." })`** — produce a PNG. The output filename is derived from the node name; rename with `mv` after if you want a different filename.
+9. **`save()`** — write the `.pen` file to the path you passed via `--out`.
+10. **`exit()`** — terminate the REPL.
 
-To use the CLI, an authenticated user logged in to Pencil is required. First, check
-the current user configuration on the machine with the `pencil status` command.
+## `batch_design` operations — quick reference
 
-If not logged in, there are the following options:
+Operations are a single string with newline-separated commands. Each command is one of:
 
-- use `pencil signup --email you@example.com --username johndoe --name "John Doe"` command, to create a new user.
-- use `pencil login --email you@example.com [--code abc123]` to authenticate an existing or newly created user.
-- optionally, the `PENCIL_CLI_KEY` env var can also be used for authentication if its set in your session.
+- **Insert:** `binding=I(parent,{type:"frame",name:"Header",x:0,y:0,width:1440,height:48,fill:"#16161B"})`
+- **Update:** `U(node_id,{content:"new label",fill:"#FFFFFF"})`
+- **Delete:** `D(node_id)`
+- **Move:** `M(node_id,new_parent)`
+- **Replace:** `R(node_id,new_node_spec)`
+- **Image:** `IMG(node_id,"path/to/image.png")`
 
-#### Claude Code agent
+Bindings (the `frame=`, `header=` etc.) name a node so later operations in the same `batch_design` can reference it. **Always create new binding names per `batch_design` call** — do not reuse across calls.
 
-The CLI needs auth to run its AI agent for which Claude Code is required. For that
-there needs to be an authenticated Claude Code user set in the system configuration
-either via env var or a user subscription.
+If an operation fails, the whole batch rolls back. The response includes a list of issues; address them in the next `batch_design` call.
 
-If none of these are available, tell the user what options they have and help them set one up.
+## Multi-screen designs — coherence
 
-### Staying up to date
-
-This skill stays in sync with the **Pencil CLI npm package** (`@pencil.dev/cli`). The published package includes `SKILL.md` at its root; the package version is the skill version.
-
-**Check for a newer CLI / skill**
-
-- Latest version on the registry: `npm view @pencil.dev/cli version`
-- Installed CLI: `pencil version`, or `npm list -g @pencil.dev/cli` (global) / `npm list @pencil.dev/cli` (project)
-
-**Upgrade the CLI**, then refresh your copied skill file (agents do not auto-update skill files you placed in config folders):
+When producing multiple screens for one product, the second through Nth screens should chain off the first via `--in`:
 
 ```bash
-npm install -g @pencil.dev/cli
+# Screen 1 — anchor screen, empty canvas
+pencil interactive --out /task/runs.pen <<'EOF'
+get_editor_state({ include_schema: true })
+get_guidelines()
+batch_design({ operations: '...' })
+get_screenshot({ nodeId: "anchor" })
+export_nodes({ nodeIds: ["anchor"], outputDir: "/task" })
+save()
+exit()
+EOF
+
+# Screen 2 — chains off anchor; inherits palette, typography, components
+pencil interactive --in /task/runs.pen --out /task/tasks.pen <<'EOF'
+get_editor_state({ include_schema: true })
+batch_get()
+batch_get({ patterns: [{ reusable: true }], readDepth: 2 })
+batch_design({ operations: '...' })
+get_screenshot({ nodeId: "..." })
+export_nodes({ nodeIds: ["..."], outputDir: "/task" })
+save()
+exit()
+EOF
 ```
 
-**Where to copy the skill from after installing**
+The `batch_get({ patterns: [{ reusable: true }] })` call is the key — it surfaces components/styles the anchor screen established so the new screen can reuse them via `R(...)` or `I(parent,{type:"ref",ref:"ButtonComp",...})`.
 
-- From a dependency tree: `node_modules/@pencil.dev/cli/SKILL.md` (path is the same for global and local installs; resolve from your project root or global `node_modules` prefix).
+## Output paths
 
-**Fetch the same file without cloning the repo** (mirrors the npm tarball; optional third-party CDNs):
+Write all artifacts into the agent's task directory (the harness will tell you where — typically `/task` in forge containers). **Do not** write to `/tmp` or other ephemeral paths — outputs disappear when the container exits.
 
-- `https://unpkg.com/@pencil.dev/cli@latest/SKILL.md`
-- `https://cdn.jsdelivr.net/npm/@pencil.dev/cli@latest/SKILL.md`
+## When the design is wrong
 
-Use `@latest` for the newest publish, or pin (e.g. `@0.2.4`) for a reproducible snapshot.
+If `get_screenshot` shows the design isn't right:
+- **Don't restart from scratch.** Use `batch_get` to find the broken nodes and `U(...)` or `D(...)` to fix them.
+- If structurally broken, `D(root_node)` to clear and start over within the same session — cheaper than killing the REPL.
 
-**If you donâ€™t know where skills live on this machine**
+## What you should NOT do
 
-Agents donâ€™t always get the skills directory from context. When the path isnâ€™t obvious:
+- Do not run `pencil --prompt` in any form. (One-shot mode delegates to a nested Claude that fails in containers.)
+- Do not write to `/tmp/designs/` or any ephemeral container path.
+- Do not pipe `pencil interactive` through `tee` — it's an interactive REPL and `tee` interferes with stdin/stdout.
+- Do not skip `get_editor_state` and `get_guidelines` at the start — designing blind produces poor results.
+- Do not skip `get_screenshot` before `export_nodes` — verify the visual before claiming the screen is done.
+- Do not run more than 25 operations in one `batch_design` — it'll error.
 
-- **Ask the user** where their agent or IDE loads skills from, or where they want this skill installed.
-- **Check the productâ€™s docs** for â€œskillsâ€, â€œagent skillsâ€, or â€œpluginsâ€ â€” paths differ by tool and version.
-- You can still **use the skill content without installing**: fetch or open the **`SKILL.md` URL above** (unpkg/jsDelivr) in the session so guidance applies even when the on-disk path is unknown. For a persistent install, copy the fetched file into the path the user or docs specify.
+## Reference: the canonical example session
 
-**Typical skill locations** (confirm with your toolâ€™s current docs â€” layouts change):
-
-| Environment | Where to put `SKILL.md` |
-|-------------|-------------------------|
-| **Cursor** | Project: `.cursor/skills/pencil-design/SKILL.md`; user-level: under `~/.cursor/skills/` |
-| **Claude Code** | Often `.claude/skills/pencil-design/SKILL.md` or user-level under `~/.claude/` |
-| **OpenClaw** | Often `~/.openclaw/skills/`, workspace `.agents/skills/`, or paths in [OpenClaw skills docs](https://docs.openclaw.ai/skills/) â€” verify for the userâ€™s setup |
-| **Other agents (Codex, etc.)** | Use the directory your product uses for skills or prompts |
-
-Example (adjust the destination path to match your agent):
-
-```bash
-curl -fsSL "https://unpkg.com/@pencil.dev/cli@latest/SKILL.md" -o .cursor/skills/pencil-design/SKILL.md
 ```
-
-**When to check for an update**
-
-- **Early in the session**, before the first Pencil design run (compare `npm view @pencil.dev/cli version` to the installed CLI), so you arenâ€™t following stale instructions.
-- **Again** if the user says they upgraded the CLI, or if behavior doesnâ€™t match this doc (flags, auth, timing).
-- **Not** before every single command â€” once per session is enough unless something changed or errors suggest a version mismatch.
-
-## Creating a Design
-
-The core command:
-
-```bash
-pencil --out <output.pen> --prompt "<design description>" --export <output.png> --export-scale 2
+pencil > get_editor_state({ include_schema: true })
+pencil > get_guidelines()
+pencil > get_guidelines({ category: "style", name: "Lunaris" })
+pencil > find_empty_space_on_canvas({ width: 1440, height: 900, padding: 100, direction: "right" })
+pencil > batch_design({ operations: 'frame=I(document,{type:"frame",name:"Hero",x:0,y:0,width:1440,height:900,fill:"#0A0A0A",layout:"vertical",clip:true})' })
+pencil > batch_design({ operations: 'heading=I("frame",{type:"text",content:"Ship faster.",fontSize:72,fontWeight:"bold",fill:"#FFFFFF"})' })
+pencil > get_screenshot({ nodeId: "frame" })
+pencil > export_nodes({ nodeIds: ["frame"], outputDir: "/task" })
+pencil > save()
+pencil > exit()
 ```
-
-Key flags:
-- `--out, -o` â€” where to save the `.pen` file (required)
-- `--prompt, -p` â€” what to design (required)
-- `--export, -e` â€” export an image of the result
-- `--export-scale` â€” image resolution multiplier (use 2 for crisp output)
-- `--export-type` â€” format: `png` (default), `jpeg`, `webp`, `pdf`
-- `--in, -i` â€” start from an existing `.pen` file (for iteration)
-- `--model, -m` â€” Claude model to use (defaults to Opus)
-
-### Passing the Prompt
-
-Pass the user's request directly as the prompt â€” do not expand, or add detail beyond what the user actually said. The Pencil CLI has its own AI designer agent that handles creative decisions like layout structure, color palettes, typography, spacing, and content. Adding your own design specifics on top of the user's request will conflict with the CLI agent's own judgment and produce worse results.
-
-If the user says "make me a landing page for a coffee shop", the prompt should be exactly that â€” not a paragraph with hero sections, color palettes, and font choices you invented.
-
-### Timing Expectations
-
-Design generation is not instant â€” the CLI runs an AI agent that plans the layout, creates each element, and validates the result visually. Expect:
-
-- **Simple designs** (a card, a single component): 1-2 minutes
-- **Medium designs** (an app screen, a landing page section): 2-3 minutes
-- **Complex designs** (full landing page, detailed dashboard): 3-5+ minutes
-
-Let the user know upfront that generation will take a few minutes so they're not left wondering. Use a generous timeout (at least 600000ms / 10 minutes) when running the command.
-
-### Showing the Result
-
-After the command completes, read the exported image to show it to the user:
-
-```bash
-# The command exports to the path you specified
-pencil --out design.pen --prompt "..." --export design.png --export-scale 2
-```
-
-Then use the Read tool on the exported PNG â€” it will render visually since you're a multimodal model.
-
-Always show the image to the user after creating it. This is the whole point â€” they want to see the visual.
-
-## Iterating on a Design
-
-When the user wants changes to an existing design, use the `--in` flag to load the previous `.pen` file:
-
-```bash
-pencil --in design.pen --out design-v2.pen --prompt "Make the header larger and change the accent color to green" --export design-v2.png --export-scale 2
-```
-
-The agent will read the existing design and apply modifications rather than starting from scratch.
-
-For quick successive iterations, keep a consistent naming pattern:
-- `design.pen` â†’ `design-v2.pen` â†’ `design-v3.pen`
-- Or use a single file: `--in design.pen --out design.pen` (overwrites)
-
-## Working Directory
-
-Save design files in the user's current working directory or a subdirectory like `designs/`. Don't use temp directories â€” the user will want to find and iterate on these files later.
