@@ -15,14 +15,13 @@ fi
 mkdir -p "$HERE/designer-skills/pencil-design"
 cp "$SKILL_SRC" "$HERE/designer-skills/pencil-design/SKILL.md"
 
-# designer-mcp.json is checked in alongside the Dockerfile, so it's already in the
-# context — but the Dockerfile COPYs it from a relative path, so we don't need to
-# stage it separately. (Keeping it next to the Dockerfile keeps things simple.)
-
 trap 'rm -rf "$HERE/designer-skills"' EXIT
 
-# Verify the base image exists; FROM agent-dev-worker fails confusingly otherwise.
-if ! docker image inspect agent-dev-worker >/dev/null 2>&1; then
+# Verify the base image exists. Use `docker images -q` rather than `docker image
+# inspect` because the latter fails on Docker Desktop's containerd-store images
+# (where `docker images` lists the image fine but `docker image inspect` says
+# "no such image"). We just need to know the build will find the FROM target.
+if [[ -z "$(docker images -q agent-dev-worker:latest 2>/dev/null)" ]]; then
   echo "ERROR: agent-dev-worker image not found. Run docker/build.sh first." >&2
   exit 1
 fi

@@ -178,19 +178,6 @@ test("buildDockerArgs: designer image without PENCIL_CLI_KEY does not pass an em
   assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
 });
 
-test("buildDockerArgs: designer image attaches --mcp-config for the Pencil MCP server", () => {
-  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, image: "agent-designer-worker" });
-  // --mcp-config <path> appears as two consecutive argv entries somewhere in the tail.
-  const idx = args.indexOf("--mcp-config");
-  assert.ok(idx >= 0, "should include --mcp-config when image is agent-designer-worker");
-  assert.equal(args[idx + 1], "/etc/forge/designer-mcp.json");
-});
-
-test("buildDockerArgs: non-designer image does not attach --mcp-config", () => {
-  const args = _buildDockerArgs(ARGS_INPUT_BASE);
-  assert.equal(args.indexOf("--mcp-config"), -1, "no MCP config for default image");
-});
-
 test("buildDockerArgs: non-designer image never forwards PENCIL_CLI_KEY", () => {
   process.env.PENCIL_CLI_KEY = "pk-leak";
   const args = _buildDockerArgs(ARGS_INPUT_BASE); // image: agent-dev-worker

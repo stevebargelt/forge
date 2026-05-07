@@ -2,10 +2,10 @@ import type { Workflow } from "../types/index.js";
 import { agent } from "./_agentRefs.js";
 
 // Single-task design phase (no fanout) — coherence across screens depends on the
-// designer copying the anchor .pen and opening the copy for each subsequent screen
-// (via Pencil's MCP tools). Fanout-per-screen would produce visually inconsistent
-// screens (independent palette / typography / density per call), which is why we
-// don't use it here.
+// designer chaining `pencil interactive --in <prior>.pen --out <new>.pen` calls,
+// one per screen, each as a complete heredoc. Fanout-per-screen would produce
+// visually inconsistent screens (independent palette / typography / density per
+// call), which is why we don't use it here.
 export const workflow: Workflow = {
   name: "ui-design",
   description: "Design a UI from a brief. Discover screens → design (single task, all screens) → export to HTML+Tailwind.",
@@ -22,7 +22,7 @@ export const workflow: Workflow = {
       agents: [agent("designer", "spec-writer", "agent-designer-worker")],
       gate: "human",
       workflowAdditions:
-        "Generate all screens in this single task by calling Pencil's MCP tools directly (mcp__pencil__open_document, mcp__pencil__batch_design, mcp__pencil__get_screenshot, mcp__pencil__export_nodes — see the pencil-design skill). DO NOT use the `pencil` CLI's `--prompt` or `interactive` modes. Anchor on the most representative screen first (open with an empty path), then chain every subsequent screen by `cp anchor.pen <new>.pen` and opening the copy so the visual language is consistent. Write all .pen and .png files into /task/. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
+        "Generate all screens in this single task by driving `pencil interactive` via stdin heredoc — see the pencil-design skill. CRITICAL: ONE Bash call = ONE complete screen (one heredoc with all tool calls inline). Each `pencil interactive` invocation pays a 3-5s boot cost; running one call per tool-invocation makes the agent fail with idle timeouts. DO NOT use `pencil --prompt`, do NOT look for `mcp__pencil__*` tools (the MCP server needs a Pencil app we don't have). Anchor screen first (no --in), then chain every subsequent screen with `--in <anchor>.pen` for visual consistency. All .pen and .png files go in /task/. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
     },
     {
       name: "export",
