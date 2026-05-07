@@ -45,10 +45,10 @@ End of 2026-05-07 session. Four prior backlog items closed (#26, #29, #30 + blue
 **Why:** `onReject` is documented but no workflow uses it. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. Until a workflow uses it, we're trusting the unit tests.
 **How to apply:** When writing a new workflow that needs branching on rejection (a natural fit for #42's how-to rewrite), exercise the path in a real run. Verify `inputs.rejectedRationale` and `inputs.rejectedTaskId` arrive at the remediation phase's tasks.
 
-### #27 — LiteLLM + cost rollup
-**Why:** `model_calls` table exists but is empty. No cost telemetry today; can't answer "what did this run cost?" or "which model was used per task?"
-**How to apply:** Opt-in via `FORGE_USE_LITELLM=1` env var. Wire LiteLLM proxy responses to populate `model_calls` rows. Aggregate per-run/per-task costs for `forge status` and the dashboard.
-Related: #38 (capture agent model on the task row) is upstream of this — once both land, dashboard task panes can show role + model + tokens + cost.
+### #27 — LiteLLM proxy: route each task to the model best suited to it
+**Why:** Today every task hits Anthropic-direct or Bedrock with whatever alias the workflow declared (`spec-writer` → Sonnet, `fast-orchestrator` → Haiku, `deep-thinker` → Opus). That hard-codes provider + family in the workflow. LiteLLM lets us declare model *capabilities* (cheap-fast, balanced, deep, cheap-summarize, etc.) and route per task without rewriting workflows. A reds panel might want a cheap fast model for triage and a stronger one for authoritative; a designer might want Opus for the discover phase and Sonnet for export. Today we can't express that without scattering provider IDs through the workflow files.
+**How to apply:** Run a LiteLLM proxy locally (already partially supported via `FORGE_USE_LITELLM=1`). Define logical aliases in LiteLLM's config that map to the actual best model per task type. Expand `_agentRefs.ts`'s alias set so workflows can pick something more specific than the current three (`spec-writer` / `fast-orchestrator` / `deep-thinker`). Bonus, *not* the goal: LiteLLM also reports per-call cost — wiring that into the empty `model_calls` table gives us a cost view for free, but that's secondary to the routing capability.
+Related: #38 (capture resolved model on the task row) is the audit-trail companion — once both land, the dashboard can show role + alias + resolved-model + tokens (+ cost when the bonus lands).
 
 ### #28 — Per-run constraint scoping (forge new --tag, tags: in constraint frontmatter)
 **Why:** The `atlas-stack-rn` constraint fires on every `feature-design-needed` run regardless of project. Today the workaround is renaming the constraint file to `.disabled`, which is global. Real fix is per-run scoping.
@@ -142,6 +142,17 @@ Localhost-only is the security model; document this.
 ### #50 — React Native code export from Pencil .pen files
 **Why:** v1 of #46 only exports HTML+Tailwind. Mobile design eventually needs RN. Harder than HTML because RN's layout primitives don't map cleanly from a free-form design tool — Flexbox-only, no grid, different typography model.
 **How to apply:** New phase or new `--target rn` flag on the `export-code` phase. Probably needs its own designer-export-rn role. Validate by exporting one screen end-to-end before committing to the approach.
+
+### #51 — Visual diff: implemented UI vs design artifact
+**Why:** Once a workflow has both a Pencil-produced design (`.png` from #46) and the implemented UI (HTML from `designer-export`, or the actual running app), we can verify the implementation matches the design rather than trusting it. A specialist red, or a verification phase, can compare the two visually and surface deltas (missing components, off colors, off layout). Today nothing checks the round-trip.
+**How to apply:** Two pieces:
+1. **Headless screenshot of the implementation.** Use a Puppeteer-Core-driven Node CLI (Mario Zechner's pattern, https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/) baked into a `verifier` or new `designer-verifier` agent's container — five small scripts (`start.js`, `nav.js`, `eval.js`, `screenshot.js`, `pick.js`) that talk to a headless Chrome over the DevTools port. Tiny tool surface (~225 tokens of docs), no Playwright MCP server. Fall back to Playwright MCP only if some interaction can't be expressed in the CLI subset.
+2. **Compare design.png ↔ impl.png.** Ship the two images to the agent and let it diff visually + textually. Initial pass is just "look at both and tell me if they match"; later we can layer pixel diff or component-tree diff.
+**Sequence:** Lands after #46 v1 is solid. Likely a new optional phase in `ui-design` (`verify`) or a specialist red on the existing `export-code` phase. Discuss before implementing — the diff prompt and "match" criteria need calibration.
+
+### #52 — Browser DevTools error capture for implementation review
+**Why:** "Did the page render without console errors?" is a binary signal that catches a lot of broken builds. Same Puppeteer-Core CLI scripts as #51 — different question. Useful as a specialist red on any phase that produces runnable web UI (`export-code` from #46, future `feature-design-needed` builds that produce a page).
+**How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
 
