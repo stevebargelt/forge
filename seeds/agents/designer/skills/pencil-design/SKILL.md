@@ -79,9 +79,65 @@ Operations are a single string with newline-separated commands. Each command is 
 - **Replace:** `R(node_id,new_node_spec)`
 - **Image:** `IMG(node_id,"path/to/image.png")`
 
-Bindings (`frame=`, `header=`, etc.) name a node so later operations *in the same `batch_design` call* can reference it. **Always create new binding names per `batch_design` call** — do not reuse them across calls.
+If any operation fails, the **whole batch rolls back**. The response includes a list of issues; address them in the next `batch_design` call.
 
-If any operation fails, the whole batch rolls back. The response includes a list of issues; address them in the next `batch_design` call.
+## CRITICAL — bindings vs names vs IDs
+
+This is the most common failure mode. Get this wrong and every `batch_design` rolls back with `Can't find parent node with id 'X'!` errors.
+
+In `frame=I(document,{type:"frame",name:"Root",...})`:
+
+- `frame=` is a **binding** — a temporary handle, valid **only inside this single `batch_design` call**.
+- `name:"Root"` is a **display label** — visible in Pencil's UI. **NOT a reference handle. Do not use it to reference the node from anywhere.**
+- The node's **real id** is assigned by Pencil and returned in the batch response. Use it for cross-batch references.
+
+**Bindings are scoped to ONE batch.** Pencil's docs are explicit: "always create new binding names for every operation list, DO NOT reuse binding names across operation lists."
+
+### Two correct patterns
+
+**Pattern A — build a logical chunk in ONE batch (preferred when ≤ 25 ops fit).**
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"Root",x:0,y:0,width:1440,height:900,fill:"#0E0E10",layout:"vertical"})\nheader=I("frame",{type:"frame",name:"Header",width:"fill_container",height:48,fill:"#16161B"})\nwordmark=I("header",{type:"text",content:"forge",fontSize:14,fill:"#E5E5E5"})' })
+```
+
+`frame`, `header`, `wordmark` are all bindings used in the same batch. Parent references are the binding name in quotes: `I("frame", ...)`. All of them — and the bindings themselves — vanish when this batch ends.
+
+**Pattern B — bridge batches via `batch_get` to discover real IDs.**
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"Root",...})' })
+# After this batch ends, "frame" is gone. The node has a real id we don't yet know.
+
+batch_get({ parentId: "document", readDepth: 1 })
+# Pencil returns something like { id: "abc123", name: "Root", ... }
+
+batch_design({ operations: 'header=I("abc123",{type:"frame",name:"Header",...})' })
+# Reference the parent by its REAL id (from batch_get's response), NOT by its name "Root".
+```
+
+### Anti-pattern (this is exactly what fails)
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"RContent",...})' })
+batch_design({ operations: 'child=I("RContent",{...})' })   # ← FAILS
+# Pencil error: "Can't find parent node with id 'RContent'!"
+```
+
+`"RContent"` was a `name` — a display label, not an id. Names cannot be parent references. Names are not ids.
+
+### Three rules
+
+- **Within one batch:** reference parents via the **binding name** (e.g. `"frame"`).
+- **Across batches:** reference parents via the **real id** returned from `batch_get`.
+- **Never** use the `name` field as a parent reference. Names are display labels only.
+
+### Practical guidance
+
+- **Prefer bigger batches.** A single 25-op `batch_design` that builds a screen's whole structure (root + 24 descendants) costs nothing extra. Many tiny batches multiply the cross-batch reference problem.
+- **When you must cross batches, always `batch_get` first** to discover real IDs. Don't guess.
+- **Capture IDs in your reasoning** when `batch_get` returns them, so subsequent batches can reference them.
+- **If a batch fails, read the error.** Pencil's error tells you which operation failed and which parent id it couldn't find. Fix the reference (or restructure) and retry — don't keep submitting the same broken pattern.
 
 ## Multi-screen designs — coherence via `--in` chaining
 
@@ -152,8 +208,13 @@ After `get_screenshot`, if the result isn't right:
 - Do NOT skip `get_screenshot` before `export_nodes` — verify the visual.
 - Do NOT run more than 25 operations in one `batch_design` — it'll error.
 - Do NOT pipe `pencil interactive` through `tee` or `| something` — only stderr can be redirected (`2>file.log`).
+- Do NOT reuse a binding name across `batch_design` calls. Bindings are per-batch.
+- Do NOT use a node's `name` field as a parent reference. Names are display labels, not ids.
+- Do NOT chain `batch_design` calls without a `batch_get` between them when the next call needs to reference parents from the previous batch.
 
-## Reference: a canonical session
+## Reference: a canonical session (Pattern A — one big batch)
+
+This is the simplest correct shape. Build the whole screen structure in ONE `batch_design` (≤ 25 ops). All bindings are valid because they're all in the same call.
 
 ```bash
 pencil interactive --out /task/hero.pen 2>/task/hero.stderr.log <<'EOF'
@@ -162,11 +223,34 @@ get_guidelines()
 get_guidelines({ category: "style", name: "Lunaris" })
 get_variables()
 find_empty_space_on_canvas({ width: 1440, height: 900, padding: 100, direction: "right" })
-batch_design({ operations: 'frame=I(document,{type:"frame",name:"Hero",x:0,y:0,width:1440,height:900,fill:"#0A0A0A",layout:"vertical",clip:true})' })
-batch_design({ operations: 'heading=I("frame",{type:"text",content:"Ship faster.",fontSize:72,fontWeight:"bold",fill:"#FFFFFF"})' })
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"Hero",x:0,y:0,width:1440,height:900,fill:"#0A0A0A",layout:"vertical",clip:true})\nheader=I("frame",{type:"frame",name:"Header",width:"fill_container",height:48,fill:"#16161B"})\nwordmark=I("header",{type:"text",content:"forge",fontSize:14,fill:"#E5E5E5"})\nheading=I("frame",{type:"text",content:"Ship faster.",fontSize:72,fontWeight:"bold",fill:"#FFFFFF"})' })
 get_screenshot({ nodeId: "frame" })
 export_nodes({ nodeIds: ["frame"], outputDir: "/task" })
 save()
 exit()
 EOF
 ```
+
+## Reference: a canonical session (Pattern B — multi-batch with batch_get bridges)
+
+Use this when a screen genuinely needs more than 25 operations. After each batch that creates parents you'll need later, call `batch_get` to discover real IDs.
+
+```bash
+pencil interactive --out /task/dashboard.pen 2>/task/dashboard.stderr.log <<'EOF'
+get_editor_state({ include_schema: true })
+get_guidelines()
+get_variables()
+batch_design({ operations: 'root=I(document,{type:"frame",name:"Root",x:0,y:0,width:1440,height:900,fill:"#0E0E10",layout:"horizontal"})\nleft=I("root",{type:"frame",name:"LeftPane",width:240,height:"fill_container",fill:"#16161B"})\nmid=I("root",{type:"frame",name:"MidPane",width:320,height:"fill_container",fill:"#16161B"})\nright=I("root",{type:"frame",name:"RightPane",width:"fill_container",height:"fill_container",fill:"#16161B"})' })
+batch_get({ parentId: "document", readDepth: 2 })
+# At this point you have the real IDs of root, left, mid, right. Use them in subsequent batches.
+# Suppose batch_get returned root.id = "n_root", left.id = "n_left", mid.id = "n_mid", right.id = "n_right":
+batch_design({ operations: 'rrow1=I("n_left",{type:"frame",name:"RunRow1",width:"fill_container",height:36})\nrrow2=I("n_left",{type:"frame",name:"RunRow2",width:"fill_container",height:36})' })
+# ... more batches, each referencing real IDs from prior batch_gets
+get_screenshot({ nodeId: "n_root" })
+export_nodes({ nodeIds: ["n_root"], outputDir: "/task" })
+save()
+exit()
+EOF
+```
+
+The exact id format ("abc123", "n_root") depends on Pencil — read the actual `batch_get` response to see what's there.

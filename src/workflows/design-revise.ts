@@ -16,7 +16,7 @@ export const workflow: Workflow = {
       agents: [agent("designer", "spec-writer", "agent-designer-worker")],
       gate: "human",
       workflowAdditions:
-        "inputs.brief contains the revision request and paths to existing .pen files. Drive `pencil interactive --in <existing>.pen --out <new>.pen` via stdin heredoc (see the pencil-design skill). CRITICAL: ONE Bash call = ONE complete screen, with all tool calls inline in the heredoc. DO NOT use `pencil --prompt`, do NOT look for `mcp__pencil__*` tools. Write revised .pen and .png files into /task/. If multiple screens are being revised, keep them coherent by chaining --in. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
+        "inputs.brief contains the revision request and paths to existing .pen files. Drive `pencil interactive --in <existing>.pen --out <new>.pen` via stdin heredoc (see the pencil-design skill). CRITICAL rules: (1) ONE Bash call = ONE complete screen, all tool calls in one heredoc. (2) `batch_design` BINDINGS are per-batch only — across batches use real IDs from `batch_get`, NEVER use a node's `name` field as a parent reference. Prefer ONE big batch_design over many small ones. (3) DO NOT use `pencil --prompt`, do NOT look for `mcp__pencil__*` tools. Write revised .pen and .png files into /task/. If multiple screens are being revised, keep them coherent by chaining --in. Output {status, screens: [{name, penFile, pngFile, rationale}], openQuestions, notes}.",
     },
     {
       name: "export",

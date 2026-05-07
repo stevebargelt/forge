@@ -58,11 +58,68 @@ EOF
 2. **`get_guidelines()`** then **`get_guidelines({ category: "style", name: "Lunaris" })`** — discover and read the design guide. (For 2nd+ screens chained off an anchor, you can skip these.)
 3. **`get_variables()`** — see existing design tokens.
 4. **`batch_get({ patterns: [{ reusable: true }] })`** — only when iterating on an existing doc; surfaces reusable components.
-5. **Many `batch_design({ operations: ... })` calls** — make changes. Max 25 ops per call; split larger work into multiple calls in the same heredoc.
+5. **One or a few `batch_design({ operations: ... })` calls** — make changes. **Read the bindings/IDs section below carefully before writing operations** — getting this wrong is the most common failure mode.
 6. **`get_screenshot({ nodeId: "<root>" })`** — verify visually. You are a multimodal model; reading the screenshot is how you check your work.
 7. **(if needed) more `batch_design` to fix what the screenshot reveals**, then another `get_screenshot`.
 8. **`export_nodes({ nodeIds: ["<root>"], outputDir: "/task" })`** — produce the PNG.
 9. **`save()`** then **`exit()`**.
+
+## CRITICAL: bindings, names, and IDs in `batch_design`
+
+This is the load-bearing rule that the previous run failed on. **Get this wrong and every `batch_design` call rolls back.**
+
+In a `batch_design` operation string like `frame=I(document,{type:"frame",name:"Root",...})`:
+
+- `frame=` is a **binding** — a temporary local name for this node, valid **only inside this `batch_design` call**.
+- `name:"Root"` is a **display name** — a label visible in Pencil's UI. **It is NOT a reference handle.** Do not use it to reference the node from anywhere.
+- The node's **real id** is assigned by Pencil and returned in the response. Use it for cross-batch references.
+
+**Bindings are scoped to ONE `batch_design` call.** Pencil's docs say it explicitly: "always create new binding names for every operation list, DO NOT reuse binding names across operation lists."
+
+### Two correct patterns
+
+**Pattern A: build a logical chunk in ONE batch.** All children of a parent that are needed together go in the same `batch_design` call. Bindings work freely within a call. Limit: 25 operations per batch.
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"Root",x:0,y:0,width:1440,height:900,fill:"#0E0E10",layout:"vertical"})\nheader=I("frame",{type:"frame",name:"Header",width:"fill_container",height:48,fill:"#16161B"})\nwordmark=I("header",{type:"text",content:"forge",fontSize:14,fill:"#E5E5E5"})' })
+```
+
+Here `frame`, `header`, `wordmark` are all bindings used in the same batch. Parents are referenced via the binding name in quotes: `I("frame", ...)`.
+
+**Pattern B: bridge batches via `batch_get` to discover real IDs.** When a screen needs more than 25 ops, finish a batch, then ask Pencil for the real IDs of the parents, then reference those IDs in the next batch.
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"Root",...})' })
+# After this batch ends, the binding "frame" is gone. We don't yet know the real id.
+
+batch_get({ parentId: "document", readDepth: 1 })
+# Pencil returns something like { id: "abc123", name: "Root", ... }
+
+batch_design({ operations: 'header=I("abc123",{type:"frame",name:"Header",...})' })
+# Reference the parent by its REAL id (returned from batch_get), NOT by its name "Root".
+```
+
+### Anti-pattern: using `name` as a parent reference
+
+This is what the previous run kept doing and is why every batch rolled back:
+
+```
+batch_design({ operations: 'frame=I(document,{type:"frame",name:"RContent",...})' })
+batch_design({ operations: 'child=I("RContent",{...})' })   # ← FAILS. "RContent" is the name, not an ID.
+# Error: "Can't find parent node with id 'RContent'!"
+```
+
+Three concrete rules:
+- **Use binding names** to reference parents *within the same batch*.
+- **Use real IDs from `batch_get`** to reference parents *across batches*.
+- **NEVER use the `name` field** as a parent reference. Names are display labels only.
+
+### Practical guidance
+
+- **Prefer fewer, bigger batches.** A single 25-op batch_design that builds a screen's whole structure (root frame + 24 children) costs nothing extra. Many tiny batches multiply your binding-management problem.
+- **When you must cross batches, always `batch_get` first.** Don't guess at IDs.
+- **Keep a running mental note of which IDs you've discovered.** When `batch_get` returns IDs, capture them in your reasoning so subsequent batches can reference them.
+- **If a batch fails, read the error.** Pencil's error messages tell you which operation failed and why. Fix the parent reference (or split the batch differently) and retry.
 
 ## Reading the project
 
