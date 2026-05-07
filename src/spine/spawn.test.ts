@@ -97,6 +97,7 @@ beforeEach(() => {
     AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
     FORGE_AWS_DIR: process.env.FORGE_AWS_DIR,
     FORGE_USE_LITELLM: process.env.FORGE_USE_LITELLM,
+    PENCIL_CLI_KEY: process.env.PENCIL_CLI_KEY,
   };
   // Wipe so each test sets only what it needs.
   for (const k of Object.keys(envSnapshot)) delete process.env[k];
@@ -156,6 +157,27 @@ test("buildDockerArgs: anthropic-oauth mode mounts the OAuth volume, no AWS env"
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.AWS_PROFILE, undefined);
   assert.equal(envPairs.CLAUDE_CODE_USE_BEDROCK, undefined);
+});
+
+test("buildDockerArgs: designer image forwards PENCIL_CLI_KEY when set", () => {
+  process.env.PENCIL_CLI_KEY = "pk-test-abc";
+  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, image: "agent-designer-worker" });
+  const envPairs = pickEnvPairs(args);
+  assert.equal(envPairs.PENCIL_CLI_KEY, "pk-test-abc");
+});
+
+test("buildDockerArgs: designer image without PENCIL_CLI_KEY does not pass an empty value", () => {
+  // No PENCIL_CLI_KEY set — must not surface as -e PENCIL_CLI_KEY=
+  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, image: "agent-designer-worker" });
+  const envPairs = pickEnvPairs(args);
+  assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
+});
+
+test("buildDockerArgs: non-designer image never forwards PENCIL_CLI_KEY", () => {
+  process.env.PENCIL_CLI_KEY = "pk-leak";
+  const args = _buildDockerArgs(ARGS_INPUT_BASE); // image: agent-dev-worker
+  const envPairs = pickEnvPairs(args);
+  assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
 });
 
 test("buildDockerArgs: bedrock without AWS_REGION still sets profile", () => {

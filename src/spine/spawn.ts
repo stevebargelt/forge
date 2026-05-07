@@ -200,6 +200,13 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     args.push("-e", `ANTHROPIC_BASE_URL=${input.litellmUrl}`);
   }
 
+  // Designer image needs the Pencil CLI auth key. Only forward to the designer image
+  // so the key isn't ambient on every container. Forge's caller is responsible for
+  // having PENCIL_CLI_KEY in the host env (export, .env via shell, or future #47).
+  if (input.image === "agent-designer-worker" && process.env.PENCIL_CLI_KEY) {
+    args.push("-e", `PENCIL_CLI_KEY=${process.env.PENCIL_CLI_KEY}`);
+  }
+
   // Mounts. CLAUDE.md is written to disk for audit but not mounted — the prompt is
   // passed via --append-system-prompt on the argv.
   args.push("-v", `${input.packagePath}:/task/package.md:ro`);

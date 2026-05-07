@@ -37,6 +37,6 @@ function resolveModel(alias: string): string {
   return DIRECT_MAP[alias] ?? alias;
 }
 
-export function agent(role: string, model: string): AgentRef {
-  return { role, agentDir: join(AGENTS_DIR, role), model: resolveModel(model) };
+export function agent(role: string, model: string, image?: string): AgentRef {
+  return { role, agentDir: join(AGENTS_DIR, role), model: resolveModel(model), image };
 }

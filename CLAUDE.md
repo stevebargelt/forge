@@ -21,6 +21,7 @@ The TaskCreate harness tool is for ephemeral within-session working state. The d
 - Red agents always get read-only project mounts (`-v <project>:/project:ro`). This is OS-level enforcement; never relax it to a prompt instruction.
 - Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.
 - Default to no comments. Add a comment only when the WHY is non-obvious.
+- **Don't estimate work in human-hours, days, or weeks.** I'm doing the work, not a human team — the unit doesn't apply and the framing leads to bad scoping. Talk about scope (small / medium / large change, isolated vs cross-cutting), risk (reversible vs not, schema change required), and dependencies between tasks. Never "this is a 2-week project" — that's noise.
 
 ## Auth modes (FORGE-DEC-007, updated by FORGE-DEC-013)
 

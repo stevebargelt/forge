@@ -23,7 +23,20 @@ End of 2026-05-07 session. Four prior backlog items closed (#26, #29, #30 + blue
 
 ## In progress
 
-(empty)
+### #46 — Designer agent + Pencil integration + ui-design workflow
+**Status:** v1 code shipped; awaiting live end-to-end run (the dashboard-redesign test).
+**What's in:**
+- `seeds/agents/designer/` + `seeds/agents/designer-export/` seeds.
+- `seeds/agents/designer/skills/pencil-design/SKILL.md` (the Claude skill, baked into the designer image).
+- `docker/agent-designer-worker.Dockerfile` + `docker/build-designer.sh` (FROM agent-dev-worker, adds Pencil CLI + skill).
+- `src/types/index.ts`: `AgentRef.image` optional override; `WorkflowName` adds `ui-design` + `design-revise`.
+- `src/spine/spawn.ts`: forwards `PENCIL_CLI_KEY` to the designer image only (3 unit tests).
+- `src/cli/commands/new.ts`: `--brief` option + workflow name list updated.
+- `src/workflows/ui-design.ts` + `src/workflows/design-revise.ts`. Single-task design phases (no fanout) — coherence comes from `pencil --in <prior>.pen` chaining within one task.
+**What's not in (deferred):**
+- Optional design phase on `feature-design-needed` (was task 10; deferred to its own follow-up after ui-design lands).
+- Live run + screenshots — staged as the dashboard-redesign test.
+**Test plan:** `forge new ui-design --project /Users/steven.bargelt/code/forge --brief "..."` redesigning the forge dashboard. 5 screens, single task in `design` phase, soft style constraints in brief.
 
 ## Active
 
@@ -99,6 +112,35 @@ Localhost-only is the security model; document this.
 ### #45 — `forge auth status` warns on stale bedrock vars
 **Why:** SSO sessions expire silently (1 hour at SGWS). The next spawn fails on auth. With FORGE-DEC-013 the watchdog usually prevents this, but `forge auth status` should still proactively detect-and-warn when bedrock creds are getting close to expiry, similar to the watchdog's threshold check.
 **How to apply:** When `detectCredsMode()` returns `bedrock`, call the same `_sso_min_remaining`-style check the watchdog uses. If under some threshold (15 min?), print a warning.
+
+### #46 — Designer agent + Pencil integration + ui-design workflow
+**Why:** No way to produce visual UI artifacts from forge today. Pencil (`@pencil.dev/cli`) is a headless design tool that turns prompts into `.pen` files and exports them as images. We want a designer blue agent that uses Pencil to produce screen-by-screen designs, with humans gating revisions, and a final phase that exports HTML+Tailwind from the approved `.pen` files. Also wanted: a way to design new apps from scratch *and* revise existing app designs.
+**How to apply:**
+1. **New container image** `agent-designer-worker` (separate from `agent-dev-worker` to avoid bloating it with Pencil's deps). Includes Node, Claude Code CLI, `@pencil.dev/cli`. Mounts `forge-claude-oauth` so Pencil's inner Claude agent has auth (oauth-only — `ANTHROPIC_API_KEY` is against company policy). Reads `PENCIL_CLI_KEY` from host env (from `.env` for now; see #47 for proper secrets).
+2. **Designer seed** `seeds/agents/designer/CLAUDE.md` + role-specific `system.md`. Job: take a brief, decide screen list, produce one Pencil prompt per screen, run Pencil, return paths to `.pen` + `.png` and a short rationale per screen.
+3. **Three workflows:**
+   - `ui-design` — standalone. Phases: `discover` (designer proposes screen list) → `design` (fanout, one task per screen) → `human-review` (awaiting_gate; revision = reject + rationale loop) → `export-code` (HTML + Tailwind v1; React Native deferred to #50).
+   - `design-revise` — input: existing `.pen` file(s) + revision brief. Phases: `revise` → `human-review` → `export-code`.
+   - Extend `feature-design-needed` with an optional design phase (gated by `withDesign: true` workflow flag).
+4. **Revision loop:** reuse `awaiting_gate`; revision = reject + rationale (designer reads rationale, uses Pencil's `--in` flag to iterate). Hard reject still available for "way off base."
+5. **CLI gate-and-rationale only for v1.** Dashboard review UI tracked separately as #48 — unblocks once forge can design its own dashboard via Pencil.
+6. **Code export:** final phase reads approved `.pen` JSON (which is structured) and produces HTML+Tailwind. Pencil itself only exports to image/pdf, not code.
+
+### #47 — Use `pass` for host-side secret storage (PENCIL_CLI_KEY, others)
+**Why:** Plaintext secrets in `.env` are fine for a single-machine personal setup but not durable. Terry's repo (cite when implementing) demonstrates a `pass`-backed pattern. Forge will accumulate more secrets (Pencil key, future API keys, integration tokens) — get the pattern right once.
+**How to apply:** Wrapper that resolves env vars from `pass` entries when configured, falls back to env. Document in `docs/auth.md` or similar. Roll forward existing `PENCIL_CLI_KEY` consumer from #46 to use it. Locate Terry's specific implementation before designing.
+
+### #48 — Dashboard support for design review (image render, comments, approve/revise buttons)
+**Why:** v1 of #46 ships with CLI-only gate-and-rationale. The intended UX is in-dashboard review — see the rendered design, comment, click approve or request revision with a rationale field. This is the right human review surface for design work.
+**How to apply:** Overlaps with #34 (human-readable result view) and #35 (gate buttons). Render `.png` exports inline in task panes; comment thread tied to a task; approve/revise buttons that write back to the task as gate decisions. Sequence after #46 ships v1 so we have real designs to render — and use forge+Pencil to design the dashboard itself.
+
+### #49 — Design-reviewer red agent (future investigation)
+**Why:** Steven's call: skip reds for design work in v1 because aesthetic judgment is squishy. Worth revisiting once we have real human-review data — there may be objective things a red can catch (accessibility contrast, missing states, broken layout primitives, brand inconsistency).
+**How to apply:** Investigate after a few `ui-design` runs ship and we see what humans actually flag. Could be one specialist red ("a11y") rather than an authoritative aesthetic judge.
+
+### #50 — React Native code export from Pencil .pen files
+**Why:** v1 of #46 only exports HTML+Tailwind. Mobile design eventually needs RN. Harder than HTML because RN's layout primitives don't map cleanly from a free-form design tool — Flexbox-only, no grid, different typography model.
+**How to apply:** New phase or new `--target rn` flag on the `export-code` phase. Probably needs its own designer-export-rn role. Validate by exporting one screen end-to-end before committing to the approach.
 
 ## Done (recent)
 

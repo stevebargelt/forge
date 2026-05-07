@@ -11,6 +11,8 @@ const VALID_NAMES: WorkflowName[] = [
   "feature-design-needed",
   "investigation",
   "codebase-assessment",
+  "ui-design",
+  "design-revise",
 ];
 
 export async function loadWorkflow(name: WorkflowName): Promise<Workflow> {

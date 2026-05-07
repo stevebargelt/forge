@@ -85,6 +85,7 @@ async function runBlueTask(
     agentConfig: agent,
     projectDir,
     readOnlyProject: false,
+    image: agent.image,
   });
 
   if (result.status === "failed") {

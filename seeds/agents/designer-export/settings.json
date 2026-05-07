@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Designer-export reads .pen JSON + .png images, writes HTML+Tailwind files."
+}
