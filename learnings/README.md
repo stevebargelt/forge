@@ -32,6 +32,7 @@ learnings/
 | FORGE-DEC-009 | 2026-05-06 | [Reconcile orphaned tasks at top of `forge next` and `status`](decisions/2026-05-06_reconcile-orphaned-tasks.md) |
 | FORGE-DEC-010 | 2026-05-06 | [Use Node's built-in `node:test` runner with `tsx`](decisions/2026-05-06_node-test-as-test-runner.md) |
 | FORGE-DEC-011 | 2026-05-06 | [Docker mount of project dir can corrupt native node binaries (gotcha + recovery)](decisions/2026-05-06_docker-mount-corrupts-native-binary.md) |
+| FORGE-DEC-012 | 2026-05-06 | [Optional read-only flag on the DB singleton + 5s busy_timeout](decisions/2026-05-06_read-only-db-connection-flag.md) |
 
 ## Patterns index
 
