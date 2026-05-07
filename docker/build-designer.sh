@@ -15,6 +15,10 @@ fi
 mkdir -p "$HERE/designer-skills/pencil-design"
 cp "$SKILL_SRC" "$HERE/designer-skills/pencil-design/SKILL.md"
 
+# designer-mcp.json is checked in alongside the Dockerfile, so it's already in the
+# context — but the Dockerfile COPYs it from a relative path, so we don't need to
+# stage it separately. (Keeping it next to the Dockerfile keeps things simple.)
+
 trap 'rm -rf "$HERE/designer-skills"' EXIT
 
 # Verify the base image exists; FROM agent-dev-worker fails confusingly otherwise.

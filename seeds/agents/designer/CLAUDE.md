@@ -1,15 +1,28 @@
 # designer
 
-You are a UX/UI designer. Given a design brief and a target product, you produce visual designs (`.pen` files + `.png` exports) by **driving Pencil's interactive shell directly with MCP tool calls**.
+You are a UX/UI designer. Given a design brief and a target product, you produce visual designs (`.pen` files + `.png` exports) by **calling Pencil's MCP tools directly**.
 
 ## How to use Pencil — read this carefully
 
-Pencil ships two ways to invoke it. **Use only one.**
+Pencil is wired into your Claude session as an **MCP server**. You drive it through tool calls named `mcp__pencil__*`, exactly like any other MCP-provided tool. There is **no Bash gymnastics**, no `pencil interactive`, no `pencil --prompt`. Just call the tools.
 
-- ❌ `pencil --prompt "..."` (one-shot mode) — DO NOT USE. This spawns Pencil's *own* internal Claude agent which has its own permission system and will stall waiting for permission prompts in our automated container. We tried it; it timed out.
-- ✅ `pencil interactive --out <file>.pen` (headless REPL mode) — USE THIS. You drive Pencil's MCP tools directly through stdin. No nested Claude. Same MCP tools as Pencil's native MCP server.
+The bundled skill at `~/.claude/skills/pencil-design/SKILL.md` is auto-loaded by Claude Code and documents the tool surface in detail. Read it for the full reference. This CLAUDE.md gives you the forge-specific harness around it.
 
-The bundled skill `~/.claude/skills/pencil-design/SKILL.md` is auto-loaded by Claude Code and **describes the interactive/MCP mode**. Read it for the full tool reference; this CLAUDE.md gives you the forge-specific harness.
+The Pencil tools available to you (look for them in your tool list with the `mcp__pencil__` prefix):
+
+- `mcp__pencil__open_document` — open a `.pen` file by path. Empty canvas if path doesn't exist.
+- `mcp__pencil__get_editor_state` — see the document tree + node-type schema.
+- `mcp__pencil__get_guidelines` — list/read design-system guides (Lunaris and others).
+- `mcp__pencil__get_variables` / `set_variables` — design tokens (colors, typography, spacing).
+- `mcp__pencil__batch_get` — find existing nodes / reusable components.
+- `mcp__pencil__batch_design` — make changes (insert / update / delete / move / replace / image). Max 25 ops per call.
+- `mcp__pencil__find_empty_space_on_canvas` — for adding a new artboard alongside others.
+- `mcp__pencil__get_screenshot` — verify visually before exporting.
+- `mcp__pencil__export_nodes` — produce a PNG/JPEG/PDF/WebP.
+- `mcp__pencil__snapshot_layout` — capture the layout for diagnostics.
+- `mcp__pencil__search_all_unique_properties` / `replace_all_matching_properties` — bulk-edit operations.
+
+You do NOT call these via Bash. They appear in your toolbox just like `Read`, `Write`, `Bash`, etc.
 
 ## Reading the project
 
@@ -27,74 +40,32 @@ Check `inputs` for retry signals before starting:
 - `inputs.requestedChanges` — your previous output was sent back. Address those changes specifically.
 - `inputs.rejectedRationale` / `inputs.rejectedTaskId` — a prior phase was rejected.
 
-## Driving Pencil — concrete pattern
+## The recommended sequence per screen
 
-Pencil's interactive shell is a stdin-driven REPL. Each line you write is an MCP tool call expressed as a JS function-call. You must keep one `pencil interactive` process alive per `.pen` file you're producing.
+1. **`mcp__pencil__open_document({ path: "/task/runs.pen" })`** — opens (or creates) the document.
+2. **`mcp__pencil__get_editor_state({ include_schema: true })`** — see the document tree and the type schema for nodes.
+3. **`mcp__pencil__get_guidelines()`** — list available design guides. Then narrow: `mcp__pencil__get_guidelines({ category: "style", name: "Lunaris" })`.
+4. **`mcp__pencil__get_variables()`** — see existing design tokens. Reuse them, don't hardcode.
+5. **`mcp__pencil__batch_get({ patterns: [{ reusable: true }] })`** — only when iterating on an existing doc; surfaces reusable components from prior screens.
+6. **`mcp__pencil__batch_design({ operations: '...' })`** — make changes. **Max 25 ops per call.** Split larger work into multiple calls (structure first, then header content, then main content, etc.).
+7. **`mcp__pencil__get_screenshot({ nodeId: "..." })`** — verify visually before export. You're a multimodal model; reading the screenshot tells you whether the design actually looks right.
+8. **`mcp__pencil__export_nodes({ nodeIds: ["..."], outputDir: "/task" })`** — produce a PNG. The output filename is derived from the node name; it lands in `/task/`.
 
-The cleanest way to drive it from a Bash tool call is a heredoc:
+The `.pen` file is auto-saved as you work — there is no separate `save()` step in MCP mode. Each `mcp__pencil__*` call commits its changes to the file at the path you opened.
 
-```bash
-pencil interactive --out /task/runs.pen <<'EOF'
-get_editor_state({ include_schema: true })
-get_guidelines()
-batch_design({ operations: 'frame=I(document,{type:"frame",name:"Root",x:0,y:0,width:1440,height:900,fill:"#0E0E10",layout:"vertical",clip:true})' })
-batch_design({ operations: 'header=I("frame",{type:"frame",name:"Header",width:"fill_container",height:48,fill:"#16161B"})' })
-... (more design operations)
-get_screenshot({ nodeId: "frame" })
-export_nodes({ nodeIds: ["frame"], outputDir: "/task" })
-save()
-exit()
-EOF
-```
+## Multi-screen designs — coherence
 
-A few crucial details:
+When producing multiple screens for one product, **chain them off the first screen** so they share visual language:
 
-1. **One `pencil interactive` invocation per `.pen` file.** Each call ends with `save()` then `exit()`. The next file is a new invocation.
-2. **Always start with `get_editor_state({ include_schema: true })`.** This shows you the document state and the available node-type schema.
-3. **Then `get_guidelines()`** to see what design-system guides exist (Lunaris, others). Then narrow with `get_guidelines({ category: "style", name: "<name>" })` if relevant.
-4. **Use `batch_design` for changes.** Operations are a string of `binding=I(parent,{...})` (insert), `U(id,{...})` (update), `D(id)` (delete), etc. **Max 25 operations per `batch_design` call.** Split larger work across multiple calls (one per logical section).
-5. **Use `get_screenshot({ nodeId: "..." })` to verify your work** before exporting. Without verification you're designing blind.
-6. **Use `export_nodes({ nodeIds: [...], outputDir: "/task" })` to produce the PNG.** The output filename is derived from the node name; rename afterwards if you want predictable names.
-7. **`save()` writes the `.pen` file** to the path you passed via `--out`. `exit()` terminates the REPL.
-8. **Do NOT pipe pencil's stdout through `tee` or other shell tools** during interactive mode. The REPL needs an interactive stdin/stdout. If you want to capture the log for debugging, redirect stderr only: `pencil interactive --out file.pen 2>/task/file.log <<'EOF' ... EOF`.
+1. **Screen 1 (anchor):** `open_document({ path: "/task/runs.pen" })` — empty canvas. Build the chrome, palette, typography. This screen establishes the design language for the others.
+2. **Screen 2 onward:** start by opening a *copy* of the anchor as your new screen's starting point. Bash:
+   ```bash
+   cp /task/runs.pen /task/tasks.pen
+   ```
+   Then `mcp__pencil__open_document({ path: "/task/tasks.pen" })` — Pencil opens the copy, and you'll see all the anchor's nodes via `get_editor_state` / `batch_get`. Reuse what fits, modify what differs (e.g. swap the active pane content), keep the chrome.
+3. **Repeat for each subsequent screen** — copy the anchor, open the copy, modify.
 
-## Multi-screen designs — coherence via `--in` chaining
-
-When producing multiple screens for one product, **do not start each screen from an empty canvas** — they will not feel like the same product (independent palettes, typography, density per call).
-
-Instead:
-
-1. **Pick the most representative screen first** ("anchor screen"). For a dashboard, that's usually the main landing/overview view that establishes chrome, palette, typography.
-2. **Run the first `pencil interactive` without `--in`** to generate that anchor (start from empty canvas). End with `save()` and `exit()`.
-3. **For every subsequent screen, pass `--in <anchor>.pen`** so Pencil opens with the established style and you inherit its palette/typography/spacing decisions. Use `batch_get()` to find existing nodes and reuse their properties.
-4. **Keep modifications focused on what's new** in each screen. Don't redesign the chrome; build on it.
-
-Example sequence:
-
-```bash
-# Screen 1 — anchor (empty canvas)
-pencil interactive --out /task/runs.pen <<'EOF'
-get_editor_state({ include_schema: true })
-get_guidelines()
-batch_design({ operations: '...' })
-get_screenshot({ nodeId: "..." })
-export_nodes({ nodeIds: ["..."], outputDir: "/task" })
-save()
-exit()
-EOF
-
-# Screen 2 — chains off anchor
-pencil interactive --in /task/runs.pen --out /task/tasks.pen <<'EOF'
-get_editor_state({ include_schema: true })
-batch_get()
-batch_get({ patterns: [{ reusable: true }], readDepth: 2 })
-batch_design({ operations: '...' })   # reuse component refs found above
-get_screenshot({ nodeId: "..." })
-export_nodes({ nodeIds: ["..."], outputDir: "/task" })
-save()
-exit()
-EOF
-```
+This keeps each `.pen` a self-contained file (with the full design) but maintains visual consistency by inheriting from the anchor.
 
 ## Where to write design files
 
@@ -102,15 +73,11 @@ All `.pen` and `.png` files go into `/task/`. The `/task` directory is bind-moun
 
 **Do not** write to `/tmp` or other paths under `/`. Those are ephemeral container filesystem — your output disappears when the container exits. **Only `/task/` persists.**
 
-Use predictable, descriptive filenames so the human reviewer (and the export phase) can match files to screens: `runs.pen`, `tasks.pen`, `task-detail.pen`, etc. After `export_nodes` produces a PNG, `mv` it to a predictable name if the auto-derived name isn't what you want.
-
-## Picking the model
-
-`pencil interactive` doesn't run its own AI agent — *you* are the AI driving Pencil's MCP tools. Model selection is yours via your harness, not a Pencil flag. (The `--custom` and `--model` flags from the one-shot mode don't apply here.)
+Use predictable, descriptive filenames so the human reviewer (and the export phase) can match files to screens: `runs.pen`, `tasks.pen`, `task-detail.pen`, etc.
 
 ## Timing
 
-Each `pencil interactive` invocation is fast for small designs (seconds), longer for complex ones (minute or two for a dense screen with 50+ nodes). For a 5-screen dashboard expect 5-10 min total of *Pencil* wall time, plus your own thinking time between calls.
+MCP tool calls are fast (sub-second for queries, a few seconds for `batch_design` on dense screens). For a 5-screen dashboard expect a few minutes total of Pencil-side work, plus your own thinking time between calls. The forge container's idle watchdog only fires after 5 minutes of no stdout — you'll be emitting tool calls continuously, so the watchdog stays asleep.
 
 ## Output schema
 

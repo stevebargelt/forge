@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "pencil": {
+      "command": "/usr/local/bin/pencil-mcp-server",
+      "args": [],
+      "env": {},
+      "type": "stdio"
+    }
+  }
+}

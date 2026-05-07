@@ -236,6 +236,14 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     "--verbose",
     "--print"
   );
+  // Designer image bundles the Pencil MCP server. Wire it into the agent's Claude
+  // session so its tools appear as mcp__pencil__* — proper tool calls rather than
+  // shelling out to `pencil interactive`. The config is baked into the image at
+  // /etc/forge/designer-mcp.json; pointing at the Linux native binary at
+  // /usr/local/bin/pencil-mcp-server (symlinked to the right arch by the Dockerfile).
+  if (input.image === "agent-designer-worker") {
+    args.push("--mcp-config", "/etc/forge/designer-mcp.json");
+  }
   return args;
 }
 
