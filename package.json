@@ -11,7 +11,7 @@
     "forge": "tsx src/cli/index.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p .",
-    "test": "FORGE_HOME=$(mktemp -d -t forge-test-XXXXXX) node --import tsx --test 'src/**/*.test.ts'"
+    "test": "FORGE_HOME=$(mktemp -d -t forge-test-XXXXXX) node --import tsx --test $(find src -name '*.test.ts' -type f)"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
