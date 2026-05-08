@@ -6,18 +6,20 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at session start 2026-05-08 afternoon:** main is clean. #57 v1 merged (`a8e1b0f`). #58 merged (`e744e18`). The morning daily-friction batch (#41, #36, #40, #37, #38, #44) all on main. #54 stub on main. #53 validated. The `interactive-dashboard-57` and `designer-agent-46` branches are gone. Test baseline: 149 passing.
+**State at end of 2026-05-08 afternoon session:** main has #54 + FORGE-DEC-016 landed. ui-design workflow now has both `brief` and `review` phases. `forge submit` is wired. Dashboard renders manual-phase tasks. 171 tests passing. **End-to-end validation still owed:** a real `forge new ui-design "<title>" --design-dir ~/code/<dir> --brief "..."` run that walks brief → submit → review → gate. The mechanics are tested in isolation but no real run has touched the new code path yet.
 
 **Top of the stack — pick from here:**
 
-1. **#54 proper** — finish the `ui-design` workflow's `review` phase. The stub only has `brief`. The `review` phase needs a manual/human-led concept that gates without dispatching a container (the human runs PROMPT.md outside forge, then comes back to gate with rationale containing artifact paths). No such phase concept exists yet — likely **FORGE-DEC-016** territory. **#55 (design-revise) blocks on this.**
-2. **#53 polish** — already validated end-to-end. Any rough edges from the v3 run worth tightening?
-3. **Run FOLLOWUP-PROMPT.md** through Pencil at the host to fill the 9 design gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Then wire the new screens into the dashboard. Same shape as the MISSING-SCREENS-PROMPT pass that worked.
-4. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX) — accumulated during #53 validation. Worth a focused dashboard pass when ready.
+1. **End-to-end validate #54.** Run a real ui-design workflow. Confirm: brief produces PROMPT.md, dashboard renders it inline, human runs it on the host, `forge submit` validates, dashboard shows the .pen + PNGs + HTML, gate advance closes the run, gate reject loops back to brief with `inputs.rejectedRationale` populated. This also closes #25's pending validation.
+2. **#55** — design-revise rewrite. Same two-phase shape as #54 (`brief` + `review`), different prompt-author template that opens a prior `.pen` and applies revisions. Mostly mechanical now that #54 is in place.
+3. **#66** — dashboard new-run modal must require `--design-dir` for ui-design/design-revise. Becomes more important now that submit hard-errors on missing designDir.
+4. **Run FOLLOWUP-PROMPT.md** through Pencil at the host to fill the 9 design gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Then wire the new screens into the dashboard.
+5. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX). With #54 in, gate-button copy (#62) becomes more interesting since manual-phase gate semantics differ from agent-led ones.
+6. **#48 image previews** — currently the dashboard shows PNG paths as text. To render actual previews we need a `/api/artifact?path=...` passthrough endpoint (browsers block `file://` from http-served pages). Whitelisted paths only (under `~/code/`). Small, deferred.
 
 **Validation still pending:**
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
-- #25 (reject + `onReject` flow) — no workflow uses `onReject` today; can only validate after writing a workflow that does.
+- #25 (reject + `onReject` flow) — code is exercised by the gate.test.ts manual-phase reject test, but a real ui-design reject hasn't run yet. Closes when #1 above lands.
 
 **Watchdog status:** works.
 
@@ -49,13 +51,8 @@ When you start a session, read this file. When you finish, update it: move close
 - The agent runs in `agent-dev-worker` (no special image). Standard blue-agent shape.
 Validated empirically tonight: this exact prompt produced a complete dashboard design in `~/code/forge-design/`.
 
-### #54 — Rewrite `ui-design` workflow for the new architecture
-**Why:** The current `src/workflows/ui-design.ts` (commit `d560b7b`) has phases (discover / design / export) that assume an agent-led design phase. Per FORGE-DEC-014 there is no agent-led design — only an agent-led brief + a human-led design. Workflow shape must change.
-**How to apply:** Replace existing phases with:
-- `brief` — agent: `prompt-author`, gate: `human`. Output: `{promptPath, brief, screens, notes}`. Human reviews the prompt + gates advance (or request-changes if the prompt isn't right).
-- `review` — agent: none (manual phase, gate: `human`). The human runs PROMPT.md outside forge, comes back, gates advance with rationale that includes the artifact paths (`{penFile, pngFiles}`). Forge stores in gate.rationale; dashboard reads from there for #57.
-- (Optionally a `code-export` phase later if HTML+Tailwind generation is wanted — but defer until someone actually needs it.)
-Depends on: #53.
+### #54 — Rewrite `ui-design` workflow for the new architecture (DONE this session)
+Closed in Done (recent) below. Validation: a real `forge new ui-design` run that goes brief → submit → review → gate. Reject path exercises #25 incidentally.
 
 ### #55 — Rewrite `design-revise` workflow for the new architecture
 **Why:** Same pivot as #54 but for the iteration case. Input is a previously-saved `.pen` file plus a revision brief.
@@ -213,6 +210,20 @@ Localhost-only is the security model; document this.
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #54 — `ui-design` review phase + manual-phase primitive
+**Closed:** 2026-05-08 afternoon, on `main` (FORGE-DEC-016 + implementation).
+**What shipped:**
+- New task status `awaiting_human_input` added to `TaskStatus` union. Manual phases (`agents: []`) create exactly one task in this status; human transitions it via `forge submit`.
+- New CLI: `forge submit <task-id> [--notes "..."]`. Validates `<designDir>/<title>.pen` non-zero + `<designDir>/designs/*.png` ≥ 1 + `<designDir>/code/*.html` ≥ 1. Hard-errors on missing `run.metadata.designDir` for `ui-design`/`design-revise`. Captures paths into `task.result` and transitions to `awaiting_gate`.
+- `src/workflows/ui-design.ts`: `review` phase added with `agents: []`, `gate: "human"`, `onReject: "brief"`. Reject loops back to brief with `inputs.rejectedRationale` populated (exercises the #25 plumbing).
+- Spine: `next.ts` recognizes `awaiting_human_input` (returns new `kind`). `dispatch.ts` no-ops on empty-agents phases. `advise.ts` recommends `forge submit`. `gate.ts` rejects `request-changes` on manual phases (would otherwise create a pending task with no agent to dispatch).
+- Dashboard: `/api/submit/:taskId` POST endpoint shells out to `forge submit` (FORGE-DEC-015 pattern). Awaiting-gate detail for review tasks renders artifact paths (.pen, PNGs, HTML files). Awaiting-human-input detail renders the brief context (PROMPT.md inline, parameters, openQuestions, designDir) + "I'm done" submit button.
+- New helpers in `util/paths.ts`: `briefPromptHostPath` + `sanitizeTitleForFilename` (extracted from `new.ts`).
+- New event type `task.submitted` in the audit trail.
+**Tests:** 22 new tests across manualPhase, submit, advise, gate, server. 171 passing total (was 149).
+**Closes / exercises:** #25 (onReject end-to-end via the reject path — verified by gate.test.ts). #48's substance partially lands (text-only artifact list in dashboard; PNG image previews remain a future enhancement, blocked on the browser file:// → http page security boundary).
+**Depends on / unblocks:** #55 (design-revise rewrite) is unblocked — same workflow shape with a different prompt-author template. #66 (dashboard new-run modal) becomes load-bearing because submit hard-errors on missing designDir.
 
 ### #57 — Interactive dashboard v1 (gate buttons, run-next, design review)
 **Closed:** 2026-05-08, merged to main as `a8e1b0f` (merge of branch `interactive-dashboard-57`, branch commit `65eaae3`).

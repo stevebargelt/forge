@@ -24,6 +24,12 @@ export function registerNext(program: Command): void {
             console.log(`  ⚠ ${t.id} (${t.phase})  →  forge gate ${t.id} advance | reject | request-changes`);
           }
           break;
+        case "awaiting_human_input":
+          console.log(`Run ${runId}: ${result.tasks.length} task(s) awaiting your design work.`);
+          for (const t of result.tasks) {
+            console.log(`  ▢ ${t.id} (${t.phase})  →  forge submit ${t.id}`);
+          }
+          break;
         case "blocked_by_red":
           console.log(`Run ${runId}: BLOCKED by red verdicts.`);
           for (const t of result.tasks) {

@@ -130,6 +130,14 @@ export async function gate(
       }
     }
   } else if (decision === "request-changes") {
+    // Manual phase (FORGE-DEC-016): re-queueing would create a `pending` task with no
+    // agent to dispatch — it would sit forever. The right escape hatch on a manual
+    // phase is reject (loops to onReject) or advance with corrected artifacts.
+    if (phase.agents.length === 0) {
+      throw new Error(
+        `Task ${taskId} is in a manual phase ('${phase.name}'); request-changes is not supported. Use 'reject' to loop back to '${phase.onReject ?? "the prior phase"}', or re-submit with corrected artifacts.`
+      );
+    }
     // Re-queue same phase: create a new pending task with the rationale injected.
     const newId = newTaskId(task.phase);
     const newTask: Task = {

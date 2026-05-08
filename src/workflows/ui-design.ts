@@ -1,22 +1,25 @@
 import type { Workflow } from "../types/index.js";
 import { agent } from "./_agentRefs.js";
 
-// Minimal stub per FORGE-DEC-014. The full shape from BACKLOG #54 is brief
-// (prompt-author, gate=human) → review (no agent, gate=human). Today this
-// stub is only the brief phase: it's enough to validate the prompt-author
-// primitive (#53) end-to-end via the dashboard.
-//
-// The "review" phase (human runs PROMPT.md outside forge, comes back, gates
-// with artifact paths) needs either a human-placeholder agent or a manual-
-// phase concept that doesn't dispatch a container — neither exists yet.
-// When that lands, append the second phase here.
+// ui-design (FORGE-DEC-014, FORGE-DEC-016):
+//   brief   — prompt-author interviews + writes /task/PROMPT.md. gate=human.
+//             Human reviews the prompt body in the dashboard, then advances.
+//   review  — manual phase (no agent). Human runs PROMPT.md against Pencil +
+//             Claude Code on their host, iterates until happy, then runs
+//             `forge submit <task-id>` (or hits the dashboard button).
+//             `forge submit` validates the conventional artifacts under
+//             run.metadata.designDir (.pen non-zero, designs/*.png ≥ 1,
+//             code/*.html ≥ 1) and transitions to awaiting_gate. Human gates:
+//             advance | reject. Reject loops back to `brief` via onReject —
+//             prompt-author re-runs with inputs.rejectedRationale populated,
+//             producing a revised PROMPT.md.
 //
 // Inputs the prompt-author reads from inputs.brief (passed via
-// `forge new ui-design "<title>" --brief "..."`).
+// `forge new ui-design "<title>" --brief "..." --design-dir <path>`).
 export const workflow: Workflow = {
   name: "ui-design",
   description:
-    "Design a UI from a brief. The prompt-author interviews + writes a PROMPT.md; the human runs that PROMPT.md in their own Claude Code + Pencil session and gates back with artifact paths.",
+    "Design a UI from a brief. The prompt-author interviews + writes a PROMPT.md; the human runs that PROMPT.md in their own Claude Code + Pencil session and submits artifacts back to forge.",
   phases: [
     {
       name: "brief",
@@ -24,6 +27,12 @@ export const workflow: Workflow = {
       gate: "human",
       workflowAdditions:
         "inputs.brief contains the design brief. Use the ui-design template at templates/ui-design.md (already in your seed). Interview the human to fill any missing parameters (target_pen_file, output_dir, file_naming, style, screens). Write the produced PROMPT.md to /task/PROMPT.md. Output {status, promptPath: '/task/PROMPT.md', brief, template: 'ui-design', parameters, openQuestions, notes}.",
+    },
+    {
+      name: "review",
+      agents: [], // manual phase per FORGE-DEC-016 — human produces artifacts off-forge
+      gate: "human",
+      onReject: "brief",
     },
   ],
 };

@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { DB_PATH } from "../util/paths.js";
+import { existsSync, readFileSync } from "node:fs";
+import { DB_PATH, briefPromptHostPath } from "../util/paths.js";
 import { SCHEMA_SQL } from "../store/schema.js";
 import type { Run, Task, RunStatus, WorkflowName, TaskStatus, TaskPackage } from "../types/index.js";
 import type { VerdictRow, Finding, RedAuthority } from "../types/index.js";
@@ -163,9 +164,27 @@ export function getRunWithShouldPoll(
   return { run, tasks, verdicts, shouldPoll };
 }
 
+// Context for an awaiting_human_input review task: the upstream brief task's
+// captured output (parameters, openQuestions, notes) plus the literal PROMPT.md
+// the prompt-author wrote, read from the brief task's host workspace. The
+// dashboard renders this so the human can review the prompt + status without
+// leaving the browser tab.
+export type BriefContext = {
+  briefTaskId: string;
+  briefResult?: unknown; // the prompt-author's structured result
+  promptMarkdown?: string; // PROMPT.md contents (may be missing if file isn't there)
+  promptPathHost: string;
+  designDir?: string;
+};
+
 export function getTaskDetail(
   id: string
-): { task: Task; verdicts: VerdictRow[]; gates: GateRow[] } | undefined {
+): {
+  task: Task;
+  verdicts: VerdictRow[];
+  gates: GateRow[];
+  briefContext?: BriefContext;
+} | undefined {
   const taskRow = db().prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as TaskRow | undefined;
   if (!taskRow) return undefined;
 
@@ -181,5 +200,55 @@ export function getTaskDetail(
     .all(id) as GateDbRow[];
   const gates = gRows.map(rowToGate);
 
-  return { task, verdicts, gates };
+  const briefContext = task.status === "awaiting_human_input"
+    ? loadBriefContext(task)
+    : undefined;
+
+  return { task, verdicts, gates, briefContext };
+}
+
+// Find the most recent completed `brief` task in the same run and load its
+// output + PROMPT.md from disk. Used to render the prompt body inline on the
+// dashboard's awaiting_human_input detail screen so the human doesn't have to
+// leave the browser to read it.
+function loadBriefContext(reviewTask: Task): BriefContext | undefined {
+  const briefRow = db()
+    .prepare(
+      `SELECT * FROM tasks WHERE run_id = ? AND phase = 'brief' AND status = 'complete'
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(reviewTask.runId) as TaskRow | undefined;
+  if (!briefRow) return undefined;
+
+  const briefTask = rowToTask(briefRow);
+  const promptPathHost = briefPromptHostPath(briefTask.runId, briefTask.id);
+  let promptMarkdown: string | undefined;
+  if (existsSync(promptPathHost)) {
+    try {
+      promptMarkdown = readFileSync(promptPathHost, "utf8");
+    } catch {
+      // tolerate read failures — surface what we have, html.ts copes with the absent case
+    }
+  }
+
+  const runRow = db()
+    .prepare(`SELECT metadata FROM runs WHERE id = ?`)
+    .get(reviewTask.runId) as { metadata: string | null } | undefined;
+  let designDir: string | undefined;
+  if (runRow?.metadata) {
+    try {
+      const meta = JSON.parse(runRow.metadata) as { designDir?: unknown };
+      if (typeof meta.designDir === "string") designDir = meta.designDir;
+    } catch {
+      // ignore malformed metadata
+    }
+  }
+
+  return {
+    briefTaskId: briefTask.id,
+    briefResult: briefTask.result,
+    promptMarkdown,
+    promptPathHost,
+    designDir,
+  };
 }

@@ -15,6 +15,7 @@ export type NextOptions = {
 export type NextResult =
   | { kind: "running"; tasks: Task[] }
   | { kind: "awaiting_gate"; tasks: Task[] }
+  | { kind: "awaiting_human_input"; tasks: Task[] }
   | { kind: "blocked_by_red"; tasks: Task[] }
   | { kind: "dispatched"; phase: string; tasks: Task[] }
   | { kind: "advanced"; phase: string; tasks: Task[] }
@@ -50,6 +51,9 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
 
     const awaiting = tasks.filter((t) => t.status === "awaiting_gate");
     if (awaiting.length > 0) return { kind: "awaiting_gate", tasks: awaiting };
+
+    const awaitingHuman = tasks.filter((t) => t.status === "awaiting_human_input");
+    if (awaitingHuman.length > 0) return { kind: "awaiting_human_input", tasks: awaitingHuman };
 
     const failed = tasks.filter((t) => t.status === "failed" && t.error?.startsWith("container_crash"));
     if (failed.length > 0) return { kind: "crashed", tasks: failed };
@@ -89,9 +93,14 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
     // Create tasks for the next phase. For phases without explicit fanout, one task per agent.
     const created = createPhaseTasks(run, workflow, nextPhase.name);
     if (created.length === 0) {
-      // Phase has no agents — advance.
+      // Phase has zero agents AND no manual-phase task got created — degenerate.
       updateRunStatus(run.id, "complete");
       return { kind: "complete" };
+    }
+    // Manual phases (FORGE-DEC-016) create their task directly in awaiting_human_input.
+    // Surface that immediately so the next-command hint points at `forge submit`.
+    if (created.every((t) => t.status === "awaiting_human_input")) {
+      return { kind: "awaiting_human_input", tasks: created };
     }
     return { kind: "advanced", phase: nextPhase.name, tasks: created };
   } finally {
@@ -166,6 +175,41 @@ export function createPhaseTasks(
   // bridge between phases — without it, e.g. a reporter receives empty inputs and reports
   // "no assessment data." Reds get upstream via the `spec` field; blues get it here.
   const upstream = collectUpstreamResults(workflow, run.id, phase.name);
+
+  // Manual phase (FORGE-DEC-016): no agents → one task in awaiting_human_input. The human
+  // produces artifacts off-forge (e.g. runs PROMPT.md against Pencil), then `forge submit`
+  // validates + transitions to awaiting_gate. Inputs still get upstream + commonInputs so
+  // onReject rationale propagates if the prior review was rejected.
+  if (phase.agents.length === 0) {
+    const inputsList = opts.perAgentInputs ?? [{}];
+    const common = opts.commonInputs ?? {};
+    const inputs = inputsList[0] ?? {};
+    const taskId = newTaskId(phase.name);
+    const mergedInputs = upstream
+      ? { ...common, ...inputs, upstream }
+      : { ...common, ...inputs };
+    const taskPackage: TaskPackage = {
+      taskId,
+      runId: run.id,
+      phase: phase.name,
+      role: "",
+      inputs: mergedInputs,
+      composedSystemPrompt: "",
+    };
+    const task: Task = {
+      id: taskId,
+      runId: run.id,
+      parentId: opts.parentId,
+      phase: phase.name,
+      agentRole: "",
+      status: "awaiting_human_input",
+      taskPackage,
+      createdAt: nowIso(),
+    };
+    insertTask(task);
+    logEvent("task.created", { runId: run.id, taskId, payload: { manual: true } });
+    return [task];
+  }
 
   const inputsList = opts.perAgentInputs ?? [{}];
   const common = opts.commonInputs ?? {};

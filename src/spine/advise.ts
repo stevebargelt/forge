@@ -12,6 +12,7 @@ export type AdviceKind =
   | "abandoned"
   | "running"
   | "awaiting_gate"
+  | "awaiting_human_input"
   | "blocked_by_red"
   | "crashed"
   | "ready_to_dispatch"
@@ -32,6 +33,7 @@ export type Advice = {
     pending: number;
     running: number;
     awaiting_gate: number;
+    awaiting_human_input: number;
     blocked_by_red: number;
     failed: number;
     complete: number;
@@ -43,6 +45,7 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     pending: tasks.filter((t) => t.status === "pending").length,
     running: tasks.filter((t) => t.status === "running").length,
     awaiting_gate: tasks.filter((t) => t.status === "awaiting_gate").length,
+    awaiting_human_input: tasks.filter((t) => t.status === "awaiting_human_input").length,
     blocked_by_red: tasks.filter((t) => t.status === "blocked_by_red").length,
     failed: tasks.filter((t) => t.status === "failed").length,
     complete: tasks.filter((t) => t.status === "complete").length,
@@ -76,6 +79,17 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
       summary: `${counts.blocked_by_red} task(s) blocked by red verdict. Inspect first, then decide.`,
       command: `forge show ${t.id}`,
       alternativeCommand: `forge gate ${t.id} advance --force --rationale "..."`,
+      counts,
+    };
+  }
+
+  if (counts.awaiting_human_input > 0) {
+    const t = tasks.find((x) => x.status === "awaiting_human_input")!;
+    const noun = counts.awaiting_human_input === 1 ? "task" : "tasks";
+    return {
+      kind: "awaiting_human_input",
+      summary: `${counts.awaiting_human_input} ${noun} awaiting your design work. Submit when artifacts are ready.`,
+      command: `forge submit ${t.id}`,
       counts,
     };
   }

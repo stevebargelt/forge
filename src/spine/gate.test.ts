@@ -4,7 +4,8 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
-import { aggregateVerdicts, batchGate } from "./gate.js";
+import { aggregateVerdicts, batchGate, gate } from "./gate.js";
+import { tasksForRunPhase, getTask } from "../store/tasks.js";
 import type { VerdictRow, RedAuthority, Run, Task } from "../types/index.js";
 
 function v(
@@ -181,4 +182,78 @@ test("batchGate: tasks not in awaiting_gate are ignored, not failed", async () =
   assert.equal(r.gated[0]!.taskId, "t-aw");
   assert.equal(r.failed.length, 0);
   assert.equal(r.skippedBlocked.length, 0);
+});
+
+// ---------- manual-phase reject (FORGE-DEC-016 + #25 onReject end-to-end) ----------
+
+const UI_RUN: Run = {
+  id: "run-ui-design",
+  workflow: "ui-design",
+  title: "ui-design test",
+  status: "active",
+  createdAt: "2026-05-08T00:00:00Z",
+  metadata: { designDir: "/tmp/x" },
+};
+
+test("gate reject on a review task triggers onReject and creates a brief task with rejectedRationale", async () => {
+  insertRun(UI_RUN);
+  // Simulate the review task having been submitted (so it's in awaiting_gate
+  // with the artifact paths captured in result).
+  insertTask({
+    id: "t-review",
+    runId: UI_RUN.id,
+    phase: "review",
+    agentRole: "",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-review",
+      runId: UI_RUN.id,
+      phase: "review",
+      role: "",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete", penFile: "/x.pen", pngFiles: [], htmlFiles: [] },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+
+  const out = await gate("t-review", "reject", "design feels off-style; too saturated");
+
+  assert.equal(out.task.status, "failed");
+  // onReject loop should have produced a new pending brief task.
+  const briefTasks = tasksForRunPhase(UI_RUN.id, "brief");
+  assert.equal(briefTasks.length, 1);
+  const brief = briefTasks[0]!;
+  assert.equal(brief.status, "pending");
+  assert.equal(brief.taskPackage.inputs.rejectedRationale, "design feels off-style; too saturated");
+  assert.equal(brief.taskPackage.inputs.rejectedTaskId, "t-review");
+});
+
+test("gate request-changes on a manual-phase task throws (no agent to re-run)", async () => {
+  insertRun(UI_RUN);
+  insertTask({
+    id: "t-review-2",
+    runId: UI_RUN.id,
+    phase: "review",
+    agentRole: "",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-review-2",
+      runId: UI_RUN.id,
+      phase: "review",
+      role: "",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+
+  await assert.rejects(
+    () => gate("t-review-2", "request-changes", "noop"),
+    /manual phase.*request-changes is not supported/
+  );
+
+  // Task stays in awaiting_gate — the failed gate didn't mutate state inappropriately.
+  const refreshed = getTask("t-review-2")!;
+  assert.equal(refreshed.status, "awaiting_gate");
 });

@@ -22,6 +22,16 @@ export async function dispatch(
   const phase = findPhase(workflow, phaseName);
   if (!phase) throw new Error(`Phase ${phaseName} not in workflow ${workflow.name}`);
 
+  // Manual phase (FORGE-DEC-016): nothing to dispatch. Tasks land directly in
+  // awaiting_human_input via createPhaseTasks; the human transitions them with
+  // `forge submit`.
+  if (phase.agents.length === 0) {
+    console.warn(
+      `[forge] dispatch() called on manual phase '${phaseName}'; no-op (use 'forge submit <task-id>').`
+    );
+    return { spawned: 0, succeeded: 0, failed: 0, taskIds: [] };
+  }
+
   const allTasks = tasksForRun(runId);
   const pending = allTasks.filter(
     (t) => t.phase === phaseName && t.status === "pending" && t.agentRole !== mostRedRole(phase)

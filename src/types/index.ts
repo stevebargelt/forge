@@ -119,6 +119,7 @@ export type TaskStatus =
   | "pending"
   | "running"
   | "awaiting_gate"
+  | "awaiting_human_input"
   | "complete"
   | "failed"
   | "blocked_by_red";

@@ -37,6 +37,23 @@ test("adviseRun: abandoned run → no command", () => {
   assert.equal(a.command, "");
 });
 
+test("adviseRun: awaiting_human_input → forge submit <task> (manual phase, FORGE-DEC-016)", () => {
+  const a = adviseRun(RUN, [task("t-review", "awaiting_human_input")]);
+  assert.equal(a.kind, "awaiting_human_input");
+  assert.match(a.command, /forge submit t-review/);
+  assert.match(a.summary, /awaiting your design work/);
+  assert.equal(a.counts.awaiting_human_input, 1);
+});
+
+test("adviseRun: awaiting_human_input ranks before awaiting_gate (production gates a decision)", () => {
+  const a = adviseRun(RUN, [
+    task("t-aw", "awaiting_gate"),
+    task("t-rev", "awaiting_human_input"),
+  ]);
+  assert.equal(a.kind, "awaiting_human_input");
+  assert.match(a.command, /forge submit t-rev/);
+});
+
 test("adviseRun: blocked_by_red beats awaiting_gate (more important)", () => {
   const a = adviseRun(RUN, [
     task("t-aw", "awaiting_gate"),
@@ -109,6 +126,7 @@ test("adviseRun: counts populated correctly", () => {
     pending: 1,
     running: 1,
     awaiting_gate: 1,
+    awaiting_human_input: 0,
     blocked_by_red: 1,
     complete: 1,
     failed: 1,

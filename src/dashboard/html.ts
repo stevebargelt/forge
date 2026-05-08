@@ -229,6 +229,7 @@ a { color: var(--accent); text-decoration: none; }
 .badge.status-pending { color: var(--pending); }
 .badge.status-failed, .badge.verdict-fail { color: var(--error); }
 .badge.status-warning, .badge.status-awaiting_gate { color: var(--warning); }
+.badge.status-awaiting_human_input { color: var(--warning); background: var(--warning-bg, transparent); }
 .badge.status-blocked_by_red { color: var(--error); background: var(--error-bg); }
 .badge.status-approved { color: var(--success); }
 .badge.status-abandoned, .badge.verdict-inconclusive { color: var(--foreground-muted); }
@@ -670,6 +671,7 @@ const CLIENT_JS = `
     if (status === 'running') return 'running';
     if (status === 'failed') return 'failed';
     if (status === 'awaiting_gate') return 'warning';
+    if (status === 'awaiting_human_input') return 'awaiting_human_input';
     if (status === 'blocked_by_red') return 'blocked_by_red';
     if (status === 'pending') return 'pending';
     if (status === 'abandoned') return 'abandoned';
@@ -825,7 +827,7 @@ const CLIENT_JS = `
     ]);
   }
   function countTaskStatuses(tasks) {
-    const c = { running: 0, awaiting_gate: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
+    const c = { running: 0, awaiting_gate: 0, awaiting_human_input: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
     for (const t of tasks) c[t.status] = (c[t.status] || 0) + 1;
     const done = c.complete + c.failed;
     const summary = done + ' / ' + tasks.length;
@@ -833,7 +835,7 @@ const CLIENT_JS = `
   }
   function runActionRow(run, counts) {
     const wrap = el('div', { style: 'display: flex; gap: var(--space-sm); margin-top: var(--space-md);' });
-    if (counts.awaiting_gate > 0 || counts.blocked_by_red > 0) {
+    if (counts.awaiting_gate > 0 || counts.blocked_by_red > 0 || counts.awaiting_human_input > 0) {
       wrap.appendChild(el('button', { class: 'btn btn-sm btn-warning', onclick: () => focusFirstGate(run.id) }, 'Review gates'));
     } else if (counts.pending > 0 || counts.running === 0 && counts.complete + counts.failed < state.runDetail.tasks.length) {
       wrap.appendChild(el('button', { class: 'btn btn-sm btn-primary', onclick: () => runNext(run.id) }, '▶ Run next'));
@@ -843,7 +845,7 @@ const CLIENT_JS = `
   }
   function focusFirstGate(runId) {
     const tasks = state.runDetail ? state.runDetail.tasks : [];
-    const t = tasks.find(t => t.status === 'awaiting_gate' || t.status === 'blocked_by_red');
+    const t = tasks.find(t => t.status === 'awaiting_gate' || t.status === 'blocked_by_red' || t.status === 'awaiting_human_input');
     if (t) selectTask(t.id);
   }
   function taskRow(t) {
@@ -893,9 +895,10 @@ const CLIENT_JS = `
       detail.appendChild(el('div', { class: 'empty-state' }, 'Loading…'));
       return;
     }
-    const { task, verdicts, gates } = state.taskDetail;
+    const { task, verdicts, gates, briefContext } = state.taskDetail;
     const isBlockedByRed = task.status === 'blocked_by_red';
     const isAwaitingGate = task.status === 'awaiting_gate';
+    const isAwaitingHuman = task.status === 'awaiting_human_input';
 
     if (isBlockedByRed) {
       detail.appendChild(el('div', { class: 'alert-banner' }, [
@@ -912,6 +915,9 @@ const CLIENT_JS = `
     const body = el('div', { class: 'pane-body no-pad' });
 
     body.appendChild(taskHeaderSection(task));
+    if (isAwaitingHuman) {
+      body.appendChild(submitActionsSection(task, briefContext));
+    }
     if (isAwaitingGate || isBlockedByRed) {
       body.appendChild(gateActionsSection(task, verdicts));
     }
@@ -920,6 +926,85 @@ const CLIENT_JS = `
     if (verdicts && verdicts.length > 0 && !isBlockedByRed) body.appendChild(verdictsSection(verdicts));
     if (gates && gates.length > 0) body.appendChild(gatesSection(gates));
     detail.appendChild(body);
+  }
+  // Manual-phase task awaiting the human's off-forge work (FORGE-DEC-016).
+  // Renders the upstream brief's PROMPT.md inline + parameters/openQuestions
+  // + a primary "I'm done — review my design" button that POSTs to /api/submit.
+  function submitActionsSection(task, briefContext) {
+    const sec = el('div', { class: 'detail-section' });
+    sec.appendChild(el('div', { class: 'alert-banner', style: 'background: transparent; border: 1px solid var(--border);' }, [
+      el('strong', null, '▢ AWAITING YOUR DESIGN WORK — '),
+      el('span', null, 'Run PROMPT.md against Pencil + Claude Code on your host. When the .pen file is saved (Cmd+S in VS Code) and the export step finished, click "I’m done" below.'),
+    ]));
+
+    if (briefContext && briefContext.designDir) {
+      sec.appendChild(el('div', { class: 'kv-row' }, [
+        el('span', { class: 'k' }, 'DESIGN DIR'),
+        el('span', { class: 'v' }, el('code', null, briefContext.designDir)),
+      ]));
+    }
+    if (briefContext && briefContext.briefResult && typeof briefContext.briefResult === 'object') {
+      const r = briefContext.briefResult;
+      if (r.parameters && typeof r.parameters === 'object') {
+        const params = el('div', { class: 'detail-section', style: 'padding-top: var(--space-sm);' }, [
+          el('h3', null, 'PROMPT PARAMETERS'),
+        ]);
+        for (const k of Object.keys(r.parameters)) {
+          const v = r.parameters[k];
+          params.appendChild(el('div', { class: 'kv-row' }, [
+            el('span', { class: 'k' }, k),
+            el('span', { class: 'v' }, typeof v === 'string' ? v : JSON.stringify(v)),
+          ]));
+        }
+        sec.appendChild(params);
+      }
+      if (Array.isArray(r.openQuestions) && r.openQuestions.length > 0) {
+        const oq = el('div', { class: 'detail-section', style: 'padding-top: var(--space-sm);' }, [
+          el('h3', null, 'OPEN QUESTIONS (defaults the prompt-author picked)'),
+        ]);
+        const ul = el('ul', { style: 'margin: 0; padding-left: 18px;' });
+        for (const q of r.openQuestions) ul.appendChild(el('li', null, typeof q === 'string' ? q : JSON.stringify(q)));
+        oq.appendChild(ul);
+        sec.appendChild(oq);
+      }
+    }
+    if (briefContext && briefContext.promptMarkdown) {
+      const promptSec = el('div', { class: 'detail-section', style: 'padding-top: var(--space-sm);' }, [
+        el('h3', null, 'PROMPT.md'),
+      ]);
+      promptSec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 360px; overflow: auto;' }, briefContext.promptMarkdown));
+      sec.appendChild(promptSec);
+    } else if (briefContext) {
+      sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted);' }, [
+        'PROMPT.md not found at ',
+        el('code', null, briefContext.promptPathHost),
+      ]));
+    }
+
+    if (!state.interactive) {
+      sec.appendChild(el('div', { class: 'cli-block', style: 'margin-top: var(--space-md);' }, [
+        el('span', null, 'forge submit ' + task.id),
+        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge submit ' + task.id) }, 'copy'),
+      ]));
+      sec.appendChild(el('div', { style: 'color: var(--foreground-muted); font-size: 11px;' }, [
+        'Set ',
+        el('code', null, 'FORGE_DASHBOARD_INTERACTIVE=1'),
+        ' before launching the dashboard to enable the submit button here.',
+      ]));
+      return sec;
+    }
+
+    const notesField = el('textarea', {
+      class: 'rationale',
+      placeholder: 'Notes about the design pass (optional) — captured into result.notes for the gate reviewer.',
+      id: 'submit-notes-' + task.id,
+    });
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin: var(--space-md) 0 var(--space-sm);' }, 'Notes (optional)'));
+    sec.appendChild(notesField);
+    sec.appendChild(el('div', { class: 'gate-actions', style: 'margin-top: var(--space-sm);' }, [
+      el('button', { class: 'btn btn-primary', onclick: () => doSubmit(task.id) }, '✓ I’m done — review my design'),
+    ]));
+    return sec;
   }
   function taskHeaderSection(task) {
     return el('div', { class: 'detail-section' }, [
@@ -983,6 +1068,45 @@ const CLIENT_JS = `
   }
   function taskResultSection(task) {
     const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'OUTPUT')]);
+    // Friendlier render for review-phase manual-task results — surface the .pen,
+    // PNG, and HTML artifact paths as a list with file:// links + the JSON below.
+    // Browsers block file:// from http-served pages on click, but the path is
+    // still selectable + recognizable; image previews are a #48 follow-up.
+    const r = task.result;
+    if (r && typeof r === 'object' && (r.penFile || r.pngFiles || r.htmlFiles)) {
+      const list = el('div', { style: 'margin-bottom: var(--space-md);' });
+      if (r.penFile) {
+        list.appendChild(el('div', { class: 'kv-row' }, [
+          el('span', { class: 'k' }, '.PEN'),
+          el('span', { class: 'v' }, el('code', null, r.penFile)),
+        ]));
+      }
+      if (Array.isArray(r.pngFiles) && r.pngFiles.length > 0) {
+        list.appendChild(el('div', { class: 'kv-row' }, [
+          el('span', { class: 'k' }, 'PNGS'),
+          el('span', { class: 'v' }, r.pngFiles.length + ' file(s)'),
+        ]));
+        const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px;' });
+        for (const p of r.pngFiles) ul.appendChild(el('li', null, p));
+        list.appendChild(ul);
+      }
+      if (Array.isArray(r.htmlFiles) && r.htmlFiles.length > 0) {
+        list.appendChild(el('div', { class: 'kv-row' }, [
+          el('span', { class: 'k' }, 'HTML'),
+          el('span', { class: 'v' }, r.htmlFiles.length + ' file(s)'),
+        ]));
+        const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px;' });
+        for (const p of r.htmlFiles) ul.appendChild(el('li', null, p));
+        list.appendChild(ul);
+      }
+      if (r.notes) {
+        list.appendChild(el('div', { class: 'kv-row' }, [
+          el('span', { class: 'k' }, 'NOTES'),
+          el('span', { class: 'v' }, r.notes),
+        ]));
+      }
+      sec.appendChild(list);
+    }
     const json = JSON.stringify(task.result, null, 2);
     sec.appendChild(el('pre', { class: 'cli-block' }, json));
     return sec;
@@ -1099,6 +1223,20 @@ const CLIENT_JS = `
       await refreshAll();
     } catch (e) {
       toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
+    }
+  }
+  async function doSubmit(taskId) {
+    const ta = $('submit-notes-' + taskId);
+    const notes = ta ? ta.value.trim() : '';
+    try {
+      await fetchJSON('/api/submit/' + encodeURIComponent(taskId), {
+        method: 'POST',
+        body: { notes: notes || undefined },
+      });
+      toast('Submitted; advance the gate when ready.', 'success');
+      await refreshAll();
+    } catch (e) {
+      toast('Submit failed: ' + (e.message || 'unknown error'), 'error');
     }
   }
   async function runNext(runId) {

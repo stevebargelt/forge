@@ -267,3 +267,73 @@ test("POST /api/runs returns 501 (not implemented yet)", async () => {
     delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
+
+// ---------- /api/submit (FORGE-DEC-016) ----------
+
+test("POST /api/submit/:taskId without X-Forge-Request returns 403", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  try {
+    const res = await post("/api/submit/task-x", {}, { withHeader: false });
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/submit/:taskId returns 503 when not interactive", async () => {
+  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  const res = await post("/api/submit/task-x", {});
+  assert.equal(res.status, 503);
+});
+
+test("POST /api/submit/:taskId shells out to `forge submit <id>` with no notes", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  let capturedArgs: string[] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    capturedArgs = args;
+    return { exitCode: 0, stdout: "Submitted: task-x", stderr: "" };
+  });
+  try {
+    const res = await post("/api/submit/task-x", {});
+    assert.equal(res.status, 200);
+    assert.deepEqual(capturedArgs, ["submit", "task-x"]);
+    const data = JSON.parse(res.body) as { taskId: string };
+    assert.equal(data.taskId, "task-x");
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/submit/:taskId forwards --notes when provided", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  let capturedArgs: string[] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    capturedArgs = args;
+    return { exitCode: 0, stdout: "ok", stderr: "" };
+  });
+  try {
+    await post("/api/submit/task-y", { notes: "tried two color variants" });
+    assert.deepEqual(capturedArgs, ["submit", "task-y", "--notes", "tried two color variants"]);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/submit surfaces non-zero exit as 500 with stderr", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  _setRunForgeOverrideForTest(async () => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: "Pencil source not found at /x.pen",
+  }));
+  try {
+    const res = await post("/api/submit/task-x", {});
+    assert.equal(res.status, 500);
+    assert.match(res.body, /Pencil source not found/);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});

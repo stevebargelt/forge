@@ -24,6 +24,8 @@ export type ReconciledTask = {
 
 export function reconcileRun(runId: string, workflow: Workflow): ReconciledTask[] {
   const tasks = tasksForRun(runId);
+  // Manual-phase tasks (FORGE-DEC-016) never go through reconcile — they have no
+  // result.json on disk, only get a result via `forge submit`.
   const running = tasks.filter((t) => t.status === "running");
   const out: ReconciledTask[] = [];
   for (const t of running) {

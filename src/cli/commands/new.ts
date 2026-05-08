@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
-import { ensureForgeDirs, runDir } from "../../util/paths.js";
+import { ensureForgeDirs, runDir, sanitizeTitleForFilename } from "../../util/paths.js";
 import { mkdirSync } from "node:fs";
 import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
@@ -105,16 +105,11 @@ export function registerNew(program: Command): void {
     });
 }
 
-// Default design-dir convention: ~/code/<sanitized-title>/. The title becomes a kebab-
-// case slug (lowercase, alphanumerics + hyphens). Only applied for design workflows;
-// other workflows don't pollute their metadata with this field.
+// Default design-dir convention: ~/code/<sanitized-title>/. Slug rule lives in
+// util/paths.ts so `forge submit`'s artifact validator uses the same convention
+// the run was created with.
 function deriveDefaultDesignDir(workflow: WorkflowName, title: string): string | undefined {
   if (workflow !== "ui-design" && workflow !== "design-revise") return undefined;
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60) || "untitled";
   const home = process.env.HOME ?? "~";
-  return `${home}/code/${slug}`;
+  return `${home}/code/${sanitizeTitleForFilename(title)}`;
 }
