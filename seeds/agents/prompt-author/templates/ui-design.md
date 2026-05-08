@@ -1,3 +1,11 @@
+⚠️ READ THIS FIRST (the human running the prompt, not the model):
+
+**Run this PROMPT.md in a fresh Claude Code session.** Type `/clear` or open a new terminal — do NOT paste it into a session that's already mid-task. Multi-screen Pencil prompts are long-running and benefit from full context budget at the start. If the session compacts mid-run with stale context, the model can silently drop later screens and end-of-prompt actions (verified empirically, 2026-05-08).
+
+If a run does fall short (screens missing, end-actions skipped), do not re-paste fragments into the same session — start a new session and re-run from the missing point with explicit "we already designed N-M, continue with the rest" framing.
+
+---
+
 {{brief}}
 
 WORKFLOW REQUIREMENTS (must follow):
