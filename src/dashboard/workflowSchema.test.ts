@@ -70,8 +70,8 @@ test("validateNewRunBody: investigation requires --question", () => {
   }
 });
 
-test("validateNewRunBody: feature-design-provided requires --prd", () => {
-  const r = validateNewRunBody("feature-design-provided", { title: "f", project: "/x" });
+test("validateNewRunBody: feature-ui-design-provided requires --prd", () => {
+  const r = validateNewRunBody("feature-ui-design-provided", { title: "f", project: "/x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     assert.ok(r.errors.find((e) => e.field === "prd"));

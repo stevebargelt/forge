@@ -1,12 +1,13 @@
 // Forge core types — see Harness Spine Sketch for authoritative definitions.
 
 export type WorkflowName =
-  | "feature-design-provided"
-  | "feature-design-needed"
+  | "feature"
+  | "feature-ui-design-needed"
+  | "feature-ui-design-provided"
   | "investigation"
   | "codebase-assessment"
   | "ui-design"
-  | "design-revise";
+  | "ui-design-revise";
 
 export type GateType = "human" | "auto" | "verdict";
 

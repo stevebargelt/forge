@@ -3,8 +3,9 @@
 // validator that checks the artifacts exist + look right before the task transitions
 // to awaiting_gate.
 //
-// Today only ui-design / design-revise have manual phases. Each new manual-phase
-// workflow adds another validator here and a switch arm in submit.ts.
+// Today ui-design, ui-design-revise, and feature-ui-design-needed have manual
+// phases. Each new manual-phase workflow adds another validator here and a
+// switch arm in submit.ts.
 
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";

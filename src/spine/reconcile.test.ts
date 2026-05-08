@@ -38,7 +38,7 @@ const BLUE_AGENT: AgentRef = {
 
 function makePhaseWithReds(): Phase {
   return {
-    name: "frame",
+    name: "frame-question",
     agents: [BLUE_AGENT],
     reds: {
       wide: RED_AGENT,
@@ -74,13 +74,13 @@ function makeTask(overrides: Partial<Task>): Task {
     id,
     runId: overrides.runId ?? RUN.id,
     parentId: overrides.parentId,
-    phase: overrides.phase ?? "frame",
+    phase: overrides.phase ?? "frame-question",
     agentRole: overrides.agentRole ?? "framer",
     status: overrides.status ?? "running",
     taskPackage: {
       taskId: id,
       runId: overrides.runId ?? RUN.id,
-      phase: overrides.phase ?? "frame",
+      phase: overrides.phase ?? "frame-question",
       role: overrides.agentRole ?? "framer",
       inputs: {},
       composedSystemPrompt: "",

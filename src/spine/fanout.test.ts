@@ -27,7 +27,7 @@ function workflow(): Workflow {
     name: "investigation",
     description: "",
     phases: [
-      { name: "frame", agents: [FRAMER], gate: "human" },
+      { name: "frame-question", agents: [FRAMER], gate: "human" },
       {
         name: "investigate",
         agents: [INVESTIGATOR],
@@ -43,10 +43,10 @@ function makeUpstreamTask(id: string, result: unknown): Task {
   return {
     id,
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "framer",
     status: "complete",
-    taskPackage: { taskId: id, runId: RUN.id, phase: "frame", role: "framer", inputs: {}, composedSystemPrompt: "" },
+    taskPackage: { taskId: id, runId: RUN.id, phase: "frame-question", role: "framer", inputs: {}, composedSystemPrompt: "" },
     result,
     createdAt: "2026-05-06T00:00:00Z",
   };
@@ -141,7 +141,7 @@ test("deriveFanoutInputs: object entries pass through verbatim", () => {
 
 test("createPhaseTasks: first phase (no upstream) gets empty inputs", () => {
   const wf = workflow();
-  const created = createPhaseTasks(RUN, wf, "frame");
+  const created = createPhaseTasks(RUN, wf, "frame-question");
   assert.equal(created.length, 1);
   assert.deepEqual(created[0]!.taskPackage.inputs, {});
 });
@@ -152,13 +152,13 @@ test("createPhaseTasks: downstream phase with no fanout gets inputs.upstream", (
   insertTask({
     id: "frame-1",
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "framer",
     status: "complete",
     taskPackage: {
       taskId: "frame-1",
       runId: RUN.id,
-      phase: "frame",
+      phase: "frame-question",
       role: "framer",
       inputs: {},
       composedSystemPrompt: "",
@@ -187,13 +187,13 @@ test("createPhaseTasks: upstream excludes red tasks from the bridge", () => {
   insertTask({
     id: "frame-1",
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "framer",
     status: "complete",
     taskPackage: {
       taskId: "frame-1",
       runId: RUN.id,
-      phase: "frame",
+      phase: "frame-question",
       role: "framer",
       inputs: {},
       composedSystemPrompt: "",
@@ -204,14 +204,14 @@ test("createPhaseTasks: upstream excludes red tasks from the bridge", () => {
   insertTask({
     id: "red-frame-1",
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "red-wide",
     parentId: "frame-1",
     status: "complete",
     taskPackage: {
       taskId: "red-frame-1",
       runId: RUN.id,
-      phase: "frame",
+      phase: "frame-question",
       role: "red-wide",
       inputs: {},
       composedSystemPrompt: "",
@@ -238,13 +238,13 @@ test("createPhaseTasks: explicit perAgentInputs are merged with upstream context
   insertTask({
     id: "frame-1",
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "framer",
     status: "complete",
     taskPackage: {
       taskId: "frame-1",
       runId: RUN.id,
-      phase: "frame",
+      phase: "frame-question",
       role: "framer",
       inputs: {},
       composedSystemPrompt: "",
@@ -272,13 +272,13 @@ test("createPhaseTasks: commonInputs is merged into every created task", () => {
   insertTask({
     id: "frame-2",
     runId: RUN.id,
-    phase: "frame",
+    phase: "frame-question",
     agentRole: "framer",
     status: "complete",
     taskPackage: {
       taskId: "frame-2",
       runId: RUN.id,
-      phase: "frame",
+      phase: "frame-question",
       role: "framer",
       inputs: {},
       composedSystemPrompt: "",
@@ -302,7 +302,7 @@ test("createPhaseTasks: commonInputs is merged into every created task", () => {
 
 test("createPhaseTasks: per-agent inputs win over commonInputs on key collision", () => {
   const wf = workflow();
-  const created = createPhaseTasks(RUN, wf, "frame", {
+  const created = createPhaseTasks(RUN, wf, "frame-question", {
     perAgentInputs: [{ source: "specific" }],
     commonInputs: { source: "common" },
   });

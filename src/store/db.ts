@@ -22,6 +22,24 @@ function applyMigrations(db: DatabaseInstance): void {
   if (!haveTasks.has("agent_model")) {
     db.exec(`ALTER TABLE tasks ADD COLUMN agent_model TEXT`);
   }
+
+  // Phase rename: investigation.frame → investigation.frame-question. UPDATE
+  // any existing task rows so dashboards / status / loadWorkflow can resolve
+  // the phase against the renamed workflow file. Idempotent — second run finds
+  // 0 rows.
+  db.exec(`UPDATE tasks SET phase = 'frame-question' WHERE phase = 'frame'`);
+
+  // Workflow rename (2026-05-08): old run rows reference deleted workflow names.
+  // Rather than maintain alias maps in workflows.ts forever (Steven 2026-05-08:
+  // "Start after this run. Solves it no?"), in-place migrate. Idempotent.
+  db.exec(`UPDATE runs SET workflow = 'feature' WHERE workflow = 'feature-design-needed'`);
+  db.exec(`UPDATE runs SET workflow = 'feature-ui-design-provided' WHERE workflow = 'feature-design-provided'`);
+  db.exec(`UPDATE runs SET workflow = 'ui-design-revise' WHERE workflow = 'design-revise'`);
+
+  // Phase rename: ui-design.review → ui-design.ui-review. Same idempotent UPDATE.
+  // Scope by phase only — both ui-design and ui-design-revise use this phase
+  // and there's no other workflow with a phase named "review" today.
+  db.exec(`UPDATE tasks SET phase = 'ui-review' WHERE phase = 'review'`);
 }
 
 let _db: DatabaseInstance | null = null;

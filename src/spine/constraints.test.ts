@@ -16,7 +16,7 @@ before(() => {
 id: atlas-stack
 level: force
 roles: [architect, implementer]
-workflows: [feature-design-needed, feature-design-provided]
+workflows: [feature-ui-design-needed, feature-ui-design-provided]
 phases: [architect, build]
 antiPrompt: "Demonstrate that this design uses any frontend stack other than React Native"
 ---
@@ -65,7 +65,7 @@ test("parseConstraintFile: reads frontmatter + body", () => {
   assert.equal(c.id, "atlas-stack");
   assert.equal(c.level, "force");
   assert.deepEqual(c.roles, ["architect", "implementer"]);
-  assert.deepEqual(c.workflows, ["feature-design-needed", "feature-design-provided"]);
+  assert.deepEqual(c.workflows, ["feature-ui-design-needed", "feature-ui-design-provided"]);
   assert.deepEqual(c.phases, ["architect", "build"]);
   assert.match(c.antiPrompt!, /React Native/);
   assert.match(c.body, /React Native \+ TypeScript/);
@@ -123,7 +123,7 @@ test("filterConstraints: role-scoped excludes other roles", () => {
     },
   ];
   assert.equal(
-    filterConstraints(all, { role: "framer", workflow: "investigation", phase: "frame" }).length,
+    filterConstraints(all, { role: "framer", workflow: "investigation", phase: "frame-question" }).length,
     0
   );
   assert.equal(
@@ -139,7 +139,7 @@ test("filterConstraints: workflow-scoped excludes other workflows", () => {
       id: "feature-only",
       level: "suggest",
       roles: [],
-      workflows: ["feature-design-needed"],
+      workflows: ["feature-ui-design-needed"],
       body: "x",
     },
   ];
@@ -148,7 +148,7 @@ test("filterConstraints: workflow-scoped excludes other workflows", () => {
     0
   );
   assert.equal(
-    filterConstraints(all, { role: "x", workflow: "feature-design-needed", phase: "y" }).length,
+    filterConstraints(all, { role: "x", workflow: "feature-ui-design-needed", phase: "y" }).length,
     1
   );
 });
@@ -165,7 +165,7 @@ test("filterConstraints: phase-scoped excludes other phases", () => {
     },
   ];
   assert.equal(
-    filterConstraints(all, { role: "x", workflow: "investigation", phase: "frame" }).length,
+    filterConstraints(all, { role: "x", workflow: "investigation", phase: "frame-question" }).length,
     0
   );
   assert.equal(

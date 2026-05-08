@@ -36,7 +36,7 @@ function uiDesignWorkflow(): Workflow {
     description: "",
     phases: [
       { name: "brief", agents: [PROMPT_AUTHOR], gate: "human" },
-      { name: "review", agents: [], gate: "human", onReject: "brief" },
+      { name: "ui-review", agents: [], gate: "human", onReject: "brief" },
     ],
   };
 }
@@ -60,19 +60,19 @@ afterEach(() => {
 
 test("createPhaseTasks: empty-agents phase creates one task in awaiting_human_input", () => {
   const wf = uiDesignWorkflow();
-  const created = createPhaseTasks(RUN, wf, "review");
+  const created = createPhaseTasks(RUN, wf, "ui-review");
   assert.equal(created.length, 1);
   const t = created[0]!;
   assert.equal(t.status, "awaiting_human_input");
   assert.equal(t.agentRole, "");
-  assert.equal(t.phase, "review");
+  assert.equal(t.phase, "ui-review");
   assert.equal(t.taskPackage.role, "");
   assert.equal(t.taskPackage.composedSystemPrompt, ""); // no agent → no prompt
 });
 
 test("createPhaseTasks: empty-agents phase still receives commonInputs (so onReject rationale flows)", () => {
   const wf = uiDesignWorkflow();
-  const created = createPhaseTasks(RUN, wf, "review", {
+  const created = createPhaseTasks(RUN, wf, "ui-review", {
     commonInputs: { rejectedRationale: "the design was off-style", rejectedTaskId: "t-prior" },
   });
   assert.equal(created.length, 1);
@@ -84,7 +84,7 @@ test("createPhaseTasks: empty-agents phase still receives commonInputs (so onRej
 test("dispatch: no-op for an empty-agents phase", async () => {
   // dispatch needs to load the workflow from disk; ui-design is a real workflow
   // file, so this should resolve. The phase 'review' is the manual one.
-  const result = await dispatch(RUN.id, "review", { projectDir: "/tmp" });
+  const result = await dispatch(RUN.id, "ui-review", { projectDir: "/tmp" });
   assert.equal(result.spawned, 0);
   assert.equal(result.taskIds.length, 0);
 });

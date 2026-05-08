@@ -1,9 +1,14 @@
 import type { Workflow } from "../types/index.js";
 import { agent } from "./_agentRefs.js";
 
+// `feature` workflow: feature work with no UI/UX design step. Architecture
+// review is always part of feature work (Steven's call 2026-05-08), so this
+// always starts with `architect`. For features that need UI design, see
+// `feature-ui-design-needed`. For features that already have UI design done,
+// see `feature-ui-design-provided`.
 export const workflow: Workflow = {
-  name: "feature-design-needed",
-  description: "PRD exists but design does not. Architect → plan → build → verify.",
+  name: "feature",
+  description: "Feature work without UI/UX design. Architect → plan → build → verify.",
   phases: [
     {
       name: "architect",
