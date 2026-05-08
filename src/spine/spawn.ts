@@ -13,7 +13,6 @@ export type SpawnOptions = {
   agentConfig: AgentRef;
   projectDir: string;
   readOnlyProject: boolean; // true for red agents
-  image?: string;            // default agent-dev-worker
   litellmUrl?: string;       // default http://host.docker.internal:4000
   // Kill the container if no stdout for this many ms. Default 5min, override via
   // FORGE_AGENT_IDLE_TIMEOUT_MS env. 0 disables.
@@ -21,7 +20,6 @@ export type SpawnOptions = {
 };
 
 const DEFAULT_IMAGE = "agent-dev-worker";
-const DESIGNER_IMAGE = "agent-designer-worker";
 const DEFAULT_LITELLM = "http://host.docker.internal:4000";
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const IDLE_TIMEOUT_EXIT_CODE = 137; // matches SIGKILL convention
@@ -54,13 +52,13 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
 
   // Stable name lets us `docker kill <name>` from the idle watchdog without parsing IDs.
   const containerName = `forge-${tp.taskId}`;
-  const idleTimeoutMs = pickIdleTimeoutMs(opts.image, opts.idleTimeoutMs);
+  const idleTimeoutMs = resolveIdleTimeoutMs(opts.idleTimeoutMs);
 
   const dockerArgs = buildDockerArgs({
     taskDir: dir,
     projectDir: opts.projectDir,
     readOnlyProject: opts.readOnlyProject,
-    image: opts.image ?? DEFAULT_IMAGE,
+    image: DEFAULT_IMAGE,
     litellmUrl: opts.litellmUrl ?? DEFAULT_LITELLM,
     model: opts.agentConfig.model,
     systemPrompt: tp.composedSystemPrompt,
@@ -203,18 +201,11 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     args.push("-e", `ANTHROPIC_BASE_URL=${input.litellmUrl}`);
   }
 
-  // Designer image needs the Pencil CLI auth key. Only forward to the designer image
-  // so the key isn't ambient on every container. Forge's caller is responsible for
-  // having PENCIL_CLI_KEY in the host env (export, .env via shell, or future #47).
-  if (input.image === DESIGNER_IMAGE && process.env.PENCIL_CLI_KEY) {
-    args.push("-e", `PENCIL_CLI_KEY=${process.env.PENCIL_CLI_KEY}`);
-  }
-
   // Mount the task dir as a writable directory at /task so the agent can create new
-  // files (e.g. designer's .pen/.png artifacts) alongside the pre-created package.md
-  // and result.json. The host dir is per-task under ~/.forge/runs/<run>/<task>/, so any
-  // visible host-side files (CLAUDE.md, container.{stdout,stderr}.log) are intentional
-  // audit artifacts. The container UID (1000) needs write perms on the host dir;
+  // files alongside the pre-created package.md and result.json. The host dir is
+  // per-task under ~/.forge/runs/<run>/<task>/, so any visible host-side files
+  // (CLAUDE.md, container.{stdout,stderr}.log) are intentional audit artifacts.
+  // The container UID (1000) needs write perms on the host dir;
   // ensureTaskDirWritable() in the caller handles that.
   args.push("-v", `${input.taskDir}:/task`);
   args.push("-v", projectMount);
@@ -322,7 +313,8 @@ export function startIdleWatchdog(
   };
 }
 
-function resolveIdleTimeoutMs(explicit: number | undefined): number {
+// Exported for unit testing. Resolves the idle timeout from explicit > env > default.
+export function resolveIdleTimeoutMs(explicit: number | undefined): number {
   if (typeof explicit === "number") return explicit;
   const env = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
   if (env !== undefined) {
@@ -330,18 +322,6 @@ function resolveIdleTimeoutMs(explicit: number | undefined): number {
     if (Number.isFinite(n) && n >= 0) return n;
   }
   return DEFAULT_IDLE_TIMEOUT_MS;
-}
-
-// Designer tasks run watchdog-free: Pencil sessions and long thinking turns can
-// legitimately go minutes between stdout chunks. A false-positive kill costs more than
-// a (rare) stuck designer container. Other agents keep the default watchdog. Exported
-// for testing.
-export function pickIdleTimeoutMs(
-  image: string | undefined,
-  explicit: number | undefined
-): number {
-  if (image === DESIGNER_IMAGE) return 0;
-  return resolveIdleTimeoutMs(explicit);
 }
 
 // Exported for unit testing the envelope-parsing logic. Not part of the public API.

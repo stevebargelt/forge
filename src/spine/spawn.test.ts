@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startIdleWatchdog, _buildDockerArgs, _readResultJson, pickIdleTimeoutMs } from "./spawn.js";
+import { startIdleWatchdog, _buildDockerArgs, _readResultJson, resolveIdleTimeoutMs } from "./spawn.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -95,7 +95,6 @@ beforeEach(() => {
     AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
     FORGE_AWS_DIR: process.env.FORGE_AWS_DIR,
     FORGE_USE_LITELLM: process.env.FORGE_USE_LITELLM,
-    PENCIL_CLI_KEY: process.env.PENCIL_CLI_KEY,
   };
   // Wipe so each test sets only what it needs.
   for (const k of Object.keys(envSnapshot)) delete process.env[k];
@@ -164,50 +163,33 @@ test("buildDockerArgs: task dir is mounted as a writable directory at /task", ()
   assert.equal(taskMount, "/tmp/x:/task", "should be a directory mount, no :ro flag");
 });
 
-test("buildDockerArgs: designer image forwards PENCIL_CLI_KEY when set", () => {
-  process.env.PENCIL_CLI_KEY = "pk-test-abc";
-  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, image: "agent-designer-worker" });
-  const envPairs = pickEnvPairs(args);
-  assert.equal(envPairs.PENCIL_CLI_KEY, "pk-test-abc");
-});
-
-test("buildDockerArgs: designer image without PENCIL_CLI_KEY does not pass an empty value", () => {
-  // No PENCIL_CLI_KEY set — must not surface as -e PENCIL_CLI_KEY=
-  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, image: "agent-designer-worker" });
-  const envPairs = pickEnvPairs(args);
-  assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
-});
-
-test("buildDockerArgs: non-designer image never forwards PENCIL_CLI_KEY", () => {
-  process.env.PENCIL_CLI_KEY = "pk-leak";
-  const args = _buildDockerArgs(ARGS_INPUT_BASE); // image: agent-dev-worker
-  const envPairs = pickEnvPairs(args);
-  assert.equal(envPairs.PENCIL_CLI_KEY, undefined);
-});
-
-test("pickIdleTimeoutMs: designer image disables the watchdog (returns 0)", () => {
+test("resolveIdleTimeoutMs: explicit value wins over env and default", () => {
   const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
-  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "60000"; // even with an env override
+  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "60000";
   try {
-    assert.equal(pickIdleTimeoutMs("agent-designer-worker", undefined), 0);
-    assert.equal(pickIdleTimeoutMs("agent-designer-worker", 99999), 0);
+    assert.equal(resolveIdleTimeoutMs(12345), 12345);
   } finally {
     if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
     else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
   }
 });
 
-test("pickIdleTimeoutMs: non-designer image uses the explicit value or env or default", () => {
+test("resolveIdleTimeoutMs: env override applies when no explicit value", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "30000";
+  try {
+    assert.equal(resolveIdleTimeoutMs(undefined), 30000);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("resolveIdleTimeoutMs: default when nothing set", () => {
   const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
   delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
   try {
-    // Default when nothing set
-    assert.equal(pickIdleTimeoutMs("agent-dev-worker", undefined), 5 * 60 * 1000);
-    // Explicit overrides default
-    assert.equal(pickIdleTimeoutMs("agent-dev-worker", 12345), 12345);
-    // Env override applies for non-designer images
-    process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "30000";
-    assert.equal(pickIdleTimeoutMs("agent-dev-worker", undefined), 30000);
+    assert.equal(resolveIdleTimeoutMs(undefined), 5 * 60 * 1000);
   } finally {
     if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
     else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;

@@ -16,10 +16,6 @@ export type AgentRef = {
   role: string;
   agentDir: string;
   model: string;
-  // Optional Docker image override. Defaults to agent-dev-worker. Used when an agent
-  // needs tools the default image doesn't carry (e.g. designer → agent-designer-worker
-  // bundles the Pencil CLI).
-  image?: string;
 };
 
 export type RedConfig = {

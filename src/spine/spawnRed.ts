@@ -182,7 +182,6 @@ async function runOneRed(args: RunOneRedArgs): Promise<{
     agentConfig: args.ref,
     projectDir: args.projectDir,
     readOnlyProject: true, // OS-level enforcement for red agents
-    image: args.ref.image,
   });
 
   const verdict = parseVerdict(result.output);
