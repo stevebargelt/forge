@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
+import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, UNIVERSAL_FIELDS } from "./workflowSchema.js";
+import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
 
@@ -66,6 +68,20 @@ function handleGet(path: string, res: ServerResponse): void {
     res
       .writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({ interactive: isInteractive() }));
+    return;
+  }
+
+  if (path === "/api/workflows") {
+    // Workflow schema for the new-run modal — order, fields, validation hints.
+    // GET-only so no CSRF / interactive gate; the schema is dashboard-internal
+    // and pulling it out keeps html.ts decoupled from workflow definitions.
+    res
+      .writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify({
+        order: WORKFLOW_ORDER,
+        universal: UNIVERSAL_FIELDS,
+        workflows: WORKFLOW_SPECS,
+      }));
     return;
   }
 
@@ -190,10 +206,32 @@ async function handleSubmit(taskId: string, body: Record<string, unknown>, res: 
   jsonOk(res, { taskId, summary: tail(out.stdout) });
 }
 
-async function handleNewRun(_body: Record<string, unknown>, res: ServerResponse): Promise<void> {
-  // Stub per OVERNIGHT-SCOPE: real new-run form is deferred to a follow-up.
-  // The dashboard surfaces the equivalent CLI command in the modal instead.
-  jsonError(res, 501, "POST /api/runs is not implemented yet — use `forge new` from a terminal.");
+async function handleNewRun(body: Record<string, unknown>, res: ServerResponse): Promise<void> {
+  const workflow = typeof body.workflow === "string" ? body.workflow : "";
+  if (!workflow) {
+    return jsonValidation(res, [{ field: "workflow", message: "workflow is required." }]);
+  }
+
+  const validation = validateNewRunBody(workflow, body);
+  if (!validation.ok) {
+    return jsonValidation(res, validation.errors);
+  }
+
+  const argv = buildForgeNewArgv(workflow as WorkflowName, validation.values);
+  const out = await invokeForge(argv);
+  if (out.exitCode !== 0) {
+    return jsonError(res, 500, out.stderr || `forge new exited ${out.exitCode}`);
+  }
+
+  // Parse the new run id from `forge new`'s stdout — the first line is "Created run <id>".
+  const match = out.stdout.match(/Created run (\S+)/);
+  const runId = match ? match[1] : undefined;
+  jsonOk(res, { runId, summary: tail(out.stdout, 8) });
+}
+
+function jsonValidation(res: ServerResponse, errors: { field: string; message: string }[]): void {
+  res.writeHead(400, { "Content-Type": "application/json" })
+     .end(JSON.stringify({ error: "Validation failed", errors }));
 }
 
 function jsonOk(res: ServerResponse, payload: Record<string, unknown>): void {

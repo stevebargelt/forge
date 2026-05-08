@@ -119,9 +119,8 @@ Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-desig
 **Lean toward (3) initially.** It's the cheapest honest answer and exposes whether the monotonic-growth cost is real before we build (1) or (2). (1) becomes the documentation form of (3). (2) only becomes worth building if Pencil ships better cross-file tooling AND we hit a case where one .pen is genuinely too big.
 **Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
 
-### #66 — Dashboard new-run modal: require --design-dir for ui-design / design-revise
-**Why:** When the dashboard gets the real new-run modal (the deferred screen 07 / `forge new` POST endpoint), `ui-design` and `design-revise` runs MUST capture `designDir` at creation. Forge's `submit` step hard-errors when `run.metadata.designDir` is missing — so the modal needs a required field for these workflows, with the same `~/code/<sanitized-title>/` default the CLI offers. Surface what files will land where so the human knows what to expect.
-**How to apply:** When the workflow picker selects `ui-design` or `design-revise`, reveal a `Design directory` input pre-filled with `~/code/<kebab-cased-title>/`. Editable, required. POST to the (future) `/api/runs` endpoint includes `designDir`. Validation: path is absolute, parent exists, the dir itself either doesn't exist yet (will be created) or is empty/contains only `<title>.pen`/`designs/`/`code/`. Mirror the CLI's `forge new --design-dir` flag exactly.
+### #66 — Dashboard new-run modal — DONE this session (on `new-run-modal-66` branch)
+Closed in Done (recent) below. All 6 workflows supported with conditional fields, server-side validation mirrors client, and POST /api/runs shells out to `forge new`.
 
 ### #25 — Validate `onReject` rationale-propagation end-to-end (legacy, partly obsolete)
 **Why:** `onReject` is documented but no workflow used it as of 2026-05-07. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. **#54's `review` phase will exercise this path** — when the human rejects a design, `onReject: "brief"` loops back and the prompt-author re-runs with `inputs.rejectedRationale` populated. Once #54 ships and a real run rejects a design, this entry can close.
@@ -242,6 +241,20 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #66 — Dashboard new-run modal (full form, all 6 workflows)
+**Closed:** 2026-05-08 afternoon, on branch `new-run-modal-66` (199 tests passing, +26 new).
+**What shipped:**
+- New `src/dashboard/workflowSchema.ts`: single source of truth for the modal — workflow specs (description + per-workflow required/optional fields), universal fields (title + project), validation (required + absolute-path + shell-meta loose mode per Steven 2026-05-08 call), and argv builder for `forge new`.
+- New `GET /api/workflows` endpoint exposes the schema; modal fetches once and caches.
+- `POST /api/runs` replaces the 501 stub: validates server-side, shells out to `bin/forge new` (per FORGE-DEC-015), parses `Created run <id>` from stdout, returns `{runId, summary}`. 400 + structured `errors[]` on validation failure (client maps these to per-field error rows). 500 + stderr on subprocess failure.
+- Dashboard modal: workflow picker first, fields appear/disappear per workflow choice, per-field validation, error rows on the matching field, submit disabled while creating, success closes modal + selects the new run. Read-only fallback when not interactive.
+- 26 new tests covering: schema validation per workflow + edge cases (relative paths, shell-meta in paths, whitespace), argv builder shape per workflow, server endpoint (CSRF, interactive, validation surfacing, argv shell-out shape per workflow, success runId parsing, error surfacing).
+**Locked design decisions** (Steven 2026-05-08):
+- (A) Schema lives in `src/dashboard/workflowSchema.ts`, dashboard-internal — CLI keeps Commander as its source of truth. Sharing would couple two consumers without enough payoff.
+- (B) Loose path validation — must be absolute (`/` or `~`), no shell metacharacters. Existence is `forge new`'s job downstream (mkdir for designDir, mount for project).
+- (C) Briefs/questions are textareas. No shell-quoting concerns since cpSpawn takes argv as an array.
+**Open follow-up:** when `--design-dir` defaults to `~/code/<title-slug>/`, the modal could pre-fill it as the user types the title (live default-derivation). Current behavior: empty placeholder text. Cheap polish, defer.
 
 ### #68 — `forge new --design-dir` pre-creates the conventional layout
 **Closed:** 2026-05-08, on `main` (alongside #54 smoke-test fixes).

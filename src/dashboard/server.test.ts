@@ -258,14 +258,135 @@ test("POST /api/next/:runId works with no project", async () => {
   }
 });
 
-test("POST /api/runs returns 501 (not implemented yet)", async () => {
+// ---------- /api/workflows + /api/runs (#66) ----------
+
+test("GET /api/workflows returns the schema with order, universal, workflows", async () => {
+  const res = await get("/api/workflows");
+  assert.equal(res.status, 200);
+  const data = JSON.parse(res.body) as { order: string[]; universal: unknown[]; workflows: Record<string, unknown> };
+  assert.ok(Array.isArray(data.order));
+  assert.ok(data.order.includes("ui-design"));
+  assert.ok(Array.isArray(data.universal));
+  assert.ok(data.workflows["ui-design"]);
+});
+
+test("POST /api/runs validates and returns 400 with field errors when fields missing", async () => {
   process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   try {
-    const res = await post("/api/runs", { workflow: "investigation" });
-    assert.equal(res.status, 501);
+    const res = await post("/api/runs", { workflow: "ui-design", title: "x", project: "/x" });
+    assert.equal(res.status, 400);
+    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+    assert.ok(Array.isArray(data.errors));
+    assert.ok(data.errors.find((e) => e.field === "brief"));
+    assert.ok(data.errors.find((e) => e.field === "designDir"));
   } finally {
     delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
+});
+
+test("POST /api/runs rejects unknown workflow with field=workflow", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  try {
+    const res = await post("/api/runs", { workflow: "bogus", title: "x", project: "/x" });
+    assert.equal(res.status, 400);
+    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+    assert.ok(data.errors.find((e) => e.field === "workflow"));
+  } finally {
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs missing workflow → 400 with field=workflow", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  try {
+    const res = await post("/api/runs", { title: "x", project: "/x" });
+    assert.equal(res.status, 400);
+    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+    assert.equal(data.errors[0]!.field, "workflow");
+  } finally {
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs shells out to `forge new` with the right argv (codebase-assessment)", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  let capturedArgs: string[] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    capturedArgs = args;
+    return { exitCode: 0, stdout: "Created run run-audit-abc123\nWorkflow: codebase-assessment\n", stderr: "" };
+  });
+  try {
+    const res = await post("/api/runs", { workflow: "codebase-assessment", title: "audit", project: "/code/x" });
+    assert.equal(res.status, 200);
+    assert.deepEqual(capturedArgs, ["new", "codebase-assessment", "audit", "--project", "/code/x"]);
+    const data = JSON.parse(res.body) as { runId: string };
+    assert.equal(data.runId, "run-audit-abc123");
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs argv shape for ui-design includes brief + design-dir", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  let capturedArgs: string[] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    capturedArgs = args;
+    return { exitCode: 0, stdout: "Created run run-w-xyz\n", stderr: "" };
+  });
+  try {
+    await post("/api/runs", {
+      workflow: "ui-design",
+      title: "widget",
+      project: "/code/forge",
+      brief: "a stats widget",
+      designDir: "/code/widget-design",
+    });
+    assert.deepEqual(capturedArgs, [
+      "new",
+      "ui-design",
+      "widget",
+      "--project", "/code/forge",
+      "--brief", "a stats widget",
+      "--design-dir", "/code/widget-design",
+    ]);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs surfaces forge new failure as 500 with stderr", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  _setRunForgeOverrideForTest(async () => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: "forge: workflow already exists",
+  }));
+  try {
+    const res = await post("/api/runs", { workflow: "codebase-assessment", title: "x", project: "/x" });
+    assert.equal(res.status, 500);
+    assert.match(res.body, /workflow already exists/);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs without X-Forge-Request → 403", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  try {
+    const res = await post("/api/runs", { workflow: "codebase-assessment" }, { withHeader: false });
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/runs without interactive flag → 503", async () => {
+  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  const res = await post("/api/runs", { workflow: "codebase-assessment" });
+  assert.equal(res.status, 503);
 });
 
 // ---------- /api/submit (FORGE-DEC-016) ----------

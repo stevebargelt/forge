@@ -433,6 +433,26 @@ a { color: var(--accent); text-decoration: none; }
 .modal-close { background: none; border: none; color: var(--foreground-muted); font-size: 14px; }
 .modal-close:hover { color: var(--foreground); }
 
+.form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--space-md); }
+.form-row label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--foreground-muted); font-weight: 600; }
+.form-row label .req { color: var(--accent); margin-left: 4px; }
+.form-row input, .form-row textarea, .form-row select {
+  background: var(--background);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.form-row input:focus, .form-row textarea:focus, .form-row select:focus { border-color: var(--accent); }
+.form-row textarea { min-height: 80px; resize: vertical; }
+.form-row .help { font-size: 11px; color: var(--foreground-muted); }
+.form-row .err { font-size: 11px; color: var(--error); margin-top: 2px; }
+.form-row.has-err input, .form-row.has-err textarea, .form-row.has-err select { border-color: var(--error); }
+.workflow-desc { font-size: 12px; color: var(--foreground-secondary); padding: var(--space-sm) 0; border-bottom: 1px dashed var(--border); margin-bottom: var(--space-md); }
+
 .cli-block {
   background: var(--background);
   border: 1px solid var(--border);
@@ -1324,32 +1344,205 @@ const CLIENT_JS = `
     }
   }
 
-  // ---------- new-run modal (stub: shows equivalent CLI command) ----------
-  function openNewRunModal() {
+  // ---------- new-run modal (BACKLOG #66) ----------
+  // Workflow schema is fetched once from /api/workflows then cached. The modal
+  // re-renders when the workflow picker changes — fields appear/disappear per
+  // the selected workflow's spec. Submit POSTs to /api/runs which validates
+  // server-side too (single source of truth in workflowSchema.ts).
+  let _workflowSchema = null;
+  async function loadWorkflowSchema() {
+    if (_workflowSchema) return _workflowSchema;
+    _workflowSchema = await fetchJSON('/api/workflows');
+    return _workflowSchema;
+  }
+  async function openNewRunModal() {
     const root = $('modal-root');
     root.innerHTML = '';
+    let schema;
+    try {
+      schema = await loadWorkflowSchema();
+    } catch (e) {
+      toast('Failed to load workflow schema: ' + (e.message || 'unknown'), 'error');
+      return;
+    }
+    if (!state.interactive) {
+      // Read-only fallback: show what would be submitted as a CLI command.
+      renderReadOnlyNewRun(schema);
+      return;
+    }
+    renderInteractiveNewRun(schema);
+  }
+  function renderReadOnlyNewRun(schema) {
+    const root = $('modal-root');
     const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
     const modal = el('div', { class: 'modal' });
     overlay.appendChild(modal);
     modal.appendChild(el('div', { class: 'modal-header' }, [
-      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— v1: copy the CLI command')]),
+      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— read-only: copy the CLI command')]),
       el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
     ]));
     const body = el('div', { class: 'modal-body' });
     body.appendChild(el('p', { style: 'color: var(--foreground-secondary); margin-bottom: var(--space-md); font-size: 12px;' },
-      'Full new-run form is deferred (BACKLOG #57 follow-up). For now, run this in your terminal:'));
-    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."]';
+      'Set FORGE_DASHBOARD_INTERACTIVE=1 before launching to enable the form. Until then, copy the CLI:'));
+    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."] [--design-dir <path>]';
     body.appendChild(el('div', { class: 'cli-block' }, [
       el('span', null, example),
       el('button', { class: 'copy', onclick: (e) => copyText(e, example) }, 'copy'),
     ]));
     body.appendChild(el('p', { style: 'color: var(--foreground-muted); margin-top: var(--space-md); font-size: 11px;' },
-      'Workflows: feature-design-provided, feature-design-needed, investigation, codebase-assessment, ui-design, design-revise.'));
+      'Workflows: ' + schema.order.join(', ') + '.'));
     modal.appendChild(body);
     modal.appendChild(el('div', { class: 'modal-footer' }, [
       el('button', { class: 'btn', onclick: closeModal }, 'Close'),
     ]));
     root.appendChild(overlay);
+  }
+  function renderInteractiveNewRun(schema) {
+    const root = $('modal-root');
+    const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
+    const modal = el('div', { class: 'modal' });
+    overlay.appendChild(modal);
+    // Form state lives on a closure object so re-rendering fields preserves
+    // values across workflow-picker changes that share field names.
+    const formState = {
+      workflow: schema.order[0],
+      values: {}, // keyed by field name; persists across workflow re-renders
+      errors: {}, // keyed by field name
+      submitting: false,
+    };
+    modal.appendChild(el('div', { class: 'modal-header' }, [
+      el('div', null, [el('strong', null, 'NEW RUN')]),
+      el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
+    ]));
+    const body = el('div', { class: 'modal-body' });
+    modal.appendChild(body);
+    const footer = el('div', { class: 'modal-footer' });
+    const submitBtn = el('button', { class: 'btn btn-primary', onclick: () => submitNewRun(schema, formState, body, submitBtn) }, '▶ Create run');
+    footer.appendChild(el('button', { class: 'btn', onclick: closeModal }, 'Cancel'));
+    footer.appendChild(submitBtn);
+    modal.appendChild(footer);
+    rerenderNewRunBody(schema, formState, body);
+    root.appendChild(overlay);
+  }
+  function rerenderNewRunBody(schema, formState, body) {
+    body.innerHTML = '';
+    const spec = schema.workflows[formState.workflow];
+
+    // Workflow picker — first field, drives the rest.
+    const pickerRow = el('div', { class: 'form-row' });
+    pickerRow.appendChild(el('label', null, ['Workflow', el('span', { class: 'req' }, '*')]));
+    const select = el('select', {
+      onchange: (e) => {
+        formState.workflow = e.target.value;
+        // Reset only field-level errors; preserve user input on shared field names.
+        formState.errors = {};
+        rerenderNewRunBody(schema, formState, body);
+      },
+    });
+    for (const w of schema.order) {
+      const opt = el('option', { value: w }, w);
+      if (w === formState.workflow) opt.selected = true;
+      select.appendChild(opt);
+    }
+    pickerRow.appendChild(select);
+    pickerRow.appendChild(el('div', { class: 'help' }, spec.description));
+    body.appendChild(pickerRow);
+
+    body.appendChild(el('div', { class: 'workflow-desc' }, [
+      'Required: ',
+      el('code', null, ['title', ', ', 'project'].concat(spec.fields.filter(f => f.required).map(f => f.name)).filter(Boolean).join(', ')),
+    ]));
+
+    // Universal fields then per-workflow fields.
+    const allFields = schema.universal.concat(spec.fields);
+    for (const f of allFields) body.appendChild(renderField(f, formState, schema, body));
+  }
+  function renderField(f, formState, schema, body) {
+    const wrap = el('div', { class: 'form-row' + (formState.errors[f.name] ? ' has-err' : '') });
+    const labelChildren = [f.label];
+    if (f.required) labelChildren.push(el('span', { class: 'req' }, '*'));
+    wrap.appendChild(el('label', null, labelChildren));
+    const value = formState.values[f.name] != null ? formState.values[f.name] : (f.defaultValue || '');
+    const inputAttrs = {
+      placeholder: f.placeholder || '',
+      value,
+      oninput: (e) => {
+        formState.values[f.name] = e.target.value;
+        // Clear field error on edit; full validation runs at submit.
+        if (formState.errors[f.name]) {
+          delete formState.errors[f.name];
+          // Light-touch error clearing: don't re-render the whole modal on
+          // every keystroke. Just remove the err class + message from this row.
+          wrap.classList.remove('has-err');
+          const errEl = wrap.querySelector('.err');
+          if (errEl) errEl.remove();
+        }
+      },
+    };
+    let input;
+    if (f.type === 'textarea') {
+      input = el('textarea', inputAttrs);
+      input.value = value;
+    } else {
+      input = el('input', { ...inputAttrs, type: 'text' });
+      input.value = value;
+    }
+    wrap.appendChild(input);
+    if (f.help) wrap.appendChild(el('div', { class: 'help' }, f.help));
+    if (formState.errors[f.name]) wrap.appendChild(el('div', { class: 'err' }, formState.errors[f.name]));
+    return wrap;
+  }
+  async function submitNewRun(schema, formState, body, submitBtn) {
+    if (formState.submitting) return;
+    // Client-side preflight: required fields filled, paths look absolute. Mirrors
+    // the server validation in workflowSchema.validateNewRunBody.
+    const errors = {};
+    const spec = schema.workflows[formState.workflow];
+    const allFields = schema.universal.concat(spec.fields);
+    for (const f of allFields) {
+      const v = (formState.values[f.name] || '').trim();
+      if (f.required && !v) {
+        errors[f.name] = f.label + ' is required.';
+        continue;
+      }
+      if (v && f.type === 'path') {
+        if (!v.startsWith('/') && !v.startsWith('~')) {
+          errors[f.name] = f.label + ' must be an absolute path.';
+        }
+      }
+    }
+    if (Object.keys(errors).length > 0) {
+      formState.errors = errors;
+      rerenderNewRunBody(schema, formState, body);
+      return;
+    }
+
+    formState.submitting = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '… creating';
+    try {
+      const payload = { workflow: formState.workflow, ...formState.values };
+      const resp = await fetchJSON('/api/runs', { method: 'POST', body: payload });
+      toast('Run created: ' + (resp.runId || '(unknown id)'), 'success');
+      closeModal();
+      await loadRuns();
+      if (resp.runId) await selectRun(resp.runId);
+    } catch (e) {
+      // Server returned 400 with field-level errors → show inline. Otherwise
+      // generic toast. fetchJSON attaches parsed body to e.data on non-2xx.
+      if (e.data && Array.isArray(e.data.errors)) {
+        const newErrors = {};
+        for (const er of e.data.errors) newErrors[er.field] = er.message;
+        formState.errors = newErrors;
+        rerenderNewRunBody(schema, formState, body);
+      } else {
+        toast('Create failed: ' + (e.message || 'unknown'), 'error');
+      }
+    } finally {
+      formState.submitting = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = '▶ Create run';
+    }
   }
   function closeModal() { $('modal-root').innerHTML = ''; }
   function copyText(e, text) {
