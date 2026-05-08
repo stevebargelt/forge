@@ -24,12 +24,11 @@ The full day was spent trying to put a designer agent in a container, driving Pe
 - The `prompt-author` primitive is reusable beyond design (marketing copy, code review prompts, architecture briefs). Tracked as #53.
 
 **Suggested next-session priorities (top of Active list, in this order):**
-1. **#53** Build the `prompt-author` agent seed + ui-design PROMPT.md template. The keystone of the new architecture. Validates everything FORGE-DEC-014 says.
+1. **#53** Build the `prompt-author` agent seed + ui-design PROMPT.md template. The keystone of the new architecture. Draft seed + template are committed (commit `d7257a1`); needs live validation + interview-script alignment with screen 11 from the design pass.
 2. **#54** Rewrite `ui-design` workflow to the new shape. Small, depends on #53.
-3. **#56** Run a *second* Pencil pass to fill design gaps (run-next button, new-run flow, blocked_by_red variant, human-led-design dashboard screens). Cheap (~30 min in Pencil) and unblocks dashboard implementation.
-4. **#57** Start interactive dashboard implementation against the now-complete design spec. Depends on #56.
-5. **#58** Tear down container designer code in a clean cleanup commit.
-6. Returning daily-friction items for any spare time: **#41** (auto-gate-on-terminal-phase), **#40** (batch-gate), **#36** (persist project_dir).
+3. **#57** Start interactive dashboard implementation against the now-complete design spec. The 11-screen design at `~/code/forge-design/dashboard.pen` is the canonical reference (see #56 in Done — closed 2026-05-07). Depends on #54 only for the design-task screens having data to render.
+4. **#58** Tear down container designer code in a clean cleanup commit.
+5. Returning daily-friction items for any spare time: **#41** (auto-gate-on-terminal-phase), **#40** (batch-gate), **#36** (persist project_dir).
 
 **Validation still pending:**
 - #32 (failed-result detection) — code shipped, didn't fire this run because the framer succeeded on retry. Wait for it to catch a real failure or contrive one.
@@ -86,17 +85,6 @@ Depends on: #53.
 - `brief` — agent: `prompt-author` with the `ui-design-revise` template. Reads the prior `.pen` file path from inputs; produces a PROMPT.md that opens it via `--in` and applies the requested changes. Verifies the prior `.pen` is non-zero before generating (hard error if 0 — design source was lost).
 - `review` — same as #54.
 Depends on: #53.
-
-### #56 — Second Pencil pass: design the missing screens
-**Why:** The first dashboard design pass (tonight, in `~/code/forge-design/`) covered ~85% of the interactive surface. Five gaps remain:
-1. **Run-row "Run next" button + run-level actions** (cancel, abandon, archive)
-2. **`forge new` flow** (modal or sidebar palette for kicking off a workflow)
-3. **`blocked_by_red` task detail variant** with "Force advance + rationale" override
-4. **Human-led design phase screens** for the `ui-design` workflow itself: handoff view (PROMPT.md inline + Cmd+S reminder + "I've completed this" gate), review view (PNG gallery + Approve/Revise gate), complete view (read-only summary)
-5. **`prompt-author` interview screen** — what the brief-author looks like in the dashboard (one or two human-facing question cards + answer area)
-
-**How to apply:** Run the prompt-author flow (or just hand-write a focused PROMPT.md for now) targeting these 5 screens against the existing `~/code/forge-design/dashboard.pen`. The existing design system + components + Lunaris palette are already there — use `--in` to chain. Add the new screens on the canvas alongside the existing ones.
-**Sequence:** Do this BEFORE #57. The chicken-egg problem (design → discover gaps → revise design → rebuild) is much cheaper paid in Pencil time than in TypeScript+CSS rework.
 
 ### #57 — Interactive dashboard v1 (gate buttons, run-next, design review)
 **Why:** Today the dashboard is read-only. All driving still happens in CLI. Per dashboard-rebuild plan (#34/#35) and FORGE-DEC-014, the dashboard should be the primary UX. The design from #56 is the spec.
@@ -253,6 +241,13 @@ Localhost-only is the security model; document this.
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #56 — Second Pencil pass: design the missing screens
+**Closed:** 2026-05-07. Validated by a live `MISSING-SCREENS-PROMPT.md` run against the existing `~/code/forge-design/dashboard.pen`.
+**Output:** 6 new screens added (now 11 total in the .pen file). PNGs at `~/code/forge-design/designs/06-run-row-actions.png` through `11-prompt-author-interview.png`. The .pen file is 458 KB, saved to disk by the human after the run. The dashboard interactive surface is now fully specified — no anticipated rework when implementing #57.
+**Coverage delivered:** run-row actions (3 states) with overflow menu, new-run modal with workflow typeahead + CLI-equivalent display, blocked_by_red detail with force-advance affordance, design-handoff view (PROMPT.md inline + loud Cmd+S warning), design-review view (PNG gallery + approve/revise gate), prompt-author interview (chat thread + structured Q&A current question card). All in Lunaris/Saturated-Code-Bridge style with the same component library as the original 5 screens.
+**Storage:** ~/code/forge-design/ is the working dir, untracked by forge git. No remote (per Steven's call). Treat as canonical reference for #57's implementation.
+
 
 ### #25 — Propagate reject rationale to onReject phase + tell blues about retry inputs (partial)
 **Closed:** 2026-05-06, commit `d075f9f`
