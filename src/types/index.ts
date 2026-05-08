@@ -124,6 +124,10 @@ export type Run = {
   createdAt: string;
   completedAt?: string;
   metadata?: Record<string, unknown>;
+  // Project directory mounted at /project on every spawn. Set on first `forge next
+  // --project <path>` and reused by subsequent calls + the dashboard's run-next
+  // button. Override by passing --project again (warns on change).
+  projectDir?: string;
 };
 
 export type Task = {

@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS runs (
   status          TEXT NOT NULL,
   created_at      TEXT NOT NULL,
   completed_at    TEXT,
-  metadata        TEXT
+  metadata        TEXT,
+  project_dir     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS tasks (

@@ -10,6 +10,7 @@ type RunRow = {
   created_at: string;
   completed_at: string | null;
   metadata: string | null;
+  project_dir: string | null;
 };
 
 function rowToRun(row: RunRow): Run {
@@ -21,14 +22,15 @@ function rowToRun(row: RunRow): Run {
     createdAt: row.created_at,
     completedAt: row.completed_at ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    projectDir: row.project_dir ?? undefined,
   };
 }
 
 export function insertRun(run: Run): void {
   getDb()
     .prepare(
-      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO runs (id, workflow, title, status, created_at, completed_at, metadata, project_dir)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       run.id,
@@ -37,8 +39,21 @@ export function insertRun(run: Run): void {
       run.status,
       run.createdAt,
       run.completedAt ?? null,
-      run.metadata ? JSON.stringify(run.metadata) : null
+      run.metadata ? JSON.stringify(run.metadata) : null,
+      run.projectDir ?? null
     );
+}
+
+// Set the project_dir on a run. Used by `forge next --project ...` to remember
+// the path so subsequent calls can omit it. Returns the previous value (if any)
+// so the caller can decide whether to warn the user about a change.
+export function setRunProjectDir(id: string, projectDir: string): string | undefined {
+  const row = getDb()
+    .prepare(`SELECT project_dir FROM runs WHERE id = ?`)
+    .get(id) as { project_dir: string | null } | undefined;
+  const prev = row?.project_dir ?? undefined;
+  getDb().prepare(`UPDATE runs SET project_dir = ? WHERE id = ?`).run(projectDir, id);
+  return prev;
 }
 
 export function getRun(id: string): Run | undefined {
