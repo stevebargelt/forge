@@ -304,6 +304,62 @@ a { color: var(--accent); text-decoration: none; }
 .kv-row .v { color: var(--foreground); word-break: break-word; }
 .kv-row .v code { font-size: 11px; background: var(--background-elevated); padding: 1px 4px; border-radius: var(--radius-sm); }
 
+/* #34: pretty-rendered task results. Walks an arbitrary result object and
+   renders prose / lists / paths / nested objects with appropriate widgets. */
+.result-pretty { display: flex; flex-direction: column; gap: var(--space-md); }
+.result-field { display: flex; flex-direction: column; gap: 4px; }
+.result-field-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--foreground-muted);
+  font-weight: 600;
+}
+.result-prose { font-size: 13px; color: var(--foreground); line-height: 1.55; }
+.result-prose p { margin: 0 0 8px 0; }
+.result-prose p:last-child { margin-bottom: 0; }
+.result-list { font-size: 13px; color: var(--foreground); line-height: 1.55; padding-left: 22px; margin: 0; }
+.result-list li { margin-bottom: 8px; }
+.result-list li:last-child { margin-bottom: 0; }
+.result-list li p { margin: 0 0 6px 0; }
+.result-list li p:last-child { margin-bottom: 0; }
+.result-list-of-objects { display: flex; flex-direction: column; gap: 8px; }
+.result-subcard {
+  background: var(--background-elevated, var(--background));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.result-subcard-index { font-size: 10px; color: var(--foreground-muted); font-weight: 600; }
+.result-nested {
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.result-empty { font-size: 12px; color: var(--foreground-muted); font-style: italic; }
+.result-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--background-elevated, var(--background));
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  word-break: break-all;
+}
+.result-scalar {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--background-elevated, var(--background));
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+}
+.view-toggle { display: flex; gap: 4px; }
+.view-toggle .btn { padding: 2px 8px; font-size: 11px; }
+
 .input-row {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -432,6 +488,26 @@ a { color: var(--accent); text-decoration: none; }
 }
 .modal-close { background: none; border: none; color: var(--foreground-muted); font-size: 14px; }
 .modal-close:hover { color: var(--foreground); }
+
+.form-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--space-md); }
+.form-row label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--foreground-muted); font-weight: 600; }
+.form-row label .req { color: var(--accent); margin-left: 4px; }
+.form-row input, .form-row textarea, .form-row select {
+  background: var(--background);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.form-row input:focus, .form-row textarea:focus, .form-row select:focus { border-color: var(--accent); }
+.form-row textarea { min-height: 80px; resize: vertical; }
+.form-row .help { font-size: 11px; color: var(--foreground-muted); }
+.form-row .err { font-size: 11px; color: var(--error); margin-top: 2px; }
+.form-row.has-err input, .form-row.has-err textarea, .form-row.has-err select { border-color: var(--error); }
+.workflow-desc { font-size: 12px; color: var(--foreground-secondary); padding: var(--space-sm) 0; border-bottom: 1px dashed var(--border); margin-bottom: var(--space-md); }
 
 .cli-block {
   background: var(--background);
@@ -603,10 +679,34 @@ const CLIENT_JS = `
     pollTimer: null,
     interactive: false,
     openMenuTaskId: null,
+    // Last-rendered cache keys per pane (#72). Each render computes a key from
+    // the data it would draw + selection state; if the key matches the cached
+    // one, the render is skipped entirely (DOM untouched). Polling ticks that
+    // bring back unchanged data become silent — solves the entire class of
+    // "polling clobbers user input / scroll / focus" bugs.
+    lastRender: { sidebar: null, middle: null, detail: null },
   };
 
   // ---------- helpers ----------
   function $(id) { return document.getElementById(id); }
+  // Render-key helpers (#72). Computes a string key from the data + selection
+  // a render function would consume; identical key → skip the render. Cheap
+  // because pane data is bounded (tasks per run, runs per dashboard), and a
+  // skipped render does ZERO DOM work — preserving scroll, input, focus,
+  // selection, and animation state for free. JSON.stringify is good enough
+  // for forge's scale; no need for a content hash.
+  function renderKey(parts) {
+    return JSON.stringify(parts);
+  }
+  // Slim a tasks array down to just the fields the middle pane renders. Keeps
+  // the render-key small + stable: trivial fields the dashboard doesn't render
+  // (e.g. taskPackage, full result blobs) don't trigger spurious re-renders.
+  function slimTasksForKey(tasks) {
+    return (tasks || []).map(t => ({
+      id: t.id, phase: t.phase, agentRole: t.agentRole, status: t.status,
+      startedAt: t.startedAt, completedAt: t.completedAt, taskName: t.taskName,
+    }));
+  }
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     if (attrs) {
@@ -714,6 +814,16 @@ const CLIENT_JS = `
   // ---------- render: sidebar (runs) ----------
   function renderSidebar() {
     const sidebar = $('sidebar');
+    // Smart-refresh gate (#72): skip the render if the data + selection key
+    // hasn't changed. Polling that returns identical run rows becomes silent.
+    const slimRuns = (state.runs || []).map(r => ({
+      id: r.id, status: r.status, title: r.title, workflow: r.workflow,
+      taskCount: r.taskCount, completedAt: r.completedAt,
+    }));
+    const key = renderKey([slimRuns, state.searchQuery || '', state.selectedRunId]);
+    if (state.lastRender.sidebar === key) return;
+    state.lastRender.sidebar = key;
+    const prevScrollTop = readPaneScroll(sidebar);
     sidebar.innerHTML = '';
     sidebar.appendChild(el('div', { class: 'brand' }, [
       el('div', { class: 'brand-logo' }),
@@ -742,6 +852,9 @@ const CLIENT_JS = `
     sidebar.appendChild(el('div', { class: 'bottom-nav' }, [
       el('div', { class: 'item' }, '⚙ settings'),
     ]));
+    if (prevScrollTop > 0) {
+      requestAnimationFrame(() => { writePaneScroll(sidebar, prevScrollTop); });
+    }
   }
   function onSearchInput(e) {
     state.searchQuery = e.target.value;
@@ -772,6 +885,23 @@ const CLIENT_JS = `
   // ---------- render: middle (run detail / tasks) ----------
   function renderMiddle() {
     const middle = $('middle');
+    // Smart-refresh gate (#72): skip if data + selection unchanged. Idle
+    // polling on awaiting-gate / awaiting_human_input runs becomes silent;
+    // user can scroll the task list without polling popping it back.
+    const rd = state.runDetail;
+    const key = rd
+      ? renderKey([
+          rd.run.id, rd.run.status, rd.run.title, rd.run.workflow,
+          rd.run.completedAt, rd.run.projectDir,
+          (rd.run.metadata && rd.run.metadata.designDir) || null,
+          slimTasksForKey(rd.tasks),
+          state.selectedTaskId,
+          state.interactive,
+        ])
+      : renderKey(['none', state.selectedRunId]);
+    if (state.lastRender.middle === key) return;
+    state.lastRender.middle = key;
+    const prevScrollTop = readPaneScroll(middle);
     middle.innerHTML = '';
     if (!state.selectedRunId) {
       middle.appendChild(el('div', { class: 'pane-header' }, [
@@ -823,9 +953,33 @@ const CLIENT_JS = `
     ]);
     middle.appendChild(listHeader);
     const body = el('div', { class: 'pane-body no-pad' });
-    for (const t of tasks) body.appendChild(taskRow(t));
+    // Compute per-phase position FIRST (over the natural creation order, not
+    // the display order) so "1 of 8" assignments are stable when we re-sort
+    // the list by attention level below. Without this a task labeled "3 of 8"
+    // could become "5 of 8" simply because its status changed and the visual
+    // order shifted.
+    const phaseCounts = {};
+    const phaseIndex = new Map();
+    for (const t of tasks) phaseCounts[t.phase] = (phaseCounts[t.phase] || 0) + 1;
+    const phaseSeen = {};
+    for (const t of tasks) {
+      phaseSeen[t.phase] = (phaseSeen[t.phase] || 0) + 1;
+      phaseIndex.set(t.id, phaseSeen[t.phase]);
+    }
+    // Sort by attention level: actionable states bubble up so the user lands
+    // on the things they need to act on. Within a status, group by phase and
+    // preserve creation order so the "N of M" indices read naturally.
+    const sortedTasks = tasks.slice().sort(compareTaskAttention);
+    for (const t of sortedTasks) {
+      const idx = phaseIndex.get(t.id);
+      const total = phaseCounts[t.phase];
+      body.appendChild(taskRow(t, idx, total));
+    }
     if (tasks.length === 0) body.appendChild(el('div', { class: 'empty-state' }, 'No tasks yet.'));
     middle.appendChild(body);
+    if (prevScrollTop > 0) {
+      requestAnimationFrame(() => { writePaneScroll(middle, prevScrollTop); });
+    }
   }
   function kvCell(k, v) {
     return el('div', null, [
@@ -855,8 +1009,16 @@ const CLIENT_JS = `
     const t = tasks.find(t => t.status === 'awaiting_gate' || t.status === 'blocked_by_red' || t.status === 'awaiting_human_input');
     if (t) selectTask(t.id);
   }
-  function taskRow(t) {
+  function taskRow(t, phaseIndex, phaseTotal) {
     const elapsed = t.startedAt ? durationBetween(t.startedAt, t.completedAt) : '—';
+    // Title shape: "<phase> · N of M" when the phase has multiple tasks (fanout
+    // or otherwise), plain "<phase>" when there's just one. Lets the user say
+    // "the third investigate" without reading inputs to disambiguate. The
+    // detail pane shows the heuristic-derived claim/lens text + full task id
+    // for content-based + copy-paste navigation.
+    let title;
+    if (phaseTotal > 1) title = t.phase + ' · ' + phaseIndex + ' of ' + phaseTotal;
+    else title = t.taskName || t.phase;
     return el('div', {
       class: 'task-row' + (t.id === state.selectedTaskId ? ' selected' : ''),
       onclick: () => selectTask(t.id),
@@ -864,7 +1026,7 @@ const CLIENT_JS = `
       el('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;' }, [
         el('span', { style: 'color: var(--foreground-muted);' }, '◇'),
         el('div', { class: 'row-main' }, [
-          el('div', { class: 'row-id' }, t.taskName || t.phase),
+          el('div', { class: 'row-id' }, title),
           el('div', { class: 'row-meta' }, [
             el('span', null, t.phase),
             el('span', null, t.agentRole),
@@ -881,10 +1043,67 @@ const CLIENT_JS = `
     if (t.status === 'complete') return 'success';
     return t.status;
   }
+  // Sort key by attention level — lowest number first. Actionable states
+  // (running, awaiting_*, blocked) bubble to the top so the user lands on
+  // what needs them. failed comes after actionable (resolved-as-bad still
+  // worth seeing). pending sits low (queued, not yet interesting). complete
+  // sinks to the bottom (nothing to do).
+  function attentionRank(status) {
+    switch (status) {
+      case 'running': return 0;
+      case 'awaiting_human_input': return 1;
+      case 'awaiting_gate': return 2;
+      case 'blocked_by_red': return 3;
+      case 'failed': return 4;
+      case 'pending': return 5;
+      case 'complete': return 6;
+      default: return 7;
+    }
+  }
+  function compareTaskAttention(a, b) {
+    const r = attentionRank(a.status) - attentionRank(b.status);
+    if (r !== 0) return r;
+    // Same status → group by phase (alphabetical for now; workflows have ≤6
+    // phases so this is fine) then by creation order so "N of M" reads in
+    // sequence.
+    const p = (a.phase || '').localeCompare(b.phase || '');
+    if (p !== 0) return p;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
+  }
 
   // ---------- render: detail pane ----------
   function renderDetail() {
     const detail = $('detail');
+    // Smart-refresh gate (#72): the detail pane is the most expensive to
+    // re-render and the most user-hostile when re-rendered (form inputs lose
+    // focus + content). Skip when the underlying data is unchanged.
+    const td = state.taskDetail;
+    let key;
+    if (!state.selectedTaskId) {
+      key = renderKey(['empty']);
+    } else if (!td) {
+      key = renderKey(['loading', state.selectedTaskId]);
+    } else {
+      key = renderKey([
+        td.task.id, td.task.status, td.task.startedAt, td.task.completedAt,
+        td.task.error || null,
+        td.task.result ? JSON.stringify(td.task.result) : null,
+        (td.verdicts || []).map(v => ({ id: v.id, verdict: v.verdict, confidence: v.confidence, redRole: v.redRole, redTaskId: v.redTaskId, findings: v.findings })),
+        (td.gates || []).map(g => ({ id: g.id, decision: g.decision, rationale: g.rationale, decidedAt: g.decidedAt })),
+        td.briefContext ? { briefTaskId: td.briefContext.briefTaskId, designDir: td.briefContext.designDir, hasPrompt: !!td.briefContext.promptMarkdown, promptLen: (td.briefContext.promptMarkdown || '').length } : null,
+        state.interactive,
+      ]);
+    }
+    if (state.lastRender.detail === key) return;
+    state.lastRender.detail = key;
+    // Preserve scroll position + form-input values + focus across re-renders.
+    // The actual scroll container is .pane-body inside the pane (the pane
+    // itself has overflow:hidden); read scrollTop from there.
+    const prevScrollTop = readPaneScroll(detail);
+    const inputSnapshot = snapshotInputs(detail);
+    const activeId = (document.activeElement && detail.contains(document.activeElement)) ? document.activeElement.id : null;
+    const activeSelStart = activeId ? document.activeElement.selectionStart : null;
+    const activeSelEnd = activeId ? document.activeElement.selectionEnd : null;
     detail.innerHTML = '';
     if (!state.selectedTaskId) {
       detail.appendChild(el('div', { class: 'pane-header' }, [
@@ -916,7 +1135,7 @@ const CLIENT_JS = `
     detail.appendChild(el('div', { class: 'pane-header' }, [
       el('span', { class: 'label' }, 'TASK'),
       el('span', { class: 'sep' }, '/'),
-      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;' }, task.taskName || task.phase),
+      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;', title: deriveTaskTitle(task) }, deriveTaskTitle(task)),
     ]));
 
     const body = el('div', { class: 'pane-body no-pad' });
@@ -933,6 +1152,48 @@ const CLIENT_JS = `
     if (verdicts && verdicts.length > 0 && !isBlockedByRed) body.appendChild(verdictsSection(verdicts));
     if (gates && gates.length > 0) body.appendChild(gatesSection(gates));
     detail.appendChild(body);
+    // Restore form-input values + focus + scroll after the new DOM is in
+    // place. requestAnimationFrame so the browser applies these after layout.
+    requestAnimationFrame(() => {
+      restoreInputs(detail, inputSnapshot);
+      if (activeId) {
+        const el = detail.querySelector('#' + CSS.escape(activeId));
+        if (el) {
+          el.focus();
+          if (activeSelStart != null && typeof el.setSelectionRange === 'function') {
+            try { el.setSelectionRange(activeSelStart, activeSelEnd); } catch (e) { /* selection unsupported on this input type */ }
+          }
+        }
+      }
+      if (prevScrollTop > 0) writePaneScroll(detail, prevScrollTop);
+    });
+  }
+  // The .pane elements have overflow:hidden; their .pane-body child is the
+  // real scroll container. Helpers route around that so polling preservation
+  // actually works (without these the pane's own scrollTop is always 0).
+  function readPaneScroll(pane) {
+    const body = pane.querySelector('.pane-body');
+    return body ? body.scrollTop : 0;
+  }
+  function writePaneScroll(pane, top) {
+    const body = pane.querySelector('.pane-body');
+    if (body) body.scrollTop = top;
+  }
+  // Capture textarea + input values keyed by id so we can restore them after
+  // a polling re-render. Only inputs with an id participate (the load-bearing
+  // ones — rationale-<taskId>, submit-notes-<taskId> — both have ids).
+  function snapshotInputs(root) {
+    const out = {};
+    const inputs = root.querySelectorAll('input[id], textarea[id]');
+    for (const el of inputs) out[el.id] = el.value;
+    return out;
+  }
+  function restoreInputs(root, snapshot) {
+    if (!snapshot) return;
+    for (const id in snapshot) {
+      const el = root.querySelector('#' + CSS.escape(id));
+      if (el && el.value === '') el.value = snapshot[id];
+    }
   }
   // Manual-phase task awaiting the human's off-forge work (FORGE-DEC-016).
   // Renders the upstream brief's PROMPT.md inline + parameters/openQuestions
@@ -1013,14 +1274,40 @@ const CLIENT_JS = `
     ]));
     return sec;
   }
+  // Heuristic title: pick the first scalar-string input whose key isn't one of
+  // the universal/run-level inputs that the dashboard already shows elsewhere.
+  // Works for fanout-from-upstream phases without any workflow change:
+  //   investigate → inputs.claim → "build is slow because of cold cache"
+  //   codebase-assessment.assess → inputs.lens → "security"
+  // Falls back to phase name when no scalar input exists. Truncates long values.
+  const GENERIC_INPUT_KEYS = new Set(['brief', 'question', 'prd', 'designDir', 'upstream', 'requestedChanges', 'rejectedRationale', 'rejectedTaskId']);
+  function deriveTaskTitle(task) {
+    const inputs = (task.taskPackage && task.taskPackage.inputs) || {};
+    for (const k of Object.keys(inputs)) {
+      if (GENERIC_INPUT_KEYS.has(k)) continue;
+      const v = inputs[k];
+      if (typeof v === 'string' && v.length > 0) {
+        return v.length > 80 ? v.slice(0, 80) + '…' : v;
+      }
+    }
+    return task.taskName || task.phase;
+  }
   function taskHeaderSection(task) {
+    const heuristicTitle = deriveTaskTitle(task);
     return el('div', { class: 'detail-section' }, [
       el('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
-        el('div', { style: 'display: flex; align-items: center; gap: 8px;' }, [
+        el('div', { style: 'display: flex; align-items: center; gap: 8px; min-width: 0;' }, [
           el('span', { style: 'color: var(--foreground-muted);' }, '◇'),
-          el('span', { style: 'font-weight: 600;' }, task.taskName || task.phase),
+          el('span', { style: 'font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;', title: heuristicTitle }, heuristicTitle),
         ]),
         badge(displayTaskStatus(task)),
+      ]),
+      el('div', { class: 'kv-row' }, [
+        el('span', { class: 'k' }, 'TASK ID'),
+        el('span', { class: 'v' }, [
+          el('code', null, task.id),
+          el('button', { class: 'copy', style: 'margin-left: 8px;', onclick: (e) => copyText(e, task.id) }, 'copy'),
+        ]),
       ]),
       el('div', { class: 'kv-row' }, [
         el('span', { class: 'k' }, 'TYPE'),
@@ -1073,50 +1360,134 @@ const CLIENT_JS = `
     }
     return sec;
   }
+  // Per-task pretty/raw toggle state (#34). Persists across polling re-renders
+  // because the map lives on the module's closure, not the DOM.
+  const _resultViewMode = new Map();
   function taskResultSection(task) {
-    const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'OUTPUT')]);
-    // Friendlier render for review-phase manual-task results — surface the .pen,
-    // PNG, and HTML artifact paths as a list with file:// links + the JSON below.
-    // Browsers block file:// from http-served pages on click, but the path is
-    // still selectable + recognizable; image previews are a #48 follow-up.
+    const sec = el('div', { class: 'detail-section' });
     const r = task.result;
-    if (r && typeof r === 'object' && (r.penFile || r.pngFiles || r.htmlFiles)) {
-      const list = el('div', { style: 'margin-bottom: var(--space-md);' });
-      if (r.penFile) {
-        list.appendChild(el('div', { class: 'kv-row' }, [
-          el('span', { class: 'k' }, '.PEN'),
-          el('span', { class: 'v' }, el('code', null, r.penFile)),
-        ]));
-      }
-      if (Array.isArray(r.pngFiles) && r.pngFiles.length > 0) {
-        list.appendChild(el('div', { class: 'kv-row' }, [
-          el('span', { class: 'k' }, 'PNGS'),
-          el('span', { class: 'v' }, r.pngFiles.length + ' file(s)'),
-        ]));
-        const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px;' });
-        for (const p of r.pngFiles) ul.appendChild(el('li', null, p));
-        list.appendChild(ul);
-      }
-      if (Array.isArray(r.htmlFiles) && r.htmlFiles.length > 0) {
-        list.appendChild(el('div', { class: 'kv-row' }, [
-          el('span', { class: 'k' }, 'HTML'),
-          el('span', { class: 'v' }, r.htmlFiles.length + ' file(s)'),
-        ]));
-        const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px;' });
-        for (const p of r.htmlFiles) ul.appendChild(el('li', null, p));
-        list.appendChild(ul);
-      }
-      if (r.notes) {
-        list.appendChild(el('div', { class: 'kv-row' }, [
-          el('span', { class: 'k' }, 'NOTES'),
-          el('span', { class: 'v' }, r.notes),
-        ]));
-      }
-      sec.appendChild(list);
+    const mode = _resultViewMode.get(task.id) || 'pretty';
+    const header = el('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--space-sm);' }, [
+      el('h3', { style: 'margin: 0;' }, 'OUTPUT'),
+      el('div', { class: 'view-toggle' }, [
+        el('button', { class: 'btn btn-sm' + (mode === 'pretty' ? ' btn-primary' : ' btn-ghost'), onclick: () => { _resultViewMode.set(task.id, 'pretty'); state.lastRender.detail = null; renderDetail(); } }, 'pretty'),
+        el('button', { class: 'btn btn-sm' + (mode === 'raw' ? ' btn-primary' : ' btn-ghost'), onclick: () => { _resultViewMode.set(task.id, 'raw'); state.lastRender.detail = null; renderDetail(); } }, 'raw'),
+      ]),
+    ]);
+    sec.appendChild(header);
+
+    if (mode === 'raw' || r == null || typeof r !== 'object') {
+      const json = JSON.stringify(r, null, 2);
+      sec.appendChild(el('pre', { class: 'cli-block', style: 'white-space: pre-wrap; word-wrap: break-word;' }, json));
+      return sec;
     }
-    const json = JSON.stringify(task.result, null, 2);
-    sec.appendChild(el('pre', { class: 'cli-block' }, json));
+
+    // Pretty mode — render the result object structurally.
+    sec.appendChild(renderResultObject(r));
     return sec;
+  }
+  // Render an arbitrary result object as readable sections. The result schemas
+  // forge agents return are loose ({status, claim, evidence, conclusion, notes}
+  // for investigators; {architecturalImplications, antiFindings, openQuestions}
+  // for synthesizers; {penFile, pngFiles, htmlFiles, notes} for ui-design
+  // review; etc), so the renderer is shape-agnostic — walk top-level keys, pick
+  // the right widget per value type.
+  //
+  // Special-case the keys we know about so they get prettier framing; fall
+  // through to a generic key/value treatment for unknown keys (forward-compat).
+  function renderResultObject(r) {
+    const wrap = el('div', { class: 'result-pretty' });
+    // A few keys we want to render with specific widgets.
+    const keys = Object.keys(r);
+    // Drop the status field — it's redundant with the badge in the task header.
+    const visibleKeys = keys.filter(k => k !== 'status');
+    for (const k of visibleKeys) {
+      wrap.appendChild(renderResultField(k, r[k]));
+    }
+    if (visibleKeys.length === 0) {
+      wrap.appendChild(el('div', { style: 'color: var(--foreground-muted); font-size: 12px;' }, '(empty)'));
+    }
+    return wrap;
+  }
+  function renderResultField(key, value) {
+    const block = el('div', { class: 'result-field' });
+    block.appendChild(el('div', { class: 'result-field-label' }, humanizeKey(key)));
+    block.appendChild(renderResultValue(value, key));
+    return block;
+  }
+  function renderResultValue(value, contextKey) {
+    if (value == null) {
+      return el('div', { class: 'result-empty' }, '(none)');
+    }
+    if (typeof value === 'string') {
+      // File-path keys: render as <code> so they're scannable + selectable as one.
+      if (looksLikePath(contextKey, value)) {
+        return el('code', { class: 'result-path' }, value);
+      }
+      // Multi-paragraph strings: split on blank lines, render each paragraph.
+      // Single-line strings render as a plain paragraph. Either way, no <pre>
+      // wrapper — natural word-wrap is what we want for prose.
+      const paragraphs = String(value).split(/\\n{2,}/);
+      const wrap = el('div', { class: 'result-prose' });
+      for (const p of paragraphs) wrap.appendChild(el('p', null, p));
+      return wrap;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return el('code', { class: 'result-scalar' }, String(value));
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) return el('div', { class: 'result-empty' }, '(empty list)');
+      // Array of strings — render as numbered list. Long prose strings get
+      // split-on-blank-line just like top-level strings.
+      if (value.every(v => typeof v === 'string')) {
+        const ol = el('ol', { class: 'result-list' });
+        for (const item of value) {
+          const li = el('li', null);
+          const paragraphs = String(item).split(/\\n{2,}/);
+          for (const p of paragraphs) li.appendChild(el('p', null, p));
+          ol.appendChild(li);
+        }
+        return ol;
+      }
+      // Array of objects — render each as a sub-card.
+      if (value.every(v => v && typeof v === 'object' && !Array.isArray(v))) {
+        const wrap = el('div', { class: 'result-list-of-objects' });
+        value.forEach((obj, i) => {
+          const card = el('div', { class: 'result-subcard' });
+          card.appendChild(el('div', { class: 'result-subcard-index' }, '#' + (i + 1)));
+          for (const k of Object.keys(obj)) card.appendChild(renderResultField(k, obj[k]));
+          wrap.appendChild(card);
+        });
+        return wrap;
+      }
+      // Mixed array — fall back to JSON.
+      return el('pre', { class: 'cli-block', style: 'white-space: pre-wrap; word-wrap: break-word;' }, JSON.stringify(value, null, 2));
+    }
+    if (typeof value === 'object') {
+      // Nested object — render each key as a sub-field, indented.
+      const wrap = el('div', { class: 'result-nested' });
+      for (const k of Object.keys(value)) wrap.appendChild(renderResultField(k, value[k]));
+      return wrap;
+    }
+    // Unknown type — JSON fallback.
+    return el('pre', { class: 'cli-block', style: 'white-space: pre-wrap; word-wrap: break-word;' }, String(value));
+  }
+  // Convert camelCase / snake_case / kebab-case keys to readable labels.
+  function humanizeKey(k) {
+    return String(k)
+      .replace(/[_-]+/g, ' ')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .replace(/\\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+  // Heuristic: a string looks like a path if its key suggests one OR the value
+  // has a / and no spaces. Used for monospace styling, not validation.
+  function looksLikePath(key, value) {
+    const keyLooksPathy = /(file|path|dir|directory)$/i.test(String(key)) || /^(penFile|designDir|projectDir|promptPath|promptPathHost)$/.test(String(key));
+    if (keyLooksPathy) return true;
+    if (typeof value === 'string' && value.length < 200 && !/\\s/.test(value) && (value.includes('/') || value.startsWith('~'))) return true;
+    return false;
   }
   function verdictsSection(verdicts) {
     const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'RED VERDICTS')]);
@@ -1127,6 +1498,13 @@ const CLIENT_JS = `
         el('span', null, [el('span', { class: 'badge ' + verdictClass }, v.verdict), ' · ', v.redRole, ' · ', v.authority]),
         el('span', { style: 'color: var(--foreground-muted);' }, 'confidence ' + v.confidence),
       ]));
+      if (v.redTaskId) {
+        card.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm); display: flex; align-items: center; gap: 6px;' }, [
+          el('span', null, 'red task:'),
+          el('code', null, v.redTaskId),
+          el('button', { class: 'copy', onclick: (e) => copyText(e, v.redTaskId) }, 'copy'),
+        ]));
+      }
       for (const f of (v.findings || [])) {
         card.appendChild(el('div', { class: 'finding' }, [
           el('span', { class: 'severity', style: severityColor(f.severity) }, f.severity.toUpperCase()),
@@ -1204,6 +1582,13 @@ const CLIENT_JS = `
       el('span', null, [el('span', { class: 'badge verdict-fail' }, 'BLOCKED'), ' · ', v.redRole, ' · ', v.authority]),
       el('span', { style: 'color: var(--foreground-muted);' }, 'confidence ' + v.confidence),
     ]));
+    if (v.redTaskId) {
+      card.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm); display: flex; align-items: center; gap: 6px;' }, [
+        el('span', null, 'red task:'),
+        el('code', null, v.redTaskId),
+        el('button', { class: 'copy', onclick: (e) => copyText(e, v.redTaskId) }, 'copy'),
+      ]));
+    }
     for (const f of (v.findings || [])) {
       card.appendChild(el('div', { class: 'finding' }, [
         el('span', { class: 'severity', style: severityColor(f.severity) }, f.severity.toUpperCase()),
@@ -1324,32 +1709,205 @@ const CLIENT_JS = `
     }
   }
 
-  // ---------- new-run modal (stub: shows equivalent CLI command) ----------
-  function openNewRunModal() {
+  // ---------- new-run modal (BACKLOG #66) ----------
+  // Workflow schema is fetched once from /api/workflows then cached. The modal
+  // re-renders when the workflow picker changes — fields appear/disappear per
+  // the selected workflow's spec. Submit POSTs to /api/runs which validates
+  // server-side too (single source of truth in workflowSchema.ts).
+  let _workflowSchema = null;
+  async function loadWorkflowSchema() {
+    if (_workflowSchema) return _workflowSchema;
+    _workflowSchema = await fetchJSON('/api/workflows');
+    return _workflowSchema;
+  }
+  async function openNewRunModal() {
     const root = $('modal-root');
     root.innerHTML = '';
+    let schema;
+    try {
+      schema = await loadWorkflowSchema();
+    } catch (e) {
+      toast('Failed to load workflow schema: ' + (e.message || 'unknown'), 'error');
+      return;
+    }
+    if (!state.interactive) {
+      // Read-only fallback: show what would be submitted as a CLI command.
+      renderReadOnlyNewRun(schema);
+      return;
+    }
+    renderInteractiveNewRun(schema);
+  }
+  function renderReadOnlyNewRun(schema) {
+    const root = $('modal-root');
     const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
     const modal = el('div', { class: 'modal' });
     overlay.appendChild(modal);
     modal.appendChild(el('div', { class: 'modal-header' }, [
-      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— v1: copy the CLI command')]),
+      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— read-only: copy the CLI command')]),
       el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
     ]));
     const body = el('div', { class: 'modal-body' });
     body.appendChild(el('p', { style: 'color: var(--foreground-secondary); margin-bottom: var(--space-md); font-size: 12px;' },
-      'Full new-run form is deferred (BACKLOG #57 follow-up). For now, run this in your terminal:'));
-    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."]';
+      'Set FORGE_DASHBOARD_INTERACTIVE=1 before launching to enable the form. Until then, copy the CLI:'));
+    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."] [--design-dir <path>]';
     body.appendChild(el('div', { class: 'cli-block' }, [
       el('span', null, example),
       el('button', { class: 'copy', onclick: (e) => copyText(e, example) }, 'copy'),
     ]));
     body.appendChild(el('p', { style: 'color: var(--foreground-muted); margin-top: var(--space-md); font-size: 11px;' },
-      'Workflows: feature-design-provided, feature-design-needed, investigation, codebase-assessment, ui-design, design-revise.'));
+      'Workflows: ' + schema.order.join(', ') + '.'));
     modal.appendChild(body);
     modal.appendChild(el('div', { class: 'modal-footer' }, [
       el('button', { class: 'btn', onclick: closeModal }, 'Close'),
     ]));
     root.appendChild(overlay);
+  }
+  function renderInteractiveNewRun(schema) {
+    const root = $('modal-root');
+    const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
+    const modal = el('div', { class: 'modal' });
+    overlay.appendChild(modal);
+    // Form state lives on a closure object so re-rendering fields preserves
+    // values across workflow-picker changes that share field names.
+    const formState = {
+      workflow: schema.order[0],
+      values: {}, // keyed by field name; persists across workflow re-renders
+      errors: {}, // keyed by field name
+      submitting: false,
+    };
+    modal.appendChild(el('div', { class: 'modal-header' }, [
+      el('div', null, [el('strong', null, 'NEW RUN')]),
+      el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
+    ]));
+    const body = el('div', { class: 'modal-body' });
+    modal.appendChild(body);
+    const footer = el('div', { class: 'modal-footer' });
+    const submitBtn = el('button', { class: 'btn btn-primary', onclick: () => submitNewRun(schema, formState, body, submitBtn) }, '▶ Create run');
+    footer.appendChild(el('button', { class: 'btn', onclick: closeModal }, 'Cancel'));
+    footer.appendChild(submitBtn);
+    modal.appendChild(footer);
+    rerenderNewRunBody(schema, formState, body);
+    root.appendChild(overlay);
+  }
+  function rerenderNewRunBody(schema, formState, body) {
+    body.innerHTML = '';
+    const spec = schema.workflows[formState.workflow];
+
+    // Workflow picker — first field, drives the rest.
+    const pickerRow = el('div', { class: 'form-row' });
+    pickerRow.appendChild(el('label', null, ['Workflow', el('span', { class: 'req' }, '*')]));
+    const select = el('select', {
+      onchange: (e) => {
+        formState.workflow = e.target.value;
+        // Reset only field-level errors; preserve user input on shared field names.
+        formState.errors = {};
+        rerenderNewRunBody(schema, formState, body);
+      },
+    });
+    for (const w of schema.order) {
+      const opt = el('option', { value: w }, w);
+      if (w === formState.workflow) opt.selected = true;
+      select.appendChild(opt);
+    }
+    pickerRow.appendChild(select);
+    pickerRow.appendChild(el('div', { class: 'help' }, spec.description));
+    body.appendChild(pickerRow);
+
+    body.appendChild(el('div', { class: 'workflow-desc' }, [
+      'Required: ',
+      el('code', null, ['title', ', ', 'project'].concat(spec.fields.filter(f => f.required).map(f => f.name)).filter(Boolean).join(', ')),
+    ]));
+
+    // Universal fields then per-workflow fields.
+    const allFields = schema.universal.concat(spec.fields);
+    for (const f of allFields) body.appendChild(renderField(f, formState, schema, body));
+  }
+  function renderField(f, formState, schema, body) {
+    const wrap = el('div', { class: 'form-row' + (formState.errors[f.name] ? ' has-err' : '') });
+    const labelChildren = [f.label];
+    if (f.required) labelChildren.push(el('span', { class: 'req' }, '*'));
+    wrap.appendChild(el('label', null, labelChildren));
+    const value = formState.values[f.name] != null ? formState.values[f.name] : (f.defaultValue || '');
+    const inputAttrs = {
+      placeholder: f.placeholder || '',
+      value,
+      oninput: (e) => {
+        formState.values[f.name] = e.target.value;
+        // Clear field error on edit; full validation runs at submit.
+        if (formState.errors[f.name]) {
+          delete formState.errors[f.name];
+          // Light-touch error clearing: don't re-render the whole modal on
+          // every keystroke. Just remove the err class + message from this row.
+          wrap.classList.remove('has-err');
+          const errEl = wrap.querySelector('.err');
+          if (errEl) errEl.remove();
+        }
+      },
+    };
+    let input;
+    if (f.type === 'textarea') {
+      input = el('textarea', inputAttrs);
+      input.value = value;
+    } else {
+      input = el('input', { ...inputAttrs, type: 'text' });
+      input.value = value;
+    }
+    wrap.appendChild(input);
+    if (f.help) wrap.appendChild(el('div', { class: 'help' }, f.help));
+    if (formState.errors[f.name]) wrap.appendChild(el('div', { class: 'err' }, formState.errors[f.name]));
+    return wrap;
+  }
+  async function submitNewRun(schema, formState, body, submitBtn) {
+    if (formState.submitting) return;
+    // Client-side preflight: required fields filled, paths look absolute. Mirrors
+    // the server validation in workflowSchema.validateNewRunBody.
+    const errors = {};
+    const spec = schema.workflows[formState.workflow];
+    const allFields = schema.universal.concat(spec.fields);
+    for (const f of allFields) {
+      const v = (formState.values[f.name] || '').trim();
+      if (f.required && !v) {
+        errors[f.name] = f.label + ' is required.';
+        continue;
+      }
+      if (v && f.type === 'path') {
+        if (!v.startsWith('/') && !v.startsWith('~')) {
+          errors[f.name] = f.label + ' must be an absolute path.';
+        }
+      }
+    }
+    if (Object.keys(errors).length > 0) {
+      formState.errors = errors;
+      rerenderNewRunBody(schema, formState, body);
+      return;
+    }
+
+    formState.submitting = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = '… creating';
+    try {
+      const payload = { workflow: formState.workflow, ...formState.values };
+      const resp = await fetchJSON('/api/runs', { method: 'POST', body: payload });
+      toast('Run created: ' + (resp.runId || '(unknown id)'), 'success');
+      closeModal();
+      await loadRuns();
+      if (resp.runId) await selectRun(resp.runId);
+    } catch (e) {
+      // Server returned 400 with field-level errors → show inline. Otherwise
+      // generic toast. fetchJSON attaches parsed body to e.data on non-2xx.
+      if (e.data && Array.isArray(e.data.errors)) {
+        const newErrors = {};
+        for (const er of e.data.errors) newErrors[er.field] = er.message;
+        formState.errors = newErrors;
+        rerenderNewRunBody(schema, formState, body);
+      } else {
+        toast('Create failed: ' + (e.message || 'unknown'), 'error');
+      }
+    } finally {
+      formState.submitting = false;
+      submitBtn.disabled = false;
+      submitBtn.textContent = '▶ Create run';
+    }
   }
   function closeModal() { $('modal-root').innerHTML = ''; }
   function copyText(e, text) {

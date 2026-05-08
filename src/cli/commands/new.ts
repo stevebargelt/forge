@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
-import { ensureForgeDirs, runDir, sanitizeTitleForFilename } from "../../util/paths.js";
+import { ensureForgeDirs, runDir, sanitizeTitleForFilename, expandTildePath } from "../../util/paths.js";
 import { mkdirSync } from "node:fs";
 import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
@@ -40,8 +40,13 @@ export function registerNew(program: Command): void {
       if (options.question) metadata.question = options.question;
       if (options.prd) metadata.prd = options.prd;
       if (options.brief) metadata.brief = options.brief;
-      const designDir =
+      // Expand ~ at run creation. Forge passes paths verbatim to docker -v
+      // and fs.existsSync downstream; neither does shell expansion. The
+      // dashboard's POST body also never traverses a shell. Expand once here
+      // so everything sees an absolute path from this point on.
+      const designDirRaw =
         (options as { designDir?: string }).designDir ?? deriveDefaultDesignDir(workflow as WorkflowName, title);
+      const designDir = designDirRaw ? expandTildePath(designDirRaw) : undefined;
       if (designDir) {
         metadata.designDir = designDir;
         // Pre-create the conventional layout so the prompt-author and submit
@@ -52,7 +57,7 @@ export function registerNew(program: Command): void {
         mkdirSync(`${designDir}/code`, { recursive: true });
       }
 
-      const projectDir = (options as { project?: string }).project ?? process.cwd();
+      const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
 
       const run: Run = {
         id: runId,

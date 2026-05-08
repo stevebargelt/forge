@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import { next } from "../../spine/next.js";
-import { ensureForgeDirs } from "../../util/paths.js";
+import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { getRun, setRunProjectDir } from "../../store/runs.js";
 
 export function registerNext(program: Command): void {
@@ -66,11 +66,13 @@ function resolveProjectDir(runId: string, explicit: string | undefined): string 
   const run = getRun(runId);
   if (!run) throw new Error(`Run not found: ${runId}`);
   if (explicit) {
-    const prev = setRunProjectDir(runId, explicit);
-    if (prev && prev !== explicit) {
-      console.error(`[forge] project_dir changed for ${runId}: ${prev} → ${explicit}`);
+    // Expand ~ before persisting so docker -v / spawn never see a tilde.
+    const expanded = expandTildePath(explicit);
+    const prev = setRunProjectDir(runId, expanded);
+    if (prev && prev !== expanded) {
+      console.error(`[forge] project_dir changed for ${runId}: ${prev} → ${expanded}`);
     }
-    return explicit;
+    return expanded;
   }
   if (run.projectDir) return run.projectDir;
   // First-ever call without --project: fall back to cwd and persist so subsequent

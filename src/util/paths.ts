@@ -31,6 +31,18 @@ export function briefPromptHostPath(runId: string, briefTaskId: string): string 
   return join(taskDir(runId, briefTaskId), "PROMPT.md");
 }
 
+// Expand a leading `~` in a path to the user's home directory. Forge stores
+// projectDir / designDir verbatim, but downstream consumers (docker -v, fs
+// existsSync) don't do shell-style expansion. The dashboard's POST body
+// likewise never goes through a shell. So we expand once at run creation —
+// after that everything sees an absolute path. Returns absolute paths
+// unchanged; returns relative paths unchanged (caller decides what to do).
+export function expandTildePath(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
 // Sanitize a run title to a filename slug. Source of truth for the
 // `<sanitized-title>.pen` convention used by ui-design / design-revise workflows.
 // Both `forge new --design-dir` defaulting and `forge submit` validation share
