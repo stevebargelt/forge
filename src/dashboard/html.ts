@@ -1,455 +1,1243 @@
+// Forge dashboard — server-rendered HTML shell.
+//
+// The dashboard is a single-page app. The shell is rendered once by `dashboardHtml()`
+// and then JavaScript fetches `/api/...` endpoints and re-renders panes client-side.
+// All styling uses CSS variables sourced from the Lunaris palette (the same tokens
+// declared in ~/code/forge-design/dashboard.pen — keep these in sync if the .pen
+// file's variables block changes).
+
 export function dashboardHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Forge Dashboard</title>
-  <script
-    src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"
-    integrity="sha384-odPBjvtXVM/5hOYIr3A1dB+flh0c3wAT3bSesIOqEGmyUA4JoKf/YTWy0XKOYAY7"
-    crossorigin="anonymous"></script>
-  <script
-    src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"
-    integrity="sha384-cwS6YdhLI7XS60eoDiC+egV0qHp8zI+Cms46R0nbn8JrmoAzV9uFL60etMZhAnSu"
-    crossorigin="anonymous"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
-    header { background: #1a1a2e; color: #fff; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
-    header h1 { font-size: 1.25rem; font-weight: 600; }
-    .badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; text-transform: uppercase; }
-    .badge-active { background: #22c55e; color: #fff; }
-    .badge-complete { background: #6366f1; color: #fff; }
-    .badge-abandoned { background: #94a3b8; color: #fff; }
-    .badge-running { background: #f59e0b; color: #fff; }
-    .badge-pending { background: #e2e8f0; color: #555; }
-    .badge-failed { background: #ef4444; color: #fff; }
-    .badge-awaiting_gate { background: #a78bfa; color: #fff; }
-    .badge-blocked_by_red { background: #f97316; color: #fff; }
-    .badge-pass { background: #22c55e; color: #fff; }
-    .badge-fail { background: #ef4444; color: #fff; }
-    .badge-inconclusive { background: #94a3b8; color: #fff; }
-    main { max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
-    .card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1rem; }
-    .card-header { padding: 1rem 1.5rem; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 0.75rem; cursor: pointer; }
-    .card-header h2 { font-size: 1rem; font-weight: 600; flex: 1; }
-    .card-body { padding: 1.5rem; }
-    .runs-list { display: flex; flex-direction: column; gap: 0.75rem; }
-    .run-item { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 1rem 1.5rem; cursor: pointer; display: flex; align-items: center; gap: 1rem; transition: box-shadow 0.1s; }
-    .run-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
-    .run-item .run-title { flex: 1; font-weight: 500; }
-    .run-item .run-meta { font-size: 0.8rem; color: #888; }
-    #run-detail { display: none; }
-    #run-detail.visible { display: block; }
-    .tasks-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    .tasks-table th { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 2px solid #e5e7eb; font-weight: 600; color: #555; }
-    .tasks-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #f0f0f0; }
-    .tasks-table tr:last-child td { border-bottom: none; }
-    .tasks-table tr:hover td { background: #f9fafb; }
-    .tasks-table .clickable { cursor: pointer; color: #4f46e5; text-decoration: underline; }
-    #task-detail { display: none; }
-    #task-detail.visible { display: block; }
-    .back-btn { display: inline-flex; align-items: center; gap: 0.4rem; background: none; border: none; color: #4f46e5; font-size: 0.9rem; cursor: pointer; padding: 0; margin-bottom: 1rem; }
-    .back-btn:hover { text-decoration: underline; }
-    .section-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-bottom: 0.75rem; }
-    .markdown-body { font-size: 0.9rem; line-height: 1.6; }
-    .markdown-body h1, .markdown-body h2, .markdown-body h3 { margin: 1rem 0 0.5rem; }
-    .markdown-body p { margin-bottom: 0.75rem; }
-    .markdown-body ul, .markdown-body ol { padding-left: 1.5rem; margin-bottom: 0.75rem; }
-    .markdown-body code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 0.85em; }
-    .markdown-body pre { background: #f1f5f9; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin-bottom: 0.75rem; }
-    pre.json { background: #f1f5f9; padding: 0.75rem; border-radius: 6px; overflow-x: auto; font-size: 0.8rem; }
-    .findings { display: flex; flex-direction: column; gap: 0.75rem; }
-    .finding { border-left: 3px solid #e5e7eb; padding: 0.75rem 1rem; background: #fafafa; border-radius: 0 6px 6px 0; }
-    .finding.high { border-color: #ef4444; }
-    .finding.medium { border-color: #f59e0b; }
-    .finding.low { border-color: #22c55e; }
-    .finding-summary { font-weight: 600; margin-bottom: 0.5rem; }
-    .finding-label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; color: #888; margin-top: 0.5rem; }
-    .gate-item { display: flex; gap: 1rem; align-items: flex-start; padding: 0.75rem 0; border-bottom: 1px solid #f0f0f0; }
-    .gate-item:last-child { border-bottom: none; }
-    .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid #f59e0b; border-top-color: transparent; border-radius: 50%; animation: spin 0.6s linear infinite; margin-left: 6px; vertical-align: middle; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .error-msg { color: #ef4444; font-size: 0.85rem; padding: 0.5rem; background: #fef2f2; border-radius: 6px; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Forge Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>${BASE_CSS}</style>
 </head>
 <body>
-  <header>
-    <h1>Forge Dashboard</h1>
-    <span id="poll-indicator" style="display:none"><span class="spinner"></span> Live</span>
-  </header>
-  <main>
-    <div id="runs-view">
-      <p class="section-title" style="margin-bottom:1rem">Runs</p>
-      <div id="runs-list" class="runs-list"><p style="color:#888">Loading…</p></div>
-    </div>
-    <div id="run-detail">
-      <button class="back-btn" id="back-to-runs">&#8592; All runs</button>
-      <div id="run-detail-card" class="card">
-        <div class="card-body"><p style="color:#888">Loading…</p></div>
-      </div>
-    </div>
-    <div id="task-detail">
-      <button class="back-btn" id="back-to-run">&#8592; Back to run</button>
-      <div id="task-detail-card" class="card">
-        <div class="card-body"><p style="color:#888">Loading…</p></div>
-      </div>
-    </div>
-  </main>
-  <script>
-    (function () {
-      let currentRunId = null;
-      let currentTaskId = null;
-      let pollInterval = null;
-
-      function md(text) {
-        if (!text) return '';
-        return DOMPurify.sanitize(marked.parse(text));
-      }
-
-      function badge(status) {
-        const span = document.createElement('span');
-        span.className = 'badge badge-' + status;
-        span.textContent = status;
-        return span;
-      }
-
-      function el(tag, cls, text) {
-        const e = document.createElement(tag);
-        if (cls) e.className = cls;
-        if (text !== undefined) e.textContent = text;
-        return e;
-      }
-
-      function showView(name) {
-        document.getElementById('runs-view').style.display = name === 'runs' ? '' : 'none';
-        const rd = document.getElementById('run-detail');
-        rd.style.display = name === 'run' ? '' : 'none';
-        rd.classList.toggle('visible', name === 'run');
-        const td = document.getElementById('task-detail');
-        td.style.display = name === 'task' ? '' : 'none';
-        td.classList.toggle('visible', name === 'task');
-      }
-
-      function stopPoll() {
-        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-        document.getElementById('poll-indicator').style.display = 'none';
-      }
-
-      function startPoll(fn) {
-        stopPoll();
-        document.getElementById('poll-indicator').style.display = '';
-        pollInterval = setInterval(fn, 2000);
-      }
-
-      // ── Runs list ──────────────────────────────────────────────────────────
-      async function loadRuns() {
-        const res = await fetch('/api/runs');
-        const data = await res.json();
-        renderRuns(data.runs);
-      }
-
-      function renderRuns(runs) {
-        const container = document.getElementById('runs-list');
-        container.innerHTML = '';
-        if (!runs.length) {
-          container.textContent = 'No runs yet.';
-          return;
-        }
-        for (const run of runs) {
-          const item = el('div', 'run-item');
-          const titleEl = el('span', 'run-title');
-          titleEl.textContent = run.title;
-          item.appendChild(titleEl);
-          item.appendChild(badge(run.status));
-          const meta = el('span', 'run-meta');
-          meta.textContent = run.createdAt;
-          item.appendChild(meta);
-          item.addEventListener('click', () => openRun(run.id));
-          container.appendChild(item);
-        }
-      }
-
-      // ── Run detail ─────────────────────────────────────────────────────────
-      async function openRun(runId) {
-        currentRunId = runId;
-        currentTaskId = null;
-        stopPoll();
-        showView('run');
-        await fetchAndRenderRun();
-      }
-
-      async function fetchAndRenderRun() {
-        const res = await fetch('/api/runs/' + currentRunId);
-        if (!res.ok) {
-          document.getElementById('run-detail-card').innerHTML = '<div class="card-body"><p class="error-msg">Run not found.</p></div>';
-          return;
-        }
-        const data = await res.json();
-        renderRun(data);
-        if (data.shouldPoll) {
-          startPoll(fetchAndRenderRun);
-        } else {
-          stopPoll();
-        }
-      }
-
-      function renderRun(data) {
-        const { run, tasks, verdicts } = data;
-        const card = document.getElementById('run-detail-card');
-        card.innerHTML = '';
-
-        const hdr = el('div', 'card-header');
-        const title = el('h2');
-        title.textContent = run.title;
-        hdr.appendChild(title);
-        hdr.appendChild(badge(run.status));
-        const meta = el('span', 'run-meta');
-        meta.textContent = run.workflow + ' · ' + run.createdAt;
-        hdr.appendChild(meta);
-        card.appendChild(hdr);
-
-        const body = el('div', 'card-body');
-
-        const tableWrap = document.createElement('div');
-        tableWrap.style.overflowX = 'auto';
-        const table = document.createElement('table');
-        table.className = 'tasks-table';
-        const thead = document.createElement('thead');
-        const hr = document.createElement('tr');
-        for (const h of ['ID', 'Phase', 'Role', 'Status', 'Created']) {
-          const th = document.createElement('th');
-          th.textContent = h;
-          hr.appendChild(th);
-        }
-        thead.appendChild(hr);
-        table.appendChild(thead);
-
-        const tbody = document.createElement('tbody');
-        for (const task of tasks) {
-          const tr = document.createElement('tr');
-          const tdId = document.createElement('td');
-          tdId.className = 'clickable';
-          tdId.textContent = task.id;
-          tdId.addEventListener('click', () => openTask(task.id));
-          tr.appendChild(tdId);
-          const tdPhase = document.createElement('td');
-          tdPhase.textContent = task.phase;
-          tr.appendChild(tdPhase);
-          const tdRole = document.createElement('td');
-          tdRole.textContent = task.agentRole;
-          tr.appendChild(tdRole);
-          const tdStatus = document.createElement('td');
-          tdStatus.appendChild(badge(task.status));
-          tr.appendChild(tdStatus);
-          const tdCreated = document.createElement('td');
-          tdCreated.textContent = task.createdAt;
-          tr.appendChild(tdCreated);
-          tbody.appendChild(tr);
-        }
-        table.appendChild(tbody);
-        tableWrap.appendChild(table);
-        body.appendChild(tableWrap);
-        card.appendChild(body);
-      }
-
-      // ── Task detail ────────────────────────────────────────────────────────
-      async function openTask(taskId) {
-        currentTaskId = taskId;
-        stopPoll();
-        showView('task');
-        const res = await fetch('/api/tasks/' + taskId);
-        if (!res.ok) {
-          document.getElementById('task-detail-card').innerHTML = '<div class="card-body"><p class="error-msg">Task not found.</p></div>';
-          return;
-        }
-        const data = await res.json();
-        renderTask(data);
-      }
-
-      function renderTask(data) {
-        const { task, verdicts, gates } = data;
-        const card = document.getElementById('task-detail-card');
-        card.innerHTML = '';
-
-        const hdr = el('div', 'card-header');
-        const title = el('h2');
-        title.textContent = task.id;
-        hdr.appendChild(title);
-        hdr.appendChild(badge(task.status));
-        card.appendChild(hdr);
-
-        const body = el('div', 'card-body');
-
-        // Meta
-        const meta = el('div');
-        meta.style.marginBottom = '1.5rem';
-        const metaLines = [
-          ['Run', task.runId],
-          ['Phase', task.phase],
-          ['Role', task.agentRole],
-          ['Created', task.createdAt],
-        ];
-        if (task.startedAt) metaLines.push(['Started', task.startedAt]);
-        if (task.completedAt) metaLines.push(['Completed', task.completedAt]);
-        if (task.error) metaLines.push(['Error', task.error]);
-        for (const [k, v] of metaLines) {
-          const row = el('div');
-          row.style.display = 'flex';
-          row.style.gap = '0.5rem';
-          row.style.marginBottom = '0.25rem';
-          row.style.fontSize = '0.85rem';
-          const lbl = el('span');
-          lbl.style.fontWeight = '600';
-          lbl.style.minWidth = '90px';
-          lbl.style.color = '#666';
-          lbl.textContent = k + ':';
-          row.appendChild(lbl);
-          const val = el('span');
-          val.textContent = v;
-          row.appendChild(val);
-          meta.appendChild(row);
-        }
-        body.appendChild(meta);
-
-        // Result
-        if (task.result) {
-          const result = task.result;
-          const sec = el('div');
-          sec.style.marginBottom = '1.5rem';
-          const sTitle = el('p', 'section-title');
-          sTitle.textContent = 'Result';
-          sec.appendChild(sTitle);
-
-          if (typeof result === 'object' && result !== null) {
-            const r = result;
-            for (const field of ['report', 'recommendation', 'summary']) {
-              if (r[field] && typeof r[field] === 'string') {
-                const fTitle = el('p');
-                fTitle.style.fontWeight = '600';
-                fTitle.style.marginBottom = '0.25rem';
-                fTitle.style.fontSize = '0.85rem';
-                fTitle.textContent = field.charAt(0).toUpperCase() + field.slice(1);
-                sec.appendChild(fTitle);
-                const fBody = el('div', 'markdown-body');
-                fBody.innerHTML = md(r[field]);
-                sec.appendChild(fBody);
-              }
-            }
-          }
-
-          const pre = document.createElement('pre');
-          pre.className = 'json';
-          pre.textContent = JSON.stringify(task.result, null, 2);
-          sec.appendChild(pre);
-          body.appendChild(sec);
-        }
-
-        // Verdicts
-        if (verdicts.length > 0) {
-          const sec = el('div');
-          sec.style.marginBottom = '1.5rem';
-          const sTitle = el('p', 'section-title');
-          sTitle.textContent = 'Verdicts';
-          sec.appendChild(sTitle);
-
-          for (const v of verdicts) {
-            const vCard = el('div', 'card');
-            vCard.style.marginBottom = '0.75rem';
-            const vHdr = el('div', 'card-header');
-            vHdr.style.cursor = 'default';
-            const vTitle = el('h2');
-            vTitle.textContent = v.redRole + ' (' + v.authority + ')';
-            vHdr.appendChild(vTitle);
-            vHdr.appendChild(badge(v.verdict));
-            const conf = el('span', 'run-meta');
-            conf.textContent = 'confidence: ' + v.confidence.toFixed(2);
-            vHdr.appendChild(conf);
-            vCard.appendChild(vHdr);
-
-            if (v.findings.length > 0) {
-              const vBody = el('div', 'card-body');
-              const findings = el('div', 'findings');
-              for (const f of v.findings) {
-                const fEl = el('div', 'finding ' + f.severity);
-                const fSum = el('div', 'finding-summary');
-                fSum.textContent = '[' + f.severity + '] ' + f.summary;
-                fEl.appendChild(fSum);
-
-                const evLbl = el('div', 'finding-label');
-                evLbl.textContent = 'Evidence';
-                fEl.appendChild(evLbl);
-                const evBody = el('div', 'markdown-body');
-                evBody.innerHTML = md(f.evidence);
-                fEl.appendChild(evBody);
-
-                const hypLbl = el('div', 'finding-label');
-                hypLbl.textContent = 'Hypothesis';
-                fEl.appendChild(hypLbl);
-                const hypBody = el('div', 'markdown-body');
-                hypBody.innerHTML = md(f.hypothesis);
-                fEl.appendChild(hypBody);
-
-                findings.appendChild(fEl);
-              }
-              vBody.appendChild(findings);
-              vCard.appendChild(vBody);
-            }
-            sec.appendChild(vCard);
-          }
-          body.appendChild(sec);
-        }
-
-        // Gates
-        if (gates.length > 0) {
-          const sec = el('div');
-          const sTitle = el('p', 'section-title');
-          sTitle.textContent = 'Gates';
-          sec.appendChild(sTitle);
-          for (const g of gates) {
-            const gItem = el('div', 'gate-item');
-            gItem.appendChild(badge(g.decision));
-            const gInfo = el('div');
-            gInfo.style.flex = '1';
-            const gMeta = el('div', 'run-meta');
-            gMeta.textContent = g.decidedBy + ' · ' + g.decidedAt;
-            gInfo.appendChild(gMeta);
-            if (g.rationale) {
-              const gRat = el('div');
-              gRat.style.fontSize = '0.85rem';
-              gRat.style.marginTop = '0.25rem';
-              gRat.textContent = g.rationale;
-              gInfo.appendChild(gRat);
-            }
-            gItem.appendChild(gInfo);
-            sec.appendChild(gItem);
-          }
-          body.appendChild(sec);
-        }
-
-        card.appendChild(body);
-      }
-
-      // ── Navigation ─────────────────────────────────────────────────────────
-      document.getElementById('back-to-runs').addEventListener('click', () => {
-        stopPoll();
-        currentRunId = null;
-        showView('runs');
-        loadRuns();
-      });
-
-      document.getElementById('back-to-run').addEventListener('click', () => {
-        currentTaskId = null;
-        if (currentRunId) openRun(currentRunId);
-        else { showView('runs'); loadRuns(); }
-      });
-
-      // Initial load
-      showView('runs');
-      loadRuns();
-    })();
-  </script>
+  <div id="app">
+    <aside id="sidebar" class="pane pane-sidebar"></aside>
+    <section id="middle" class="pane pane-middle"></section>
+    <section id="detail" class="pane pane-detail"></section>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script>${CLIENT_JS}</script>
 </body>
 </html>`;
 }
+
+const BASE_CSS = `
+:root {
+  --accent: #582CFF;
+  --accent-hover: #6B40FF;
+  --accent-secondary: #BF40FF;
+  --accent-subtle: #1A0F40;
+  --accent-tertiary: #00F2FF;
+  --background: #080810;
+  --background-elevated: #0D0D1A;
+  --surface: #111124;
+  --surface-raised: #161630;
+  --border: #1E1E3A;
+  --border-bright: #2E2E55;
+  --foreground: #F0F0FF;
+  --foreground-secondary: #A1A1C0;
+  --foreground-muted: #5A5A7A;
+  --pending: #6B7280;
+  --running: #00F2FF;
+  --success: #22C55E;
+  --success-bg: #0A2016;
+  --warning: #F59E0B;
+  --warning-bg: #201505;
+  --error: #EF4444;
+  --error-bg: #200A0A;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; font-size: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+a { color: var(--accent); text-decoration: none; }
+
+#app {
+  display: grid;
+  grid-template-columns: 280px 360px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+.pane {
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.pane-detail { border-right: none; }
+.pane-header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+}
+.pane-header .label { font-weight: 600; }
+.pane-body { flex: 1; overflow-y: auto; padding: var(--space-md); }
+.pane-body.no-pad { padding: 0; }
+
+.brand {
+  padding: var(--space-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.brand-logo {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  flex-shrink: 0;
+}
+.brand-name { font-weight: 700; letter-spacing: 0.1em; font-size: 12px; color: var(--foreground); }
+
+.search {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.search input {
+  width: 100%;
+  background: var(--background-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  color: var(--foreground);
+  font-size: 12px;
+}
+.search input::placeholder { color: var(--foreground-muted); }
+.search input:focus { outline: none; border-color: var(--accent); }
+
+.list-header {
+  padding: var(--space-md) var(--space-md) var(--space-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+}
+.list-header .count { color: var(--foreground-muted); }
+.list-header .new-btn {
+  background: var(--accent-subtle);
+  color: var(--accent-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.list-header .new-btn:hover { background: var(--accent); color: #fff; }
+
+.run-row, .task-row {
+  padding: var(--space-sm) var(--space-md);
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  border-bottom: 1px solid transparent;
+}
+.run-row:hover, .task-row:hover { background: var(--background-elevated); }
+.run-row.selected, .task-row.selected {
+  background: var(--accent-subtle);
+  border-left-color: var(--accent);
+}
+.run-row .row-main, .task-row .row-main { flex: 1; min-width: 0; }
+.run-row .row-id, .task-row .row-id {
+  font-weight: 600;
+  color: var(--foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-row .row-meta, .task-row .row-meta {
+  font-size: 11px;
+  color: var(--foreground-muted);
+  margin-top: 2px;
+  display: flex;
+  gap: var(--space-sm);
+}
+.run-row .row-meta span + span::before { content: '·'; margin-right: var(--space-sm); color: var(--border-bright); }
+.run-row .row-side, .task-row .row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.badge.status-running, .badge.status-active { color: var(--running); }
+.badge.status-success, .badge.status-complete, .badge.verdict-pass { color: var(--success); }
+.badge.status-pending { color: var(--pending); }
+.badge.status-failed, .badge.verdict-fail { color: var(--error); }
+.badge.status-warning, .badge.status-awaiting_gate { color: var(--warning); }
+.badge.status-blocked_by_red { color: var(--error); background: var(--error-bg); }
+.badge.status-approved { color: var(--success); }
+.badge.status-abandoned, .badge.verdict-inconclusive { color: var(--foreground-muted); }
+.badge.solid-running { background: var(--running); color: var(--background); }
+.badge.solid-warning { background: var(--warning); color: var(--background); }
+.badge.solid-error { background: var(--error); color: #fff; }
+
+.row-meta .duration::before { content: ''; margin: 0; }
+
+.middle-header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.crumb {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--foreground-muted);
+  margin-bottom: var(--space-sm);
+}
+.crumb .sep { margin: 0 6px; color: var(--border-bright); }
+.crumb .current { color: var(--foreground); }
+.run-meta-strip {
+  display: flex;
+  gap: var(--space-lg);
+  margin-top: var(--space-sm);
+  font-size: 11px;
+  color: var(--foreground-muted);
+}
+.run-meta-strip .key { display: block; color: var(--foreground-muted); margin-bottom: 2px; }
+.run-meta-strip .val { color: var(--foreground); font-weight: 500; }
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--foreground-muted);
+  font-size: 12px;
+  text-align: center;
+  padding: var(--space-xl);
+}
+.empty-state svg { opacity: 0.3; margin-bottom: var(--space-md); }
+
+.detail-section {
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-md);
+}
+.detail-section:last-child { border-bottom: none; }
+.detail-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--foreground-muted);
+  font-weight: 600;
+  margin-bottom: var(--space-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kv-row {
+  display: grid;
+  grid-template-columns: 100px 1fr;
+  gap: var(--space-sm);
+  padding: 4px 0;
+  font-size: 12px;
+}
+.kv-row .k { color: var(--foreground-muted); }
+.kv-row .v { color: var(--foreground); word-break: break-word; }
+.kv-row .v code { font-size: 11px; background: var(--background-elevated); padding: 1px 4px; border-radius: var(--radius-sm); }
+
+.input-row {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.input-row .label {
+  color: var(--foreground-muted);
+  margin-right: var(--space-sm);
+}
+.input-row .type {
+  color: var(--accent-tertiary);
+  font-size: 10px;
+  margin: 0 var(--space-sm);
+}
+
+.log-stream {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: var(--space-sm);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.log-stream .line { display: flex; gap: var(--space-sm); padding: 2px 0; }
+.log-stream .ts { color: var(--foreground-muted); flex-shrink: 0; }
+.log-stream .lvl { font-weight: 600; flex-shrink: 0; width: 40px; }
+.log-stream .lvl.info { color: var(--accent-tertiary); }
+.log-stream .lvl.warn { color: var(--warning); }
+.log-stream .lvl.err { color: var(--error); }
+
+.gate-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.4fr;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--foreground);
+  font-weight: 500;
+  font-size: 12px;
+  transition: background 0.1s, border-color 0.1s;
+}
+.btn:hover { background: var(--surface-raised); border-color: var(--border-bright); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-reject { color: var(--error); border-color: var(--error); }
+.btn-reject:hover { background: var(--error-bg); }
+.btn-warning { color: var(--warning); border-color: var(--warning); }
+.btn-warning:hover { background: var(--warning-bg); }
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-danger {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+  font-weight: 600;
+}
+.btn-ghost { background: transparent; }
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+
+.rationale {
+  width: 100%;
+  background: var(--background-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  color: var(--foreground);
+  resize: vertical;
+  min-height: 80px;
+  font-family: var(--font-mono);
+}
+.rationale:focus { outline: none; border-color: var(--accent); }
+.rationale::placeholder { color: var(--foreground-muted); }
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  width: 560px;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.modal-body { padding: var(--space-md); overflow-y: auto; }
+.modal-footer {
+  padding: var(--space-md);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+.modal-close { background: none; border: none; color: var(--foreground-muted); font-size: 14px; }
+.modal-close:hover { color: var(--foreground); }
+
+.cli-block {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--foreground-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  position: relative;
+}
+.cli-block .copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--accent-tertiary);
+}
+.cli-block .copy:hover { background: var(--accent-subtle); border-color: var(--accent); }
+
+.alert-banner {
+  background: var(--error-bg);
+  border-bottom: 1px solid var(--error);
+  color: var(--error);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.alert-banner.warn { background: var(--warning-bg); border-color: var(--warning); color: var(--warning); }
+
+.verdict-card {
+  background: var(--error-bg);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  font-size: 11px;
+}
+.verdict-card .finding { display: flex; gap: var(--space-sm); padding: 4px 0; }
+.verdict-card .severity { font-weight: 600; flex-shrink: 0; }
+
+.thread { display: flex; flex-direction: column; gap: var(--space-sm); margin-bottom: var(--space-md); }
+.thread-msg {
+  background: var(--background-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.thread-msg .who {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--accent-tertiary);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.thread-msg .who .ts { color: var(--foreground-muted); }
+.thread-msg.from-human .who { color: var(--foreground-secondary); }
+
+.png-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: var(--space-sm);
+}
+.png-tile {
+  background: var(--background-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  aspect-ratio: 4/3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--foreground-muted);
+  font-size: 11px;
+}
+
+.toast {
+  position: fixed;
+  bottom: var(--space-md);
+  right: var(--space-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 12px;
+  z-index: 200;
+  animation: slide-in 0.15s ease-out;
+  max-width: 360px;
+}
+.toast.success { border-color: var(--success); color: var(--success); }
+.toast.error { border-color: var(--error); color: var(--error); }
+@keyframes slide-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.bottom-nav {
+  border-top: 1px solid var(--border);
+  padding: var(--space-sm) var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.bottom-nav .item {
+  font-size: 11px;
+  color: var(--foreground-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.bottom-nav .item:hover { color: var(--foreground-secondary); }
+
+.icon { width: 12px; height: 12px; flex-shrink: 0; }
+.kbd {
+  display: inline-block;
+  font-size: 10px;
+  background: var(--background-elevated);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--foreground-secondary);
+}
+
+.menu {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  min-width: 180px;
+  padding: 4px;
+  z-index: 50;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+}
+.menu .item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--foreground);
+  cursor: pointer;
+}
+.menu .item:hover { background: var(--accent-subtle); color: var(--accent-secondary); }
+.menu .item.danger { color: var(--error); }
+.menu .item.danger:hover { background: var(--error-bg); color: var(--error); }
+.menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
+`;
+
+const CLIENT_JS = `
+(function() {
+  const state = {
+    runs: [],
+    selectedRunId: null,
+    runDetail: null,
+    selectedTaskId: null,
+    taskDetail: null,
+    pollTimer: null,
+    interactive: false,
+    openMenuTaskId: null,
+  };
+
+  // ---------- helpers ----------
+  function $(id) { return document.getElementById(id); }
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const k of Object.keys(attrs)) {
+        if (k === 'class') node.className = attrs[k];
+        else if (k === 'html') node.innerHTML = attrs[k];
+        else if (k.startsWith('on')) node.addEventListener(k.slice(2), attrs[k]);
+        else if (attrs[k] !== undefined && attrs[k] !== null) node.setAttribute(k, attrs[k]);
+      }
+    }
+    if (children) {
+      for (const c of [].concat(children)) {
+        if (c == null) continue;
+        node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      }
+    }
+    return node;
+  }
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+  }
+  function shortId(id) {
+    if (!id) return '';
+    return id.length > 14 ? id.slice(0, 14) + '…' : id;
+  }
+  function formatDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    return d.getFullYear() + '-' + m + '-' + day + ' ' + h + ':' + min;
+  }
+  function relTime(iso) {
+    if (!iso) return '—';
+    const ms = Date.now() - new Date(iso).getTime();
+    if (Number.isNaN(ms)) return '—';
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + 's ago';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm ago';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ago';
+    const d = Math.floor(h / 24);
+    return d + 'd ago';
+  }
+  function durationBetween(startIso, endIso) {
+    if (!startIso) return '—';
+    const start = new Date(startIso).getTime();
+    const end = endIso ? new Date(endIso).getTime() : Date.now();
+    let s = Math.max(0, Math.floor((end - start) / 1000));
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + s + 's';
+    return s + 's';
+  }
+  function statusTone(status) {
+    if (status === 'success' || status === 'complete' || status === 'active') return 'success';
+    if (status === 'running') return 'running';
+    if (status === 'failed') return 'failed';
+    if (status === 'awaiting_gate') return 'warning';
+    if (status === 'blocked_by_red') return 'blocked_by_red';
+    if (status === 'pending') return 'pending';
+    if (status === 'abandoned') return 'abandoned';
+    return 'pending';
+  }
+  function rowDisplayStatus(run) {
+    if (run.status === 'active') return 'running';
+    return run.status;
+  }
+  function badge(status) {
+    return el('span', { class: 'badge status-' + statusTone(status) }, status);
+  }
+  function toast(msg, kind) {
+    const root = $('toast-root');
+    const t = el('div', { class: 'toast ' + (kind || '') }, msg);
+    root.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+  }
+
+  // ---------- API ----------
+  async function fetchJSON(url, opts) {
+    const o = opts || {};
+    const headers = { 'Accept': 'application/json' };
+    if (o.body) headers['Content-Type'] = 'application/json';
+    if (o.method && o.method !== 'GET') headers['X-Forge-Request'] = '1';
+    const res = await fetch(url, { method: o.method || 'GET', headers, body: o.body ? JSON.stringify(o.body) : undefined });
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+    if (!res.ok) {
+      const msg = (data && data.error) || ('HTTP ' + res.status);
+      const err = new Error(msg);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---------- render: sidebar (runs) ----------
+  function renderSidebar() {
+    const sidebar = $('sidebar');
+    sidebar.innerHTML = '';
+    sidebar.appendChild(el('div', { class: 'brand' }, [
+      el('div', { class: 'brand-logo' }),
+      el('span', { class: 'brand-name' }, 'FORGE'),
+    ]));
+    sidebar.appendChild(el('div', { class: 'search' }, [
+      el('input', { type: 'text', placeholder: 'search runs…', oninput: onSearchInput, id: 'search-input' }),
+    ]));
+    const header = el('div', { class: 'list-header' }, [
+      el('span', null, 'RUNS'),
+      el('span', { class: 'count' }, state.runs.length + ' total'),
+    ]);
+    if (state.interactive) {
+      header.appendChild(el('button', { class: 'new-btn', onclick: openNewRunModal, title: 'Create a new run' }, '+ New run'));
+    }
+    sidebar.appendChild(header);
+    const body = el('div', { class: 'pane-body no-pad' });
+    const filter = (state.searchQuery || '').toLowerCase();
+    const filtered = filter ? state.runs.filter(r => (r.id + ' ' + (r.title || '')).toLowerCase().includes(filter)) : state.runs;
+    if (filtered.length === 0) {
+      body.appendChild(el('div', { class: 'empty-state' }, 'No runs yet.'));
+    } else {
+      for (const r of filtered) body.appendChild(runRow(r));
+    }
+    sidebar.appendChild(body);
+    sidebar.appendChild(el('div', { class: 'bottom-nav' }, [
+      el('div', { class: 'item' }, '⚙ settings'),
+    ]));
+  }
+  function onSearchInput(e) {
+    state.searchQuery = e.target.value;
+    renderSidebar();
+  }
+  function runRow(r) {
+    const taskCount = (r.taskCount != null ? r.taskCount : 0) + ' tasks';
+    const status = rowDisplayStatus(r);
+    const row = el('div', {
+      class: 'run-row' + (r.id === state.selectedRunId ? ' selected' : ''),
+      onclick: () => selectRun(r.id),
+    }, [
+      el('div', { class: 'row-main' }, [
+        el('div', { class: 'row-id' }, shortId(r.id)),
+        el('div', { class: 'row-meta' }, [
+          el('span', null, relTime(r.createdAt)),
+          el('span', null, taskCount),
+        ]),
+      ]),
+      el('div', { class: 'row-side' }, [
+        badge(status),
+        el('span', { class: 'row-meta' }, formatDate(r.createdAt).slice(5)),
+      ]),
+    ]);
+    return row;
+  }
+
+  // ---------- render: middle (run detail / tasks) ----------
+  function renderMiddle() {
+    const middle = $('middle');
+    middle.innerHTML = '';
+    if (!state.selectedRunId) {
+      middle.appendChild(el('div', { class: 'pane-header' }, [
+        el('span', { class: 'label' }, 'RUN'),
+      ]));
+      middle.appendChild(el('div', { class: 'empty-state' }, 'Select a run.'));
+      return;
+    }
+    if (!state.runDetail) {
+      middle.appendChild(el('div', { class: 'pane-header' }, [
+        el('span', { class: 'label' }, 'RUN'),
+      ]));
+      middle.appendChild(el('div', { class: 'empty-state' }, 'Loading…'));
+      return;
+    }
+    const { run, tasks } = state.runDetail;
+    const counts = countTaskStatuses(tasks);
+    middle.appendChild(el('div', { class: 'pane-header' }, [
+      el('span', { class: 'label' }, 'RUN'),
+      el('span', { class: 'sep' }, '/'),
+      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;' }, shortId(run.id)),
+    ]));
+    const headerBlock = el('div', { class: 'middle-header' }, [
+      el('div', { style: 'display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
+        el('span', { style: 'font-weight: 600; color: var(--foreground);' }, run.id),
+        badge(rowDisplayStatus(run)),
+      ]),
+      el('div', { class: 'run-meta-strip' }, [
+        kvCell('STARTED', formatDate(run.createdAt)),
+        kvCell('DURATION', durationBetween(run.createdAt, run.completedAt)),
+        kvCell('TASKS', counts.summary),
+      ]),
+    ]);
+    if (state.interactive) {
+      headerBlock.appendChild(runActionRow(run, counts));
+    }
+    middle.appendChild(headerBlock);
+
+    const listHeader = el('div', { class: 'list-header' }, [
+      el('span', null, 'TASKS'),
+      el('span', { class: 'count' }, tasks.length + ' tasks'),
+    ]);
+    middle.appendChild(listHeader);
+    const body = el('div', { class: 'pane-body no-pad' });
+    for (const t of tasks) body.appendChild(taskRow(t));
+    if (tasks.length === 0) body.appendChild(el('div', { class: 'empty-state' }, 'No tasks yet.'));
+    middle.appendChild(body);
+  }
+  function kvCell(k, v) {
+    return el('div', null, [
+      el('span', { class: 'key' }, k),
+      el('span', { class: 'val' }, v),
+    ]);
+  }
+  function countTaskStatuses(tasks) {
+    const c = { running: 0, awaiting_gate: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
+    for (const t of tasks) c[t.status] = (c[t.status] || 0) + 1;
+    const done = c.complete + c.failed;
+    const summary = done + ' / ' + tasks.length;
+    return Object.assign(c, { summary, done });
+  }
+  function runActionRow(run, counts) {
+    const wrap = el('div', { style: 'display: flex; gap: var(--space-sm); margin-top: var(--space-md);' });
+    if (counts.awaiting_gate > 0 || counts.blocked_by_red > 0) {
+      wrap.appendChild(el('button', { class: 'btn btn-sm btn-warning', onclick: () => focusFirstGate(run.id) }, 'Review gates'));
+    } else if (counts.pending > 0 || counts.running === 0 && counts.complete + counts.failed < state.runDetail.tasks.length) {
+      wrap.appendChild(el('button', { class: 'btn btn-sm btn-primary', onclick: () => runNext(run.id) }, '▶ Run next'));
+    }
+    wrap.appendChild(el('button', { class: 'btn btn-sm btn-ghost', onclick: (e) => openRunMenu(e, run) }, '⋯'));
+    return wrap;
+  }
+  function focusFirstGate(runId) {
+    const tasks = state.runDetail ? state.runDetail.tasks : [];
+    const t = tasks.find(t => t.status === 'awaiting_gate' || t.status === 'blocked_by_red');
+    if (t) selectTask(t.id);
+  }
+  function taskRow(t) {
+    const elapsed = t.startedAt ? durationBetween(t.startedAt, t.completedAt) : '—';
+    return el('div', {
+      class: 'task-row' + (t.id === state.selectedTaskId ? ' selected' : ''),
+      onclick: () => selectTask(t.id),
+    }, [
+      el('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;' }, [
+        el('span', { style: 'color: var(--foreground-muted);' }, '◇'),
+        el('div', { class: 'row-main' }, [
+          el('div', { class: 'row-id' }, t.taskName || t.phase),
+          el('div', { class: 'row-meta' }, [
+            el('span', null, t.phase),
+            el('span', null, t.agentRole),
+          ]),
+        ]),
+      ]),
+      el('div', { class: 'row-side' }, [
+        badge(displayTaskStatus(t)),
+        el('span', { class: 'row-meta' }, elapsed),
+      ]),
+    ]);
+  }
+  function displayTaskStatus(t) {
+    if (t.status === 'complete') return 'success';
+    return t.status;
+  }
+
+  // ---------- render: detail pane ----------
+  function renderDetail() {
+    const detail = $('detail');
+    detail.innerHTML = '';
+    if (!state.selectedTaskId) {
+      detail.appendChild(el('div', { class: 'pane-header' }, [
+        el('span', { class: 'label' }, 'TASK'),
+      ]));
+      detail.appendChild(el('div', { class: 'empty-state' }, [
+        el('div', null, '↘ select a task to inspect'),
+      ]));
+      return;
+    }
+    if (!state.taskDetail) {
+      detail.appendChild(el('div', { class: 'pane-header' }, [
+        el('span', { class: 'label' }, 'TASK'),
+      ]));
+      detail.appendChild(el('div', { class: 'empty-state' }, 'Loading…'));
+      return;
+    }
+    const { task, verdicts, gates } = state.taskDetail;
+    const isBlockedByRed = task.status === 'blocked_by_red';
+    const isAwaitingGate = task.status === 'awaiting_gate';
+
+    if (isBlockedByRed) {
+      detail.appendChild(el('div', { class: 'alert-banner' }, [
+        el('strong', null, '🚫 BLOCKED BY RED — '),
+        el('span', null, 'An authoritative red verdict failed. Force-advance requires explicit rationale.'),
+      ]));
+    }
+    detail.appendChild(el('div', { class: 'pane-header' }, [
+      el('span', { class: 'label' }, 'TASK'),
+      el('span', { class: 'sep' }, '/'),
+      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;' }, task.taskName || task.phase),
+    ]));
+
+    const body = el('div', { class: 'pane-body no-pad' });
+
+    body.appendChild(taskHeaderSection(task));
+    if (isAwaitingGate || isBlockedByRed) {
+      body.appendChild(gateActionsSection(task, verdicts));
+    }
+    body.appendChild(taskInputsSection(task));
+    if (task.result) body.appendChild(taskResultSection(task));
+    if (verdicts && verdicts.length > 0 && !isBlockedByRed) body.appendChild(verdictsSection(verdicts));
+    if (gates && gates.length > 0) body.appendChild(gatesSection(gates));
+    detail.appendChild(body);
+  }
+  function taskHeaderSection(task) {
+    return el('div', { class: 'detail-section' }, [
+      el('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
+        el('div', { style: 'display: flex; align-items: center; gap: 8px;' }, [
+          el('span', { style: 'color: var(--foreground-muted);' }, '◇'),
+          el('span', { style: 'font-weight: 600;' }, task.taskName || task.phase),
+        ]),
+        badge(displayTaskStatus(task)),
+      ]),
+      el('div', { class: 'kv-row' }, [
+        el('span', { class: 'k' }, 'TYPE'),
+        el('span', { class: 'v' }, task.phase + ' · ' + task.agentRole),
+      ]),
+      el('div', { class: 'kv-row' }, [
+        el('span', { class: 'k' }, 'STARTED'),
+        el('span', { class: 'v' }, task.startedAt ? formatDate(task.startedAt) : '—'),
+      ]),
+      el('div', { class: 'kv-row' }, [
+        el('span', { class: 'k' }, 'ELAPSED'),
+        el('span', { class: 'v' }, task.startedAt ? durationBetween(task.startedAt, task.completedAt) : '—'),
+      ]),
+      task.taskPackage && task.taskPackage.role
+        ? el('div', { class: 'kv-row' }, [
+            el('span', { class: 'k' }, 'ROLE'),
+            el('span', { class: 'v' }, task.taskPackage.role),
+          ])
+        : null,
+    ]);
+  }
+  function taskInputsSection(task) {
+    const inputs = (task.taskPackage && task.taskPackage.inputs) || {};
+    const keys = Object.keys(inputs);
+    const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'INPUTS')]);
+    if (keys.length === 0) {
+      sec.appendChild(el('div', { class: 'input-row' }, '(no inputs)'));
+      return sec;
+    }
+    for (const k of keys) {
+      const val = inputs[k];
+      const valStr = typeof val === 'string' ? val : JSON.stringify(val);
+      const type = typeof val;
+      const truncated = valStr.length > 200 ? valStr.slice(0, 200) + '…' : valStr;
+      sec.appendChild(el('div', { class: 'input-row' }, [
+        el('span', { class: 'label' }, k),
+        el('span', { class: 'type' }, type),
+        el('span', null, truncated),
+      ]));
+    }
+    return sec;
+  }
+  function taskResultSection(task) {
+    const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'OUTPUT')]);
+    const json = JSON.stringify(task.result, null, 2);
+    sec.appendChild(el('pre', { class: 'cli-block' }, json));
+    return sec;
+  }
+  function verdictsSection(verdicts) {
+    const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'RED VERDICTS')]);
+    for (const v of verdicts) {
+      const verdictClass = v.verdict === 'fail' ? 'verdict-fail' : (v.verdict === 'pass' ? 'verdict-pass' : 'verdict-inconclusive');
+      const card = el('div', { class: 'verdict-card', style: v.verdict === 'fail' ? '' : 'background: transparent; border-color: var(--border);' });
+      card.appendChild(el('div', { style: 'display: flex; justify-content: space-between; margin-bottom: var(--space-sm); font-size: 11px;' }, [
+        el('span', null, [el('span', { class: 'badge ' + verdictClass }, v.verdict), ' · ', v.redRole, ' · ', v.authority]),
+        el('span', { style: 'color: var(--foreground-muted);' }, 'confidence ' + v.confidence),
+      ]));
+      for (const f of (v.findings || [])) {
+        card.appendChild(el('div', { class: 'finding' }, [
+          el('span', { class: 'severity', style: severityColor(f.severity) }, f.severity.toUpperCase()),
+          el('span', null, f.summary),
+        ]));
+      }
+      sec.appendChild(card);
+    }
+    return sec;
+  }
+  function severityColor(sev) {
+    if (sev === 'high') return 'color: var(--error);';
+    if (sev === 'medium') return 'color: var(--warning);';
+    return 'color: var(--foreground-muted);';
+  }
+  function gatesSection(gates) {
+    const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'GATE HISTORY')]);
+    for (const g of gates) {
+      sec.appendChild(el('div', { class: 'thread-msg' }, [
+        el('div', { class: 'who' }, [
+          el('span', null, g.decision + ' · ' + g.decidedBy),
+          el('span', { class: 'ts' }, formatDate(g.decidedAt)),
+        ]),
+        g.rationale ? el('div', null, g.rationale) : el('em', { style: 'color: var(--foreground-muted);' }, '(no rationale)'),
+      ]));
+    }
+    return sec;
+  }
+  function gateActionsSection(task, verdicts) {
+    const sec = el('div', { class: 'detail-section' });
+    const isBlocked = task.status === 'blocked_by_red';
+    if (isBlocked && verdicts) {
+      const failing = verdicts.filter(v => v.verdict === 'fail' && v.authority === 'authoritative');
+      for (const v of failing) sec.appendChild(redVerdictCard(v));
+    }
+    if (!state.interactive) {
+      sec.appendChild(el('div', { class: 'cli-block', style: 'margin-bottom: var(--space-md);' }, [
+        el('span', null, 'forge gate ' + task.id + ' advance --rationale "..."'),
+        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge gate ' + task.id + ' advance') }, 'copy'),
+      ]));
+      sec.appendChild(el('div', { style: 'color: var(--foreground-muted); font-size: 11px;' }, [
+        'Set ',
+        el('code', null, 'FORGE_DASHBOARD_INTERACTIVE=1'),
+        ' before launching the dashboard to enable gate buttons here.',
+      ]));
+      return sec;
+    }
+    const rationaleField = el('textarea', {
+      class: 'rationale',
+      placeholder: isBlocked ? 'Required for force-advance: explain why overriding this red verdict is justified…' : 'optional rationale for your decision…',
+      id: 'rationale-' + task.id,
+    });
+    if (isBlocked) {
+      sec.appendChild(el('div', { class: 'gate-actions' }, [
+        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: false }) }, '✕ Reject'),
+        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: false }) }, '↻ Re-run task'),
+        el('button', { class: 'btn btn-danger', onclick: () => doGate(task.id, 'advance', { force: true, requireRationale: true }) }, '⚠ Force advance + rationale'),
+      ]));
+    } else {
+      sec.appendChild(el('div', { class: 'gate-actions' }, [
+        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: false }) }, '✕ Reject Run'),
+        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: false }) }, '↻ Request Changes'),
+        el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: false }) }, '→ Advance Run'),
+      ]));
+    }
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, isBlocked ? 'Rationale — required for force-advance' : 'Rationale (optional)'));
+    sec.appendChild(rationaleField);
+    return sec;
+  }
+  function redVerdictCard(v) {
+    const card = el('div', { class: 'verdict-card' });
+    card.appendChild(el('div', { style: 'display: flex; justify-content: space-between; margin-bottom: var(--space-sm); font-size: 11px;' }, [
+      el('span', null, [el('span', { class: 'badge verdict-fail' }, 'BLOCKED'), ' · ', v.redRole, ' · ', v.authority]),
+      el('span', { style: 'color: var(--foreground-muted);' }, 'confidence ' + v.confidence),
+    ]));
+    for (const f of (v.findings || [])) {
+      card.appendChild(el('div', { class: 'finding' }, [
+        el('span', { class: 'severity', style: severityColor(f.severity) }, f.severity.toUpperCase()),
+        el('span', null, f.summary),
+      ]));
+    }
+    return card;
+  }
+
+  // ---------- mutation actions ----------
+  async function doGate(taskId, decision, opts) {
+    opts = opts || {};
+    const ta = $('rationale-' + taskId);
+    const rationale = ta ? ta.value.trim() : '';
+    if (opts.requireRationale && !rationale) {
+      toast('Rationale required for force-advance.', 'error');
+      ta && ta.focus();
+      return;
+    }
+    try {
+      await fetchJSON('/api/gate/' + encodeURIComponent(taskId), {
+        method: 'POST',
+        body: { decision, rationale: rationale || undefined, force: opts.force || undefined },
+      });
+      toast('Gate decision recorded: ' + decision, 'success');
+      await refreshAll();
+    } catch (e) {
+      toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
+    }
+  }
+  async function runNext(runId) {
+    try {
+      const data = await fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
+      const summary = (data && data.summary) || 'Dispatched next phase.';
+      toast(summary, 'success');
+      await refreshAll();
+    } catch (e) {
+      toast('Run-next failed: ' + (e.message || 'unknown error'), 'error');
+    }
+  }
+  async function refreshAll() {
+    await loadRuns();
+    if (state.selectedRunId) await loadRunDetail(state.selectedRunId);
+    if (state.selectedTaskId) await loadTaskDetail(state.selectedTaskId);
+  }
+
+  // ---------- selection ----------
+  async function selectRun(runId) {
+    state.selectedRunId = runId;
+    state.selectedTaskId = null;
+    state.taskDetail = null;
+    renderSidebar();
+    renderMiddle();
+    renderDetail();
+    await loadRunDetail(runId);
+  }
+  async function selectTask(taskId) {
+    state.selectedTaskId = taskId;
+    renderMiddle();
+    renderDetail();
+    await loadTaskDetail(taskId);
+  }
+  async function loadRuns() {
+    try {
+      const data = await fetchJSON('/api/runs');
+      state.runs = data.runs || [];
+      renderSidebar();
+    } catch (e) {
+      toast('Failed to load runs: ' + e.message, 'error');
+    }
+  }
+  async function loadRunDetail(runId) {
+    try {
+      const data = await fetchJSON('/api/runs/' + encodeURIComponent(runId));
+      state.runDetail = data;
+      attachTaskCounts();
+      renderMiddle();
+      schedulePoll();
+    } catch (e) {
+      if (e.status !== 404) toast('Failed to load run: ' + e.message, 'error');
+    }
+  }
+  async function loadTaskDetail(taskId) {
+    try {
+      const data = await fetchJSON('/api/tasks/' + encodeURIComponent(taskId));
+      state.taskDetail = data;
+      renderDetail();
+    } catch (e) {
+      if (e.status !== 404) toast('Failed to load task: ' + e.message, 'error');
+    }
+  }
+  function attachTaskCounts() {
+    const counts = {};
+    if (state.runDetail) counts[state.runDetail.run.id] = state.runDetail.tasks.length;
+    state.runs = state.runs.map(r => ({ ...r, taskCount: counts[r.id] != null ? counts[r.id] : r.taskCount }));
+  }
+  function schedulePoll() {
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    if (state.runDetail && state.runDetail.shouldPoll) {
+      state.pollTimer = setTimeout(() => {
+        if (state.selectedRunId) loadRunDetail(state.selectedRunId);
+        if (state.selectedTaskId) loadTaskDetail(state.selectedTaskId);
+      }, 3000);
+    }
+  }
+
+  // ---------- new-run modal (stub: shows equivalent CLI command) ----------
+  function openNewRunModal() {
+    const root = $('modal-root');
+    root.innerHTML = '';
+    const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
+    const modal = el('div', { class: 'modal' });
+    overlay.appendChild(modal);
+    modal.appendChild(el('div', { class: 'modal-header' }, [
+      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— v1: copy the CLI command')]),
+      el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
+    ]));
+    const body = el('div', { class: 'modal-body' });
+    body.appendChild(el('p', { style: 'color: var(--foreground-secondary); margin-bottom: var(--space-md); font-size: 12px;' },
+      'Full new-run form is deferred (BACKLOG #57 follow-up). For now, run this in your terminal:'));
+    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."]';
+    body.appendChild(el('div', { class: 'cli-block' }, [
+      el('span', null, example),
+      el('button', { class: 'copy', onclick: (e) => copyText(e, example) }, 'copy'),
+    ]));
+    body.appendChild(el('p', { style: 'color: var(--foreground-muted); margin-top: var(--space-md); font-size: 11px;' },
+      'Workflows: feature-design-provided, feature-design-needed, investigation, codebase-assessment, ui-design, design-revise.'));
+    modal.appendChild(body);
+    modal.appendChild(el('div', { class: 'modal-footer' }, [
+      el('button', { class: 'btn', onclick: closeModal }, 'Close'),
+    ]));
+    root.appendChild(overlay);
+  }
+  function closeModal() { $('modal-root').innerHTML = ''; }
+  function copyText(e, text) {
+    try {
+      navigator.clipboard.writeText(text);
+      toast('Copied.', 'success');
+    } catch (err) {
+      toast('Copy failed.', 'error');
+    }
+  }
+
+  // ---------- run-row overflow menu ----------
+  function openRunMenu(e, run) {
+    e.stopPropagation();
+    closeMenus();
+    const menu = el('div', { class: 'menu' }, [
+      el('div', { class: 'item', onclick: () => { closeMenus(); runNext(run.id); } }, '▶ Run next'),
+      el('div', { class: 'item', onclick: () => { closeMenus(); copyText(e, run.id); } }, '⧉ Copy run ID'),
+      el('div', { class: 'sep' }),
+      el('div', { class: 'item danger', onclick: () => { closeMenus(); toast('Cancel/abandon: not implemented in v1.', 'error'); } }, '✕ Abandon'),
+    ]);
+    document.body.appendChild(menu);
+    const rect = e.target.getBoundingClientRect();
+    menu.style.left = (rect.right - 180) + 'px';
+    menu.style.top = (rect.bottom + 4) + 'px';
+    setTimeout(() => document.addEventListener('click', closeMenus, { once: true }), 0);
+  }
+  function closeMenus() {
+    document.querySelectorAll('.menu').forEach(m => m.remove());
+  }
+
+  // ---------- bootstrap ----------
+  async function bootstrap() {
+    state.interactive = (document.documentElement.getAttribute('data-interactive') === '1') ||
+      (window.__FORGE_INTERACTIVE === true);
+    // The server injects /api/runs?_meta to surface the flag without a separate endpoint.
+    try {
+      const meta = await fetchJSON('/api/meta');
+      state.interactive = !!meta.interactive;
+    } catch { /* meta endpoint optional */ }
+    renderSidebar();
+    renderMiddle();
+    renderDetail();
+    await loadRuns();
+  }
+  bootstrap();
+})();
+`;

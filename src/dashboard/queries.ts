@@ -123,9 +123,15 @@ function rowToGate(row: GateDbRow): GateRow {
   };
 }
 
-export function listRunsForDashboard(): Run[] {
-  const rows = db().prepare(`SELECT * FROM runs ORDER BY created_at DESC`).all() as RunRow[];
-  return rows.map(rowToRun);
+export function listRunsForDashboard(): (Run & { taskCount: number })[] {
+  const rows = db()
+    .prepare(
+      `SELECT runs.*, (SELECT COUNT(*) FROM tasks WHERE tasks.run_id = runs.id) AS task_count
+       FROM runs
+       ORDER BY runs.created_at DESC`
+    )
+    .all() as (RunRow & { task_count: number })[];
+  return rows.map((r) => ({ ...rowToRun(r), taskCount: r.task_count ?? 0 }));
 }
 
 export function getRunWithShouldPoll(
