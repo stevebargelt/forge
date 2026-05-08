@@ -26,6 +26,7 @@ export function registerNew(program: Command): void {
     .option("--prd <path>", "path to a PRD/spec file")
     .option("--brief <text>", "for ui-design / design-revise: the design brief")
     .option("--design-dir <path>", "for ui-design / design-revise: directory for the .pen file + designs/ + code/. Defaults to ~/code/<sanitized-title>/.")
+    .option("--project <path>", "project directory mounted at /project on agent containers. Defaults to cwd. Subsequent forge next calls reuse this without --project.")
     .option("--meta <json>", "extra run metadata as JSON")
     .description("Create a new workflow run")
     .action(async (workflow: string, title: string, options) => {
@@ -43,6 +44,8 @@ export function registerNew(program: Command): void {
         (options as { designDir?: string }).designDir ?? deriveDefaultDesignDir(workflow as WorkflowName, title);
       if (designDir) metadata.designDir = designDir;
 
+      const projectDir = (options as { project?: string }).project ?? process.cwd();
+
       const run: Run = {
         id: runId,
         workflow: wf.name,
@@ -50,6 +53,7 @@ export function registerNew(program: Command): void {
         status: "active",
         createdAt: nowIso(),
         metadata,
+        projectDir,
       };
       insertRun(run);
       mkdirSync(runDir(runId), { recursive: true });
@@ -93,8 +97,9 @@ export function registerNew(program: Command): void {
       console.log(`Workflow: ${wf.name}`);
       console.log(`Title:    ${title}`);
       console.log(`First phase: ${firstPhase.name} (${firstPhase.agents.length} task(s) seeded)`);
+      console.log(`Project:  ${projectDir}`);
       if (designDir) console.log(`Design dir: ${designDir}`);
-      console.log(`\nNext:\n  forge next ${runId} --project <path>`);
+      console.log(`\nNext:\n  forge next ${runId}`);
     });
 }
 
