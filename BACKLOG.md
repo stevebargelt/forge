@@ -109,6 +109,94 @@ Closed in Done (recent) below — `forge new` now `mkdir -p`s `<designDir>/{desi
 ### #69 — Prompt-author seed: hard-stop the human session if Pencil MCP is unavailable (DONE this session)
 Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-design.md` now has a PRECONDITION 0 step that tells the human's Claude Code session to refuse to proceed without `mcp__pencil__*` tools. Caught 2026-05-08: a session without the Pencil MCP started writing HTML files instead of failing fast, polluting `<designDir>/code/`.
 
+### #72 — Dashboard: smart-refresh — DONE this session
+Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild when their underlying data + selection state hasn't changed.
+
+### #71 — Dashboard: visual representation of the workflow flow / phase ribbon
+**Why:** When you gate a task in the dashboard you can't tell what's coming next without reading the workflow file. Today: "click advance" → ??? → next thing happens. The dashboard shows what *is* (running tasks, gate state) but never what *will be* (next phase shape, fanout count, gate type, reds).
+**Caught:** 2026-05-08 mid-#66 testing. Steven: "When I'm in 'frame' and I click to advance, I have no idea what is coming next. I need to know." Then: ribbon doesn't render fanout well — `frame` kicks off 20 investigate agents, 4 running concurrently, a flat ribbon implies linear progression and lies about parallelism.
+
+**Three granularities (all from the same workflow shape data):**
+
+1. **Compact ribbon with progress-aware pills.** Single horizontal row above the task list. Each phase is a pill with: name, gate-type icon (auto/human/verdict — distinct), reds indicator (small shield if phase has reds), gate-on-verdict marker if applicable. Linear phases show status (done/running/awaiting/blocked/pending). **Fanout phases show a progress bar inside the pill: `▓▓▓░░ investigate 14/20`** so the count is honest at a glance. Manual phases show distinct iconography (▢ for awaiting_human_input, distinct from ⚠ awaiting_gate). Click a pill → filters the task list to that phase (becomes the natural drill-down for fanout).
+
+2. **Next-action preview on the gate panel.** When the user is about to gate, surface the literal consequence below the rationale field: "Advancing creates 20 `investigate` tasks (one per claim from frame's output), running 4 at a time. Reds: wide + narrow, parallel, authoritative, gate=verdict." Manual-phase variant: "Advancing puts this run into awaiting_human_input. You'll need to run PROMPT.md against Pencil, then `forge submit`." Auto-gate variant: "Advancing also finalizes the run (no successor phase)." Context-aware copy per the next phase's shape.
+
+3. **(Optional v2) Drill-in pane on fanout pill click.** Right-pane shows per-task summary for the fanout — N tasks, M running, average elapsed, finished outputs preview. Defers the decision; for v1 the existing task list is the drill-in.
+
+**Considered but rejected:**
+- **Tall ribbon with sub-rows per fanout task.** Honest about parallelism, but vertical real estate balloons during fanout (20 stacked rows competes with the task list right below).
+- **Sankey / DAG view.** Pretty, but real flow visualization is overkill for forge's current depth (workflows are 2–4 phases). Revisit if a workflow ever has branching shape.
+
+**How to apply:**
+- Server: extend `getRunWithShouldPoll` (queries.ts) to include the workflow's structural shape — `{phases: [{name, agentRoles, gate, hasFanout: bool, hasReds: bool, redsAuthority?, redsGateOnVerdict?, onReject?}]}`. No prompt bodies, just structure. Re-resolves on every request (cheap — workflows are TS files imported at runtime, already cached).
+- Client (html.ts): render the ribbon above the task list in `renderMiddle`. New CSS classes for phase pills (status-coded). Pill width ~140px, fanout pill expands to show the progress bar. Click filters task list via new `state.phaseFilter`. The same client-side `phaseShape` data feeds the gate-panel preview text.
+- Gate-panel preview: small helper `describeAdvanceConsequence(currentPhase, nextPhase, currentTasks)` returns one or two sentences for the dashboard to render below the rationale field. Similar helper for reject and request-changes (e.g. for reject in ui-design.review, "Rejecting loops back to the brief phase. Your rationale will be passed to the prompt-author as inputs.rejectedRationale").
+- Build (1) first; (2) immediately after using the same data; (3) defer.
+
+**Lands after:** the workflow rename refactor (#70 / refactor-2026-05-08-workflow-naming.md). Phase names are about to change; building the ribbon before the rename means rework.
+
+### #74 — Reconcile + watchdog can't catch zero-stdout orphans
+**Why:** Caught 2026-05-08 on `task-investigate-dace4f`. Container apparently died (no `docker ps` output) but the task stayed `running` in the DB indefinitely. Three failure modes stacked:
+1. **No container.stdout.log was ever written.** The task workspace had only the input files + an empty 0-byte `result.json`. Stdout never started flowing — possibly the container exited before producing any, or forge's `cpSpawn` parent process died before piping anything to disk.
+2. **Reconcile doesn't catch this.** `reconcileRun` checks for non-empty `result.json` to decide "agent finished, forge lost track." Empty-but-existing `result.json` is treated as "still running, skip" — but here the container is genuinely gone.
+3. **Idle watchdog can't fire.** The watchdog hooks `proc.stdout`. If the parent forge process (or its dispatch invocation) already exited, the watchdog isn't running anymore. If the container produced zero stdout AND its forge parent died, there's nothing watching.
+**How to apply:** Three layered fixes worth considering:
+1. **Reconcile sniffs for dead containers, not just non-empty result.json.** When status=running on disk but `docker ps` shows no matching container (forge could persist the container id at spawn time + check it on reconcile), mark failed with `container_crash`.
+2. **Persist container id at spawn.** New column `tasks.container_id`. Lets reconcile check `docker inspect <id>` to detect "container is exited / dead / not running."
+3. **Treat empty result.json + age beyond N minutes as a hard signal.** If a task has been "running" for over (say) 2× the idle-timeout AND result.json is 0 bytes AND no container is alive, declare it crashed.
+**Recovery for the in-flight case:** SQL UPDATE the task back to pending + delete the empty result.json + `forge next` re-dispatches. Done manually for `task-investigate-dace4f` 2026-05-08.
+
+### #73 — Reds-on-investigators: category mismatch; redirect parallel scrutiny to peer-investigation
+**Why this is the wrong shape today, not a prompt-fix problem.** Caught 2026-05-08 mid-investigation run on `task-investigate-f6ed49`. Both red-wide and red-narrow returned `verdict: "fail"` with high-severity findings that *restated the investigator's own findings about the topaz codebase*, not critiques of the investigator's work. Initial diagnosis was "reds drifted out of scope; tighten their seed prompts." That's wrong — the deeper bug is in the verdict vocabulary itself.
+
+**The verdict vocabulary is the real bug.** Everywhere else in forge, `fail` means "the thing being checked is broken" (an architect's design has problems; a build's diff fails review). For investigate, `fail` collapses three distinct things:
+1. The investigator's evidence is weak (work-product critique)
+2. The investigator's conclusion is wrong (judgment critique)
+3. The underlying subject has problems (subject critique — what reds actually did)
+
+No prompt-tightening fix makes that ambiguity go away. Even with crisp instructions, the human reading "fail" in the dashboard will instinctively read it as "the investigation got it wrong" — because that's what `fail` means everywhere else in the app. Painting prompts onto a category mistake is the wrong move.
+
+**What we don't want to lose: parallel scrutiny on claims.** Steven's call (2026-05-08): "If we aren't going to use reds to investigate the investigators we should use reds to do investigation on the codebase." The *capacity* for two AI agents to scrutinize a claim from different angles is valuable. We just had it pointed the wrong direction (review-after-the-fact instead of investigate-in-parallel).
+
+**Three architectural options worth weighing:**
+
+**(A) Peer-fanout pattern (counter-investigator).** Drop reds from `investigate`. Add a second blue agent type — `investigator-counter` (or `devils-advocate`) — that runs in parallel for each claim. Same `inputs.claim`, opposite framing: "find what would refute this claim; gather evidence the original investigator might have missed." Both outputs become first-class inputs to `synthesize`. The synthesizer is *already* designed to weigh investigator outputs; it now weighs two sides instead of one. Synthesizer's verdict vocabulary stays its own (`supported / refuted / inconclusive` per claim, matching the investigator's own conclusion vocabulary, not pass/fail).
+- *Pros:* Honest vocabulary. Right shape: investigation doesn't have a verifiable artifact to review, so reviewer is the wrong primitive. Each claim gets two angles instead of one + a noisy "did the work" check.
+- *Cons:* Doubles compute on the investigate phase (16 claims → 32 blues). New agent seed. New workflow primitive (two parallel blues per claim, not just blue + reds).
+- *Open question:* Does the counter run literally the same input or does it get a slight prompt twist? E.g. `inputs.claim` plus a hint "your job is to find evidence this is wrong"?
+
+**(B) Co-investigator pattern (different lenses, no opposition).** Like (A) but the second blue isn't framed as devil's advocate — it's just a second investigator with a different *lens* (e.g. one prioritizes code, one prioritizes documentation; one looks for happy path, one looks for edge cases). The synthesizer weighs both for completeness, not opposition.
+- *Pros:* Less adversarial framing; less risk of artificial disagreement when both would naturally agree.
+- *Cons:* More subtle to define lens distinctions; risk of two blues just doing the same work twice if their prompts don't actually diverge.
+
+**(C) Drop reds from investigate, don't replace.** Cleanest if peer-fanout turns out not to be worth the compute cost. The synthesizer is currently the only layer that weighs evidence; let it do that job alone.
+- *Pros:* Minimal change, immediately stops the confusion.
+- *Cons:* Loses parallel scrutiny entirely. Single-investigator runs become single-point-of-failure for each claim's evidence quality.
+
+**(D) Different verdict vocabulary per phase.** Reds on investigate use `corroborates / contradicts / inconclusive` instead of `pass / fail`. Verdict aggregation rules in `gate.ts` have to know what each vocabulary maps to (does "contradicts" block the gate? probably not the same way "fail" does). Bigger change; possibly the right long-term answer if forge accumulates more phase types where pass/fail doesn't fit.
+- *Pros:* Solves the vocabulary problem head-on. Lets reds stay structurally similar to today.
+- *Cons:* Schema change for `Verdict.verdict` (maybe a `kind` field). `gate.ts`'s aggregation rule fragments per kind. Multi-vocabulary makes the dashboard more complex.
+
+**Lean toward (A)**, but worth thinking about (B) and (D) before deciding. (C) is the fallback if (A) doesn't work in practice.
+
+**Things that need to be decided before implementing any of these:**
+1. Does the workflow shape need a new primitive ("two parallel blues with shared input, both contribute to upstream"), or can we model peer-fanout with the existing fanout machinery (e.g. by spawning two blues from the same fanout input)?
+2. Does the synthesizer's prompt need to know "you're reading two views of each claim now" explicitly, or can we just rename the input field?
+3. For peer-fanout: does the counter run BEFORE the original investigator (giving the original a chance to address known counter-arguments), AFTER (so it can react to the original's evidence), or strictly in parallel (independent)? Strictly parallel is cleanest; the others introduce ordering coupling.
+4. Cost-of-change: dropping reds from investigate touches the investigation workflow file + the dashboard's red-rendering paths. Not large, but worth catching `forge advise` and the verdict-aggregation paths in tests.
+5. Does this same problem exist in `feature-design-needed.architect`? Probably not — architect produces a verifiable artifact (decisions/components/interfaces) that reds can review against the brief. The pattern fits there. Validate by example.
+
+**What to do for the in-flight run:** advance `task-investigate-f6ed49` with rationale ("reds restated investigator findings; advance"). Specialist reds with `gateOnVerdict: false` mean the fail is informational. Do this for every investigate task in this run. Don't change workflows mid-run.
+
+**Side issue, separate fix already shipped:** verdict cards now render `red task: <id>` so the human can copy/reference reds for troubleshooting. Doesn't fix the vocabulary issue but helps debug confusing verdicts in the meantime.
+
+### #75 — Dashboard: markdown rendering for prose result fields
+**Why:** #34's pretty result view splits prose on blank lines and renders paragraphs — fine for plain prose, but agent recommendations + reports often emit markdown (headings, bold, fenced code, lists). Currently those render as literal text (`# Heading` shows the hash). Caught 2026-05-08 on `task-recommend-071478`'s `recommendation` field — a thoughtful markdown report rendered as a wall of paragraphs with literal `##` headings.
+**How to apply:** When a string value's content looks like markdown (heuristic: presence of `^#` lines, `**bold**`, ` ``` ` fences, `- ` / `* ` list markers, `[link](url)` patterns above some threshold), pipe through a small markdown renderer. Browsers don't ship one; either add a tiny single-file markdown lib (~5KB), or write a focused renderer for the subset agents actually emit (headings, bold, code, fenced blocks, ordered/unordered lists, paragraphs). Defer images and tables. Keep the raw toggle so users can see source markdown.
+**Detection:** simplest = check for `^#{1,6}\s` or fenced `^```` early in the string. False positives are cheap (rendering plain prose through markdown is mostly idempotent); false negatives leave the existing paragraph render in place.
+**Side note:** currently the recommendation field is the only place this matters in practice. Could even gate by field name (`recommendation`, `report`, `summary`) rather than content sniffing.
+
 ### #67 — Per-app design corpus: encourage / enforce shared designDir within an app
 **Why:** Today every `ui-design` run gets its own `--design-dir`. Each .pen file is a fresh document with no link to prior designs of the same app. If you design the forge dashboard at `~/code/forge-design/dashboard.pen`, then later add a widget to that dashboard, the widget design lives in a new .pen with no automatic access to the variable block or named components from the dashboard's .pen. Pencil 0.2.5 has no cross-file component import — components live inside their .pen file. Result: visual drift, redundant token redefinition, and the human has to keep "the dashboard's house style" in their head when running each new ui-design.
 **Caught 2026-05-08:** running ui-design for a forge dashboard widget against a fresh `--design-dir ~/code/forge-stats-widget/`. Steven flagged that this should have been added to `~/code/forge-design/` so it could reuse the existing component library + variable block. The prompt-author had no way to know.
@@ -142,9 +230,8 @@ Related: #38 (capture resolved model on the task row) is the audit-trail compani
 2. Make workflows reference roles whose base CLAUDE.md already matches the workflow's schema (e.g. don't reuse `framer` for scoping if its schema is investigation-shaped).
 Lean toward (1).
 
-### #34 — Dashboard: human-readable result view with raw toggle
-**Why:** Today the dashboard renders agent results as a raw JSON code block. For results with structure (lenses, findings, decisions), that's dense and hard to scan.
-**How to apply:** Per-task view toggle. Default = human-readable: render headings for top-level keys, nested objects as sections, arrays as bullet/numbered lists, severity badges for findings, render markdown `report` fields as HTML (already partly works). Raw view = existing JSON code block. Toggle remembered in URL (`?view=raw`) so links can target either.
+### #34 — Dashboard: human-readable result view with raw toggle — DONE this session
+Closed in Done (recent) below. Pretty/raw toggle in the OUTPUT header; pretty walks the result object structurally (top-level keys → labeled sections, prose → paragraphs, arrays → numbered lists, paths → monospace, nested → indented). Toggle state persists per-task across renders.
 
 ### #35 — Dashboard: gate buttons + run-next + "what's next" surfacing
 **Why:** Dashboard is read-only today; all driving still happens in the CLI. From the dashboard you can see state but can't act on it. Five sub-pieces:
@@ -255,6 +342,16 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 - (B) Loose path validation — must be absolute (`/` or `~`), no shell metacharacters. Existence is `forge new`'s job downstream (mkdir for designDir, mount for project).
 - (C) Briefs/questions are textareas. No shell-quoting concerns since cpSpawn takes argv as an array.
 **Open follow-up:** when `--design-dir` defaults to `~/code/<title-slug>/`, the modal could pre-fill it as the user types the title (live default-derivation). Current behavior: empty placeholder text. Cheap polish, defer.
+
+### #34 — Pretty/raw result view toggle
+**Closed:** 2026-05-08, on branch `new-run-modal-66`.
+Per-task toggle in the OUTPUT header. Pretty mode walks the result object structurally — top-level string keys become labeled paragraph blocks (split on blank lines so `\n\n`-separated prose reads naturally); arrays of strings become numbered lists; arrays of objects become sub-cards; paths get monospace styling; nested objects render with a left border. Raw mode is the original JSON code block with `white-space: pre-wrap` so it word-wraps too. Toggle state is stored in a closure-scoped Map keyed by task id — survives polling re-renders, lost on full page reload (good enough). Caught when the synthesizer's 3-key output (architecturalImplications + antiFindings + openQuestions) was unreadable as a single JSON wall.
+
+### #72 — Dashboard: smart-refresh
+**Closed:** 2026-05-08 afternoon, on branch `new-run-modal-66`.
+**What shipped:** Each render function (`renderSidebar`, `renderMiddle`, `renderDetail`) computes a render key from the data + selection state it would draw, and bails out if the key matches the last render. Polling ticks that bring back unchanged data become silent — DOM is untouched, scroll/input/focus/animation/selection state preserved automatically. JSON.stringify-based; cheap because pane data is bounded.
+**Why this fix replaces the band-aids:** Previously we patched scrollTop preservation and input-value preservation as scoped fixes for symptoms (scroll-jump on red-verdict reading; textarea wipe mid-typing). Each new form interaction would have needed its own preservation logic. Smart-refresh ends the entire class — when nothing's changed, nothing re-renders. The scroll/input preservation patches stay in place as a second layer (handle the case where data DOES change but the user has unsubmitted state).
+**Caught:** 2026-05-08 — three distinct polling-induced bugs in an afternoon (scroll-jump, textarea-wipe, middle-column scroll-jump). Steven's call: stop patching, do this right.
 
 ### #68 — `forge new --design-dir` pre-creates the conventional layout
 **Closed:** 2026-05-08, on `main` (alongside #54 smoke-test fixes).
