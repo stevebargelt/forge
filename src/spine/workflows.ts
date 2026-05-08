@@ -7,12 +7,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const WORKFLOWS_DIR = resolve(here, "..", "workflows");
 
 const VALID_NAMES: WorkflowName[] = [
-  "feature-design-provided",
-  "feature-design-needed",
+  "feature",
+  "feature-ui-design-needed",
+  "feature-ui-design-provided",
   "investigation",
   "codebase-assessment",
   "ui-design",
-  "design-revise",
+  "ui-design-revise",
 ];
 
 export async function loadWorkflow(name: WorkflowName): Promise<Workflow> {

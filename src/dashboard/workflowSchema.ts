@@ -54,36 +54,58 @@ export const UNIVERSAL_FIELDS: FieldSpec[] = [
 
 // Per-workflow extras. Required-ness here mirrors the CLI's expectations:
 // - investigation needs --question
-// - feature-design-provided needs --prd
-// - feature-design-needed / ui-design / design-revise need --brief
-// - ui-design / design-revise need --design-dir
+// - feature-ui-design-provided needs --prd
+// - feature / feature-ui-design-needed / ui-design / ui-design-revise need --brief
+// - feature-ui-design-needed / ui-design / ui-design-revise need --design-dir
 // - codebase-assessment has no extras
 export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
-  "feature-design-provided": {
-    name: "feature-design-provided",
-    description: "Implement a feature from a PRD or spec doc you already have.",
-    fields: [
-      {
-        name: "prd",
-        label: "--prd",
-        type: "path",
-        required: true,
-        help: "Absolute path to the PRD / spec file (markdown, txt, etc).",
-        placeholder: "/Users/you/code/your-project/docs/feature-x.md",
-      },
-    ],
-  },
-  "feature-design-needed": {
-    name: "feature-design-needed",
-    description: "Design + implement a feature from a brief; framer + spec-writer phases produce the design.",
+  feature: {
+    name: "feature",
+    description: "Build a feature with no UI/UX design step (CLI, API, library, internal refactor). Architect → plan → build → verify.",
     fields: [
       {
         name: "brief",
         label: "--brief",
         type: "textarea",
         required: true,
-        help: "What you want built, in your own words. The framer turns it into a design.",
-        placeholder: "A small dashboard widget that shows live forge run stats…",
+        help: "What you want built, in your own words. Architect turns it into decisions/components/interfaces.",
+        placeholder: "Add a forge submit --dry-run flag that validates artifacts without transitioning the task…",
+      },
+    ],
+  },
+  "feature-ui-design-needed": {
+    name: "feature-ui-design-needed",
+    description: "Build a feature that needs UI design first. Composed: brief → ui-review → architect → plan → build → verify.",
+    fields: [
+      {
+        name: "brief",
+        label: "--brief",
+        type: "textarea",
+        required: true,
+        help: "What the feature does AND how the UI should feel. The brief feeds both the design step and the architect step.",
+        placeholder: "A run-detail panel showing per-task progress with red verdicts inline…",
+      },
+      {
+        name: "designDir",
+        label: "--design-dir",
+        type: "path",
+        required: true,
+        help: "Where the .pen, designs/, and code/ artifacts live. Absolute path.",
+        placeholder: "/Users/you/code/your-design-dir",
+      },
+    ],
+  },
+  "feature-ui-design-provided": {
+    name: "feature-ui-design-provided",
+    description: "Build a feature where the UI design already exists (a .pen, mocks, or PRD with design). Architect → plan → build → verify.",
+    fields: [
+      {
+        name: "prd",
+        label: "--prd",
+        type: "path",
+        required: true,
+        help: "Absolute path to the PRD / design doc / spec file. Architect reads this as upstream context.",
+        placeholder: "/Users/you/code/your-project/docs/feature-x.md",
       },
     ],
   },
@@ -128,8 +150,8 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
       },
     ],
   },
-  "design-revise": {
-    name: "design-revise",
+  "ui-design-revise": {
+    name: "ui-design-revise",
     description: "Revise a prior ui-design run. Same designDir; opens the existing .pen and applies changes.",
     fields: [
       {
@@ -152,16 +174,26 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
   },
 };
 
-// Workflow names in dashboard-render order (UI / dev-flow workflows first;
-// codebase-assessment and feature-design-* second, since those are heavier).
-export const WORKFLOW_ORDER: WorkflowName[] = [
-  "ui-design",
-  "design-revise",
-  "feature-design-needed",
-  "feature-design-provided",
-  "investigation",
-  "codebase-assessment",
+// Workflow groups for the modal picker (Steven 2026-05-08 — phase grouping
+// in the modal). Each group has a label + ordered workflow names. Render
+// order within a group is intentional (most-common variant first).
+export const WORKFLOW_GROUPS: { label: string; workflows: WorkflowName[] }[] = [
+  {
+    label: "Build features",
+    workflows: ["feature", "feature-ui-design-needed", "feature-ui-design-provided"],
+  },
+  {
+    label: "Design UI",
+    workflows: ["ui-design", "ui-design-revise"],
+  },
+  {
+    label: "Investigate or audit",
+    workflows: ["investigation", "codebase-assessment"],
+  },
 ];
+
+// Flat order — derived from WORKFLOW_GROUPS so the two stay in sync.
+export const WORKFLOW_ORDER: WorkflowName[] = WORKFLOW_GROUPS.flatMap((g) => g.workflows);
 
 // ---------- validation ----------
 

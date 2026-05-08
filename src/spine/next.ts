@@ -16,6 +16,7 @@ export type NextResult =
   | { kind: "running"; tasks: Task[] }
   | { kind: "awaiting_gate"; tasks: Task[] }
   | { kind: "awaiting_human_input"; tasks: Task[] }
+  | { kind: "awaiting_red"; tasks: Task[] }
   | { kind: "blocked_by_red"; tasks: Task[] }
   | { kind: "dispatched"; phase: string; tasks: Task[] }
   | { kind: "advanced"; phase: string; tasks: Task[] }
@@ -45,6 +46,12 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
   try {
     const running = tasks.filter((t) => t.status === "running");
     if (running.length > 0) return { kind: "running", tasks: running };
+
+    // awaiting_red — blue done, reds in flight. Surface so the user knows to
+    // wait rather than thinking the run has stalled. Not actionable — same
+    // as `running` from the user's perspective, just a different phase.
+    const awaitingRed = tasks.filter((t) => t.status === "awaiting_red");
+    if (awaitingRed.length > 0) return { kind: "awaiting_red", tasks: awaitingRed };
 
     const blocked = tasks.filter((t) => t.status === "blocked_by_red");
     if (blocked.length > 0) return { kind: "blocked_by_red", tasks: blocked };

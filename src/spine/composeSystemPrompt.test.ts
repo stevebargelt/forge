@@ -26,7 +26,7 @@ const WORKFLOW: Workflow = {
 
 function phaseWith(opts: Partial<Phase> = {}): Phase {
   return {
-    name: opts.name ?? "frame",
+    name: opts.name ?? "frame-question",
     agents: [],
     gate: "human",
     workflowAdditions: opts.workflowAdditions,
@@ -130,7 +130,7 @@ test("composeSystemPrompt: tier 2 workflowAdditions appended when present", () =
     constraintsDir: CONSTRAINTS_DIR,
   });
   assert.match(out, /Phase-specific framing here/);
-  assert.match(out, /Workflow additions \(phase: frame\)/);
+  assert.match(out, /Workflow additions \(phase: frame-question\)/);
 });
 
 test("composeSystemPrompt: tier 2 omitted when workflowAdditions empty", () => {

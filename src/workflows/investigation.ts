@@ -7,7 +7,7 @@ export const workflow: Workflow = {
     "Multi-phase research: frame the question, fan out per-claim investigators, synthesize, recommend.",
   phases: [
     {
-      name: "frame",
+      name: "frame-question",
       agents: [agent("framer", "spec-writer")],
       gate: "human",
       workflowAdditions:

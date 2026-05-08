@@ -230,6 +230,7 @@ a { color: var(--accent); text-decoration: none; }
 .badge.status-failed, .badge.verdict-fail { color: var(--error); }
 .badge.status-warning, .badge.status-awaiting_gate { color: var(--warning); }
 .badge.status-awaiting_human_input { color: var(--warning); background: var(--warning-bg, transparent); }
+.badge.status-awaiting_red { color: var(--running); background: var(--warning-bg, transparent); }
 .badge.status-blocked_by_red { color: var(--error); background: var(--error-bg); }
 .badge.status-approved { color: var(--success); }
 .badge.status-abandoned, .badge.verdict-inconclusive { color: var(--foreground-muted); }
@@ -503,6 +504,8 @@ a { color: var(--accent); text-decoration: none; }
   outline: none;
 }
 .form-row input:focus, .form-row textarea:focus, .form-row select:focus { border-color: var(--accent); }
+.form-row select optgroup { color: var(--foreground-muted); font-style: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.form-row select option { color: var(--foreground); background: var(--background); }
 .form-row textarea { min-height: 80px; resize: vertical; }
 .form-row .help { font-size: 11px; color: var(--foreground-muted); }
 .form-row .err { font-size: 11px; color: var(--error); margin-top: 2px; }
@@ -772,6 +775,7 @@ const CLIENT_JS = `
     if (status === 'failed') return 'failed';
     if (status === 'awaiting_gate') return 'warning';
     if (status === 'awaiting_human_input') return 'awaiting_human_input';
+    if (status === 'awaiting_red') return 'awaiting_red';
     if (status === 'blocked_by_red') return 'blocked_by_red';
     if (status === 'pending') return 'pending';
     if (status === 'abandoned') return 'abandoned';
@@ -988,7 +992,7 @@ const CLIENT_JS = `
     ]);
   }
   function countTaskStatuses(tasks) {
-    const c = { running: 0, awaiting_gate: 0, awaiting_human_input: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
+    const c = { running: 0, awaiting_gate: 0, awaiting_human_input: 0, awaiting_red: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
     for (const t of tasks) c[t.status] = (c[t.status] || 0) + 1;
     const done = c.complete + c.failed;
     const summary = done + ' / ' + tasks.length;
@@ -1051,13 +1055,14 @@ const CLIENT_JS = `
   function attentionRank(status) {
     switch (status) {
       case 'running': return 0;
-      case 'awaiting_human_input': return 1;
-      case 'awaiting_gate': return 2;
-      case 'blocked_by_red': return 3;
-      case 'failed': return 4;
-      case 'pending': return 5;
-      case 'complete': return 6;
-      default: return 7;
+      case 'awaiting_red': return 1; // active, but waiting on reds — peer of running
+      case 'awaiting_human_input': return 2;
+      case 'awaiting_gate': return 3;
+      case 'blocked_by_red': return 4;
+      case 'failed': return 5;
+      case 'pending': return 6;
+      case 'complete': return 7;
+      default: return 8;
     }
   }
   function compareTaskAttention(a, b) {
@@ -1804,10 +1809,22 @@ const CLIENT_JS = `
         rerenderNewRunBody(schema, formState, body);
       },
     });
-    for (const w of schema.order) {
-      const opt = el('option', { value: w }, w);
-      if (w === formState.workflow) opt.selected = true;
-      select.appendChild(opt);
+    // Use schema.groups for the picker so workflows are visually grouped
+     // ("Build features" / "Design UI" / "Investigate or audit"). Falls back
+     // to a flat list if the server didn't send groups (older API responses).
+    const groups = Array.isArray(schema.groups) && schema.groups.length > 0
+      ? schema.groups
+      : [{ label: '', workflows: schema.order }];
+    for (const g of groups) {
+      const parent = g.label
+        ? el('optgroup', { label: g.label })
+        : select;
+      for (const w of g.workflows) {
+        const opt = el('option', { value: w }, w);
+        if (w === formState.workflow) opt.selected = true;
+        parent.appendChild(opt);
+      }
+      if (g.label) select.appendChild(parent);
     }
     pickerRow.appendChild(select);
     pickerRow.appendChild(el('div', { class: 'help' }, spec.description));

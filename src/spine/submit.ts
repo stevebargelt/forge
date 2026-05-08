@@ -37,7 +37,12 @@ export async function submit(
 
   let artifacts: UiDesignArtifacts;
 
-  if (run.workflow === "ui-design" || run.workflow === "design-revise") {
+  // Workflows with manual phases that produce ui-design artifacts (.pen + PNGs + HTML).
+  if (
+    run.workflow === "ui-design" ||
+    run.workflow === "ui-design-revise" ||
+    run.workflow === "feature-ui-design-needed"
+  ) {
     const designDir =
       typeof run.metadata?.designDir === "string" ? (run.metadata.designDir as string) : undefined;
     if (!designDir) {
@@ -48,7 +53,7 @@ export async function submit(
     artifacts = validateUiDesignArtifacts(designDir, run.title);
   } else {
     throw new Error(
-      `forge submit is not supported for workflow '${run.workflow}' — manual phases only exist in ui-design / design-revise today.`
+      `forge submit is not supported for workflow '${run.workflow}' — only ui-design / ui-design-revise / feature-ui-design-needed have manual phases today.`
     );
   }
 

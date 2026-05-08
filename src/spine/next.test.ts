@@ -54,3 +54,21 @@ test("shouldAutoFinalize: false when refreshed tasks list is empty", () => {
   const wf = workflowWithPhases(["only"]);
   assert.equal(shouldAutoFinalize(wf, "only", []), false);
 });
+
+test("shouldAutoFinalize: false when terminal phase has any awaiting_red task (FORGE-DEC-017)", () => {
+  // awaiting_red blue tasks are explicitly NOT auto-completable — reds are
+  // still running. Defensive against a future regression that treats
+  // awaiting_red as terminal.
+  const wf = workflowWithPhases(["only"]);
+  assert.equal(shouldAutoFinalize(wf, "only", [task("only", "awaiting_red")]), false);
+  assert.equal(
+    shouldAutoFinalize(wf, "only", [task("only", "complete"), task("only", "awaiting_red")]),
+    false
+  );
+});
+
+test("shouldAutoFinalize: false when terminal phase has any awaiting_human_input task (FORGE-DEC-016)", () => {
+  // Manual phases never auto-complete — they always need explicit submit.
+  const wf = workflowWithPhases(["only"]);
+  assert.equal(shouldAutoFinalize(wf, "only", [task("only", "awaiting_human_input")]), false);
+});

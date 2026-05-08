@@ -6,20 +6,26 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-08 afternoon session:** main has #54 + FORGE-DEC-016 landed. ui-design workflow now has both `brief` and `review` phases. `forge submit` is wired. Dashboard renders manual-phase tasks. 171 tests passing. **End-to-end validation still owed:** a real `forge new ui-design "<title>" --design-dir ~/code/<dir> --brief "..."` run that walks brief → submit → review → gate. The mechanics are tested in isolation but no real run has touched the new code path yet.
+**State at end of 2026-05-08 evening session:** branch `workflow-rename-70`, sitting on top of merged main (281b541 includes #66 modal + #34 pretty results + #72 smart-refresh + dashboard usability batch). Big push:
 
-**Top of the stack — pick from here:**
+- **First end-to-end investigation run via the dashboard** (`run-code-review-terry-workflow-586a86`). Walked frame-question → 16 fanout investigates → synthesize → recommend. Surfaced + fixed: scroll/input preservation, smart-refresh (#72), task identification (phase·N of M, heuristic detail title, TASK ID + red task ID), attention-based sort, run config visibility, tilde expansion, reject-rationale required, pretty result view (#34). Plus three architectural BACKLOG entries: #73 reds-as-reviewer category mismatch, #74 zero-stdout orphan recovery, #75 markdown rendering.
+- **First real `forge new ui-design`** ran (`run-test-prompt-author-v4-c2dcda`). Validated the manual-phase shape end-to-end: brief → submit → review → advance → run complete. Caught + fixed three things along the way (slug-from-basename not title, designDir layout pre-create, Pencil-MCP availability gate, gate-finalize on terminal advance).
+- **Workflow rename refactor (this branch).** Renamed `feature-design-needed` → `feature` (the no-UI variant — disambiguates "design" from "UI/UX"). Renamed `feature-design-provided` → `feature-ui-design-provided` (and added the architect phase that was missing — Steven's call: architecture review is universal across feature work). New composed `feature-ui-design-needed` (brief → ui-review → architect → plan → build → verify) — forge's most complex workflow shape. New `ui-design-revise` workflow file. Phase rename `frame` → `frame-question`. Phase rename `ui-design.review` → `ui-design.ui-review`. In-place data migration. FORGE-DEC-017 introduces `awaiting_red` status (honest representation of "blue done, reds running, gate not yet decided"). Architect seed updated to read upstream design artifacts (`htmlFiles`, `pngFiles`). Modal grouped by category (Build features / Design UI / Investigate or audit). 203 tests passing.
 
-1. **End-to-end validate #54.** Run a real ui-design workflow. Confirm: brief produces PROMPT.md, dashboard renders it inline, human runs it on the host, `forge submit` validates, dashboard shows the .pen + PNGs + HTML, gate advance closes the run, gate reject loops back to brief with `inputs.rejectedRationale` populated. This also closes #25's pending validation.
-2. **#55** — design-revise rewrite. Same two-phase shape as #54 (`brief` + `review`), different prompt-author template that opens a prior `.pen` and applies revisions. Mostly mechanical now that #54 is in place.
-3. **#66** — dashboard new-run modal must require `--design-dir` for ui-design/design-revise. Becomes more important now that submit hard-errors on missing designDir.
+**Top of the stack:**
+
+1. **End-to-end validate `feature-ui-design-needed`.** Run a real one. The composed workflow chains manual + agent phases that haven't been exercised together. Specifically watch: does the architect actually read upstream htmlFiles/pngFiles? Does onReject from architect → brief loop the prompt-author with rationale? Does verify → run finalize work after all the new phases land?
+2. **#55** is now obsolete — `ui-design-revise` already exists as a workflow file in this branch. Close out as done.
+3. **#66** is closed (modal works for all 7 workflows now including the renamed ones).
 4. **Run FOLLOWUP-PROMPT.md** through Pencil at the host to fill the 9 design gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Then wire the new screens into the dashboard.
-5. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX). With #54 in, gate-button copy (#62) becomes more interesting since manual-phase gate semantics differ from agent-led ones.
-6. **#48 image previews** — currently the dashboard shows PNG paths as text. To render actual previews we need a `/api/artifact?path=...` passthrough endpoint (browsers block `file://` from http-served pages). Whitelisted paths only (under `~/code/`). Small, deferred.
+5. **#71 phase ribbon** — depends on this rename refactor (now done). Up next architecturally.
+6. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX).
+7. **#48 image previews** — `/api/artifact?path=...` passthrough endpoint, whitelisted paths under `~/code/`.
+8. **#73** reds-as-reviewer architecture decision (peer fanout vs status quo). Open.
 
 **Validation still pending:**
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
-- #25 (reject + `onReject` flow) — code is exercised by the gate.test.ts manual-phase reject test, but a real ui-design reject hasn't run yet. Closes when #1 above lands.
+- #25 (reject + `onReject` flow) — gate.test.ts covers it; real-run validation possible once #1 above runs an architect reject.
 
 **Watchdog status:** works.
 
@@ -54,7 +60,10 @@ Validated empirically tonight: this exact prompt produced a complete dashboard d
 ### #54 — Rewrite `ui-design` workflow for the new architecture (DONE this session)
 Closed in Done (recent) below. Validation: a real `forge new ui-design` run that goes brief → submit → review → gate. Reject path exercises #25 incidentally.
 
-### #55 — Rewrite `design-revise` workflow for the new architecture
+### #55 — `ui-design-revise` workflow — DONE this session (workflow-rename-70 branch)
+Closed in Done (recent) below. The workflow file landed as part of the rename refactor: same two-phase shape as ui-design (brief + ui-review), prompt-author template hook for ui-design-revise.md (template file itself can be added in a follow-up if the basic ui-design template proves inadequate).
+
+### #55-orig — Rewrite design-revise workflow (original framing, now closed)
 **Why:** Same pivot as #54 but for the iteration case. Input is a previously-saved `.pen` file plus a revision brief.
 **How to apply:** Phases:
 - `brief` — agent: `prompt-author` with the `ui-design-revise` template. Reads the prior `.pen` file path from inputs; produces a PROMPT.md that opens it via `--in` and applies the requested changes. Verifies the prior `.pen` is non-zero before generating (hard error if 0 — design source was lost).
@@ -185,7 +194,7 @@ No prompt-tightening fix makes that ambiguity go away. Even with crisp instructi
 2. Does the synthesizer's prompt need to know "you're reading two views of each claim now" explicitly, or can we just rename the input field?
 3. For peer-fanout: does the counter run BEFORE the original investigator (giving the original a chance to address known counter-arguments), AFTER (so it can react to the original's evidence), or strictly in parallel (independent)? Strictly parallel is cleanest; the others introduce ordering coupling.
 4. Cost-of-change: dropping reds from investigate touches the investigation workflow file + the dashboard's red-rendering paths. Not large, but worth catching `forge advise` and the verdict-aggregation paths in tests.
-5. Does this same problem exist in `feature-design-needed.architect`? Probably not — architect produces a verifiable artifact (decisions/components/interfaces) that reds can review against the brief. The pattern fits there. Validate by example.
+5. Does this same problem exist in `feature-ui-design-needed.architect`? Probably not — architect produces a verifiable artifact (decisions/components/interfaces) that reds can review against the brief. The pattern fits there. Validate by example.
 
 **What to do for the in-flight run:** advance `task-investigate-f6ed49` with rationale ("reds restated investigator findings; advance"). Specialist reds with `gateOnVerdict: false` mean the fail is informational. Do this for every investigate task in this run. Don't change workflows mid-run.
 
@@ -220,7 +229,7 @@ Closed in Done (recent) below. All 6 workflows supported with conditional fields
 Related: #38 (capture resolved model on the task row) is the audit-trail companion — once both land, the dashboard can show role + alias + resolved-model + tokens (+ cost when the bonus lands).
 
 ### #28 — Per-run constraint scoping (forge new --tag, tags: in constraint frontmatter)
-**Why:** The `atlas-stack-rn` constraint fires on every `feature-design-needed` run regardless of project. Today the workaround is renaming the constraint file to `.disabled`, which is global. Real fix is per-run scoping.
+**Why:** The `atlas-stack-rn` constraint fires on every `feature-ui-design-needed` run regardless of project. Today the workaround is renaming the constraint file to `.disabled`, which is global. Real fix is per-run scoping.
 **How to apply:** Add `--tag <tag>` to `forge new`. Add `tags: [...]` to constraint frontmatter. Constraints fire only when the run's tag matches one of the constraint's tags (or the constraint has no tags = global, current behavior).
 
 ### #33 — Resolve workflowAdditions vs base output schema conflict
@@ -309,7 +318,7 @@ Localhost-only is the security model; document this.
 3. **Targets:** v1 is web (headless Chrome). Electron renderer is Chromium-on-DevTools-protocol — same scripts work, modulo "how do we launch the app and find its DevTools port"; defer to v2. Mobile is genuinely different (no DevTools protocol; needs Maestro/Detox/native screenshotting); defer to v3, separate decision.
 4. **Invocation shapes — three patterns the workflow can pick from:**
    - **Fanout-from-upstream.** A `verify` phase in `ui-design` (or a future `feature-implementation` workflow) declares `fanoutFromUpstream: { arrayKey: "pngFiles" }` and creates one design-reviewer task per PNG. Most natural fit for "as the work gets completed, the reviewer checks each screen." Already a forge primitive.
-   - **Specialist red on an implementation phase.** When a phase produces runnable UI (e.g. `export-code` or a `feature-design-needed` build), attach `design-reviewer` as a specialist red. Non-blocking by default; failures warn the human at the gate.
+   - **Specialist red on an implementation phase.** When a phase produces runnable UI (e.g. `export-code` or a `feature-ui-design-needed` build), attach `design-reviewer` as a specialist red. Non-blocking by default; failures warn the human at the gate.
    - **Ad-hoc spot check.** A future `forge review <run-id> --screen home` command could spawn a one-off task outside planned phases. Not supported today; build only if the fanout/red shapes turn out to be too coarse.
 5. **Open question (defer):** how does the agent get the URL? Options: workflow-input field, `--target-url` on the invoking command, or upstream phase output. **Decided 2026-05-08 (Steven's Q2):** make this decision when we start developing — it's downstream of the agent's existence.
 **Input contract (locked, given #54 shipped):** the agent reads `inputs.upstream[*].result.pngFiles` (canonical designs) and either `inputs.upstream[*].result.htmlFiles` (static HTML files to screenshot via `file://`) OR a `targetUrl` input (running app, web/Electron). Output: `{verdict: "pass"|"fail"|"inconclusive", confidence, findings: [{severity, summary, evidence, hypothesis}], notes}` — same shape as other reds.
@@ -324,10 +333,30 @@ Localhost-only is the security model; document this.
 Don't start until the calibration question has a plan — uncalibrated visual judges produce noise that erodes trust in the whole reds layer.
 
 ### #52 — Browser DevTools error capture for implementation review
-**Why:** "Did the page render without console errors?" is a binary signal that catches a lot of broken builds. Same Puppeteer-Core CLI scripts as #51 — different question. Useful as a specialist red on any phase that produces runnable web UI (`export-code` from #46, future `feature-design-needed` builds that produce a page).
+**Why:** "Did the page render without console errors?" is a binary signal that catches a lot of broken builds. Same Puppeteer-Core CLI scripts as #51 — different question. Useful as a specialist red on any phase that produces runnable web UI (`export-code` from #46, future `feature-ui-design-needed` builds that produce a page).
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #70 — Workflow rename refactor + composed feature-ui-design-needed + awaiting_red status
+**Closed:** 2026-05-08 evening, on branch `workflow-rename-70` (203 tests passing).
+**What shipped:**
+- **Renames** (disambiguating "design" — was overloading system-architecture and UI/UX):
+  - `feature-design-needed` → `feature` (the no-UI variant; CLI / API / library / refactor work)
+  - `feature-design-provided` → `feature-ui-design-provided` (added architect phase at front; was missing — Steven 2026-05-08: architecture review is universal across feature work)
+  - `design-revise` → `ui-design-revise` (new file; the old design-revise.ts was already deleted under #58)
+  - `investigation.frame` phase → `frame-question` (was ambiguous in dashboard rendering)
+  - `ui-design.review` phase → `ui-review` (consistency with composed workflow)
+- **New workflow file:** `feature-ui-design-needed` — composed shape: brief → ui-review → architect → plan → build → verify. Mixes manual + agent + reds + onReject branching. Forge's most complex workflow shape. The architect's onReject loops back to `brief` (revise the design first per Steven Q2).
+- **FORGE-DEC-017 + new task status `awaiting_red`** — honest vocabulary for "blue done, reds running, gate not yet decided." Was being collapsed into `complete` which was a lie. Wired through dispatch.ts (sets status), next.ts (surfaces kind), advise.ts (informational, ranks after running), reconcile.ts (skips), CLI status icon (⏵), dashboard badge tone + sort rank (peer of running).
+- **Architect seed updated** — reads `inputs.upstream[*].result.{htmlFiles,pngFiles}` when present; treats the design as canonical UI; surfaces design/code conflicts as architectural decisions. Re-installed via FORCE=1 install-seeds.sh.
+- **Phase data migration in db.ts** — UPDATE runs SET workflow on the rename pairs, UPDATE tasks SET phase for `frame`→`frame-question` and `review`→`ui-review`. Idempotent. No alias map (Steven 2026-05-08: "we need to wait for my current test run to complete! Solves it no?" — yes; in-flight migration not needed if no in-flight runs).
+- **Modal grouping** (Steven Q3): WORKFLOW_GROUPS introduced (Build features / Design UI / Investigate or audit), rendered as native `<optgroup>`s in the picker. WORKFLOW_ORDER derived from groups so they stay in sync.
+- **Tests:** advise.test, fanout.test, reconcile.test, composeSystemPrompt.test, manualPhase.test, submit.test, gate.test, constraints.test, server.test, workflowSchema.test all updated for the new names. New tests for awaiting_red in next.test + advise.test. 203 passing total (was 199).
+- **CLAUDE.md updated** — state-machine status list, design-workflow exception list.
+
+### #55 — ui-design-revise workflow rewrite
+**Closed:** 2026-05-08 (rolled into #70). New `src/workflows/ui-design-revise.ts` registers the same two-phase shape as `ui-design` (brief + ui-review). The brief phase's prompt-author seed gets a workflowAdditions hint pointing at a (future) `templates/ui-design-revise.md`; until that template exists, the standard ui-design template works for revise too — the prompt-author can adapt based on the brief saying "revise X."
 
 ### #66 — Dashboard new-run modal (full form, all 6 workflows)
 **Closed:** 2026-05-08 afternoon, on branch `new-run-modal-66` (199 tests passing, +26 new).
@@ -365,7 +394,7 @@ Per-task toggle in the OUTPUT header. Pretty mode walks the result object struct
 **Closed:** 2026-05-08 afternoon, on `main` (FORGE-DEC-016 + implementation).
 **What shipped:**
 - New task status `awaiting_human_input` added to `TaskStatus` union. Manual phases (`agents: []`) create exactly one task in this status; human transitions it via `forge submit`.
-- New CLI: `forge submit <task-id> [--notes "..."]`. Validates `<designDir>/<title>.pen` non-zero + `<designDir>/designs/*.png` ≥ 1 + `<designDir>/code/*.html` ≥ 1. Hard-errors on missing `run.metadata.designDir` for `ui-design`/`design-revise`. Captures paths into `task.result` and transitions to `awaiting_gate`.
+- New CLI: `forge submit <task-id> [--notes "..."]`. Validates `<designDir>/<title>.pen` non-zero + `<designDir>/designs/*.png` ≥ 1 + `<designDir>/code/*.html` ≥ 1. Hard-errors on missing `run.metadata.designDir` for `ui-design`/`ui-design-revise`. Captures paths into `task.result` and transitions to `awaiting_gate`.
 - `src/workflows/ui-design.ts`: `review` phase added with `agents: []`, `gate: "human"`, `onReject: "brief"`. Reject loops back to brief with `inputs.rejectedRationale` populated (exercises the #25 plumbing).
 - Spine: `next.ts` recognizes `awaiting_human_input` (returns new `kind`). `dispatch.ts` no-ops on empty-agents phases. `advise.ts` recommends `forge submit`. `gate.ts` rejects `request-changes` on manual phases (would otherwise create a pending task with no agent to dispatch).
 - Dashboard: `/api/submit/:taskId` POST endpoint shells out to `forge submit` (FORGE-DEC-015 pattern). Awaiting-gate detail for review tasks renders artifact paths (.pen, PNGs, HTML files). Awaiting-human-input detail renders the brief context (PROMPT.md inline, parameters, openQuestions, designDir) + "I'm done" submit button.

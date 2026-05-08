@@ -44,7 +44,7 @@ export function expandTildePath(p: string): string {
 }
 
 // Sanitize a run title to a filename slug. Source of truth for the
-// `<sanitized-title>.pen` convention used by ui-design / design-revise workflows.
+// `<sanitized-title>.pen` convention used by ui-design / ui-design-revise / feature-ui-design-needed workflows.
 // Both `forge new --design-dir` defaulting and `forge submit` validation share
 // this rule so the .pen file produced by Pencil and the .pen file expected by
 // the validator are guaranteed to match.

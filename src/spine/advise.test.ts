@@ -37,6 +37,21 @@ test("adviseRun: abandoned run → no command", () => {
   assert.equal(a.command, "");
 });
 
+test("adviseRun: awaiting_red → informational (no command), ranked after running (FORGE-DEC-017)", () => {
+  const a = adviseRun(RUN, [task("t-blue", "awaiting_red")]);
+  assert.equal(a.kind, "awaiting_red");
+  assert.equal(a.command, ""); // informational only; nothing for the human to do
+  assert.match(a.summary, /awaiting red verdicts/);
+  assert.equal(a.counts.awaiting_red, 1);
+});
+
+test("adviseRun: running beats awaiting_red (a still-running blue is more salient)", () => {
+  // If both running blues exist alongside awaiting_red blues, surface the
+  // running ones first — they're more actively producing state changes.
+  const a = adviseRun(RUN, [task("t-r", "running"), task("t-blue", "awaiting_red")]);
+  assert.equal(a.kind, "running");
+});
+
 test("adviseRun: awaiting_human_input → forge submit <task> (manual phase, FORGE-DEC-016)", () => {
   const a = adviseRun(RUN, [task("t-review", "awaiting_human_input")]);
   assert.equal(a.kind, "awaiting_human_input");
@@ -127,6 +142,7 @@ test("adviseRun: counts populated correctly", () => {
     running: 1,
     awaiting_gate: 1,
     awaiting_human_input: 0,
+    awaiting_red: 0,
     blocked_by_red: 1,
     complete: 1,
     failed: 1,

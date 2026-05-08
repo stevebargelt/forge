@@ -31,13 +31,13 @@ function reviewTask(): Task {
   return {
     id: "t-review",
     runId: RUN_BASE.id,
-    phase: "review",
+    phase: "ui-review",
     agentRole: "",
     status: "awaiting_human_input",
     taskPackage: {
       taskId: "t-review",
       runId: RUN_BASE.id,
-      phase: "review",
+      phase: "ui-review",
       role: "",
       inputs: {},
       composedSystemPrompt: "",

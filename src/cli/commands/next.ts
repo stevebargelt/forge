@@ -30,6 +30,10 @@ export function registerNext(program: Command): void {
             console.log(`  ▢ ${t.id} (${t.phase})  →  forge submit ${t.id}`);
           }
           break;
+        case "awaiting_red":
+          console.log(`Run ${runId}: ${result.tasks.length} task(s) awaiting red verdicts. Wait for reds to finish.`);
+          for (const t of result.tasks) console.log(`  ⏵ ${t.id} (${t.phase}/${t.agentRole})`);
+          break;
         case "blocked_by_red":
           console.log(`Run ${runId}: BLOCKED by red verdicts.`);
           for (const t of result.tasks) {

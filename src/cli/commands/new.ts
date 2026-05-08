@@ -9,12 +9,13 @@ import { loadWorkflow } from "../../spine/workflows.js";
 import type { Run, Task, TaskPackage, WorkflowName } from "../../types/index.js";
 
 const VALID: WorkflowName[] = [
-  "feature-design-provided",
-  "feature-design-needed",
+  "feature",
+  "feature-ui-design-needed",
+  "feature-ui-design-provided",
   "investigation",
   "codebase-assessment",
   "ui-design",
-  "design-revise",
+  "ui-design-revise",
 ];
 
 export function registerNew(program: Command): void {
@@ -24,8 +25,8 @@ export function registerNew(program: Command): void {
     .argument("<title>", "human-readable run title (used to derive the run id)")
     .option("--question <q>", "for investigation: the framing question")
     .option("--prd <path>", "path to a PRD/spec file")
-    .option("--brief <text>", "for ui-design / design-revise: the design brief")
-    .option("--design-dir <path>", "for ui-design / design-revise: directory for the .pen file + designs/ + code/. Defaults to ~/code/<sanitized-title>/.")
+    .option("--brief <text>", "for feature / feature-ui-design-* / ui-design / ui-design-revise: the design or feature brief")
+    .option("--design-dir <path>", "for ui-design / ui-design-revise / feature-ui-design-needed: directory for the .pen file + designs/ + code/. Defaults to ~/code/<sanitized-title>/.")
     .option("--project <path>", "project directory mounted at /project on agent containers. Defaults to cwd. Subsequent forge next calls reuse this without --project.")
     .option("--meta <json>", "extra run metadata as JSON")
     .description("Create a new workflow run")
@@ -122,7 +123,11 @@ export function registerNew(program: Command): void {
 // util/paths.ts so `forge submit`'s artifact validator uses the same convention
 // the run was created with.
 function deriveDefaultDesignDir(workflow: WorkflowName, title: string): string | undefined {
-  if (workflow !== "ui-design" && workflow !== "design-revise") return undefined;
+  if (
+    workflow !== "ui-design" &&
+    workflow !== "ui-design-revise" &&
+    workflow !== "feature-ui-design-needed"
+  ) return undefined;
   const home = process.env.HOME ?? "~";
   return `${home}/code/${sanitizeTitleForFilename(title)}`;
 }

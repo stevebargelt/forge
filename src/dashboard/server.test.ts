@@ -260,12 +260,21 @@ test("POST /api/next/:runId works with no project", async () => {
 
 // ---------- /api/workflows + /api/runs (#66) ----------
 
-test("GET /api/workflows returns the schema with order, universal, workflows", async () => {
+test("GET /api/workflows returns the schema with order, groups, universal, workflows", async () => {
   const res = await get("/api/workflows");
   assert.equal(res.status, 200);
-  const data = JSON.parse(res.body) as { order: string[]; universal: unknown[]; workflows: Record<string, unknown> };
+  const data = JSON.parse(res.body) as {
+    order: string[];
+    groups: { label: string; workflows: string[] }[];
+    universal: unknown[];
+    workflows: Record<string, unknown>;
+  };
   assert.ok(Array.isArray(data.order));
   assert.ok(data.order.includes("ui-design"));
+  assert.ok(Array.isArray(data.groups));
+  assert.ok(data.groups.some((g) => g.label === "Build features"));
+  assert.ok(data.groups.some((g) => g.label === "Design UI"));
+  assert.ok(data.groups.some((g) => g.label === "Investigate or audit"));
   assert.ok(Array.isArray(data.universal));
   assert.ok(data.workflows["ui-design"]);
 });
