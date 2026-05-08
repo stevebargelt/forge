@@ -25,6 +25,7 @@ export function registerNew(program: Command): void {
     .option("--question <q>", "for investigation: the framing question")
     .option("--prd <path>", "path to a PRD/spec file")
     .option("--brief <text>", "for ui-design / design-revise: the design brief")
+    .option("--design-dir <path>", "for ui-design / design-revise: directory for the .pen file + designs/ + code/. Defaults to ~/code/<sanitized-title>/.")
     .option("--meta <json>", "extra run metadata as JSON")
     .description("Create a new workflow run")
     .action(async (workflow: string, title: string, options) => {
@@ -38,6 +39,9 @@ export function registerNew(program: Command): void {
       if (options.question) metadata.question = options.question;
       if (options.prd) metadata.prd = options.prd;
       if (options.brief) metadata.brief = options.brief;
+      const designDir =
+        (options as { designDir?: string }).designDir ?? deriveDefaultDesignDir(workflow as WorkflowName, title);
+      if (designDir) metadata.designDir = designDir;
 
       const run: Run = {
         id: runId,
@@ -60,6 +64,7 @@ export function registerNew(program: Command): void {
       if (options.question) seedInputs.question = options.question;
       if (options.prd) seedInputs.prd = options.prd;
       if (options.brief) seedInputs.brief = options.brief;
+      if (designDir) seedInputs.designDir = designDir;
 
       for (const agent of firstPhase.agents) {
         const taskId = newTaskId(firstPhase.name);
@@ -88,6 +93,21 @@ export function registerNew(program: Command): void {
       console.log(`Workflow: ${wf.name}`);
       console.log(`Title:    ${title}`);
       console.log(`First phase: ${firstPhase.name} (${firstPhase.agents.length} task(s) seeded)`);
+      if (designDir) console.log(`Design dir: ${designDir}`);
       console.log(`\nNext:\n  forge next ${runId} --project <path>`);
     });
+}
+
+// Default design-dir convention: ~/code/<sanitized-title>/. The title becomes a kebab-
+// case slug (lowercase, alphanumerics + hyphens). Only applied for design workflows;
+// other workflows don't pollute their metadata with this field.
+function deriveDefaultDesignDir(workflow: WorkflowName, title: string): string | undefined {
+  if (workflow !== "ui-design" && workflow !== "design-revise") return undefined;
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60) || "untitled";
+  const home = process.env.HOME ?? "~";
+  return `${home}/code/${slug}`;
 }

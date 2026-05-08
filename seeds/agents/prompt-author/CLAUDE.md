@@ -33,7 +33,8 @@ Your job is to take whatever inputs you have and **produce a PROMPT.md immediate
 
 Read `inputs` for everything the human passed at run creation:
 
-- `inputs.brief` — the only required field. The agent / human's design brief.
+- `inputs.brief` — the only required field. The human's design brief.
+- `inputs.designDir` — the directory where this workflow's artifacts live (e.g. `/Users/x/code/forge-stats-widget`). Set automatically by `forge new` from `--design-dir` (explicit) or a sanitized-title default. Trust this value over your own derivation.
 - `inputs.template` — which template to use (e.g. `ui-design`). If unset, infer from the workflow name.
 - `inputs.screens` — optional explicit screen list.
 - `inputs.style` — optional Pencil-style hint.
@@ -46,10 +47,12 @@ For ui-design, the defaults are:
 1. **Brief / goal** — `inputs.brief` verbatim. If that's truly empty (it shouldn't be, the workflow requires it), output `{status: "failed", error: "brief is required for ui-design"}` and stop.
 2. **Screens / sections** — derive 4-7 sensible screens from the brief. If the brief mentions "dashboard," "widget," etc., default screens cover the obvious states (empty / loaded / error / detail / etc.). Capture *what you derived* in `parameters.screens` and put a note in `openQuestions` so the human can correct via gate.
 3. **Style** — pick a reasonable Pencil style based on the brief tone. "Dense / terminal / monospace / dark" → Saturated Code Bridge. "Marketing / hero / consumer" → Soft Bento. "I don't know" → Saturated Code Bridge (forge's house style). Note your choice in `openQuestions`.
-4. **Target paths** — derive from the workflow + project name:
-   - `target_pen_file`: `~/code/<project-basename>/<workflow-name>.pen` where `<project-basename>` is the last path segment of the project. If running with `--project /Users/me/code/foo`, that's `~/code/foo/<workflow>.pen`. **Read `/project` (mounted in your container) to learn the project's actual name** — `cat /project/package.json` or `basename "$(pwd /project)"`.
-   - `output_dir`: `<project-parent>/designs/`
-   - `code_export_dir`: `<project-parent>/code/` (peer of designs, not nested)
+4. **Target paths** — derive from `inputs.designDir` (always present — `forge new` sets it). Convention is the design directory holds three siblings:
+   - `target_pen_file`: `<designDir>/<sanitized-title>.pen` where `<sanitized-title>` is the last path segment of `designDir` (already kebab-cased by `forge new`). E.g. designDir `/Users/x/code/forge-stats-widget` → pen file `/Users/x/code/forge-stats-widget/forge-stats-widget.pen`.
+   - `output_dir`: `<designDir>/designs/`
+   - `code_export_dir`: `<designDir>/code/` (peer of designs, not nested)
+   The `<designDir>` itself does NOT live inside `/project`. It's a peer directory next to the project being designed for, so design artifacts don't pollute the source tree's git status.
+   Fallback ONLY if `inputs.designDir` is somehow missing (older runs, manual DB inserts): use `~/code/<workflow-name>/` based on the workflow name. Note the fallback in `openQuestions`.
 5. **Naming convention** — `01-<screen-name>.png`, `02-<screen-name>.png`, etc. (sanitize screen names: lowercase, hyphens for spaces).
 6. **Constraints** — `inputs.constraints` if present, else empty.
 7. **Code export** — `inputs.includeCodeExport ?? true` (default ON; the export is optional at run-time and skips cleanly if Pencil's tooling doesn't support it).
