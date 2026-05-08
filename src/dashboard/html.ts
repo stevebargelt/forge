@@ -1089,6 +1089,15 @@ const CLIENT_JS = `
     } else if (!td) {
       key = renderKey(['loading', state.selectedTaskId]);
     } else {
+      // Task-chain signal for the RETRY OF / RETRIED AS breadcrumbs in the
+      // header — same-phase siblings whose parentId references this task or
+      // vice versa. Including in the key ensures the detail re-renders when
+      // a retry creates a new child, even though the underlying td.task row
+      // didn't change.
+      const allTasks = (state.runDetail && state.runDetail.tasks) || [];
+      const chainSignal = allTasks
+        .filter(t => t.id === td.task.parentId || (t.parentId === td.task.id && t.phase === td.task.phase))
+        .map(t => t.id + ':' + t.status);
       key = renderKey([
         td.task.id, td.task.status, td.task.startedAt, td.task.completedAt,
         td.task.error || null,
@@ -1096,6 +1105,7 @@ const CLIENT_JS = `
         (td.verdicts || []).map(v => ({ id: v.id, verdict: v.verdict, confidence: v.confidence, redRole: v.redRole, redTaskId: v.redTaskId, findings: v.findings })),
         (td.gates || []).map(g => ({ id: g.id, decision: g.decision, rationale: g.rationale, decidedAt: g.decidedAt })),
         td.briefContext ? { briefTaskId: td.briefContext.briefTaskId, designDir: td.briefContext.designDir, hasPrompt: !!td.briefContext.promptMarkdown, promptLen: (td.briefContext.promptMarkdown || '').length } : null,
+        chainSignal,
         state.interactive,
       ]);
     }
@@ -1328,6 +1338,17 @@ const CLIENT_JS = `
   }
   function taskHeaderSection(task) {
     const heuristicTitle = deriveTaskTitle(task);
+    // Find retry chain: parent (if this task was a retry) and children (if
+    // this task was retried). Parent = task.parentId pointing at a same-phase
+    // task. Children = other tasks in the run with parentId === task.id and
+    // same phase. Excludes onReject children (those land in a *different*
+    // phase via gate.ts) and reds (red tasks have parentId pointing to the
+    // blue but live in the same phase row — distinguish by agentRole prefix).
+    const allTasks = (state.runDetail && state.runDetail.tasks) || [];
+    const sameSamePhaseRetryParent = task.parentId
+      ? allTasks.find(t => t.id === task.parentId && t.phase === task.phase && !t.agentRole.startsWith('red-'))
+      : null;
+    const retryChildren = allTasks.filter(t => t.parentId === task.id && t.phase === task.phase && !t.agentRole.startsWith('red-'));
     return el('div', { class: 'detail-section' }, [
       el('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
         el('div', { style: 'display: flex; align-items: center; gap: 8px; min-width: 0;' }, [
@@ -1343,6 +1364,31 @@ const CLIENT_JS = `
           el('button', { class: 'copy', style: 'margin-left: 8px;', onclick: (e) => copyText(e, task.id) }, 'copy'),
         ]),
       ]),
+      sameSamePhaseRetryParent
+        ? el('div', { class: 'kv-row' }, [
+            el('span', { class: 'k' }, 'RETRY OF'),
+            el('span', { class: 'v' }, [
+              el('a', { href: '#', onclick: (e) => { e.preventDefault(); selectTask(sameSamePhaseRetryParent.id); } }, [
+                el('code', null, sameSamePhaseRetryParent.id),
+              ]),
+              ' ',
+              el('span', { style: 'color: var(--foreground-muted); font-size: 11px;' }, '(' + sameSamePhaseRetryParent.status + ')'),
+            ]),
+          ])
+        : null,
+      retryChildren.length > 0
+        ? el('div', { class: 'kv-row' }, [
+            el('span', { class: 'k' }, 'RETRIED AS'),
+            el('span', { class: 'v' }, retryChildren.flatMap((c, i) => [
+              i > 0 ? ', ' : '',
+              el('a', { href: '#', onclick: (e) => { e.preventDefault(); selectTask(c.id); } }, [
+                el('code', null, c.id),
+              ]),
+              ' ',
+              el('span', { style: 'color: var(--foreground-muted); font-size: 11px;' }, '(' + c.status + ')'),
+            ])),
+          ])
+        : null,
       el('div', { class: 'kv-row' }, [
         el('span', { class: 'k' }, 'TYPE'),
         el('span', { class: 'v' }, task.phase + ' · ' + task.agentRole),

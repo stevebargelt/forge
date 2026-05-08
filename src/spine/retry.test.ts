@@ -1,12 +1,12 @@
-// retry: resets a failed task to pending so the next forge next redispatches.
-// Scoped to failed status only.
+// retry: preserves the failed task as audit record; inserts a new pending
+// task that inherits the same phase/role/inputs and points back via parentId.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
-import { insertTask, getTask } from "../store/tasks.js";
+import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { retry } from "./retry.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -27,6 +27,8 @@ function failedTask(): Task {
     runId: RUN.id,
     phase: "frame-question",
     agentRole: "framer",
+    agentAlias: "spec-writer",
+    agentModel: "us.anthropic.claude-sonnet-4-6",
     status: "failed",
     taskPackage: {
       taskId: "t-failed",
@@ -34,7 +36,7 @@ function failedTask(): Task {
       phase: "frame-question",
       role: "framer",
       inputs: { question: "test" },
-      composedSystemPrompt: "",
+      composedSystemPrompt: "PRE-COMPOSED-PROMPT",
     },
     result: { status: "failed", error: "transient_auth_error" },
     error: "Failed to authenticate. API Error: 403 ...",
@@ -69,36 +71,73 @@ test("retry: throws on awaiting_gate", async () => {
   await assert.rejects(retry("t-failed"), /not failed/);
 });
 
-test("retry: success resets failed task to pending and clears error/startedAt/completedAt/result", async () => {
+test("retry: original task stays failed (audit record preserved)", async () => {
+  insertTask(failedTask());
+  await retry("t-failed");
+  const original = getTask("t-failed")!;
+  assert.equal(original.status, "failed");
+  assert.equal(original.error, "Failed to authenticate. API Error: 403 ...");
+  assert.deepEqual(original.result, { status: "failed", error: "transient_auth_error" });
+  assert.equal(original.startedAt, "2026-05-08T00:00:01Z");
+  assert.equal(original.completedAt, "2026-05-08T00:00:30Z");
+});
+
+test("retry: creates a new pending task with parentId pointing to the failed one", async () => {
   insertTask(failedTask());
   const out = await retry("t-failed");
-  assert.equal(out.task.status, "pending");
-  assert.equal(out.task.error, undefined);
-  assert.equal(out.task.startedAt, undefined);
-  assert.equal(out.task.completedAt, undefined);
-  assert.equal(out.task.result, undefined);
-  // Persisted in the DB
-  const refreshed = getTask("t-failed")!;
-  assert.equal(refreshed.status, "pending");
-  assert.equal(refreshed.error, undefined);
+  assert.equal(out.newTask.status, "pending");
+  assert.equal(out.newTask.parentId, "t-failed");
+  assert.notEqual(out.newTask.id, "t-failed");
+  // The new task starts fresh — no error, no startedAt, no completedAt, no result.
+  assert.equal(out.newTask.error, undefined);
+  assert.equal(out.newTask.startedAt, undefined);
+  assert.equal(out.newTask.completedAt, undefined);
+  assert.equal(out.newTask.result, undefined);
 });
 
-test("retry: idempotent semantics — retrying a pending task throws (caller should check first)", async () => {
-  // The status guard catches the second retry attempt; first one already
-  // moved task to pending, so the second sees status=pending and refuses.
-  // This is intentional — retry only resets failed tasks; treating
-  // already-pending as a noop would mask bugs.
+test("retry: new task inherits phase, role, agent metadata, and inputs", async () => {
   insertTask(failedTask());
-  await retry("t-failed");
-  await assert.rejects(retry("t-failed"), /not failed/);
+  const out = await retry("t-failed");
+  assert.equal(out.newTask.phase, "frame-question");
+  assert.equal(out.newTask.runId, RUN.id);
+  assert.equal(out.newTask.agentRole, "framer");
+  assert.equal(out.newTask.agentAlias, "spec-writer");
+  assert.equal(out.newTask.agentModel, "us.anthropic.claude-sonnet-4-6");
+  assert.deepEqual(out.newTask.taskPackage.inputs, { question: "test" });
 });
 
-test("retry: does not change phase, runId, agentRole, or taskPackage", async () => {
+test("retry: new task gets a fresh composedSystemPrompt slot (re-composed at dispatch)", async () => {
+  insertTask(failedTask());
+  const out = await retry("t-failed");
+  // The original had a non-empty composedSystemPrompt; the retry should have
+  // an empty one so dispatch re-composes against the current workflow + agent
+  // state (constraints may have changed since the original spawn).
+  assert.equal(out.newTask.taskPackage.composedSystemPrompt, "");
+});
+
+test("retry: cascading retries form a walkable chain via parentId", async () => {
+  // Original fails. First retry creates A'. A' fails. Second retry creates A''.
+  // Chain: A → A' → A''.
+  insertTask(failedTask());
+  const r1 = await retry("t-failed");
+  // Simulate A' failing too — retry() already inserted it as `pending`; flip
+  // it to `failed` directly so retry() can run again.
+  db.prepare(`UPDATE tasks SET status='failed', error='second failure' WHERE id=?`).run(r1.newTask.id);
+
+  const r2 = await retry(r1.newTask.id);
+  assert.equal(r2.newTask.parentId, r1.newTask.id);
+  // Walk the chain: r2 → r1 → t-failed
+  const r1Refreshed = getTask(r1.newTask.id)!;
+  assert.equal(r1Refreshed.parentId, "t-failed");
+});
+
+test("retry: all rows persist; tasksForRun returns the chain", async () => {
   insertTask(failedTask());
   await retry("t-failed");
-  const refreshed = getTask("t-failed")!;
-  assert.equal(refreshed.phase, "frame-question");
-  assert.equal(refreshed.runId, RUN.id);
-  assert.equal(refreshed.agentRole, "framer");
-  assert.deepEqual(refreshed.taskPackage.inputs, { question: "test" });
+  const all = tasksForRun(RUN.id);
+  assert.equal(all.length, 2);
+  const failed = all.find((t) => t.status === "failed")!;
+  const pending = all.find((t) => t.status === "pending")!;
+  assert.equal(failed.id, "t-failed");
+  assert.equal(pending.parentId, "t-failed");
 });

@@ -121,6 +121,23 @@ Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-desig
 ### #72 — Dashboard: smart-refresh — DONE this session
 Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild when their underlying data + selection state hasn't changed.
 
+### #79 — Dashboard creds-mode parity: arm bedrock automatically + pre-flight check
+**Why:** Caught 2026-05-08 mid-phase-flow run. `forge new` from the dashboard runs as a child of the dashboard process; the dashboard inherits the env it was forked with. If the user *didn't* `. ./scripts/use-bedrock.sh` before launching the dashboard, every run created from the modal is broken — agent containers start without AWS creds and fail Bedrock auth ~3 minutes in with a 403. CLI runs are fine because the user happens to source bedrock at the prompt; dashboard runs are silently broken with no way to arm bedrock from the modal.
+**Symptom Steven hit:** task-brief-6cc6ca failed twice in a row with `403 The security token included in the request is expired`. Host AWS creds were valid; the dashboard process simply didn't have the bedrock env vars. Workaround: kill the dashboard, source use-bedrock.sh, relaunch the dashboard. Untenable.
+
+**Two-part fix (real, not workaround):**
+
+**Part A — auto-arm bedrock when AWS is configured.** Dashboard (and `forge` CLI more broadly) detects "this machine has AWS bedrock-style configuration" — heuristic: `~/.aws/config` exists AND the `AWS_PROFILE` env var is set OR a `default` profile exists with `sso_session` configured. When that's true, dashboard treats bedrock as the default mode regardless of whether `CLAUDE_CODE_USE_BEDROCK=1` was set in the launching shell. Effectively: if you have AWS configured for bedrock, you don't need to remember to source the script.
+- Implementation lives in `util/creds.ts`. `detectCredsMode()` becomes a smarter detector. `CLAUDE_CODE_USE_BEDROCK=1` stays as a hard override (force on); `CLAUDE_CODE_USE_BEDROCK=0` stays as a hard override (force off). Otherwise auto-detect.
+- Dashboard processes also need to launch the SSO watchdog if they detect bedrock — today the watchdog only starts via the run-time spawn flow. Auto-armed dashboard should kick off the watchdog the moment the first bedrock run is created, just like the CLI does.
+
+**Part B — pre-flight check at run-creation.** When `forge new` resolves a Bedrock model id but `~/.aws/sso/cache/*.json` is empty or stale (token expired), refuse to create the run with a clear error: "Bedrock mode active but no valid SSO token; run `aws sso login --profile <name>` and try again." This surfaces the failure mode before spawning a doomed container 3 minutes later. Lives in `cli/commands/new.ts` between `loadWorkflow` and `insertRun`.
+- Same check should happen at the modal POST handler — surface as a structured error to the dashboard so the toast says something actionable instead of "forge new exited 1."
+
+**Combined effect:** if AWS is configured, bedrock works from the dashboard without ceremony. If AWS *isn't* configured (token expired, profile missing), the failure is surfaced at run-creation time with a clear remediation path instead of failing 3 minutes into the agent's first API call.
+
+**Out of scope but worth noting:** picking creds-mode from the modal (option B from the discussion) is friction every time and not what we want. Auto-detect + pre-flight is the right shape.
+
 ### #78 — `forge retry` + dashboard retry button — DONE this session
 Closed in Done (recent) below. CLI command, server endpoint, dashboard button. Scoped to failed tasks only; rerun-on-complete deferred (different semantics; user wants different result from same inputs — needs design).
 
@@ -355,15 +372,19 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 
 ## Done (recent)
 
-### #78 — `forge retry` + dashboard retry button
-**Closed:** 2026-05-08 evening, on branch `phase-flow-71` (213 tests passing, +10 new).
-- New `src/spine/retry.ts`: `retry(taskId)` resets a failed task to pending (clears error/startedAt/completedAt/result). Status guard: only operates on `failed`. Logs `task.retried` event with the previous error preserved for audit.
-- New CLI: `forge retry <task-id>`. Modeled on advise/submit. Prints next-action hint.
+### #78 — `forge retry` + dashboard retry button (insert-new shape, audit-preserving)
+**Closed:** 2026-05-08 evening, on branch `phase-flow-71` (216 tests passing, +13 new).
+- **Audit-preserving shape (Steven's call mid-implementation):** retry doesn't mutate the failed task in place — it creates a *new* task row with a fresh id, same phase/role/inputs/agentAlias/agentModel, `parentId` pointing at the failed one, status `pending`. The original stays `failed` forever as the audit record. Mirrors `request-changes` semantics in gate.ts. Cascading retries form a walkable chain via parentId.
+- New `src/spine/retry.ts`: `retry(taskId)` returns `{task, newTask}`. Status guard: only operates on `failed`. Logs `task.retried` event with `newTaskId` + `previousError` for audit.
+- New CLI: `forge retry <task-id>`. Prints both ids (failed + new pending).
 - New POST endpoint `/api/retry/:taskId` shells out to `bin/forge retry` per FORGE-DEC-015. CSRF + interactive gates apply.
-- Dashboard: failed tasks now show an alert banner with the error + a "↻ Retry task" button in a new section above the inputs. Click → POST /api/retry → redispatch on next forge-next.
-- 10 new tests across spine + server.
-**Caught:** 2026-05-08 — `task-brief-6cc6ca` failed with a transient AWS STS expiry mid-spawn. Recovery was a manual SQL update; should have been a button. Now it is.
-**Out-of-scope:** rerun-on-complete (different semantics — user wants a different result from the same inputs; needs design before implementing).
+- Dashboard:
+  - Failed tasks show an alert banner with the error + a "↻ Retry task" button in a new section above the inputs.
+  - `taskHeaderSection` renders `RETRY OF <id>` (when current task has a same-phase non-red parent) and `RETRIED AS <id>, ...` (when same-phase non-red children exist with this task's id as parentId). Clickable — selectTask navigates the chain.
+  - Smart-refresh detail key includes a "chain signal" (parent + child statuses) so retry-creating-a-new-row triggers a re-render even though `td.task` itself didn't change.
+- 13 new tests across spine + server. Spine tests cover: original-stays-failed, new-pending-with-parentId, inheritance of phase/role/inputs/model, fresh composedSystemPrompt slot, cascading chain, both rows persist.
+**Caught:** 2026-05-08 — `task-brief-6cc6ca` failed with AWS auth expiry. First fix was mutate-in-place; mid-review Steven called out that audit history should be preserved. Insert-new is the right shape.
+**Out-of-scope:** rerun-on-complete (different semantics — user wants a different result from same inputs; needs design before implementing).
 
 ### #70 — Workflow rename refactor + composed feature-ui-design-needed + awaiting_red status
 **Closed:** 2026-05-08 evening, on branch `workflow-rename-70` (203 tests passing).

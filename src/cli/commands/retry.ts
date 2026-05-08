@@ -10,8 +10,8 @@ export function registerRetry(program: Command): void {
     .action(async (taskId: string) => {
       ensureForgeDirs();
       const out = await retry(taskId);
-      console.log(`Reset: ${taskId}`);
-      console.log(`  status: ${out.task.status}`);
-      console.log(`\nNext:\n  forge next ${out.task.runId}`);
+      console.log(`Retried ${taskId} (kept as failed for audit)`);
+      console.log(`  new task: ${out.newTask.id} (pending)`);
+      console.log(`\nNext:\n  forge next ${out.newTask.runId}`);
     });
 }
