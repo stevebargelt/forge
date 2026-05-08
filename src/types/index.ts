@@ -120,6 +120,7 @@ export type TaskStatus =
   | "running"
   | "awaiting_gate"
   | "awaiting_human_input"
+  | "awaiting_red"
   | "complete"
   | "failed"
   | "blocked_by_red";

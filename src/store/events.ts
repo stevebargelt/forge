@@ -11,6 +11,7 @@ export type EventType =
   | "task.crashed"
   | "task.idle_timeout"
   | "task.blocked_by_red"
+  | "task.awaiting_red"
   | "task.submitted"
   | "verdict.received"
   | "gate.decided";
