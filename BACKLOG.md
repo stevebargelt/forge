@@ -6,14 +6,30 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-End of 2026-05-07 session. Four prior backlog items closed (#26, #29, #30 + blue follow-up, partial #25). New cred architecture (FORGE-DEC-013) shipped: SSO watchdog detached + PID-tracked, bedrock containers mount `~/.aws` + use `AWS_PROFILE` instead of snapshotted STS env vars. Validated end-to-end against an 89K-LOC ObjC iOS codebase via a real `codebase-assessment` run that produced a 22.5KB code review report.
+**End of 2026-05-07 (late). Big architectural pivot on #46 — see FORGE-DEC-014.**
+
+The full day was spent trying to put a designer agent in a container, driving Pencil headlessly. **It can't be done in Pencil 0.2.5.** Three independent dead-ends, each confirmed empirically:
+
+1. `pencil --prompt` spawns an inner Claude that asks for permission and stalls in containers (no way to skip).
+2. `pencil interactive`'s `save()` is a no-op — Pencil has no auto-save and no programmatic save (https://docs.pencil.dev/troubleshooting). The .pen file only persists when the human presses Cmd+S in VS Code.
+3. Pencil's MCP server binary requires `--app <name>` pointing at a running Pencil GUI app; there's no such app in our container.
+
+**Pivot: forge becomes a prompt-author for design, not a designer.** A new `prompt-author` agent (running in a normal forge container) interrogates the human and produces a `PROMPT.md` containing all the workflow rules we discovered. The human runs that PROMPT.md in their host's Claude Code with VS Code as the editor host. Pencil works perfectly there — produced 5 coherent screens with full design system in the validation runs at `~/code/forge-design/designs/`.
+
+**Validation:** `~/code/forge-design/dashboard.pen` (not committed; in-VS-Code) plus the 5 PNG exports represent a real Lunaris-styled forge dashboard mockup. Quality is high enough to drive the dashboard rebuild (#34/#35/#48) directly.
+
+**Architectural consequences:**
+- Container-based designer code is now dead (the `agent-designer-worker` image, `designer` + `designer-export` seeds, `AgentRef.image` plumbing). Tracked as #58 (cleanup).
+- The `ui-design` and `design-revise` workflows need a complete rewrite — no agent-led design phase, just `brief` (prompt-author, gate=human) + `review` (gate=human, captures artifact paths). Tracked as #54 + #55.
+- The `prompt-author` primitive is reusable beyond design (marketing copy, code review prompts, architecture briefs). Tracked as #53.
 
 **Suggested next-session priorities (top of Active list, in this order):**
-1. **#41** auto-gate-on-terminal-phase — small bug, surfaced when reporter completed but run stayed `active` until next `forge next`. Low-friction fix, high-value cleanup.
-2. **#40** batch-gate command — daily friction reducer; fanouts of 8 tasks need 8 separate gate commands today.
-3. **#36** persist project_dir on runs — small, prereq for #35.
-4. **#37** `forge advise` — small, gives users (and dashboard #35) one place to ask "what's next?"
-5. Then any of the dashboard work (#34/#35) when there's a focused chunk of time.
+1. **#53** Build the `prompt-author` agent seed + ui-design PROMPT.md template. The keystone of the new architecture. Validates everything FORGE-DEC-014 says.
+2. **#54** Rewrite `ui-design` workflow to the new shape. Small, depends on #53.
+3. **#56** Run a *second* Pencil pass to fill design gaps (run-next button, new-run flow, blocked_by_red variant, human-led-design dashboard screens). Cheap (~30 min in Pencil) and unblocks dashboard implementation.
+4. **#57** Start interactive dashboard implementation against the now-complete design spec. Depends on #56.
+5. **#58** Tear down container designer code in a clean cleanup commit.
+6. Returning daily-friction items for any spare time: **#41** (auto-gate-on-terminal-phase), **#40** (batch-gate), **#36** (persist project_dir).
 
 **Validation still pending:**
 - #32 (failed-result detection) — code shipped, didn't fire this run because the framer succeeded on retry. Wait for it to catch a real failure or contrive one.
@@ -21,27 +37,120 @@ End of 2026-05-07 session. Four prior backlog items closed (#26, #29, #30 + blue
 
 **Watchdog status:** the SSO watchdog ran cleanly during the validation run, persisted across multiple `forge next` invocations, stopped on run completion. The "no manual kill needed" goal is met.
 
+**Work-in-progress branch:** all #46 commits live on `designer-agent-46` (12 commits ahead of main as of 2026-05-07). Don't merge as-is — most become obsolete with #58. The few worth keeping (cherry-picks for main):
+- `58480ec` "Improve Next: hints in CLI: include --project, copy-friendly layout" — pure CLI UX, no designer dependency
+- `099d54e` "forge next: surface awaiting_gate / blocked_by_red after dispatch" — real bug fix, not designer-specific
+- `b5d2acf` "Switch agent stdout to stream-json so the idle watchdog tracks live progress" — applies to all agents
+- `9e8d466` "Disable idle watchdog for designer image; emit partial-message stream-json" — keep `--include-partial-messages`, drop the designer-specific `pickIdleTimeoutMs` once #58 lands
+The rest (designer Dockerfile, designer seeds, MCP-server wiring, --custom flag instructions, etc.) all die with #58.
+
 ## In progress
 
-### #46 — Designer agent + Pencil integration + ui-design workflow
-**Status:** v1 code shipped; awaiting live end-to-end run (the dashboard-redesign test).
-**What's in:**
-- `seeds/agents/designer/` + `seeds/agents/designer-export/` seeds.
-- `seeds/agents/designer/skills/pencil-design/SKILL.md` (the Claude skill, baked into the designer image).
-- `docker/agent-designer-worker.Dockerfile` + `docker/build-designer.sh` (FROM agent-dev-worker, adds Pencil CLI + skill).
-- `src/types/index.ts`: `AgentRef.image` optional override; `WorkflowName` adds `ui-design` + `design-revise`.
-- `src/spine/spawn.ts`: forwards `PENCIL_CLI_KEY` to the designer image only (3 unit tests).
-- `src/cli/commands/new.ts`: `--brief` option + workflow name list updated.
-- `src/workflows/ui-design.ts` + `src/workflows/design-revise.ts`. Single-task design phases (no fanout) — coherence comes from `pencil --in <prior>.pen` chaining within one task.
-- **stream-json output mode for ALL agents** (not designer-specific). Surfaced when designer's first run hit the 5-min idle timeout: `claude --output-format json --print` buffers everything until the agent finishes — silent stdout for the entire run. With `--output-format stream-json --verbose --print`, Claude emits NDJSON in real time (system init, status, tool use, assistant text, then the final result envelope as the last line). The watchdog now sees continuous progress and only fires when the agent is genuinely stuck. The result envelope shape is unchanged, so `_readResultJson` works as-is; 4 new tests cover the NDJSON shape.
-**What's not in (deferred):**
-- Optional design phase on `feature-design-needed` (was task 10; deferred to its own follow-up after ui-design lands).
-- Live run + screenshots — staged as the dashboard-redesign test.
-**Test plan:** `forge new ui-design --project /Users/steven.bargelt/code/forge --brief "..."` redesigning the forge dashboard. 5 screens, single task in `design` phase, soft style constraints in brief.
+### #46 — Designer agent + Pencil integration + ui-design workflow (SUPERSEDED by FORGE-DEC-014)
+**Status:** Container-based v1 abandoned. Architectural pivot decided 2026-05-07. See [FORGE-DEC-014](learnings/decisions/2026-05-07_host-led-pencil-design.md). Replaced by **#53** (prompt-author seed) + **#54** (ui-design rewrite) + **#55** (design-revise rewrite) + **#58** (cleanup of container designer code).
+**Why the pivot:** Pencil 0.2.5 has no headless save mechanism. `pencil --prompt` stalls on inner-Claude permissions; `pencil interactive --save()` writes 0 bytes; Pencil's MCP server requires a GUI app. The .pen file only persists when the human presses Cmd+S in VS Code. The new model has forge author the prompt and the human run it on the host, where Pencil works correctly.
+**What survived (good for cherry-pick to main):**
+- `--include-partial-messages` + `--output-format stream-json --verbose` in `spawn.ts` — keeps stdout flowing during long thinking turns. Belongs to all agents, not just designer.
+- Idle watchdog opt-out via `pickIdleTimeoutMs(image, ...)` — useful pattern even outside designer (some long-running phase might want it later).
+- CLI `Next:` hint improvements (`forge next` / `forge gate` / `forge new` printing the next command on its own line with `--project`).
+- The reflection that **forge needs to surface awaiting_gate after dispatch when phases land in awaiting_gate immediately** (was a real bug, fixed).
+**What dies (cleanup #58):**
+- `docker/agent-designer-worker.Dockerfile`, `docker/build-designer.sh`
+- `seeds/agents/designer/`, `seeds/agents/designer-export/`
+- `AgentRef.image` plumbing in `spawn.ts` and dispatch.ts (only used by designer)
+- `PENCIL_CLI_KEY` forwarding for the designer image
+- `src/workflows/ui-design.ts` and `src/workflows/design-revise.ts` (rewritten under #54/#55)
 
 ## Active
 
-### #25 — Validate reject + onReject flow end-to-end
+### #53 — `prompt-author` agent seed + ui-design PROMPT.md template
+**Why:** Per FORGE-DEC-014, forge's role in design becomes "author the prompt, the human runs it." The `prompt-author` agent is a generic prompt-elicitation primitive: interview the human about brief / screens / style / paths / constraints, fill the right template, output a `PROMPT.md` file path. ui-design is the first consumer; future consumers (marketing-copy, code-review, architecture-review) will use the same primitive with different templates.
+**How to apply:**
+- New seed: `seeds/agents/prompt-author/CLAUDE.md`. Interview structure: brief / screens (or sections) / style guidance / target paths / constraints / known gotchas. Output schema: `{status, promptPath: "...", brief, screens?, notes}`.
+- New seed: `seeds/agents/prompt-author/templates/ui-design.md` — parameterized PROMPT.md. Variables: `{{target_pen_file}}`, `{{output_dir}}`, `{{screens_list}}`, `{{style_guidance}}`, `{{brief}}`, `{{file_naming}}`. Encodes: touch precondition, open_document + verify, filePath everywhere, find_empty_space_on_canvas, export+rename, loud Cmd+S warning, stat-verification step.
+- A drafted, validated version lives at `~/code/forge-design/PROMPT.md` — use as the canonical reference when authoring the template.
+- The agent runs in `agent-dev-worker` (no special image). Standard blue-agent shape.
+Validated empirically tonight: this exact prompt produced a complete dashboard design in `~/code/forge-design/`.
+
+### #54 — Rewrite `ui-design` workflow for the new architecture
+**Why:** The current `src/workflows/ui-design.ts` (commit `d560b7b`) has phases (discover / design / export) that assume an agent-led design phase. Per FORGE-DEC-014 there is no agent-led design — only an agent-led brief + a human-led design. Workflow shape must change.
+**How to apply:** Replace existing phases with:
+- `brief` — agent: `prompt-author`, gate: `human`. Output: `{promptPath, brief, screens, notes}`. Human reviews the prompt + gates advance (or request-changes if the prompt isn't right).
+- `review` — agent: none (manual phase, gate: `human`). The human runs PROMPT.md outside forge, comes back, gates advance with rationale that includes the artifact paths (`{penFile, pngFiles}`). Forge stores in gate.rationale; dashboard reads from there for #57.
+- (Optionally a `code-export` phase later if HTML+Tailwind generation is wanted — but defer until someone actually needs it.)
+Depends on: #53.
+
+### #55 — Rewrite `design-revise` workflow for the new architecture
+**Why:** Same pivot as #54 but for the iteration case. Input is a previously-saved `.pen` file plus a revision brief.
+**How to apply:** Phases:
+- `brief` — agent: `prompt-author` with the `ui-design-revise` template. Reads the prior `.pen` file path from inputs; produces a PROMPT.md that opens it via `--in` and applies the requested changes. Verifies the prior `.pen` is non-zero before generating (hard error if 0 — design source was lost).
+- `review` — same as #54.
+Depends on: #53.
+
+### #56 — Second Pencil pass: design the missing screens
+**Why:** The first dashboard design pass (tonight, in `~/code/forge-design/`) covered ~85% of the interactive surface. Five gaps remain:
+1. **Run-row "Run next" button + run-level actions** (cancel, abandon, archive)
+2. **`forge new` flow** (modal or sidebar palette for kicking off a workflow)
+3. **`blocked_by_red` task detail variant** with "Force advance + rationale" override
+4. **Human-led design phase screens** for the `ui-design` workflow itself: handoff view (PROMPT.md inline + Cmd+S reminder + "I've completed this" gate), review view (PNG gallery + Approve/Revise gate), complete view (read-only summary)
+5. **`prompt-author` interview screen** — what the brief-author looks like in the dashboard (one or two human-facing question cards + answer area)
+
+**How to apply:** Run the prompt-author flow (or just hand-write a focused PROMPT.md for now) targeting these 5 screens against the existing `~/code/forge-design/dashboard.pen`. The existing design system + components + Lunaris palette are already there — use `--in` to chain. Add the new screens on the canvas alongside the existing ones.
+**Sequence:** Do this BEFORE #57. The chicken-egg problem (design → discover gaps → revise design → rebuild) is much cheaper paid in Pencil time than in TypeScript+CSS rework.
+
+### #57 — Interactive dashboard v1 (gate buttons, run-next, design review)
+**Why:** Today the dashboard is read-only. All driving still happens in CLI. Per dashboard-rebuild plan (#34/#35) and FORGE-DEC-014, the dashboard should be the primary UX. The design from #56 is the spec.
+**How to apply:** Build against the screens from #56. Concrete pieces:
+- POST endpoints in `src/dashboard/server.ts` for `/api/gate/<task>` (advance/reject/request-changes + rationale) and `/api/next/<run>` (shells out to `forge gate` and `forge next` CLI subprocesses — does NOT reimplement spawn/gate logic).
+- Frontend: gate-decision UI matches the awaiting-gate detail screen design (Y1qtm.png from tonight). Localhost-only is the security model; document it in the dashboard server file.
+- CSRF mitigation: require a small custom header on all mutating endpoints (e.g. `X-Forge-Request: 1`) so plain HTML form POSTs from other localhost contexts can't reach forge.
+- Render PNGs from gate.rationale paths for design tasks (refines #48).
+- "Run next" button on the run row (matches design from #56 gap #1).
+
+Depends on: #56 (designs), #54 (ui-design rewrite for the design-task review screens to have something to review).
+Replaces / refines / overlaps: #34 (human-readable result view), #35 (gate buttons + run-next + what's-next surfacing), #48 (design review). When #57 ships, those three become "done" by absorption.
+
+### #58 — Tear down container-designer code (cleanup)
+**Why:** Per FORGE-DEC-014, the container-based designer is dead. Several hundred LOC + image build infrastructure exists for it on `designer-agent-46` branch and shouldn't merge to main as-is.
+**How to apply:** When #53/#54/#55 are in place, delete in one cleanup commit:
+- `docker/agent-designer-worker.Dockerfile`
+- `docker/build-designer.sh` (and the `designer-skills/` pattern in `.dockerignore`)
+- `seeds/agents/designer/` (entire dir, including `skills/pencil-design/SKILL.md`)
+- `seeds/agents/designer-export/` (entire dir)
+- `AgentRef.image` field on the type + plumbing through `dispatch.ts`, `spawnRed.ts`, `_agentRefs.ts`, `spawn.ts`. The image-override unit test in `spawn.test.ts` goes too.
+- The `PENCIL_CLI_KEY` env-var forwarding in `spawn.ts` (designer-image-conditional). Goes with the AgentRef.image cleanup.
+- The `image` arg in `_buildDockerArgs` test fixture — simplify back to a single `agent-dev-worker` default.
+**Keep:** `--include-partial-messages` and `pickIdleTimeoutMs(image, explicit)` if it's general — but `pickIdleTimeoutMs` was only special-cased for designer; once designer is gone, the function can simplify back to `resolveIdleTimeoutMs`. Decide at delete time.
+**Test plan:** `npm run typecheck && npm test` must stay green. The cleanup is mechanical — no behavior change for any non-designer agent.
+
+### #59 — Track Pencil release notes for auto-save shipping
+**Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
+**How to apply:** Periodically run `npm view @pencil.dev/cli version` and check the changelog. When auto-save lands:
+- Update the prompt-author template to drop the loud Cmd+S warning + the stat-verification step.
+- Test that the .pen file persists without human Cmd+S in a real run.
+- Update FORGE-DEC-014 with a "Revisited" note pointing at the simpler flow.
+Lightweight: probably one check every couple of months unless we hear about it sooner.
+
+### #60 — Use `pass` for host-side secret storage (was previously #47, kept here as it now applies to PROMPT.md design output)
+**Why:** Same as the original #47 — secrets like `PENCIL_CLI_KEY` shouldn't sit in a `.env` file forever. With FORGE-DEC-014 the consumer of `PENCIL_CLI_KEY` moves *out* of forge entirely (it's used by the human's host-side Claude Code, not by a forge container). But forge still touches host-side env in `forge auth` and possibly in future host-side tools. Keeping the entry but renumbered to reflect the architectural pivot.
+**How to apply:** When forge needs another host-side secret (e.g., for a future GitHub or Slack integration), build the `pass` wrapper then. Until then, this is dormant.
+**Status of original #47:** content unchanged but no longer about PENCIL_CLI_KEY-in-container — it's about whatever host-side secrets forge accumulates next.
+
+### #61 — Electron shell investigation (deferred)
+**Why:** The dashboard is becoming forge's primary UX (see #57 + FORGE-DEC-014). At some point it should be a native app, not a localhost browser tab. Native menus, native shortcuts, OS notifications, no "is this exposed to the network?" question, no CORS dance.
+**How to apply (when):** Don't rebuild the dashboard in Electron from scratch — wrap the existing thing. Once #57 ships and the SPA is mature:
+- `BrowserWindow` loads `localhost:port` (or the bundled SPA HTML)
+- Add native chrome (menubar, Cmd+G, Cmd+N, status indicator)
+- Distribution is a separate problem (signing, auto-updater) — defer until forge has external users
+**Revisit conditions:** the dashboard is doing 80%+ of forge's interaction surface, OR you want notifications/menubar/global shortcuts, OR you want to ship forge to anyone else. Until then, browser tab is fine.
+Stays here so it's not forgotten.
+
+### #62 — Design-task vs awaiting-gate: distinct gate-button copy
+**Why:** Gate semantics differ between "agent did the work, you approve" and "human did the work, you confirm completion." The dashboard should reflect this distinction in button copy: agent-led phases say "Approve / Send back / Reject"; human-led phases (the `review` phase of ui-design / design-revise after the human ran PROMPT.md) say "I've done the work / I need to pause / I've decided not to do this." Same gate primitive, different verbs.
+**How to apply:** Phase definition or task metadata indicates "human-led" vs "agent-led"; dashboard renders gate-button copy accordingly. Small but worth getting right early — it shapes how users mentally model the gate.
+Belongs in #57's first cut.
+
+
 **Why:** `onReject` is documented but no workflow uses it. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. Until a workflow uses it, we're trusting the unit tests.
 **How to apply:** When writing a new workflow that needs branching on rejection (a natural fit for #42's how-to rewrite), exercise the path in a real run. Verify `inputs.rejectedRationale` and `inputs.rejectedTaskId` arrive at the remediation phase's tasks.
 
