@@ -1130,11 +1130,18 @@ const CLIENT_JS = `
     const isBlockedByRed = task.status === 'blocked_by_red';
     const isAwaitingGate = task.status === 'awaiting_gate';
     const isAwaitingHuman = task.status === 'awaiting_human_input';
+    const isFailed = task.status === 'failed';
 
     if (isBlockedByRed) {
       detail.appendChild(el('div', { class: 'alert-banner' }, [
         el('strong', null, '🚫 BLOCKED BY RED — '),
         el('span', null, 'An authoritative red verdict failed. Force-advance requires explicit rationale.'),
+      ]));
+    }
+    if (isFailed) {
+      detail.appendChild(el('div', { class: 'alert-banner' }, [
+        el('strong', null, '☠ FAILED — '),
+        el('span', null, task.error || 'Task failed; see error below.'),
       ]));
     }
     detail.appendChild(el('div', { class: 'pane-header' }, [
@@ -1146,6 +1153,9 @@ const CLIENT_JS = `
     const body = el('div', { class: 'pane-body no-pad' });
 
     body.appendChild(taskHeaderSection(task));
+    if (isFailed) {
+      body.appendChild(retryActionsSection(task));
+    }
     if (isAwaitingHuman) {
       body.appendChild(submitActionsSection(task, briefContext));
     }
@@ -1203,6 +1213,25 @@ const CLIENT_JS = `
   // Manual-phase task awaiting the human's off-forge work (FORGE-DEC-016).
   // Renders the upstream brief's PROMPT.md inline + parameters/openQuestions
   // + a primary "I'm done — review my design" button that POSTs to /api/submit.
+  // Retry section for failed tasks. Resets to pending; next forge-next (or
+  // the dashboard "Run next" button) redispatches. Read-only fallback shows
+  // the CLI command + copy.
+  function retryActionsSection(task) {
+    const sec = el('div', { class: 'detail-section' });
+    sec.appendChild(el('div', { style: 'font-size: 12px; color: var(--foreground-secondary); margin-bottom: var(--space-sm);' },
+      'This task failed. Retry resets it to pending so the next dispatch starts fresh. The error is preserved on the events table for audit.'));
+    if (!state.interactive) {
+      sec.appendChild(el('div', { class: 'cli-block' }, [
+        el('span', null, 'forge retry ' + task.id),
+        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge retry ' + task.id) }, 'copy'),
+      ]));
+      return sec;
+    }
+    sec.appendChild(el('div', { class: 'gate-actions' }, [
+      el('button', { class: 'btn btn-warning', onclick: () => doRetry(task.id) }, '↻ Retry task'),
+    ]));
+    return sec;
+  }
   function submitActionsSection(task, briefContext) {
     const sec = el('div', { class: 'detail-section' });
     sec.appendChild(el('div', { class: 'alert-banner', style: 'background: transparent; border: 1px solid var(--border);' }, [
@@ -1622,6 +1651,15 @@ const CLIENT_JS = `
       await refreshAll();
     } catch (e) {
       toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
+    }
+  }
+  async function doRetry(taskId) {
+    try {
+      await fetchJSON('/api/retry/' + encodeURIComponent(taskId), { method: 'POST', body: {} });
+      toast('Task reset; click Run next to redispatch.', 'success');
+      await refreshAll();
+    } catch (e) {
+      toast('Retry failed: ' + (e.message || 'unknown error'), 'error');
     }
   }
   async function doSubmit(taskId) {

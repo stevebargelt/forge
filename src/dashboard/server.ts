@@ -142,6 +142,8 @@ function handlePost(path: string, req: IncomingMessage, res: ServerResponse): vo
     if (nextMatch) return handleNext(nextMatch[1]!, body, res);
     const submitMatch = path.match(/^\/api\/submit\/([^/]+)$/);
     if (submitMatch) return handleSubmit(submitMatch[1]!, body, res);
+    const retryMatch = path.match(/^\/api\/retry\/([^/]+)$/);
+    if (retryMatch) return handleRetry(retryMatch[1]!, res);
     if (path === "/api/runs") return handleNewRun(body, res);
 
     res.writeHead(404, { "Content-Type": "application/json" })
@@ -196,6 +198,12 @@ async function handleNext(runId: string, body: Record<string, unknown>, res: Ser
   const out = await invokeForge(args);
   if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge next exited ${out.exitCode}`);
   jsonOk(res, { runId, summary: tail(out.stdout) });
+}
+
+async function handleRetry(taskId: string, res: ServerResponse): Promise<void> {
+  const out = await invokeForge(["retry", taskId]);
+  if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge retry exited ${out.exitCode}`);
+  jsonOk(res, { taskId, summary: tail(out.stdout) });
 }
 
 async function handleSubmit(taskId: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {

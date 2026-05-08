@@ -258,6 +258,58 @@ test("POST /api/next/:runId works with no project", async () => {
   }
 });
 
+// ---------- /api/retry ----------
+
+test("POST /api/retry/:taskId without X-Forge-Request → 403", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  try {
+    const res = await post("/api/retry/task-x", {}, { withHeader: false });
+    assert.equal(res.status, 403);
+  } finally {
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/retry/:taskId returns 503 when not interactive", async () => {
+  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  const res = await post("/api/retry/task-x", {});
+  assert.equal(res.status, 503);
+});
+
+test("POST /api/retry/:taskId shells out to `forge retry <id>`", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  let capturedArgs: string[] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    capturedArgs = args;
+    return { exitCode: 0, stdout: "Reset: task-x\n  status: pending\n", stderr: "" };
+  });
+  try {
+    const res = await post("/api/retry/task-x", {});
+    assert.equal(res.status, 200);
+    assert.deepEqual(capturedArgs, ["retry", "task-x"]);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
+test("POST /api/retry surfaces non-zero exit as 500 with stderr", async () => {
+  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
+  _setRunForgeOverrideForTest(async () => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: "Task task-x is in status 'complete', not failed.",
+  }));
+  try {
+    const res = await post("/api/retry/task-x", {});
+    assert.equal(res.status, 500);
+    assert.match(res.body, /not failed/);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+  }
+});
+
 // ---------- /api/workflows + /api/runs (#66) ----------
 
 test("GET /api/workflows returns the schema with order, groups, universal, workflows", async () => {

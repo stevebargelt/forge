@@ -121,6 +121,23 @@ Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-desig
 ### #72 — Dashboard: smart-refresh — DONE this session
 Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild when their underlying data + selection state hasn't changed.
 
+### #78 — `forge retry` + dashboard retry button — DONE this session
+Closed in Done (recent) below. CLI command, server endpoint, dashboard button. Scoped to failed tasks only; rerun-on-complete deferred (different semantics; user wants different result from same inputs — needs design).
+
+### #76 — Elapsed time goes stale between polls (smart-refresh side-effect)
+**Why:** #72's render-key skips renders when underlying task data doesn't change. ELAPSED is derived from `task.startedAt` + now() — only the wall clock changes every second, not the task data, so the skip kicks in and the displayed elapsed value freezes until something else triggers a render. Caught 2026-05-08 mid-phase-flow run.
+**How to apply:** Don't defeat smart-refresh by forcing renders every N polls. Instead update *only* the elapsed cells via a separate `setInterval(updateElapsedCells, 1000)`. Tag each elapsed cell at render with `data-elapsed-task-id` + `data-started-at`; the interval walks those elements and rewrites text only — no DOM identity churn, polling stays smart. ~15 lines. Same pattern works for any future "ticks every second regardless of data" cell (countdowns, freshness indicators, etc).
+
+### #77 — Evaluate Preact + htm for the dashboard
+**Why:** Caught 2026-05-08 — Steven: "I think we need to start thinking about using React." The elapsed-time bug (#76), smart-refresh (#72), input-value preservation, form state across re-renders, scroll preservation, optgroup vs flat-fallback fork — all symptoms of hand-rolling reactive primitives. Each individually is <50 lines; cumulatively the dashboard's html.ts is ~2000 lines doing what a real reactive layer would do for free. The dashboard is forge's primary UX (FORGE-DEC-015); investing in the right tool compounds.
+**Three options to weigh:**
+1. **Stay vanilla, fix bugs as they come.** Cheap per-bug; cumulative cost grows linearly. Zero infrastructure change.
+2. **Preact (~3KB) + htm (template-tagged-literal API, no build step).** Almost-React API; ~80% of the win at ~10% of the cost. Render functions become components; smart-refresh disappears; controlled inputs handle their own state. Could rewrite html.ts in stages without breaking the existing server template. ~1-2 days.
+3. **Full React + Vite + build pipeline.** Splits forge into "CLI/spine + agents (TS, no build)" and "dashboard (TS, build)." Most power, but introduces a real build forge has avoided.
+**Lean (2).** Bounded reactive needs (panes, not Slack), no build pipeline, real diffing without forge becoming a two-build-system project. (3) only if the dashboard genuinely needs first-class React features (Suspense, server components, big component libraries). (1) is fine for tonight; not fine for the long term given how the dashboard is growing.
+**Decide cold, not in the middle of a phase-flow run.** Real cost-benefit numbers come from: counting how many lines in html.ts are reactive-primitive workarounds, prototyping one render-function-as-Preact-component, measuring the migration friction. Don't commit until those numbers exist.
+**Revisit when:** another reactive-bug-of-this-shape lands AND the dashboard's html.ts crosses some threshold (3000 lines? more reactive workarounds than actual UI logic?). At that point (1) is paying real interest and (2) becomes obvious.
+
 ### #71 — Dashboard: visual representation of the workflow flow / phase ribbon
 **Why:** When you gate a task in the dashboard you can't tell what's coming next without reading the workflow file. Today: "click advance" → ??? → next thing happens. The dashboard shows what *is* (running tasks, gate state) but never what *will be* (next phase shape, fanout count, gate type, reds).
 **Caught:** 2026-05-08 mid-#66 testing. Steven: "When I'm in 'frame' and I click to advance, I have no idea what is coming next. I need to know." Then: ribbon doesn't render fanout well — `frame` kicks off 20 investigate agents, 4 running concurrently, a flat ribbon implies linear progression and lies about parallelism.
@@ -337,6 +354,16 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #78 — `forge retry` + dashboard retry button
+**Closed:** 2026-05-08 evening, on branch `phase-flow-71` (213 tests passing, +10 new).
+- New `src/spine/retry.ts`: `retry(taskId)` resets a failed task to pending (clears error/startedAt/completedAt/result). Status guard: only operates on `failed`. Logs `task.retried` event with the previous error preserved for audit.
+- New CLI: `forge retry <task-id>`. Modeled on advise/submit. Prints next-action hint.
+- New POST endpoint `/api/retry/:taskId` shells out to `bin/forge retry` per FORGE-DEC-015. CSRF + interactive gates apply.
+- Dashboard: failed tasks now show an alert banner with the error + a "↻ Retry task" button in a new section above the inputs. Click → POST /api/retry → redispatch on next forge-next.
+- 10 new tests across spine + server.
+**Caught:** 2026-05-08 — `task-brief-6cc6ca` failed with a transient AWS STS expiry mid-spawn. Recovery was a manual SQL update; should have been a button. Now it is.
+**Out-of-scope:** rerun-on-complete (different semantics — user wants a different result from the same inputs; needs design before implementing).
 
 ### #70 — Workflow rename refactor + composed feature-ui-design-needed + awaiting_red status
 **Closed:** 2026-05-08 evening, on branch `workflow-rename-70` (203 tests passing).

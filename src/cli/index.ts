@@ -8,6 +8,7 @@ import { registerAuth } from "./commands/auth.js";
 import { registerDashboard } from "./commands/dashboard.js";
 import { registerAdvise } from "./commands/advise.js";
 import { registerSubmit } from "./commands/submit.js";
+import { registerRetry } from "./commands/retry.js";
 
 const program = new Command();
 program
@@ -24,6 +25,7 @@ registerAuth(program);
 registerDashboard(program);
 registerAdvise(program);
 registerSubmit(program);
+registerRetry(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
