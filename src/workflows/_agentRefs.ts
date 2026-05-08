@@ -38,5 +38,10 @@ function resolveModel(alias: string): string {
 }
 
 export function agent(role: string, model: string): AgentRef {
-  return { role, agentDir: join(AGENTS_DIR, role), model: resolveModel(model) };
+  return {
+    role,
+    agentDir: join(AGENTS_DIR, role),
+    alias: model,
+    model: resolveModel(model),
+  };
 }

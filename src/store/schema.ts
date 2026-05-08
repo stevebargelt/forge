@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   parent_id       TEXT REFERENCES tasks(id),
   phase           TEXT NOT NULL,
   agent_role      TEXT NOT NULL,
+  agent_alias     TEXT,
+  agent_model     TEXT,
   status          TEXT NOT NULL,
   task_package    TEXT NOT NULL,
   result          TEXT,

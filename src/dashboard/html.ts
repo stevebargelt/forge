@@ -942,6 +942,16 @@ const CLIENT_JS = `
         el('span', { class: 'k' }, 'ELAPSED'),
         el('span', { class: 'v' }, task.startedAt ? durationBetween(task.startedAt, task.completedAt) : '—'),
       ]),
+      task.agentAlias || task.agentModel
+        ? el('div', { class: 'kv-row' }, [
+            el('span', { class: 'k' }, 'MODEL'),
+            el('span', { class: 'v' }, [
+              task.agentAlias ? el('code', null, task.agentAlias) : '',
+              task.agentModel ? ' → ' : '',
+              task.agentModel ? el('code', null, task.agentModel) : '',
+            ]),
+          ])
+        : null,
       task.taskPackage && task.taskPackage.role
         ? el('div', { class: 'kv-row' }, [
             el('span', { class: 'k' }, 'ROLE'),

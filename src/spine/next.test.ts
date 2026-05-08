@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { shouldAutoFinalize } from "./next.js";
 import type { Workflow, Task, AgentRef } from "../types/index.js";
 
-const AGENT: AgentRef = { role: "framer", agentDir: "/x", model: "m" };
+const AGENT: AgentRef = { role: "framer", agentDir: "/x", alias: "spec-writer", model: "m" };
 
 function workflowWithPhases(phaseNames: string[]): Workflow {
   return {

@@ -10,9 +10,17 @@ import { SCHEMA_SQL } from "./schema.js";
 // noop. Add a new entry here whenever you add a column to an existing table.
 function applyMigrations(db: DatabaseInstance): void {
   const runsCols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[];
-  const have = new Set(runsCols.map((r) => r.name));
-  if (!have.has("project_dir")) {
+  const haveRuns = new Set(runsCols.map((r) => r.name));
+  if (!haveRuns.has("project_dir")) {
     db.exec(`ALTER TABLE runs ADD COLUMN project_dir TEXT`);
+  }
+  const tasksCols = db.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+  const haveTasks = new Set(tasksCols.map((r) => r.name));
+  if (!haveTasks.has("agent_alias")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN agent_alias TEXT`);
+  }
+  if (!haveTasks.has("agent_model")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN agent_model TEXT`);
   }
 }
 

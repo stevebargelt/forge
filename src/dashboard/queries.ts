@@ -39,6 +39,8 @@ type TaskRow = {
   parent_id: string | null;
   phase: string;
   agent_role: string;
+  agent_alias: string | null;
+  agent_model: string | null;
   status: string;
   task_package: string;
   result: string | null;
@@ -88,6 +90,8 @@ function rowToTask(row: TaskRow): Task {
     parentId: row.parent_id ?? undefined,
     phase: row.phase,
     agentRole: row.agent_role,
+    agentAlias: row.agent_alias ?? undefined,
+    agentModel: row.agent_model ?? undefined,
     status: row.status as TaskStatus,
     taskPackage: JSON.parse(row.task_package) as TaskPackage,
     result: row.result ? JSON.parse(row.result) : undefined,

@@ -15,6 +15,13 @@ export type RedAuthority = "triage" | "specialist" | "authoritative";
 export type AgentRef = {
   role: string;
   agentDir: string;
+  // Logical model name as declared in the workflow (e.g. "spec-writer",
+  // "fast-orchestrator"). Preserved on the AgentRef for audit-trail purposes
+  // (#38) so a task can record both alias and resolved model.
+  alias: string;
+  // Resolved model id — what's actually passed to claude --model. Determined
+  // at agent-ref construction time from BEDROCK_MAP / DIRECT_MAP / env var
+  // overrides / LiteLLM passthrough. See workflows/_agentRefs.ts.
   model: string;
 };
 
@@ -136,6 +143,12 @@ export type Task = {
   parentId?: string;
   phase: string;
   agentRole: string;
+  // Logical model alias declared in the workflow (e.g. "spec-writer"). Captured at
+  // task creation; null for legacy rows pre-#38.
+  agentAlias?: string;
+  // Resolved model id that ran (or will run) the task — what claude --model received.
+  // Captured at task creation alongside agentAlias; null for legacy rows.
+  agentModel?: string;
   status: TaskStatus;
   taskPackage: TaskPackage;
   result?: unknown;

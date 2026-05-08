@@ -25,12 +25,14 @@ const RUN: Run = {
 const RED_AGENT: AgentRef = {
   role: "red-wide",
   agentDir: "/tmp/notreal",
+  alias: "fast-orchestrator",
   model: "x",
 };
 
 const BLUE_AGENT: AgentRef = {
   role: "framer",
   agentDir: "/tmp/notreal",
+  alias: "spec-writer",
   model: "x",
 };
 

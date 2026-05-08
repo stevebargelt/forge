@@ -189,6 +189,8 @@ export function createPhaseTasks(
         parentId: opts.parentId,
         phase: phase.name,
         agentRole: agent.role,
+        agentAlias: agent.alias,
+        agentModel: agent.model,
         status: "pending",
         taskPackage,
         createdAt: nowIso(),

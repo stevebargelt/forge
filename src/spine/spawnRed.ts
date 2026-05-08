@@ -171,6 +171,8 @@ async function runOneRed(args: RunOneRedArgs): Promise<{
     parentId: args.blueTask.id,
     phase: args.phase.name,
     agentRole: args.ref.role,
+    agentAlias: args.ref.alias,
+    agentModel: args.ref.model,
     status: "pending",
     taskPackage,
     createdAt: nowIso(),

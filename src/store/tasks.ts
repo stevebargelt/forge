@@ -8,6 +8,8 @@ type TaskRow = {
   parent_id: string | null;
   phase: string;
   agent_role: string;
+  agent_alias: string | null;
+  agent_model: string | null;
   status: string;
   task_package: string;
   result: string | null;
@@ -24,6 +26,8 @@ function rowToTask(row: TaskRow): Task {
     parentId: row.parent_id ?? undefined,
     phase: row.phase,
     agentRole: row.agent_role,
+    agentAlias: row.agent_alias ?? undefined,
+    agentModel: row.agent_model ?? undefined,
     status: row.status as TaskStatus,
     taskPackage: JSON.parse(row.task_package) as TaskPackage,
     result: row.result ? JSON.parse(row.result) : undefined,
@@ -37,8 +41,8 @@ function rowToTask(row: TaskRow): Task {
 export function insertTask(task: Task): void {
   getDb()
     .prepare(
-      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, status, task_package, result, created_at, started_at, completed_at, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, created_at, started_at, completed_at, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.id,
@@ -46,6 +50,8 @@ export function insertTask(task: Task): void {
       task.parentId ?? null,
       task.phase,
       task.agentRole,
+      task.agentAlias ?? null,
+      task.agentModel ?? null,
       task.status,
       JSON.stringify(task.taskPackage),
       task.result ? JSON.stringify(task.result) : null,

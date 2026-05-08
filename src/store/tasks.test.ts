@@ -33,6 +33,8 @@ function task(overrides: Partial<Task> = {}): Task {
     parentId: overrides.parentId,
     phase: overrides.phase ?? "frame",
     agentRole: overrides.agentRole ?? "framer",
+    agentAlias: overrides.agentAlias,
+    agentModel: overrides.agentModel,
     status: overrides.status ?? "pending",
     taskPackage: overrides.taskPackage ?? {
       taskId: overrides.id ?? "task-1",
@@ -138,4 +140,61 @@ test("re-running a failed task: markTaskRunning clears error, then markTaskCompl
   const t = getTask("task-retry")!;
   assert.equal(t.status, "complete");
   assert.equal(t.error, undefined);
+});
+
+// ---------- agent_alias / agent_model (#38) ----------
+
+test("insertTask persists agentAlias + agentModel; getTask returns them", () => {
+  insertTask(task({
+    id: "task-with-model",
+    agentAlias: "spec-writer",
+    agentModel: "us.anthropic.claude-sonnet-4-6",
+  }));
+  const got = getTask("task-with-model");
+  assert.equal(got?.agentAlias, "spec-writer");
+  assert.equal(got?.agentModel, "us.anthropic.claude-sonnet-4-6");
+});
+
+test("insertTask leaves agentAlias + agentModel undefined when not set (legacy compatibility)", () => {
+  insertTask(task({ id: "task-no-model" }));
+  const got = getTask("task-no-model");
+  assert.equal(got?.agentAlias, undefined);
+  assert.equal(got?.agentModel, undefined);
+});
+
+test("schema migration: legacy tasks table without agent_alias / agent_model gains both columns", async () => {
+  const { default: Database } = await import("better-sqlite3");
+  const legacy = new Database(":memory:");
+  legacy.pragma("foreign_keys = ON");
+  legacy.exec(`
+    CREATE TABLE runs (id TEXT PRIMARY KEY, workflow TEXT, title TEXT, status TEXT, created_at TEXT);
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      parent_id TEXT,
+      phase TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      task_package TEXT NOT NULL,
+      result TEXT,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      error TEXT
+    );
+  `);
+
+  let cols = legacy.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+  assert.ok(!cols.some((c) => c.name === "agent_alias"), "legacy schema must not have agent_alias");
+  assert.ok(!cols.some((c) => c.name === "agent_model"), "legacy schema must not have agent_model");
+
+  // Apply same migration db.ts runs on open.
+  const have = new Set(cols.map((c) => c.name));
+  if (!have.has("agent_alias")) legacy.exec(`ALTER TABLE tasks ADD COLUMN agent_alias TEXT`);
+  if (!have.has("agent_model")) legacy.exec(`ALTER TABLE tasks ADD COLUMN agent_model TEXT`);
+
+  cols = legacy.prepare(`PRAGMA table_info(tasks)`).all() as { name: string }[];
+  assert.ok(cols.some((c) => c.name === "agent_alias"));
+  assert.ok(cols.some((c) => c.name === "agent_model"));
+  legacy.close();
 });

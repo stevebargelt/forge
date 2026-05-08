@@ -19,8 +19,8 @@ const RUN: Run = {
   createdAt: "2026-05-06T00:00:00Z",
 };
 
-const FRAMER: AgentRef = { role: "framer", agentDir: "/x", model: "m" };
-const INVESTIGATOR: AgentRef = { role: "investigator", agentDir: "/x", model: "m" };
+const FRAMER: AgentRef = { role: "framer", agentDir: "/x", alias: "spec-writer", model: "m" };
+const INVESTIGATOR: AgentRef = { role: "investigator", agentDir: "/x", alias: "spec-writer", model: "m" };
 
 function workflow(): Workflow {
   return {

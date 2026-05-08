@@ -85,6 +85,8 @@ export function registerNew(program: Command): void {
           runId,
           phase: firstPhase.name,
           agentRole: agent.role,
+          agentAlias: agent.alias,
+          agentModel: agent.model,
           status: "pending",
           taskPackage,
           createdAt: nowIso(),
