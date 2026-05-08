@@ -223,26 +223,15 @@ Localhost-only is the security model; document this.
 **Why:** SSO sessions expire silently (1 hour at SGWS). The next spawn fails on auth. With FORGE-DEC-013 the watchdog usually prevents this, but `forge auth status` should still proactively detect-and-warn when bedrock creds are getting close to expiry, similar to the watchdog's threshold check.
 **How to apply:** When `detectCredsMode()` returns `bedrock`, call the same `_sso_min_remaining`-style check the watchdog uses. If under some threshold (15 min?), print a warning.
 
-### #46 — Designer agent + Pencil integration + ui-design workflow
-**Why:** No way to produce visual UI artifacts from forge today. Pencil (`@pencil.dev/cli`) is a headless design tool that turns prompts into `.pen` files and exports them as images. We want a designer blue agent that uses Pencil to produce screen-by-screen designs, with humans gating revisions, and a final phase that exports HTML+Tailwind from the approved `.pen` files. Also wanted: a way to design new apps from scratch *and* revise existing app designs.
-**How to apply:**
-1. **New container image** `agent-designer-worker` (separate from `agent-dev-worker` to avoid bloating it with Pencil's deps). Includes Node, Claude Code CLI, `@pencil.dev/cli`. Mounts `forge-claude-oauth` so Pencil's inner Claude agent has auth (oauth-only — `ANTHROPIC_API_KEY` is against company policy). Reads `PENCIL_CLI_KEY` from host env (from `.env` for now; see #47 for proper secrets).
-2. **Designer seed** `seeds/agents/designer/CLAUDE.md` + role-specific `system.md`. Job: take a brief, decide screen list, produce one Pencil prompt per screen, run Pencil, return paths to `.pen` + `.png` and a short rationale per screen.
-3. **Three workflows:**
-   - `ui-design` — standalone. Phases: `discover` (designer proposes screen list) → `design` (fanout, one task per screen) → `human-review` (awaiting_gate; revision = reject + rationale loop) → `export-code` (HTML + Tailwind v1; React Native deferred to #50).
-   - `design-revise` — input: existing `.pen` file(s) + revision brief. Phases: `revise` → `human-review` → `export-code`.
-   - Extend `feature-design-needed` with an optional design phase (gated by `withDesign: true` workflow flag).
-4. **Revision loop:** reuse `awaiting_gate`; revision = reject + rationale (designer reads rationale, uses Pencil's `--in` flag to iterate). Hard reject still available for "way off base."
-5. **CLI gate-and-rationale only for v1.** Dashboard review UI tracked separately as #48 — unblocks once forge can design its own dashboard via Pencil.
-6. **Code export:** final phase reads approved `.pen` JSON (which is structured) and produces HTML+Tailwind. Pencil itself only exports to image/pdf, not code.
+### #46 — Designer agent + Pencil integration + ui-design workflow (SUPERSEDED)
+**Status:** SUPERSEDED by FORGE-DEC-014. The container-based designer is dead — Pencil 0.2.5 has no headless save mechanism. Replaced by #53 (prompt-author seed) + #54 (ui-design rewrite) + #55 (design-revise rewrite) + #58 (cleanup of container-designer code).
+**Original framing kept here for the audit trail; see In progress section above for the current #46 entry with the cleanup ladder.**
 
-### #47 — Use `pass` for host-side secret storage (PENCIL_CLI_KEY, others)
-**Why:** Plaintext secrets in `.env` are fine for a single-machine personal setup but not durable. Terry's repo (cite when implementing) demonstrates a `pass`-backed pattern. Forge will accumulate more secrets (Pencil key, future API keys, integration tokens) — get the pattern right once.
-**How to apply:** Wrapper that resolves env vars from `pass` entries when configured, falls back to env. Document in `docs/auth.md` or similar. Roll forward existing `PENCIL_CLI_KEY` consumer from #46 to use it. Locate Terry's specific implementation before designing.
+### #47 — Use `pass` for host-side secret storage (renumbered as #60)
+**Status:** Renumbered as #60. The original #47 framing was "PENCIL_CLI_KEY in containers"; with FORGE-DEC-014 PENCIL_CLI_KEY moves out of forge entirely. The pass-based pattern is still wanted for whatever host-side secrets forge accumulates next; see #60.
 
-### #48 — Dashboard support for design review (image render, comments, approve/revise buttons)
-**Why:** v1 of #46 ships with CLI-only gate-and-rationale. The intended UX is in-dashboard review — see the rendered design, comment, click approve or request revision with a rationale field. This is the right human review surface for design work.
-**How to apply:** Overlaps with #34 (human-readable result view) and #35 (gate buttons). Render `.png` exports inline in task panes; comment thread tied to a task; approve/revise buttons that write back to the task as gate decisions. Sequence after #46 ships v1 so we have real designs to render — and use forge+Pencil to design the dashboard itself.
+### #48 — Dashboard support for design review (subsumed by #57)
+**Status:** Subsumed by #57 (interactive dashboard v1) which renders PNG outputs from gate.rationale paths as part of the design review UI. The original #48 framing assumed the container designer (#46 v1); with the FORGE-DEC-014 pivot the design review surface lives in #57's gate UI for the `review` phase of ui-design / design-revise workflows.
 
 ### #49 — Design-reviewer red agent (future investigation)
 **Why:** Steven's call: skip reds for design work in v1 because aesthetic judgment is squishy. Worth revisiting once we have real human-review data — there may be objective things a red can catch (accessibility contrast, missing states, broken layout primitives, brand inconsistency).
