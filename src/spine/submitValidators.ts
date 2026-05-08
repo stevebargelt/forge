@@ -7,7 +7,7 @@
 // workflow adds another validator here and a switch arm in submit.ts.
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { sanitizeTitleForFilename } from "../util/paths.js";
 
 export type UiDesignArtifacts = {
@@ -16,18 +16,22 @@ export type UiDesignArtifacts = {
   htmlFiles: string[];
 };
 
-// Validates the conventional ui-design artifact layout under designDir:
-//   <designDir>/<sanitized-title>.pen   (Pencil source, non-zero)
-//   <designDir>/designs/*.png           (rendered screens, ≥1)
-//   <designDir>/code/*.html             (HTML/Tailwind exports, ≥1)
-// Throws a descriptive error naming the failed check + path. The human re-runs
-// Pencil or fixes the export and re-submits — these errors are the "Pencil didn't
-// save" / "code-export step skipped" failure catchers.
+// The .pen file's name comes from the **last segment of designDir**, not the
+// run title. The prompt-author seed (seeds/agents/prompt-author/CLAUDE.md) tells
+// the human "save to <designDir>/<basename(designDir)>.pen", so the validator
+// must look at the same place. The title is just a human label; the designDir
+// basename is the contract that crosses the human/machine boundary.
+//
+// `runTitle` is still passed in as a fallback for the unusual case where
+// designDir is empty or "/" (basename returns "" or "/"); in that case the
+// title slug is the only signal we have. In normal runs that fallback never
+// fires.
 export function validateUiDesignArtifacts(
   designDir: string,
   runTitle: string
 ): UiDesignArtifacts {
-  const slug = sanitizeTitleForFilename(runTitle);
+  const dirSlug = basename(designDir);
+  const slug = dirSlug && dirSlug !== "/" ? dirSlug : sanitizeTitleForFilename(runTitle);
   const penFile = join(designDir, `${slug}.pen`);
 
   if (!existsSync(penFile)) {

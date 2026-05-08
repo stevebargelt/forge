@@ -47,7 +47,9 @@ function reviewTask(): Task {
 }
 
 function seedHappyPath(dir: string) {
-  // Slug for "stats widget" is "stats-widget"
+  // Slug derives from basename(designDir), not the run title — that's the
+  // contract the prompt-author writes into PROMPT.md. Tests create designDirs
+  // with a fixed basename ("stats-widget") via a tmp parent.
   writeFileSync(join(dir, "stats-widget.pen"), "PENCIL_FILE_BYTES");
   mkdirSync(join(dir, "designs"));
   writeFileSync(join(dir, "designs", "01-home.png"), "PNG");
@@ -55,16 +57,22 @@ function seedHappyPath(dir: string) {
   writeFileSync(join(dir, "code", "01-home.html"), "<html></html>");
 }
 
+let tmpParent: string;
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
-  designDir = mkdtempSync(join(tmpdir(), "forge-submit-test-"));
+  // Create a tmp parent dir, then designDir under it with a fixed basename so
+  // the validator's basename-derived slug is deterministic.
+  tmpParent = mkdtempSync(join(tmpdir(), "forge-submit-test-"));
+  designDir = join(tmpParent, "stats-widget");
+  mkdirSync(designDir);
 });
 
 afterEach(() => {
   setDbForTest(prev as DatabaseInstance);
   db.close();
-  rmSync(designDir, { recursive: true, force: true });
+  rmSync(tmpParent, { recursive: true, force: true });
 });
 
 // ---------- validator ----------
@@ -112,6 +120,20 @@ test("validateUiDesignArtifacts: throws when no HTML in code/", () => {
     () => validateUiDesignArtifacts(designDir, "stats widget"),
     /No HTML files/
   );
+});
+
+test("validateUiDesignArtifacts: .pen filename comes from basename(designDir), NOT the run title", () => {
+  // The prompt-author seed tells the human "save to <basename(designDir)>.pen".
+  // Validator must agree, regardless of how funky the title is. This test pins
+  // the basename-not-title contract that the prompt-author + submit share.
+  writeFileSync(join(designDir, "stats-widget.pen"), "PEN");
+  mkdirSync(join(designDir, "designs"));
+  writeFileSync(join(designDir, "designs", "x.png"), "PNG");
+  mkdirSync(join(designDir, "code"));
+  writeFileSync(join(designDir, "code", "x.html"), "h");
+  // Title that would slugify to a different filename — validator should ignore it.
+  const out = validateUiDesignArtifacts(designDir, "test-prompt-author-v3");
+  assert.equal(out.penFile, join(designDir, "stats-widget.pen"));
 });
 
 test("validateUiDesignArtifacts: success returns sorted absolute paths", () => {

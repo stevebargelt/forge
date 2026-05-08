@@ -152,7 +152,14 @@ Behavior:
 1. Load task. If status ≠ `awaiting_human_input`, hard-error.
 2. Load run. If `run.metadata.designDir` missing for ui-design / design-revise workflows, hard-error with the message "this workflow requires `--design-dir` at run creation; re-create the run."
 3. Workflow-specific validator runs (start with `validateUiDesignArtifacts(designDir, runTitle)`):
-   - `<designDir>/<sanitized-title>.pen` exists, size > 0
+   - `<designDir>/<basename(designDir)>.pen` exists, size > 0. The `.pen` filename
+     derives from the **last segment of designDir**, not the run title — that's the
+     contract `seeds/agents/prompt-author/CLAUDE.md` writes into PROMPT.md, so the
+     validator must agree. (Originally drafted as `<sanitized-title>.pen`; corrected
+     during the smoke-test prep when the mismatch was caught — title is a human
+     label, designDir basename is the cross-boundary contract. The runTitle
+     parameter is retained as a fallback when basename is empty/`/`, an edge case
+     that doesn't fire in real runs.)
    - `<designDir>/designs/*.png` matches at least one file
    - `<designDir>/code/*.html` matches at least one file
    - On any failure: hard-error naming the missing/empty path. Human re-runs Pencil or fixes the export, then re-submits.
