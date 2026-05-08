@@ -504,6 +504,8 @@ a { color: var(--accent); text-decoration: none; }
   outline: none;
 }
 .form-row input:focus, .form-row textarea:focus, .form-row select:focus { border-color: var(--accent); }
+.form-row select optgroup { color: var(--foreground-muted); font-style: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.form-row select option { color: var(--foreground); background: var(--background); }
 .form-row textarea { min-height: 80px; resize: vertical; }
 .form-row .help { font-size: 11px; color: var(--foreground-muted); }
 .form-row .err { font-size: 11px; color: var(--error); margin-top: 2px; }
@@ -1807,10 +1809,22 @@ const CLIENT_JS = `
         rerenderNewRunBody(schema, formState, body);
       },
     });
-    for (const w of schema.order) {
-      const opt = el('option', { value: w }, w);
-      if (w === formState.workflow) opt.selected = true;
-      select.appendChild(opt);
+    // Use schema.groups for the picker so workflows are visually grouped
+     // ("Build features" / "Design UI" / "Investigate or audit"). Falls back
+     // to a flat list if the server didn't send groups (older API responses).
+    const groups = Array.isArray(schema.groups) && schema.groups.length > 0
+      ? schema.groups
+      : [{ label: '', workflows: schema.order }];
+    for (const g of groups) {
+      const parent = g.label
+        ? el('optgroup', { label: g.label })
+        : select;
+      for (const w of g.workflows) {
+        const opt = el('option', { value: w }, w);
+        if (w === formState.workflow) opt.selected = true;
+        parent.appendChild(opt);
+      }
+      if (g.label) select.appendChild(parent);
     }
     pickerRow.appendChild(select);
     pickerRow.appendChild(el('div', { class: 'help' }, spec.description));

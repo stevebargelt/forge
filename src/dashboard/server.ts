@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
-import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, UNIVERSAL_FIELDS } from "./workflowSchema.js";
+import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, WORKFLOW_GROUPS, UNIVERSAL_FIELDS } from "./workflowSchema.js";
 import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
@@ -79,6 +79,7 @@ function handleGet(path: string, res: ServerResponse): void {
       .writeHead(200, { "Content-Type": "application/json" })
       .end(JSON.stringify({
         order: WORKFLOW_ORDER,
+        groups: WORKFLOW_GROUPS,
         universal: UNIVERSAL_FIELDS,
         workflows: WORKFLOW_SPECS,
       }));
