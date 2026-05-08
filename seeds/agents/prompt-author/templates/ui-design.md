@@ -41,7 +41,7 @@ This guarantees the target file exists on disk so open_document can route to it.
    ls {{output_dir}}/
    Include both outputs in your summary so the user can see exactly what's on disk vs in-memory.
 
-10. OPTIONAL — HTML/CSS code export. After all screens are designed and PNGs exported, also produce HTML+CSS reference snapshots — one .html (and a sibling .css if it makes sense) per top-level screen frame. Output to `{{output_dir}}/code/`, matching the same numeric-prefix naming as the PNGs (`01-<screen-name>.html`, etc).
+10. OPTIONAL — HTML/CSS code export. After all screens are designed and PNGs exported, also produce HTML+CSS reference snapshots — one .html (and a sibling .css if it makes sense) per top-level screen frame. Write the .html and .css files directly into `{{output_dir}}/`, alongside the PNGs (NOT in a `code/` subdirectory). Match the same numeric-prefix naming as the PNGs (`01-<screen-name>.html` next to `01-<screen-name>.png`, etc).
 
    This step is OPTIONAL — skip the entire section if `{{include_code_export}}` is false, or if the human indicated they don't want code export.
 
@@ -54,7 +54,7 @@ This guarantees the target file exists on disk so open_document can route to it.
 
    After the first screen is exported, smoke-test it: `cat` the file, check it's roughly 200-1000 lines (not a stub or an absolute-positioning blob), confirm the CSS variables survived, and report a short excerpt in your progress notes before continuing with the rest. If the first export is unusable, stop and report — don't generate the others.
 
-   If the available tooling can't produce something matching the spec above, skip cleanly: write `{{output_dir}}/code/SKIPPED.md` with the reason and continue without blocking the rest of the work.
+   If the available tooling can't produce something matching the spec above, skip cleanly: write `{{output_dir}}/SKIPPED.md` with the reason and continue without blocking the rest of the work.
 
    Treat the HTML files as REFERENCE, not implementation. State this in your final summary: "These HTML files are static reference exports — they show exact spacing, palette, DOM hierarchy. They are not wired to data, won't match the target stack's idioms, and aren't meant to be served. Useful as high-fidelity ground truth when implementing the screens in the real codebase later."
 
