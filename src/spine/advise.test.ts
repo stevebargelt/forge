@@ -127,6 +127,7 @@ test("adviseRun: counts populated correctly", () => {
     running: 1,
     awaiting_gate: 1,
     awaiting_human_input: 0,
+    awaiting_red: 0,
     blocked_by_red: 1,
     complete: 1,
     failed: 1,

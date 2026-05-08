@@ -26,6 +26,9 @@ export function reconcileRun(runId: string, workflow: Workflow): ReconciledTask[
   const tasks = tasksForRun(runId);
   // Manual-phase tasks (FORGE-DEC-016) never go through reconcile — they have no
   // result.json on disk, only get a result via `forge submit`.
+  // awaiting_red blues (FORGE-DEC-017) are also intentionally skipped — they're
+  // not orphaned; reds are running. If a red itself crashes the blue stays in
+  // awaiting_red indefinitely; that's tracked separately (similar shape to #74).
   const running = tasks.filter((t) => t.status === "running");
   const out: ReconciledTask[] = [];
   for (const t of running) {

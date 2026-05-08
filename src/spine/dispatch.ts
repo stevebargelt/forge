@@ -106,6 +106,12 @@ async function runBlueTask(
   if (!refreshed) return { taskId: task.id, status: "failed" };
 
   if (phase.reds && (phase.reds.wide || phase.reds.narrow)) {
+    // Blue is done, reds are about to run. Mark awaiting_red explicitly per
+    // FORGE-DEC-017 — the prior `complete` state was a lie ("complete" but the
+    // gate hasn't happened yet). spawnRed transitions out of awaiting_red →
+    // awaiting_gate / blocked_by_red as it does today.
+    setTaskStatus(task.id, "awaiting_red");
+    logEvent("task.awaiting_red", { runId: run.id, taskId: task.id });
     await spawnRed({
       blueTask: refreshed,
       redConfig: phase.reds,

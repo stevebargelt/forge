@@ -13,6 +13,7 @@ export type AdviceKind =
   | "running"
   | "awaiting_gate"
   | "awaiting_human_input"
+  | "awaiting_red"
   | "blocked_by_red"
   | "crashed"
   | "ready_to_dispatch"
@@ -34,6 +35,7 @@ export type Advice = {
     running: number;
     awaiting_gate: number;
     awaiting_human_input: number;
+    awaiting_red: number;
     blocked_by_red: number;
     failed: number;
     complete: number;
@@ -46,6 +48,7 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     running: tasks.filter((t) => t.status === "running").length,
     awaiting_gate: tasks.filter((t) => t.status === "awaiting_gate").length,
     awaiting_human_input: tasks.filter((t) => t.status === "awaiting_human_input").length,
+    awaiting_red: tasks.filter((t) => t.status === "awaiting_red").length,
     blocked_by_red: tasks.filter((t) => t.status === "blocked_by_red").length,
     failed: tasks.filter((t) => t.status === "failed").length,
     complete: tasks.filter((t) => t.status === "complete").length,
@@ -116,6 +119,15 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     return {
       kind: "running",
       summary: `${counts.running} task(s) running. Wait for them to finish, or check the dashboard.`,
+      command: "",
+      counts,
+    };
+  }
+
+  if (counts.awaiting_red > 0) {
+    return {
+      kind: "awaiting_red",
+      summary: `${counts.awaiting_red} task(s) awaiting red verdicts. Wait for reds to finish.`,
       command: "",
       counts,
     };
