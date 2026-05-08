@@ -105,14 +105,42 @@ Branch from main (post-cherry-pick) to a new branch `interactive-dashboard-57`. 
 - Each commit message should reference the design PNG it implements (e.g. "Reskin run-list to match design 01-run-list.png").
 - The first commit (palette + typography + the legacy.ts rename) sets up everything else; subsequent commits implement screens incrementally.
 
-### Phase 4: post-flight (~5 min)
+### Phase 4: post-flight (~10-15 min)
 
 When phases 1-3 are done:
 
 1. **Update BACKLOG.md** — mark #57 in In progress with a manifest of what shipped (which screens, what's behind the feature flag, what's deferred). Mark #58 closed with the commit hash range.
 2. **Update Notes-for-next-session** at the top of BACKLOG with: "End of overnight session. Cherry-picks landed on main. #58 cleanup done on `designer-agent-46`. #57 v1 (reskin + interactive backbone) live on `interactive-dashboard-57`. Next: validate prompt-author seed (#53), wire up #54/#55, then unblock the deferred screens 07/09/10/11."
-3. **Delete this `OVERNIGHT-SCOPE.md` file** in a final commit. It's done its job.
-4. **Final summary message** — recap what was done, list anything skipped or deferred with reasons.
+3. **Write `~/code/forge-design/FOLLOWUP-PROMPT.md`** — see Phase 5 for what goes in it.
+4. **Delete this `OVERNIGHT-SCOPE.md` file** in a final commit. It's done its job.
+5. **Final summary message** — recap what was done, list anything skipped or deferred with reasons.
+
+### Phase 5: design-gap discovery + optional design execution (Steven's last request before bed)
+
+Steven asked for two things on top of the implementation work:
+
+**5a. If you find design gaps while implementing the 8 screens**, capture them in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Examples of what counts as a gap:
+- A status code or task state the existing 11 designs don't cover (e.g., "what does a `pending` task with no started_at yet look like?")
+- A screen variant the brief didn't anticipate (e.g., the empty-state when a user has zero runs)
+- Visual elements that don't render coherently when wired to real data (e.g., a verdict card with 0 findings — the design assumes ≥1)
+- Something the implementation needs that the design just doesn't show
+
+Don't invent design choices to fill gaps — capture them and let Steven run them through Pencil in the morning. The FOLLOWUP-PROMPT.md should be in the same shape as `~/code/forge-design/MISSING-SCREENS-PROMPT.md` (which Steven ran successfully) — point at the existing dashboard.pen, list the missing screens with one paragraph each, include the standard WORKFLOW REQUIREMENTS block (touch precondition, open_document, filePath everywhere, find_empty_space_on_canvas, export+rename, the loud Cmd+S warning).
+
+Always write FOLLOWUP-PROMPT.md, even if you think you covered everything — it can simply say "no gaps found; here's a prompt for a third pass if you want one." Easy for morning-Steven to discard.
+
+**5b. (Optional, do this only if MCP is connected and reliable.)** If the Pencil MCP server is connected in your session (check via tool availability — `mcp__pencil__open_document` etc. should be in your toolset; if not, skip this entire substep), you may **run the FOLLOWUP-PROMPT.md yourself**. The catch: you cannot trigger Cmd+S from any tool you have. So:
+
+- DO: produce designs, export PNGs (these persist on disk), update the in-memory dashboard.pen.
+- DO: include in the final summary message a note: "I ran the followup prompt; PNGs are at `~/code/forge-design/designs/<new-names>.png`; dashboard.pen has updated content in-memory but is UNSAVED — please Cmd+S in VS Code first thing."
+- DO NOT: attempt AppleScript / osascript / xdotool / pyautogui or anything else that simulates a Cmd+S keystroke. The risk of misfiring into the wrong app is bad. Steven explicitly approved this constraint before going to bed.
+- DO NOT: claim the .pen is saved. It is not, until Steven Cmd+Ses.
+
+If MCP isn't connected, just leave FOLLOWUP-PROMPT.md on disk and note "MCP not connected; I didn't run the prompt — Steven, run it in the morning."
+
+If MCP is connected but a tool call fails partway, capture what got produced (any successfully-exported PNGs survive on disk) and document the failure mode in the final summary. Don't retry indefinitely; one retry max, then move on.
+
+This whole substep is a stretch goal. The implementation work in phases 1-3 is the priority. Don't sacrifice phase 1-3 quality to attempt phase 5b.
 
 ## Hard constraints (non-negotiable)
 
@@ -124,6 +152,7 @@ When phases 1-3 are done:
 - **No deletes that aren't reversible.** `git mv` over `git rm`+create. Keep `html.legacy.ts` until Steven says drop it.
 - **No pushes to remote.** Steven reviews and pushes himself in the morning.
 - **No skipping the BACKLOG update.** It's how morning Steven knows what happened.
+- **No AppleScript / osascript / keyboard-simulation tools** to trigger Cmd+S in VS Code, or any other app. Steven explicitly considered this and ruled it out — the risk of misfiring into the wrong app while he's asleep is unacceptable. Pencil .pen files stay unsaved when this overnight session ends; morning-Steven Cmd+Ses to persist. PNG exports do persist via `mcp__pencil__export_nodes` and don't need Cmd+S.
 
 ## When to stop and write a TODO instead
 
