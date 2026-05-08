@@ -14,13 +14,6 @@ The project under review is mounted at `/project` inside your container. Read it
 
 For ui-design specifically: read the source code of whatever's being redesigned so the prompt can reference real concepts (file paths, component names, status taxonomies, etc.) instead of inventing them.
 
-## Re-dispatched tasks
-
-Check `inputs` for retry signals before starting:
-
-- `inputs.requestedChanges` — your previous PROMPT.md was sent back. Read the rationale, address the changes specifically, regenerate.
-- `inputs.rejectedRationale` / `inputs.rejectedTaskId` — a prior phase was rejected. The rationale tells you what was wrong.
-
 ## Templates
 
 Templates live alongside this CLAUDE.md under `templates/`. Each is a parameterized PROMPT.md the human will run. As of now:
@@ -30,31 +23,55 @@ Templates live alongside this CLAUDE.md under `templates/`. Each is a parameteri
 
 The workflow tells you which template to use via `inputs.template`. If unset, infer from the workflow name.
 
-## The interview
+## You run non-interactively. DO NOT ask questions.
 
-Ask the human a structured set of questions. ONE question at a time, wait for their answer, then the next. Don't dump everything at once.
+You run inside a forge container under `claude --print`. There is **no human on the other end of stdin** — any question you ask gets no answer, and the run will fail. Forge will reject prose-shaped responses (`agent_replied_text` contract violation, see FORGE-DEC-014 / spawn.ts).
 
-For ui-design, the questions are:
+Your job is to take whatever inputs you have and **produce a PROMPT.md immediately**, applying defaults for anything the human didn't specify. The human reviews your output at the human gate that follows this phase. If your decisions were wrong, the human will gate `request-changes` with rationale, and you'll re-run with the updated guidance — that's the iteration loop, not a real-time interview.
 
-1. **Brief / goal** — "In one paragraph, what are you designing and why? Who uses it, what's the dominant feeling, what should it NOT look like?"
-2. **Screens / sections** — "List the screens or sections you want, one line each. (Or say 'I don't know yet, propose some' and I will.)"
-3. **Style** — "Pencil ships 27 named styles (Aerial Gravitas, Dark Centered Platform, Saturated Code Bridge, Soft Bento, etc.). Want one of those, a vibe direction (e.g. 'dense terminal-adjacent, monospace, dark'), or your own design system you'll describe?"
-4. **Target paths** — "Where should the .pen file live? Where should PNG exports land? (And if HTML/CSS code export is enabled, where should those files go?)" Defaults: `~/code/<project-name>/<workflow>.pen`, `~/code/<project-name>/designs/` for PNGs, `~/code/<project-name>/code/` for HTML/CSS — code is a peer of designs, not a subdirectory.
-5. **Naming convention** — "How should the PNG files be named? Default: `01-<screen-name>.png`, `02-<screen-name>.png`, etc."
-6. **Constraints** — "Anything else? Existing source code to ground against, brand rules, components to import, screens to NOT redesign, things you don't want?"
-7. **Code export** — "Want the prompt to also ask Pencil to emit HTML/CSS reference files for each screen? Useful as grounding when implementing in your target stack later. Default: yes."
-8. **Confirm** — Show the brief in summary, ask "ready to author the PROMPT.md?" or "anything to revise?"
+## Filling the parameters
 
-If the human says "use defaults" or "skip", do that — they're a power user. The interview is for first-time use; don't make it ceremonial.
+Read `inputs` for everything the human passed at run creation:
+
+- `inputs.brief` — the only required field. The human's design brief.
+- `inputs.designDir` — the directory where this workflow's artifacts live (e.g. `/Users/x/code/forge-stats-widget`). Set automatically by `forge new` from `--design-dir` (explicit) or a sanitized-title default. Trust this value over your own derivation.
+- `inputs.template` — which template to use (e.g. `ui-design`). If unset, infer from the workflow name.
+- `inputs.screens` — optional explicit screen list.
+- `inputs.style` — optional Pencil-style hint.
+- `inputs.targetPenFile`, `inputs.outputDir`, `inputs.codeExportDir`, `inputs.fileNaming`, `inputs.constraints`, `inputs.includeCodeExport` — optional overrides.
+
+Apply these defaults when a parameter is missing. **Always fill every `{{...}}` placeholder in the template — never emit literal `{{name}}` markers in the produced PROMPT.md.**
+
+For ui-design, the defaults are:
+
+1. **Brief / goal** — `inputs.brief` verbatim. If that's truly empty (it shouldn't be, the workflow requires it), output `{status: "failed", error: "brief is required for ui-design"}` and stop.
+2. **Screens / sections** — derive 4-7 sensible screens from the brief. If the brief mentions "dashboard," "widget," etc., default screens cover the obvious states (empty / loaded / error / detail / etc.). Capture *what you derived* in `parameters.screens` and put a note in `openQuestions` so the human can correct via gate.
+3. **Style** — pick a reasonable Pencil style based on the brief tone. "Dense / terminal / monospace / dark" → Saturated Code Bridge. "Marketing / hero / consumer" → Soft Bento. "I don't know" → Saturated Code Bridge (forge's house style). Note your choice in `openQuestions`.
+4. **Target paths** — derive from `inputs.designDir` (always present — `forge new` sets it). Convention is the design directory holds three siblings:
+   - `target_pen_file`: `<designDir>/<sanitized-title>.pen` where `<sanitized-title>` is the last path segment of `designDir` (already kebab-cased by `forge new`). E.g. designDir `/Users/x/code/forge-stats-widget` → pen file `/Users/x/code/forge-stats-widget/forge-stats-widget.pen`.
+   - `output_dir`: `<designDir>/designs/`
+   - `code_export_dir`: `<designDir>/code/` (peer of designs, not nested)
+   The `<designDir>` itself does NOT live inside `/project`. It's a peer directory next to the project being designed for, so design artifacts don't pollute the source tree's git status.
+   Fallback ONLY if `inputs.designDir` is somehow missing (older runs, manual DB inserts): use `~/code/<workflow-name>/` based on the workflow name. Note the fallback in `openQuestions`.
+5. **Naming convention** — `01-<screen-name>.png`, `02-<screen-name>.png`, etc. (sanitize screen names: lowercase, hyphens for spaces).
+6. **Constraints** — `inputs.constraints` if present, else empty.
+7. **Code export** — `inputs.includeCodeExport ?? true` (default ON; the export is optional at run-time and skips cleanly if Pencil's tooling doesn't support it).
+
+## Re-dispatched tasks
+
+Check `inputs` for retry signals before starting:
+
+- `inputs.requestedChanges` — your previous PROMPT.md was sent back. Read the rationale, address the changes specifically, regenerate.
+- `inputs.rejectedRationale` / `inputs.rejectedTaskId` — a prior phase was rejected. The rationale tells you what was wrong.
 
 ## Producing the PROMPT.md
 
-Once interview is complete:
+Once you've gathered inputs and applied defaults:
 
 1. Read `templates/<template-name>.md`.
-2. Substitute the parameters (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{code_export_dir}}`, `{{file_naming}}`, `{{constraints}}`, `{{include_code_export}}`). When `{{include_code_export}}` is true and the human didn't specify `{{code_export_dir}}` explicitly, default it to `<output_dir's parent>/code/` (peer of designs/, not nested inside it).
+2. Substitute every parameter (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{code_export_dir}}`, `{{file_naming}}`, `{{constraints}}`, `{{include_code_export}}`). No `{{...}}` markers should remain in the produced file.
 3. Write to `/task/PROMPT.md`. **The path must be `/task/PROMPT.md` — do not put it elsewhere.** Forge surfaces the file from there in the dashboard.
-4. Tell the human it's ready and what to do with it (the templates have a "How to run this prompt" section the human reads; you don't need to repeat it).
+4. Write `/task/result.json` per the schema below and exit. Do NOT print prose to stdout.
 
 ## Output schema
 
@@ -84,8 +101,8 @@ If the human declined to answer a question or you couldn't get a clear answer, l
 
 ## Discipline
 
-- **One question at a time.** Don't write a wall of text at the human.
-- **Default to defaults.** When the human says "I don't care" or skips, fill in sensible defaults from the template — don't loop.
-- **Don't author until the interview is done.** If a critical field is missing, ask one more time or default — don't generate a PROMPT.md with `{{brief}}` literal placeholders.
-- **Don't overpromise.** The PROMPT.md you write is the thing forge can validate; what happens *when the human runs it* is outside forge's control. Tell the human that.
-- **Don't be a designer.** Your job is the brief and the prompt, not the design. If the human asks design questions, redirect them to running the PROMPT.md and seeing what comes out.
+- **No questions, no prose.** Write `/task/PROMPT.md` and `/task/result.json` and exit. The human reviews your output at the gate; that's where iteration happens.
+- **Default aggressively.** Every missing parameter gets a sensible default per the rules above. Capture what you defaulted in `parameters` + `openQuestions` so the human knows what you decided for them.
+- **No literal placeholders.** A produced PROMPT.md with `{{brief}}` left in it is a contract violation. Substitute everything.
+- **Don't overpromise.** The PROMPT.md you write is the thing forge can validate; what happens *when the human runs it* is outside forge's control. Capture that in your `notes`.
+- **Don't be a designer.** Your job is the brief and the prompt, not the design. The PROMPT.md the human pastes elsewhere is what becomes the design.
