@@ -6,58 +6,20 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**End of overnight session 2026-05-07 → 08. Cherry-picks landed on main, #58 done on `designer-agent-46`, #57 v1 live on new `interactive-dashboard-57` branch.**
+**State at session start 2026-05-08 afternoon:** main is clean. #57 v1 merged (`a8e1b0f`). #58 merged (`e744e18`). The morning daily-friction batch (#41, #36, #40, #37, #38, #44) all on main. #54 stub on main. #53 validated. The `interactive-dashboard-57` and `designer-agent-46` branches are gone. Test baseline: 149 passing.
 
-What changed while you slept (3 branches touched, no pushes):
+**Top of the stack — pick from here:**
 
-- **`main` ← 3 cherry-picks** from designer-agent-46 (clean wins, no designer dependency):
-  - `98b9ed5` "Improve Next: hints in CLI: include --project, copy-friendly layout"
-  - `a42f23c` "forge next: surface awaiting_gate / blocked_by_red after dispatch"
-  - `e119bfc` "Switch agent stdout to stream-json so the idle watchdog tracks live progress" (had a BACKLOG.md conflict — code applied cleanly, BACKLOG line dropped)
-  Push when you're happy. Tests: 105 → expected after cherry-picks (was 101 baseline, b5d2acf adds 4 NDJSON tests).
-
-- **`designer-agent-46` ← #58 cleanup, 3 commits** (`d15e741` → `40fe81b`):
-  - `d15e741` delete designer image + build script + tighten .dockerignore
-  - `a9d1b1e` delete designer + designer-export seeds (CLAUDE.md, settings, skills/pencil-design/)
-  - `40fe81b` drop AgentRef.image plumbing, simplify spawn.ts (DESIGNER_IMAGE constant + PENCIL_CLI_KEY conditional + pickIdleTimeoutMs all gone), delete stale ui-design/design-revise workflow files. Tests adjusted (3 PENCIL_CLI_KEY + 2 pickIdleTimeoutMs tests dropped, 3 resolveIdleTimeoutMs tests added). Tests on this branch: 110 passing.
-  - The branch is no longer needed once you accept #58. You can `git branch -D designer-agent-46` after eyeballing — everything not yet on main is either #58 cleanup (which lands via this commit set) or design-related work that's superseded by FORGE-DEC-014.
-
-- **`interactive-dashboard-57` ← #57 v1, 1 large commit** (`65eaae3`, branched from main+cherry-picks):
-  - Full reskin to the Lunaris designs at `~/code/forge-design/designs/01-08`. Three-pane layout, CSS variables sourced from the .pen file's variable block, Geist + Geist Mono via Google Fonts CDN.
-  - POST endpoints: `/api/gate/:taskId`, `/api/next/:runId`, `/api/runs` (501 stub). Mutations gated behind `FORGE_DASHBOARD_INTERACTIVE=1`. CSRF mitigation = required `X-Forge-Request: 1` header (FORGE-DEC-015 § Security). Mutations shell out to `bin/forge`; no in-process spawn/gate logic.
-  - `GET /api/meta` reports `{interactive}` so the client knows whether to render gate buttons or copy-CLI fallbacks.
-  - `listRunsForDashboard` now returns task counts (single SQL JOIN) so run rows show "0/8/12 tasks".
-  - Old `html.ts` saved as `html.legacy.ts` for reference — delete after you confirm the reskin is good.
-  - Screens shipped: 01 run list, 02 task list, 03 generic detail, 04 design detail (degrades when no design data), 05 awaiting-gate detail with rationale + buttons, 06 run-row overflow menu, 08 blocked-by-red with force-advance + required-rationale UX. **Deferred** by design: 07 full new-run modal (depends on POST `/api/runs` body schema), 09/10 design handoff/review (depend on #54), 11 prompt-author interview (depends on #53).
-  - Tests: 116 passing (+11 new dashboard tests). Typecheck green.
-
-- **`~/code/forge-design/FOLLOWUP-PROMPT.md`** written. Captures 9 design gaps discovered during implementation:
-  - Empty states (no runs, search no-match)
-  - Toast notification visual spec
-  - Polling/live indicator
-  - Long input/output rendering (collapsible)
-  - Specialist-red findings on a passing task
-  - Multi-decision gate audit thread
-  - Run-row "running and on track" state
-  - Full new-run modal (refines design 07)
-  Run it through Pencil at the host when convenient — same shape as `MISSING-SCREENS-PROMPT.md` that worked for the second pass.
-
-**Phase 5b status:** see the final summary in the conversation transcript — I'll note here whether I attempted the optional design pass and what happened.
-
-**Suggested next-session priorities (top of Active list, in this order):**
-1. **Eyeball the dashboard.** `cd interactive-dashboard-57 && FORGE_DASHBOARD_INTERACTIVE=1 ./bin/forge dashboard` then open http://127.0.0.1:8765. The reskin should match the Lunaris designs; gate buttons should shell out to forge correctly.
-2. **Push main + merge interactive-dashboard-57** if the dashboard is good. Or revise.
-3. **#53** Validate the prompt-author seed + interview-script alignment with design 11 (still the keystone for design workflows).
-4. **#54** Rewrite `ui-design` workflow shape (brief + review). Small, depends on #53.
-5. **#55** Same for `design-revise`.
-6. **Run FOLLOWUP-PROMPT.md** through Pencil to fill the 9 gaps in `~/code/forge-design/dashboard.pen`. Then a follow-up commit on interactive-dashboard-57 wires those new screens into the implementation.
-7. Returning daily-friction items for any spare time: **#41** (auto-gate-on-terminal-phase), **#40** (batch-gate), **#36** (persist project_dir), and a thin `forge new` POST endpoint to replace the new-run modal stub.
+1. **#54 proper** — finish the `ui-design` workflow's `review` phase. The stub only has `brief`. The `review` phase needs a manual/human-led concept that gates without dispatching a container (the human runs PROMPT.md outside forge, then comes back to gate with rationale containing artifact paths). No such phase concept exists yet — likely **FORGE-DEC-016** territory. **#55 (design-revise) blocks on this.**
+2. **#53 polish** — already validated end-to-end. Any rough edges from the v3 run worth tightening?
+3. **Run FOLLOWUP-PROMPT.md** through Pencil at the host to fill the 9 design gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Then wire the new screens into the dashboard. Same shape as the MISSING-SCREENS-PROMPT pass that worked.
+4. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX) — accumulated during #53 validation. Worth a focused dashboard pass when ready.
 
 **Validation still pending:**
-- #32 (failed-result detection) — code shipped, didn't fire this run because the framer succeeded on retry. Wait for it to catch a real failure or contrive one.
+- #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
 - #25 (reject + `onReject` flow) — no workflow uses `onReject` today; can only validate after writing a workflow that does.
 
-**Watchdog status:** unchanged from prior session — works.
+**Watchdog status:** works.
 
 ## In progress
 
@@ -102,21 +64,6 @@ Depends on: #53.
 - `review` — same as #54.
 Depends on: #53.
 
-### #57 — Interactive dashboard v1 (gate buttons, run-next, design review) — V1 SHIPPED, AWAITING REVIEW
-**Status:** v1 shipped overnight 2026-05-07 → 08, commit `65eaae3` on branch `interactive-dashboard-57` (branched from main+cherry-picks). Awaiting human review before merge to main. The branch is unpushed.
-**What landed:**
-- Full reskin to the Lunaris designs at `~/code/forge-design/designs/01-08`. Three-pane layout. CSS variables sourced from the .pen file's variable block. Geist + Geist Mono via Google Fonts CDN.
-- POST endpoints in `src/dashboard/server.ts` for `/api/gate/<task>`, `/api/next/<run>`, `/api/runs` (501 stub). All shell out to `bin/forge` subprocesses per FORGE-DEC-015 — never reimplement spawn/gate logic in-process.
-- Mutations gated behind `FORGE_DASHBOARD_INTERACTIVE=1` env var (read-only by default). CSRF mitigation = required `X-Forge-Request: 1` header on every POST. Localhost-only.
-- `GET /api/meta` reports the interactivity flag so the client renders gate buttons or copy-CLI fallbacks accordingly.
-- `listRunsForDashboard` returns task counts via SQL JOIN so run rows show "0/8/12 tasks" without N+1.
-- Old `html.ts` saved as `html.legacy.ts` for reference; delete after Steven confirms the reskin is good.
-- 11 new server tests cover meta, CSRF, gate argv shape, force flag, error surfacing, next argv shape, new-run stub. Tests: 116 passing on the branch (was 105 baseline). Typecheck green.
-**Screens shipped:** 01 run list, 02 task list, 03 generic detail, 04 design detail (degrades when no design data), 05 awaiting-gate detail with rationale + buttons, 06 run-row overflow menu, 08 blocked-by-red with force-advance + required-rationale UX. **Stub for 07** (new-run modal — shows equivalent CLI command + copy button until a real `forge new` POST schema exists).
-**Deferred (follow-ups):** screens 09/10 (depend on #54 ui-design rewrite), 11 (depends on #53 prompt-author validation), 12-20 (the 9 gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md` overnight). Real new-run modal (#57 follow-up, depends on a `forge new` POST endpoint with full validation).
-**Refines / absorbs on merge:** #34 (human-readable result view — partly addressed via the new generic detail layout), #35 (gate buttons + run-next + what's-next surfacing — addressed), #48 (design review — partly; the PNG-render-from-rationale-paths piece lands with #54).
-**Test plan for morning:** `FORGE_DASHBOARD_INTERACTIVE=1 ./bin/forge dashboard` then visit http://127.0.0.1:8765. Click a gate button to confirm the shell-out works end-to-end.
-
 ### #59 — Track Pencil release notes for auto-save shipping
 **Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
 **How to apply:** Periodically run `npm view @pencil.dev/cli version` and check the changelog. When auto-save lands:
@@ -159,9 +106,13 @@ Caught 2026-05-08 during #53 validation — Steven couldn't read the full `run-t
 **How to apply:** When the dashboard's awaiting-gate detail renders a task whose result has `openQuestions`, render them as a checklist with three states per question (accept / change / explain) and a small inline text field for the change case. On submit, synthesize the gate rationale automatically from the per-question responses (e.g. "accepted #1, #3; changed #2 to: <text>; left #4 open") and POST to `/api/gate/:taskId` as today. The agent's re-run loop is unchanged — just a friendlier capture surface for the human.
 Caught 2026-05-08 during #53 validation. Belongs in #57's iteration backlog alongside #62/#63/#64.
 
+### #66 — Dashboard new-run modal: require --design-dir for ui-design / design-revise
+**Why:** When the dashboard gets the real new-run modal (the deferred screen 07 / `forge new` POST endpoint), `ui-design` and `design-revise` runs MUST capture `designDir` at creation. Forge's `submit` step hard-errors when `run.metadata.designDir` is missing — so the modal needs a required field for these workflows, with the same `~/code/<sanitized-title>/` default the CLI offers. Surface what files will land where so the human knows what to expect.
+**How to apply:** When the workflow picker selects `ui-design` or `design-revise`, reveal a `Design directory` input pre-filled with `~/code/<kebab-cased-title>/`. Editable, required. POST to the (future) `/api/runs` endpoint includes `designDir`. Validation: path is absolute, parent exists, the dir itself either doesn't exist yet (will be created) or is empty/contains only `<title>.pen`/`designs/`/`code/`. Mirror the CLI's `forge new --design-dir` flag exactly.
 
-**Why:** `onReject` is documented but no workflow uses it. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. Until a workflow uses it, we're trusting the unit tests.
-**How to apply:** When writing a new workflow that needs branching on rejection (a natural fit for #42's how-to rewrite), exercise the path in a real run. Verify `inputs.rejectedRationale` and `inputs.rejectedTaskId` arrive at the remediation phase's tasks.
+### #25 — Validate `onReject` rationale-propagation end-to-end (legacy, partly obsolete)
+**Why:** `onReject` is documented but no workflow used it as of 2026-05-07. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. **#54's `review` phase will exercise this path** — when the human rejects a design, `onReject: "brief"` loops back and the prompt-author re-runs with `inputs.rejectedRationale` populated. Once #54 ships and a real run rejects a design, this entry can close.
+**How to apply:** Already covered by #54's review phase. Verify `inputs.rejectedRationale` and `inputs.rejectedTaskId` arrive at the brief phase's prompt-author task during the first real reject in a `ui-design` run.
 
 ### #27 — LiteLLM proxy: route each task to the model best suited to it
 **Why:** Today every task hits Anthropic-direct or Bedrock with whatever alias the workflow declared (`spec-writer` → Sonnet, `fast-orchestrator` → Haiku, `deep-thinker` → Opus). That hard-codes provider + family in the workflow. LiteLLM lets us declare model *capabilities* (cheap-fast, balanced, deep, cheap-summarize, etc.) and route per task without rewriting workflows. A reds panel might want a cheap fast model for triage and a stronger one for authoritative; a designer might want Opus for the discover phase and Sonnet for export. Today we can't express that without scattering provider IDs through the workflow files.
@@ -262,6 +213,19 @@ Localhost-only is the security model; document this.
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #57 — Interactive dashboard v1 (gate buttons, run-next, design review)
+**Closed:** 2026-05-08, merged to main as `a8e1b0f` (merge of branch `interactive-dashboard-57`, branch commit `65eaae3`).
+**What shipped:**
+- Full reskin to the Lunaris designs at `~/code/forge-design/designs/01-08`. Three-pane layout. CSS variables sourced from the .pen file's variable block. Geist + Geist Mono via Google Fonts CDN.
+- POST endpoints in `src/dashboard/server.ts` for `/api/gate/<task>`, `/api/next/<run>`, `/api/runs` (501 stub). All shell out to `bin/forge` per FORGE-DEC-015.
+- Mutations gated behind `FORGE_DASHBOARD_INTERACTIVE=1` (read-only by default). CSRF = `X-Forge-Request: 1` header. Localhost-only.
+- `GET /api/meta` reports the interactivity flag so the client renders gate buttons or copy-CLI fallbacks.
+- `listRunsForDashboard` returns task counts via SQL JOIN.
+- 11 new server tests on the branch.
+**Screens shipped:** 01 run list, 02 task list, 03 generic detail, 04 design detail, 05 awaiting-gate, 06 run-row overflow, 08 blocked-by-red. Stub for 07 (new-run modal).
+**Deferred to followups:** screens 09/10 (#54), 11 (#53), 12-20 (the 9 FOLLOWUP-PROMPT.md gaps). Dashboard polish #62-65. Real new-run modal pending `forge new` POST schema.
+**Absorbs:** #34 (human-readable result view — partly), #35 (gate buttons + run-next), #48 (design review surface).
 
 ### #58 — Tear down container-designer code (cleanup)
 **Closed:** 2026-05-07/08 overnight, commits `d15e741` + `a9d1b1e` + `40fe81b` on branch `designer-agent-46` (3 commits).

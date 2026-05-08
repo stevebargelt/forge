@@ -34,6 +34,9 @@ learnings/
 | FORGE-DEC-011 | 2026-05-06 | [Docker mount of project dir can corrupt native node binaries (gotcha + recovery)](decisions/2026-05-06_docker-mount-corrupts-native-binary.md) |
 | FORGE-DEC-012 | 2026-05-06 | [Optional read-only flag on the DB singleton + 5s busy_timeout](decisions/2026-05-06_read-only-db-connection-flag.md) |
 | FORGE-DEC-013 | 2026-05-06 | [Mount ~/.aws into bedrock containers + detached SSO watchdog](decisions/2026-05-06_profile-mount-and-detached-watchdog.md) |
+| FORGE-DEC-014 | 2026-05-07 | [Host-led human-driven design phase, with forge as the prompt-author](decisions/2026-05-07_host-led-pencil-design.md) |
+| FORGE-DEC-015 | 2026-05-07 | [Interactive dashboard: shell out to bin/forge, gate behind env flag, CSRF header](decisions/2026-05-07_interactive-dashboard.md) |
+| FORGE-DEC-016 | 2026-05-08 | [Manual phases and the awaiting_human_input task status](decisions/2026-05-08_manual-phase-and-awaiting-human-input.md) |
 
 ## Patterns index
 
