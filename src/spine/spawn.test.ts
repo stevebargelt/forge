@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startIdleWatchdog, _buildDockerArgs, _readResultJson } from "./spawn.js";
+import { startIdleWatchdog, _buildDockerArgs, _readResultJson, resolveIdleTimeoutMs } from "./spawn.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -72,9 +72,7 @@ test("idle watchdog: only fires once even on long silence", async () => {
 // ---------- buildDockerArgs: credential mode wiring ----------
 
 const ARGS_INPUT_BASE = {
-  claudeMdPath: "/tmp/x/CLAUDE.md",
-  packagePath: "/tmp/x/package.md",
-  resultPath: "/tmp/x/result.json",
+  taskDir: "/tmp/x",
   projectDir: "/tmp/project",
   readOnlyProject: false,
   image: "agent-dev-worker",
@@ -156,6 +154,51 @@ test("buildDockerArgs: anthropic-oauth mode mounts the OAuth volume, no AWS env"
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.AWS_PROFILE, undefined);
   assert.equal(envPairs.CLAUDE_CODE_USE_BEDROCK, undefined);
+});
+
+test("buildDockerArgs: task dir is mounted as a writable directory at /task", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  const taskMount = pickMount(args, "/task");
+  assert.ok(taskMount, "should mount /task");
+  assert.equal(taskMount, "/tmp/x:/task", "should be a directory mount, no :ro flag");
+});
+
+test("resolveIdleTimeoutMs: explicit value wins over env and default", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "60000";
+  try {
+    assert.equal(resolveIdleTimeoutMs(12345), 12345);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("resolveIdleTimeoutMs: env override applies when no explicit value", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "30000";
+  try {
+    assert.equal(resolveIdleTimeoutMs(undefined), 30000);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("resolveIdleTimeoutMs: default when nothing set", () => {
+  const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+  try {
+    assert.equal(resolveIdleTimeoutMs(undefined), 5 * 60 * 1000);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
+    else process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = prev;
+  }
+});
+
+test("buildDockerArgs: --include-partial-messages is passed to claude", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  assert.ok(args.includes("--include-partial-messages"), "claude argv should include --include-partial-messages so stdout flows during long thinking turns");
 });
 
 test("buildDockerArgs: bedrock without AWS_REGION still sets profile", () => {

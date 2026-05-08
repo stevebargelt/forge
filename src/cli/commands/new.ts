@@ -13,6 +13,8 @@ const VALID: WorkflowName[] = [
   "feature-design-needed",
   "investigation",
   "codebase-assessment",
+  "ui-design",
+  "design-revise",
 ];
 
 export function registerNew(program: Command): void {
@@ -22,6 +24,7 @@ export function registerNew(program: Command): void {
     .argument("<title>", "human-readable run title (used to derive the run id)")
     .option("--question <q>", "for investigation: the framing question")
     .option("--prd <path>", "path to a PRD/spec file")
+    .option("--brief <text>", "for ui-design / design-revise: the design brief")
     .option("--meta <json>", "extra run metadata as JSON")
     .description("Create a new workflow run")
     .action(async (workflow: string, title: string, options) => {
@@ -34,6 +37,7 @@ export function registerNew(program: Command): void {
       const metadata: Record<string, unknown> = options.meta ? JSON.parse(options.meta) : {};
       if (options.question) metadata.question = options.question;
       if (options.prd) metadata.prd = options.prd;
+      if (options.brief) metadata.brief = options.brief;
 
       const run: Run = {
         id: runId,
@@ -55,6 +59,7 @@ export function registerNew(program: Command): void {
       const seedInputs: Record<string, unknown> = {};
       if (options.question) seedInputs.question = options.question;
       if (options.prd) seedInputs.prd = options.prd;
+      if (options.brief) seedInputs.brief = options.brief;
 
       for (const agent of firstPhase.agents) {
         const taskId = newTaskId(firstPhase.name);

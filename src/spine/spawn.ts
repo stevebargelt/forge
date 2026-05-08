@@ -1,5 +1,5 @@
 import { spawn as cpSpawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
@@ -13,7 +13,6 @@ export type SpawnOptions = {
   agentConfig: AgentRef;
   projectDir: string;
   readOnlyProject: boolean; // true for red agents
-  image?: string;            // default agent-dev-worker
   litellmUrl?: string;       // default http://host.docker.internal:4000
   // Kill the container if no stdout for this many ms. Default 5min, override via
   // FORGE_AGENT_IDLE_TIMEOUT_MS env. 0 disables.
@@ -39,8 +38,14 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
 
   writeFileSync(claudeMdPath, tp.composedSystemPrompt);
   writeFileSync(packagePath, renderTaskPackageMarkdown(tp));
-  // Pre-create the result file so the bind mount has a target. Empty until agent writes.
+  // Pre-create result.json so reconcile / readResultJson have a stable path even if the
+  // agent never writes. Empty until the agent fills it.
   writeFileSync(resultPath, "");
+  // The whole task dir is mounted at /task so agents can create new files alongside
+  // package.md and result.json (designer drops .pen/.png here). The container's agent
+  // user is UID 1000; the host dir is owned by the host user. 0777 keeps the agent
+  // writable across host UIDs without forcing a chown.
+  chmodSync(dir, 0o777);
 
   markTaskRunning(tp.taskId);
   logEvent("task.started", { runId: tp.runId, taskId: tp.taskId });
@@ -50,12 +55,10 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
   const idleTimeoutMs = resolveIdleTimeoutMs(opts.idleTimeoutMs);
 
   const dockerArgs = buildDockerArgs({
-    claudeMdPath,
-    packagePath,
-    resultPath,
+    taskDir: dir,
     projectDir: opts.projectDir,
     readOnlyProject: opts.readOnlyProject,
-    image: opts.image ?? DEFAULT_IMAGE,
+    image: DEFAULT_IMAGE,
     litellmUrl: opts.litellmUrl ?? DEFAULT_LITELLM,
     model: opts.agentConfig.model,
     systemPrompt: tp.composedSystemPrompt,
@@ -153,9 +156,7 @@ function renderTaskPackageMarkdown(tp: TaskPackage): string {
 }
 
 type DockerArgsInput = {
-  claudeMdPath: string;
-  packagePath: string;
-  resultPath: string;
+  taskDir: string;
   projectDir: string;
   readOnlyProject: boolean;
   image: string;
@@ -200,10 +201,13 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     args.push("-e", `ANTHROPIC_BASE_URL=${input.litellmUrl}`);
   }
 
-  // Mounts. CLAUDE.md is written to disk for audit but not mounted — the prompt is
-  // passed via --append-system-prompt on the argv.
-  args.push("-v", `${input.packagePath}:/task/package.md:ro`);
-  args.push("-v", `${input.resultPath}:/task/result.json`);
+  // Mount the task dir as a writable directory at /task so the agent can create new
+  // files alongside the pre-created package.md and result.json. The host dir is
+  // per-task under ~/.forge/runs/<run>/<task>/, so any visible host-side files
+  // (CLAUDE.md, container.{stdout,stderr}.log) are intentional audit artifacts.
+  // The container UID (1000) needs write perms on the host dir;
+  // ensureTaskDirWritable() in the caller handles that.
+  args.push("-v", `${input.taskDir}:/task`);
   args.push("-v", projectMount);
 
   args.push(input.image);
@@ -219,9 +223,14 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     // (e.g. Pencil's 1-5 min per-screen budget) survive the 5-min idle timeout.
     // The final line is the same {type:"result", result:"..."} envelope as --output-format=json,
     // so result-parsing in readResultJson is unchanged. --verbose is required for stream-json.
+    // --include-partial-messages emits intermediate chunks during long thinking turns,
+    // which keeps stdout flowing (and the watchdog asleep) even when the agent is
+    // mid-reasoning between tool calls. Without it, a multi-minute thinking turn
+    // produces zero stdout and the idle timeout fires.
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--print"
   );
   return args;
@@ -304,7 +313,8 @@ export function startIdleWatchdog(
   };
 }
 
-function resolveIdleTimeoutMs(explicit: number | undefined): number {
+// Exported for unit testing. Resolves the idle timeout from explicit > env > default.
+export function resolveIdleTimeoutMs(explicit: number | undefined): number {
   if (typeof explicit === "number") return explicit;
   const env = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
   if (env !== undefined) {

@@ -4,7 +4,9 @@ export type WorkflowName =
   | "feature-design-provided"
   | "feature-design-needed"
   | "investigation"
-  | "codebase-assessment";
+  | "codebase-assessment"
+  | "ui-design"
+  | "design-revise";
 
 export type GateType = "human" | "auto" | "verdict";
 
