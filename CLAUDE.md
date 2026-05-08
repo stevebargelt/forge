@@ -17,7 +17,7 @@ The TaskCreate harness tool is for ephemeral within-session working state. The d
 - TypeScript with strict mode and `noUncheckedIndexedAccess`. Run `npm run typecheck` before committing source changes.
 - Module type is ES modules (`"type": "module"` in `package.json`). Always use `.js` import suffixes from TypeScript files.
 - Workflow definitions are TypeScript files under `src/workflows/`. **Do not** introduce a YAML/JSON workflow loader. The `Workflow` type is the schema.
-- Agents always run in containers. Forge itself never runs in a container.
+- Agents always run in containers. Forge itself never runs in a container. **One documented exception:** the human-led design phase of `ui-design` and `design-revise` workflows runs *outside* forge entirely — the human runs Pencil on their host (FORGE-DEC-014). Forge's role for design is to author the prompt (`prompt-author` agent in a normal container) and gate the artifacts the human produces. There is no agent-led design phase.
 - Red agents always get read-only project mounts (`-v <project>:/project:ro`). This is OS-level enforcement; never relax it to a prompt instruction.
 - Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.
 - Default to no comments. Add a comment only when the WHY is non-obvious.
@@ -54,6 +54,7 @@ learnings/          ADRs and patterns for forge itself
 - The state-machine status values in `tasks.status` (`pending|running|awaiting_gate|complete|failed|blocked_by_red`). Adding a new status is a schema change and an ADR.
 - The verdict aggregation rule in `gate.ts`: pass if all reds pass; fail if any authoritative; inconclusive otherwise. Specialist fails warn but don't block without rationale.
 - The Docker invocation pattern in `spawn.ts`. Read DEC-004 (orchestrator on host, agents in containers), DEC-005 (Ubuntu base), DEC-006 (OAuth file mount), DEC-009 (UID 1000) before changing any of it.
+- **Don't add a designer agent that runs Pencil headlessly.** FORGE-DEC-014 documents three independent reasons this fails in Pencil 0.2.5. The `prompt-author` agent (BACKLOG #53) is forge's role; the human runs Pencil on their host. Revisit only if Pencil ships auto-save AND a headless persistence path.
 
 ## Documentation
 
