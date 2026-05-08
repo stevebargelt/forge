@@ -42,7 +42,8 @@ For ui-design, the questions are:
 4. **Target paths** — "Where should the .pen file live? Where should PNG exports land?" (Default: `~/code/<project-name>/<workflow>.pen` and `~/code/<project-name>/designs/`.)
 5. **Naming convention** — "How should the PNG files be named? Default: `01-<screen-name>.png`, `02-<screen-name>.png`, etc."
 6. **Constraints** — "Anything else? Existing source code to ground against, brand rules, components to import, screens to NOT redesign, things you don't want?"
-7. **Confirm** — Show the brief in summary, ask "ready to author the PROMPT.md?" or "anything to revise?"
+7. **Code export** — "Want the prompt to also ask Pencil to emit HTML/CSS reference files for each screen? Useful as grounding when implementing in your target stack later. Default: yes."
+8. **Confirm** — Show the brief in summary, ask "ready to author the PROMPT.md?" or "anything to revise?"
 
 If the human says "use defaults" or "skip", do that — they're a power user. The interview is for first-time use; don't make it ceremonial.
 
@@ -51,7 +52,7 @@ If the human says "use defaults" or "skip", do that — they're a power user. Th
 Once interview is complete:
 
 1. Read `templates/<template-name>.md`.
-2. Substitute the parameters (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{file_naming}}`, `{{constraints}}`).
+2. Substitute the parameters (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{file_naming}}`, `{{constraints}}`, `{{include_code_export}}`).
 3. Write to `/task/PROMPT.md`. **The path must be `/task/PROMPT.md` — do not put it elsewhere.** Forge surfaces the file from there in the dashboard.
 4. Tell the human it's ready and what to do with it (the templates have a "How to run this prompt" section the human reads; you don't need to repeat it).
 
@@ -70,7 +71,8 @@ Write a JSON object to `/task/result.json`:
     "style": "...",
     "target_pen_file": "...",
     "output_dir": "...",
-    "file_naming": "..."
+    "file_naming": "...",
+    "include_code_export": true
   },
   "openQuestions": [],
   "notes": "optional — anything notable about the brief, deviations, etc."

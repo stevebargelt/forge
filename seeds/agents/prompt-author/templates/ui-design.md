@@ -33,4 +33,16 @@ This guarantees the target file exists on disk so open_document can route to it.
    ls {{output_dir}}/
    Include both outputs in your summary so the user can see exactly what's on disk vs in-memory.
 
+10. OPTIONAL — HTML/CSS code export. After all screens are designed and PNGs exported, ask Pencil to generate reference HTML/CSS for the design. Pencil's CLI / tooling can produce a static HTML+CSS snapshot of frames, useful as a grounding artifact when an agent or human implements the UI in their target stack. When this step runs, do the following:
+
+   a. For each top-level screen frame, ask Pencil to export an HTML+CSS representation. The exact tool name evolves with Pencil's release (check `mcp__pencil__*` tool listing for an `export_code`, `export_html`, or `export_to_html` variant; if none is exposed, fall back to driving the Pencil CLI from Bash: `pencil export --format html --in {{target_pen_file}} --node <id> --out {{output_dir}}/<screen-name>.html`).
+
+   b. Write outputs to `{{output_dir}}/code/<screen-name>.html` (and a sibling .css if Pencil emits one). Match the same numeric-prefix naming as the PNGs so files sort consistently: `01-<screen-name>.html`, etc.
+
+   c. Treat the HTML as a REFERENCE, not the final implementation. Make this explicit in your final summary: "These HTML files are Pencil's static export — exact spacing, palette, and DOM hierarchy. They are not wired to any data, won't match your stack's idioms, and aren't meant to be served as-is. Use them as a high-fidelity ground truth when building the real implementation."
+
+   d. If the export tool/CLI isn't available or fails, skip this step cleanly — do NOT block the run. Note in the final summary: "HTML/CSS export skipped (tool unavailable / failed). PNGs are still the ground truth."
+
+   This step is OPTIONAL — if the human indicated they don't want code export, or if the prompt-author template's `{{include_code_export}}` parameter is `false`, skip the whole step.
+
 {{constraints_section}}
