@@ -1172,6 +1172,13 @@ const CLIENT_JS = `
     if (isAwaitingGate || isBlockedByRed) {
       body.appendChild(gateActionsSection(task, verdicts));
     }
+    // PROMPT.md inline preview for brief-phase tasks awaiting gate. The human
+    // is reviewing whether the prompt-author's prompt is good enough to run;
+    // they need to read the prompt body, not just the structured fields.
+    // Lives between gate actions (so buttons are accessible) and inputs.
+    if (isAwaitingGate && task.phase === 'brief' && briefContext && briefContext.promptMarkdown) {
+      body.appendChild(promptPreviewSection(briefContext));
+    }
     body.appendChild(taskInputsSection(task));
     if (task.result) body.appendChild(taskResultSection(task));
     if (verdicts && verdicts.length > 0 && !isBlockedByRed) body.appendChild(verdictsSection(verdicts));
@@ -1223,6 +1230,23 @@ const CLIENT_JS = `
   // Manual-phase task awaiting the human's off-forge work (FORGE-DEC-016).
   // Renders the upstream brief's PROMPT.md inline + parameters/openQuestions
   // + a primary "I'm done — review my design" button that POSTs to /api/submit.
+  // PROMPT.md preview for awaiting_gate brief tasks. Shows the agent-produced
+  // prompt body inline so the human can review it before advancing. No buttons
+  // or interactivity — just the body in a scrollable pre block.
+  function promptPreviewSection(briefContext) {
+    const sec = el('div', { class: 'detail-section' }, [
+      el('h3', null, 'PROMPT.md (preview)'),
+    ]);
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, [
+      'This is the prompt the agent would have you run. Review before advancing — the gate is your chance to push back if it picked wrong defaults.',
+    ]));
+    sec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 480px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;' }, briefContext.promptMarkdown));
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-top: var(--space-sm);' }, [
+      'On disk: ',
+      el('code', null, briefContext.promptPathHost),
+    ]));
+    return sec;
+  }
   // Retry section for failed tasks. Resets to pending; next forge-next (or
   // the dashboard "Run next" button) redispatches. Read-only fallback shows
   // the CLI command + copy.

@@ -202,11 +202,58 @@ export function getTaskDetail(
     .all(id) as GateDbRow[];
   const gates = gRows.map(rowToGate);
 
-  const briefContext = task.status === "awaiting_human_input"
-    ? loadBriefContext(task)
-    : undefined;
+  // briefContext serves two surfaces:
+  //   (1) awaiting_human_input review task — load the upstream brief's PROMPT.md
+  //       so the human can read it before going to run Pencil
+  //   (2) awaiting_gate brief task — load THIS task's PROMPT.md so the human
+  //       can review the prompt before gating advance
+  // (2) is the more common case in practice — every brief-phase task lands
+  // awaiting_gate first; only design workflows ever have an awaiting_human_input
+  // task that depends on an upstream brief.
+  let briefContext: BriefContext | undefined;
+  if (task.status === "awaiting_human_input") {
+    briefContext = loadBriefContext(task);
+  } else if (task.status === "awaiting_gate" && task.phase === "brief") {
+    briefContext = loadBriefContextForCurrentTask(task);
+  }
 
   return { task, verdicts, gates, briefContext };
+}
+
+// Load PROMPT.md for the current task (the one being gated). Used when a
+// brief-phase task is awaiting_gate — the prompt-author wrote PROMPT.md and
+// the human needs to read it to decide whether to advance.
+function loadBriefContextForCurrentTask(task: Task): BriefContext | undefined {
+  const promptPathHost = briefPromptHostPath(task.runId, task.id);
+  let promptMarkdown: string | undefined;
+  if (existsSync(promptPathHost)) {
+    try {
+      promptMarkdown = readFileSync(promptPathHost, "utf8");
+    } catch {
+      // tolerate read failures — surface what we have, html.ts handles absent
+    }
+  }
+
+  const runRow = db()
+    .prepare(`SELECT metadata FROM runs WHERE id = ?`)
+    .get(task.runId) as { metadata: string | null } | undefined;
+  let designDir: string | undefined;
+  if (runRow?.metadata) {
+    try {
+      const meta = JSON.parse(runRow.metadata) as { designDir?: unknown };
+      if (typeof meta.designDir === "string") designDir = meta.designDir;
+    } catch {
+      // ignore malformed metadata
+    }
+  }
+
+  return {
+    briefTaskId: task.id,
+    briefResult: task.result,
+    promptMarkdown,
+    promptPathHost,
+    designDir,
+  };
 }
 
 // Find the most recent completed `brief` task in the same run and load its
