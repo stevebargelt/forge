@@ -1,7 +1,11 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { aggregateVerdicts } from "./gate.js";
-import type { VerdictRow, RedAuthority } from "../types/index.js";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
+import { aggregateVerdicts, batchGate } from "./gate.js";
+import type { VerdictRow, RedAuthority, Run, Task } from "../types/index.js";
 
 function v(
   partial: Partial<VerdictRow> & { verdict: VerdictRow["verdict"]; authority: RedAuthority }
@@ -74,4 +78,107 @@ test("aggregateVerdicts: multiple authoritative fails all captured", () => {
   ]);
   assert.equal(r.verdict, "fail");
   assert.equal(r.authoritativeFails.length, 2);
+});
+
+// ---------- batchGate (#40) ----------
+
+let db: DatabaseInstance;
+let prev: DatabaseInstance | null;
+
+const RUN: Run = {
+  id: "run-batch",
+  workflow: "investigation",
+  title: "batch gate test",
+  status: "active",
+  createdAt: "2026-05-08T00:00:00Z",
+};
+
+function task(overrides: Partial<Task> & { id: string; status: Task["status"] }): Task {
+  return {
+    id: overrides.id,
+    runId: overrides.runId ?? RUN.id,
+    parentId: overrides.parentId,
+    phase: overrides.phase ?? "investigate",
+    agentRole: overrides.agentRole ?? "investigator",
+    status: overrides.status,
+    taskPackage: overrides.taskPackage ?? {
+      taskId: overrides.id,
+      runId: overrides.runId ?? RUN.id,
+      phase: overrides.phase ?? "investigate",
+      role: overrides.agentRole ?? "investigator",
+      inputs: { claim: "test" },
+      composedSystemPrompt: "",
+    },
+    result: overrides.result ?? { status: "complete" },
+    createdAt: overrides.createdAt ?? "2026-05-08T00:00:00Z",
+  };
+}
+
+beforeEach(() => {
+  db = makeInMemoryDb();
+  prev = setDbForTest(db);
+  insertRun(RUN);
+});
+
+afterEach(() => {
+  setDbForTest(prev as DatabaseInstance);
+  db.close();
+});
+
+test("batchGate: throws on unknown run", async () => {
+  await assert.rejects(
+    () => batchGate("run-does-not-exist", "advance", undefined),
+    /Run not found/
+  );
+});
+
+test("batchGate: rejects non-advance decisions (initial scope per #40)", async () => {
+  await assert.rejects(
+    () => batchGate(RUN.id, "reject", undefined),
+    /supports 'advance' only/
+  );
+  await assert.rejects(
+    () => batchGate(RUN.id, "request-changes", undefined),
+    /supports 'advance' only/
+  );
+});
+
+test("batchGate: empty run → gated:[] and skippedBlocked:[]", async () => {
+  const r = await batchGate(RUN.id, "advance", undefined);
+  assert.equal(r.gated.length, 0);
+  assert.equal(r.skippedBlocked.length, 0);
+  assert.equal(r.failed.length, 0);
+});
+
+test("batchGate: advances every awaiting_gate task in the run, skips blocked_by_red", async () => {
+  insertTask(task({ id: "t-aw-1", status: "awaiting_gate" }));
+  insertTask(task({ id: "t-aw-2", status: "awaiting_gate" }));
+  insertTask(task({ id: "t-aw-3", status: "awaiting_gate" }));
+  insertTask(task({ id: "t-blocked", status: "blocked_by_red" }));
+  insertTask(task({ id: "t-pending", status: "pending" }));
+
+  const r = await batchGate(RUN.id, "advance", "looks good");
+
+  // All 3 awaiting_gate tasks should be gated.
+  assert.equal(r.gated.length, 3);
+  const gatedIds = r.gated.map((g) => g.taskId).sort();
+  assert.deepEqual(gatedIds, ["t-aw-1", "t-aw-2", "t-aw-3"]);
+  // Blocked task is reported, not silently ignored, not advanced.
+  assert.equal(r.skippedBlocked.length, 1);
+  assert.equal(r.skippedBlocked[0]!.taskId, "t-blocked");
+  // Pending task is not in eligible set and not in skipped (only blocked_by_red counts).
+  assert.equal(r.failed.length, 0);
+});
+
+test("batchGate: tasks not in awaiting_gate are ignored, not failed", async () => {
+  insertTask(task({ id: "t-running", status: "running" }));
+  insertTask(task({ id: "t-complete", status: "complete" }));
+  insertTask(task({ id: "t-failed", status: "failed" }));
+  insertTask(task({ id: "t-aw", status: "awaiting_gate" }));
+
+  const r = await batchGate(RUN.id, "advance", undefined);
+  assert.equal(r.gated.length, 1);
+  assert.equal(r.gated[0]!.taskId, "t-aw");
+  assert.equal(r.failed.length, 0);
+  assert.equal(r.skippedBlocked.length, 0);
 });

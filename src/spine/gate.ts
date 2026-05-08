@@ -1,5 +1,5 @@
 import type { GateDecision, Task, VerdictRow } from "../types/index.js";
-import { getTask, setTaskStatus, insertTask } from "../store/tasks.js";
+import { getTask, setTaskStatus, insertTask, tasksForRun } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun } from "../store/runs.js";
@@ -186,4 +186,60 @@ function singularize(s: string): string {
   if (s.endsWith("ses")) return s.slice(0, -2);
   if (s.endsWith("s")) return s.slice(0, -1);
   return s;
+}
+
+export type BatchGateResult = {
+  runId: string;
+  decision: GateDecision;
+  // Tasks the caller actually advanced (status was awaiting_gate at the time of the call).
+  gated: Array<{ taskId: string; followups: number }>;
+  // Tasks skipped because they were blocked_by_red — those need per-task --force + rationale.
+  skippedBlocked: Array<{ taskId: string; phase: string }>;
+  // Per-task gate failures (e.g. the task transitioned out from under us). Rare; surface for
+  // visibility rather than silently ignore.
+  failed: Array<{ taskId: string; error: string }>;
+};
+
+// Batch-gate every awaiting_gate task in a run. Initial scope per BACKLOG #40:
+// 'advance' only. reject and request-changes typically need per-task rationale and
+// don't make sense in bulk. blocked_by_red tasks are skipped (the caller can gate
+// those individually with --force --rationale "...").
+export async function batchGate(
+  runId: string,
+  decision: GateDecision,
+  rationale: string | undefined,
+  opts: GateOptions = {}
+): Promise<BatchGateResult> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  if (decision !== "advance") {
+    throw new Error(
+      `batchGate currently supports 'advance' only. ` +
+        `${decision} typically needs per-task rationale; gate those individually.`
+    );
+  }
+
+  const tasks = tasksForRun(runId);
+  const eligible = tasks.filter((t) => t.status === "awaiting_gate");
+  const blocked = tasks.filter((t) => t.status === "blocked_by_red");
+
+  const result: BatchGateResult = {
+    runId,
+    decision,
+    gated: [],
+    skippedBlocked: blocked.map((t) => ({ taskId: t.id, phase: t.phase })),
+    failed: [],
+  };
+
+  for (const t of eligible) {
+    try {
+      const r = await gate(t.id, decision, rationale, opts);
+      result.gated.push({ taskId: t.id, followups: r.nextTasks.length });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      result.failed.push({ taskId: t.id, error: msg });
+    }
+  }
+
+  return result;
 }
