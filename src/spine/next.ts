@@ -66,6 +66,14 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
       if (postBlocked.length > 0) return { kind: "blocked_by_red", tasks: postBlocked };
       const postAwaiting = refreshed.filter((t) => t.status === "awaiting_gate");
       if (postAwaiting.length > 0) return { kind: "awaiting_gate", tasks: postAwaiting };
+      // Auto-gated terminal phase: every task in the just-dispatched phase is complete,
+      // and there's no next phase to advance to. Finalize the run here instead of making
+      // the user run `forge next` a second time just to discover the run is done.
+      if (shouldAutoFinalize(workflow, phaseName, refreshed)) {
+        updateRunStatus(run.id, "complete");
+        logEvent("run.completed", { runId: run.id });
+        return { kind: "complete" };
+      }
       return { kind: "dispatched", phase: phaseName, tasks: refreshed };
     }
 
@@ -93,6 +101,20 @@ export async function next(runId: string, opts: NextOptions): Promise<NextResult
       stopSsoWatchdog();
     }
   }
+}
+
+// True when the just-dispatched phase has finished all its work (every refreshed task
+// is `complete`) AND the workflow has no successor phase. In that case `next()` finalizes
+// the run inline instead of returning `kind:"dispatched"` and forcing a second `forge
+// next` to discover the run is done. Exported for unit testing.
+export function shouldAutoFinalize(
+  workflow: Workflow,
+  phaseName: string,
+  refreshed: Task[]
+): boolean {
+  if (refreshed.length === 0) return false;
+  if (!refreshed.every((t) => t.status === "complete")) return false;
+  return !nextPhaseAfter(workflow, phaseName);
 }
 
 function lastPhaseWithCompletedTasks(workflow: Workflow, tasks: Task[]): string | undefined {
