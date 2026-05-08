@@ -1,9 +1,5 @@
-# Keep the build context tiny. Everything except the Dockerfiles and staged build
-# inputs is excluded. build.sh stages corp-root.pem; build-designer.sh stages the
-# pencil-design skill under designer-skills/ before `docker build`.
+# Keep the build context tiny. Everything except the Dockerfile and staged build
+# inputs is excluded. build.sh stages corp-root.pem before `docker build`.
 *
 !agent-dev-worker.Dockerfile
-!agent-designer-worker.Dockerfile
 !corp-root.pem
-!designer-skills
-!designer-skills/**
