@@ -39,7 +39,7 @@ For ui-design, the questions are:
 1. **Brief / goal** — "In one paragraph, what are you designing and why? Who uses it, what's the dominant feeling, what should it NOT look like?"
 2. **Screens / sections** — "List the screens or sections you want, one line each. (Or say 'I don't know yet, propose some' and I will.)"
 3. **Style** — "Pencil ships 27 named styles (Aerial Gravitas, Dark Centered Platform, Saturated Code Bridge, Soft Bento, etc.). Want one of those, a vibe direction (e.g. 'dense terminal-adjacent, monospace, dark'), or your own design system you'll describe?"
-4. **Target paths** — "Where should the .pen file live? Where should PNG exports land?" (Default: `~/code/<project-name>/<workflow>.pen` and `~/code/<project-name>/designs/`.)
+4. **Target paths** — "Where should the .pen file live? Where should PNG exports land? (And if HTML/CSS code export is enabled, where should those files go?)" Defaults: `~/code/<project-name>/<workflow>.pen`, `~/code/<project-name>/designs/` for PNGs, `~/code/<project-name>/code/` for HTML/CSS — code is a peer of designs, not a subdirectory.
 5. **Naming convention** — "How should the PNG files be named? Default: `01-<screen-name>.png`, `02-<screen-name>.png`, etc."
 6. **Constraints** — "Anything else? Existing source code to ground against, brand rules, components to import, screens to NOT redesign, things you don't want?"
 7. **Code export** — "Want the prompt to also ask Pencil to emit HTML/CSS reference files for each screen? Useful as grounding when implementing in your target stack later. Default: yes."
@@ -52,7 +52,7 @@ If the human says "use defaults" or "skip", do that — they're a power user. Th
 Once interview is complete:
 
 1. Read `templates/<template-name>.md`.
-2. Substitute the parameters (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{file_naming}}`, `{{constraints}}`, `{{include_code_export}}`).
+2. Substitute the parameters (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{code_export_dir}}`, `{{file_naming}}`, `{{constraints}}`, `{{include_code_export}}`). When `{{include_code_export}}` is true and the human didn't specify `{{code_export_dir}}` explicitly, default it to `<output_dir's parent>/code/` (peer of designs/, not nested inside it).
 3. Write to `/task/PROMPT.md`. **The path must be `/task/PROMPT.md` — do not put it elsewhere.** Forge surfaces the file from there in the dashboard.
 4. Tell the human it's ready and what to do with it (the templates have a "How to run this prompt" section the human reads; you don't need to repeat it).
 
@@ -71,6 +71,7 @@ Write a JSON object to `/task/result.json`:
     "style": "...",
     "target_pen_file": "...",
     "output_dir": "...",
+    "code_export_dir": "...",
     "file_naming": "...",
     "include_code_export": true
   },
