@@ -42,7 +42,15 @@ export function registerNew(program: Command): void {
       if (options.brief) metadata.brief = options.brief;
       const designDir =
         (options as { designDir?: string }).designDir ?? deriveDefaultDesignDir(workflow as WorkflowName, title);
-      if (designDir) metadata.designDir = designDir;
+      if (designDir) {
+        metadata.designDir = designDir;
+        // Pre-create the conventional layout so the prompt-author and submit
+        // validator both have something to point at. Idempotent — reusing an
+        // existing designDir (per #67) leaves prior artifacts untouched.
+        mkdirSync(designDir, { recursive: true });
+        mkdirSync(`${designDir}/designs`, { recursive: true });
+        mkdirSync(`${designDir}/code`, { recursive: true });
+      }
 
       const projectDir = (options as { project?: string }).project ?? process.cwd();
 

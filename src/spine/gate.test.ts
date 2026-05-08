@@ -229,6 +229,54 @@ test("gate reject on a review task triggers onReject and creates a brief task wi
   assert.equal(brief.taskPackage.inputs.rejectedTaskId, "t-review");
 });
 
+test("gate advance on the last task of the terminal phase finalizes the run", async () => {
+  insertRun(UI_RUN);
+  // Brief task already complete; review task is the terminal one being advanced.
+  insertTask({
+    id: "t-brief-done",
+    runId: UI_RUN.id,
+    phase: "brief",
+    agentRole: "prompt-author",
+    status: "complete",
+    taskPackage: {
+      taskId: "t-brief-done",
+      runId: UI_RUN.id,
+      phase: "brief",
+      role: "prompt-author",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  insertTask({
+    id: "t-review-final",
+    runId: UI_RUN.id,
+    phase: "review",
+    agentRole: "",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-review-final",
+      runId: UI_RUN.id,
+      phase: "review",
+      role: "",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete", penFile: "/x.pen", pngFiles: [], htmlFiles: [] },
+    createdAt: "2026-05-08T00:00:01Z",
+  });
+
+  await gate("t-review-final", "advance", undefined);
+
+  // The run should have transitioned to complete because review is the last
+  // phase of ui-design and the terminal task just advanced. (#41 fix at the
+  // gate() entry point.)
+  const { getRun } = await import("../store/runs.js");
+  const finalRun = getRun(UI_RUN.id)!;
+  assert.equal(finalRun.status, "complete");
+});
+
 test("gate request-changes on a manual-phase task throws (no agent to re-run)", async () => {
   insertRun(UI_RUN);
   insertTask({

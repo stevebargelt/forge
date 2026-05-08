@@ -10,7 +10,17 @@ If a run does fall short (screens missing, end-actions skipped), do not re-paste
 
 WORKFLOW REQUIREMENTS (must follow):
 
-PRECONDITION — before any MCP tool call, run this Bash:
+PRECONDITION 0 — VERIFY PENCIL MCP TOOLS ARE AVAILABLE BEFORE DOING ANYTHING ELSE.
+
+This prompt requires the Pencil MCP server. The tools you need (`mcp__pencil__open_document`, `mcp__pencil__find_empty_space_on_canvas`, `mcp__pencil__export_nodes`, etc.) come from a Pencil MCP server that must be connected before you start. If those tools are NOT in your tool list:
+
+1. **STOP.** Do not start designing. Do not write HTML files as a fallback — the human asked for Pencil designs (.pen + PNG), not arbitrary HTML.
+2. Tell the human, in your own words: "The Pencil MCP server is not connected — I don't see `mcp__pencil__*` tools in this session. Reconnect Pencil's MCP and tell me to retry, or rerun this prompt in a session where it's connected." If you can list the MCP servers you DO see, mention them so the human knows what's connected vs missing.
+3. Wait for the human to fix it. Re-check tool availability when they tell you to retry.
+
+This is non-negotiable. Producing HTML-only output here is a failure mode — it pollutes `{{output_dir}}` with the wrong artifact type and the run can't be submitted (forge submit validates both .pen and PNG presence). Refuse and wait, don't improvise.
+
+PRECONDITION 1 — before any MCP tool call, run this Bash:
 mkdir -p {{output_dir_parent}} && touch {{target_pen_file}}
 This guarantees the target file exists on disk so open_document can route to it.
 

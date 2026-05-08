@@ -103,6 +103,22 @@ Caught 2026-05-08 during #53 validation — Steven couldn't read the full `run-t
 **How to apply:** When the dashboard's awaiting-gate detail renders a task whose result has `openQuestions`, render them as a checklist with three states per question (accept / change / explain) and a small inline text field for the change case. On submit, synthesize the gate rationale automatically from the per-question responses (e.g. "accepted #1, #3; changed #2 to: <text>; left #4 open") and POST to `/api/gate/:taskId` as today. The agent's re-run loop is unchanged — just a friendlier capture surface for the human.
 Caught 2026-05-08 during #53 validation. Belongs in #57's iteration backlog alongside #62/#63/#64.
 
+### #68 — `forge new --design-dir` should pre-create the conventional layout (DONE this session)
+Closed in Done (recent) below — `forge new` now `mkdir -p`s `<designDir>/{designs,code}/` at run-creation time. Idempotent for shared-designDir reuse (#67).
+
+### #69 — Prompt-author seed: hard-stop the human session if Pencil MCP is unavailable (DONE this session)
+Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-design.md` now has a PRECONDITION 0 step that tells the human's Claude Code session to refuse to proceed without `mcp__pencil__*` tools. Caught 2026-05-08: a session without the Pencil MCP started writing HTML files instead of failing fast, polluting `<designDir>/code/`.
+
+### #67 — Per-app design corpus: encourage / enforce shared designDir within an app
+**Why:** Today every `ui-design` run gets its own `--design-dir`. Each .pen file is a fresh document with no link to prior designs of the same app. If you design the forge dashboard at `~/code/forge-design/dashboard.pen`, then later add a widget to that dashboard, the widget design lives in a new .pen with no automatic access to the variable block or named components from the dashboard's .pen. Pencil 0.2.5 has no cross-file component import — components live inside their .pen file. Result: visual drift, redundant token redefinition, and the human has to keep "the dashboard's house style" in their head when running each new ui-design.
+**Caught 2026-05-08:** running ui-design for a forge dashboard widget against a fresh `--design-dir ~/code/forge-stats-widget/`. Steven flagged that this should have been added to `~/code/forge-design/` so it could reuse the existing component library + variable block. The prompt-author had no way to know.
+**Three shapes to consider (decide before implementing):**
+1. **Convention only.** Document that ui-design runs for the same app share a designDir. Update prompt-author seed to ask "is this an addition to an existing design corpus? if so, point me at it." Cheapest, no code change.
+2. **`forge new --inherit-from <other-design-dir>`.** New flag. The prompt-author template gets a step at the top: "open the inherit-from .pen first, copy variable block + named components into the new .pen, then proceed." Pencil supports this manually; agent automates the copy. Risky — node-copying across .pen files isn't a tested path in Pencil 0.2.5.
+3. **Reuse the same designDir; .pen grows monotonically.** No flag needed. The existing prompt-author already supports an existing .pen (touch + open_document is idempotent; new screens go in empty canvas space via `find_empty_space_on_canvas`). Just teach the human (and the prompt-author seed) that the right move is `--design-dir` pointed at the existing corpus, not a new dir. Accepts the cost of larger .pen files in exchange for actual reuse.
+**Lean toward (3) initially.** It's the cheapest honest answer and exposes whether the monotonic-growth cost is real before we build (1) or (2). (1) becomes the documentation form of (3). (2) only becomes worth building if Pencil ships better cross-file tooling AND we hit a case where one .pen is genuinely too big.
+**Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
+
 ### #66 — Dashboard new-run modal: require --design-dir for ui-design / design-revise
 **Why:** When the dashboard gets the real new-run modal (the deferred screen 07 / `forge new` POST endpoint), `ui-design` and `design-revise` runs MUST capture `designDir` at creation. Forge's `submit` step hard-errors when `run.metadata.designDir` is missing — so the modal needs a required field for these workflows, with the same `~/code/<sanitized-title>/` default the CLI offers. Surface what files will land where so the human knows what to expect.
 **How to apply:** When the workflow picker selects `ui-design` or `design-revise`, reveal a `Design directory` input pre-filled with `~/code/<kebab-cased-title>/`. Editable, required. POST to the (future) `/api/runs` endpoint includes `designDir`. Validation: path is absolute, parent exists, the dir itself either doesn't exist yet (will be created) or is empty/contains only `<title>.pen`/`designs/`/`code/`. Mirror the CLI's `forge new --design-dir` flag exactly.
@@ -226,6 +242,14 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #68 — `forge new --design-dir` pre-creates the conventional layout
+**Closed:** 2026-05-08, on `main` (alongside #54 smoke-test fixes).
+`src/cli/commands/new.ts` now creates `<designDir>/`, `<designDir>/designs/`, and `<designDir>/code/` via `mkdirSync({recursive: true})` when designDir is set. Idempotent — reusing an existing designDir (per #67) leaves prior artifacts untouched. Caught during the v4 smoke test where the human session's PROMPT.md hit `mkdir -p` defensively at run time; cleaner to do this once at run creation so submit's existsSync checks have something deterministic to verify.
+
+### #69 — Prompt-author seed: hard-stop on missing Pencil MCP
+**Closed:** 2026-05-08, on `main` (seed change).
+`seeds/agents/prompt-author/templates/ui-design.md` gains a PRECONDITION 0 step: verify `mcp__pencil__*` tools are connected before starting; if not, refuse to proceed and tell the human to reconnect. Caught 2026-05-08: a session ran the prompt without Pencil MCP attached and started writing HTML files as a fallback — wrong artifact type, would have hard-errored at `forge submit` because no .pen + no PNGs. Refuse + wait is the right shape, not improvise. Re-installed via `FORCE=1 scripts/install-seeds.sh`.
 
 ### #54 — `ui-design` review phase + manual-phase primitive
 **Closed:** 2026-05-08 afternoon, on `main` (FORGE-DEC-016 + implementation).

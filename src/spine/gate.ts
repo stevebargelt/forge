@@ -2,10 +2,11 @@ import type { GateDecision, Task, VerdictRow } from "../types/index.js";
 import { getTask, setTaskStatus, insertTask, tasksForRun } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
-import { getRun } from "../store/runs.js";
+import { getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { findPhase, loadWorkflow, nextPhaseAfter } from "./workflows.js";
+import { stopSsoWatchdog } from "../util/sso-watchdog.js";
 
 export type GateOptions = {
   force?: boolean;        // override blocked_by_red
@@ -110,6 +111,13 @@ export async function gate(
           parentId: refreshed.id,
           perAgentInputs,
         });
+      } else {
+        // Terminal phase + every sibling advanced + no successor → run is done.
+        // #41 closed this for next()'s auto-gate path; gate() needs the same finalize
+        // for the human-gate path (gating from CLI/dashboard never re-enters next()).
+        updateRunStatus(run.id, "complete");
+        logEvent("run.completed", { runId: run.id });
+        stopSsoWatchdog();
       }
     }
   } else if (decision === "reject") {

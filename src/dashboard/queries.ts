@@ -32,6 +32,7 @@ type RunRow = {
   created_at: string;
   completed_at: string | null;
   metadata: string | null;
+  project_dir: string | null;
 };
 
 type TaskRow = {
@@ -81,6 +82,7 @@ function rowToRun(row: RunRow): Run {
     createdAt: row.created_at,
     completedAt: row.completed_at ?? undefined,
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    projectDir: row.project_dir ?? undefined,
   };
 }
 

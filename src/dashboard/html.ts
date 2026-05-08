@@ -794,16 +794,23 @@ const CLIENT_JS = `
       el('span', { class: 'sep' }, '/'),
       el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;' }, shortId(run.id)),
     ]));
+    const designDir = (run.metadata && typeof run.metadata.designDir === 'string') ? run.metadata.designDir : '';
     const headerBlock = el('div', { class: 'middle-header' }, [
       el('div', { style: 'display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
         el('span', { style: 'font-weight: 600; color: var(--foreground);' }, run.id),
         badge(rowDisplayStatus(run)),
       ]),
+      run.title ? el('div', { style: 'color: var(--foreground); margin-bottom: var(--space-sm); font-size: 13px;' }, run.title) : null,
       el('div', { class: 'run-meta-strip' }, [
+        kvCell('WORKFLOW', run.workflow),
         kvCell('STARTED', formatDate(run.createdAt)),
         kvCell('DURATION', durationBetween(run.createdAt, run.completedAt)),
         kvCell('TASKS', counts.summary),
       ]),
+      (run.projectDir || designDir) ? el('div', { class: 'run-meta-strip', style: 'margin-top: var(--space-sm); font-family: var(--font-mono); font-size: 11px;' }, [
+        run.projectDir ? kvCell('--project', run.projectDir) : null,
+        designDir ? kvCell('--design-dir', designDir) : null,
+      ]) : null,
     ]);
     if (state.interactive) {
       headerBlock.appendChild(runActionRow(run, counts));
@@ -1169,24 +1176,26 @@ const CLIENT_JS = `
     }
     const rationaleField = el('textarea', {
       class: 'rationale',
-      placeholder: isBlocked ? 'Required for force-advance: explain why overriding this red verdict is justified…' : 'optional rationale for your decision…',
+      placeholder: isBlocked
+        ? 'Required for force-advance: explain why overriding this red verdict is justified…'
+        : 'Required for reject and request-changes — describe what to change. Optional for advance.',
       id: 'rationale-' + task.id,
     });
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, isBlocked ? 'Rationale — required for force-advance' : 'Rationale — required for reject + request-changes, optional for advance'));
+    sec.appendChild(rationaleField);
     if (isBlocked) {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
-        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: false }) }, '✕ Reject'),
-        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: false }) }, '↻ Re-run task'),
+        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ Reject'),
+        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: true }) }, '↻ Re-run task'),
         el('button', { class: 'btn btn-danger', onclick: () => doGate(task.id, 'advance', { force: true, requireRationale: true }) }, '⚠ Force advance + rationale'),
       ]));
     } else {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
-        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: false }) }, '✕ Reject Run'),
-        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: false }) }, '↻ Request Changes'),
+        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ Reject Run'),
+        el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: true }) }, '↻ Request Changes'),
         el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: false }) }, '→ Advance Run'),
       ]));
     }
-    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, isBlocked ? 'Rationale — required for force-advance' : 'Rationale (optional)'));
-    sec.appendChild(rationaleField);
     return sec;
   }
   function redVerdictCard(v) {
@@ -1210,7 +1219,7 @@ const CLIENT_JS = `
     const ta = $('rationale-' + taskId);
     const rationale = ta ? ta.value.trim() : '';
     if (opts.requireRationale && !rationale) {
-      toast('Rationale required for force-advance.', 'error');
+      toast('Rationale required for ' + decision + '. Add it above and try again.', 'error');
       ta && ta.focus();
       return;
     }
