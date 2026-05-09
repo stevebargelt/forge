@@ -6,24 +6,37 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-09 overnight:** #71 (phase pill row + next-action preview) shipped on `phase-flow-71`. Designs from yesterday's session walked into a real implementation: server-side `phaseShape` array per run, client renders the pill row above the task list with status colors + fanout dot strips, advance-preview line below the rationale field on awaiting_gate detail. 233 tests passing (was 218 → 232 after server, 233 after fanoutConcurrency test). Smoke-tested against the existing investigation run (66 tasks, 21-dot fanout strip rendered as fanoutDots: 15 done, 6 failed). Single commit on `phase-flow-71`.
+**State at end of 2026-05-09 overnight:** Eight commits shipped on `phase-flow-71`, all green at 231 tests (started at 218). Punch list went further than the original plan because each item was bounded and isolated.
+
+**What shipped overnight (commit-ordered, oldest first):**
+
+1. **#71 — phase pill row + advance-preview line** (`c99106b`). Server-side phaseShape per run (one entry per workflow phase, dynamic status + fanout dot strip + reds metadata). Client renders the pill row above the task list with status-coded backgrounds; click filters task list. Advance-preview line below gate buttons describes "what advance does" in four flavors (terminal/manual/fanout/plain). +15 tests.
+2. **#89 — drop FORGE_DASHBOARD_INTERACTIVE flag** (`369a7f2`). Dashboard is unconditionally interactive; CSRF header is the actual defense. -5 tests (obsolete 503 cases).
+3. **#94 — suppress retry on rejected** (`8239e8a`). queries returns derived `failureMode`; rejected tasks skip the retry button + get a clearer banner. +3 tests.
+4. **#76 — elapsed timer interval** (`c97ff46`). 1Hz setInterval rewrites textContent only on tagged cells; smart-refresh (#72) untouched. No DOM identity churn. Pure UI, 0 test deltas.
+5. **#62 + #63 — human-led gate copy + fresh-session warning** (`ed5627b`). "✓ I've done the work / ✕ I've decided not to" on manual phases. Yellow alert on awaiting_gate brief tasks: "Run PROMPT.md in a fresh session before approving." Pure UI.
+6. **#64 — sidebar 320px + tooltips** (`0365d2b`). Common run ids stop truncating; full id available on hover. Draggable resizers (option a) deferred. Pure UI.
+7. **#75 — markdown renderer for prose result fields** (`35d6f7d`). Conservative markdown detection (heading line / triple-backtick fence / 2+ list markers); focused renderer for headings/lists/fences/inline. XSS-safe. Pure UI.
+8. **#83 — PROMPT.md counts existing PNGs** (`7034e00`). Template runs `ls *.png | wc -l` and uses `$(printf "%02d" $START_NUM)` instead of hardcoded 01. Unblocks shared-corpus reuse (#67) without clobbering. Reinstalled to `~/.forge/agents/`.
 
 **Top of the stack tomorrow:**
 
-1. **Visual review of #71.** API + tests are green; what's missing is your eyes on the actual rendered pill row + advance preview in a browser. Spin up the dashboard against the existing investigation run + the abandoned phase-flow run; verify the visual matches designs 21/22/23/26 closely enough. Specific things I haven't confirmed visually: (a) status-coded backgrounds read clearly at the pill scale, (b) the fanout dot strip stays readable for 20+ tasks, (c) the advance-preview line wraps cleanly when verbose.
-2. **Decide on visual fixes / polish.** If the pill row looks good, push the commit to main as-is (or via PR). If not, BACKLOG entries to capture follow-ups + iterate.
-3. **Restart on #92 architect scope.** Once #71 lands, the most leveraged next thing is the architect seed rewrite — every subsequent `feature*` run pays for the bad shape until that's fixed.
-4. **Corpus consistency pass (#88).** Propagate the pill row into existing screens 02/03/05/08/etc so the design corpus matches reality. Do this BEFORE the next design-reviewer pass — otherwise it'd flag drift that's actually intentional.
-5. **#93 reject-loop picker.** Open architectural call.
-6. **Dashboard punch list (deferred from yesterday).** #89 drop-flag, #76 elapsed-timer, #62 gate-copy, #63 fresh-session, #64 tooltip+width, #75 markdown, #42 docs rewrite. None of these were touched overnight — the call was "do #71 first, no overnight punch list."
+1. **Visual review of #71 + the rest.** Eight commits in a row didn't get visual eyes. Spin up the dashboard, click through both the abandoned phase-flow run + the working investigation run, confirm: pill row reads at the right scale, fanout 21-dot strip stays readable, advance-preview line wraps cleanly, markdown actually renders on the recommend task, sidebar tooltip shows on truncated rows, elapsed cell ticks. If anything's off — capture a follow-up BACKLOG entry rather than rushing fixes.
+2. **Decide on the merge path.** Eight commits is more than #71 alone. Reasonable options: (a) merge `phase-flow-71` to main as-is (one big push); (b) cherry-pick into stages (#71 first, then the punch list); (c) PR with all eight visible. Lean (a) — the commits are already isolated and each one's commit message tells its own story.
+3. **#92 architect scope rewrite.** Highest-leverage next thing once visual review is settled — every subsequent `feature*` run pays for the bad shape until this is fixed.
+4. **Corpus consistency pass (#88).** Propagate the pill row visually into existing screens 02/03/05/08/etc. Do this BEFORE the next design-reviewer pass.
+5. **#93 reject-loop picker.** Architectural call still open.
+6. **Remaining BACKLOG items that defer:** #79 (auto-arm bedrock — touches creds path, real risk), #90 (corpus vs run artifacts — wait until it bites), #88 (Pencil session, needs human), #80 (long-form #83 fix — different code path), #51 (design-reviewer agent — needs ADR conversation), #73 (reds-as-reviewer — open call), #42 (docs rewrite — needs taste).
 
 **Validation still pending:**
 - #25 (reject + `onReject` flow) — still un-validated end-to-end.
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
 
-**Branch state:** `phase-flow-71` ahead of main with #78 retry, #82 *.pen glob, gate-advance auto-chain, BACKLOG hygiene, three new entries (#92/#93/#94), and now **#71** — the biggest piece of dashboard UX shipped this week.
+**Branch state:** `phase-flow-71` ahead of main with #78 retry, #82 *.pen glob, gate-advance auto-chain, BACKLOG hygiene, three new entries (#92/#93/#94), **#71**, and the punch list (#89/#94/#76/#62/#63/#64/#75/#83). 231 tests passing, typecheck green at every commit boundary.
 
 **Watchdog status:** works.
+
+**One thing I'd flag:** every overnight task's tests live in queries.test.ts / phaseShape.test.ts. The CLIENT_JS string in html.ts (the 2400-line dashboard JS) has *zero* unit tests — render functions, render-key derivations, advance-preview formatting, markdown renderer, all untested. They were tested implicitly via API smoke + typecheck only. If #77 (Preact migration) ever happens, that's the natural moment to extract unit-testable components; until then it stays under-covered.
 
 ## Active
 
