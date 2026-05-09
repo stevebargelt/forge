@@ -164,6 +164,34 @@ Then the per-screen rename steps use `$(printf "%02d" $START_NUM)`, `$(printf "%
 
 **Composite with #80:** #80's per-screen Cmd+S reminders are still good (Pencil sessions can also crash mid-run for unrelated reasons). The dirty-marker check is an *earlier* tripwire — catches the failure within seconds of starting, not after 24 screens of wasted work.
 
+### #89 — Drop FORGE_DASHBOARD_INTERACTIVE feature flag (always on)
+**Why:** Steven 2026-05-08: "I'm not going back." The flag was the right shape for FORGE-DEC-015 v0 — a defensive switch when interactive mutations were unproven and read-only-by-default protected against an in-progress dashboard accidentally driving things. After multiple weeks of real interactive use (gate, run-next, retry, submit, new-run modal, all reliably) the flag is friction that catches Steven on every dashboard restart and serves no protective purpose.
+
+**What this means concretely:**
+- Stop reading `FORGE_DASHBOARD_INTERACTIVE` in `src/dashboard/server.ts` (the `isInteractive()` helper). Mutations are unconditional.
+- Drop the read-only fallback paths in the dashboard UI (`renderReadOnlyNewRun`, the "Set FORGE_DASHBOARD_INTERACTIVE=1 ..." copy-CLI fallbacks scattered through gate/submit/retry sections).
+- `GET /api/meta` removes the `interactive` field (or returns it as always-true for backward compat with any client that hasn't been redeployed; not really a concern since the dashboard ships in the same repo).
+- All the server tests that check "503 when not interactive" become obsolete. Drop them.
+- Documentation: the README/docs that mention "set FORGE_DASHBOARD_INTERACTIVE=1 to enable mutations" → just say "the dashboard is interactive."
+
+**Side note:** the CSRF header check (`X-Forge-Request: 1`) stays. It's the actual defense against drive-by browser requests, and it's free — the dashboard's own client adds it automatically. The interactive flag was belt-and-suspenders; CSRF header is the belt.
+
+**Ship as part of:** any nearby dashboard work. Could be its own tiny commit after the in-flight phase-flow stuff lands. Probably ~30 line removal across 3 files + test cleanup.
+
+### #90 — Submit captures corpus-level artifacts, not run-level deliverables
+**Why:** Caught 2026-05-08 reviewing phase-flow submit. The validator globs `*.png` / `*.html` across designDir/{designs,code}/ and stores all matches in `result.pngFiles` / `result.htmlFiles`. With shared-corpus reuse (#67), that's the *whole corpus*, not just this run's deliverables. The phase-flow run's review task captured 24 PNGs + ~25 HTMLs — 20 of each from earlier runs that have nothing to do with the phase flow widget. Architect agent reads `inputs.upstream[*].result.pngFiles` and gets the full list as input, including 20 unrelated screens.
+
+**For this run it's fine** (architect needs full corpus context to integrate the new component into the existing dashboard). For other features where designDir has unrelated history, it'd be noise.
+
+**Three options:**
+1. **Snapshot at brief-time, diff at submit-time.** When `forge new` creates a run with `--design-dir`, snapshot the existing file list to `run.metadata.designDirSnapshot`. At submit, compute "new since snapshot" and store both: `result.allPngFiles` (full corpus) and `result.newPngFiles` (just this run's). Architect prompt could choose which to read.
+2. **mtime threshold.** Submit only captures files newer than `run.createdAt`. Cleaner; doesn't require run-creation-time bookkeeping. Edge case: if the human iterates in Pencil for a long time and the corpus had files added meanwhile (e.g. another forge run finished mid-Pencil-session), they'd show up as "new." Probably rare enough to ignore.
+3. **Leave as-is.** Architect prompt updated to "when there are 20+ artifacts, distinguish 'just this run' from 'pre-existing context' by looking at filename numbering patterns." Frail; punts the problem to the agent.
+
+**Lean (2)** — mtime threshold. Simple, no schema change, agent gets clean input most of the time. Composite with #88 (corpus consistency) makes the corpus-vs-deliverable distinction operational at multiple layers.
+
+**Sequencing:** wait until we see this become an actual problem in a real run. For phase-flow specifically, the full-corpus context is appropriate. Capture and defer.
+
 ### #88 — Corpus consistency: propagate new components into affected existing screens
 **Why:** Caught 2026-05-08 reviewing phase-flow design output. The pill row (#71) is a new component that, once implemented, will appear above the task list in many existing dashboard screens — 02 (task-list), 03 (task-detail-generic), 05 (task-detail-gate), 08 (task-detail-blocked-by-red), 11, 17, 18, 19, 20, etc. The current design corpus shows those screens *without* pills (drawn pre-pill-row). After implementation: live dashboard shows pills everywhere, corpus shows pills in isolation only. Mismatch.
 

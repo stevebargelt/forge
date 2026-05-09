@@ -1717,7 +1717,23 @@ const CLIENT_JS = `
         method: 'POST',
         body: { decision, rationale: rationale || undefined, force: opts.force || undefined },
       });
-      toast('Gate decision recorded: ' + decision, 'success');
+      // Auto-chain forge-next on advance — the user already decided "go forward"
+      // by clicking Advance; making them click Run-next is asking permission twice.
+      // Reject and request-changes don't chain (they need human follow-up).
+      if (decision === 'advance' && state.selectedRunId) {
+        try {
+          await fetchJSON('/api/next/' + encodeURIComponent(state.selectedRunId), {
+            method: 'POST', body: {},
+          });
+          toast('Advanced + dispatched next phase.', 'success');
+        } catch (e) {
+          // Gate succeeded; next failed. Surface the next-failure but don't
+          // act like the gate didn't happen.
+          toast('Advanced. But next dispatch failed: ' + (e.message || 'unknown') + '. Click Run next to retry.', 'error');
+        }
+      } else {
+        toast('Gate decision recorded: ' + decision, 'success');
+      }
       await refreshAll();
     } catch (e) {
       toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
