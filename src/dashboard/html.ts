@@ -1688,12 +1688,57 @@ const CLIENT_JS = `
     sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, [
       'This is the prompt the agent would have you run. Review before advancing — the gate is your chance to push back if it picked wrong defaults.',
     ]));
-    sec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 480px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;' }, briefContext.promptMarkdown));
+    sec.appendChild(renderPromptBlocks(briefContext.promptMarkdown, 480));
     sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-top: var(--space-sm);' }, [
       'On disk: ',
       el('code', null, briefContext.promptPathHost),
     ]));
     return sec;
+  }
+  // Split a PROMPT.md into the human-only prefix (everything before the first
+  // standalone "---" separator) and the prompt body the agent should receive.
+  // The ui-design template puts a "READ THIS FIRST (the human running the
+  // prompt, not the model)" preamble above a "---" divider; that prefix
+  // shouldn't end up in the agent's context when the human pastes.
+  // Returns { meta, body } — meta may be empty if no separator is found.
+  function splitPromptMarkdown(md) {
+    const lines = String(md || '').split(/\\n/);
+    let i = 0;
+    while (i < lines.length) {
+      if (/^---\\s*$/.test(lines[i])) {
+        const meta = lines.slice(0, i).join('\\n').trim();
+        const body = lines.slice(i + 1).join('\\n').replace(/^\\n+/, '');
+        return { meta, body };
+      }
+      i++;
+    }
+    return { meta: '', body: String(md || '') };
+  }
+  // Render the PROMPT.md split into a (collapsible) human-only block and the
+  // agent prompt body with a copy button. Reused by awaiting_gate brief tasks
+  // and awaiting_human_input review tasks.
+  function renderPromptBlocks(md, maxHeight) {
+    const { meta, body } = splitPromptMarkdown(md);
+    const wrap = el('div');
+    if (meta) {
+      const details = el('details', { class: 'prompt-meta', style: 'margin-bottom: var(--space-sm); border: 1px dashed var(--border-bright); border-radius: var(--radius-sm); padding: 6px 10px; background: var(--background-elevated);' });
+      details.appendChild(el('summary', { style: 'cursor: pointer; font-size: 11px; color: var(--foreground-muted); user-select: none;' }, '⚠️ Instructions for you (NOT the prompt body — do not copy this part)'));
+      details.appendChild(el('pre', { style: 'margin-top: 6px; white-space: pre-wrap; word-wrap: break-word; font-family: var(--font-mono); font-size: 11px; color: var(--foreground-secondary);' }, meta));
+      wrap.appendChild(details);
+    }
+    const bodyBlock = el('pre', {
+      class: 'cli-block',
+      style: 'max-height: ' + (maxHeight || 480) + 'px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;',
+    });
+    // Copy button copies the agent body only (not the meta preamble).
+    bodyBlock.appendChild(el('button', {
+      class: 'copy',
+      title: 'Copy prompt body (excludes the human-only instructions)',
+      onclick: (e) => copyText(e, body),
+    }, 'copy'));
+    bodyBlock.appendChild(document.createTextNode(body));
+    wrap.appendChild(bodyBlock);
+    return wrap;
   }
   // Retry section for failed tasks. Resets to pending; next forge-next (or
   // the dashboard "Run next" button) redispatches. Read-only fallback shows
@@ -1749,7 +1794,7 @@ const CLIENT_JS = `
       const promptSec = el('div', { class: 'detail-section', style: 'padding-top: var(--space-sm);' }, [
         el('h3', null, 'PROMPT.md'),
       ]);
-      promptSec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 360px; overflow: auto;' }, briefContext.promptMarkdown));
+      promptSec.appendChild(renderPromptBlocks(briefContext.promptMarkdown, 360));
       sec.appendChild(promptSec);
     } else if (briefContext) {
       sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted);' }, [
