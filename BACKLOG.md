@@ -296,6 +296,79 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 
 **Lands after:** the workflow rename refactor (#70 / refactor-2026-05-08-workflow-naming.md). Phase names are about to change; building the ribbon before the rename means rework.
 
+### #93 — Reject UX: choose where to loop back, not just trigger the workflow's fixed onReject
+**Why:** Caught 2026-05-09 — Steven rejected architect output (wrong scope per #92, not a brief problem). Workflow's `onReject: "brief"` fired, spawning a fresh `prompt-author` brief task. But the brief was *fine*; the architect's seed was the problem. Looping to brief redoes work that was already correct, wastes tokens, and pollutes the corpus.
+
+**The bug:** `onReject` is a single fixed target on the phase definition. The human at gate-reject time has no way to say "this output was wrong, restart from THIS phase, not the workflow's default." Today's only options are:
+1. Reject → workflow's `onReject` target fires (fixed by config, may be wrong for this rejection)
+2. Force-advance with rationale (admits the bad output into downstream phases — also wrong)
+3. Manually mark the run abandoned via SQL (wasteful; loses audit trail)
+
+**Two real shapes for the fix:**
+- **(a) Picker at reject-time.** When the human clicks Reject in the dashboard, surface a phase picker: "redo from which phase?" Default to workflow's `onReject` target; allow override. The chosen phase becomes the parent for the new pending task.
+- **(b) Multiple onReject targets per phase.** Workflow defines `onReject: ["brief", "architect"]` as valid options; human picks which fires. Less flexible than (a), but matches workflow-author intent (they know which targets are valid).
+
+(a) is more flexible but harder to reason about ("what if the human picks an invalid loop target?"). (b) constrains to workflow-author-blessed targets. Lean (b) — workflows know their topology; humans pick from options the workflow validates.
+
+**Composite with #92:** if architect is properly scoped (#92), most architect-rejects will be "your scope was wrong, redo architect with fixed expectations" — looping to architect is the right target. Today's onReject loops to brief. Different outcomes; different right answers depending on what failed.
+
+**Caught the wrong way:** at 04:30 UTC, mid-run-shutdown. Architect output got rejected; brief re-spawned automatically; killed manually. Should have been: reject → "redo architect" picker → architect re-runs against the corrected seed.
+
+### #94 — Retry button shouldn't appear on tasks failed via gate-reject
+**Why:** Caught 2026-05-09 alongside #93. Architect task was rejected via gate; status flipped to `failed`. Dashboard's failed-task render (per #78) shows the "↻ Retry task" button. But retry on a *rejected* task means re-running the same agent with same inputs — reproduces the same output the human just rejected. Token waste.
+
+**The fix:** dashboard's render distinguishes failure modes via the `gates` table. If the task has a gate row with `decision='reject'`, it failed by human decision, not by container crash or agent error. Don't offer retry. Maybe offer "clone with edits" or nothing at all (the workflow's onReject path already handled the loop).
+
+**Where this lives:** `src/dashboard/queries.ts` — `getTaskDetail` already returns `gates`. Add a derived `failureMode: 'rejected' | 'crashed' | 'agent_error'` field. `src/dashboard/html.ts` — gate retryActionsSection on `failureMode !== 'rejected'`.
+
+### #92 — Architect agent scope is wrong: tutoring the implementer instead of doing systems architecture
+**Why:** Caught 2026-05-09 reviewing task-architect-c29474's output (run-forge-phase-flow-visualization-f55801). The architect produced 6+ "decisions" of the shape "PhaseShape is a plain serializable object, not a re-export of the Phase type" + "Pill-click sets state.phaseFilter; renderMiddle already re-runs on state change" + "Gate-panel advance preview is a pure client-side text function, not a server endpoint." These read like one Claude telling another Claude how to code — line-level guidance on type names, function names, file structure.
+
+That is **not what a systems architect does**, and it's the thing Steven hates most about real-world architects who try to dictate code: "This pissed me off more than anything in the real world. Architects shouldn't tell engineers how to code."
+
+**What systems architecture should be (Steven's framing, 2026-05-09):**
+- "This is impossible because of constraint X" — surface real blockers
+- "That would require 72 API calls and will be too slow" — surface scaling/performance limits
+- "This couples to system Y in a way that breaks when Y evolves" — surface integration risks
+- "The data shape implied here doesn't fit our database/transport" — surface data-flow problems
+- Decisions about boundaries (where logic lives, who owns what state, which system is authoritative for X)
+- Risks worth flagging that the implementer might miss (concurrency, security, audit, schema migrations)
+
+**What the architect should NOT be doing:**
+- Picking type names
+- Choosing function names
+- Specifying file structure
+- Suggesting "do X this way, not that way" when both are valid
+- Anything an engineer would do better with the code in front of them
+
+**Where the bug lives:** the architect agent seed (`seeds/agents/architect/CLAUDE.md`). Today it says "produce decisions, components, interfaces" — which the agent is interpreting as "design the implementation in detail." Need to reshape the seed so the agent's output is closer to a risk-and-constraints report than a code design document.
+
+**How to apply (seed update):**
+1. Reframe the role: "You are a systems architect. Your job is to surface what would make this hard, slow, expensive, or impossible — not to design the implementation. The engineer is competent; respect that. If you find yourself naming functions or types, you've gone too far."
+2. New output structure (proposed):
+   - `risks` — what could go wrong, with severity and likelihood
+   - `constraints` — hard limits the implementer must respect (data volume, API budgets, latency, security boundaries, schema-migration cost)
+   - `boundaries` — where logic should live, who owns state, what's authoritative for what
+   - `prior_art` — relevant existing patterns in the codebase or related systems
+   - `open_questions` — things only the human can decide (what's the budget? which provider? how strict is X?)
+3. Explicit anti-pattern list in the seed: "do not specify type names, function signatures, file paths, or 'do X this way' when both X and Y are valid choices."
+4. Worked example in the seed showing a bad architectural output ("PhaseShape should be a separate type") next to a good one ("the dashboard API will leak internal types if you ship Phase directly — there's a real boundary discipline question worth deciding").
+
+**Composite with #73 (reds-as-reviewer):** both #73 and #92 are "the agent has the wrong job description, not just a wrong prompt." Reds were reviewing the underlying subject instead of the work product; architects are tutoring the implementer instead of doing systems architecture. Same shape of category mistake, different agents. Worth fixing both with the same lens: define each agent's role by what *only it* can contribute, not by what's vaguely related to the phase name.
+
+**Sequencing:** worth doing before more `feature*` runs land, since architect's wrong output shape compounds — the planner reads architect's output as input, and if the architect dictated implementation, the planner just tries to translate that into steps. Garbage propagates.
+
+**Deeper framing (Steven 2026-05-09):** "It's a waste of tokens for one agent (using the same model) to tell another agent how to code." Same model + same context budget means architect-tells-implementer-how-to-code pays for two invocations to do work one would do better. The implementer has the *actual code* in front of it; architect is speculating in absentia.
+
+The architect phase only earns its tokens by doing something the implementer *can't*:
+- Look up at constraints / integration / scale / risk that the implementer's narrow code-focused view misses
+- Surface "this is impossible because X" *before* the implementer wastes cycles on it
+- Notice cross-cutting concerns (security, audit, migration) that show up only when you're not in the weeds
+
+Implication: when an architect run produces output that's mostly code-design (type names, function signatures, "do it this way"), that's a signal the architect had nothing distinctive to contribute. Either the work doesn't need an architect phase, or the seed isn't enforcing the role distinction enough. **Future test:** add a quick post-run check — does the architect's output reference any project file, constraint, integration, or risk that an implementer wouldn't naturally consider? If not, the run was token waste regardless of seed quality.
+
+This argues for: (a) tightening the architect seed per #92, (b) considering whether some workflows ship without an architect phase entirely (cheap features, refactors, isolated additions where the implementer's view is sufficient), and (c) making "skip architect" a workflow-level configuration, not just a different workflow choice.
+
 ### #91 — Reconcile bypasses gate=human on recovery
 **Why:** Caught 2026-05-09 ~04:30 UTC during the architect phase of run-forge-phase-flow-visualization-f55801. The architect container exited cleanly + wrote 13KB of valid result.json, but the parent forge process never observed `close` (similar shape to #74). When reconcile recovered the orphan, it called `markTaskComplete` directly — skipping the `gate: "human"` step that the architect phase's config requires.
 
