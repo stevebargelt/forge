@@ -149,6 +149,62 @@ test("red-prefixed agentRole tasks excluded from phase aggregate", () => {
   assert.equal(shape.status, "done"); // running reds don't pull phase back to running
 });
 
+test("retry chain collapses to terminal task in phase aggregate", () => {
+  // Original failed (t1), then retry succeeded (t2 → parentId=t1). Phase
+  // aggregate should report 1/1 done, not 2 tasks with 1 failed.
+  const tasks = [
+    {
+      id: "t1",
+      runId: "run-1",
+      phase: "investigate",
+      agentRole: "investigator",
+      status: "failed" as const,
+      taskPackage: { taskId: "t1", runId: "run-1", phase: "investigate", role: "investigator", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-05-09T00:00:01Z",
+    },
+    {
+      id: "t2",
+      runId: "run-1",
+      parentId: "t1",
+      phase: "investigate",
+      agentRole: "investigator",
+      status: "complete" as const,
+      taskPackage: { taskId: "t2", runId: "run-1", phase: "investigate", role: "investigator", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-05-09T00:00:02Z",
+    },
+  ];
+  const shape = buildPhaseShape(SIMPLE_WORKFLOW, tasks);
+  const investigate = shape[1]!;
+  assert.equal(investigate.taskCounts.total, 1);
+  assert.equal(investigate.taskCounts.complete, 1);
+  assert.equal(investigate.taskCounts.failed, 0);
+  assert.equal(investigate.status, "done");
+  assert.deepEqual(investigate.fanoutDots, ["done"]);
+});
+
+test("retry chain that ends in failed reports failed (terminal status)", () => {
+  // Original failed, retry failed too.
+  const tasks = [
+    {
+      id: "t1", runId: "run-1", phase: "investigate", agentRole: "investigator",
+      status: "failed" as const,
+      taskPackage: { taskId: "t1", runId: "run-1", phase: "investigate", role: "investigator", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-05-09T00:00:01Z",
+    },
+    {
+      id: "t2", runId: "run-1", parentId: "t1", phase: "investigate", agentRole: "investigator",
+      status: "failed" as const,
+      taskPackage: { taskId: "t2", runId: "run-1", phase: "investigate", role: "investigator", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-05-09T00:00:02Z",
+    },
+  ];
+  const shape = buildPhaseShape(SIMPLE_WORKFLOW, tasks);
+  const investigate = shape[1]!;
+  assert.equal(investigate.taskCounts.total, 1);
+  assert.equal(investigate.taskCounts.failed, 1);
+  assert.equal(investigate.status, "failed");
+});
+
 test("partial-failed phase that has some complete + some failed → failed", () => {
   const tasks = [
     task("t1", "investigate", "investigator", "complete"),

@@ -91,10 +91,27 @@ function countTasks(tasks: Task[]) {
 // that belong to it. Excludes red tasks (agentRole prefix "red-") from the
 // aggregate — reds are a separate concern, not first-class members of the
 // phase from the user's POV.
+//
+// Collapses retry chains (#78) to their terminal task: when a failed task is
+// retried, a new task row is created with parentId pointing at the failed one.
+// The audit trail keeps both rows; the phase aggregate keeps only the
+// terminal task (newest in each chain). Counting both would double-count —
+// e.g. an investigate run with 16 claims, 5 of which had one failed attempt
+// before a successful retry, would show as 21 tasks / 5 failed instead of
+// 16 done.
 export function buildPhaseShapeForPhase(phase: Phase, allRunTasks: Task[]): PhaseShape {
-  const phaseTasks = allRunTasks.filter(
+  const allPhaseTasks = allRunTasks.filter(
     (t) => t.phase === phase.name && !t.agentRole.startsWith("red-")
   );
+  // Build set of task ids that have been superseded by a same-phase, same-
+  // role child via parentId. Those are non-terminal — drop them from the
+  // aggregate but keep them in the task list (the list shows the full audit
+  // trail via taskHeaderSection's RETRY OF / RETRIED AS).
+  const supersededIds = new Set<string>();
+  for (const t of allPhaseTasks) {
+    if (t.parentId) supersededIds.add(t.parentId);
+  }
+  const phaseTasks = allPhaseTasks.filter((t) => !supersededIds.has(t.id));
   const isManual = (phase.agents || []).length === 0;
   const hasFanout = !!(phase.fanout || phase.fanoutFromUpstream);
   const hasReds = !!(phase.reds && (phase.reds.wide || phase.reds.narrow));
