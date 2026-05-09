@@ -2360,20 +2360,24 @@ const CLIENT_JS = `
       // by clicking Advance; making them click Run-next is asking permission twice.
       // Reject and request-changes don't chain (they need human follow-up).
       if (decision === 'advance' && state.selectedRunId) {
-        try {
-          await fetchJSON('/api/next/' + encodeURIComponent(state.selectedRunId), {
-            method: 'POST', body: {},
-          });
-          toast('Advanced + dispatched next phase.', 'success');
-        } catch (e) {
-          // Gate succeeded; next failed. Surface the next-failure but don't
-          // act like the gate didn't happen.
+        // Don't wait for forge next — the dispatched task can run for
+        // minutes. Fire-and-forget; refresh immediately so the now-running
+        // task shows up; let smart-refresh polling keep ticking.
+        toast('Advanced; dispatching next phase…', 'success');
+        const runId = state.selectedRunId;
+        const nextPromise = fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
+        setTimeout(() => { void refreshAll(); }, 250);
+        nextPromise.then(() => {
+          toast('Phase complete.', 'success');
+          void refreshAll();
+        }).catch((e) => {
           toast('Advanced. But next dispatch failed: ' + (e.message || 'unknown') + '. Click Run next to retry.', 'error');
-        }
+          void refreshAll();
+        });
       } else {
         toast('Gate decision recorded: ' + decision, 'success');
+        await refreshAll();
       }
-      await refreshAll();
     } catch (e) {
       toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
     }
@@ -2402,14 +2406,24 @@ const CLIENT_JS = `
     }
   }
   async function runNext(runId) {
-    try {
-      const data = await fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
-      const summary = (data && data.summary) || 'Dispatched next phase.';
+    // forge next blocks until the dispatched task finishes — the spawn is sync.
+    // If we waited for the POST to return before refreshing the dashboard,
+    // the user would see "pending" for the entire task duration. Instead:
+    // fire-and-forget the POST, then refresh immediately so the now-running
+    // task lands in state. The smart-refresh poll (schedulePoll) keeps
+    // ticking every 3s while shouldPoll is true.
+    toast('Dispatching next phase…', 'success');
+    const promise = fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
+    // Give the spine a moment to flip the task to running, then refresh.
+    setTimeout(() => { void refreshAll(); }, 250);
+    promise.then((data) => {
+      const summary = (data && data.summary) || 'Phase complete.';
       toast(summary, 'success');
-      await refreshAll();
-    } catch (e) {
+      void refreshAll();
+    }).catch((e) => {
       toast('Run-next failed: ' + (e.message || 'unknown error'), 'error');
-    }
+      void refreshAll();
+    });
   }
   async function refreshAll() {
     await loadRuns();
