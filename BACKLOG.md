@@ -296,6 +296,22 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 
 **Lands after:** the workflow rename refactor (#70 / refactor-2026-05-08-workflow-naming.md). Phase names are about to change; building the ribbon before the rename means rework.
 
+### #91 — Reconcile bypasses gate=human on recovery
+**Why:** Caught 2026-05-09 ~04:30 UTC during the architect phase of run-forge-phase-flow-visualization-f55801. The architect container exited cleanly + wrote 13KB of valid result.json, but the parent forge process never observed `close` (similar shape to #74). When reconcile recovered the orphan, it called `markTaskComplete` directly — skipping the `gate: "human"` step that the architect phase's config requires.
+
+**The bug:** in reconcile.ts (lines ~75 + the no-reds branch), recovery → `markTaskComplete` regardless of phase.gate. For a `gate: "human"` phase that's wrong; for a `gate: "auto"` phase it's correct. The same logic in dispatch.ts's normal path (lines ~107-112) DOES check phase.gate — auto → markComplete, human → setStatus(awaiting_gate). Reconcile should mirror that.
+
+**For phases with reds:** the right reconcile behavior is also more nuanced. If the phase has reds and they were never spawned (because the parent forge died before kicking them off), reconcile today doesn't spawn them either — it just marks complete. This means specialist reds get silently skipped on orphan recovery. For specialist (non-blocking) reds, that's mostly OK; for authoritative reds with gateOnVerdict, it's a real correctness issue.
+
+**Three things to fix:**
+1. `gate: "human"` recovery → `awaiting_gate` instead of `complete`. (Easiest.)
+2. `gate: "auto"` recovery → `complete` (current behavior, correct).
+3. Phase has reds + reds never ran → spawn reds during reconcile. Or, more conservatively, transition to `awaiting_gate` and let the human force-advance through; the missed reds are an audit gap that's surface-able. This is the harder design question.
+
+**Manual recovery for the in-flight run (2026-05-09 04:30 UTC):** SQL `UPDATE tasks SET status='awaiting_gate' WHERE id='task-architect-c29474'` after reconcile flipped it to `complete`. Architect output landed correctly; just needs human gate.
+
+**Composite with #74:** the orphan-detection problem is upstream (forge loses the docker child); the gate-honoring problem is downstream (reconcile's recovery logic). Fixing one doesn't fix the other. Both worth doing.
+
 ### #74 — Reconcile + watchdog can't catch zero-stdout orphans
 **Why:** Caught 2026-05-08 on `task-investigate-dace4f`. Container apparently died (no `docker ps` output) but the task stayed `running` in the DB indefinitely. Three failure modes stacked:
 1. **No container.stdout.log was ever written.** The task workspace had only the input files + an empty 0-byte `result.json`. Stdout never started flowing — possibly the container exited before producing any, or forge's `cpSpawn` parent process died before piping anything to disk.
