@@ -374,12 +374,6 @@ No prompt-tightening fix makes that ambiguity go away. Even with crisp instructi
 
 **Side issue, separate fix already shipped:** verdict cards now render `red task: <id>` so the human can copy/reference reds for troubleshooting. Doesn't fix the vocabulary issue but helps debug confusing verdicts in the meantime.
 
-### #75 — Dashboard: markdown rendering for prose result fields
-**Why:** #34's pretty result view splits prose on blank lines and renders paragraphs — fine for plain prose, but agent recommendations + reports often emit markdown (headings, bold, fenced code, lists). Currently those render as literal text (`# Heading` shows the hash). Caught 2026-05-08 on `task-recommend-071478`'s `recommendation` field — a thoughtful markdown report rendered as a wall of paragraphs with literal `##` headings.
-**How to apply:** When a string value's content looks like markdown (heuristic: presence of `^#` lines, `**bold**`, ` ``` ` fences, `- ` / `* ` list markers, `[link](url)` patterns above some threshold), pipe through a small markdown renderer. Browsers don't ship one; either add a tiny single-file markdown lib (~5KB), or write a focused renderer for the subset agents actually emit (headings, bold, code, fenced blocks, ordered/unordered lists, paragraphs). Defer images and tables. Keep the raw toggle so users can see source markdown.
-**Detection:** simplest = check for `^#{1,6}\s` or fenced `^```` early in the string. False positives are cheap (rendering plain prose through markdown is mostly idempotent); false negatives leave the existing paragraph render in place.
-**Side note:** currently the recommendation field is the only place this matters in practice. Could even gate by field name (`recommendation`, `report`, `summary`) rather than content sniffing.
-
 ### #67 — Per-app design corpus: encourage / enforce shared designDir within an app
 **Why:** Today every `ui-design` run gets its own `--design-dir`. Each .pen file is a fresh document with no link to prior designs of the same app. If you design the forge dashboard at `~/code/forge-design/dashboard.pen`, then later add a widget to that dashboard, the widget design lives in a new .pen with no automatic access to the variable block or named components from the dashboard's .pen. Pencil 0.2.5 has no cross-file component import — components live inside their .pen file. Result: visual drift, redundant token redefinition, and the human has to keep "the dashboard's house style" in their head when running each new ui-design.
 **Caught 2026-05-08:** running ui-design for a forge dashboard widget against a fresh `--design-dir ~/code/forge-stats-widget/`. Steven flagged that this should have been added to `~/code/forge-design/` so it could reuse the existing component library + variable block. The prompt-author had no way to know.
@@ -460,6 +454,15 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #75 — Dashboard: markdown rendering for prose result fields
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).
+- New `looksLikeMarkdown(s)` heuristic in html.ts: triggers on at least one structural marker — heading line (`^#{1,6}\s`), triple-backtick fence (`^```), or two-or-more list-marker lines. Inline markers (bold, links) alone don't trigger; ordinary prose with one **bold** word stays plain.
+- New `renderMarkdown(src)` walks lines and emits structured DOM: fenced code blocks (`<pre><code>`), headings (h3-h6 to avoid clashing with `.result-field-label` h3 above), ordered + unordered lists, paragraphs that gather consecutive non-structural lines.
+- New `renderInline(s)` handles inline: HTML-escape input, then `**bold**`, `*em*`, `` `code` ``, `[text](url)` for http(s) + relative anchors. javascript: links explicitly rejected — anchor href regex requires `https?://` or `#` start. XSS-safe: input is escapeHtml'd before any markdown patterns are applied.
+- Wired into `renderResultValue` — string values that pass the markdown heuristic go through `renderMarkdown`; everything else falls through to the existing paragraph treatment. Paths still get the `<code>` path treatment first (no regression).
+- Backticks throughout (in regex source + comments) escaped via `\\u0060` because the entire CLIENT_JS lives inside a TS template literal where raw backticks would close the literal early.
+- Pretty/raw toggle (#34) unchanged — raw mode keeps showing the source markdown.
 
 ### #64 — Sidebar widened to 320px + tooltips on truncated run ids
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).

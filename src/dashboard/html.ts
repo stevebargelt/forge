@@ -1899,6 +1899,15 @@ const CLIENT_JS = `
       if (looksLikePath(contextKey, value)) {
         return el('code', { class: 'result-path' }, value);
       }
+      // #75 — if the string looks like markdown (headings, fences, lists,
+      // bold, links), render it through the small markdown helper so headings
+      // stop showing up as literal "## " text and bold actually emboldens.
+      // Detection is conservative — false positives are cheap (markdown of
+      // plain prose is mostly idempotent) but we don't want to confuse
+      // narrow prose ("a small **note**" vs a real markdown block).
+      if (looksLikeMarkdown(value)) {
+        return renderMarkdown(value);
+      }
       // Multi-paragraph strings: split on blank lines, render each paragraph.
       // Single-line strings render as a plain paragraph. Either way, no <pre>
       // wrapper — natural word-wrap is what we want for prose.
@@ -1963,6 +1972,111 @@ const CLIENT_JS = `
     if (keyLooksPathy) return true;
     if (typeof value === 'string' && value.length < 200 && !/\\s/.test(value) && (value.includes('/') || value.startsWith('~'))) return true;
     return false;
+  }
+  // #75 — does this string look like markdown? Conservative — require at
+  // least one structural marker (heading line, fenced code block, list
+  // marker on its own line). Inline-only markers (bold, links) on their own
+  // don't trigger; ordinary prose with one bold word stays plain.
+  // Note: backtick (U+0060) is escaped via \\u0060 throughout this file
+  // because the whole CLIENT_JS lives inside a TS template literal where
+  // raw backticks would close the literal early.
+  function looksLikeMarkdown(s) {
+    if (typeof s !== 'string' || s.length < 8) return false;
+    // Heading line at start of any line.
+    if (/^#{1,6}\\s/m.test(s)) return true;
+    // Fenced code block (triple-backtick).
+    if (/^\\u0060\\u0060\\u0060/m.test(s)) return true;
+    // Two or more list-marker lines (ordered or unordered).
+    const listMarkers = s.match(/^(?:[-*+]|\\d+\\.)\\s/gm);
+    if (listMarkers && listMarkers.length >= 2) return true;
+    return false;
+  }
+  // Tiny markdown renderer for the subset agents emit. Headings (h1-h6),
+  // fenced code blocks, ordered + unordered lists, paragraphs. Inline:
+  // bold, italic, code, links. HTML-escaped at the input boundary so user
+  // data can never render as raw HTML. Defers tables, images, blockquotes —
+  // agents don't emit those today.
+  function renderMarkdown(src) {
+    const wrap = el('div', { class: 'result-prose result-markdown' });
+    const lines = String(src).split(/\\n/);
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // Fenced code block (triple-backtick).
+      const fence = line.match(/^\\u0060\\u0060\\u0060(\\w*)\\s*$/);
+      if (fence) {
+        const lang = fence[1] || '';
+        const code = [];
+        i++;
+        while (i < lines.length && !/^\\u0060\\u0060\\u0060\\s*$/.test(lines[i])) {
+          code.push(lines[i]);
+          i++;
+        }
+        if (i < lines.length) i++; // skip closing fence
+        const pre = el('pre', { class: 'cli-block', style: 'white-space: pre-wrap; word-wrap: break-word;' });
+        if (lang) pre.setAttribute('data-lang', lang);
+        pre.appendChild(el('code', null, code.join('\\n')));
+        wrap.appendChild(pre);
+        continue;
+      }
+      // Heading.
+      const heading = line.match(/^(#{1,6})\\s+(.*?)\\s*$/);
+      if (heading) {
+        const level = heading[1].length;
+        const tag = 'h' + Math.min(level + 2, 6);
+        const node = el(tag, { style: 'margin: 8px 0 4px; font-size: ' + (level === 1 ? 14 : level === 2 ? 13 : 12) + 'px; font-weight: 600;', html: renderInline(heading[2]) });
+        wrap.appendChild(node);
+        i++;
+        continue;
+      }
+      // List (consecutive list-marker lines).
+      const ulMatch = line.match(/^[-*+]\\s+(.*)$/);
+      const olMatch = line.match(/^\\d+\\.\\s+(.*)$/);
+      if (ulMatch || olMatch) {
+        const ordered = !!olMatch;
+        const list = el(ordered ? 'ol' : 'ul', { class: 'result-list' });
+        const itemRe = ordered ? /^\\d+\\.\\s+(.*)$/ : /^[-*+]\\s+(.*)$/;
+        while (i < lines.length) {
+          const m = lines[i].match(itemRe);
+          if (!m) break;
+          list.appendChild(el('li', { html: renderInline(m[1]) }));
+          i++;
+        }
+        wrap.appendChild(list);
+        continue;
+      }
+      // Blank line — skip.
+      if (line.trim() === '') {
+        i++;
+        continue;
+      }
+      // Paragraph: gather consecutive non-blank lines that aren't structural.
+      const para = [line];
+      i++;
+      while (i < lines.length) {
+        const next = lines[i];
+        if (next.trim() === '') break;
+        if (/^#{1,6}\\s/.test(next)) break;
+        if (/^\\u0060\\u0060\\u0060/.test(next)) break;
+        if (/^[-*+]\\s/.test(next) || /^\\d+\\.\\s/.test(next)) break;
+        para.push(next);
+        i++;
+      }
+      wrap.appendChild(el('p', { html: renderInline(para.join(' ')) }));
+    }
+    return wrap;
+  }
+  // Inline markdown — emits HTML, escapes input first.
+  function renderInline(s) {
+    const escaped = escapeHtml(s);
+    return escaped
+      // Inline code first (single-backtick).
+      .replace(/\\u0060([^\\u0060]+?)\\u0060/g, '<code class="result-scalar">$1</code>')
+      // Bold then em (order matters — ** before *).
+      .replace(/\\*\\*([^*]+?)\\*\\*/g, '<strong>$1</strong>')
+      .replace(/(^|[^*])\\*([^*]+?)\\*(?!\\*)/g, '$1<em>$2</em>')
+      // Links — http(s) + relative anchors only; javascript: rejected.
+      .replace(/\\[([^\\]]+)\\]\\((https?:\\/\\/[^)]+|#[^)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
   }
   function verdictsSection(verdicts) {
     const sec = el('div', { class: 'detail-section' }, [el('h3', null, 'RED VERDICTS')]);
