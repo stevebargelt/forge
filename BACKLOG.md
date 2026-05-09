@@ -40,7 +40,10 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Active
 
-### #53 — `prompt-author` agent seed + ui-design PROMPT.md template
+### #95 — Copy-id buttons next to run names (parity with task ids)
+**Why:** Caught 2026-05-09 reviewing the post-#64 sidebar polish. Task ids in the detail-pane header have a `copy` button next to them (added under #78 / chain navigation work). Run ids do not — to copy a run id today you either select-and-copy the truncated text, hover for the tooltip then memorize, or open DevTools. Friction every time a CLI command needs the id.
+**How to apply:** Mirror the task-id copy pattern. Best home is the middle pane's run-detail header (line ~1194 in html.ts, currently shows `run.id` + status badge). Sidebar rows are too cramped for an inline button — keep the title= tooltip there. Optional: also add to the breadcrumb at the top of the middle pane (`RUN / <shortId>`). Copy button uses the existing `copyText` helper + `.copy` style.
+**Caught:** 2026-05-09 morning post-overnight polish review.
 **Why:** Per FORGE-DEC-014, forge's role in design becomes "author the prompt, the human runs it." The `prompt-author` agent is a generic prompt-elicitation primitive: interview the human about brief / screens / style / paths / constraints, fill the right template, output a `PROMPT.md` file path. ui-design is the first consumer; future consumers (marketing-copy, code-review, architecture-review) will use the same primitive with different templates.
 **How to apply:**
 - New seed: `seeds/agents/prompt-author/CLAUDE.md`. Interview structure: brief / screens (or sections) / style guidance / target paths / constraints / known gotchas. Output schema: `{status, promptPath: "...", brief, screens?, notes}`.
