@@ -59,16 +59,6 @@ Lightweight: probably one check every couple of months unless we hear about it s
 **Revisit conditions:** the dashboard is doing 80%+ of forge's interaction surface, OR you want notifications/menubar/global shortcuts, OR you want to ship forge to anyone else. Until then, browser tab is fine.
 Stays here so it's not forgotten.
 
-### #62 — Design-task vs awaiting-gate: distinct gate-button copy
-**Why:** Gate semantics differ between "agent did the work, you approve" and "human did the work, you confirm completion." The dashboard should reflect this distinction in button copy: agent-led phases say "Approve / Send back / Reject"; human-led phases (the `review` phase of ui-design / design-revise after the human ran PROMPT.md) say "I've done the work / I need to pause / I've decided not to do this." Same gate primitive, different verbs.
-**How to apply:** Phase definition or task metadata indicates "human-led" vs "agent-led"; dashboard renders gate-button copy accordingly. Small but worth getting right early — it shapes how users mentally model the gate.
-Belongs in #57's first cut.
-
-### #63 — Dashboard handoff copy: tell humans to run PROMPT.md in a fresh session
-**Why:** Discovered 2026-05-08 while running FOLLOWUP-PROMPT.md: a long structured prompt (multi-screen Pencil run) can silently drop later sections + end-of-prompt actions when the running Claude Code session compacts mid-task with stale context. The fix is run-time hygiene: open a fresh session before pasting. The model can't reliably know its own context budget; the human has to enforce the discipline.
-**How to apply:** When the dashboard's awaiting-gate detail renders for a `prompt-author`-produced task (or any task whose result has a `promptPath`), include a load-bearing instruction near the gate buttons: "Run the PROMPT.md in a fresh Claude Code session (`/clear` or new terminal) before approving. Don't paste into a session already mid-task." Same copy on the design-handoff screen (#57's deferred screen 09 design). The PROMPT.md template itself already has this warning at the top (committed alongside this entry); the dashboard duplicates it where the human will actually see it at run-time.
-Belongs in #57's next iteration alongside #62.
-
 ### #64 — Dashboard pane widths are fixed; full run names get clipped
 **Why:** The three-pane layout in `src/dashboard/html.ts` uses `grid-template-columns: 280px 360px 1fr`. When run titles are longer than ~14 chars (kebab-cased ids like `run-test-prompt-author-v3-da7d57` are common), they truncate with `text-overflow: ellipsis`. There's no way to widen the sidebar to read the full id without DevTools. Annoying any time you need to reference a run id in a terminal command.
 **How to apply:** Two reasonable options: (a) draggable resizers between panes — tracks divider positions in localStorage so widths persist across reloads; (b) hover/click tooltip showing the full title when an id is truncated. (a) is the right long-term answer; (b) is a 10-line fallback if (a) is too much for one pass. Either way, raise the sidebar's default minimum width from 280px to maybe 320px so the common case stops truncating.
@@ -475,6 +465,13 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #62 + #63 — Human-led gate copy fork + fresh-session warning
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).
+- **#62 (gate copy fork):** `gateActionsSection` reads `phaseShape` to detect human-led phases (`isManual: true`). Three button-shape branches now: blocked-by-red (existing), human-led (new), agent-led (existing). Human-led branch shows two buttons — "✓ I've done the work" + "✕ I've decided not to do this" — and skips the request-changes middle option (which gate.ts rejects on manual phases anyway because there's no agent to re-dispatch). Rationale label changes to "Notes — optional on confirm, required on send-back / stop." Same primitive, different verbs.
+- **#63 (fresh-session warning):** awaiting_gate brief tasks now render a yellow warn alert above the rationale: "⚡ Run the PROMPT.md in a fresh Claude Code session before approving. Don't paste into a session already mid-task — long structured prompts can silently drop trailing sections when the running session compacts mid-run." Caught 2026-05-08 during FOLLOWUP-PROMPT.md run.
+- Detail render-key already includes the slim phaseShape signal from #71, so this picks up phaseFilter changes naturally.
+- New `findPhaseShape(phaseName)` helper looks up the phase in `state.runDetail.phaseShape` (also useful to future copy/icon variants).
 
 ### #76 — Elapsed-time cells tick once per second (smart-refresh side-effect)
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).

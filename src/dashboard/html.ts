@@ -2004,24 +2004,56 @@ const CLIENT_JS = `
   function gateActionsSection(task, verdicts) {
     const sec = el('div', { class: 'detail-section' });
     const isBlocked = task.status === 'blocked_by_red';
+    // #62 — gate-button copy varies for human-led (manual) phases. The phase
+    // is human-led when phaseShape.isManual is true (agents=[]) — the reviewer
+    // already did the work themselves (e.g., the ui-review phase); they are
+    // confirming completion, not approving an agent's output. Different verbs.
+    const phase = findPhaseShape(task.phase);
+    const isHumanLed = phase && phase.isManual;
     if (isBlocked && verdicts) {
       const failing = verdicts.filter(v => v.verdict === 'fail' && v.authority === 'authoritative');
       for (const v of failing) sec.appendChild(redVerdictCard(v));
+    }
+    // #63 — fresh-session warning for awaiting_gate brief tasks. The PROMPT.md
+    // is rendered above; the human is reviewing it before running it. The
+    // discipline is: open a fresh Claude Code session before pasting, so the
+    // mid-run compaction failure mode (caught 2026-05-08 during FOLLOWUP-PROMPT
+    // run) doesn't bite.
+    if (task.status === 'awaiting_gate' && task.phase === 'brief') {
+      sec.appendChild(el('div', { class: 'alert-banner warn', style: 'margin-bottom: var(--space-md);' }, [
+        el('strong', null, '⚡ Run the PROMPT.md in a fresh Claude Code session before approving. '),
+        el('span', null, 'Don\\'t paste it into a session already mid-task — long structured prompts can silently drop trailing sections when the running session compacts mid-run.'),
+      ]));
     }
     const rationaleField = el('textarea', {
       class: 'rationale',
       placeholder: isBlocked
         ? 'Required for force-advance: explain why overriding this red verdict is justified…'
-        : 'Required for reject and request-changes — describe what to change. Optional for advance.',
+        : (isHumanLed
+            ? 'Notes about the design pass (optional for completion). Required if you\\'re sending it back or stopping.'
+            : 'Required for reject and request-changes — describe what to change. Optional for advance.'),
       id: 'rationale-' + task.id,
     });
-    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, isBlocked ? 'Rationale — required for force-advance' : 'Rationale — required for reject + request-changes, optional for advance'));
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' },
+      isBlocked
+        ? 'Rationale — required for force-advance'
+        : (isHumanLed
+            ? 'Notes — optional on confirm, required on send-back / stop'
+            : 'Rationale — required for reject + request-changes, optional for advance')));
     sec.appendChild(rationaleField);
     if (isBlocked) {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
         el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ Reject'),
         el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: true }) }, '↻ Re-run task'),
         el('button', { class: 'btn btn-danger', onclick: () => doGate(task.id, 'advance', { force: true, requireRationale: true }) }, '⚠ Force advance + rationale'),
+      ]));
+    } else if (isHumanLed) {
+      // Human-led phase: agents=[] means request-changes is invalid (gate.ts
+      // rejects it on manual phases — there's no agent to re-dispatch). So
+      // expose only confirm + send-back, no middle option.
+      sec.appendChild(el('div', { class: 'gate-actions' }, [
+        el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ I\\'ve decided not to do this'),
+        el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: false }) }, '✓ I\\'ve done the work'),
       ]));
     } else {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
@@ -2031,6 +2063,12 @@ const CLIENT_JS = `
       ]));
     }
     return sec;
+  }
+  // Look up a phase by name in the run's phaseShape. Used by gateActionsSection
+  // to decide human-led vs agent-led copy. (#62)
+  function findPhaseShape(phaseName) {
+    if (!state.runDetail || !Array.isArray(state.runDetail.phaseShape)) return null;
+    return state.runDetail.phaseShape.find(p => p.name === phaseName) || null;
   }
   // #71 — advance-preview helper. Returns an HTML-snippet sentence (or null)
   // describing what "Advance Run" will do, computed from the workflow shape.
