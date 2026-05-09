@@ -66,18 +66,6 @@ Caught 2026-05-08 during #53 validation. Belongs in #57's iteration backlog alon
 
 
 
-### #83 — PROMPT.md: count existing PNGs and use max+1 as starting number (immediate fix for #80)
-**Why:** Caught 2026-05-08 mid-phase-flow run again. The brief mentioned "11 dashboard screens" (stale — actually 20) but Pencil-Claude has no way to verify; it inferred a starting number on its own and picked wrong (started at 12, would have clobbered existing 12-20). The "existing screens" count is unreliable as brief context — the corpus changes between runs and the brief is frozen at run-creation.
-
-**Fix at the prompt-template level (cheap, ships now):** add a count step early in PROMPT.md. First Bash command after the precondition `touch`:
-```bash
-EXISTING_COUNT=$(ls <designDir>/designs/*.png 2>/dev/null | wc -l | tr -d ' ')
-START_NUM=$((EXISTING_COUNT + 1))
-echo "Existing PNGs: $EXISTING_COUNT. Starting new screens at $START_NUM."
-```
-Then the per-screen rename steps use `$(printf "%02d" $START_NUM)`, `$(printf "%02d" $((START_NUM + 1)))`, etc. instead of hardcoded `01`, `02`, etc. Pencil-Claude does the count itself; nothing inferred from brief context.
-
-**Longer-term fix (#80 unchanged):** prompt-author should mount designDir read-only into its container and bake the actual starting number into PROMPT.md at author time. Cleaner because it's discovered once, not at run-time-on-the-host. But (#83) ships now; (#80) ships later.
 
 ### #80 — Prompt-author seed needs to read existing designDir before authoring (shared-corpus support)
 **Why:** Caught 2026-05-08 mid-phase-flow run. The prompt-author seed assumes a fresh designDir and authors a PROMPT.md based on `<basename(designDir)>.pen` + screen numbering starting at `01-` + a static "N screens" framing pulled from the brief. With #67 (shared per-app corpus), every one of those assumptions breaks:
@@ -454,6 +442,14 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #83 — PROMPT.md template: count existing PNGs, use max+1 as starting number
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — seed-only change, no test deltas).
+- `seeds/agents/prompt-author/templates/ui-design.md`: new PRECONDITION 2 step counts existing PNGs in `{{output_dir}}` (using `ls *.png | wc -l`), sets `START_NUM` accordingly. Step 6 (PNG NAMING) updated to use `$(printf "%02d" $START_NUM)` etc. instead of hardcoded 01/02. Empty/non-existent directory → `START_NUM=1` → numbering starts at `01-` as before.
+- `{{file_naming_list}}` is now a list of suggested screen names, not a list of literal filenames — the prefix is computed at run time from the corpus state.
+- Reinstalled via `FORCE=1 scripts/install-seeds.sh`. Active in `~/.forge/agents/prompt-author/templates/`.
+- Unblocks shared-corpus reuse (#67) where prior runs already produced PNGs 01-N. Without this, the template hardcoded 01 and would clobber.
+- Long-term fix (#80) still pending — prompt-author should mount designDir read-only and bake the start number into PROMPT.md at author time. Different code path; this template-level fix ships value now.
 
 ### #75 — Dashboard: markdown rendering for prose result fields
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).

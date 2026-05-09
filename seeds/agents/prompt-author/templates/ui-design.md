@@ -24,14 +24,32 @@ PRECONDITION 1 — before any MCP tool call, run this Bash:
 mkdir -p {{output_dir_parent}} && touch {{target_pen_file}}
 This guarantees the target file exists on disk so open_document can route to it.
 
+PRECONDITION 2 — count existing PNGs and pick a starting screen number (#83). Some runs reuse a shared design corpus (#67) where prior runs already produced PNGs 01-N; if you start numbering at 01 you'll clobber them. Run this Bash next:
+
+    EXISTING_COUNT=$(ls {{output_dir}}/*.png 2>/dev/null | wc -l | tr -d ' ')
+    START_NUM=$((EXISTING_COUNT + 1))
+    echo "Existing PNGs in {{output_dir}}: $EXISTING_COUNT. Starting new screens at $START_NUM."
+
+Use `$START_NUM` (and `$((START_NUM + 1))`, `$((START_NUM + 2))`, etc.) as the numeric prefix when renaming PNGs in step 6. Format with `printf "%02d"` for two-digit zero-padded names, e.g. `$(printf "%02d" $START_NUM)-<screen-name>.png`.
+
+If `{{output_dir}}` is empty or doesn't exist yet, START_NUM = 1 and numbering starts at `01-` as before.
+
 1. Target file: {{target_pen_file}}
 2. FIRST MCP call (after the touch): mcp__pencil__open_document({ path: "{{target_pen_file}}" }). Then call mcp__pencil__get_editor_state and confirm the active editor is the right file — NOT pencil-new.pen. If it's wrong, STOP and report the issue rather than proceeding.
 3. Pass filePath: "{{target_pen_file}}" explicitly on every MCP call. Do not rely on the active-editor fallback.
 4. CANVAS LAYOUT: Place each top-level screen frame in its own region of the canvas — do NOT stack them at (0,0). Before inserting a new top-level screen frame, call mcp__pencil__find_empty_space_on_canvas to find a non-overlapping position, and use the returned x/y on the frame. Same for the component library frame. Screens and components should sit side-by-side or in a grid, all visible simultaneously when the user opens the .pen.
 5. After completing each screen, export it: mcp__pencil__export_nodes({ filePath: "{{target_pen_file}}", nodeIds: ["<screen-root-node-id>"], outputDir: "{{output_dir}}" }). A screen is not complete until BOTH the .pen entry exists AND the PNG export has run.
-6. PNG NAMING: export_nodes derives filenames from node IDs (e.g. "bxvfa.png"), which is unhelpful. Immediately after each export, rename the PNG with Bash to a descriptive ordered name. Use these exact filenames:
+6. PNG NAMING: export_nodes derives filenames from node IDs (e.g. "bxvfa.png"), which is unhelpful. Immediately after each export, rename the PNG with Bash to a descriptive ordered name using the START_NUM you computed in PRECONDITION 2.
+
+   For each screen in order, use:
+   - 1st new screen: `$(printf "%02d" $START_NUM)-<screen-name>.png`
+   - 2nd new screen: `$(printf "%02d" $((START_NUM + 1)))-<screen-name>.png`
+   - 3rd new screen: `$(printf "%02d" $((START_NUM + 2)))-<screen-name>.png`
+   - …continue incrementing.
+
+   Suggested screen names (in order):
 {{file_naming_list}}
-   The numeric prefix keeps them sorted by screen order. Example: `mv {{output_dir}}/<returned-id>.png {{output_dir}}/01-<screen-name>.png`
+   Example: if START_NUM=21, the first new screen rename is `mv {{output_dir}}/<returned-id>.png {{output_dir}}/21-<screen-name>.png` (or `01-<screen-name>.png` if the corpus is empty and START_NUM=1).
 7. CRITICAL — TARGET .PEN PERSISTENCE: Pencil's MCP tools update an in-memory document keyed by the filePath, but `.pen` files are NOT auto-saved to disk. The PNG exports DO write to disk reliably. The `.pen` source file ONLY persists when the human presses Cmd+S in VS Code. Verify this yourself at the end by running `stat -f%z {{target_pen_file}}` — if it returns 0, the file is empty and the design source is unsaved.
 
 8. FINAL SUMMARY — your last message must include this exact block, formatted as bold/highlighted so the user cannot miss it:
