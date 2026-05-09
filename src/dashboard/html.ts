@@ -867,7 +867,9 @@ const CLIENT_JS = `
     selectedTaskId: null,
     taskDetail: null,
     pollTimer: null,
-    interactive: false,
+    // #89 — dashboard is unconditionally interactive; field kept as a noop-true
+    // for backwards-compatible render keys.
+    interactive: true,
     openMenuTaskId: null,
     // #71 phase-pill-row click filters the task list to that phase. null = no
     // filter (show all). Cleared when selecting a different run.
@@ -1040,9 +1042,7 @@ const CLIENT_JS = `
       el('span', null, 'RUNS'),
       el('span', { class: 'count' }, state.runs.length + ' total'),
     ]);
-    if (state.interactive) {
-      header.appendChild(el('button', { class: 'new-btn', onclick: openNewRunModal, title: 'Create a new run' }, '+ New run'));
-    }
+    header.appendChild(el('button', { class: 'new-btn', onclick: openNewRunModal, title: 'Create a new run' }, '+ New run'));
     sidebar.appendChild(header);
     const body = el('div', { class: 'pane-body no-pad' });
     const filter = (state.searchQuery || '').toLowerCase();
@@ -1148,9 +1148,7 @@ const CLIENT_JS = `
         designDir ? kvCell('--design-dir', designDir) : null,
       ]) : null,
     ]);
-    if (state.interactive) {
-      headerBlock.appendChild(runActionRow(run, counts));
-    }
+    headerBlock.appendChild(runActionRow(run, counts));
     middle.appendChild(headerBlock);
 
     // #71 — phase pill row above the task list. One pill per workflow phase,
@@ -1598,13 +1596,6 @@ const CLIENT_JS = `
     const sec = el('div', { class: 'detail-section' });
     sec.appendChild(el('div', { style: 'font-size: 12px; color: var(--foreground-secondary); margin-bottom: var(--space-sm);' },
       'This task failed. Retry resets it to pending so the next dispatch starts fresh. The error is preserved on the events table for audit.'));
-    if (!state.interactive) {
-      sec.appendChild(el('div', { class: 'cli-block' }, [
-        el('span', null, 'forge retry ' + task.id),
-        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge retry ' + task.id) }, 'copy'),
-      ]));
-      return sec;
-    }
     sec.appendChild(el('div', { class: 'gate-actions' }, [
       el('button', { class: 'btn btn-warning', onclick: () => doRetry(task.id) }, '↻ Retry task'),
     ]));
@@ -1659,19 +1650,6 @@ const CLIENT_JS = `
         'PROMPT.md not found at ',
         el('code', null, briefContext.promptPathHost),
       ]));
-    }
-
-    if (!state.interactive) {
-      sec.appendChild(el('div', { class: 'cli-block', style: 'margin-top: var(--space-md);' }, [
-        el('span', null, 'forge submit ' + task.id),
-        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge submit ' + task.id) }, 'copy'),
-      ]));
-      sec.appendChild(el('div', { style: 'color: var(--foreground-muted); font-size: 11px;' }, [
-        'Set ',
-        el('code', null, 'FORGE_DASHBOARD_INTERACTIVE=1'),
-        ' before launching the dashboard to enable the submit button here.',
-      ]));
-      return sec;
     }
 
     const notesField = el('textarea', {
@@ -1988,18 +1966,6 @@ const CLIENT_JS = `
       const failing = verdicts.filter(v => v.verdict === 'fail' && v.authority === 'authoritative');
       for (const v of failing) sec.appendChild(redVerdictCard(v));
     }
-    if (!state.interactive) {
-      sec.appendChild(el('div', { class: 'cli-block', style: 'margin-bottom: var(--space-md);' }, [
-        el('span', null, 'forge gate ' + task.id + ' advance --rationale "..."'),
-        el('button', { class: 'copy', onclick: (e) => copyText(e, 'forge gate ' + task.id + ' advance') }, 'copy'),
-      ]));
-      sec.appendChild(el('div', { style: 'color: var(--foreground-muted); font-size: 11px;' }, [
-        'Set ',
-        el('code', null, 'FORGE_DASHBOARD_INTERACTIVE=1'),
-        ' before launching the dashboard to enable gate buttons here.',
-      ]));
-      return sec;
-    }
     const rationaleField = el('textarea', {
       class: 'rationale',
       placeholder: isBlocked
@@ -2274,37 +2240,7 @@ const CLIENT_JS = `
       toast('Failed to load workflow schema: ' + (e.message || 'unknown'), 'error');
       return;
     }
-    if (!state.interactive) {
-      // Read-only fallback: show what would be submitted as a CLI command.
-      renderReadOnlyNewRun(schema);
-      return;
-    }
     renderInteractiveNewRun(schema);
-  }
-  function renderReadOnlyNewRun(schema) {
-    const root = $('modal-root');
-    const overlay = el('div', { class: 'modal-overlay', onclick: (e) => { if (e.target === overlay) closeModal(); } });
-    const modal = el('div', { class: 'modal' });
-    overlay.appendChild(modal);
-    modal.appendChild(el('div', { class: 'modal-header' }, [
-      el('div', null, [el('strong', null, 'NEW RUN'), el('span', { style: 'color: var(--foreground-muted); margin-left: 8px; font-size: 11px;' }, '— read-only: copy the CLI command')]),
-      el('button', { class: 'modal-close', onclick: closeModal }, '✕'),
-    ]));
-    const body = el('div', { class: 'modal-body' });
-    body.appendChild(el('p', { style: 'color: var(--foreground-secondary); margin-bottom: var(--space-md); font-size: 12px;' },
-      'Set FORGE_DASHBOARD_INTERACTIVE=1 before launching to enable the form. Until then, copy the CLI:'));
-    const example = 'forge new <workflow> "<title>" --project <path> [--brief "..."] [--design-dir <path>]';
-    body.appendChild(el('div', { class: 'cli-block' }, [
-      el('span', null, example),
-      el('button', { class: 'copy', onclick: (e) => copyText(e, example) }, 'copy'),
-    ]));
-    body.appendChild(el('p', { style: 'color: var(--foreground-muted); margin-top: var(--space-md); font-size: 11px;' },
-      'Workflows: ' + schema.order.join(', ') + '.'));
-    modal.appendChild(body);
-    modal.appendChild(el('div', { class: 'modal-footer' }, [
-      el('button', { class: 'btn', onclick: closeModal }, 'Close'),
-    ]));
-    root.appendChild(overlay);
   }
   function renderInteractiveNewRun(schema) {
     const root = $('modal-root');
@@ -2497,13 +2433,10 @@ const CLIENT_JS = `
 
   // ---------- bootstrap ----------
   async function bootstrap() {
-    state.interactive = (document.documentElement.getAttribute('data-interactive') === '1') ||
-      (window.__FORGE_INTERACTIVE === true);
-    // The server injects /api/runs?_meta to surface the flag without a separate endpoint.
-    try {
-      const meta = await fetchJSON('/api/meta');
-      state.interactive = !!meta.interactive;
-    } catch { /* meta endpoint optional */ }
+    // #89 dropped FORGE_DASHBOARD_INTERACTIVE in 2026-05-09 — the dashboard is
+    // unconditionally interactive. state.interactive remains as a field for
+    // smart-refresh keys (#72) but its value is fixed at true.
+    state.interactive = true;
     renderSidebar();
     renderMiddle();
     renderDetail();

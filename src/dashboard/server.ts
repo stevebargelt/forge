@@ -12,11 +12,10 @@ import type { WorkflowName } from "../types/index.js";
 let _server: Server | null = null;
 
 // FORGE-DEC-015: dashboard mutations shell out to the forge CLI; in-process
-// gate/dispatch logic stays out of this file. The interactivity flag gates the
-// POST handlers — when off, the read-only dashboard works exactly as before.
-function isInteractive(): boolean {
-  return process.env.FORGE_DASHBOARD_INTERACTIVE === "1";
-}
+// gate/dispatch logic stays out of this file. The dashboard is unconditionally
+// interactive — #89 dropped FORGE_DASHBOARD_INTERACTIVE in 2026-05-09 once
+// interactive use was proven and the flag was just friction. CSRF header
+// (X-Forge-Request) remains the actual defense against drive-by browser POSTs.
 
 // Tiny CSRF mitigation per FORGE-DEC-015: HTML <form> POSTs from a malicious
 // localhost-adjacent context can't set custom headers, so we require one for
@@ -65,9 +64,12 @@ function handleGet(path: string, res: ServerResponse): void {
   }
 
   if (path === "/api/meta") {
+    // Preserve the interactive=true field for backwards compat with any
+    // dashboard tab still loaded from before #89; the flag is dead but
+    // returning the field as always-true means old clients keep working.
     res
       .writeHead(200, { "Content-Type": "application/json" })
-      .end(JSON.stringify({ interactive: isInteractive() }));
+      .end(JSON.stringify({ interactive: true }));
     return;
   }
 
@@ -124,18 +126,13 @@ function handleGet(path: string, res: ServerResponse): void {
 }
 
 function handlePost(path: string, req: IncomingMessage, res: ServerResponse): void {
-  // CSRF mitigation — every mutation requires a custom header.
+  // CSRF mitigation — every mutation requires a custom header. This is the
+  // actual defense against drive-by browser POSTs; the interactive flag was
+  // belt-and-suspenders and got dropped in #89.
   const requestHeader = req.headers[CSRF_HEADER];
   if (!requestHeader || requestHeader === "") {
     res.writeHead(403, { "Content-Type": "application/json" })
        .end(JSON.stringify({ error: "Missing X-Forge-Request header" }));
-    return;
-  }
-  if (!isInteractive()) {
-    res.writeHead(503, { "Content-Type": "application/json" })
-       .end(JSON.stringify({
-         error: "Dashboard is read-only. Set FORGE_DASHBOARD_INTERACTIVE=1 before launching the dashboard to enable mutations.",
-       }));
     return;
   }
 

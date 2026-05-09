@@ -124,20 +124,6 @@ Then the per-screen rename steps use `$(printf "%02d" $START_NUM)`, `$(printf "%
 
 **Composite with #80:** #80's per-screen Cmd+S reminders are still good (Pencil sessions can also crash mid-run for unrelated reasons). The dirty-marker check is an *earlier* tripwire — catches the failure within seconds of starting, not after 24 screens of wasted work.
 
-### #89 — Drop FORGE_DASHBOARD_INTERACTIVE feature flag (always on)
-**Why:** Steven 2026-05-08: "I'm not going back." The flag was the right shape for FORGE-DEC-015 v0 — a defensive switch when interactive mutations were unproven and read-only-by-default protected against an in-progress dashboard accidentally driving things. After multiple weeks of real interactive use (gate, run-next, retry, submit, new-run modal, all reliably) the flag is friction that catches Steven on every dashboard restart and serves no protective purpose.
-
-**What this means concretely:**
-- Stop reading `FORGE_DASHBOARD_INTERACTIVE` in `src/dashboard/server.ts` (the `isInteractive()` helper). Mutations are unconditional.
-- Drop the read-only fallback paths in the dashboard UI (`renderReadOnlyNewRun`, the "Set FORGE_DASHBOARD_INTERACTIVE=1 ..." copy-CLI fallbacks scattered through gate/submit/retry sections).
-- `GET /api/meta` removes the `interactive` field (or returns it as always-true for backward compat with any client that hasn't been redeployed; not really a concern since the dashboard ships in the same repo).
-- All the server tests that check "503 when not interactive" become obsolete. Drop them.
-- Documentation: the README/docs that mention "set FORGE_DASHBOARD_INTERACTIVE=1 to enable mutations" → just say "the dashboard is interactive."
-
-**Side note:** the CSRF header check (`X-Forge-Request: 1`) stays. It's the actual defense against drive-by browser requests, and it's free — the dashboard's own client adds it automatically. The interactive flag was belt-and-suspenders; CSRF header is the belt.
-
-**Ship as part of:** any nearby dashboard work. Could be its own tiny commit after the in-flight phase-flow stuff lands. Probably ~30 line removal across 3 files + test cleanup.
-
 ### #90 — Submit captures corpus-level artifacts, not run-level deliverables
 **Why:** Caught 2026-05-08 reviewing phase-flow submit. The validator globs `*.png` / `*.html` across designDir/{designs,code}/ and stores all matches in `result.pngFiles` / `result.htmlFiles`. With shared-corpus reuse (#67), that's the *whole corpus*, not just this run's deliverables. The phase-flow run's review task captured 24 PNGs + ~25 HTMLs — 20 of each from earlier runs that have nothing to do with the phase flow widget. Architect agent reads `inputs.upstream[*].result.pngFiles` and gets the full list as input, including 20 unrelated screens.
 
@@ -500,6 +486,14 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #89 — Drop FORGE_DASHBOARD_INTERACTIVE feature flag (always on)
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (228 tests passing — net -5 vs post-#71's 233 because the 4× "503 when not interactive" tests + the meta-default-false test became obsolete and got dropped).
+- `src/dashboard/server.ts`: dropped `isInteractive()`, dropped the 503 read-only branch in `handlePost`. `/api/meta` returns `{ interactive: true }` unconditionally for backwards compat with any browser tab still loaded from before this change.
+- `src/dashboard/html.ts`: dropped `renderReadOnlyNewRun` + every `if (!state.interactive)` branch (retryActionsSection, submitActionsSection, gateActionsSection, openNewRunModal, sidebar's "+ New run" button). `state.interactive` field stays on the state object but is fixed at `true` — kept as a noop because it participates in the smart-refresh keys (#72) and ripping it out of every key would be a larger churn for zero functional gain.
+- `src/dashboard/server.test.ts`: removed the 5 obsolete tests + the env-var setup/teardown lines that were noops post-flag.
+- CSRF header check (`X-Forge-Request: 1`) stays — the actual defense against drive-by browser POSTs.
+- No documentation changes needed; the README + docs didn't mention the flag.
 
 ### #71 — Dashboard: phase pill row + advance-preview line
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (233 tests passing, +15 new).

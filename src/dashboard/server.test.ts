@@ -121,46 +121,20 @@ test("GET /unrecognised returns 404", async () => {
   assert.equal(res.status, 404);
 });
 
-test("GET /api/meta reports interactive=false by default", async () => {
-  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
+test("GET /api/meta reports interactive=true (always; #89 dropped the flag)", async () => {
   const res = await get("/api/meta");
   assert.equal(res.status, 200);
   const data = JSON.parse(res.body) as { interactive: boolean };
-  assert.equal(data.interactive, false);
-});
-
-test("GET /api/meta reports interactive=true when FORGE_DASHBOARD_INTERACTIVE=1", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await get("/api/meta");
-    assert.equal(res.status, 200);
-    const data = JSON.parse(res.body) as { interactive: boolean };
-    assert.equal(data.interactive, true);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
+  assert.equal(data.interactive, true);
 });
 
 test("POST without X-Forge-Request header returns 403", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/gate/some-task", { decision: "advance" }, { withHeader: false });
-    assert.equal(res.status, 403);
-    assert.match(res.body, /X-Forge-Request/);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
-});
-
-test("POST when interactive is OFF returns 503", async () => {
-  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  const res = await post("/api/gate/some-task", { decision: "advance" });
-  assert.equal(res.status, 503);
-  assert.match(res.body, /FORGE_DASHBOARD_INTERACTIVE/);
+  const res = await post("/api/gate/some-task", { decision: "advance" }, { withHeader: false });
+  assert.equal(res.status, 403);
+  assert.match(res.body, /X-Forge-Request/);
 });
 
 test("POST /api/gate/:taskId shells out to forge gate with the right argv", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -178,22 +152,15 @@ test("POST /api/gate/:taskId shells out to forge gate with the right argv", asyn
     assert.equal(data.decision, "advance");
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/gate validates decision", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/gate/task-x", { decision: "shrug" });
-    assert.equal(res.status, 400);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
+  const res = await post("/api/gate/task-x", { decision: "shrug" });
+  assert.equal(res.status, 400);
 });
 
 test("POST /api/gate adds --force flag when force=true", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -208,12 +175,10 @@ test("POST /api/gate adds --force flag when force=true", async () => {
     assert.deepEqual(capturedArgs, ["gate", "task-y", "advance", "--rationale", "approved override", "--force"]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/gate surfaces non-zero exit as 500 with stderr", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   _setRunForgeOverrideForTest(async () => ({ exitCode: 2, stdout: "", stderr: "task not found" }));
   try {
     const res = await post("/api/gate/task-x", { decision: "advance" });
@@ -221,12 +186,10 @@ test("POST /api/gate surfaces non-zero exit as 500 with stderr", async () => {
     assert.match(res.body, /task not found/);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/next/:runId shells out to forge next with --project", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -238,12 +201,10 @@ test("POST /api/next/:runId shells out to forge next with --project", async () =
     assert.deepEqual(capturedArgs, ["next", "run-srv", "--project", "/tmp/proj"]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/next/:runId works with no project", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -254,30 +215,17 @@ test("POST /api/next/:runId works with no project", async () => {
     assert.deepEqual(capturedArgs, ["next", "run-srv"]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 // ---------- /api/retry ----------
 
 test("POST /api/retry/:taskId without X-Forge-Request → 403", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/retry/task-x", {}, { withHeader: false });
-    assert.equal(res.status, 403);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
-});
-
-test("POST /api/retry/:taskId returns 503 when not interactive", async () => {
-  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  const res = await post("/api/retry/task-x", {});
-  assert.equal(res.status, 503);
+  const res = await post("/api/retry/task-x", {}, { withHeader: false });
+  assert.equal(res.status, 403);
 });
 
 test("POST /api/retry/:taskId shells out to `forge retry <id>`", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -289,12 +237,10 @@ test("POST /api/retry/:taskId shells out to `forge retry <id>`", async () => {
     assert.deepEqual(capturedArgs, ["retry", "task-x"]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/retry surfaces non-zero exit as 500 with stderr", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   _setRunForgeOverrideForTest(async () => ({
     exitCode: 1,
     stdout: "",
@@ -306,7 +252,6 @@ test("POST /api/retry surfaces non-zero exit as 500 with stderr", async () => {
     assert.match(res.body, /not failed/);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
@@ -332,45 +277,29 @@ test("GET /api/workflows returns the schema with order, groups, universal, workf
 });
 
 test("POST /api/runs validates and returns 400 with field errors when fields missing", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/runs", { workflow: "ui-design", title: "x", project: "/x" });
-    assert.equal(res.status, 400);
-    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
-    assert.ok(Array.isArray(data.errors));
-    assert.ok(data.errors.find((e) => e.field === "brief"));
-    assert.ok(data.errors.find((e) => e.field === "designDir"));
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
+  const res = await post("/api/runs", { workflow: "ui-design", title: "x", project: "/x" });
+  assert.equal(res.status, 400);
+  const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+  assert.ok(Array.isArray(data.errors));
+  assert.ok(data.errors.find((e) => e.field === "brief"));
+  assert.ok(data.errors.find((e) => e.field === "designDir"));
 });
 
 test("POST /api/runs rejects unknown workflow with field=workflow", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/runs", { workflow: "bogus", title: "x", project: "/x" });
-    assert.equal(res.status, 400);
-    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
-    assert.ok(data.errors.find((e) => e.field === "workflow"));
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
+  const res = await post("/api/runs", { workflow: "bogus", title: "x", project: "/x" });
+  assert.equal(res.status, 400);
+  const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+  assert.ok(data.errors.find((e) => e.field === "workflow"));
 });
 
 test("POST /api/runs missing workflow → 400 with field=workflow", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/runs", { title: "x", project: "/x" });
-    assert.equal(res.status, 400);
-    const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
-    assert.equal(data.errors[0]!.field, "workflow");
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
+  const res = await post("/api/runs", { title: "x", project: "/x" });
+  assert.equal(res.status, 400);
+  const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
+  assert.equal(data.errors[0]!.field, "workflow");
 });
 
 test("POST /api/runs shells out to `forge new` with the right argv (codebase-assessment)", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -384,12 +313,10 @@ test("POST /api/runs shells out to `forge new` with the right argv (codebase-ass
     assert.equal(data.runId, "run-audit-abc123");
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/runs argv shape for ui-design includes brief + design-dir", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -413,12 +340,10 @@ test("POST /api/runs argv shape for ui-design includes brief + design-dir", asyn
     ]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/runs surfaces forge new failure as 500 with stderr", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   _setRunForgeOverrideForTest(async () => ({
     exitCode: 1,
     stdout: "",
@@ -430,46 +355,22 @@ test("POST /api/runs surfaces forge new failure as 500 with stderr", async () =>
     assert.match(res.body, /workflow already exists/);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/runs without X-Forge-Request → 403", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/runs", { workflow: "codebase-assessment" }, { withHeader: false });
-    assert.equal(res.status, 403);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
-});
-
-test("POST /api/runs without interactive flag → 503", async () => {
-  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  const res = await post("/api/runs", { workflow: "codebase-assessment" });
-  assert.equal(res.status, 503);
+  const res = await post("/api/runs", { workflow: "codebase-assessment" }, { withHeader: false });
+  assert.equal(res.status, 403);
 });
 
 // ---------- /api/submit (FORGE-DEC-016) ----------
 
 test("POST /api/submit/:taskId without X-Forge-Request returns 403", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
-  try {
-    const res = await post("/api/submit/task-x", {}, { withHeader: false });
-    assert.equal(res.status, 403);
-  } finally {
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  }
-});
-
-test("POST /api/submit/:taskId returns 503 when not interactive", async () => {
-  delete process.env.FORGE_DASHBOARD_INTERACTIVE;
-  const res = await post("/api/submit/task-x", {});
-  assert.equal(res.status, 503);
+  const res = await post("/api/submit/task-x", {}, { withHeader: false });
+  assert.equal(res.status, 403);
 });
 
 test("POST /api/submit/:taskId shells out to `forge submit <id>` with no notes", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -483,12 +384,10 @@ test("POST /api/submit/:taskId shells out to `forge submit <id>` with no notes",
     assert.equal(data.taskId, "task-x");
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/submit/:taskId forwards --notes when provided", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -499,12 +398,10 @@ test("POST /api/submit/:taskId forwards --notes when provided", async () => {
     assert.deepEqual(capturedArgs, ["submit", "task-y", "--notes", "tried two color variants"]);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
 
 test("POST /api/submit surfaces non-zero exit as 500 with stderr", async () => {
-  process.env.FORGE_DASHBOARD_INTERACTIVE = "1";
   _setRunForgeOverrideForTest(async () => ({
     exitCode: 1,
     stdout: "",
@@ -516,6 +413,5 @@ test("POST /api/submit surfaces non-zero exit as 500 with stderr", async () => {
     assert.match(res.body, /Pencil source not found/);
   } finally {
     _setRunForgeOverrideForTest(undefined);
-    delete process.env.FORGE_DASHBOARD_INTERACTIVE;
   }
 });
