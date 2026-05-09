@@ -22,7 +22,7 @@ export const workflow: Workflow = {
       },
       gate: "human",
       workflowAdditions:
-        "Produce the architecture document. Output {decisions, components, interfaces, openQuestions}.",
+        "Produce systems-level architectural assessment, NOT implementation guidance. Output {risks, constraints, boundaries, priorArt, openQuestions, notes}. Empty arrays are fine when a feature genuinely has no concerns at that level. Do not pick type names, function names, or file paths — that's the implementer's job with the code in front of them. See architect seed for the discipline.",
     },
     {
       name: "plan",

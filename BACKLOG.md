@@ -259,54 +259,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 
 **Caught the wrong way:** at 04:30 UTC, mid-run-shutdown. Architect output got rejected; brief re-spawned automatically; killed manually. Should have been: reject → "redo architect" picker → architect re-runs against the corrected seed.
 
-### #92 — Architect agent scope is wrong: tutoring the implementer instead of doing systems architecture
-**Why:** Caught 2026-05-09 reviewing task-architect-c29474's output (run-forge-phase-flow-visualization-f55801). The architect produced 6+ "decisions" of the shape "PhaseShape is a plain serializable object, not a re-export of the Phase type" + "Pill-click sets state.phaseFilter; renderMiddle already re-runs on state change" + "Gate-panel advance preview is a pure client-side text function, not a server endpoint." These read like one Claude telling another Claude how to code — line-level guidance on type names, function names, file structure.
-
-That is **not what a systems architect does**, and it's the thing Steven hates most about real-world architects who try to dictate code: "This pissed me off more than anything in the real world. Architects shouldn't tell engineers how to code."
-
-**What systems architecture should be (Steven's framing, 2026-05-09):**
-- "This is impossible because of constraint X" — surface real blockers
-- "That would require 72 API calls and will be too slow" — surface scaling/performance limits
-- "This couples to system Y in a way that breaks when Y evolves" — surface integration risks
-- "The data shape implied here doesn't fit our database/transport" — surface data-flow problems
-- Decisions about boundaries (where logic lives, who owns what state, which system is authoritative for X)
-- Risks worth flagging that the implementer might miss (concurrency, security, audit, schema migrations)
-
-**What the architect should NOT be doing:**
-- Picking type names
-- Choosing function names
-- Specifying file structure
-- Suggesting "do X this way, not that way" when both are valid
-- Anything an engineer would do better with the code in front of them
-
-**Where the bug lives:** the architect agent seed (`seeds/agents/architect/CLAUDE.md`). Today it says "produce decisions, components, interfaces" — which the agent is interpreting as "design the implementation in detail." Need to reshape the seed so the agent's output is closer to a risk-and-constraints report than a code design document.
-
-**How to apply (seed update):**
-1. Reframe the role: "You are a systems architect. Your job is to surface what would make this hard, slow, expensive, or impossible — not to design the implementation. The engineer is competent; respect that. If you find yourself naming functions or types, you've gone too far."
-2. New output structure (proposed):
-   - `risks` — what could go wrong, with severity and likelihood
-   - `constraints` — hard limits the implementer must respect (data volume, API budgets, latency, security boundaries, schema-migration cost)
-   - `boundaries` — where logic should live, who owns state, what's authoritative for what
-   - `prior_art` — relevant existing patterns in the codebase or related systems
-   - `open_questions` — things only the human can decide (what's the budget? which provider? how strict is X?)
-3. Explicit anti-pattern list in the seed: "do not specify type names, function signatures, file paths, or 'do X this way' when both X and Y are valid choices."
-4. Worked example in the seed showing a bad architectural output ("PhaseShape should be a separate type") next to a good one ("the dashboard API will leak internal types if you ship Phase directly — there's a real boundary discipline question worth deciding").
-
-**Composite with #73 (reds-as-reviewer):** both #73 and #92 are "the agent has the wrong job description, not just a wrong prompt." Reds were reviewing the underlying subject instead of the work product; architects are tutoring the implementer instead of doing systems architecture. Same shape of category mistake, different agents. Worth fixing both with the same lens: define each agent's role by what *only it* can contribute, not by what's vaguely related to the phase name.
-
-**Sequencing:** worth doing before more `feature*` runs land, since architect's wrong output shape compounds — the planner reads architect's output as input, and if the architect dictated implementation, the planner just tries to translate that into steps. Garbage propagates.
-
-**Deeper framing (Steven 2026-05-09):** "It's a waste of tokens for one agent (using the same model) to tell another agent how to code." Same model + same context budget means architect-tells-implementer-how-to-code pays for two invocations to do work one would do better. The implementer has the *actual code* in front of it; architect is speculating in absentia.
-
-The architect phase only earns its tokens by doing something the implementer *can't*:
-- Look up at constraints / integration / scale / risk that the implementer's narrow code-focused view misses
-- Surface "this is impossible because X" *before* the implementer wastes cycles on it
-- Notice cross-cutting concerns (security, audit, migration) that show up only when you're not in the weeds
-
-Implication: when an architect run produces output that's mostly code-design (type names, function signatures, "do it this way"), that's a signal the architect had nothing distinctive to contribute. Either the work doesn't need an architect phase, or the seed isn't enforcing the role distinction enough. **Future test:** add a quick post-run check — does the architect's output reference any project file, constraint, integration, or risk that an implementer wouldn't naturally consider? If not, the run was token waste regardless of seed quality.
-
-This argues for: (a) tightening the architect seed per #92, (b) considering whether some workflows ship without an architect phase entirely (cheap features, refactors, isolated additions where the implementer's view is sufficient), and (c) making "skip architect" a workflow-level configuration, not just a different workflow choice.
-
 ### #91 — Reconcile bypasses gate=human on recovery
 **Why:** Caught 2026-05-09 ~04:30 UTC during the architect phase of run-forge-phase-flow-visualization-f55801. The architect container exited cleanly + wrote 13KB of valid result.json, but the parent forge process never observed `close` (similar shape to #74). When reconcile recovered the orphan, it called `markTaskComplete` directly — skipping the `gate: "human"` step that the architect phase's config requires.
 
@@ -458,6 +410,16 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #92 — Architect seed rewrite (systems-architect, not implementation-tutor)
+**Closed:** 2026-05-09 morning, on branch `graph-view-85` (233 tests passing — seed-only change, no test deltas).
+- `seeds/agents/architect/CLAUDE.md` rewritten. Role reframed to "surface what makes a feature hard/slow/expensive/impossible; decide where logic lives, who owns what state, what's authoritative for what." Explicit anti-pattern list: don't pick type names, function names, file paths, or "do X this way when both are valid." Worked example contrasting bad output (the actual line-level outputs from task-architect-c29474) against good output (boundary-risk + scaling + workflow-as-source-of-truth + prior-art references).
+- New output schema: `{risks, constraints, boundaries, priorArt, openQuestions, notes}`. Empty arrays explicitly OK — "five real entries beat fifteen padded ones." Each entry should cite real evidence (file paths, real risks).
+- Test for the architect's output earning its tokens: does any entry reference something the implementer wouldn't naturally see from inside the code? If not, the run was waste.
+- Three workflow files updated to point at the new schema: `feature.ts`, `feature-ui-design-needed.ts`, `feature-ui-design-provided.ts`. Each `workflowAdditions` string mentions the new field set + reminds the agent that this is NOT implementation guidance.
+- Dashboard `workflowSchema.ts` brief-field help copy updated.
+- Reinstalled via `FORCE=1 install-seeds.sh`.
+- Composite with #73 (reds-as-reviewer): same shape of category mistake — wrong job description. #73 still open as an architectural call.
 
 ### #83 — PROMPT.md template: count existing PNGs, use max+1 as starting number
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — seed-only change, no test deltas).

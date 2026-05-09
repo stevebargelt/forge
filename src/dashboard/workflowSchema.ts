@@ -68,7 +68,7 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
         label: "--brief",
         type: "textarea",
         required: true,
-        help: "What you want built, in your own words. Architect turns it into decisions/components/interfaces.",
+        help: "What you want built, in your own words. Architect produces systems-level concerns (risks, constraints, boundaries) — not implementation guidance.",
         placeholder: "Add a forge submit --dry-run flag that validates artifacts without transitioning the task…",
       },
     ],
