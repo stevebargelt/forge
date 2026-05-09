@@ -21,6 +21,7 @@ export function dashboardHtml(): string {
 <body>
   <div id="app">
     <aside id="sidebar" class="pane pane-sidebar"></aside>
+    <section id="pillrow" class="pane-pillrow"></section>
     <section id="middle" class="pane pane-middle"></section>
     <section id="detail" class="pane pane-detail"></section>
   </div>
@@ -83,9 +84,21 @@ a { color: var(--accent); text-decoration: none; }
   /* #64 — sidebar bumped to 320px so the common case stops truncating
      run ids like "run-test-prompt-author-v3-da7d57". */
   grid-template-columns: 320px 360px 1fr;
+  /* #71 follow-up — pill row lives in its own top-spanning area above the
+     middle + detail panes. Sidebar spans both rows on the left so its brand /
+     search / run list stays vertically aligned. The pill row only has meaning
+     for the selected run; it's empty when no run is selected. */
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "sidebar pillrow pillrow"
+    "sidebar middle  detail";
   height: 100vh;
   overflow: hidden;
 }
+#sidebar { grid-area: sidebar; }
+#pillrow { grid-area: pillrow; }
+#middle  { grid-area: middle; }
+#detail  { grid-area: detail; }
 .pane {
   border-right: 1px solid var(--border);
   display: flex;
@@ -93,6 +106,14 @@ a { color: var(--accent); text-decoration: none; }
   min-height: 0;
   overflow: hidden;
 }
+/* Pill-row pane: borders below + right separating it from the rest. */
+.pane-pillrow {
+  border-bottom: 1px solid var(--border);
+  border-right: none;
+  overflow: hidden;
+  min-height: 0;
+}
+.pane-pillrow:empty { display: none; }
 .pane-detail { border-right: none; }
 .pane-header {
   padding: var(--space-md);
@@ -672,25 +693,33 @@ a { color: var(--accent); text-decoration: none; }
 .menu .item.danger:hover { background: var(--error-bg); color: var(--error); }
 .menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
 
-/* #71 — phase pill row. Sits above the task list in the run pane. One pill per
-   workflow phase, status-coded background + border. Click filters the task list
-   to that phase via state.phaseFilter. */
+/* #71 — phase pill row. Top-spanning pane above middle + detail (post follow-up).
+   One pill per workflow phase, status-coded background + border. Click filters
+   the task list to that phase via state.phaseFilter. */
 .phase-pill-row-wrap {
-  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .phase-pill-row-wrap .phase-pill-row-label {
-  padding: var(--space-md) var(--space-md) var(--space-sm);
+  padding: var(--space-sm) var(--space-md) 6px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--foreground-muted);
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.phase-pill-row-wrap .phase-pill-row-label .run-hint {
+  color: var(--foreground-muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
 }
 .phase-pill-row {
   display: flex;
   align-items: stretch;
   gap: 0;
-  padding: 0 var(--space-md) var(--space-md);
+  padding: 0 var(--space-md) var(--space-sm);
   overflow-x: auto;
   scrollbar-width: thin;
 }
@@ -881,7 +910,7 @@ const CLIENT_JS = `
     // one, the render is skipped entirely (DOM untouched). Polling ticks that
     // bring back unchanged data become silent — solves the entire class of
     // "polling clobbers user input / scroll / focus" bugs.
-    lastRender: { sidebar: null, middle: null, detail: null },
+    lastRender: { sidebar: null, pillrow: null, middle: null, detail: null },
   };
 
   // ---------- helpers ----------
@@ -1193,12 +1222,6 @@ const CLIENT_JS = `
     headerBlock.appendChild(runActionRow(run, counts));
     middle.appendChild(headerBlock);
 
-    // #71 — phase pill row above the task list. One pill per workflow phase,
-    // status-coded. Click filters the task list to that phase.
-    if (Array.isArray(state.runDetail.phaseShape) && state.runDetail.phaseShape.length > 0) {
-      middle.appendChild(renderPhaseRibbon(state.runDetail.phaseShape));
-    }
-
     // #71 — task list filtering by phase. When state.phaseFilter is set, only
     // show tasks for that phase + render a chip showing the filter is active.
     const filteredTasks = state.phaseFilter
@@ -1210,7 +1233,14 @@ const CLIENT_JS = `
           el('button', {
             class: 'chip-x',
             title: 'Clear phase filter',
-            onclick: (e) => { e.stopPropagation(); state.phaseFilter = null; state.lastRender.middle = null; renderMiddle(); },
+            onclick: (e) => {
+              e.stopPropagation();
+              state.phaseFilter = null;
+              state.lastRender.middle = null;
+              state.lastRender.pillrow = null;
+              renderPillRowPane();
+              renderMiddle();
+            },
           }, '✕'),
         ])
       : null;
@@ -1258,12 +1288,38 @@ const CLIENT_JS = `
       el('span', { class: 'val' }, v),
     ]);
   }
+  // #71 — render the pill-row pane (top-spanning above middle + detail).
+  // Smart-refresh: same key shape as renderMiddle but only the bits the pill
+  // row consumes. When no run is selected (or workflow has no phases) the
+  // pane stays empty and the :empty CSS rule hides it.
+  function renderPillRowPane() {
+    const pane = $('pillrow');
+    const rd = state.runDetail;
+    const phaseShape = (rd && Array.isArray(rd.phaseShape)) ? rd.phaseShape : [];
+    const key = renderKey([
+      rd ? rd.run.id : null,
+      slimPhaseShapeForKey(phaseShape),
+      state.phaseFilter,
+    ]);
+    if (state.lastRender.pillrow === key) return;
+    state.lastRender.pillrow = key;
+    pane.innerHTML = '';
+    if (!rd || phaseShape.length === 0) return;
+    pane.appendChild(renderPhaseRibbon(phaseShape, rd.run));
+  }
   // #71 — render the phase pill row (one pill per workflow phase + arrows
-  // between). Pulled out of renderMiddle for clarity. Click → phaseFilter
-  // toggles for that phase (click again to clear).
-  function renderPhaseRibbon(phaseShape) {
+  // between). Click → phaseFilter toggles for that phase (click again to clear).
+  function renderPhaseRibbon(phaseShape, run) {
     const wrap = el('div', { class: 'phase-pill-row-wrap' });
-    wrap.appendChild(el('div', { class: 'phase-pill-row-label' }, 'WORKFLOW'));
+    const label = el('div', { class: 'phase-pill-row-label' }, [
+      el('span', null, 'WORKFLOW'),
+      run ? el('span', { class: 'run-hint' }, [
+        '— ',
+        el('code', null, run.workflow),
+        run.title ? ' · ' + run.title : '',
+      ]) : null,
+    ]);
+    wrap.appendChild(label);
     const row = el('div', { class: 'phase-pill-row' });
     phaseShape.forEach((p, i) => {
       row.appendChild(renderPhasePill(p));
@@ -1291,6 +1347,8 @@ const CLIENT_JS = `
       onclick: () => {
         state.phaseFilter = (state.phaseFilter === p.name) ? null : p.name;
         state.lastRender.middle = null;
+        state.lastRender.pillrow = null;
+        renderPillRowPane();
         renderMiddle();
       },
     });
@@ -2366,12 +2424,14 @@ const CLIENT_JS = `
     state.taskDetail = null;
     state.phaseFilter = null;
     renderSidebar();
+    renderPillRowPane();
     renderMiddle();
     renderDetail();
     await loadRunDetail(runId);
   }
   async function selectTask(taskId) {
     state.selectedTaskId = taskId;
+    renderPillRowPane();
     renderMiddle();
     renderDetail();
     await loadTaskDetail(taskId);
@@ -2390,6 +2450,7 @@ const CLIENT_JS = `
       const data = await fetchJSON('/api/runs/' + encodeURIComponent(runId));
       state.runDetail = data;
       attachTaskCounts();
+      renderPillRowPane();
       renderMiddle();
       schedulePoll();
     } catch (e) {
@@ -2640,6 +2701,7 @@ const CLIENT_JS = `
     state.interactive = true;
     startElapsedTicker();
     renderSidebar();
+    renderPillRowPane();
     renderMiddle();
     renderDetail();
     await loadRuns();
