@@ -77,14 +77,34 @@ afterEach(() => {
 
 // ---------- validator ----------
 
-test("validateUiDesignArtifacts: throws when .pen is missing", () => {
+test("validateUiDesignArtifacts: throws when no .pen file in designDir (#82)", () => {
   mkdirSync(join(designDir, "designs"));
   writeFileSync(join(designDir, "designs", "x.png"), "PNG");
   mkdirSync(join(designDir, "code"));
   writeFileSync(join(designDir, "code", "x.html"), "h");
   assert.throws(
     () => validateUiDesignArtifacts(designDir, "stats widget"),
-    /stats-widget\.pen/
+    /No \.pen file found/
+  );
+});
+
+test("validateUiDesignArtifacts: throws when designDir doesn't exist", () => {
+  assert.throws(
+    () => validateUiDesignArtifacts(join(designDir, "does-not-exist"), "stats widget"),
+    /Design directory does not exist/
+  );
+});
+
+test("validateUiDesignArtifacts: throws when multiple .pen files exist (ambiguous; #82)", () => {
+  writeFileSync(join(designDir, "dashboard.pen"), "PEN");
+  writeFileSync(join(designDir, "extra.pen"), "PEN");
+  mkdirSync(join(designDir, "designs"));
+  writeFileSync(join(designDir, "designs", "x.png"), "PNG");
+  mkdirSync(join(designDir, "code"));
+  writeFileSync(join(designDir, "code", "x.html"), "h");
+  assert.throws(
+    () => validateUiDesignArtifacts(designDir, "stats widget"),
+    /Multiple \.pen files.*dashboard\.pen.*extra\.pen/s
   );
 });
 
@@ -122,18 +142,19 @@ test("validateUiDesignArtifacts: throws when no HTML in code/", () => {
   );
 });
 
-test("validateUiDesignArtifacts: .pen filename comes from basename(designDir), NOT the run title", () => {
-  // The prompt-author seed tells the human "save to <basename(designDir)>.pen".
-  // Validator must agree, regardless of how funky the title is. This test pins
-  // the basename-not-title contract that the prompt-author + submit share.
-  writeFileSync(join(designDir, "stats-widget.pen"), "PEN");
+test("validateUiDesignArtifacts: any .pen filename works (#82 — meaningful names supported)", () => {
+  // With shared-corpus reuse (#67), the .pen filename is meaningful (e.g.
+  // dashboard.pen) rather than derived from designDir basename. Validator
+  // accepts whatever single .pen file exists. This is the test that pins
+  // the new contract: filename is discovered, not predicted.
+  writeFileSync(join(designDir, "dashboard.pen"), "PEN");
   mkdirSync(join(designDir, "designs"));
   writeFileSync(join(designDir, "designs", "x.png"), "PNG");
   mkdirSync(join(designDir, "code"));
   writeFileSync(join(designDir, "code", "x.html"), "h");
-  // Title that would slugify to a different filename — validator should ignore it.
-  const out = validateUiDesignArtifacts(designDir, "test-prompt-author-v3");
-  assert.equal(out.penFile, join(designDir, "stats-widget.pen"));
+  // Title is no longer load-bearing for filename resolution.
+  const out = validateUiDesignArtifacts(designDir, "completely-different-title");
+  assert.equal(out.penFile, join(designDir, "dashboard.pen"));
 });
 
 test("validateUiDesignArtifacts: success returns sorted absolute paths", () => {
@@ -203,7 +224,7 @@ test("submit: validator failure leaves the task in awaiting_human_input", async 
   insertTask(reviewTask());
   // No artifacts seeded — validator should throw before we mutate.
 
-  await assert.rejects(submit("t-review"), /Pencil source not found/);
+  await assert.rejects(submit("t-review"), /No \.pen file found/);
 
   const refreshed = getTask("t-review")!;
   assert.equal(refreshed.status, "awaiting_human_input");

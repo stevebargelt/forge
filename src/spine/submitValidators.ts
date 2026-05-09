@@ -8,8 +8,7 @@
 // switch arm in submit.ts.
 
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
-import { sanitizeTitleForFilename } from "../util/paths.js";
+import { join } from "node:path";
 
 export type UiDesignArtifacts = {
   penFile: string;
@@ -17,29 +16,38 @@ export type UiDesignArtifacts = {
   htmlFiles: string[];
 };
 
-// The .pen file's name comes from the **last segment of designDir**, not the
-// run title. The prompt-author seed (seeds/agents/prompt-author/CLAUDE.md) tells
-// the human "save to <designDir>/<basename(designDir)>.pen", so the validator
-// must look at the same place. The title is just a human label; the designDir
-// basename is the contract that crosses the human/machine boundary.
+// Find the canonical .pen file in designDir. Per #82, with shared-corpus reuse
+// (#67) the .pen filename is meaningful (e.g. `dashboard.pen`), not derived from
+// designDir basename. So glob *.pen instead of expecting a fixed name.
 //
-// `runTitle` is still passed in as a fallback for the unusual case where
-// designDir is empty or "/" (basename returns "" or "/"); in that case the
-// title slug is the only signal we have. In normal runs that fallback never
-// fires.
+// Rules:
+//   - Exactly one .pen → use it (even when its name doesn't match basename)
+//   - Zero .pen → error ("did Pencil save?")
+//   - Multiple .pen → error with file list (ambiguous; human must clean up)
+//   - The matched .pen must be non-zero (Pencil's "saved 0 bytes" failure mode)
+//
+// `runTitle` is no longer used for slug derivation but kept in the signature
+// for callers; left undocumented so existing code keeps compiling. Future
+// cleanup: drop the param if no caller depends on it.
 export function validateUiDesignArtifacts(
   designDir: string,
-  runTitle: string
+  _runTitle: string
 ): UiDesignArtifacts {
-  const dirSlug = basename(designDir);
-  const slug = dirSlug && dirSlug !== "/" ? dirSlug : sanitizeTitleForFilename(runTitle);
-  const penFile = join(designDir, `${slug}.pen`);
-
-  if (!existsSync(penFile)) {
+  if (!existsSync(designDir)) {
+    throw new Error(`Design directory does not exist: ${designDir}`);
+  }
+  const penNames = readdirSync(designDir).filter((f) => f.toLowerCase().endsWith(".pen"));
+  if (penNames.length === 0) {
     throw new Error(
-      `Pencil source not found at ${penFile}. Did Pencil save the .pen file? (Cmd+S in VS Code with the Pencil extension active.)`
+      `No .pen file found in ${designDir}. Did Pencil save the design source? (Cmd+S in VS Code with the Pencil extension active.)`
     );
   }
+  if (penNames.length > 1) {
+    throw new Error(
+      `Multiple .pen files found in ${designDir}: ${penNames.join(", ")}. Forge submit expects exactly one canonical Pencil source per design corpus. Move or delete the extras and re-submit.`
+    );
+  }
+  const penFile = join(designDir, penNames[0]!);
   if (statSync(penFile).size === 0) {
     throw new Error(
       `Pencil source at ${penFile} is empty (0 bytes). Pencil 0.2.5 requires a manual Cmd+S in VS Code to persist; auto-save isn't shipped yet.`

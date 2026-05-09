@@ -121,6 +121,19 @@ Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-desig
 ### #72 — Dashboard: smart-refresh — DONE this session
 Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild when their underlying data + selection state hasn't changed.
 
+### #83 — PROMPT.md: count existing PNGs and use max+1 as starting number (immediate fix for #80)
+**Why:** Caught 2026-05-08 mid-phase-flow run again. The brief mentioned "11 dashboard screens" (stale — actually 20) but Pencil-Claude has no way to verify; it inferred a starting number on its own and picked wrong (started at 12, would have clobbered existing 12-20). The "existing screens" count is unreliable as brief context — the corpus changes between runs and the brief is frozen at run-creation.
+
+**Fix at the prompt-template level (cheap, ships now):** add a count step early in PROMPT.md. First Bash command after the precondition `touch`:
+```bash
+EXISTING_COUNT=$(ls <designDir>/designs/*.png 2>/dev/null | wc -l | tr -d ' ')
+START_NUM=$((EXISTING_COUNT + 1))
+echo "Existing PNGs: $EXISTING_COUNT. Starting new screens at $START_NUM."
+```
+Then the per-screen rename steps use `$(printf "%02d" $START_NUM)`, `$(printf "%02d" $((START_NUM + 1)))`, etc. instead of hardcoded `01`, `02`, etc. Pencil-Claude does the count itself; nothing inferred from brief context.
+
+**Longer-term fix (#80 unchanged):** prompt-author should mount designDir read-only into its container and bake the actual starting number into PROMPT.md at author time. Cleaner because it's discovered once, not at run-time-on-the-host. But (#83) ships now; (#80) ships later.
+
 ### #80 — Prompt-author seed needs to read existing designDir before authoring (shared-corpus support)
 **Why:** Caught 2026-05-08 mid-phase-flow run. The prompt-author seed assumes a fresh designDir and authors a PROMPT.md based on `<basename(designDir)>.pen` + screen numbering starting at `01-` + a static "N screens" framing pulled from the brief. With #67 (shared per-app corpus), every one of those assumptions breaks:
 - Existing `.pen` file has a meaningful name (`dashboard.pen`), not the basename of the dir.
@@ -136,7 +149,104 @@ Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild wh
 **Validation done so far:** prompt-author DOES tell Pencil to OPEN-the-existing-file and ADD frames (good — this part of the seed worked). Numbering and filename inference are the gaps.
 **Composite with #79 + #82 (validator-glob-pen below):** these three together make shared-designDir reuse robust. Without all three, every reuse run hits a different sharp edge.
 
-### #82 — `forge submit` validator: glob `*.pen` instead of fixed filename
+### #81 — Pencil MCP server stale-handle failure mode (workaround documented)
+**Why:** Caught 2026-05-08 mid-phase-flow run. Pencil-Claude reported successful MCP calls (`open_document`, frame inserts, etc) and exported PNGs to disk, but the `dashboard.pen` tab in VS Code showed no dirty marker — meaning the in-memory edits were landing in *some* document, just not the one VS Code was showing. End-of-run Cmd+S did nothing because there was nothing dirty in the visible doc. Net result: PNGs exported, `.pen` source not updated, design lost on session close.
+
+**Hypothesis:** Pencil's MCP server holds per-session in-memory document handles. If an earlier MCP call (or the `touch <wrong-name>.pen` precondition step that created an empty stub) activated a *different* in-memory document, subsequent calls with `filePath: <correct path>` silently routed to the stale handle instead of the file the human had open. The MCP tool reports success because it operated on *some* doc, just not the right one.
+
+**Fix that worked:** restart VS Code → restart Claude session → re-run prompt. Cleared the handle map. Subsequent run shows dirty marker on `dashboard.pen` immediately on first MCP call (verified 2026-05-08).
+
+**What forge / the prompt-author seed can't defend against:** this is Pencil-internal state. No external tool can introspect Pencil's MCP handle map. The seed's existing `get_editor_state` after `open_document` step is supposed to catch the wrong-active-editor case, but if MCP misroutes silently it would still report the right path.
+
+**What the human can do:** watch the VS Code dirty marker as the live correctness indicator. If it doesn't appear within seconds of the first MCP call, the session is broken. Stop, restart VS Code + Claude, re-run.
+
+**Add to PROMPT.md template:** a step early in the prompt that says "after the first `open_document` call, the human watching VS Code should see a dirty marker (●) appear on the target file's tab. If no marker appears within 10 seconds of the first edit, the MCP session is broken — restart VS Code and Claude, then re-run this prompt."
+
+**Composite with #80:** #80's per-screen Cmd+S reminders are still good (Pencil sessions can also crash mid-run for unrelated reasons). The dirty-marker check is an *earlier* tripwire — catches the failure within seconds of starting, not after 24 screens of wasted work.
+
+### #88 — Corpus consistency: propagate new components into affected existing screens
+**Why:** Caught 2026-05-08 reviewing phase-flow design output. The pill row (#71) is a new component that, once implemented, will appear above the task list in many existing dashboard screens — 02 (task-list), 03 (task-detail-generic), 05 (task-detail-gate), 08 (task-detail-blocked-by-red), 11, 17, 18, 19, 20, etc. The current design corpus shows those screens *without* pills (drawn pre-pill-row). After implementation: live dashboard shows pills everywhere, corpus shows pills in isolation only. Mismatch.
+
+**The compounding problem:** when the design-reviewer agent (#51) runs comparing implementation screenshots against corpus PNGs, it'll see the pill row in production and not in the design — false-positive "regression" findings or, worse, calibration loss as it learns to ignore real differences. Every future cross-cutting component (notification toasts, status pills, search bars) creates the same drift.
+
+**The right shape: a "corpus consistency pass" after any cross-cutting addition.**
+- Different from `ui-design` (no new design) and `ui-design-revise` (revising one design).
+- It's: "the new component X exists in screen Y; propagate it into every affected screen in the corpus." Pencil-Claude session that retrofits in place across N existing screens.
+- Eventually maybe its own workflow primitive (`ui-design-propagate`?), or a documented post-design-run convention. For now, a manual pass after each cross-cutting design run.
+
+**For the phase-flow run specifically (Steven's call 2026-05-08):** ship as-is; capture this as a real backlog item; do the propagate pass before #71 implementation lands so the corpus matches reality at implementation review time.
+
+**Three implementation options when the time comes:**
+1. **Full retrofit in Pencil** — update every affected screen in place. Honest corpus, real time cost. Right answer.
+2. **Mark old screens explicitly stale** — annotate ("pre-pills version") to document the gap without fixing it. Cheap, keeps the gap visible. Stopgap.
+3. **Versioned corpus** — tag the .pen at the pre-pills state in git, retrofit going forward, old version lives in git for archeology. Combines (1) with explicit version semantics.
+
+Lean (1) when actually doing the work. (2) is a stopgap if the propagate session hasn't happened yet but you need to ship.
+
+**Composite with #87:** the modify-in-place convention applies to propagation too — when the propagate pass updates screen 02 to show pills, screen 02 *becomes* the pills-version. The pre-pills version lives in git history, not as a parallel screen.
+
+### #87 — Design corpus convention: modify-in-place + git, not add-new-screens for additions
+**Why:** Caught 2026-05-08 — Steven: "I'm still curious why we didn't just modify 5." The current pattern adds a new screen for every addition (screen 23 added the preview-line treatment to the existing gate panel from screen 05, instead of editing screen 05). That preserves audit trail at the cost of:
+- Duplicate frames in the .pen (the gate panel exists in 05 *and* 23)
+- "Which is canonical?" ambiguity at implementation time
+- Linear screen-count growth as the corpus iterates
+
+**The right convention:** modify in place. Screen 05 *becomes* the gate-panel-with-preview. The .pen file is committed to git after each Pencil session (per `~/code/forge-design/` already being a git repo); commit history is the audit trail. To see "what did this screen look like before phase-flow added the preview?", `git log dashboard.pen` and check out the prior version.
+
+**What this implies for forge / the prompt-author seed (#86 update):**
+- When a brief is "add X to existing component Y," PROMPT.md says "edit screen Y in place" (with the screen name discovered from the corpus, per #80) — not "add a new screen for X."
+- After each Pencil session, the human commits the corpus: `cd ~/code/forge-design && git add -A && git commit -m "<run-title>: <short summary>"`. Eventually automate this — `forge submit` could run the commit on success (or warn if the dir is dirty + uncommitted on next run).
+
+**Counter-argument worth noting:** new screens preserve "before/after" side by side without requiring the reviewer to git-checkout. If the design intent really is showing variation/comparison (state-A vs state-B of the same component), separate frames are honest. But for additions ("here's where the preview line goes"), that's not comparison — that's the new canonical state.
+
+**Pragmatic middle ground (Steven 2026-05-08):** when adding a new screen for an addition, **position it directly next to the original on the .pen canvas**. Spatial proximity inside the .pen is the audit trail — anyone opening the file sees `05-gate-panel` and `23-gate-panel-advance-preview` adjacent and immediately reads "this is the evolved version of that one" without git archeology. Cheaper than git-history awareness, more semantic than just "new screen far away on the canvas." The prompt-author seed (post-#86) should encode this: when designing an addition to existing component X, PROMPT.md tells Pencil to use `find_empty_space_on_canvas` *near* X's position rather than just any free space.
+
+**Sequencing:** ship #80 + #83 + #86 first (the seed-side fixes); revisit this convention when those are real and we have a feel for whether new-screen-for-additions still creeps back in.
+
+### #86 — Prompt-author seed: distinguish "new component" from "addition to existing component"
+**Why:** Caught 2026-05-08 reviewing phase-flow design output. The brief asked for "next-action preview on the gate panel" — a single new element (an italicized line between rationale and buttons) added to the existing gate panel that already lives in the corpus (screen 05 `task-detail-gate.png`). The agent interpreted this as needing three separate gate-panel mockups (23/24/25), each showing a different preview-copy variant. Result: three near-identical full panels with slight variations + invented sections (GATE CONTEXT, AGENT MESSAGE) that weren't in the brief. The actual design content was one piece (preview line shape + placement) with three copy variants — should have been one annotated screen, not three.
+
+**The shape of the bug:** the agent didn't know that the gate panel already exists in the design corpus, so it redrew it (with drift) instead of treating the brief as a tweak to an existing component. The prompt didn't say "the gate panel already exists; design only the addition."
+
+**How to apply:** when authoring PROMPT.md for a shared-corpus run (per #67), the prompt-author should:
+1. Read the existing PNGs/HTMLs in `<designDir>/code/` and `<designDir>/designs/`. Catalog what components already exist.
+2. For each requested screen, decide: is this a *new component* or an *addition to an existing component*?
+3. For additions, the PROMPT.md should explicitly say "the X component already exists in the corpus (see screen Y); design ONLY the addition (callout, annotation, single new element); do not redraw X." Optionally, ask the agent to design one annotated example + a sidecar showing copy/state variants of just the addition.
+4. For new components, normal full-frame design as today.
+
+**Composite with #80, #83:** the seed needs to read existing designDir state before authoring (#80), use existing PNG count for numbering (#83), AND distinguish new-vs-addition framing (#86). All three together make shared-corpus reuse work cleanly. Each one alone leaves drift.
+
+### #85 — Graph view: full workflow visualization as a separate screen
+**Why:** The phase pill row (#71) is the right shape for the always-visible header above the task list — compact, scannable, doesn't crowd the task list. But it can't show everything: branching (onReject loops back), fanout segment-by-segment over time, gate-decision history with rationale, the full topology of a complex workflow like `feature-ui-design-needed` (6 phases, mixed manual + agent + reds + onReject paths).
+**What it is:** a separate dashboard screen — possibly a modal-style overlay, possibly a new pane under "View > Graph", possibly a new tab — that renders the *whole workflow* for the selected run as a node-and-edge graph. Each phase is a node; gates are decision points; onReject is a back-edge; fanout shows the cluster of parallel tasks with per-task status. Animated state transitions if it's not too much (a task moving from running → awaiting_red → blocked_by_red → forced-advance → complete tells a story; the pill row condenses that).
+**Why a graph and not a Gantt or sankey:** Gantt is time-axis-first (right shape for "how long did each phase take"); sankey is flow-volume (right shape for "where does the data go"). Forge's interesting story is *control flow with branching* — onReject loops back, request-changes re-queues, retry creates a chain — that's a directed graph with cycles. Graph view is the honest shape.
+**What it adds beyond the pill row:**
+- Branching paths (onReject, request-changes, retry chains)
+- Per-task status within fanout (the pill row condenses to N dots; the graph view shows each as a node with full hover state)
+- Gate-decision audit thread overlaid on the relevant edge
+- The "what's possible from here" question — looking at a phase, you see all its outgoing edges (advance + reject + request-changes), labeled with the consequence
+**Caught:** 2026-05-08 reviewing screen 22 of phase-flow design run. Pill row is the right always-on header; graph view is the on-demand "show me everything" surface. Two different jobs, two different placements.
+**Sequencing:** lands AFTER #71 (the pill row) is implemented and live. No point designing a graph view before the pill row is real — the pill row is the canonical workflow representation in the dashboard, and the graph view should reuse the same status colors, gate icons, and node treatments. Defer the design step until then.
+**Open question:** is this its own ui-design run, or a phase added to the existing `forge phase flow visualization` corpus? Probably a separate run — different cognitive surface, different design language considerations (graph layout, edge routing, zoom, pan).
+
+**Affordance for opening the graph view (Steven 2026-05-08):** add a small graph-icon glyph to the pill row strip — clicking opens the graph view as a modal/overlay. The pill row is the canonical surface; the icon is the launchpad. Don't retrofit into screens 21/26 from this design corpus — design the icon + its placement properly during the #85 pass. Plus a keyboard shortcut (probably `g` or `cmd+shift+g`).
+
+### #84 — Document the two-channel feedback model for design workflows
+**Why:** Caught 2026-05-08 — Steven's call when reviewing the phase-flow PNGs: "I'd argue that this is exactly what the human loop is for. I can work with claude/pencil to make the corrections." Right take, and worth pinning down so future sessions don't reflexively reach for forge-reject when the cheaper channel exists.
+
+**Two distinct feedback channels in the design workflow:**
+
+1. **Forge gate (reject + onReject)** — for *prompt-level* problems. The prompt-author made wrong inferences (wrong screens listed, wrong style, missing requirements, stale context like "11 screens" when there are 20). Reject loops back to brief; prompt-author re-runs with rationale. Heavy: full round-trip, new Pencil session needed afterward.
+2. **In-Pencil iteration with Claude** — for *rendering-level* problems. The prompt was right; one specific element rendered wrong (e.g., fanout pill showing single-task-progress instead of N-task-parallelism). Open the frame, tell Pencil-Claude what to fix, save. No forge round-trip. Stays inside the human-led `ui-review` phase where the brief intended.
+
+**Heuristic for which channel:** if the *brief* would change as a result of the fix, that's a reject. If only the *frame* would change, that's a Pencil iteration.
+
+**Where this lives:**
+- prompt-author seed should mention both channels in PROMPT.md output (so the human running PROMPT.md knows iteration during the session is normal/expected, not a sign that the prompt was wrong).
+- ui-design workflow's gate-button copy (#62) might want different verbs to reflect this — "reject" reads heavy when the right move was iteration. Maybe a third option "back to prompt-author" or "this is a Pencil-iteration thing, just keep working."
+- Documentation: a small section in `docs/concepts.md` or a new `docs/how-to-design-workflows.md` walking through the two channels.
+
+Validates by experience: Steven shipped multiple in-Pencil corrections this session that would have been over-rejected through forge.
 **Why:** Caught alongside #80. Validator looks for `<basename(designDir)>.pen`; with shared corpora the filename is meaningful (`dashboard.pen`), not derived. The seed-convention is too tight.
 **How to apply:** `submitValidators.ts` — replace fixed-name lookup with `readdirSync(designDir).filter(f => f.endsWith('.pen'))`. Error if zero (with a clear "did Pencil save?" message); error if multiple (ambiguity, list found files); pass if exactly one. The non-zero check still applies. ~10 lines.
 
@@ -390,6 +500,14 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #82 — `forge submit` validator: glob `*.pen` instead of fixed filename
+**Closed:** 2026-05-08 evening, on branch `phase-flow-71` (218 tests passing, +2 new).
+- `submitValidators.ts` no longer derives the .pen filename from `basename(designDir)`. Now it `readdirSync(designDir).filter(f => f.endsWith('.pen'))` — exactly one matches → use it; zero → "No .pen file found, did Pencil save?"; multiple → "Multiple .pen files found: <list>; move/delete extras and re-submit."
+- The non-zero size check still applies (catches Pencil-saved-empty-file failure mode).
+- Fix unblocks shared-corpus reuse (#67) where the .pen filename is meaningful (e.g. `dashboard.pen`) rather than derived from the directory name.
+- New tests: "designDir doesn't exist" + "multiple .pen files" + "any .pen filename works." Existing test for "throws on missing .pen" updated to the new error message; existing "basename-not-title" test rewritten as "any-filename-works" to pin the new contract.
+**Caught:** 2026-05-08 — the phase-flow run had `dashboard.pen` (the existing dashboard corpus) but submit was looking for `forge-design.pen` (basename of designDir). Hard-error every time without manual rename or env-var hack.
 
 ### #78 — `forge retry` + dashboard retry button (insert-new shape, audit-preserving)
 **Closed:** 2026-05-08 evening, on branch `phase-flow-71` (216 tests passing, +13 new).
