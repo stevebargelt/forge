@@ -80,7 +80,9 @@ a { color: var(--accent); text-decoration: none; }
 
 #app {
   display: grid;
-  grid-template-columns: 280px 360px 1fr;
+  /* #64 — sidebar bumped to 320px so the common case stops truncating
+     run ids like "run-test-prompt-author-v3-da7d57". */
+  grid-template-columns: 320px 360px 1fr;
   height: 100vh;
   overflow: hidden;
 }
@@ -1100,6 +1102,9 @@ const CLIENT_JS = `
     const row = el('div', {
       class: 'run-row' + (r.id === state.selectedRunId ? ' selected' : ''),
       onclick: () => selectRun(r.id),
+      // #64 — full id available on hover. Critical when truncated rows make
+      // the trailing hash unreadable.
+      title: r.id + (r.title ? ' — ' + r.title : ''),
     }, [
       el('div', { class: 'row-main' }, [
         el('div', { class: 'row-id' }, shortId(r.id)),
@@ -1158,7 +1163,9 @@ const CLIENT_JS = `
     middle.appendChild(el('div', { class: 'pane-header' }, [
       el('span', { class: 'label' }, 'RUN'),
       el('span', { class: 'sep' }, '/'),
-      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;' }, shortId(run.id)),
+      // #64 — full id on hover so the breadcrumb can be referenced from
+      // a terminal even when the displayed value is truncated.
+      el('span', { class: 'current', style: 'color: var(--foreground); text-transform: none;', title: run.id }, shortId(run.id)),
     ]));
     const designDir = (run.metadata && typeof run.metadata.designDir === 'string') ? run.metadata.designDir : '';
     const headerBlock = el('div', { class: 'middle-header' }, [
