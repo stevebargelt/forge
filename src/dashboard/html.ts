@@ -1434,6 +1434,7 @@ const CLIENT_JS = `
         td.task.id, td.task.status, td.task.startedAt, td.task.completedAt,
         td.task.error || null,
         td.task.result ? JSON.stringify(td.task.result) : null,
+        td.failureMode || null,
         (td.verdicts || []).map(v => ({ id: v.id, verdict: v.verdict, confidence: v.confidence, redRole: v.redRole, redTaskId: v.redTaskId, findings: v.findings })),
         (td.gates || []).map(g => ({ id: g.id, decision: g.decision, rationale: g.rationale, decidedAt: g.decidedAt })),
         td.briefContext ? { briefTaskId: td.briefContext.briefTaskId, designDir: td.briefContext.designDir, hasPrompt: !!td.briefContext.promptMarkdown, promptLen: (td.briefContext.promptMarkdown || '').length } : null,
@@ -1469,11 +1470,14 @@ const CLIENT_JS = `
       detail.appendChild(el('div', { class: 'empty-state' }, 'Loading…'));
       return;
     }
-    const { task, verdicts, gates, briefContext } = state.taskDetail;
+    const { task, verdicts, gates, briefContext, failureMode } = state.taskDetail;
     const isBlockedByRed = task.status === 'blocked_by_red';
     const isAwaitingGate = task.status === 'awaiting_gate';
     const isAwaitingHuman = task.status === 'awaiting_human_input';
     const isFailed = task.status === 'failed';
+    // #94 — failure-mode aware: rejected tasks shouldn't show retry (would
+    // reproduce the rejected output). Banner copy also clarifies the cause.
+    const isRejected = failureMode === 'rejected';
 
     if (isBlockedByRed) {
       detail.appendChild(el('div', { class: 'alert-banner' }, [
@@ -1483,8 +1487,10 @@ const CLIENT_JS = `
     }
     if (isFailed) {
       detail.appendChild(el('div', { class: 'alert-banner' }, [
-        el('strong', null, '☠ FAILED — '),
-        el('span', null, task.error || 'Task failed; see error below.'),
+        el('strong', null, isRejected ? '✕ REJECTED — ' : '☠ FAILED — '),
+        el('span', null, isRejected
+          ? 'Task was rejected at the gate. Retry would re-run the same agent with the same inputs; the workflow\\'s onReject path already loops back to where the fix belongs.'
+          : (task.error || 'Task failed; see error below.')),
       ]));
     }
     detail.appendChild(el('div', { class: 'pane-header' }, [
@@ -1496,7 +1502,7 @@ const CLIENT_JS = `
     const body = el('div', { class: 'pane-body no-pad' });
 
     body.appendChild(taskHeaderSection(task));
-    if (isFailed) {
+    if (isFailed && !isRejected) {
       body.appendChild(retryActionsSection(task));
     }
     if (isAwaitingHuman) {

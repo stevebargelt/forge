@@ -274,13 +274,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 
 **Caught the wrong way:** at 04:30 UTC, mid-run-shutdown. Architect output got rejected; brief re-spawned automatically; killed manually. Should have been: reject → "redo architect" picker → architect re-runs against the corrected seed.
 
-### #94 — Retry button shouldn't appear on tasks failed via gate-reject
-**Why:** Caught 2026-05-09 alongside #93. Architect task was rejected via gate; status flipped to `failed`. Dashboard's failed-task render (per #78) shows the "↻ Retry task" button. But retry on a *rejected* task means re-running the same agent with same inputs — reproduces the same output the human just rejected. Token waste.
-
-**The fix:** dashboard's render distinguishes failure modes via the `gates` table. If the task has a gate row with `decision='reject'`, it failed by human decision, not by container crash or agent error. Don't offer retry. Maybe offer "clone with edits" or nothing at all (the workflow's onReject path already handled the loop).
-
-**Where this lives:** `src/dashboard/queries.ts` — `getTaskDetail` already returns `gates`. Add a derived `failureMode: 'rejected' | 'crashed' | 'agent_error'` field. `src/dashboard/html.ts` — gate retryActionsSection on `failureMode !== 'rejected'`.
-
 ### #92 — Architect agent scope is wrong: tutoring the implementer instead of doing systems architecture
 **Why:** Caught 2026-05-09 reviewing task-architect-c29474's output (run-forge-phase-flow-visualization-f55801). The architect produced 6+ "decisions" of the shape "PhaseShape is a plain serializable object, not a re-export of the Phase type" + "Pill-click sets state.phaseFilter; renderMiddle already re-runs on state change" + "Gate-panel advance preview is a pure client-side text function, not a server endpoint." These read like one Claude telling another Claude how to code — line-level guidance on type names, function names, file structure.
 
@@ -486,6 +479,13 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #94 — Retry button suppressed on tasks failed via gate-reject
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing, +3 new).
+- `src/dashboard/queries.ts`: `getTaskDetail` returns a derived `failureMode: 'rejected' | 'crashed_or_agent_error' | undefined` field. Rejected = task is failed AND has at least one gate row with `decision='reject'`. `crashed_or_agent_error` covers everything else (container crash, agent error, validation failure, watchdog kill). undefined for non-failed tasks.
+- `src/dashboard/html.ts`: failed-task rendering branches on `failureMode === 'rejected'`. The retry section is suppressed on rejected. Banner copy clarifies — "Task was rejected at the gate. Retry would re-run the same agent..." vs the original crash banner.
+- Detail render-key (#72) includes `failureMode` so the retry section flips correctly when a gate-reject lands.
+- 3 new queries.test cases: rejected, crashed, undefined-on-non-failed.
 
 ### #89 — Drop FORGE_DASHBOARD_INTERACTIVE feature flag (always on)
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (228 tests passing — net -5 vs post-#71's 233 because the 4× "503 when not interactive" tests + the meta-default-false test became obsolete and got dropped).

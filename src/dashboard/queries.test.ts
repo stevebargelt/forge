@@ -159,3 +159,33 @@ test("getTaskDetail returns undefined for unknown task id", () => {
   const result = getTaskDetail("nope");
   assert.equal(result, undefined);
 });
+
+test("getTaskDetail derives failureMode='rejected' when failed task has reject gate (#94)", () => {
+  const failedRejected = task("task-reject", "failed");
+  insertTask(failedRejected);
+  insertGate({
+    id: "gate-r1",
+    taskId: "task-reject",
+    decision: "reject",
+    rationale: "wrong scope",
+    decidedAt: "2026-05-09T01:00:00Z",
+    decidedBy: "human",
+  });
+  const result = getTaskDetail("task-reject");
+  assert.ok(result);
+  assert.equal(result.failureMode, "rejected");
+});
+
+test("getTaskDetail derives failureMode='crashed_or_agent_error' when failed task has no reject gate (#94)", () => {
+  const failedCrashed = task("task-crashed", "failed");
+  insertTask(failedCrashed);
+  const result = getTaskDetail("task-crashed");
+  assert.ok(result);
+  assert.equal(result.failureMode, "crashed_or_agent_error");
+});
+
+test("getTaskDetail leaves failureMode undefined for non-failed tasks (#94)", () => {
+  const result = getTaskDetail("task-d1");  // status=complete from beforeEach
+  assert.ok(result);
+  assert.equal(result.failureMode, undefined);
+});

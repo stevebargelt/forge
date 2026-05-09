@@ -195,6 +195,13 @@ export type BriefContext = {
   designDir?: string;
 };
 
+// #94 — distinguish gate-rejected failures from crashes/agent errors. A task
+// rejected by the human via gate has a gate row with decision='reject' AND
+// the task's status flipped to failed; retry would re-run the same agent and
+// reproduce the rejected output. Other failure modes (container crash, agent
+// error, validation failure) are valid retry targets.
+export type FailureMode = "rejected" | "crashed_or_agent_error";
+
 export function getTaskDetail(
   id: string
 ): {
@@ -202,6 +209,7 @@ export function getTaskDetail(
   verdicts: VerdictRow[];
   gates: GateRow[];
   briefContext?: BriefContext;
+  failureMode?: FailureMode;
 } | undefined {
   const taskRow = db().prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as TaskRow | undefined;
   if (!taskRow) return undefined;
@@ -218,6 +226,14 @@ export function getTaskDetail(
     .all(id) as GateDbRow[];
   const gates = gRows.map(rowToGate);
 
+  // Derive failureMode for failed tasks. If any gate row on this task is a
+  // reject decision, the task failed by human gate-reject. Otherwise crash /
+  // agent error / validation failure.
+  let failureMode: FailureMode | undefined;
+  if (task.status === "failed") {
+    failureMode = gates.some((g) => g.decision === "reject") ? "rejected" : "crashed_or_agent_error";
+  }
+
   // briefContext serves two surfaces:
   //   (1) awaiting_human_input review task — load the upstream brief's PROMPT.md
   //       so the human can read it before going to run Pencil
@@ -233,7 +249,7 @@ export function getTaskDetail(
     briefContext = loadBriefContextForCurrentTask(task);
   }
 
-  return { task, verdicts, gates, briefContext };
+  return { task, verdicts, gates, briefContext, failureMode };
 }
 
 // Load PROMPT.md for the current task (the one being gated). Used when a
