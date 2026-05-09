@@ -6,45 +6,26 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-08 evening session:** branch `workflow-rename-70`, sitting on top of merged main (281b541 includes #66 modal + #34 pretty results + #72 smart-refresh + dashboard usability batch). Big push:
+**State at end of 2026-05-08:** running `feature-ui-design-needed` end-to-end against forge itself — designed the phase pill row + next-action preview (the visualization of #71). Architect phase currently in flight (`run-forge-phase-flow-visualization-f55801`). Designs landed at `~/code/forge-design/` as PNGs 21/22/23/26 + matching HTMLs.
 
-- **First end-to-end investigation run via the dashboard** (`run-code-review-terry-workflow-586a86`). Walked frame-question → 16 fanout investigates → synthesize → recommend. Surfaced + fixed: scroll/input preservation, smart-refresh (#72), task identification (phase·N of M, heuristic detail title, TASK ID + red task ID), attention-based sort, run config visibility, tilde expansion, reject-rationale required, pretty result view (#34). Plus three architectural BACKLOG entries: #73 reds-as-reviewer category mismatch, #74 zero-stdout orphan recovery, #75 markdown rendering.
-- **First real `forge new ui-design`** ran (`run-test-prompt-author-v4-c2dcda`). Validated the manual-phase shape end-to-end: brief → submit → review → advance → run complete. Caught + fixed three things along the way (slug-from-basename not title, designDir layout pre-create, Pencil-MCP availability gate, gate-finalize on terminal advance).
-- **Workflow rename refactor (this branch).** Renamed `feature-design-needed` → `feature` (the no-UI variant — disambiguates "design" from "UI/UX"). Renamed `feature-design-provided` → `feature-ui-design-provided` (and added the architect phase that was missing — Steven's call: architecture review is universal across feature work). New composed `feature-ui-design-needed` (brief → ui-review → architect → plan → build → verify) — forge's most complex workflow shape. New `ui-design-revise` workflow file. Phase rename `frame` → `frame-question`. Phase rename `ui-design.review` → `ui-design.ui-review`. In-place data migration. FORGE-DEC-017 introduces `awaiting_red` status (honest representation of "blue done, reds running, gate not yet decided"). Architect seed updated to read upstream design artifacts (`htmlFiles`, `pngFiles`). Modal grouped by category (Build features / Design UI / Investigate or audit). 203 tests passing.
+**Two live branches as of bedtime:**
+- **`phase-flow-71`** — has #54 smoke-test fixes, #66 modal, #34 pretty results, #72 smart-refresh, #78 retry-with-audit, #82 *.pen glob validator, gate-advance auto-chains forge-next, prompt preview inline on awaiting_gate brief tasks. **Architect run is running against this branch's code.**
+- **`dashboard-polish-overnight`** (cut from main) — overnight punch list: #89 (drop interactive flag), #76 (elapsed timer), #62 (manual-phase gate copy), #63 (fresh-session warning), #64 (sidebar tooltip + 320px), #75 (markdown renderer for prose results), #42 (rewrite how-to-new-workflow.md against feature-ui-design-needed).
 
-**Top of the stack:**
+**Top of the stack tomorrow:**
 
-1. **End-to-end validate `feature-ui-design-needed`.** Run a real one. The composed workflow chains manual + agent phases that haven't been exercised together. Specifically watch: does the architect actually read upstream htmlFiles/pngFiles? Does onReject from architect → brief loop the prompt-author with rationale? Does verify → run finalize work after all the new phases land?
-2. **#55** is now obsolete — `ui-design-revise` already exists as a workflow file in this branch. Close out as done.
-3. **#66** is closed (modal works for all 7 workflows now including the renamed ones).
-4. **Run FOLLOWUP-PROMPT.md** through Pencil at the host to fill the 9 design gaps captured in `~/code/forge-design/FOLLOWUP-PROMPT.md`. Then wire the new screens into the dashboard.
-5. **#71 phase ribbon** — depends on this rename refactor (now done). Up next architecturally.
-6. **Dashboard followups #62-65** (gate-button copy, fresh-session warning, resizable panes, per-question gate UX).
-7. **#48 image previews** — `/api/artifact?path=...` passthrough endpoint, whitelisted paths under `~/code/`.
-8. **#73** reds-as-reviewer architecture decision (peer fanout vs status quo). Open.
+1. **Check on the in-flight architect run.** Did it land? What did it produce? First time seeing the architect read upstream design artifacts (htmlFiles + pngFiles) per the seed update.
+2. **Review the overnight polish branch.** Read each commit, decide what merges, what gets reverted.
+3. **#71 phase pill row implementation.** Started overnight on `phase-flow-71`. May have stopped at a clean commit boundary mid-implementation; check the BACKLOG entry for last state.
+4. **Architect → plan → build → verify.** Walking the composed workflow end-to-end is the validation we owe.
+5. **Once #71 lands:** corpus consistency pass (#88) — propagate the pill row into existing screens 02/03/05/08/etc so the design corpus matches reality.
+6. **#73** reds-as-reviewer architecture decision (peer fanout vs status quo). Still open; needs a daytime conversation.
 
 **Validation still pending:**
+- #25 (reject + `onReject` flow) — possibly closed by overnight architect-reject if it happens.
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
-- #25 (reject + `onReject` flow) — gate.test.ts covers it; real-run validation possible once #1 above runs an architect reject.
 
 **Watchdog status:** works.
-
-## In progress
-
-### #46 — Designer agent + Pencil integration + ui-design workflow (SUPERSEDED by FORGE-DEC-014)
-**Status:** Container-based v1 abandoned. Architectural pivot decided 2026-05-07. See [FORGE-DEC-014](learnings/decisions/2026-05-07_host-led-pencil-design.md). Replaced by **#53** (prompt-author seed) + **#54** (ui-design rewrite) + **#55** (design-revise rewrite) + **#58** (cleanup of container designer code).
-**Why the pivot:** Pencil 0.2.5 has no headless save mechanism. `pencil --prompt` stalls on inner-Claude permissions; `pencil interactive --save()` writes 0 bytes; Pencil's MCP server requires a GUI app. The .pen file only persists when the human presses Cmd+S in VS Code. The new model has forge author the prompt and the human run it on the host, where Pencil works correctly.
-**What survived (good for cherry-pick to main):**
-- `--include-partial-messages` + `--output-format stream-json --verbose` in `spawn.ts` — keeps stdout flowing during long thinking turns. Belongs to all agents, not just designer.
-- Idle watchdog opt-out via `pickIdleTimeoutMs(image, ...)` — useful pattern even outside designer (some long-running phase might want it later).
-- CLI `Next:` hint improvements (`forge next` / `forge gate` / `forge new` printing the next command on its own line with `--project`).
-- The reflection that **forge needs to surface awaiting_gate after dispatch when phases land in awaiting_gate immediately** (was a real bug, fixed).
-**What dies (cleanup #58):**
-- `docker/agent-designer-worker.Dockerfile`, `docker/build-designer.sh`
-- `seeds/agents/designer/`, `seeds/agents/designer-export/`
-- `AgentRef.image` plumbing in `spawn.ts` and dispatch.ts (only used by designer)
-- `PENCIL_CLI_KEY` forwarding for the designer image
-- `src/workflows/ui-design.ts` and `src/workflows/design-revise.ts` (rewritten under #54/#55)
 
 ## Active
 
@@ -57,18 +38,6 @@ When you start a session, read this file. When you finish, update it: move close
 - The agent runs in `agent-dev-worker` (no special image). Standard blue-agent shape.
 Validated empirically tonight: this exact prompt produced a complete dashboard design in `~/code/forge-design/`.
 
-### #54 — Rewrite `ui-design` workflow for the new architecture (DONE this session)
-Closed in Done (recent) below. Validation: a real `forge new ui-design` run that goes brief → submit → review → gate. Reject path exercises #25 incidentally.
-
-### #55 — `ui-design-revise` workflow — DONE this session (workflow-rename-70 branch)
-Closed in Done (recent) below. The workflow file landed as part of the rename refactor: same two-phase shape as ui-design (brief + ui-review), prompt-author template hook for ui-design-revise.md (template file itself can be added in a follow-up if the basic ui-design template proves inadequate).
-
-### #55-orig — Rewrite design-revise workflow (original framing, now closed)
-**Why:** Same pivot as #54 but for the iteration case. Input is a previously-saved `.pen` file plus a revision brief.
-**How to apply:** Phases:
-- `brief` — agent: `prompt-author` with the `ui-design-revise` template. Reads the prior `.pen` file path from inputs; produces a PROMPT.md that opens it via `--in` and applies the requested changes. Verifies the prior `.pen` is non-zero before generating (hard error if 0 — design source was lost).
-- `review` — same as #54.
-Depends on: #53.
 
 ### #59 — Track Pencil release notes for auto-save shipping
 **Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
@@ -112,14 +81,7 @@ Caught 2026-05-08 during #53 validation — Steven couldn't read the full `run-t
 **How to apply:** When the dashboard's awaiting-gate detail renders a task whose result has `openQuestions`, render them as a checklist with three states per question (accept / change / explain) and a small inline text field for the change case. On submit, synthesize the gate rationale automatically from the per-question responses (e.g. "accepted #1, #3; changed #2 to: <text>; left #4 open") and POST to `/api/gate/:taskId` as today. The agent's re-run loop is unchanged — just a friendlier capture surface for the human.
 Caught 2026-05-08 during #53 validation. Belongs in #57's iteration backlog alongside #62/#63/#64.
 
-### #68 — `forge new --design-dir` should pre-create the conventional layout (DONE this session)
-Closed in Done (recent) below — `forge new` now `mkdir -p`s `<designDir>/{designs,code}/` at run-creation time. Idempotent for shared-designDir reuse (#67).
 
-### #69 — Prompt-author seed: hard-stop the human session if Pencil MCP is unavailable (DONE this session)
-Closed in Done (recent) below — `seeds/agents/prompt-author/templates/ui-design.md` now has a PRECONDITION 0 step that tells the human's Claude Code session to refuse to proceed without `mcp__pencil__*` tools. Caught 2026-05-08: a session without the Pencil MCP started writing HTML files instead of failing fast, polluting `<designDir>/code/`.
-
-### #72 — Dashboard: smart-refresh — DONE this session
-Closed in Done (recent) below. Render functions now skip the wipe-and-rebuild when their underlying data + selection state hasn't changed.
 
 ### #83 — PROMPT.md: count existing PNGs and use max+1 as starting number (immediate fix for #80)
 **Why:** Caught 2026-05-08 mid-phase-flow run again. The brief mentioned "11 dashboard screens" (stale — actually 20) but Pencil-Claude has no way to verify; it inferred a starting number on its own and picked wrong (started at 12, would have clobbered existing 12-20). The "existing screens" count is unreliable as brief context — the corpus changes between runs and the brief is frozen at run-creation.
@@ -295,8 +257,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 
 **Out of scope but worth noting:** picking creds-mode from the modal (option B from the discussion) is friction every time and not what we want. Auto-detect + pre-flight is the right shape.
 
-### #78 — `forge retry` + dashboard retry button — DONE this session
-Closed in Done (recent) below. CLI command, server endpoint, dashboard button. Scoped to failed tasks only; rerun-on-complete deferred (different semantics; user wants different result from same inputs — needs design).
 
 ### #76 — Elapsed time goes stale between polls (smart-refresh side-effect)
 **Why:** #72's render-key skips renders when underlying task data doesn't change. ELAPSED is derived from `task.startedAt` + now() — only the wall clock changes every second, not the task data, so the skip kicks in and the displayed elapsed value freezes until something else triggers a render. Caught 2026-05-08 mid-phase-flow run.
@@ -407,8 +367,6 @@ No prompt-tightening fix makes that ambiguity go away. Even with crisp instructi
 **Lean toward (3) initially.** It's the cheapest honest answer and exposes whether the monotonic-growth cost is real before we build (1) or (2). (1) becomes the documentation form of (3). (2) only becomes worth building if Pencil ships better cross-file tooling AND we hit a case where one .pen is genuinely too big.
 **Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
 
-### #66 — Dashboard new-run modal — DONE this session (on `new-run-modal-66` branch)
-Closed in Done (recent) below. All 6 workflows supported with conditional fields, server-side validation mirrors client, and POST /api/runs shells out to `forge new`.
 
 ### #25 — Validate `onReject` rationale-propagation end-to-end (legacy, partly obsolete)
 **Why:** `onReject` is documented but no workflow used it as of 2026-05-07. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. **#54's `review` phase will exercise this path** — when the human rejects a design, `onReject: "brief"` loops back and the prompt-author re-runs with `inputs.rejectedRationale` populated. Once #54 ships and a real run rejects a design, this entry can close.
@@ -430,67 +388,18 @@ Related: #38 (capture resolved model on the task row) is the audit-trail compani
 2. Make workflows reference roles whose base CLAUDE.md already matches the workflow's schema (e.g. don't reuse `framer` for scoping if its schema is investigation-shaped).
 Lean toward (1).
 
-### #34 — Dashboard: human-readable result view with raw toggle — DONE this session
-Closed in Done (recent) below. Pretty/raw toggle in the OUTPUT header; pretty walks the result object structurally (top-level keys → labeled sections, prose → paragraphs, arrays → numbered lists, paths → monospace, nested → indented). Toggle state persists per-task across renders.
-
-### #35 — Dashboard: gate buttons + run-next + "what's next" surfacing
-**Why:** Dashboard is read-only today; all driving still happens in the CLI. From the dashboard you can see state but can't act on it. Five sub-pieces:
-1. "What's next" banner per run (awaiting gate / running / blocked / complete).
-2. Gate action buttons for `awaiting_gate` tasks (advance / request-changes / reject + rationale field).
-3. "Run next phase" button that triggers `forge next`.
-4. Project path stored on the run (#36).
-5. Dashboard shells out to the `forge` CLI for actions; doesn't reimplement spawn/gate logic.
-Localhost-only is the security model; document this.
-
-### #36 — Persist project_dir on the runs table
-**Why:** `--project` is required on every `forge next` today. Users have to remember the path each time; the dashboard can't know it. Prereq for #35.
-**How to apply:** Add `project_dir TEXT` to the runs table. Populated on first `forge next --project ...`. Subsequent calls without `--project` use the stored value. New `--project` overrides and updates the stored value (warn on change).
-
-### #37 — `forge advise` — print recommended next command for a run
-**Why:** Users (and #35's dashboard) need a "what should I run next?" answer. Today that knowledge lives in my head when I'm pairing with the user.
-**How to apply:** New CLI command `forge advise <run-id>`. Reads run state, picks the right action, prints the literal command to copy (`forge gate task-... advance` / `forge next ... --project ...`). Doesn't execute. Also reusable as the surfacing logic for #35.
-
-### #38 — Capture agent model on the task row
-**Why:** `AgentRef.model` is resolved at spawn time (BEDROCK_MAP / DIRECT_MAP / LiteLLM logic) but never persisted. Dashboard can show `agent_role` but can't tell which model actually ran.
-**How to apply:** Add `agent_alias TEXT` (logical name like `spec-writer`) and `agent_model TEXT` (resolved id like `us.anthropic.claude-sonnet-4-6`) to the tasks table. Populate in `createPhaseTasks` and `spawnRed` from the AgentRef. Surface in dashboard task panes. Prereq for #27 cost rollups.
 
 ### #39 — Audit the spawn → DB pipeline for missing fields (meta-task)
 **Why:** SQLite is supposed to be the canonical audit trail of a run, but several runtime-observable values never make it to the DB (resolved model #38, agent prose replies #32 partly, model_calls #27, container start time, watchdog state). Run an audit after #32/#38/#27 land to find what's still missing.
 **How to apply:** Walk `spawn.ts`, `dispatch.ts`, `spawnRed.ts`, `gate.ts`. For each runtime-observable piece of state, decide if it belongs in the DB. Output is a punch-list of additional schema fixes, not a rewrite. Each surfaced item becomes its own task.
 
-### #40 — `forge gate <run-id> advance` — batch-gate a fanout
-**Why:** Fanouts produce N tasks (one per lens, per claim, per anything). Gating each one separately is friction. Validated as a real annoyance during the topaz-mobile review (8 lens assessors needing 8 separate `forge gate ... advance` commands).
-**How to apply:** New form: `forge gate <run-id> advance` finds all `awaiting_gate` tasks in the run and applies the decision to each. Probably advance-only initially (request-changes/reject typically need per-task rationale). Could extend later with `--rationale` for uniform application.
-
-### #41 — Auto-gate on terminal phase should mark run complete
-**Why:** When the last phase has `gate: "auto"`, the task gets marked complete by `dispatch.ts` but `run.status` stays `active` until the next `forge next` is called. The user has to type `forge next` twice — once to dispatch, once to "discover" the run is done. Confirmed during topaz-mobile-review-v2.
-**How to apply:** Either: (a) `dispatch.ts` calls `updateRunStatus(run.id, "complete")` and `stopSsoWatchdog()` when auto-gating a task whose phase has no successor; or (b) `next.ts` proactively checks at the top whether all tasks in the terminal phase are complete and finalizes there before doing anything else. (b) is cleaner — keeps the "run is done when no more work remains" invariant in one place.
-
 ### #42 — Rewrite docs/how-to-new-workflow.md with a workflow we don't already have
 **Why:** Current example is `code-review` which duplicates the existing `codebase-assessment` workflow. The doc reads as a paper exercise. Replace with a workflow forge actually doesn't have, ideally one that exercises a primitive we've built but not documented (`onReject` branching, gate=verdict + fanout combo, multi-authority red panels).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
-### #43 — Dashboard three-pane CSS layout
-**Why:** Implementer built a drill-in flow (click run → see tasks → click task → see detail) instead of the three-pane simultaneous view the PRD intended. Functional but slower for comparisons. ~5 min CSS fix per the original handoff.
-**How to apply:** `src/dashboard/html.ts`. Side-by-side panes for runs / tasks / task-detail.
-
-### #44 — `npm test` glob portability inside containers
-**Why:** `npm test` script uses a glob that doesn't expand the same way in container vs host shell. Implementer worked around it with explicit file paths during the dashboard run.
-**How to apply:** Make the test script portable so it works in both bash and the agent container's environment.
-
 ### #45 — `forge auth status` warns on stale bedrock vars
 **Why:** SSO sessions expire silently (1 hour at SGWS). The next spawn fails on auth. With FORGE-DEC-013 the watchdog usually prevents this, but `forge auth status` should still proactively detect-and-warn when bedrock creds are getting close to expiry, similar to the watchdog's threshold check.
 **How to apply:** When `detectCredsMode()` returns `bedrock`, call the same `_sso_min_remaining`-style check the watchdog uses. If under some threshold (15 min?), print a warning.
-
-### #46 — Designer agent + Pencil integration + ui-design workflow (SUPERSEDED)
-**Status:** SUPERSEDED by FORGE-DEC-014. The container-based designer is dead — Pencil 0.2.5 has no headless save mechanism. Replaced by #53 (prompt-author seed) + #54 (ui-design rewrite) + #55 (design-revise rewrite) + #58 (cleanup of container-designer code).
-**Original framing kept here for the audit trail; see In progress section above for the current #46 entry with the cleanup ladder.**
-
-### #47 — Use `pass` for host-side secret storage (renumbered as #60)
-**Status:** Renumbered as #60. The original #47 framing was "PENCIL_CLI_KEY in containers"; with FORGE-DEC-014 PENCIL_CLI_KEY moves out of forge entirely. The pass-based pattern is still wanted for whatever host-side secrets forge accumulates next; see #60.
-
-### #48 — Dashboard support for design review (subsumed by #57)
-**Status:** Subsumed by #57 (interactive dashboard v1) which renders PNG outputs from gate.rationale paths as part of the design review UI. The original #48 framing assumed the container designer (#46 v1); with the FORGE-DEC-014 pivot the design review surface lives in #57's gate UI for the `review` phase of ui-design / design-revise workflows.
 
 ### #49 — Design-reviewer red agent (future investigation)
 **Why:** Steven's call: skip reds for design work in v1 because aesthetic judgment is squishy. Worth revisiting once we have real human-review data — there may be objective things a red can catch (accessibility contrast, missing states, broken layout primitives, brand inconsistency).
@@ -528,6 +437,23 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #46, #47, #48 — closed earlier, retroactively recorded
+- **#46** (Designer agent + Pencil integration) — SUPERSEDED by FORGE-DEC-014, container-based v1 abandoned. Cleanup landed under #58 (commits `d15e741`, `a9d1b1e`, `40fe81b` on `designer-agent-46`, merged into main as `e744e18`).
+- **#47** — renumbered as #60 (host-side secret storage via `pass`). Original framing was PENCIL_CLI_KEY-in-containers; container designer is dead so the secret-storage need shifts.
+- **#48** (Dashboard support for design review) — substance landed in #57 (interactive dashboard v1) and #54 (manual-phase ui-review with artifact-path render). Image preview deferred — needs `/api/artifact?path=...` passthrough endpoint.
+
+### #35, #36, #37, #38, #40, #41, #43, #44 — closed earlier, retroactively recorded
+- **#35** (Dashboard gate buttons + run-next + what's-next surfacing) — closed by `interactive-dashboard-57` merge (`a8e1b0f`) shipping the v1 interactive dashboard.
+- **#36** (project_dir on runs table) — closed `4c216a0`.
+- **#37** (`forge advise` command) — closed `23797fa`.
+- **#38** (capture agent_alias + agent_model on tasks) — closed `91de39d`.
+- **#40** (`forge gate <run-id> advance --all`) — closed `756dcde`.
+- **#41** (auto-finalize run when terminal phase auto-gates) — closed `9201bc2`. Plus a follow-up fix for the human-gate-on-terminal-advance path (closed `09889cf`).
+- **#43** (three-pane CSS layout) — closed by the dashboard reskin in `interactive-dashboard-57` (commit `65eaae3`, merged as `a8e1b0f`).
+- **#44** (npm test glob portability) — closed `4ab9c17`.
+
+
 
 ### #82 — `forge submit` validator: glob `*.pen` instead of fixed filename
 **Closed:** 2026-05-08 evening, on branch `phase-flow-71` (218 tests passing, +2 new).
