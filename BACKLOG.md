@@ -6,24 +6,22 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-08:** running `feature-ui-design-needed` end-to-end against forge itself — designed the phase pill row + next-action preview (the visualization of #71). Architect phase currently in flight (`run-forge-phase-flow-visualization-f55801`). Designs landed at `~/code/forge-design/` as PNGs 21/22/23/26 + matching HTMLs.
-
-**Two live branches as of bedtime:**
-- **`phase-flow-71`** — has #54 smoke-test fixes, #66 modal, #34 pretty results, #72 smart-refresh, #78 retry-with-audit, #82 *.pen glob validator, gate-advance auto-chains forge-next, prompt preview inline on awaiting_gate brief tasks. **Architect run is running against this branch's code.**
-- **`dashboard-polish-overnight`** (cut from main) — overnight punch list: #89 (drop interactive flag), #76 (elapsed timer), #62 (manual-phase gate copy), #63 (fresh-session warning), #64 (sidebar tooltip + 320px), #75 (markdown renderer for prose results), #42 (rewrite how-to-new-workflow.md against feature-ui-design-needed).
+**State at end of 2026-05-09 overnight:** #71 (phase pill row + next-action preview) shipped on `phase-flow-71`. Designs from yesterday's session walked into a real implementation: server-side `phaseShape` array per run, client renders the pill row above the task list with status colors + fanout dot strips, advance-preview line below the rationale field on awaiting_gate detail. 233 tests passing (was 218 → 232 after server, 233 after fanoutConcurrency test). Smoke-tested against the existing investigation run (66 tasks, 21-dot fanout strip rendered as fanoutDots: 15 done, 6 failed). Single commit on `phase-flow-71`.
 
 **Top of the stack tomorrow:**
 
-1. **Check on the in-flight architect run.** Did it land? What did it produce? First time seeing the architect read upstream design artifacts (htmlFiles + pngFiles) per the seed update.
-2. **Review the overnight polish branch.** Read each commit, decide what merges, what gets reverted.
-3. **#71 phase pill row implementation.** Started overnight on `phase-flow-71`. May have stopped at a clean commit boundary mid-implementation; check the BACKLOG entry for last state.
-4. **Architect → plan → build → verify.** Walking the composed workflow end-to-end is the validation we owe.
-5. **Once #71 lands:** corpus consistency pass (#88) — propagate the pill row into existing screens 02/03/05/08/etc so the design corpus matches reality.
-6. **#73** reds-as-reviewer architecture decision (peer fanout vs status quo). Still open; needs a daytime conversation.
+1. **Visual review of #71.** API + tests are green; what's missing is your eyes on the actual rendered pill row + advance preview in a browser. Spin up the dashboard against the existing investigation run + the abandoned phase-flow run; verify the visual matches designs 21/22/23/26 closely enough. Specific things I haven't confirmed visually: (a) status-coded backgrounds read clearly at the pill scale, (b) the fanout dot strip stays readable for 20+ tasks, (c) the advance-preview line wraps cleanly when verbose.
+2. **Decide on visual fixes / polish.** If the pill row looks good, push the commit to main as-is (or via PR). If not, BACKLOG entries to capture follow-ups + iterate.
+3. **Restart on #92 architect scope.** Once #71 lands, the most leveraged next thing is the architect seed rewrite — every subsequent `feature*` run pays for the bad shape until that's fixed.
+4. **Corpus consistency pass (#88).** Propagate the pill row into existing screens 02/03/05/08/etc so the design corpus matches reality. Do this BEFORE the next design-reviewer pass — otherwise it'd flag drift that's actually intentional.
+5. **#93 reject-loop picker.** Open architectural call.
+6. **Dashboard punch list (deferred from yesterday).** #89 drop-flag, #76 elapsed-timer, #62 gate-copy, #63 fresh-session, #64 tooltip+width, #75 markdown, #42 docs rewrite. None of these were touched overnight — the call was "do #71 first, no overnight punch list."
 
 **Validation still pending:**
-- #25 (reject + `onReject` flow) — possibly closed by overnight architect-reject if it happens.
+- #25 (reject + `onReject` flow) — still un-validated end-to-end.
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
+
+**Branch state:** `phase-flow-71` ahead of main with #78 retry, #82 *.pen glob, gate-advance auto-chain, BACKLOG hygiene, three new entries (#92/#93/#94), and now **#71** — the biggest piece of dashboard UX shipped this week.
 
 **Watchdog status:** works.
 
@@ -272,30 +270,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 **Decide cold, not in the middle of a phase-flow run.** Real cost-benefit numbers come from: counting how many lines in html.ts are reactive-primitive workarounds, prototyping one render-function-as-Preact-component, measuring the migration friction. Don't commit until those numbers exist.
 **Revisit when:** another reactive-bug-of-this-shape lands AND the dashboard's html.ts crosses some threshold (3000 lines? more reactive workarounds than actual UI logic?). At that point (1) is paying real interest and (2) becomes obvious.
 
-### #71 — Dashboard: visual representation of the workflow flow / phase ribbon
-**Why:** When you gate a task in the dashboard you can't tell what's coming next without reading the workflow file. Today: "click advance" → ??? → next thing happens. The dashboard shows what *is* (running tasks, gate state) but never what *will be* (next phase shape, fanout count, gate type, reds).
-**Caught:** 2026-05-08 mid-#66 testing. Steven: "When I'm in 'frame' and I click to advance, I have no idea what is coming next. I need to know." Then: ribbon doesn't render fanout well — `frame` kicks off 20 investigate agents, 4 running concurrently, a flat ribbon implies linear progression and lies about parallelism.
-
-**Three granularities (all from the same workflow shape data):**
-
-1. **Compact ribbon with progress-aware pills.** Single horizontal row above the task list. Each phase is a pill with: name, gate-type icon (auto/human/verdict — distinct), reds indicator (small shield if phase has reds), gate-on-verdict marker if applicable. Linear phases show status (done/running/awaiting/blocked/pending). **Fanout phases show a progress bar inside the pill: `▓▓▓░░ investigate 14/20`** so the count is honest at a glance. Manual phases show distinct iconography (▢ for awaiting_human_input, distinct from ⚠ awaiting_gate). Click a pill → filters the task list to that phase (becomes the natural drill-down for fanout).
-
-2. **Next-action preview on the gate panel.** When the user is about to gate, surface the literal consequence below the rationale field: "Advancing creates 20 `investigate` tasks (one per claim from frame's output), running 4 at a time. Reds: wide + narrow, parallel, authoritative, gate=verdict." Manual-phase variant: "Advancing puts this run into awaiting_human_input. You'll need to run PROMPT.md against Pencil, then `forge submit`." Auto-gate variant: "Advancing also finalizes the run (no successor phase)." Context-aware copy per the next phase's shape.
-
-3. **(Optional v2) Drill-in pane on fanout pill click.** Right-pane shows per-task summary for the fanout — N tasks, M running, average elapsed, finished outputs preview. Defers the decision; for v1 the existing task list is the drill-in.
-
-**Considered but rejected:**
-- **Tall ribbon with sub-rows per fanout task.** Honest about parallelism, but vertical real estate balloons during fanout (20 stacked rows competes with the task list right below).
-- **Sankey / DAG view.** Pretty, but real flow visualization is overkill for forge's current depth (workflows are 2–4 phases). Revisit if a workflow ever has branching shape.
-
-**How to apply:**
-- Server: extend `getRunWithShouldPoll` (queries.ts) to include the workflow's structural shape — `{phases: [{name, agentRoles, gate, hasFanout: bool, hasReds: bool, redsAuthority?, redsGateOnVerdict?, onReject?}]}`. No prompt bodies, just structure. Re-resolves on every request (cheap — workflows are TS files imported at runtime, already cached).
-- Client (html.ts): render the ribbon above the task list in `renderMiddle`. New CSS classes for phase pills (status-coded). Pill width ~140px, fanout pill expands to show the progress bar. Click filters task list via new `state.phaseFilter`. The same client-side `phaseShape` data feeds the gate-panel preview text.
-- Gate-panel preview: small helper `describeAdvanceConsequence(currentPhase, nextPhase, currentTasks)` returns one or two sentences for the dashboard to render below the rationale field. Similar helper for reject and request-changes (e.g. for reject in ui-design.review, "Rejecting loops back to the brief phase. Your rationale will be passed to the prompt-author as inputs.rejectedRationale").
-- Build (1) first; (2) immediately after using the same data; (3) defer.
-
-**Lands after:** the workflow rename refactor (#70 / refactor-2026-05-08-workflow-naming.md). Phase names are about to change; building the ribbon before the rename means rework.
-
 ### #93 — Reject UX: choose where to loop back, not just trigger the workflow's fixed onReject
 **Why:** Caught 2026-05-09 — Steven rejected architect output (wrong scope per #92, not a brief problem). Workflow's `onReject: "brief"` fired, spawning a fresh `prompt-author` brief task. But the brief was *fine*; the architect's seed was the problem. Looping to brief redoes work that was already correct, wastes tokens, and pollutes the corpus.
 
@@ -526,6 +500,21 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #71 — Dashboard: phase pill row + advance-preview line
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (233 tests passing, +15 new).
+**What shipped:**
+- **Server: `src/dashboard/phaseShape.ts`** — pure helper that builds a `PhaseShape[]` from a `Workflow` + the run's tasks. Per-phase: `name`, `agentRoles`, `gate`, `isManual`, `hasFanout`, `fanoutConcurrency`, `fanoutFromUpstream`, `hasReds`, `redsAuthority`, `redsGateOnVerdict`, `onReject`, plus dynamic `status` (attention-ranked) + `taskCounts` + `fanoutDots` (per-task status array for fanout phases, in creation order). Excludes red-prefixed agentRole tasks from phase aggregates — reds don't pull a phase back to running once their blue is done.
+- **Server: `getRunWithShouldPoll` is now async** and returns `phaseShape: PhaseShape[]`. Loaded via `loadWorkflow(run.workflow)` per request — workflow files are TS imports already cached by Node, so the cost is one Map lookup. Tolerates unknown workflow names (e.g. legacy runs after a rename) by returning an empty phaseShape rather than 500. Updated `server.ts` and the existing `queries.test.ts` for the async signature.
+- **Client: pill row above the task list.** New CSS classes for phase pills (status-coded background + border; 7 statuses match the design's status key: pending, done, running, awaiting_gate, awaiting_human_input, awaiting_red, blocked_by_red/failed). Each pill: gate icon (👤 manual / ⚡ agent), phase name, gate-type sub-label (◎ human / ⚡ auto / ⚖ verdict), trailing ✓ when done, trailing colored dot when phase has reds (red for authoritative, warning for specialist). Fanout pills expand to show a row of small colored dots (one per task) + a summary like "×4 running" / "16/20 done · 4 failed". Click a pill toggles `state.phaseFilter`; the task list filters to that phase + a clearable chip appears in the TASKS header.
+- **Client: `describeAdvanceConsequence(currentTask)` advance-preview.** Italicized one-line summary rendered below the gate-actions row on awaiting_gate detail. Four flavors: (1) terminal — "Advancing also finalizes the run."; (2) human-led next-phase — "Advancing puts this run into awaiting_human_input. You'll need to run the PROMPT.md..."; (3) fanout next-phase — "Advancing creates 16 investigate tasks (one per claim from frame-question), running 4 at a time. Reds: specialist."; (4) plain agent — "Advancing dispatches the architect phase (architect). Reds: specialist." Reads the upstream task's `result[arrayKey]` to surface the actual fanout count when the phase is fanout-from-upstream.
+- **Smart-refresh integration:** middle render-key now includes `phaseShape` (slimmed) + `state.phaseFilter`. Detail render-key includes `phaseShape` so the advance-preview line refreshes when the next-phase shape changes. `selectRun` clears `phaseFilter`.
+- **Tests:** 13 new in `phaseShape.test.ts` (linear / fanout / reds / status aggregation / red-prefixed exclusion / fanoutConcurrency / fanoutFromUpstream / onReject); 1 new in `queries.test.ts` (phaseShape returned). +2 from prior counts elsewhere = 233 passing total (was 218 at start of session).
+- **Smoke:** spun up the dashboard against `~/.forge/forge.db` and inspected `/api/runs/<id>` for both an investigation run (4 phases, fanout dots = 21-task strip) and the abandoned phase-flow run (6 phases, mix of done/failed/pending with reds on architect+build). PhaseShape builds correctly across both. HTML payload includes 56 hits for the new CSS classes — the styles + render code shipped to client.
+**Designs referenced:** `~/code/forge-design/designs/21-phase-pill-row-linear.png`, `22-phase-pill-row-fanout.png`, `23-gate-panel-advance-preview.png`, `26-run-pane-composite.png`. Visual review still pending — Steven gates the corpus-consistency pass (#88) on his eyeballs first.
+**Out-of-scope by design:**
+- **Drill-in pane on fanout-pill click (granularity 3 from the BACKLOG entry).** Punted; existing task-list filtering is the v1 drill-in.
+- **Sankey/DAG view (#85).** Different surface; the BACKLOG entry is explicit about lands-after-#71.
 
 ### #46, #47, #48 — closed earlier, retroactively recorded
 - **#46** (Designer agent + Pencil integration) — SUPERSEDED by FORGE-DEC-014, container-based v1 abandoned. Cleanup landed under #58 (commits `d15e741`, `a9d1b1e`, `40fe81b` on `designer-agent-46`, merged into main as `e744e18`).

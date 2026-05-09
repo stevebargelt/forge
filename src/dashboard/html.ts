@@ -669,6 +669,193 @@ a { color: var(--accent); text-decoration: none; }
 .menu .item.danger { color: var(--error); }
 .menu .item.danger:hover { background: var(--error-bg); color: var(--error); }
 .menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
+
+/* #71 — phase pill row. Sits above the task list in the run pane. One pill per
+   workflow phase, status-coded background + border. Click filters the task list
+   to that phase via state.phaseFilter. */
+.phase-pill-row-wrap {
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.phase-pill-row-wrap .phase-pill-row-label {
+  padding: var(--space-md) var(--space-md) var(--space-sm);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--foreground-muted);
+}
+.phase-pill-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 var(--space-md) var(--space-md);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.phase-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  min-width: 120px;
+  flex-shrink: 0;
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.1s, background 0.1s;
+}
+.phase-pill:hover { border-color: var(--border-bright); background: var(--surface-raised); }
+.phase-pill.is-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.phase-pill .pill-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--foreground);
+  white-space: nowrap;
+}
+.phase-pill .pill-name { letter-spacing: 0.02em; }
+.phase-pill .pill-icon { font-size: 11px; opacity: 0.85; flex-shrink: 0; }
+.phase-pill .pill-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--foreground-muted);
+}
+.phase-pill .pill-gate-icon { font-size: 9px; }
+.phase-pill .pill-trailing {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.phase-pill .pill-check { color: var(--success); font-weight: 700; }
+.phase-pill .pill-reds-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--error);
+}
+.phase-pill .pill-reds-dot.specialist { background: var(--warning); }
+.phase-arrow {
+  align-self: center;
+  color: var(--foreground-muted);
+  font-size: 13px;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
+
+/* Status tints. Borders + foreground hues match design 21's status key. */
+.phase-pill.status-pending { background: var(--surface); }
+.phase-pill.status-pending .pill-name { color: var(--foreground-secondary); }
+
+.phase-pill.status-done { border-color: var(--success); background: var(--success-bg); }
+.phase-pill.status-done .pill-name { color: var(--foreground); }
+
+.phase-pill.status-running {
+  border-color: var(--running);
+  background: rgba(0, 242, 255, 0.06);
+  box-shadow: 0 0 0 1px rgba(0, 242, 255, 0.2);
+}
+.phase-pill.status-running .pill-name { color: var(--running); }
+
+.phase-pill.status-awaiting_gate { border-color: var(--warning); background: var(--warning-bg); }
+.phase-pill.status-awaiting_gate .pill-name { color: var(--warning); }
+
+.phase-pill.status-awaiting_human_input { border-color: var(--accent-secondary); background: rgba(191, 64, 255, 0.06); }
+.phase-pill.status-awaiting_human_input .pill-name { color: var(--accent-secondary); }
+
+.phase-pill.status-awaiting_red { border-color: var(--running); background: rgba(0, 242, 255, 0.04); }
+.phase-pill.status-awaiting_red .pill-name { color: var(--running); }
+
+.phase-pill.status-blocked_by_red { border-color: var(--error); background: var(--error-bg); }
+.phase-pill.status-blocked_by_red .pill-name { color: var(--error); }
+
+.phase-pill.status-failed { border-color: var(--error); background: var(--error-bg); }
+.phase-pill.status-failed .pill-name { color: var(--error); }
+
+/* Fanout pill: expands horizontally to show the dot row + N running label. */
+.phase-pill.has-fanout { min-width: 200px; }
+.phase-pill .fanout-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: 4px;
+}
+.phase-pill .fanout-dots {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+.phase-pill .fanout-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pending);
+  flex-shrink: 0;
+}
+.phase-pill .fanout-dot.dot-done { background: var(--success); }
+.phase-pill .fanout-dot.dot-running { background: var(--running); }
+.phase-pill .fanout-dot.dot-failed { background: var(--error); }
+.phase-pill .fanout-dot.dot-pending { background: var(--pending); }
+.phase-pill .fanout-dot.dot-awaiting_gate { background: var(--warning); }
+.phase-pill .fanout-dot.dot-awaiting_human_input { background: var(--accent-secondary); }
+.phase-pill .fanout-dot.dot-awaiting_red { background: var(--running); }
+.phase-pill .fanout-dot.dot-blocked_by_red { background: var(--error); }
+.phase-pill .fanout-summary {
+  font-size: 10px;
+  color: var(--foreground-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Filter chip for phase-filtered task list. */
+.phase-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 6px;
+  margin-left: 6px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--accent-secondary);
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+.phase-filter-chip .chip-x {
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: var(--accent-secondary);
+  padding: 0;
+  font-size: 10px;
+}
+.phase-filter-chip .chip-x:hover { color: var(--foreground); }
+
+/* #71 — advance-preview line on the gate panel. Italicized one-liner sitting
+   below the rationale field. */
+.advance-preview {
+  font-size: 11px;
+  color: var(--foreground-secondary);
+  font-style: italic;
+  margin-top: var(--space-sm);
+  padding: 8px 10px;
+  background: var(--accent-subtle);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius-sm);
+  line-height: 1.5;
+}
+.advance-preview strong { font-style: normal; color: var(--foreground); font-weight: 600; }
 `;
 
 const CLIENT_JS = `
@@ -682,6 +869,9 @@ const CLIENT_JS = `
     pollTimer: null,
     interactive: false,
     openMenuTaskId: null,
+    // #71 phase-pill-row click filters the task list to that phase. null = no
+    // filter (show all). Cleared when selecting a different run.
+    phaseFilter: null,
     // Last-rendered cache keys per pane (#72). Each render computes a key from
     // the data it would draw + selection state; if the key matches the cached
     // one, the render is skipped entirely (DOM untouched). Polling ticks that
@@ -708,6 +898,16 @@ const CLIENT_JS = `
     return (tasks || []).map(t => ({
       id: t.id, phase: t.phase, agentRole: t.agentRole, status: t.status,
       startedAt: t.startedAt, completedAt: t.completedAt, taskName: t.taskName,
+    }));
+  }
+  // Slim phase-shape for the render key (#72) — same idea as slimTasksForKey
+  // but for the phaseShape array. Picks just the fields the pill row consumes.
+  function slimPhaseShapeForKey(phaseShape) {
+    return (phaseShape || []).map(p => ({
+      name: p.name, gate: p.gate, isManual: p.isManual,
+      hasFanout: p.hasFanout, fanoutConcurrency: p.fanoutConcurrency || null,
+      hasReds: p.hasReds, redsAuthority: p.redsAuthority,
+      status: p.status, taskCounts: p.taskCounts, fanoutDots: p.fanoutDots || null,
     }));
   }
   function el(tag, attrs, children) {
@@ -899,7 +1099,9 @@ const CLIENT_JS = `
           rd.run.completedAt, rd.run.projectDir,
           (rd.run.metadata && rd.run.metadata.designDir) || null,
           slimTasksForKey(rd.tasks),
+          slimPhaseShapeForKey(rd.phaseShape),
           state.selectedTaskId,
+          state.phaseFilter,
           state.interactive,
         ])
       : renderKey(['none', state.selectedRunId]);
@@ -951,9 +1153,33 @@ const CLIENT_JS = `
     }
     middle.appendChild(headerBlock);
 
+    // #71 — phase pill row above the task list. One pill per workflow phase,
+    // status-coded. Click filters the task list to that phase.
+    if (Array.isArray(state.runDetail.phaseShape) && state.runDetail.phaseShape.length > 0) {
+      middle.appendChild(renderPhaseRibbon(state.runDetail.phaseShape));
+    }
+
+    // #71 — task list filtering by phase. When state.phaseFilter is set, only
+    // show tasks for that phase + render a chip showing the filter is active.
+    const filteredTasks = state.phaseFilter
+      ? tasks.filter(t => t.phase === state.phaseFilter)
+      : tasks;
+    const filterChip = state.phaseFilter
+      ? el('span', { class: 'phase-filter-chip' }, [
+          'phase: ' + state.phaseFilter,
+          el('button', {
+            class: 'chip-x',
+            title: 'Clear phase filter',
+            onclick: (e) => { e.stopPropagation(); state.phaseFilter = null; state.lastRender.middle = null; renderMiddle(); },
+          }, '✕'),
+        ])
+      : null;
     const listHeader = el('div', { class: 'list-header' }, [
-      el('span', null, 'TASKS'),
-      el('span', { class: 'count' }, tasks.length + ' tasks'),
+      el('span', null, [
+        'TASKS',
+        filterChip,
+      ]),
+      el('span', { class: 'count' }, filteredTasks.length + (state.phaseFilter ? ' of ' + tasks.length : '') + ' tasks'),
     ]);
     middle.appendChild(listHeader);
     const body = el('div', { class: 'pane-body no-pad' });
@@ -973,13 +1199,14 @@ const CLIENT_JS = `
     // Sort by attention level: actionable states bubble up so the user lands
     // on the things they need to act on. Within a status, group by phase and
     // preserve creation order so the "N of M" indices read naturally.
-    const sortedTasks = tasks.slice().sort(compareTaskAttention);
+    const sortedTasks = filteredTasks.slice().sort(compareTaskAttention);
     for (const t of sortedTasks) {
       const idx = phaseIndex.get(t.id);
       const total = phaseCounts[t.phase];
       body.appendChild(taskRow(t, idx, total));
     }
     if (tasks.length === 0) body.appendChild(el('div', { class: 'empty-state' }, 'No tasks yet.'));
+    else if (filteredTasks.length === 0) body.appendChild(el('div', { class: 'empty-state' }, 'No tasks in phase "' + state.phaseFilter + '".'));
     middle.appendChild(body);
     if (prevScrollTop > 0) {
       requestAnimationFrame(() => { writePaneScroll(middle, prevScrollTop); });
@@ -990,6 +1217,108 @@ const CLIENT_JS = `
       el('span', { class: 'key' }, k),
       el('span', { class: 'val' }, v),
     ]);
+  }
+  // #71 — render the phase pill row (one pill per workflow phase + arrows
+  // between). Pulled out of renderMiddle for clarity. Click → phaseFilter
+  // toggles for that phase (click again to clear).
+  function renderPhaseRibbon(phaseShape) {
+    const wrap = el('div', { class: 'phase-pill-row-wrap' });
+    wrap.appendChild(el('div', { class: 'phase-pill-row-label' }, 'WORKFLOW'));
+    const row = el('div', { class: 'phase-pill-row' });
+    phaseShape.forEach((p, i) => {
+      row.appendChild(renderPhasePill(p));
+      if (i < phaseShape.length - 1) {
+        row.appendChild(el('div', { class: 'phase-arrow' }, '→'));
+      }
+    });
+    wrap.appendChild(row);
+    return wrap;
+  }
+  // Single pill for a phase. Status-coded background + border. Shows: phase
+  // name (bold), gate-type sub-label with icon, fanout progress (when fanout
+  // and tasks exist), reds dot (when reds exist), done check (when status=done).
+  function renderPhasePill(p) {
+    const isSelected = state.phaseFilter === p.name;
+    const classes = [
+      'phase-pill',
+      'status-' + p.status,
+      p.hasFanout && p.taskCounts.total > 0 ? 'has-fanout' : '',
+      isSelected ? 'is-selected' : '',
+    ].filter(Boolean).join(' ');
+    const pill = el('div', {
+      class: classes,
+      title: phasePillHoverTitle(p),
+      onclick: () => {
+        state.phaseFilter = (state.phaseFilter === p.name) ? null : p.name;
+        state.lastRender.middle = null;
+        renderMiddle();
+      },
+    });
+    // Top line: gate icon + phase name + (right-side) check or reds dot.
+    const top = el('div', { class: 'pill-top' });
+    top.appendChild(el('span', { class: 'pill-icon' }, gateIconChar(p)));
+    top.appendChild(el('span', { class: 'pill-name' }, p.name));
+    const trailing = el('div', { class: 'pill-trailing' });
+    if (p.status === 'done') {
+      trailing.appendChild(el('span', { class: 'pill-check' }, '✓'));
+    }
+    if (p.hasReds) {
+      trailing.appendChild(el('span', {
+        class: 'pill-reds-dot' + (p.redsAuthority === 'specialist' ? ' specialist' : ''),
+        title: 'Reds: ' + (p.redsAuthority || 'specialist') + (p.redsGateOnVerdict ? ', gates on verdict' : ''),
+      }));
+    }
+    if (trailing.childNodes.length > 0) top.appendChild(trailing);
+    pill.appendChild(top);
+    // Sub-line: gate-type, plus a "manual" tag for human-led phases with no agents.
+    const meta = el('div', { class: 'pill-meta' });
+    meta.appendChild(el('span', { class: 'pill-gate-icon' }, gateTypeIconChar(p.gate)));
+    meta.appendChild(el('span', null, p.isManual ? 'human' : p.gate));
+    pill.appendChild(meta);
+    // Fanout row: dot strip + "×N running" / "×N pending" / "N/M done" summary.
+    if (p.hasFanout && p.taskCounts.total > 0) {
+      const fr = el('div', { class: 'fanout-row' });
+      const dots = el('div', { class: 'fanout-dots' });
+      for (const dotStatus of (p.fanoutDots || [])) {
+        dots.appendChild(el('span', { class: 'fanout-dot dot-' + dotStatus }));
+      }
+      fr.appendChild(dots);
+      fr.appendChild(el('span', { class: 'fanout-summary' }, fanoutSummary(p)));
+      pill.appendChild(fr);
+    }
+    return pill;
+  }
+  // ⚡ for agent-driven phases, 👤 for human-led (manual) phases. Visual cue
+  // before the user reads the name, matches the design.
+  function gateIconChar(p) {
+    if (p.isManual) return '👤';
+    return '⚡';
+  }
+  // Sub-label icon next to gate text. ⚡ for auto, ⚖ for verdict, ◎ for human.
+  function gateTypeIconChar(gate) {
+    if (gate === 'auto') return '⚡';
+    if (gate === 'verdict') return '⚖';
+    return '◎';
+  }
+  function fanoutSummary(p) {
+    const c = p.taskCounts;
+    if (c.running > 0) return '×' + c.running + ' running';
+    if (c.awaitingGate > 0) return '×' + c.awaitingGate + ' awaiting';
+    if (c.blockedByRed > 0) return '×' + c.blockedByRed + ' blocked';
+    if (c.failed > 0 && c.complete + c.failed === c.total) return c.complete + '/' + c.total + ' done · ' + c.failed + ' failed';
+    if (c.complete === c.total) return c.total + '/' + c.total + ' done';
+    return c.complete + '/' + c.total;
+  }
+  function phasePillHoverTitle(p) {
+    const parts = [p.name];
+    parts.push(p.isManual ? 'human-led (manual)' : 'agent-led');
+    parts.push('gate: ' + p.gate);
+    if (p.hasFanout) parts.push('fanout');
+    if (p.hasReds) parts.push('reds: ' + (p.redsAuthority || 'specialist') + (p.redsGateOnVerdict ? ' (gates on verdict)' : ''));
+    if (p.onReject) parts.push('onReject → ' + p.onReject);
+    parts.push('status: ' + p.status);
+    if (p.taskCounts.total > 0) parts.push(p.taskCounts.complete + '/' + p.taskCounts.total + ' tasks');
+    return parts.join(' · ');
   }
   function countTaskStatuses(tasks) {
     const c = { running: 0, awaiting_gate: 0, awaiting_human_input: 0, awaiting_red: 0, blocked_by_red: 0, complete: 0, failed: 0, pending: 0 };
@@ -1098,6 +1427,11 @@ const CLIENT_JS = `
       const chainSignal = allTasks
         .filter(t => t.id === td.task.parentId || (t.parentId === td.task.id && t.phase === td.task.phase))
         .map(t => t.id + ':' + t.status);
+      // #71 — advance-preview reads next-phase shape from runDetail. Include
+      // the slim phaseShape signal in the detail key so the preview line
+      // refreshes when a workflow definition changes hot-reload-style or the
+      // surrounding run swaps under us.
+      const phaseShapeSignal = state.runDetail ? slimPhaseShapeForKey(state.runDetail.phaseShape) : null;
       key = renderKey([
         td.task.id, td.task.status, td.task.startedAt, td.task.completedAt,
         td.task.error || null,
@@ -1106,6 +1440,7 @@ const CLIENT_JS = `
         (td.gates || []).map(g => ({ id: g.id, decision: g.decision, rationale: g.rationale, decidedAt: g.decidedAt })),
         td.briefContext ? { briefTaskId: td.briefContext.briefTaskId, designDir: td.briefContext.designDir, hasPrompt: !!td.briefContext.promptMarkdown, promptLen: (td.briefContext.promptMarkdown || '').length } : null,
         chainSignal,
+        phaseShapeSignal,
         state.interactive,
       ]);
     }
@@ -1171,6 +1506,15 @@ const CLIENT_JS = `
     }
     if (isAwaitingGate || isBlockedByRed) {
       body.appendChild(gateActionsSection(task, verdicts));
+    }
+    // #71 — advance-preview: render below the gate actions. One italicized
+    // sentence describing what advance does (creates fanout tasks, transitions
+    // to awaiting_human_input, finalizes the run, etc).
+    if (isAwaitingGate) {
+      const previewLine = describeAdvanceConsequence(task);
+      if (previewLine) {
+        body.appendChild(el('div', { class: 'advance-preview', html: previewLine }));
+      }
     }
     // PROMPT.md inline preview for brief-phase tasks awaiting gate. The human
     // is reviewing whether the prompt-author's prompt is good enough to run;
@@ -1680,6 +2024,76 @@ const CLIENT_JS = `
     }
     return sec;
   }
+  // #71 — advance-preview helper. Returns an HTML-snippet sentence (or null)
+  // describing what "Advance Run" will do, computed from the workflow shape.
+  // Three flavors per design 23:
+  //   1. Fanout: "Advancing creates N <phase> tasks (one per <key> from <upstream>),
+  //              running M at a time. Reds: <list>."
+  //   2. Manual (human-led): "Advancing puts this run into awaiting_human_input.
+  //                            You'll need to run PROMPT.md against Pencil, then
+  //                            forge submit."
+  //   3. Terminal (no next phase): "Advancing also finalizes the run."
+  //   4. Plain auto/agent: "Advancing dispatches the <next> phase (<role>)."
+  // Emits HTML so the next phase name can be bolded; escape user-provided strings.
+  function describeAdvanceConsequence(currentTask) {
+    if (!state.runDetail || !Array.isArray(state.runDetail.phaseShape)) return null;
+    const phases = state.runDetail.phaseShape;
+    const idx = phases.findIndex(p => p.name === currentTask.phase);
+    if (idx < 0) return null;
+    const next = phases[idx + 1];
+    if (!next) {
+      return 'Advancing also <strong>finalizes the run</strong>.';
+    }
+    if (next.isManual) {
+      return 'Advancing puts this run into <strong>awaiting_human_input</strong>. You\\'ll need to run the PROMPT.md from this brief against Pencil + Claude on your host, then run <code>forge submit</code> when done.';
+    }
+    if (next.hasFanout) {
+      // Best-effort fanout count — read upstream array length when possible.
+      const fanoutCount = inferFanoutCount(currentTask, next);
+      const concurrency = inferFanoutConcurrency(next);
+      const verb = fanoutCount != null ? 'creates ' + fanoutCount : 'creates';
+      const tasksWord = fanoutCount === 1 ? ' task' : ' tasks';
+      const fanoutFromHint = next.fanoutFromUpstream ? ' (one per ' + escapeHtml(next.fanoutFromUpstream.inputKey || 'item') + ' from ' + escapeHtml(currentTask.phase) + ')' : '';
+      let s = 'Advancing ' + verb + ' <strong>' + escapeHtml(next.name) + '</strong>' + tasksWord + fanoutFromHint;
+      if (concurrency) s += ', running ' + concurrency + ' at a time';
+      s += '.';
+      if (next.hasReds) {
+        s += ' Reds: ' + next.redsAuthority + (next.redsGateOnVerdict ? ', gates on verdict' : '') + '.';
+      }
+      return s;
+    }
+    // Plain auto/agent advance.
+    let s = 'Advancing dispatches the <strong>' + escapeHtml(next.name) + '</strong> phase';
+    if (next.agentRoles && next.agentRoles.length > 0) {
+      s += ' (' + escapeHtml(next.agentRoles.join(', ')) + ')';
+    }
+    s += '.';
+    if (next.gate === 'auto' && idx + 1 === phases.length - 1) {
+      s += ' That phase auto-gates and finalizes the run.';
+    } else if (next.gate === 'auto') {
+      s += ' Auto-gated — no manual review.';
+    }
+    if (next.hasReds) {
+      s += ' Reds: ' + next.redsAuthority + (next.redsGateOnVerdict ? ', gates on verdict' : '') + '.';
+    }
+    return s;
+  }
+  // For fanout-from-upstream phases, look at the current task's result for the
+  // upstream array and report its length. Keeps the preview honest — "creates 16
+  // investigate tasks" beats "creates investigate tasks (count unknown)" when
+  // the count is sitting right there in the task we're gating.
+  function inferFanoutCount(currentTask, nextPhase) {
+    if (!nextPhase.fanoutFromUpstream) return null;
+    const arrayKey = nextPhase.fanoutFromUpstream.arrayKey;
+    const r = currentTask && currentTask.result;
+    if (!r || typeof r !== 'object') return null;
+    const arr = r[arrayKey];
+    if (!Array.isArray(arr)) return null;
+    return arr.length;
+  }
+  function inferFanoutConcurrency(nextPhase) {
+    return nextPhase && typeof nextPhase.fanoutConcurrency === 'number' ? nextPhase.fanoutConcurrency : null;
+  }
   function redVerdictCard(v) {
     const card = el('div', { class: 'verdict-card' });
     card.appendChild(el('div', { style: 'display: flex; justify-content: space-between; margin-bottom: var(--space-sm); font-size: 11px;' }, [
@@ -1783,6 +2197,7 @@ const CLIENT_JS = `
     state.selectedRunId = runId;
     state.selectedTaskId = null;
     state.taskDetail = null;
+    state.phaseFilter = null;
     renderSidebar();
     renderMiddle();
     renderDetail();

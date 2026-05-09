@@ -95,12 +95,16 @@ function handleGet(path: string, res: ServerResponse): void {
   const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
   if (runMatch) {
     const id = runMatch[1];
-    const data = queries.getRunWithShouldPoll(id!);
-    if (!data) {
-      res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    void queries.getRunWithShouldPoll(id!).then((data) => {
+      if (!data) {
+        res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    }).catch((e: Error) => {
+      res.writeHead(500, { "Content-Type": "application/json" })
+         .end(JSON.stringify({ error: e.message || "Failed to load run" }));
+    });
     return;
   }
 

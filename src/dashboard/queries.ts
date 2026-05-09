@@ -7,6 +7,8 @@ import type { Run, Task, RunStatus, WorkflowName, TaskStatus, TaskPackage } from
 import type { VerdictRow, Finding, RedAuthority } from "../types/index.js";
 import type { GateRow } from "../store/gates.js";
 import type { GateDecision } from "../types/index.js";
+import { loadWorkflow } from "../spine/workflows.js";
+import { buildPhaseShape, type PhaseShape } from "./phaseShape.js";
 
 let _db: DatabaseInstance | null = null;
 
@@ -141,9 +143,9 @@ export function listRunsForDashboard(): (Run & { taskCount: number })[] {
   return rows.map((r) => ({ ...rowToRun(r), taskCount: r.task_count ?? 0 }));
 }
 
-export function getRunWithShouldPoll(
+export async function getRunWithShouldPoll(
   id: string
-): { run: Run; tasks: Task[]; verdicts: Record<string, VerdictRow[]>; shouldPoll: boolean } | undefined {
+): Promise<{ run: Run; tasks: Task[]; verdicts: Record<string, VerdictRow[]>; phaseShape: PhaseShape[]; shouldPoll: boolean } | undefined> {
   const runRow = db().prepare(`SELECT * FROM runs WHERE id = ?`).get(id) as RunRow | undefined;
   if (!runRow) return undefined;
 
@@ -161,9 +163,23 @@ export function getRunWithShouldPoll(
     verdicts[task.id] = vRows.map(rowToVerdict);
   }
 
+  // Phase shape — workflow definition + per-phase task aggregates. Loaded
+  // every request because workflow files are TS imports that Node caches in
+  // memory after first import; cost is one Map lookup, not a re-parse.
+  // Wrapped in try/catch because a workflow rename could leave a run pointing
+  // at an unknown workflow name; the dashboard should still render the run
+  // (just without the pill row) rather than 500.
+  let phaseShape: PhaseShape[] = [];
+  try {
+    const wf = await loadWorkflow(run.workflow);
+    phaseShape = buildPhaseShape(wf, tasks);
+  } catch {
+    // Fall through with empty phaseShape — client renders zero pills.
+  }
+
   const shouldPoll = tasks.some((t) => t.status === "running");
 
-  return { run, tasks, verdicts, shouldPoll };
+  return { run, tasks, verdicts, phaseShape, shouldPoll };
 }
 
 // Context for an awaiting_human_input review task: the upstream brief task's

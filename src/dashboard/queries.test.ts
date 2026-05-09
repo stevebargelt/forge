@@ -91,15 +91,15 @@ test("listRunsForDashboard returns inserted run", () => {
   assert.equal(runs[0]!.title, RUN.title);
 });
 
-test("getRunWithShouldPoll returns shouldPoll=true when at least one task is running", () => {
-  const result = getRunWithShouldPoll(RUN.id);
+test("getRunWithShouldPoll returns shouldPoll=true when at least one task is running", async () => {
+  const result = await getRunWithShouldPoll(RUN.id);
   assert.ok(result);
   assert.equal(result.shouldPoll, true);
   assert.equal(result.run.id, RUN.id);
   assert.equal(result.tasks.length, 2);
 });
 
-test("getRunWithShouldPoll returns shouldPoll=false when no tasks are running", () => {
+test("getRunWithShouldPoll returns shouldPoll=false when no tasks are running", async () => {
   const run2: Run = {
     id: "run-done",
     workflow: "investigation",
@@ -110,22 +110,39 @@ test("getRunWithShouldPoll returns shouldPoll=false when no tasks are running", 
   insertRun(run2);
   insertTask(task("task-done", "complete", "run-done"));
 
-  const result = getRunWithShouldPoll("run-done");
+  const result = await getRunWithShouldPoll("run-done");
   assert.ok(result);
   assert.equal(result.shouldPoll, false);
 });
 
-test("getRunWithShouldPoll returns verdicts keyed by task id", () => {
-  const result = getRunWithShouldPoll(RUN.id);
+test("getRunWithShouldPoll returns verdicts keyed by task id", async () => {
+  const result = await getRunWithShouldPoll(RUN.id);
   assert.ok(result);
   assert.ok(result.verdicts["task-d1"]);
   assert.equal(result.verdicts["task-d1"]!.length, 1);
   assert.equal(result.verdicts["task-d1"]![0]!.id, VERDICT.id);
 });
 
-test("getRunWithShouldPoll returns undefined for unknown run id", () => {
-  const result = getRunWithShouldPoll("nope");
+test("getRunWithShouldPoll returns undefined for unknown run id", async () => {
+  const result = await getRunWithShouldPoll("nope");
   assert.equal(result, undefined);
+});
+
+test("getRunWithShouldPoll returns phaseShape from the workflow", async () => {
+  const result = await getRunWithShouldPoll(RUN.id);
+  assert.ok(result);
+  assert.ok(Array.isArray(result.phaseShape));
+  // investigation has 4 phases.
+  assert.equal(result.phaseShape.length, 4);
+  const frame = result.phaseShape[0]!;
+  // The two tasks above are phase=frame (one complete, one running).
+  // Note: investigation.ts now uses "frame-question", but the test fixture
+  // inserts tasks with phase="frame" (legacy). Phase shape merges by the
+  // workflow's phase names, so frame-question's tasks list will be empty.
+  assert.equal(frame.name, "frame-question");
+  assert.equal(frame.gate, "human");
+  // No tasks land on this phase under that name → status = pending.
+  assert.equal(frame.status, "pending");
 });
 
 test("getTaskDetail returns task with verdicts and gates", () => {
