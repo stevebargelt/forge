@@ -971,6 +971,36 @@ const CLIENT_JS = `
     if (m > 0) return m + 'm ' + s + 's';
     return s + 's';
   }
+  // #76 — live duration cell. data-* attrs let the once-per-second tick
+  // (startElapsedTicker) rewrite just the text without disturbing surrounding
+  // DOM identity, scroll, or input focus. completedAt blank = still running →
+  // ticker keeps updating. completedAt set = frozen → ticker skips.
+  function liveDurationSpan(extraClass, startIso, endIso) {
+    const text = startIso ? durationBetween(startIso, endIso) : '—';
+    const attrs = { class: extraClass || '' };
+    if (startIso) {
+      attrs['data-elapsed-started-at'] = startIso;
+      if (endIso) attrs['data-elapsed-completed-at'] = endIso;
+    }
+    return el('span', attrs, text);
+  }
+  // Walk every [data-elapsed-started-at] cell and rewrite its text from now()
+  // — but only when completedAt is missing (still running). One-pass per
+  // second; cheap because there are O(visible-tasks) cells. No DOM identity
+  // churn, no smart-refresh interference, no scroll/focus disruption.
+  function tickElapsedCells() {
+    const cells = document.querySelectorAll('[data-elapsed-started-at]');
+    for (const cell of cells) {
+      if (cell.getAttribute('data-elapsed-completed-at')) continue;
+      const startIso = cell.getAttribute('data-elapsed-started-at');
+      cell.textContent = durationBetween(startIso, null);
+    }
+  }
+  let _elapsedInterval = null;
+  function startElapsedTicker() {
+    if (_elapsedInterval) return;
+    _elapsedInterval = setInterval(tickElapsedCells, 1000);
+  }
   function statusTone(status) {
     if (status === 'success' || status === 'complete' || status === 'active') return 'success';
     if (status === 'running') return 'running';
@@ -1140,7 +1170,12 @@ const CLIENT_JS = `
       el('div', { class: 'run-meta-strip' }, [
         kvCell('WORKFLOW', run.workflow),
         kvCell('STARTED', formatDate(run.createdAt)),
-        kvCell('DURATION', durationBetween(run.createdAt, run.completedAt)),
+        // DURATION is a live cell: bypass kvCell so the duration span itself
+        // carries the data-elapsed-* attrs the ticker walks. (#76)
+        el('div', null, [
+          el('span', { class: 'key' }, 'DURATION'),
+          liveDurationSpan('val', run.createdAt, run.completedAt),
+        ]),
         kvCell('TASKS', counts.summary),
       ]),
       (run.projectDir || designDir) ? el('div', { class: 'run-meta-strip', style: 'margin-top: var(--space-sm); font-family: var(--font-mono); font-size: 11px;' }, [
@@ -1341,7 +1376,6 @@ const CLIENT_JS = `
     if (t) selectTask(t.id);
   }
   function taskRow(t, phaseIndex, phaseTotal) {
-    const elapsed = t.startedAt ? durationBetween(t.startedAt, t.completedAt) : '—';
     // Title shape: "<phase> · N of M" when the phase has multiple tasks (fanout
     // or otherwise), plain "<phase>" when there's just one. Lets the user say
     // "the third investigate" without reading inputs to disambiguate. The
@@ -1366,7 +1400,8 @@ const CLIENT_JS = `
       ]),
       el('div', { class: 'row-side' }, [
         badge(displayTaskStatus(t)),
-        el('span', { class: 'row-meta' }, elapsed),
+        // Live cell — tagged so the 1Hz ticker rewrites text in place. (#76)
+        liveDurationSpan('row-meta', t.startedAt, t.completedAt),
       ]),
     ]);
   }
@@ -1751,7 +1786,8 @@ const CLIENT_JS = `
       ]),
       el('div', { class: 'kv-row' }, [
         el('span', { class: 'k' }, 'ELAPSED'),
-        el('span', { class: 'v' }, task.startedAt ? durationBetween(task.startedAt, task.completedAt) : '—'),
+        // Live cell — tagged so the 1Hz ticker rewrites text in place. (#76)
+        liveDurationSpan('v', task.startedAt, task.completedAt),
       ]),
       task.agentAlias || task.agentModel
         ? el('div', { class: 'kv-row' }, [
@@ -2443,6 +2479,7 @@ const CLIENT_JS = `
     // unconditionally interactive. state.interactive remains as a field for
     // smart-refresh keys (#72) but its value is fixed at true.
     state.interactive = true;
+    startElapsedTicker();
     renderSidebar();
     renderMiddle();
     renderDetail();

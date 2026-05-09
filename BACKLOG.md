@@ -242,10 +242,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 **Out of scope but worth noting:** picking creds-mode from the modal (option B from the discussion) is friction every time and not what we want. Auto-detect + pre-flight is the right shape.
 
 
-### #76 — Elapsed time goes stale between polls (smart-refresh side-effect)
-**Why:** #72's render-key skips renders when underlying task data doesn't change. ELAPSED is derived from `task.startedAt` + now() — only the wall clock changes every second, not the task data, so the skip kicks in and the displayed elapsed value freezes until something else triggers a render. Caught 2026-05-08 mid-phase-flow run.
-**How to apply:** Don't defeat smart-refresh by forcing renders every N polls. Instead update *only* the elapsed cells via a separate `setInterval(updateElapsedCells, 1000)`. Tag each elapsed cell at render with `data-elapsed-task-id` + `data-started-at`; the interval walks those elements and rewrites text only — no DOM identity churn, polling stays smart. ~15 lines. Same pattern works for any future "ticks every second regardless of data" cell (countdowns, freshness indicators, etc).
-
 ### #77 — Evaluate Preact + htm for the dashboard
 **Why:** Caught 2026-05-08 — Steven: "I think we need to start thinking about using React." The elapsed-time bug (#76), smart-refresh (#72), input-value preservation, form state across re-renders, scroll preservation, optgroup vs flat-fallback fork — all symptoms of hand-rolling reactive primitives. Each individually is <50 lines; cumulatively the dashboard's html.ts is ~2000 lines doing what a real reactive layer would do for free. The dashboard is forge's primary UX (FORGE-DEC-015); investing in the right tool compounds.
 **Three options to weigh:**
@@ -479,6 +475,13 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #76 — Elapsed-time cells tick once per second (smart-refresh side-effect)
+**Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing — pure UI, no test deltas).
+- `src/dashboard/html.ts`: new `liveDurationSpan(extraClass, startIso, endIso)` helper that emits a `<span>` carrying `data-elapsed-started-at` + (when set) `data-elapsed-completed-at` attributes. New `tickElapsedCells` walks `[data-elapsed-started-at]` once per second and rewrites `textContent` only when `completedAt` is missing — no DOM identity churn, no scroll/focus/input disruption, smart-refresh keys (#72) untouched.
+- New `startElapsedTicker` kicks off a single `setInterval(tickElapsedCells, 1000)` from `bootstrap`. Idempotent — second call is a no-op.
+- Three call sites converted: run-pane DURATION (run-meta-strip), task-row trailing elapsed cell (row-side), and the task-detail ELAPSED row in `taskHeaderSection`. All three update live without polling.
+- Pattern is reusable for any future once-per-second cell (countdowns, freshness indicators).
 
 ### #94 — Retry button suppressed on tasks failed via gate-reject
 **Closed:** 2026-05-09 overnight, on branch `phase-flow-71` (231 tests passing, +3 new).
