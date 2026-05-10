@@ -1379,14 +1379,14 @@ const CLIENT_JS = `
         renderMiddle();
       },
     });
-    // Top line: gate icon + phase name + (right-side) check or reds dot.
+    // Top line: status icon (or gate icon if no special state) + phase name +
+    // (right-side) check or reds dot.
     const top = el('div', { class: 'pill-top' });
-    top.appendChild(el('span', { class: 'pill-icon' }, gateIconChar(p)));
+    top.appendChild(el('span', { class: 'pill-icon' }, statusOrGateIcon(p)));
     top.appendChild(el('span', { class: 'pill-name' }, p.name));
     const trailing = el('div', { class: 'pill-trailing' });
-    if (p.status === 'done') {
-      trailing.appendChild(el('span', { class: 'pill-check' }, '✓'));
-    }
+    // The leading icon now conveys done/failed/awaiting/blocked status (see
+    // statusOrGateIcon) — the trailing checkmark would be redundant.
     if (p.hasReds) {
       trailing.appendChild(el('span', {
         class: 'pill-reds-dot' + (p.redsAuthority === 'specialist' ? ' specialist' : ''),
@@ -1413,8 +1413,23 @@ const CLIENT_JS = `
     }
     return pill;
   }
-  // ⚡ for agent-driven phases, 👤 for human-led (manual) phases. Visual cue
-  // before the user reads the name, matches the design.
+  // Pill leading icon. State takes priority over gate type — when a phase is
+  // in a specific awaiting state, that's what the user needs to see; when
+  // it's idle/running/done, fall back to gate-shape (manual vs agent).
+  // Awaiting-icon set matches the design Component Library's pill/awaiting-*
+  // entries: ⚖ awaiting-gate, 👤 awaiting-human, 🚨 awaiting-red.
+  function statusOrGateIcon(p) {
+    if (p.status === 'awaiting_gate') return '⚖';
+    if (p.status === 'awaiting_human_input') return '👤';
+    if (p.status === 'awaiting_red') return '🚨';
+    if (p.status === 'blocked_by_red') return '⊘';
+    if (p.status === 'failed') return '✕';
+    if (p.status === 'done') return '✓';
+    return gateIconChar(p);
+  }
+  // ⚡ for agent-driven phases, 👤 for human-led (manual) phases. Used as the
+  // pill's leading icon in idle / running / pending states (statusOrGateIcon
+  // takes over for awaiting/blocked/failed/done).
   function gateIconChar(p) {
     if (p.isManual) return '👤';
     return '⚡';
