@@ -6,37 +6,51 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-09 overnight:** Eight commits shipped on `phase-flow-71`, all green at 231 tests (started at 218). Punch list went further than the original plan because each item was bounded and isolated.
+**State at end of 2026-05-09 overnight (the second one this week):** Fifteen commits on `graph-view-85`, all green at 260 tests (started at 233 this morning, 218 a couple sessions ago). No halts. Branch is clean and ready for review or merge.
 
-**What shipped overnight (commit-ordered, oldest first):**
+**What shipped tonight, commit-ordered (oldest first):**
 
-1. **#71 — phase pill row + advance-preview line** (`c99106b`). Server-side phaseShape per run (one entry per workflow phase, dynamic status + fanout dot strip + reds metadata). Client renders the pill row above the task list with status-coded backgrounds; click filters task list. Advance-preview line below gate buttons describes "what advance does" in four flavors (terminal/manual/fanout/plain). +15 tests.
-2. **#89 — drop FORGE_DASHBOARD_INTERACTIVE flag** (`369a7f2`). Dashboard is unconditionally interactive; CSRF header is the actual defense. -5 tests (obsolete 503 cases).
-3. **#94 — suppress retry on rejected** (`8239e8a`). queries returns derived `failureMode`; rejected tasks skip the retry button + get a clearer banner. +3 tests.
-4. **#76 — elapsed timer interval** (`c97ff46`). 1Hz setInterval rewrites textContent only on tagged cells; smart-refresh (#72) untouched. No DOM identity churn. Pure UI, 0 test deltas.
-5. **#62 + #63 — human-led gate copy + fresh-session warning** (`ed5627b`). "✓ I've done the work / ✕ I've decided not to" on manual phases. Yellow alert on awaiting_gate brief tasks: "Run PROMPT.md in a fresh session before approving." Pure UI.
-6. **#64 — sidebar 320px + tooltips** (`0365d2b`). Common run ids stop truncating; full id available on hover. Draggable resizers (option a) deferred. Pure UI.
-7. **#75 — markdown renderer for prose result fields** (`35d6f7d`). Conservative markdown detection (heading line / triple-backtick fence / 2+ list markers); focused renderer for headings/lists/fences/inline. XSS-safe. Pure UI.
-8. **#83 — PROMPT.md counts existing PNGs** (`7034e00`). Template runs `ls *.png | wc -l` and uses `$(printf "%02d" $START_NUM)` instead of hardcoded 01. Unblocks shared-corpus reuse (#67) without clobbering. Reinstalled to `~/.forge/agents/`.
+1. **`5ce6acc` — BACKLOG #96 (architecture entry).** Single rich entry capturing the build-phase decomposition arc: specialist reds, specialist implementers, implementer fanout, orchestrator role. Sub-shifts 1+2 ship tonight as foundation; sub-shifts 3+4+5 are daytime architectural conversations.
+2. **`4e7931e` — seed: red-frontend.** Specialist red, gateOnVerdict: false. Discipline: a11y, browser compat, state churn, render perf, semantic HTML.
+3. **`a5de65d` — seed: red-backend.** Specialist red. Discipline: transactions, idempotency, error semantics, schema migration, concurrency, data integrity.
+4. **`d903c04` — seed: red-security.** Specialist red. Discipline: auth/authz, secrets, input validation, content security, injection vectors, audit gaps. Threat-model framing on every finding.
+5. **`f2dff91` — seed: frontend-implementer.** discipline: "frontend". Holds itself to a higher bar than "it renders."
+6. **`13ea36e` — seed: backend-implementer.** discipline: "backend". Output schema includes `migrations_added` for downstream audit.
+7. **`7c22fe6` — seed: infosec-implementer.** discipline: "infosec". Default-deny, threat-model framing, threat_model_notes field.
+8. **`1f9124a` — types + spawnRed: support RedConfig.additional + AgentRef.discipline.** Schema additions. Specialist reds run with `specialist` authority regardless of parent's gateOnVerdict; verdicts informational only.
+9. **`f77fab8` — workflows wire specialist reds into build phase across feature*.** Three specialists (red-frontend/backend/security) attach via RedConfig.additional. Authoritative wide/narrow remain alongside.
+10. **`033c537` — tests: specialist red wiring + seed structure.** 18 new tests (workflow registration + seed-on-disk).
+11. **`c2a4aca` — Dashboard: status-badge alignment with design Status Reference.** Three awaiting_* badges collapse to single `awaiting` with subtype label. blocked_by_red goes magenta. complete renders as "complete" (was "success").
+12. **`eedfdfc` — Dashboard: pill iconography matches Component Library.** Status-driven leading icon: ⚖ awaiting-gate, 👤 awaiting-human, 🚨 awaiting-red, ⊘ blocked, ✕ failed, ✓ done. Falls back to gate-shape (⚡/👤) for idle states.
+13. **`ea4986d` — #95: copy-id button next to run name.** Mirrors the task-id copy pattern.
+14. **`da65843` — graphView: pure data transformer for cytoscape.** New src/dashboard/graphView.ts. PhaseShape[] → {nodes, edges} JSON. 9 unit tests (linear edges, onReject back-edges, fanout metadata, reds metadata, edge cases).
+15. **`de08ef6` — Dashboard: graph view modal v0.** Cytoscape + dagre via CDN, full-screen modal launched from graph-btn or cmd+shift+G. Phase nodes status-coded, linear forward edges, dashed magenta onReject back-edges. Smoke-tested against the investigation run (4 phases, 16-task fanout).
+
+**Test count: 260 passing** (was 233 this morning). +27 net new tests (18 specialist + 9 graphView). Typecheck green at every commit boundary.
 
 **Top of the stack tomorrow:**
 
-1. **Visual review of #71 + the rest.** Eight commits in a row didn't get visual eyes. Spin up the dashboard, click through both the abandoned phase-flow run + the working investigation run, confirm: pill row reads at the right scale, fanout 21-dot strip stays readable, advance-preview line wraps cleanly, markdown actually renders on the recommend task, sidebar tooltip shows on truncated rows, elapsed cell ticks. If anything's off — capture a follow-up BACKLOG entry rather than rushing fixes.
-2. **Decide on the merge path.** Eight commits is more than #71 alone. Reasonable options: (a) merge `phase-flow-71` to main as-is (one big push); (b) cherry-pick into stages (#71 first, then the punch list); (c) PR with all eight visible. Lean (a) — the commits are already isolated and each one's commit message tells its own story.
-3. **#92 architect scope rewrite.** Highest-leverage next thing once visual review is settled — every subsequent `feature*` run pays for the bad shape until this is fixed.
-4. **Corpus consistency pass (#88).** Propagate the pill row visually into existing screens 02/03/05/08/etc. Do this BEFORE the next design-reviewer pass.
-5. **#93 reject-loop picker.** Architectural call still open.
-6. **Remaining BACKLOG items that defer:** #79 (auto-arm bedrock — touches creds path, real risk), #90 (corpus vs run artifacts — wait until it bites), #88 (Pencil session, needs human), #80 (long-form #83 fix — different code path), #51 (design-reviewer agent — needs ADR conversation), #73 (reds-as-reviewer — open call), #42 (docs rewrite — needs taste).
+1. **Visual review of the new pill iconography + status badges.** The biggest visible changes are: pills now show ⚖/👤/🚨/⊘/✕/✓ in the leading position depending on phase state; badges collapse three awaiting_* into one "awaiting · gate / · human / · reds" label; blocked_by_red is magenta. Confirm the visual reads at-a-glance and the awaiting subtypes are still legible. If any colors are off or icons feel wrong, capture follow-up entries.
+2. **Visual review of the graph view.** Open a real run, click the graph button at the right end of the WORKFLOW label (or cmd+shift+G). The investigation run is the densest test case (4 phases with 16-task fanout). Confirm: nodes status-coded correctly, linear edges look clean at the dagre layout, esc closes, scroll-zoom works. v0 deliberately defers fanout cluster expansion + retry chains + side panel + minimap — those are real BACKLOG #85 v1 work.
+3. **Decide on merge path.** Branch has 15 fresh commits + 4 from this morning = 19 total ahead of main. Options: (a) fast-forward merge as-is (clean per-commit story); (b) split into "Tier 1 specialists" PR + "Tier 2 design alignment" PR + "graph view" PR for separate review. Lean (a) per yesterday's pattern.
+4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Daytime conversation now that the foundation is in. The architecture in BACKLOG #96 is ready to act on.
+5. **Graph view v1.** Fanout cluster (per-task subnodes), retry chains (forked edges), gate-decision labels on edges, side panel for selected phase, minimap. All deferred per #85; design specs are in `~/code/forge-design/dashboard.pen` Component Library.
+6. **#73 reds-as-reviewer architectural call.** Specialist reds are now wired in the build phase as informational; that doesn't fully address #73 (which is about reds reviewing the work-product vs the underlying subject). Worth a separate decision.
 
-**Validation still pending:**
+**One thing to flag honestly:**
+- The specialist reds (red-frontend/backend/security) are wired into the workflows but **haven't been exercised by a real run yet**. Tests confirm they're attached + seed structure is right + spawnRed handles the additional list, but no `feature` workflow has actually run end-to-end with them since the wiring landed. First real `feature*` run will be the smoke test.
+- Graph view v0 was visually smoke-tested against one run via the API — I confirmed the cytoscape script tags, CSS classes, and JS function bodies all ship to the client (29 references in the rendered HTML) and the buildGraphData layer is unit-tested. The actual rendered DAG was *not* visually confirmed in a browser overnight (I can't drive a browser headless without significant overhead). If the modal opens to a broken layout when you try it tomorrow, the data layer is sound; the renderer config is the place to look (`openGraphView()` in html.ts).
+
+**Validation still pending from prior work:**
 - #25 (reject + `onReject` flow) — still un-validated end-to-end.
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
+- Specialist reds (this session) — not yet run end-to-end.
 
-**Branch state:** `phase-flow-71` ahead of main with #78 retry, #82 *.pen glob, gate-advance auto-chain, BACKLOG hygiene, three new entries (#92/#93/#94), **#71**, and the punch list (#89/#94/#76/#62/#63/#64/#75/#83). 231 tests passing, typecheck green at every commit boundary.
+**Branch state:** `graph-view-85` ahead of main with morning's 4 commits (#92 architect rewrite + 3 morning bug fixes) + tonight's 15 commits = 19 total ahead. 260 tests passing, typecheck green at every boundary.
 
 **Watchdog status:** works.
 
-**One thing I'd flag:** every overnight task's tests live in queries.test.ts / phaseShape.test.ts. The CLIENT_JS string in html.ts (the 2400-line dashboard JS) has *zero* unit tests — render functions, render-key derivations, advance-preview formatting, markdown renderer, all untested. They were tested implicitly via API smoke + typecheck only. If #77 (Preact migration) ever happens, that's the natural moment to extract unit-testable components; until then it stays under-covered.
+**Local-only file (gitignored):** `.overnight-plan-2026-05-09.md` at repo root captures tonight's plan. Not a deliverable; safe to delete.
 
 ## Active
 
