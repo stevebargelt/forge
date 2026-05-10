@@ -54,6 +54,84 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Active
 
+### #100 — Graph view fanout layout is broken (HIGH PRIORITY — needs Playwright eyes-on)
+**Why:** Caught 2026-05-10 morning. After landing #85 v1 fanout-cluster expansion, the layout breaks in ways I couldn't fix iterating blind via screenshots. Multiple rounds of changes shipped without browser verification; user confirmed "still off" after each. **Stopped iterating, captured this.**
+
+**Current uncommitted state** (working tree on `graph-view-85`):
+- `src/dashboard/html.ts` — fanout cluster expansion via detach-on-collapse approach (children stored in JS Map, added/removed on toggle, NOT compound nodes hidden via display:none)
+- `src/dashboard/graphView.ts` — emits child nodes with `data.parent` for fanout phases
+- `src/dashboard/graphView.test.ts` — 6 new tests for fanout (all passing, 266 total)
+- All typecheck + tests green; **layout visually wrong**
+
+**What works:**
+- Data layer is correct. Server emits the right shape (6 unit tests pass).
+- Collapsed view *with the detach approach* renders investigate as a single 220×60 node with summary label "▸ investigate (16, 15 done, 1 failed)". Confirmed by user.
+- Click-to-toggle interaction works — children get added on expand, removed on collapse.
+- Grid sub-layout produces a 4×4 of children for the 16-task case. Visible in screenshot.
+
+**What's broken (from user screenshots):**
+1. **Expanded view: frame-question overlaps the cluster.** dagre's top-level layout puts frame-question in the same horizontal lane as the expanded investigate cluster. The compound parent's bounding box at dagre time is too small.
+2. **Expanded view: synthesize sits 600+ pixels below the cluster.** dagre is leaving rank-space for the cluster's height but not its width.
+3. **Expanded view: linear edges cut diagonally through the cluster.** Even with `curve-style: taxi`, the routing is wrong. Edges should bend around cluster boundaries.
+
+**Iteration history (what I tried, in order):**
+1. v0 attempt: `display: none` on children, fixed width/height on collapsed parent. **Failed:** cytoscape's compound auto-sizing ignored the width/height rules — collapsed parent stayed sized to children's bounding box.
+2. v1 attempt: detach children entirely on collapse (cache in JS Map, add/remove via cy.add / cy.remove). **Worked for collapsed view.** Expanded view layout broke.
+3. v1.1: layout order swap — grid sub-layouts BEFORE dagre, so dagre sees correct compound parent sizes. Bumped rankSep 100→150, nodeSep 60→80. **Didn't fix overlap per user.**
+4. v1.2: `curve-style: taxi` on linear edges for orthogonal routing around clusters. **Didn't fix per user (still off).**
+
+**Where the bugs likely are (educated guesses, untested without Playwright):**
+
+**Hypothesis A: cytoscape-dagre doesn't respect compound parent bounding boxes correctly.** dagre.js handles top-level nodes; cytoscape-dagre extension wraps it but might not pass compound dimensions through. Real fix would be: compute each compound parent's effective size manually before dagre, then either:
+- Set explicit `width` / `height` on each compound parent before dagre runs
+- Or give dagre a custom `boundingBox` per compound
+
+**Hypothesis B: order of operations is still wrong.** Even after my swap, cytoscape may compute compound bounding boxes lazily — dagre asks for sizes, gets stale ones from before the grid sub-layout finished. Fix: force a `cy.style().update()` or similar between sub-layout and dagre. Or run dagre twice (initial + post-grid).
+
+**Hypothesis C: cytoscape compound nodes are the wrong primitive entirely.** Could render fanout as N peer top-level nodes between phases (no compound), with linear edges from upstream → each task → downstream. dagre handles that natively (parallel ranks). Less "cluster"-shaped visually but layout works. **This is the bail-out plan.**
+
+**What to try first when this resumes (with Playwright connected):**
+
+1. **Open `http://127.0.0.1:8022/` in Playwright.** Click into `run-code-review-terry-workflow-586a86` (investigation, 4 phases, 16-task fanout). Open graph view. Screenshot collapsed state. Click investigate. Screenshot expanded state.
+2. **Inspect compound parent size in console** after expand: `cy.$('#n:investigate').boundingBox()`. Compare to actual visual size. If they differ → Hypothesis A.
+3. **Try Hypothesis A fix:** after grid sub-layout, manually set `cy.$('node.fanout-parent:not(.collapsed)').forEach(p => { const bb = p.boundingBox(); p.style({ width: bb.w, height: bb.h }); })` before dagre runs.
+4. **If A doesn't work, try B:** add `cy.layout({...dagre}).run(); cy.layout({...dagre}).run();` — two dagre passes. The second pass sees the first pass's positions as inputs. Brutal but sometimes works.
+5. **If neither, fall back to Hypothesis C:** rewrite to flat node model. Children become top-level nodes; phase becomes a virtual concept marked by a label/color band. dagre is happy with parallel ranks.
+
+**Files touched (uncommitted):**
+- `src/dashboard/html.ts` — fanout-parent class, openGraphView modifications, relayoutGraph helper, fanoutCollapsedLabel, GRAPH_STATUS_COLORS, taxi edge style. ~150 lines added across the cytoscape config + helpers.
+- `src/dashboard/graphView.ts` — buildGraphData emits compound child nodes; CyNode.data gains `parent` field.
+- `src/dashboard/graphView.test.ts` — 6 fanout tests.
+
+**Suggest next session:**
+1. **Stash current state** (`git stash push -m "fanout v1 wip — expanded layout bug per #100"`) to keep main branch clean during diagnosis.
+2. **Connect Playwright MCP** (now configured via Docker Desktop per Steven 2026-05-10).
+3. **Pop the stash, iterate with Playwright eyes-on.** Validate Hypothesis A first; bail to C if A+B don't pan out.
+4. **Don't commit until visual review confirms** all three failure modes (overlap, gap, edge routing) are resolved.
+
+**Test count if reverting:** stash pop restores 266; without it 260 (no fanout tests).
+
+**Branch state:** `graph-view-85`, 20 commits ahead of main, working tree dirty with #100 WIP.
+
+**Caught:** 2026-05-10 morning. Steven's call: "I don't want to commit broken code." Documented + stashed; resume with browser feedback loop.
+
+### #98 — Graph view fanout-collapsed node polish (progress bar + tags)
+**Why:** v1 fanout-cluster-expansion (this morning's work) renders the collapsed node as `name + "16 tasks · 15 done · 1 failed"` text. The design Component Library's `fanout-collapsed-node` atom has more — a thin progress bar (green-bar for done + red-sliver for failed) and chip tags (`15 done` `1 failed`) inside the node. v1 deferred those because cytoscape's native node-rendering doesn't have a clean primitive for in-node bars/chips.
+**How to apply:** Three options worth weighing:
+- (a) Cytoscape HTML labels — render an HTML div overlay positioned over each fanout-collapsed node. Match the design exactly. Fragile across cytoscape/library versions.
+- (b) Cytoscape compound nodes with sub-rectangles for progress + tags. More native; less flexible.
+- (c) Skip: text summary is honest and at-a-glance enough; progress bar is visual noise we don't need.
+Lean (a) when the time comes — it's what the design is asking for and HTML overlays are well-documented in cytoscape.
+**Caught:** 2026-05-10 — deferred from #85 v1 fanout work for scope.
+
+### #99 — Graph view retry chains
+**Why:** v0 graph view collapses retry chains via phaseShape's supersededIds filter (a failed task with a successful retry shows only the terminal). The design has separate visual treatment for retry chains — forked edges between failed-and-retried tasks, "RETRY CHAIN ×N" cluster annotation in the design Component Library. v1 fanout-expansion shows N nodes per fanout phase; retry chains would expand that to also include the failed originals + retry edges.
+**How to apply:**
+- Data transformer (`graphView.ts`): query the run's tasks array (currently passed as `_tasks` parameter, unused). For each task with a `parentId` referencing a same-phase same-role failed task, emit a retry edge from parent to child.
+- Renderer: dashed cyan-or-green edge styling (the design might pin a color); maybe a small "↻" annotation on the edge.
+**Caught:** 2026-05-10 — deferred from #85 v1 work. Steven's call: ask designer if it's worth the complexity vs the audit-trail-via-task-list alternative.
+**Open question for designer:** is retry-chain visualization in the graph view valuable, or does the audit trail in the task list (RETRY OF / RETRIED AS rows from #78) carry enough? If audit-trail-only: close this entry and document the decision.
+
 ### #97 — Auth-mode picker in the dashboard
 **Why:** Today the dashboard inherits whatever creds env the parent shell had at launch. If you forgot to source `use-bedrock.sh` first, every run created via the dashboard uses anthropic-direct (or fails at SSO if you have AWS configured but no token). #79 (auto-arm bedrock + pre-flight) is the auto-detect path; this entry is the opposite: let the user *explicitly choose* per-run or per-dashboard-session which auth mode to use.
 **Caught:** 2026-05-10 morning — Steven asked whether smoke-test dashboards source bedrock. They don't, which is fine for GET-only smoke but a real footgun for any run created via the modal.
