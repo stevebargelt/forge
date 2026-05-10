@@ -6,51 +6,58 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-09 overnight (the second one this week):** Fifteen commits on `graph-view-85`, all green at 260 tests (started at 233 this morning, 218 a couple sessions ago). No halts. Branch is clean and ready for review or merge.
+**⚠️ READ FIRST — uncommitted WIP in working tree:**
+The graph view fanout cluster expansion (#85 v1) is partially built and **broken** in the working tree. `git status` will show `src/dashboard/html.ts`, `src/dashboard/graphView.ts`, `src/dashboard/graphView.test.ts` modified. **Do NOT discard these changes.** They are diagnosed in BACKLOG #100 with full iteration history + three hypotheses + bail-out plan. Resume there before starting anything else if graph view is the focus.
 
-**What shipped tonight, commit-ordered (oldest first):**
+Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showing the broken fanout layout. Use them as evidence; safe to delete after fix lands.
 
-1. **`5ce6acc` — BACKLOG #96 (architecture entry).** Single rich entry capturing the build-phase decomposition arc: specialist reds, specialist implementers, implementer fanout, orchestrator role. Sub-shifts 1+2 ship tonight as foundation; sub-shifts 3+4+5 are daytime architectural conversations.
-2. **`4e7931e` — seed: red-frontend.** Specialist red, gateOnVerdict: false. Discipline: a11y, browser compat, state churn, render perf, semantic HTML.
-3. **`a5de65d` — seed: red-backend.** Specialist red. Discipline: transactions, idempotency, error semantics, schema migration, concurrency, data integrity.
-4. **`d903c04` — seed: red-security.** Specialist red. Discipline: auth/authz, secrets, input validation, content security, injection vectors, audit gaps. Threat-model framing on every finding.
-5. **`f2dff91` — seed: frontend-implementer.** discipline: "frontend". Holds itself to a higher bar than "it renders."
-6. **`13ea36e` — seed: backend-implementer.** discipline: "backend". Output schema includes `migrations_added` for downstream audit.
-7. **`7c22fe6` — seed: infosec-implementer.** discipline: "infosec". Default-deny, threat-model framing, threat_model_notes field.
-8. **`1f9124a` — types + spawnRed: support RedConfig.additional + AgentRef.discipline.** Schema additions. Specialist reds run with `specialist` authority regardless of parent's gateOnVerdict; verdicts informational only.
-9. **`f77fab8` — workflows wire specialist reds into build phase across feature*.** Three specialists (red-frontend/backend/security) attach via RedConfig.additional. Authoritative wide/narrow remain alongside.
-10. **`033c537` — tests: specialist red wiring + seed structure.** 18 new tests (workflow registration + seed-on-disk).
-11. **`c2a4aca` — Dashboard: status-badge alignment with design Status Reference.** Three awaiting_* badges collapse to single `awaiting` with subtype label. blocked_by_red goes magenta. complete renders as "complete" (was "success").
-12. **`eedfdfc` — Dashboard: pill iconography matches Component Library.** Status-driven leading icon: ⚖ awaiting-gate, 👤 awaiting-human, 🚨 awaiting-red, ⊘ blocked, ✕ failed, ✓ done. Falls back to gate-shape (⚡/👤) for idle states.
-13. **`ea4986d` — #95: copy-id button next to run name.** Mirrors the task-id copy pattern.
-14. **`da65843` — graphView: pure data transformer for cytoscape.** New src/dashboard/graphView.ts. PhaseShape[] → {nodes, edges} JSON. 9 unit tests (linear edges, onReject back-edges, fanout metadata, reds metadata, edge cases).
-15. **`de08ef6` — Dashboard: graph view modal v0.** Cytoscape + dagre via CDN, full-screen modal launched from graph-btn or cmd+shift+G. Phase nodes status-coded, linear forward edges, dashed magenta onReject back-edges. Smoke-tested against the investigation run (4 phases, 16-task fanout).
+---
 
-**Test count: 260 passing** (was 233 this morning). +27 net new tests (18 specialist + 9 graphView). Typecheck green at every commit boundary.
+**State at start of 2026-05-10 morning session:** Branch `graph-view-85` is 21 commits ahead of main (last night's 19 + this morning's 2 BACKLOG entries: #97 auth-mode picker + #100 graph fanout bug). 266 tests passing **with WIP applied** (260 without). Typecheck green at HEAD; WIP also typechecks but renders broken.
 
-**Top of the stack tomorrow:**
+**Playwright MCP is now available** via Docker Desktop (Steven configured 2026-05-10). Use it for the graph view fix — iterating blind via screenshots wasted hours of last session.
 
-1. **Visual review of the new pill iconography + status badges.** The biggest visible changes are: pills now show ⚖/👤/🚨/⊘/✕/✓ in the leading position depending on phase state; badges collapse three awaiting_* into one "awaiting · gate / · human / · reds" label; blocked_by_red is magenta. Confirm the visual reads at-a-glance and the awaiting subtypes are still legible. If any colors are off or icons feel wrong, capture follow-up entries.
-2. **Visual review of the graph view.** Open a real run, click the graph button at the right end of the WORKFLOW label (or cmd+shift+G). The investigation run is the densest test case (4 phases with 16-task fanout). Confirm: nodes status-coded correctly, linear edges look clean at the dagre layout, esc closes, scroll-zoom works. v0 deliberately defers fanout cluster expansion + retry chains + side panel + minimap — those are real BACKLOG #85 v1 work.
-3. **Decide on merge path.** Branch has 15 fresh commits + 4 from this morning = 19 total ahead of main. Options: (a) fast-forward merge as-is (clean per-commit story); (b) split into "Tier 1 specialists" PR + "Tier 2 design alignment" PR + "graph view" PR for separate review. Lean (a) per yesterday's pattern.
-4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Daytime conversation now that the foundation is in. The architecture in BACKLOG #96 is ready to act on.
-5. **Graph view v1.** Fanout cluster (per-task subnodes), retry chains (forked edges), gate-decision labels on edges, side panel for selected phase, minimap. All deferred per #85; design specs are in `~/code/forge-design/dashboard.pen` Component Library.
-6. **#73 reds-as-reviewer architectural call.** Specialist reds are now wired in the build phase as informational; that doesn't fully address #73 (which is about reds reviewing the work-product vs the underlying subject). Worth a separate decision.
+---
 
-**One thing to flag honestly:**
-- The specialist reds (red-frontend/backend/security) are wired into the workflows but **haven't been exercised by a real run yet**. Tests confirm they're attached + seed structure is right + spawnRed handles the additional list, but no `feature` workflow has actually run end-to-end with them since the wiring landed. First real `feature*` run will be the smoke test.
-- Graph view v0 was visually smoke-tested against one run via the API — I confirmed the cytoscape script tags, CSS classes, and JS function bodies all ship to the client (29 references in the rendered HTML) and the buildGraphData layer is unit-tested. The actual rendered DAG was *not* visually confirmed in a browser overnight (I can't drive a browser headless without significant overhead). If the modal opens to a broken layout when you try it tomorrow, the data layer is sound; the renderer config is the place to look (`openGraphView()` in html.ts).
+**What shipped this morning (2026-05-10) before the WIP:**
+
+1. **`ca563a4` — BACKLOG #97 (auth-mode picker).** Captured: dashboard inherits parent shell's creds env at launch; manual override picker complements #79's auto-detect. Architecture-only; no code shipped.
+2. **`1e8c314` — BACKLOG #100 (graph view fanout broken — HIGH PRIORITY).** Comprehensive diagnosis of the WIP: collapsed view works (detach-on-collapse approach), expanded view has dagre layout-order bugs. Three hypotheses to try in order, with the flat-node-model bail-out as #C.
+
+**What shipped overnight 2026-05-09 (full list in `git log`):**
+
+- **#96 foundation** — six new agent seeds (red-frontend/backend/security + frontend/backend/infosec implementers), `RedConfig.additional` schema, specialist reds wired into `build` phase across feature*. **Not yet exercised by a real run.**
+- **Status Reference + Component Library alignment** — three awaiting_* badges collapse to single `awaiting · subtype` label, magenta blocked_by_red, complete (not success), pill iconography (⚖/👤/🚨/⊘/✕/✓).
+- **Graph view v0** — cytoscape + dagre via CDN, full-screen modal, status-coded phase nodes, linear forward edges + dashed magenta onReject back-edges, no fanout expansion (that's the WIP that broke).
+- **#95 copy-id button** next to run name.
+
+---
+
+**Top of the stack now:**
+
+1. **Fix #100 graph view fanout layout (HIGH PRIORITY).** WIP is in working tree. Read #100, then iterate with Playwright eyes-on. Hypothesis A first: explicit width/height on compound parents before dagre. If A+B fail, fall back to Hypothesis C (flat node model — no compound nodes). **Don't commit until visually verified.**
+2. **Visual review of the morning's design alignment** (pill iconography, status-badge collapse, blocked_by_red magenta). Confirm via Playwright. Capture follow-up entries if anything is off.
+3. **Decide on merge path** for the 21-commit branch. Lean fast-forward as-is once #100 resolves. Alternative: cherry-pick the foundation work (#96 specialists + design alignment + #95) to main and leave the broken graph-view WIP on this branch until it's fixed.
+4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Daytime architectural conversation. Ready when you are.
+5. **#73 reds-as-reviewer architectural call.** Adjacent to #96 but distinct shape.
+
+---
+
+**Honest flags:**
+
+- **Specialist reds aren't tested end-to-end yet.** Wiring is correct, tests pass, but no real `feature*` run has exercised them since the foundation landed. First real run will be the smoke test.
+- **Graph view v0 (single-node phases, no fanout) DOES work.** That part shipped clean overnight. The WIP is specifically the v1 fanout-cluster-expansion layer on top.
 
 **Validation still pending from prior work:**
-- #25 (reject + `onReject` flow) — still un-validated end-to-end.
+- #25 (reject + `onReject` flow) — un-validated end-to-end.
 - #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
-- Specialist reds (this session) — not yet run end-to-end.
+- Specialist reds (overnight) — not yet run end-to-end.
 
-**Branch state:** `graph-view-85` ahead of main with morning's 4 commits (#92 architect rewrite + 3 morning bug fixes) + tonight's 15 commits = 19 total ahead. 260 tests passing, typecheck green at every boundary.
+**Branch state:** `graph-view-85`, 21 commits ahead of main, WIP in working tree (uncommitted, broken layout per #100). 266 tests passing with WIP, 260 without.
 
 **Watchdog status:** works.
 
-**Local-only file (gitignored):** `.overnight-plan-2026-05-09.md` at repo root captures tonight's plan. Not a deliverable; safe to delete.
+**Local-only file (gitignored):** `.overnight-plan-2026-05-09.md` at repo root captures yesterday's plan. Safe to delete.
 
 ## Active
 
