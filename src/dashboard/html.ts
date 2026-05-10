@@ -16,6 +16,12 @@ export function dashboardHtml(): string {
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- #85 graph view: cytoscape.js for layered DAG layout. CDN-loaded so the
+     dashboard stays vanilla-no-build. dagre extension provides hierarchical
+     layout (top→bottom forward edges). -->
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 <style>${BASE_CSS}</style>
 </head>
 <body>
@@ -724,6 +730,24 @@ a { color: var(--accent); text-decoration: none; }
   align-items: center;
   gap: var(--space-sm);
 }
+/* #85 — graph view launch button (right-end of pill-row label). Mirrors
+   the design Component Library's graph-btn atom. */
+.graph-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--foreground-muted);
+  cursor: pointer;
+}
+.graph-btn:hover { color: var(--foreground); border-color: var(--border-bright); background: var(--surface-raised); }
+.graph-btn svg { display: block; }
 .phase-pill-row-wrap .phase-pill-row-label .run-hint {
   color: var(--foreground-muted);
   text-transform: none;
@@ -902,6 +926,73 @@ a { color: var(--accent); text-decoration: none; }
   line-height: 1.5;
 }
 .advance-preview strong { font-style: normal; color: var(--foreground); font-weight: 600; }
+
+/* #85 graph view modal — full-screen overlay above the dashboard. */
+.graph-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--background);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+}
+.graph-modal-header {
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-shrink: 0;
+}
+.graph-modal-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--foreground-muted);
+  font-weight: 600;
+}
+.graph-modal-title .breadcrumb {
+  color: var(--foreground);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  margin-left: var(--space-sm);
+}
+.graph-modal-close {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--foreground-muted);
+  cursor: pointer;
+}
+.graph-modal-close:hover { color: var(--foreground); background: var(--surface); }
+.graph-modal-body {
+  flex: 1;
+  position: relative;
+  background: var(--background);
+  overflow: hidden;
+}
+#graph-cy-canvas {
+  position: absolute;
+  inset: 0;
+}
+.graph-modal-footer {
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: 11px;
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+}
+.graph-modal-footer .kbd-hints { margin-left: auto; display: flex; gap: var(--space-md); }
 `;
 
 const CLIENT_JS = `
@@ -1354,6 +1445,16 @@ const CLIENT_JS = `
         el('code', null, run.workflow),
         run.title ? ' · ' + run.title : '',
       ]) : null,
+      // #85 — graph-btn from the design Component Library. Opens the
+      // full-screen graph view modal. Right-aligned via margin-left: auto
+      // so it sits at the far end of the label row. SVG mirrors lucide's
+      // 'workflow' icon (a node + connections) — the design's glyph.
+      el('button', {
+        class: 'graph-btn',
+        title: 'View workflow graph (cmd+shift+g)',
+        onclick: () => openGraphView(),
+        html: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>',
+      }),
     ]);
     wrap.appendChild(label);
     const row = el('div', { class: 'phase-pill-row' });
@@ -2810,6 +2911,201 @@ const CLIENT_JS = `
     document.querySelectorAll('.menu').forEach(m => m.remove());
   }
 
+  // ---------- graph view (#85) ----------
+  // Status → CSS color mapping for cytoscape node styling. Mirrors the
+  // Component Library's node/* atoms (node/complete = green border on
+  // dark-green bg, etc).
+  const GRAPH_STATUS_COLORS = {
+    pending:               { border: '#1E1E3A', bg: '#111124',          text: '#A1A1C0' },
+    running:               { border: '#00F2FF', bg: '#001A1F',          text: '#00F2FF' },
+    awaiting_red:          { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    awaiting_gate:         { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    awaiting_human_input:  { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    blocked_by_red:        { border: '#BF40FF', bg: 'rgba(191,64,255,0.1)', text: '#BF40FF' },
+    failed:                { border: '#EF4444', bg: '#200A0A',          text: '#EF4444' },
+    done:                  { border: '#22C55E', bg: '#0A2016',          text: '#F0F0FF' },
+  };
+
+  // Inline mirror of src/dashboard/graphView.ts buildGraphData. Server-side
+  // file is the source of truth + is unit-tested; this client copy stays
+  // in sync because phaseShape is the same shape on both sides. If this
+  // logic grows, refactor to ship the JSON over the API instead.
+  function buildGraphDataClient(phaseShape) {
+    const nodes = (phaseShape || []).map((p) => ({
+      data: {
+        id: 'n:' + p.name,
+        label: p.name,
+        status: p.status,
+        taskCounts: p.taskCounts,
+        hasFanout: p.hasFanout,
+        hasReds: p.hasReds,
+        redsAuthority: p.redsAuthority,
+        isManual: p.isManual,
+        fanoutDots: p.fanoutDots,
+      },
+    }));
+    const edges = [];
+    for (let i = 0; i < (phaseShape || []).length - 1; i++) {
+      const from = phaseShape[i];
+      const to = phaseShape[i + 1];
+      edges.push({
+        data: {
+          id: 'e:linear:' + from.name + '->' + to.name,
+          source: 'n:' + from.name,
+          target: 'n:' + to.name,
+          kind: 'linear',
+        },
+      });
+    }
+    for (const p of (phaseShape || [])) {
+      if (p.onReject) {
+        edges.push({
+          data: {
+            id: 'e:onReject:' + p.name + '->' + p.onReject,
+            source: 'n:' + p.name,
+            target: 'n:' + p.onReject,
+            kind: 'onReject',
+            label: 'reject',
+          },
+        });
+      }
+    }
+    return { nodes, edges };
+  }
+
+  function openGraphView() {
+    if (!state.runDetail || !Array.isArray(state.runDetail.phaseShape) || state.runDetail.phaseShape.length === 0) {
+      toast('No workflow shape to visualize.', 'error');
+      return;
+    }
+    if (typeof window.cytoscape !== 'function') {
+      toast('Graph library failed to load.', 'error');
+      return;
+    }
+    const root = $('modal-root');
+    root.innerHTML = '';
+    const overlay = el('div', { class: 'graph-modal-overlay' });
+    const run = state.runDetail.run;
+    overlay.appendChild(el('div', { class: 'graph-modal-header' }, [
+      el('span', { class: 'graph-modal-title' }, [
+        'GRAPH VIEW',
+        el('span', { class: 'breadcrumb' }, run.workflow + ' · ' + run.id),
+      ]),
+      el('button', {
+        class: 'graph-modal-close',
+        title: 'Close (esc)',
+        onclick: closeGraphView,
+      }, '✕'),
+    ]));
+    const body = el('div', { class: 'graph-modal-body' });
+    const canvas = el('div', { id: 'graph-cy-canvas' });
+    body.appendChild(canvas);
+    overlay.appendChild(body);
+    overlay.appendChild(el('div', { class: 'graph-modal-footer' }, [
+      el('span', null, 'drag to pan · scroll to zoom'),
+      el('div', { class: 'kbd-hints' }, [
+        el('span', null, 'esc: close'),
+      ]),
+    ]));
+    root.appendChild(overlay);
+
+    // Build graph data + render via cytoscape. The data transformer is the
+    // client-side mirror of src/dashboard/graphView.ts (unit-tested).
+    const data = buildGraphDataClient(state.runDetail.phaseShape);
+    const cy = window.cytoscape({
+      container: canvas,
+      elements: [
+        ...data.nodes.map(n => ({ group: 'nodes', data: n.data })),
+        ...data.edges.map(e => ({ group: 'edges', data: e.data })),
+      ],
+      style: [
+        // Phase nodes — rectangular with status-coded border + bg. Each
+        // status family pulls from GRAPH_STATUS_COLORS so the look matches
+        // the Component Library's node/* atoms.
+        {
+          selector: 'node',
+          style: {
+            'shape': 'round-rectangle',
+            'width': 180,
+            'height': 70,
+            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
+            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
+            'border-width': 2,
+            'label': 'data(label)',
+            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 12,
+            'font-weight': 600,
+            'text-valign': 'center',
+            'text-halign': 'center',
+          },
+        },
+        // Linear edges — solid arrows, accent-tertiary color (cyan).
+        {
+          selector: 'edge[kind = "linear"]',
+          style: {
+            'curve-style': 'bezier',
+            'target-arrow-shape': 'triangle',
+            'line-color': '#A1A1C0',
+            'target-arrow-color': '#A1A1C0',
+            'width': 1.5,
+          },
+        },
+        // onReject back-edges — dashed magenta, curved.
+        {
+          selector: 'edge[kind = "onReject"]',
+          style: {
+            'curve-style': 'unbundled-bezier',
+            'control-point-distances': [-80],
+            'control-point-weights': [0.5],
+            'line-style': 'dashed',
+            'target-arrow-shape': 'triangle',
+            'line-color': '#BF40FF',
+            'target-arrow-color': '#BF40FF',
+            'width': 1.5,
+            'label': 'data(label)',
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 9,
+            'color': '#BF40FF',
+            'text-background-color': '#080810',
+            'text-background-padding': 3,
+            'text-background-opacity': 1,
+          },
+        },
+      ],
+      // dagre extension: hierarchical top-to-bottom layout. Forge workflows
+      // are short (≤8 phases) so dagre's layered layout reads cleanly.
+      layout: {
+        name: 'dagre',
+        rankDir: 'LR',
+        nodeSep: 60,
+        rankSep: 100,
+        edgeSep: 20,
+        animate: false,
+        fit: true,
+        padding: 40,
+      },
+      minZoom: 0.3,
+      maxZoom: 3,
+      wheelSensitivity: 0.2,
+    });
+
+    // Hover tooltip via title — cytoscape doesn't have native tooltips,
+    // so we wire qtip-style on hover. Skip for v0 (renderer concern).
+    // Esc key closes.
+    document.addEventListener('keydown', graphEscHandler);
+  }
+
+  function graphEscHandler(e) {
+    if (e.key === 'Escape') closeGraphView();
+  }
+
+  function closeGraphView() {
+    document.removeEventListener('keydown', graphEscHandler);
+    const root = $('modal-root');
+    if (root) root.innerHTML = '';
+  }
+
   // ---------- bootstrap ----------
   async function bootstrap() {
     // #89 dropped FORGE_DASHBOARD_INTERACTIVE in 2026-05-09 — the dashboard is
@@ -2817,6 +3113,17 @@ const CLIENT_JS = `
     // smart-refresh keys (#72) but its value is fixed at true.
     state.interactive = true;
     startElapsedTicker();
+    // #85 — cmd+shift+g (mac) / ctrl+shift+g (other) opens the graph view
+    // when a run is selected. Honored at the document level so it works
+    // regardless of focus.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'G' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+        if (state.runDetail && Array.isArray(state.runDetail.phaseShape) && state.runDetail.phaseShape.length > 0) {
+          e.preventDefault();
+          openGraphView();
+        }
+      }
+    });
     renderSidebar();
     renderPillRowPane();
     renderMiddle();
