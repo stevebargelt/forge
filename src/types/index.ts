@@ -13,6 +13,13 @@ export type GateType = "human" | "auto" | "verdict";
 
 export type RedAuthority = "triage" | "specialist" | "authoritative";
 
+// Optional discipline tag on an AgentRef. Set on specialist implementers
+// (frontend-implementer, backend-implementer, infosec-implementer) so future
+// fanout / routing logic can pick the right specialist per plan-step. Optional
+// + additive: existing agents have no discipline; specialists carry one. See
+// BACKLOG #96 for the build-phase decomposition arc this enables.
+export type AgentDiscipline = "frontend" | "backend" | "infosec";
+
 export type AgentRef = {
   role: string;
   agentDir: string;
@@ -24,11 +31,22 @@ export type AgentRef = {
   // at agent-ref construction time from BEDROCK_MAP / DIRECT_MAP / env var
   // overrides / LiteLLM passthrough. See workflows/_agentRefs.ts.
   model: string;
+  // Optional. Set on specialist implementer agents (#96 sub-shift 2). Future
+  // implementer-fanout (#96 sub-shift 3) reads this to route plan steps to
+  // the right specialist.
+  discipline?: AgentDiscipline;
 };
 
 export type RedConfig = {
   wide?: AgentRef;
   narrow?: AgentRef;
+  // Specialist reds attached alongside wide/narrow. #96 sub-shift 1 — these
+  // run with `gateOnVerdict: false` semantics regardless of the parent
+  // RedConfig's gateOnVerdict (their fail verdicts are informational, the
+  // wide/narrow authoritative reds still control the gate). Unconfigured by
+  // default; workflows that want discipline-specific specialist coverage opt
+  // in by listing the agents.
+  additional?: AgentRef[];
   parallel: boolean;
   authority: RedAuthority;
   gateOnVerdict: boolean;

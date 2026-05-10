@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AgentRef } from "../types/index.js";
+import type { AgentRef, AgentDiscipline } from "../types/index.js";
 
 const AGENTS_DIR = process.env.FORGE_HOME
   ? join(process.env.FORGE_HOME, "agents")
@@ -43,5 +43,23 @@ export function agent(role: string, model: string): AgentRef {
     agentDir: join(AGENTS_DIR, role),
     alias: model,
     model: resolveModel(model),
+  };
+}
+
+// Specialist agent constructor — same as `agent()` but stamps a discipline
+// on the resulting AgentRef. Used by specialist red + implementer roles
+// (#96). The discipline tag lets future fanout / routing logic pick the
+// right specialist per plan step.
+export function specialistAgent(
+  role: string,
+  model: string,
+  discipline: AgentDiscipline
+): AgentRef {
+  return {
+    role,
+    agentDir: join(AGENTS_DIR, role),
+    alias: model,
+    model: resolveModel(model),
+    discipline,
   };
 }
