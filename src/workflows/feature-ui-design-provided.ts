@@ -39,9 +39,16 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
+      // Specialist reds added per #96 sub-shift 1 — informational discipline
+      // coverage alongside the authoritative wide/narrow.
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
+        additional: [
+          agent("red-frontend", "fast-orchestrator"),
+          agent("red-backend", "fast-orchestrator"),
+          agent("red-security", "fast-orchestrator"),
+        ],
         parallel: true,
         authority: "authoritative",
         gateOnVerdict: true,
