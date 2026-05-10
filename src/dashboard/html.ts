@@ -251,10 +251,25 @@ a { color: var(--accent); text-decoration: none; }
 .badge.status-success, .badge.status-complete, .badge.verdict-pass { color: var(--success); }
 .badge.status-pending { color: var(--pending); }
 .badge.status-failed, .badge.verdict-fail { color: var(--error); }
-.badge.status-warning, .badge.status-awaiting_gate { color: var(--warning); }
-.badge.status-awaiting_human_input { color: var(--warning); background: var(--warning-bg, transparent); }
-.badge.status-awaiting_red { color: var(--running); background: var(--warning-bg, transparent); }
-.badge.status-blocked_by_red { color: var(--error); background: var(--error-bg); }
+.badge.status-warning { color: var(--warning); }
+/* Status Reference (~/code/forge-design/dashboard.pen): the three awaiting_*
+   states share a single badge treatment because the badge is a per-task
+   surface where the kind of waiting doesn't matter. The pill (per-phase)
+   keeps three distinct visual treatments because there the kind matters. */
+.badge.status-awaiting,
+.badge.status-awaiting_gate,
+.badge.status-awaiting_human_input,
+.badge.status-awaiting_red {
+  color: var(--warning);
+  background: var(--warning-bg, transparent);
+}
+/* blocked_by_red: magenta per Status Reference — distinguishes "system
+   stopped, you have override options" (magenta = action required) from
+   the failed state (red = dead end, retry-or-move-on). */
+.badge.status-blocked_by_red {
+  color: var(--accent-secondary);
+  background: rgba(191, 64, 255, 0.1);
+}
 .badge.status-approved { color: var(--success); }
 .badge.status-abandoned, .badge.verdict-inconclusive { color: var(--foreground-muted); }
 .badge.solid-running { background: var(--running); color: var(--background); }
@@ -1033,13 +1048,13 @@ const CLIENT_JS = `
     _elapsedInterval = setInterval(tickElapsedCells, 1000);
   }
   function statusTone(status) {
-    if (status === 'success' || status === 'complete' || status === 'active') return 'success';
+    if (status === 'success' || status === 'complete' || status === 'active') return 'complete';
     if (status === 'running') return 'running';
     if (status === 'failed') return 'failed';
-    if (status === 'awaiting_gate') return 'warning';
-    if (status === 'awaiting_human_input') return 'awaiting_human_input';
-    if (status === 'awaiting_red') return 'awaiting_red';
-    if (status === 'blocked_by_red') return 'blocked_by_red';
+    // Three awaiting states share a single badge treatment per Status
+    // Reference. Subtype is preserved on the rendered label.
+    if (status === 'awaiting' || status === 'awaiting_gate' || status === 'awaiting_human_input' || status === 'awaiting_red') return 'awaiting';
+    if (status === 'blocked' || status === 'blocked_by_red') return 'blocked_by_red';
     if (status === 'pending') return 'pending';
     if (status === 'abandoned') return 'abandoned';
     return 'pending';
@@ -1048,8 +1063,20 @@ const CLIENT_JS = `
     if (run.status === 'active') return 'running';
     return run.status;
   }
+  // badge() accepts either a raw backend status (e.g. "awaiting_gate") or
+  // an already-formatted display label (e.g. "awaiting · gate"). The CSS
+  // class is derived from the category — for display labels with " · "
+  // we strip everything after to find the category prefix.
   function badge(status) {
-    return el('span', { class: 'badge status-' + statusTone(status) }, status);
+    const cls = statusTone(badgeCategory(status));
+    return el('span', { class: 'badge status-' + cls }, status);
+  }
+  function badgeCategory(s) {
+    if (typeof s !== 'string') return 'pending';
+    // Display labels like "awaiting · gate" → "awaiting"
+    const idx = s.indexOf(' · ');
+    if (idx > 0) return s.slice(0, idx);
+    return s;
   }
   function toast(msg, kind) {
     const root = $('toast-root');
@@ -1470,8 +1497,15 @@ const CLIENT_JS = `
       ]),
     ]);
   }
+  // Per Status Reference: awaiting_* collapses to "awaiting" with a subtype
+  // suffix (gate / human / reds) so the badge surface is consistent while
+  // preserving information. complete renders as "complete" (was "success" —
+  // cleaned up to align with backend vocabulary).
   function displayTaskStatus(t) {
-    if (t.status === 'complete') return 'success';
+    if (t.status === 'awaiting_gate') return 'awaiting · gate';
+    if (t.status === 'awaiting_human_input') return 'awaiting · human';
+    if (t.status === 'awaiting_red') return 'awaiting · reds';
+    if (t.status === 'blocked_by_red') return 'blocked';
     return t.status;
   }
   // Sort key by attention level — lowest number first. Actionable states
