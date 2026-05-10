@@ -54,6 +54,13 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Active
 
+### #97 — Auth-mode picker in the dashboard
+**Why:** Today the dashboard inherits whatever creds env the parent shell had at launch. If you forgot to source `use-bedrock.sh` first, every run created via the dashboard uses anthropic-direct (or fails at SSO if you have AWS configured but no token). #79 (auto-arm bedrock + pre-flight) is the auto-detect path; this entry is the opposite: let the user *explicitly choose* per-run or per-dashboard-session which auth mode to use.
+**Caught:** 2026-05-10 morning — Steven asked whether smoke-test dashboards source bedrock. They don't, which is fine for GET-only smoke but a real footgun for any run created via the modal.
+**How to apply (sketch):** Add an auth-mode selector somewhere prominent — likely in the new-run modal next to project/design-dir, or as a global indicator in the dashboard chrome (top-right, near settings). Three options: bedrock (default if `~/.aws` configured), anthropic-oauth (default if `forge-claude-oauth` volume exists), anthropic-apikey (if `ANTHROPIC_API_KEY` set). The selected mode passes through as an env override on the `forge new` subprocess.
+**Open questions:** Per-run choice (each new run picks) vs per-dashboard-session (set once, all subsequent runs use it)? Lean per-run — one user might have ongoing bedrock runs they don't want to interrupt while testing an api-key flow. UI: dropdown vs radio vs status-pill-with-click-to-edit? Defer the design decision; the architectural shape is "user-explicit auth-mode selection at run-creation time."
+**Composite with #79:** #79 auto-detects and arms; this picker is the manual override. Both can ship — auto-detect default, picker for explicit choice. Don't ship picker without auto-detect; the default-case user shouldn't have to fiddle.
+
 ### #96 — Build-phase decomposition: implementer fanout + orchestrator + planner-emits-deps
 **Why:** Today the `build` phase is a monolith — one `implementer` agent reads the plan, edits the codebase serially, produces one diff. That works for tasks small enough to fit in one agent's head, but it doesn't scale: parallel-safe steps run sequentially, the diff balloons until reds can barely review it, and there's no specialization (a frontend feature, a backend migration, and a security hardening pass all route through the same generic seed). Composite of multiple architectural shifts that share a lens — *the build phase needs to decompose into specialized fanout + coordination, the way other multi-phase forge primitives already work*.
 
