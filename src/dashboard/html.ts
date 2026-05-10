@@ -1225,8 +1225,17 @@ const CLIENT_JS = `
     ]));
     const designDir = (run.metadata && typeof run.metadata.designDir === 'string') ? run.metadata.designDir : '';
     const headerBlock = el('div', { class: 'middle-header' }, [
+      // #95 — run id with inline copy button. Mirrors the task-id copy
+      // pattern in taskHeaderSection so terminal commands referencing this
+      // run id are one click away.
       el('div', { style: 'display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
         el('span', { style: 'font-weight: 600; color: var(--foreground);' }, run.id),
+        el('button', {
+          class: 'copy',
+          style: 'position: static;',
+          title: 'Copy run id',
+          onclick: (e) => copyText(e, run.id),
+        }, 'copy'),
         badge(rowDisplayStatus(run)),
       ]),
       run.title ? el('div', { style: 'color: var(--foreground); margin-bottom: var(--space-sm); font-size: 13px;' }, run.title) : null,

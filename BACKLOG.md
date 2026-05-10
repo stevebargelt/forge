@@ -87,10 +87,7 @@ The decision between (a)/(b)/(c) defers to actual fanout-implementer behavior �
 
 **Stretch goal worth flagging:** "skip architect" workflow flag. Some feature work (cheap features, refactors, isolated additions) doesn't need an architect phase. Today the workflow shape is fixed; turning architect off requires a new workflow file. Better: a workflow-level flag `phases.skipIf: <condition>`. Defer; architectural framing only.
 
-### #95 — Copy-id buttons next to run names (parity with task ids)
-**Why:** Caught 2026-05-09 reviewing the post-#64 sidebar polish. Task ids in the detail-pane header have a `copy` button next to them (added under #78 / chain navigation work). Run ids do not — to copy a run id today you either select-and-copy the truncated text, hover for the tooltip then memorize, or open DevTools. Friction every time a CLI command needs the id.
-**How to apply:** Mirror the task-id copy pattern. Best home is the middle pane's run-detail header (line ~1194 in html.ts, currently shows `run.id` + status badge). Sidebar rows are too cramped for an inline button — keep the title= tooltip there. Optional: also add to the breadcrumb at the top of the middle pane (`RUN / <shortId>`). Copy button uses the existing `copyText` helper + `.copy` style.
-**Caught:** 2026-05-09 morning post-overnight polish review.
+### #53 — `prompt-author` agent seed + ui-design PROMPT.md template
 **Why:** Per FORGE-DEC-014, forge's role in design becomes "author the prompt, the human runs it." The `prompt-author` agent is a generic prompt-elicitation primitive: interview the human about brief / screens / style / paths / constraints, fill the right template, output a `PROMPT.md` file path. ui-design is the first consumer; future consumers (marketing-copy, code-review, architecture-review) will use the same primitive with different templates.
 **How to apply:**
 - New seed: `seeds/agents/prompt-author/CLAUDE.md`. Interview structure: brief / screens (or sections) / style guidance / target paths / constraints / known gotchas. Output schema: `{status, promptPath: "...", brief, screens?, notes}`.
@@ -457,6 +454,11 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #95 — Copy-id button next to run name in run-detail header
+**Closed:** 2026-05-09 overnight, on branch `graph-view-85` (251 tests, no test deltas — pure UI).
+- `src/dashboard/html.ts`: middle-pane run-detail header now renders `<run-id> [copy] [status-badge]`. Reuses the existing `copy` class + `copyText` helper. Mirrors the task-id copy pattern in `taskHeaderSection` (#78).
+- Sidebar rows kept tooltip-only — too cramped for an inline button.
 
 ### #92 — Architect seed rewrite (systems-architect, not implementation-tutor)
 **Closed:** 2026-05-09 morning, on branch `graph-view-85` (233 tests passing — seed-only change, no test deltas).
