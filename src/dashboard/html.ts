@@ -1391,7 +1391,7 @@ const CLIENT_JS = `
       if (d.awsAvailable) {
         // AWS is configured on this host but the user didn't export
         // AWS_PROFILE. Tell them — they probably meant bedrock.
-        row('Note', 'AWS SSO is configured on this host but AWS_PROFILE isn\'t set.');
+        row('Note', 'AWS SSO is configured on this host but AWS_PROFILE is not set.');
       }
     } else if (a.mode === 'anthropic-apikey') {
       row('Source', 'ANTHROPIC_API_KEY env var');
