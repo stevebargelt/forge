@@ -178,6 +178,72 @@ a { color: var(--accent); text-decoration: none; }
 .auth-indicator.health-missing .dot { background: var(--error); }
 .auth-indicator .mode { color: var(--foreground); font-weight: 600; }
 .auth-indicator .identity { color: var(--foreground-muted); }
+.auth-indicator .countdown { color: var(--foreground-muted); margin-left: auto; }
+.auth-indicator { cursor: pointer; }
+.auth-indicator:hover { background: var(--background-elevated); }
+
+/* #97 click-to-open auth popover. Anchored manually to the indicator; closes
+   on click-outside or Esc. */
+.auth-popover {
+  position: fixed;
+  background: var(--background-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px #00000088;
+  z-index: 100;
+  min-width: 320px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--foreground);
+}
+.auth-popover .pop-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: 0.05em;
+}
+.auth-popover .pop-header .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.auth-popover.health-ok .pop-header .dot { background: var(--success); }
+.auth-popover.health-expired .pop-header .dot { background: var(--warning); }
+.auth-popover.health-missing .pop-header .dot { background: var(--error); }
+.auth-popover .pop-header .pop-mode { font-weight: 700; color: var(--foreground); }
+.auth-popover .pop-header .pop-status { color: var(--foreground-muted); margin-left: auto; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; }
+.auth-popover .pop-rows {
+  padding: 8px 14px;
+}
+.auth-popover .pop-row {
+  display: flex;
+  gap: 12px;
+  padding: 3px 0;
+}
+.auth-popover .pop-row .pop-key {
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+  width: 88px;
+}
+.auth-popover .pop-row .pop-val {
+  color: var(--foreground);
+  word-break: break-all;
+}
+.auth-popover .pop-footer {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--foreground-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.auth-popover .pop-footer code {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 10px;
+}
 
 .search {
   padding: var(--space-md);
@@ -1229,15 +1295,15 @@ const CLIENT_JS = `
   }
 
   // #97 — auth-mode indicator under the FORGE wordmark. Renders a status dot,
-  // the mode (e.g. "bedrock"), and an identity hint (e.g. AWS profile name)
-  // when available. Driven by /api/auth-mode (state.authMode); a fetch error
-  // or first-render-before-fetch shows a neutral "?" state. Read-only —
-  // changing auth means restarting the dashboard with a different shell env.
+  // the mode (e.g. "bedrock"), an identity hint (e.g. AWS profile name) when
+  // available, and a compact expiry countdown for bedrock when the token is
+  // fresh. Driven by /api/auth-mode (state.authMode); a fetch error or first-
+  // render-before-fetch shows a neutral "auth…" state. Click opens a popover
+  // with the full detail (see openAuthPopover). Read-only — changing auth
+  // means restarting the dashboard with a different shell env.
   function renderAuthIndicator() {
     const a = state.authMode;
     if (!a) {
-      // Pre-fetch render: neutral placeholder so the slot doesn't pop into
-      // existence when the response arrives.
       return el('div', { class: 'auth-indicator health-ok', title: 'auth status loading…' }, [
         el('span', { class: 'dot' }),
         el('span', { class: 'mode' }, 'auth…'),
@@ -1251,12 +1317,131 @@ const CLIENT_JS = `
     if (a.identity) {
       parts.push(el('span', { class: 'identity' }, '· ' + a.identity));
     }
-    // Tooltip carries the remediation step when health isn't ok, so the
-    // user has the exact command to copy without leaving the dashboard.
+    // Bedrock + fresh token: surface the remaining time in the pill itself.
+    // The countdown text is computed each render and refreshed once a minute
+    // by the loadAuthMode poll, which is more than enough granularity.
+    if (a.mode === 'bedrock' && a.health === 'ok' && a.detail && a.detail.expiresAt) {
+      const left = formatExpiry(a.detail.expiresAt);
+      if (left) parts.push(el('span', { class: 'countdown' }, left));
+    }
     const title = a.health === 'ok'
-      ? a.mode + (a.identity ? ' · ' + a.identity : '') + ' (ready)'
+      ? 'click for detail'
       : (a.remediation || a.mode + ' (' + a.health + ')');
-    return el('div', { class: cls, title }, parts);
+    return el('div', { class: cls, title, onclick: openAuthPopover }, parts);
+  }
+
+  // Compact "Xh Ym" / "Ym" string for the inline countdown. Returns empty when
+  // the timestamp is unparseable or already past.
+  function formatExpiry(iso) {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return '';
+    const ms = t - Date.now();
+    if (ms <= 0) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return mins + 'm';
+    const hours = Math.floor(mins / 60);
+    const rem = mins - hours * 60;
+    return hours + 'h ' + rem + 'm';
+  }
+
+  // Click-to-open popover anchored to the indicator. Closes on click-outside
+  // or Esc. Renders mode-specific rows from state.authMode.detail plus a
+  // restart-the-dashboard footer (the only way to switch modes).
+  function openAuthPopover(e) {
+    if (e) e.stopPropagation();
+    const existing = document.querySelector('.auth-popover');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const a = state.authMode;
+    if (!a) return;
+    const cls = 'auth-popover health-' + (a.health || 'ok');
+    const pop = el('div', { class: cls });
+    const statusLabel = a.health === 'ok'
+      ? 'READY'
+      : (a.health === 'expired' ? 'EXPIRED' : 'MISSING');
+    pop.appendChild(el('div', { class: 'pop-header' }, [
+      el('span', { class: 'dot' }),
+      el('span', { class: 'pop-mode' }, a.mode),
+      el('span', { class: 'pop-status' }, statusLabel),
+    ]));
+    const rows = el('div', { class: 'pop-rows' });
+    const d = a.detail || {};
+    const row = (k, v) => rows.appendChild(el('div', { class: 'pop-row' }, [
+      el('span', { class: 'pop-key' }, k),
+      el('span', { class: 'pop-val' }, v),
+    ]));
+    if (a.mode === 'bedrock') {
+      if (d.profile) row('Profile', d.profile);
+      if (d.accountId) row('Account', d.accountId);
+      if (d.roleName) row('Role', d.roleName);
+      if (d.region) row('Region', d.region);
+      if (d.ssoPortal) row('SSO portal', d.ssoPortal);
+      if (d.expiresAt) {
+        const left = formatExpiry(d.expiresAt);
+        const local = new Date(d.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        row('Token', left ? 'expires ' + local + ' (' + left + ')' : 'expires ' + local);
+      } else {
+        row('Token', 'expired — log in again');
+      }
+      row('Watchdog', d.watchdogRunning ? 'running' : 'not running');
+    } else if (a.mode === 'anthropic-oauth') {
+      row('Volume', d.oauthVolume || 'forge-claude-oauth');
+      row('Status', 'optimistic (volume not probed)');
+    } else if (a.mode === 'anthropic-apikey') {
+      row('Source', 'ANTHROPIC_API_KEY env var');
+    }
+    pop.appendChild(rows);
+
+    // Footer differs per mode — the actionable advice is "how do I change auth
+    // or refresh this?", and that's mode-specific.
+    const footer = el('div', { class: 'pop-footer' });
+    if (a.mode === 'bedrock' && a.health !== 'ok') {
+      footer.appendChild(el('div', null, [
+        document.createTextNode('Refresh: '),
+        el('code', null, 'aws sso login --profile ' + (d.profile || 'default')),
+      ]));
+    } else if (a.mode === 'anthropic-oauth') {
+      footer.appendChild(el('div', null, [
+        document.createTextNode('Re-auth: '),
+        el('code', null, 'forge auth login'),
+      ]));
+    }
+    const switchBlock = el('div', { style: 'margin-top:6px;' });
+    switchBlock.appendChild(document.createTextNode('To switch modes: '));
+    switchBlock.appendChild(el('code', null, 'pkill -f "forge dashboard"'));
+    switchBlock.appendChild(document.createTextNode(', source different shell config, restart.'));
+    footer.appendChild(switchBlock);
+    pop.appendChild(footer);
+
+    // Anchor to the indicator. The indicator sits in the left sidebar; we
+    // position the popover to its right, vertically aligned with its top.
+    const anchor = document.querySelector('.auth-indicator');
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      pop.style.left = (rect.right + 8) + 'px';
+      pop.style.top = rect.top + 'px';
+    }
+    document.body.appendChild(pop);
+
+    // Dismiss handlers — clickaway + Esc. Use capture phase so the close fires
+    // before any inner click handlers on the popover content do anything.
+    const onClickAway = (ev) => {
+      if (!pop.contains(ev.target)) closeAuthPopover();
+    };
+    const onKey = (ev) => { if (ev.key === 'Escape') closeAuthPopover(); };
+    function closeAuthPopover() {
+      pop.remove();
+      document.removeEventListener('click', onClickAway, true);
+      document.removeEventListener('keydown', onKey);
+    }
+    // Defer the listener attachment so the click that opened us doesn't
+    // immediately close us.
+    setTimeout(() => {
+      document.addEventListener('click', onClickAway, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
   }
 
   // ---------- render: sidebar (runs) ----------

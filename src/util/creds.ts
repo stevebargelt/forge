@@ -20,6 +20,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isWatchdogRunning } from "./sso-watchdog.js";
 
 export type CredsMode = "bedrock" | "anthropic-oauth" | "anthropic-apikey";
 
@@ -67,40 +68,48 @@ export function resolveAwsRegion(): string {
   return process.env.AWS_REGION ?? "us-east-1";
 }
 
-// Scan ~/.aws/config for an SSO-backed default profile. Returns true if found.
-// Cheap: existsSync + read + plain-string scan. No INI library dependency.
-// We look specifically at the [default] profile because that's what the auto-
-// detect path will use via resolveAwsProfile() — finding sso_session in some
-// other profile doesn't help if AWS_PROFILE isn't pointing at it.
-export function hasAwsSsoConfigured(): boolean {
+// Parse ~/.aws/config and return the key/value pairs of the given profile
+// section. AWS config uses [default] for the default profile and [profile X]
+// for named profiles, so callers pass profileName='default' / profileName='work'
+// (without the "profile " prefix). Returns an empty object when the config or
+// the named section doesn't exist. Cheap: existsSync + read + plain-string
+// scan. No INI library dependency.
+export function parseAwsProfile(profileName: string): Record<string, string> {
   const configPath = join(awsConfigDir(), "config");
-  if (!existsSync(configPath)) return false;
+  if (!existsSync(configPath)) return {};
   let text: string;
   try {
     text = readFileSync(configPath, "utf8");
   } catch {
-    return false;
+    return {};
   }
-  // Find the [default] section (AWS config uses [default] for the default
-  // profile, [profile name] for named profiles). Scan forward until the next
-  // [ section header or EOF, and check whether sso_session = ... appears in
-  // that block.
+  const targetHeader = profileName === "default" ? "[default]" : `[profile ${profileName}]`;
   const lines = text.split(/\r?\n/);
-  let inDefault = false;
+  const out: Record<string, string> = {};
+  let inTarget = false;
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith("[")) {
-      inDefault = line === "[default]";
+      inTarget = line === targetHeader;
       continue;
     }
-    if (!inDefault) continue;
-    // Allow whitespace around the = sign, accept either sso_session or sso_start_url
-    // as evidence of SSO configuration. sso_session is the AWS v2 form; sso_start_url
-    // is the legacy form that's still accepted by the AWS CLI.
-    if (/^sso_session\s*=/.test(line)) return true;
-    if (/^sso_start_url\s*=/.test(line)) return true;
+    if (!inTarget) continue;
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    out[key] = value;
   }
-  return false;
+  return out;
+}
+
+// True when the default profile has SSO configured (either the AWS v2 form
+// sso_session or the legacy sso_start_url). Reused by detectCredsMode for the
+// auto-detect path.
+export function hasAwsSsoConfigured(): boolean {
+  const p = parseAwsProfile("default");
+  return Boolean(p["sso_session"] || p["sso_start_url"]);
 }
 
 export function oauthVolumeName(): string {
@@ -218,8 +227,17 @@ export function validateCredsForNewRun(): void {
 }
 
 // Snapshot of the dashboard's auth state for the indicator (#97). Pure
-// inspection — no throws. Returns enough for the UI to render dot + mode +
-// identity without any client-side env-sniffing.
+// inspection — no throws, no network, no docker. Returns enough for the UI
+// to render the inline pill + the click-to-open popover.
+//
+// Per mode, what's populated:
+//   bedrock — full detail (profile, account, role, region, ssoPortal,
+//             expiresAt, watchdog). All from ~/.aws on the host; cheap.
+//   oauth   — volumeName only. We don't probe the volume here (a docker
+//             run takes 1-2s and the popover should open instantly).
+//   apikey  — nothing beyond mode + health. We deliberately don't show key
+//             prefix/suffix; it leaks credentials into screenshots without
+//             earning much.
 export type AuthState = {
   mode: CredsMode;
   // 'ok' = ready to use. 'expired' = bedrock SSO token has expired (or never
@@ -228,49 +246,116 @@ export type AuthState = {
   // won't return apikey if the var is absent, so this branch is theoretical
   // for now and reserved for #106's future provider checks).
   health: "ok" | "expired" | "missing";
-  // Short identity string for display ("sgws-poc" for bedrock profile, etc.).
-  // Empty string when no identity metadata is available (oauth/apikey).
+  // Short identity string for the inline pill ("sgws-poc" for bedrock profile,
+  // etc.). Empty string when no identity metadata is available (oauth/apikey).
   identity: string;
   // Action the user should take when health !== 'ok'. Empty when ok.
   remediation: string;
+  // Detail surface for the click-to-open popover. Bedrock fields are populated
+  // from ~/.aws/config + the SSO cache + the watchdog PID file; oauth fields
+  // are mostly the volume name; apikey is empty.
+  detail: AuthDetail;
+};
+
+export type AuthDetail = {
+  // bedrock-only
+  profile?: string;        // AWS profile (e.g. "adx-dev")
+  accountId?: string;      // sso_account_id from ~/.aws/config
+  roleName?: string;       // sso_role_name from ~/.aws/config
+  region?: string;         // resolveAwsRegion()
+  ssoPortal?: string;      // host part of session cache's startUrl
+  expiresAt?: string;      // ISO timestamp from the session cache
+  watchdogRunning?: boolean;
+  // oauth-only
+  oauthVolume?: string;
 };
 
 export function getAuthState(): AuthState {
   const mode = detectCredsMode();
   if (mode === "bedrock") {
     const profile = resolveAwsProfile();
+    const region = resolveAwsRegion();
     const cacheDir = join(awsConfigDir(), "sso", "cache");
-    if (!existsSync(cacheDir) || !hasFreshSsoCache(cacheDir)) {
+    const profileConfig = parseAwsProfile(profile);
+    const session = existsSync(cacheDir) ? readFreshSsoSession(cacheDir) : null;
+    const detail: AuthDetail = {
+      profile,
+      region,
+      watchdogRunning: isWatchdogRunningSafe(),
+    };
+    if (profileConfig["sso_account_id"]) detail.accountId = profileConfig["sso_account_id"];
+    if (profileConfig["sso_role_name"]) detail.roleName = profileConfig["sso_role_name"];
+    if (session) {
+      detail.expiresAt = session.expiresAt;
+      detail.ssoPortal = extractHost(session.startUrl);
+    }
+    if (!session) {
       return {
         mode,
         health: "expired",
         identity: profile,
         remediation: `aws sso login --profile ${profile}`,
+        detail,
       };
     }
-    return { mode, health: "ok", identity: profile, remediation: "" };
+    return { mode, health: "ok", identity: profile, remediation: "", detail };
   }
   if (mode === "anthropic-apikey") {
-    return { mode, health: "ok", identity: "", remediation: "" };
+    return { mode, health: "ok", identity: "", remediation: "", detail: {} };
   }
   // oauth: report 'ok' here. The docker-volume probe is too expensive to run
   // on every dashboard load — if it's actually missing, run-creation surfaces
   // a clear error. The indicator stays optimistic for oauth.
-  return { mode, health: "ok", identity: "", remediation: "" };
+  return {
+    mode,
+    health: "ok",
+    identity: "",
+    remediation: "",
+    detail: { oauthVolume: oauthVolumeName() },
+  };
 }
 
-// Scan ~/.aws/sso/cache/ for at least one *session* cache file (has top-level
-// `startUrl` AND `accessToken`) with a non-expired `expiresAt`. The directory
-// also contains client-registration files (one per `clientId`) which have a
-// year-long expiry and aren't proof of an active session — we skip those.
-export function hasFreshSsoCache(cacheDir: string): boolean {
+// Wrap isWatchdogRunning() in a try/catch so getAuthState can't throw from a
+// PID-file-read error (very unlikely but the indicator path must be robust).
+function isWatchdogRunningSafe(): boolean {
+  try {
+    return isWatchdogRunning();
+  } catch {
+    return false;
+  }
+}
+
+// Pull the host out of a URL string. Falls back to the raw value if URL parsing
+// fails — better to show something weird than nothing.
+function extractHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+// Snapshot of an SSO session cache file: just the user-relevant fields. Used
+// to drive the indicator's expiry countdown + portal hostname.
+export type SsoSessionSnapshot = {
+  startUrl: string;
+  expiresAt: string; // ISO timestamp
+};
+
+// Find the freshest *session* cache file in ~/.aws/sso/cache/ — i.e., one
+// with top-level startUrl + accessToken + a non-expired expiresAt. Client-
+// registration files (year-long expiry, no startUrl/accessToken) are skipped.
+// Returns null when no fresh session exists.
+export function readFreshSsoSession(cacheDir: string): SsoSessionSnapshot | null {
   let entries: string[];
   try {
     entries = readdirSync(cacheDir);
   } catch {
-    return false;
+    return null;
   }
   const now = Date.now();
+  let bestExpiry = -Infinity;
+  let best: SsoSessionSnapshot | null = null;
   for (const name of entries) {
     if (!name.endsWith(".json")) continue;
     let parsed: { expiresAt?: string; startUrl?: string; accessToken?: string };
@@ -281,7 +366,19 @@ export function hasFreshSsoCache(cacheDir: string): boolean {
     }
     if (!parsed.startUrl || !parsed.accessToken || !parsed.expiresAt) continue;
     const expiry = Date.parse(parsed.expiresAt);
-    if (Number.isFinite(expiry) && expiry > now) return true;
+    if (!Number.isFinite(expiry) || expiry <= now) continue;
+    // Multiple fresh sessions can exist if the user has switched profiles
+    // recently. Pick the one with the latest expiry — it's the most recently
+    // refreshed.
+    if (expiry > bestExpiry) {
+      bestExpiry = expiry;
+      best = { startUrl: parsed.startUrl, expiresAt: parsed.expiresAt };
+    }
   }
-  return false;
+  return best;
+}
+
+// Boolean wrapper kept for back-compat with existing call sites.
+export function hasFreshSsoCache(cacheDir: string): boolean {
+  return readFreshSsoSession(cacheDir) !== null;
 }
