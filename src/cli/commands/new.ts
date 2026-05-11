@@ -6,6 +6,7 @@ import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
 import { logEvent } from "../../store/events.js";
 import { loadWorkflow } from "../../spine/workflows.js";
+import { validateCredsForNewRun } from "../../util/creds.js";
 import type { Run, Task, TaskPackage, WorkflowName } from "../../types/index.js";
 
 const VALID: WorkflowName[] = [
@@ -34,6 +35,11 @@ export function registerNew(program: Command): void {
       if (!VALID.includes(workflow as WorkflowName)) {
         throw new Error(`Unknown workflow '${workflow}'. Valid: ${VALID.join(", ")}`);
       }
+      // Pre-flight (#79): surface auth problems at run-creation time rather
+      // than 30 seconds into the first container spawn. Bedrock mode catches
+      // expired SSO tokens; apikey mode checks the env var. Oauth defers to
+      // spawn-time (docker-volume probe is too expensive per `forge new`).
+      validateCredsForNewRun();
       ensureForgeDirs();
       const wf = await loadWorkflow(workflow as WorkflowName);
       const runId = newRunId(title);

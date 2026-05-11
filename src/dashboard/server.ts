@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
 import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, WORKFLOW_GROUPS, UNIVERSAL_FIELDS } from "./workflowSchema.js";
+import { AUTH_ERROR_PREFIX } from "../util/creds.js";
 import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
@@ -230,6 +231,12 @@ async function handleNewRun(body: Record<string, unknown>, res: ServerResponse):
   const argv = buildForgeNewArgv(workflow as WorkflowName, validation.values);
   const out = await invokeForge(argv);
   if (out.exitCode !== 0) {
+    // Route auth pre-flight failures to a 400 so the frontend can render a
+    // useful toast (#79). The CLI's stderr will contain the AUTH_ERROR_PREFIX
+    // string for any failure that came from validateCredsForNewRun.
+    if (out.stderr.includes(AUTH_ERROR_PREFIX)) {
+      return jsonError(res, 400, out.stderr.trim());
+    }
     return jsonError(res, 500, out.stderr || `forge new exited ${out.exitCode}`);
   }
 

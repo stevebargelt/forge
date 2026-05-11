@@ -17,7 +17,7 @@
 // agent run mounts the same volume read-only at /home/agent/.claude.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -171,4 +171,75 @@ Run \`forge auth login\` once (or set CLAUDE_CODE_USE_BEDROCK=1 + AWS creds for 
 or set ANTHROPIC_API_KEY for API-key mode).`
     );
   }
+}
+
+// Auth-error prefix used by validateCredsForNewRun(). The CLI's top-level
+// handler prints the error verbatim; the dashboard's POST handler sniffs for
+// this prefix in stderr to route an "auth problem, here's what to fix" toast
+// instead of a generic 500. Exposed as a constant so dashboard + CLI agree on
+// the string without a separate IPC contract.
+export const AUTH_ERROR_PREFIX = "Auth error: ";
+
+// Pre-flight check at run-creation time (#79 part 2). Catches the failure mode
+// where bedrock mode is active but the SSO cache is empty/expired — without
+// this, the run is created, dispatch starts, and the first container fails
+// ~30 seconds in with a 403 from inside Docker.
+//
+// Throws an Error prefixed with AUTH_ERROR_PREFIX on failure. Caller is
+// expected to print and exit 1 (CLI) or convert to a structured 400 (dashboard).
+export function validateCredsForNewRun(): void {
+  const mode = detectCredsMode();
+  if (mode === "bedrock") {
+    const cacheDir = join(awsConfigDir(), "sso", "cache");
+    if (!existsSync(cacheDir)) {
+      throw new Error(
+        `${AUTH_ERROR_PREFIX}Bedrock mode active but no SSO cache found at ${cacheDir}. Run \`aws sso login --profile ${resolveAwsProfile()}\` and try again.`
+      );
+    }
+    if (!hasFreshSsoCache(cacheDir)) {
+      throw new Error(
+        `${AUTH_ERROR_PREFIX}Bedrock mode active but the AWS SSO token is expired (or no session cache exists yet). Run \`aws sso login --profile ${resolveAwsProfile()}\` and try again.`
+      );
+    }
+    return;
+  }
+  if (mode === "anthropic-apikey") {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      throw new Error(
+        `${AUTH_ERROR_PREFIX}anthropic-apikey mode requires ANTHROPIC_API_KEY in the environment.`
+      );
+    }
+    return;
+  }
+  // oauth: defer to ensureCreds at spawn time. The docker-volume probe is
+  // expensive (spins up a container) and not worth running per `forge new`;
+  // the failure mode here is the user not having run `forge auth login`,
+  // which still surfaces clearly at the first task dispatch.
+}
+
+// Scan ~/.aws/sso/cache/ for at least one *session* cache file (has top-level
+// `startUrl` AND `accessToken`) with a non-expired `expiresAt`. The directory
+// also contains client-registration files (one per `clientId`) which have a
+// year-long expiry and aren't proof of an active session — we skip those.
+export function hasFreshSsoCache(cacheDir: string): boolean {
+  let entries: string[];
+  try {
+    entries = readdirSync(cacheDir);
+  } catch {
+    return false;
+  }
+  const now = Date.now();
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    let parsed: { expiresAt?: string; startUrl?: string; accessToken?: string };
+    try {
+      parsed = JSON.parse(readFileSync(join(cacheDir, name), "utf8")) as typeof parsed;
+    } catch {
+      continue;
+    }
+    if (!parsed.startUrl || !parsed.accessToken || !parsed.expiresAt) continue;
+    const expiry = Date.parse(parsed.expiresAt);
+    if (Number.isFinite(expiry) && expiry > now) return true;
+  }
+  return false;
 }

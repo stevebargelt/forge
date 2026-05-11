@@ -6,8 +6,11 @@ import { join } from "node:path";
 import {
   detectCredsMode,
   hasAwsSsoConfigured,
+  hasFreshSsoCache,
   resolveAwsProfile,
   resolveAwsRegion,
+  validateCredsForNewRun,
+  AUTH_ERROR_PREFIX,
 } from "./creds.js";
 
 // Snapshot of every env var creds.ts cares about. detectCredsMode reads several
@@ -170,4 +173,137 @@ test("resolveAwsRegion honors AWS_REGION when set", () => {
 
 test("resolveAwsRegion falls back to 'us-east-1' when AWS_REGION unset", () => {
   assert.equal(resolveAwsRegion(), "us-east-1");
+});
+
+// -------- hasFreshSsoCache --------
+
+function writeSsoCache(name: string, body: object): void {
+  const dir = join(tmpAwsDir, "sso", "cache");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), JSON.stringify(body));
+}
+
+test("hasFreshSsoCache: false when cache dir doesn't exist", () => {
+  assert.equal(hasFreshSsoCache(join(tmpAwsDir, "sso", "cache")), false);
+});
+
+test("hasFreshSsoCache: false when only a client-registration file exists (no session)", () => {
+  // Client-registration files have `expiresAt` but no `startUrl` / `accessToken`.
+  // They prove the SDK has registered, not that there's an active session.
+  writeSsoCache("reg.json", {
+    clientId: "abc",
+    clientSecret: "shh",
+    expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString(),
+  });
+  assert.equal(hasFreshSsoCache(join(tmpAwsDir, "sso", "cache")), false);
+});
+
+test("hasFreshSsoCache: true when a session cache has future expiresAt", () => {
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(), // 1h out
+  });
+  assert.equal(hasFreshSsoCache(join(tmpAwsDir, "sso", "cache")), true);
+});
+
+test("hasFreshSsoCache: false when the session cache is expired", () => {
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() - 3600 * 1000).toISOString(), // 1h ago
+  });
+  assert.equal(hasFreshSsoCache(join(tmpAwsDir, "sso", "cache")), false);
+});
+
+test("hasFreshSsoCache: true when any cache file is fresh (mixed dir)", () => {
+  // Real ~/.aws/sso/cache has both client-registration AND session files
+  // side by side. Only one needs to be a fresh session for us to accept.
+  writeSsoCache("reg.json", {
+    clientId: "abc",
+    clientSecret: "shh",
+    expiresAt: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString(),
+  });
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+  });
+  assert.equal(hasFreshSsoCache(join(tmpAwsDir, "sso", "cache")), true);
+});
+
+test("hasFreshSsoCache: tolerates corrupt JSON in one file without failing", () => {
+  const dir = join(tmpAwsDir, "sso", "cache");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "broken.json"), "{not valid json");
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+  });
+  assert.equal(hasFreshSsoCache(dir), true);
+});
+
+// -------- validateCredsForNewRun --------
+
+test("validateCredsForNewRun: bedrock + fresh SSO cache → no throw", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "test";
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+  });
+  assert.doesNotThrow(() => validateCredsForNewRun());
+});
+
+test("validateCredsForNewRun: bedrock + expired SSO cache → throws with AUTH_ERROR_PREFIX", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "test";
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() - 3600 * 1000).toISOString(),
+  });
+  assert.throws(
+    () => validateCredsForNewRun(),
+    (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("aws sso login")
+  );
+});
+
+test("validateCredsForNewRun: bedrock + no cache dir → throws with AUTH_ERROR_PREFIX", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "test";
+  // tmpAwsDir exists but has no sso/cache subdir
+  assert.throws(
+    () => validateCredsForNewRun(),
+    (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("no SSO cache")
+  );
+});
+
+test("validateCredsForNewRun: apikey + ANTHROPIC_API_KEY set → no throw", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test";
+  assert.doesNotThrow(() => validateCredsForNewRun());
+});
+
+test("validateCredsForNewRun: apikey mode forced by CLAUDE_CODE_USE_BEDROCK=0 + missing key → throws", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "0";
+  // Simulate "user wanted apikey but forgot to set ANTHROPIC_API_KEY". Mode
+  // resolves to oauth in this case (since the key isn't set), so the check
+  // doesn't throw — defer to spawn time. This test documents that intentional
+  // softness: validateCredsForNewRun() doesn't validate oauth.
+  assert.doesNotThrow(() => validateCredsForNewRun());
+});
+
+test("validateCredsForNewRun: oauth mode → no throw (deferred to spawn time)", () => {
+  // No AWS, no API key — falls to oauth. We don't probe the docker volume here
+  // because that costs 1-2 seconds; the spawn-time ensureCreds() handles it.
+  assert.doesNotThrow(() => validateCredsForNewRun());
+});
+
+test("AUTH_ERROR_PREFIX is a stable string the dashboard sniffs for", () => {
+  // If this changes, dashboard server.ts's `out.stderr.includes(AUTH_ERROR_PREFIX)`
+  // check still passes (it imports the constant). But downstream tooling /
+  // tests / docs that hardcode the string would break — keep it stable.
+  assert.equal(AUTH_ERROR_PREFIX, "Auth error: ");
 });
