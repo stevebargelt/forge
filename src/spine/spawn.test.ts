@@ -201,16 +201,17 @@ test("buildDockerArgs: --include-partial-messages is passed to claude", () => {
   assert.ok(args.includes("--include-partial-messages"), "claude argv should include --include-partial-messages so stdout flows during long thinking turns");
 });
 
-test("buildDockerArgs: bedrock without AWS_REGION still sets profile", () => {
+test("buildDockerArgs: bedrock without AWS_REGION falls back to us-east-1", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "adx-dev";
-  // No AWS_REGION set
+  // No AWS_REGION set — resolveAwsRegion() supplies the default so the
+  // container always has a region to call against (matches use-bedrock.sh).
   process.env.FORGE_AWS_DIR = "/tmp/.aws";
 
   const args = _buildDockerArgs(ARGS_INPUT_BASE);
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.AWS_PROFILE, "adx-dev");
-  assert.equal(envPairs.AWS_REGION, undefined, "AWS_REGION omitted when not in env");
+  assert.equal(envPairs.AWS_REGION, "us-east-1", "AWS_REGION defaults to us-east-1 when not in env");
 });
 
 // Helpers

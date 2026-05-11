@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
-import { ensureCreds, detectCredsMode, oauthVolumeName, awsConfigDir } from "../util/creds.js";
+import { ensureCreds, detectCredsMode, oauthVolumeName, awsConfigDir, resolveAwsProfile, resolveAwsRegion } from "../util/creds.js";
 import { logEvent } from "../store/events.js";
 import { markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 
@@ -186,8 +186,8 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
     // cache is enough to keep long-running containers authenticated. No env-var
     // snapshot of STS tokens — those would go stale within an hour.
     args.push("-e", "CLAUDE_CODE_USE_BEDROCK=1");
-    args.push("-e", `AWS_PROFILE=${process.env.AWS_PROFILE}`);
-    if (process.env.AWS_REGION) args.push("-e", `AWS_REGION=${process.env.AWS_REGION}`);
+    args.push("-e", `AWS_PROFILE=${resolveAwsProfile()}`);
+    args.push("-e", `AWS_REGION=${resolveAwsRegion()}`);
     args.push("-v", `${awsConfigDir()}:/home/agent/.aws:ro`);
   } else if (mode === "anthropic-apikey") {
     args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
