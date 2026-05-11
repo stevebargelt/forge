@@ -198,7 +198,12 @@ async function handleNext(runId: string, body: Record<string, unknown>, res: Ser
   const args = ["next", runId];
   if (project) args.push("--project", project);
   const out = await invokeForge(args);
-  if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge next exited ${out.exitCode}`);
+  if (out.exitCode !== 0) {
+    if (out.stderr.includes(AUTH_ERROR_PREFIX)) {
+      return jsonError(res, 400, out.stderr.trim());
+    }
+    return jsonError(res, 500, out.stderr || `forge next exited ${out.exitCode}`);
+  }
   jsonOk(res, { runId, summary: tail(out.stdout) });
 }
 

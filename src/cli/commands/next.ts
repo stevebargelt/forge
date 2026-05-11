@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { next } from "../../spine/next.js";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { getRun, setRunProjectDir } from "../../store/runs.js";
+import { validateCredsForNewRun } from "../../util/creds.js";
 
 export function registerNext(program: Command): void {
   program
@@ -11,6 +12,11 @@ export function registerNext(program: Command): void {
     .description("Advance the run: dispatch pending tasks, or surface what's blocking progress")
     .action(async (runId: string, options) => {
       ensureForgeDirs();
+      // Pre-flight (#79): catch expired SSO tokens before spawning a doomed
+      // container. Same validator as `forge new`, so a run whose auth has
+      // gone stale between create and dispatch surfaces at the CLI rather
+      // than as a 403 inside the agent's first API call.
+      validateCredsForNewRun();
       const projectDir = resolveProjectDir(runId, options.project as string | undefined);
       const result = await next(runId, { projectDir });
       switch (result.kind) {
