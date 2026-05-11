@@ -153,6 +153,32 @@ a { color: var(--accent); text-decoration: none; }
 }
 .brand-name { font-weight: 700; letter-spacing: 0.1em; font-size: 12px; color: var(--foreground); }
 
+/* #97 auth-mode indicator — system context under the wordmark, before the runs list. */
+.auth-indicator {
+  padding: 8px var(--space-md);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--foreground-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.auth-indicator .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.auth-indicator.health-ok .dot { background: var(--success); }
+.auth-indicator.health-expired .dot { background: var(--warning); }
+.auth-indicator.health-missing .dot { background: var(--error); }
+.auth-indicator .mode { color: var(--foreground); font-weight: 600; }
+.auth-indicator .identity { color: var(--foreground-muted); }
+
 .search {
   padding: var(--space-md);
   border-bottom: 1px solid var(--border);
@@ -730,16 +756,17 @@ a { color: var(--accent); text-decoration: none; }
   align-items: center;
   gap: var(--space-sm);
 }
-/* #85 — graph view launch button (right-end of pill-row label). Mirrors
-   the design Component Library's graph-btn atom. */
+/* #85 — graph view launch button. Hugs the run-hint text rather than
+   floating to the far edge of the pane — keeps the button associated
+   with the workflow it visualizes. */
 .graph-btn {
-  margin-left: auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   padding: 0;
+  margin-left: 4px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--surface);
@@ -1017,6 +1044,11 @@ const CLIENT_JS = `
     // bring back unchanged data become silent — solves the entire class of
     // "polling clobbers user input / scroll / focus" bugs.
     lastRender: { sidebar: null, pillrow: null, middle: null, detail: null },
+    // #97 — auth-mode snapshot from /api/auth-mode. Drives the indicator in
+    // the sidebar between FORGE and search. Refreshed on bootstrap + on a
+    // slow timer so SSO-expired transitions surface without a dashboard
+    // restart. Null before the first fetch completes.
+    authMode: null,
   };
 
   // ---------- helpers ----------
@@ -1196,6 +1228,37 @@ const CLIENT_JS = `
     return data;
   }
 
+  // #97 — auth-mode indicator under the FORGE wordmark. Renders a status dot,
+  // the mode (e.g. "bedrock"), and an identity hint (e.g. AWS profile name)
+  // when available. Driven by /api/auth-mode (state.authMode); a fetch error
+  // or first-render-before-fetch shows a neutral "?" state. Read-only —
+  // changing auth means restarting the dashboard with a different shell env.
+  function renderAuthIndicator() {
+    const a = state.authMode;
+    if (!a) {
+      // Pre-fetch render: neutral placeholder so the slot doesn't pop into
+      // existence when the response arrives.
+      return el('div', { class: 'auth-indicator health-ok', title: 'auth status loading…' }, [
+        el('span', { class: 'dot' }),
+        el('span', { class: 'mode' }, 'auth…'),
+      ]);
+    }
+    const cls = 'auth-indicator health-' + (a.health || 'ok');
+    const parts = [
+      el('span', { class: 'dot' }),
+      el('span', { class: 'mode' }, a.mode),
+    ];
+    if (a.identity) {
+      parts.push(el('span', { class: 'identity' }, '· ' + a.identity));
+    }
+    // Tooltip carries the remediation step when health isn't ok, so the
+    // user has the exact command to copy without leaving the dashboard.
+    const title = a.health === 'ok'
+      ? a.mode + (a.identity ? ' · ' + a.identity : '') + ' (ready)'
+      : (a.remediation || a.mode + ' (' + a.health + ')');
+    return el('div', { class: cls, title }, parts);
+  }
+
   // ---------- render: sidebar (runs) ----------
   function renderSidebar() {
     const sidebar = $('sidebar');
@@ -1205,7 +1268,7 @@ const CLIENT_JS = `
       id: r.id, status: r.status, title: r.title, workflow: r.workflow,
       taskCount: r.taskCount, completedAt: r.completedAt,
     }));
-    const key = renderKey([slimRuns, state.searchQuery || '', state.selectedRunId]);
+    const key = renderKey([slimRuns, state.searchQuery || '', state.selectedRunId, state.authMode]);
     if (state.lastRender.sidebar === key) return;
     state.lastRender.sidebar = key;
     const prevScrollTop = readPaneScroll(sidebar);
@@ -1214,6 +1277,7 @@ const CLIENT_JS = `
       el('div', { class: 'brand-logo' }),
       el('span', { class: 'brand-name' }, 'FORGE'),
     ]));
+    sidebar.appendChild(renderAuthIndicator());
     sidebar.appendChild(el('div', { class: 'search' }, [
       el('input', { type: 'text', placeholder: 'search runs…', oninput: onSearchInput, id: 'search-input' }),
     ]));
@@ -2663,6 +2727,19 @@ const CLIENT_JS = `
       toast('Failed to load runs: ' + e.message, 'error');
     }
   }
+  async function loadAuthMode() {
+    // #97 — silent on failure. The indicator shows a "?" mode while
+    // state.authMode is null; a transient fetch error just leaves the
+    // last-known state in place. No toast — auth status isn't actionable
+    // in-dashboard, restart-with-different-shell is.
+    try {
+      const data = await fetchJSON('/api/auth-mode');
+      state.authMode = data;
+      renderSidebar();
+    } catch (e) {
+      void e;
+    }
+  }
   async function loadRunDetail(runId) {
     try {
       const data = await fetchJSON('/api/runs/' + encodeURIComponent(runId));
@@ -2931,19 +3008,37 @@ const CLIENT_JS = `
   // in sync because phaseShape is the same shape on both sides. If this
   // logic grows, refactor to ship the JSON over the API instead.
   function buildGraphDataClient(phaseShape) {
-    const nodes = (phaseShape || []).map((p) => ({
-      data: {
-        id: 'n:' + p.name,
-        label: p.name,
-        status: p.status,
-        taskCounts: p.taskCounts,
-        hasFanout: p.hasFanout,
-        hasReds: p.hasReds,
-        redsAuthority: p.redsAuthority,
-        isManual: p.isManual,
-        fanoutDots: p.fanoutDots,
-      },
-    }));
+    const nodes = [];
+    for (const p of (phaseShape || [])) {
+      nodes.push({
+        data: {
+          id: 'n:' + p.name,
+          label: p.name,
+          status: p.status,
+          taskCounts: p.taskCounts,
+          hasFanout: p.hasFanout,
+          hasReds: p.hasReds,
+          redsAuthority: p.redsAuthority,
+          isManual: p.isManual,
+          fanoutDots: p.fanoutDots,
+        },
+      });
+      // Per-task child nodes for fanout phases (#85 v1). One per task in
+      // fanoutDots order; status is the per-task value.
+      if (p.hasFanout && Array.isArray(p.fanoutDots) && p.fanoutDots.length > 0) {
+        for (let i = 0; i < p.fanoutDots.length; i++) {
+          nodes.push({
+            data: {
+              id: 'n:' + p.name + ':t' + i,
+              label: (i + 1).toString(),
+              status: p.fanoutDots[i],
+              parent: 'n:' + p.name,
+              isFanoutChild: true,
+            },
+          });
+        }
+      }
+    }
     const edges = [];
     for (let i = 0; i < (phaseShape || []).length - 1; i++) {
       const from = phaseShape[i];
@@ -3012,39 +3107,111 @@ const CLIENT_JS = `
     // Build graph data + render via cytoscape. The data transformer is the
     // client-side mirror of src/dashboard/graphView.ts (unit-tested).
     const data = buildGraphDataClient(state.runDetail.phaseShape);
+    // #85 v1: flat-node model for fanout. Compound nodes + dagre + grid
+    // sub-layouts fight each other (#100 iteration history). Instead, we
+    // keep every node top-level: a fanout phase renders as a single
+    // collapsed-summary node when collapsed, and as N peer task nodes
+    // (no parent reference) when expanded. Dagre handles parallel ranks
+    // natively, so children laid out at the same rank produce the visual
+    // cluster without any of the compound-sizing bugs.
+    //
+    // Caches needed for expand/collapse toggle:
+    //   - fanoutChildrenByPhase: phaseId → child CyNode[] (data only)
+    //   - phaseNeighbors: phaseId → { prev: prevPhaseId|null, next: nextPhaseId|null }
+    //   - linearEdgeIdByPair: "src->tgt" → edgeId (source-of-truth from
+    //     the data builder; lets us remove + re-add the right edges).
+    const fanoutChildrenByPhase = {};
+    const phaseNodeDataById = {}; // phaseId → original phase CyNode data
+    const phaseNeighbors = {};
+    const expandedPhases = new Set();
+    const phaseShape = state.runDetail.phaseShape;
+    for (let i = 0; i < phaseShape.length; i++) {
+      const p = phaseShape[i];
+      const id = 'n:' + p.name;
+      phaseNeighbors[id] = {
+        prev: i > 0 ? 'n:' + phaseShape[i - 1].name : null,
+        next: i < phaseShape.length - 1 ? 'n:' + phaseShape[i + 1].name : null,
+      };
+    }
+    const initialNodeData = [];
+    for (const n of data.nodes) {
+      if (n.data.parent) {
+        // child of a fanout phase — cache, don't render yet. Strip the
+        // .parent reference so when we add it later as a peer node, it
+        // doesn't become a compound child of an already-removed phase.
+        const pid = n.data.parent;
+        if (!fanoutChildrenByPhase[pid]) fanoutChildrenByPhase[pid] = [];
+        const flatData = Object.assign({}, n.data);
+        delete flatData.parent;
+        fanoutChildrenByPhase[pid].push({ data: flatData });
+        continue;
+      }
+      phaseNodeDataById[n.data.id] = n.data;
+      const cls = n.data.hasFanout ? 'fanout-parent collapsed' : '';
+      initialNodeData.push({ group: 'nodes', data: n.data, classes: cls });
+    }
+    const initialElements = [
+      ...initialNodeData,
+      ...data.edges.map(e => ({ group: 'edges', data: e.data })),
+    ];
     const cy = window.cytoscape({
       container: canvas,
-      elements: [
-        ...data.nodes.map(n => ({ group: 'nodes', data: n.data })),
-        ...data.edges.map(e => ({ group: 'edges', data: e.data })),
-      ],
+      elements: initialElements,
       style: [
-        // Phase nodes — rectangular with status-coded border + bg. Each
-        // status family pulls from GRAPH_STATUS_COLORS so the look matches
-        // the Component Library's node/* atoms.
+        // Phase nodes (default — non-fanout-child) — rectangular with
+        // status-coded border + bg. Matches Component Library's node/*
+        // atoms.
         {
           selector: 'node',
           style: {
             'shape': 'round-rectangle',
-            'width': 180,
-            'height': 70,
+            'width': 220,
+            'height': 60,
             'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
             'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
             'border-width': 2,
-            'label': 'data(label)',
+            'label': (n) => fanoutCollapsedLabel(n),
             'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
             'font-family': 'Geist Mono, monospace',
-            'font-size': 12,
+            'font-size': 11,
             'font-weight': 600,
             'text-valign': 'center',
             'text-halign': 'center',
           },
         },
-        // Linear edges — solid arrows, accent-tertiary color (cyan).
+        // Fanout child nodes — compact status-coded rectangles. One per
+        // task; rendered only while the parent phase is expanded
+        // (added/removed via the toggle handler). Smaller than phase
+        // nodes so 16+ children stack neatly within a single dagre rank.
+        {
+          selector: 'node.fanout-cluster',
+          style: {
+            'shape': 'round-rectangle',
+            'width': 110,
+            'height': 36,
+            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
+            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
+            'border-width': 1,
+            'label': 'data(label)',
+            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 10,
+            'font-weight': 500,
+            'text-valign': 'center',
+            'text-halign': 'center',
+          },
+        },
+        // Linear edges — solid arrows, gentle arc. Unbundled-bezier
+        // gives every edge a real curve even when it's the only one
+        // between its endpoints (plain bezier degenerates to a straight
+        // line for single source→target pairs). The arc reads as a
+        // living/moving system rather than a static org chart.
         {
           selector: 'edge[kind = "linear"]',
           style: {
-            'curve-style': 'bezier',
+            'curve-style': 'unbundled-bezier',
+            'control-point-distances': [40],
+            'control-point-weights': [0.5],
             'target-arrow-shape': 'triangle',
             'line-color': '#A1A1C0',
             'target-arrow-color': '#A1A1C0',
@@ -3073,27 +3240,142 @@ const CLIENT_JS = `
           },
         },
       ],
-      // dagre extension: hierarchical top-to-bottom layout. Forge workflows
-      // are short (≤8 phases) so dagre's layered layout reads cleanly.
-      layout: {
-        name: 'dagre',
-        rankDir: 'LR',
-        nodeSep: 60,
-        rankSep: 100,
-        edgeSep: 20,
-        animate: false,
-        fit: true,
-        padding: 40,
-      },
+      // No layout in constructor — relayoutGraph() below handles dagre
+      // (top level) + grid sub-layouts for expanded fanout clusters.
+      layout: { name: 'preset' },
       minZoom: 0.3,
       maxZoom: 3,
       wheelSensitivity: 0.2,
     });
 
-    // Hover tooltip via title — cytoscape doesn't have native tooltips,
-    // so we wire qtip-style on hover. Skip for v0 (renderer concern).
+    // #85 v1: tap any node to toggle its fanout phase. Flat-node model
+    // — expand swaps the single phase node for N peer task nodes and
+    // rewires the linear edges so each child sits between the prev and
+    // next phase; collapse reverses it. Single global tap handler that
+    // routes by node class (the selector form cy.on('tap', 'node.x',
+    // ...) doesn't fire for elements added after registration in
+    // cytoscape 3.30, so we filter inside).
+    cy.on('tap', (evt) => {
+      const node = evt.target;
+      if (!node || node === cy || !node.isNode || !node.isNode()) return;
+      if (node.hasClass('fanout-parent')) {
+        expandFanoutPhase(cy, node.id(), fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
+        relayoutGraph(cy);
+        return;
+      }
+      if (node.hasClass('fanout-cluster')) {
+        const phaseId = node.id().replace(/:t\\d+$/, '');
+        collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
+        relayoutGraph(cy);
+        return;
+      }
+    });
+
+    // Initial layout: nothing is expanded, so dagre sees only phase
+    // nodes (one per phase) plus linear edges — a simple horizontal
+    // chain.
+    relayoutGraph(cy);
+
     // Esc key closes.
     document.addEventListener('keydown', graphEscHandler);
+  }
+  // Flat-node layout: dagre alone, no compound nodes. Children of an
+  // expanded fanout phase share a rank; dagre stacks them vertically
+  // (rankDir LR) with nodeSep between siblings. No grid sub-layout
+  // needed because there is no compound parent to size.
+  function relayoutGraph(cy) {
+    cy.layout({
+      name: 'dagre',
+      rankDir: 'LR',
+      nodeSep: 24,
+      rankSep: 120,
+      edgeSep: 12,
+      animate: false,
+      fit: true,
+      padding: 40,
+    }).run();
+  }
+
+  // Expand a fanout phase: replace the single phase node with N peer
+  // task nodes, and rewire the linear edges so prev → each child →
+  // next. The 'fanout-cluster' class on children lets the renderer
+  // group them visually (status-coded smaller nodes).
+  function expandFanoutPhase(cy, phaseId, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
+    const children = fanoutChildrenByPhase[phaseId] || [];
+    if (children.length === 0) return;
+    const { prev, next } = phaseNeighbors[phaseId] || { prev: null, next: null };
+    // Remove the phase node + its incident linear edges.
+    cy.$id(phaseId).connectedEdges('[kind = "linear"]').remove();
+    cy.$id(phaseId).remove();
+    // Add child nodes as peers.
+    cy.add(children.map(c => ({
+      group: 'nodes',
+      data: c.data,
+      classes: 'fanout-cluster',
+    })));
+    // Rewire edges: prev → each child, each child → next. Failed
+    // children are dead-ends — they didn't produce a result for the
+    // next phase to consume, so we omit the outgoing edge. The
+    // incoming edge stays so the failure is still visible as a branch
+    // from the upstream phase.
+    const newEdges = [];
+    for (const c of children) {
+      const cid = c.data.id;
+      if (prev) newEdges.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + cid, source: prev, target: cid, kind: 'linear' } });
+      if (next && c.data.status !== 'failed') newEdges.push({ group: 'edges', data: { id: 'e:linear:' + cid + '->' + next, source: cid, target: next, kind: 'linear' } });
+    }
+    if (newEdges.length > 0) cy.add(newEdges);
+    expandedPhases.add(phaseId);
+  }
+
+  // Collapse a fanout phase: remove its child nodes + their edges, and
+  // restore the single phase node + its two linear edges (prev → phase,
+  // phase → next).
+  function collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
+    const children = fanoutChildrenByPhase[phaseId] || [];
+    const neighbors = phaseNeighbors[phaseId] || { prev: null, next: null };
+    const prev = neighbors.prev;
+    const next = neighbors.next;
+    // Remove children + their incident edges.
+    for (const c of children) {
+      const node = cy.$id(c.data.id);
+      if (node.length > 0) {
+        node.connectedEdges().remove();
+        node.remove();
+      }
+    }
+    // Re-add the phase node.
+    const phaseData = phaseNodeDataById[phaseId];
+    if (phaseData) {
+      cy.add({ group: 'nodes', data: phaseData, classes: 'fanout-parent collapsed' });
+    }
+    // Re-add the two phase-level edges.
+    const edgesToAdd = [];
+    if (prev) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + phaseId, source: prev, target: phaseId, kind: 'linear' } });
+    if (next) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + phaseId + '->' + next, source: phaseId, target: next, kind: 'linear' } });
+    if (edgesToAdd.length > 0) cy.add(edgesToAdd);
+    expandedPhases.delete(phaseId);
+  }
+  // Label for fanout-parent nodes — collapsed shows summary; expanded shows
+  // phase name + chevron (children carry their own labels). Non-fanout nodes
+  // keep the default label.
+  // Single-line by design: cytoscape's multiline-via-\\n is finicky with
+  // text-wrap and caused rendering issues in earlier iterations. Compact
+  // single-line summary works.
+  function fanoutCollapsedLabel(n) {
+    if (!n.data('hasFanout')) return n.data('label');
+    if (n.hasClass('collapsed')) {
+      const tc = n.data('taskCounts') || {};
+      const total = tc.total || 0;
+      const done = tc.complete || 0;
+      const failed = tc.failed || 0;
+      let summary = ' (' + total;
+      if (done > 0) summary += ', ' + done + ' done';
+      if (failed > 0) summary += ', ' + failed + ' failed';
+      summary += ')';
+      return '▸ ' + n.data('label') + summary;
+    }
+    return '▾ ' + n.data('label');
   }
 
   function graphEscHandler(e) {
@@ -3129,6 +3411,10 @@ const CLIENT_JS = `
     renderMiddle();
     renderDetail();
     await loadRuns();
+    // #97 — auth indicator. Fetch once on bootstrap, then refresh every 60s
+    // so SSO-expiring-during-the-session transitions surface in the UI.
+    void loadAuthMode();
+    setInterval(loadAuthMode, 60000);
   }
   bootstrap();
 })();

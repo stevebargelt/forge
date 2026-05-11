@@ -10,6 +10,7 @@ import {
   resolveAwsProfile,
   resolveAwsRegion,
   validateCredsForNewRun,
+  getAuthState,
   AUTH_ERROR_PREFIX,
 } from "./creds.js";
 
@@ -306,4 +307,60 @@ test("AUTH_ERROR_PREFIX is a stable string the dashboard sniffs for", () => {
   // check still passes (it imports the constant). But downstream tooling /
   // tests / docs that hardcode the string would break — keep it stable.
   assert.equal(AUTH_ERROR_PREFIX, "Auth error: ");
+});
+
+// -------- getAuthState (#97 indicator backend) --------
+
+test("getAuthState: oauth default → health=ok, no identity", () => {
+  const s = getAuthState();
+  assert.equal(s.mode, "anthropic-oauth");
+  assert.equal(s.health, "ok");
+  assert.equal(s.identity, "");
+  assert.equal(s.remediation, "");
+});
+
+test("getAuthState: apikey mode → health=ok, no identity", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test";
+  const s = getAuthState();
+  assert.equal(s.mode, "anthropic-apikey");
+  assert.equal(s.health, "ok");
+  assert.equal(s.identity, "");
+});
+
+test("getAuthState: bedrock + fresh SSO → health=ok with identity", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "sgws-poc";
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+  });
+  const s = getAuthState();
+  assert.equal(s.mode, "bedrock");
+  assert.equal(s.health, "ok");
+  assert.equal(s.identity, "sgws-poc");
+});
+
+test("getAuthState: bedrock + expired SSO → health=expired with remediation", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "sgws-poc";
+  writeSsoCache("session.json", {
+    startUrl: "https://example.awsapps.com/start/",
+    accessToken: "tok-abc",
+    expiresAt: new Date(Date.now() - 1000).toISOString(),
+  });
+  const s = getAuthState();
+  assert.equal(s.mode, "bedrock");
+  assert.equal(s.health, "expired");
+  assert.equal(s.identity, "sgws-poc");
+  assert.ok(s.remediation.includes("aws sso login --profile sgws-poc"));
+});
+
+test("getAuthState: bedrock + no SSO cache → health=expired", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "sgws-poc";
+  const s = getAuthState();
+  assert.equal(s.mode, "bedrock");
+  assert.equal(s.health, "expired");
+  assert.ok(s.remediation.includes("aws sso login"));
 });

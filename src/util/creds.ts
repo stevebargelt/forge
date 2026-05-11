@@ -217,6 +217,48 @@ export function validateCredsForNewRun(): void {
   // which still surfaces clearly at the first task dispatch.
 }
 
+// Snapshot of the dashboard's auth state for the indicator (#97). Pure
+// inspection — no throws. Returns enough for the UI to render dot + mode +
+// identity without any client-side env-sniffing.
+export type AuthState = {
+  mode: CredsMode;
+  // 'ok' = ready to use. 'expired' = bedrock SSO token has expired (or never
+  // logged in). 'missing' = mode requires something that isn't there
+  // (e.g. ANTHROPIC_API_KEY missing in apikey mode — though detectCredsMode
+  // won't return apikey if the var is absent, so this branch is theoretical
+  // for now and reserved for #106's future provider checks).
+  health: "ok" | "expired" | "missing";
+  // Short identity string for display ("sgws-poc" for bedrock profile, etc.).
+  // Empty string when no identity metadata is available (oauth/apikey).
+  identity: string;
+  // Action the user should take when health !== 'ok'. Empty when ok.
+  remediation: string;
+};
+
+export function getAuthState(): AuthState {
+  const mode = detectCredsMode();
+  if (mode === "bedrock") {
+    const profile = resolveAwsProfile();
+    const cacheDir = join(awsConfigDir(), "sso", "cache");
+    if (!existsSync(cacheDir) || !hasFreshSsoCache(cacheDir)) {
+      return {
+        mode,
+        health: "expired",
+        identity: profile,
+        remediation: `aws sso login --profile ${profile}`,
+      };
+    }
+    return { mode, health: "ok", identity: profile, remediation: "" };
+  }
+  if (mode === "anthropic-apikey") {
+    return { mode, health: "ok", identity: "", remediation: "" };
+  }
+  // oauth: report 'ok' here. The docker-volume probe is too expensive to run
+  // on every dashboard load — if it's actually missing, run-creation surfaces
+  // a clear error. The indicator stays optimistic for oauth.
+  return { mode, health: "ok", identity: "", remediation: "" };
+}
+
 // Scan ~/.aws/sso/cache/ for at least one *session* cache file (has top-level
 // `startUrl` AND `accessToken`) with a non-expired `expiresAt`. The directory
 // also contains client-registration files (one per `clientId`) which have a

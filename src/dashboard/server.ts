@@ -7,7 +7,7 @@ import { dirname, resolve } from "node:path";
 import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
 import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, WORKFLOW_GROUPS, UNIVERSAL_FIELDS } from "./workflowSchema.js";
-import { AUTH_ERROR_PREFIX } from "../util/creds.js";
+import { AUTH_ERROR_PREFIX, getAuthState } from "../util/creds.js";
 import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
@@ -92,6 +92,15 @@ function handleGet(path: string, res: ServerResponse): void {
   if (path === "/api/runs") {
     const runs = queries.listRunsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ runs }));
+    return;
+  }
+
+  if (path === "/api/auth-mode") {
+    // #97 — dashboard auth indicator. Read-only snapshot of the active mode +
+    // identity hint + health, computed from the dashboard process's env. Re-
+    // evaluated on every GET so the indicator catches SSO expiry without a
+    // dashboard restart (the dashboard polls this on a schedule client-side).
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(getAuthState()));
     return;
   }
 
