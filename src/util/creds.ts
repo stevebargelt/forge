@@ -27,31 +27,29 @@ export type CredsMode = "bedrock" | "anthropic-oauth" | "anthropic-apikey";
 const OAUTH_VOLUME_NAME = "forge-claude-oauth";
 
 // Auto-detection precedence (#79):
-//   1. CLAUDE_CODE_USE_BEDROCK=1  → force bedrock
-//   2. CLAUDE_CODE_USE_BEDROCK=0  → force OFF bedrock, fall through to (3)/(4)/(5)
-//   3. ANTHROPIC_API_KEY set      → apikey
-//   4. ~/.aws/config has SSO configured for the active profile → bedrock
-//      ("active profile" = $AWS_PROFILE if set, else [default])
-//   5. Fallback → oauth
+//   1. CLAUDE_CODE_USE_BEDROCK=1   → force bedrock
+//   2. CLAUDE_CODE_USE_BEDROCK=0   → force OFF bedrock, fall through to (3)/(4)/(5)
+//   3. ANTHROPIC_API_KEY set       → apikey
+//   4. AWS_PROFILE set             → bedrock (env var IS the user's "I want AWS" signal)
+//   5. ~/.aws/config has SSO in [default] → bedrock
+//   6. Fallback                    → oauth
 //
-// The auto-detect path means a host with AWS configured doesn't need to source
-// use-bedrock.sh — the dashboard process inherits its env from whatever launched
-// it, so previously, forgetting to source the script silently broke every run.
-// The hard-off (CLAUDE_CODE_USE_BEDROCK=0) lets a user with AWS configured still
-// force oauth/apikey for a session without unsetting AWS env vars.
+// Rule 4 is the key ergonomic: any AWS-aware shell tooling sets AWS_PROFILE
+// (direnv, asdf-aws, the AWS CLI itself when you `aws configure sso`). If the
+// user has AWS_PROFILE in their env, they've already chosen AWS; we shouldn't
+// require them to also remember CLAUDE_CODE_USE_BEDROCK=1.
 //
-// Why we check $AWS_PROFILE instead of just [default]: real AWS configs often
-// have only named profiles like [profile adx-dev], no [default]. Checking
-// [default] alone misses these even when AWS_PROFILE points at the right one.
+// The hard-off (CLAUDE_CODE_USE_BEDROCK=0) lets a user with AWS_PROFILE set
+// still force oauth/apikey without unsetting their shell AWS config.
 export function detectCredsMode(): CredsMode {
   if (process.env.CLAUDE_CODE_USE_BEDROCK === "1") return "bedrock";
   const hardOff = process.env.CLAUDE_CODE_USE_BEDROCK === "0";
   if (!hardOff) {
-    // Auto-detect bedrock from AWS config before falling back to oauth/apikey.
-    // ANTHROPIC_API_KEY still wins over AWS config when both are present, on the
-    // theory that an explicit API key in env is more deliberate than a leftover
-    // ~/.aws/config from someone's workplace.
+    // ANTHROPIC_API_KEY still wins over AWS config when both are present, on
+    // the theory that an explicit API key in env is more deliberate than a
+    // leftover ~/.aws/config from someone's workplace.
     if (process.env.ANTHROPIC_API_KEY) return "anthropic-apikey";
+    if (process.env.AWS_PROFILE) return "bedrock";
     if (hasAwsSsoConfigured()) return "bedrock";
     return "anthropic-oauth";
   }
@@ -61,8 +59,9 @@ export function detectCredsMode(): CredsMode {
 }
 
 // Returns the AWS profile to use for bedrock mode. Honors AWS_PROFILE when set;
-// otherwise falls back to "default" — which is what auto-detected bedrock implies,
-// since the auto-detect only triggers when the default profile has sso_session.
+// otherwise falls back to "default". When AWS_PROFILE is set, that IS the
+// signal that the user wants AWS — detectCredsMode() picks bedrock without
+// needing CLAUDE_CODE_USE_BEDROCK.
 export function resolveAwsProfile(): string {
   return process.env.AWS_PROFILE ?? "default";
 }

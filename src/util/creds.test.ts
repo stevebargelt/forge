@@ -100,28 +100,29 @@ test("AWS config with sso_start_url in default profile auto-detects bedrock (leg
 });
 
 test("AWS config with sso_session only in a named profile + no AWS_PROFILE → oauth fallback", () => {
-  // No AWS_PROFILE in env, named profile has SSO. resolveAwsProfile()
-  // returns 'default', which has nothing in this config, so auto-detect
-  // doesn't fire. Falls through to oauth.
+  // No AWS_PROFILE in env, [default] has nothing. The named profile having
+  // SSO doesn't matter — without AWS_PROFILE, the user hasn't signaled AWS.
+  // Falls through to oauth.
   writeAwsConfig("[profile work]\nsso_session = my-sso\n");
   assert.equal(detectCredsMode(), "anthropic-oauth");
 });
 
-test("AWS_PROFILE points at an SSO-configured named profile → auto-detect bedrock", () => {
-  // The user has [profile adx-dev] with SSO and AWS_PROFILE=adx-dev in env
-  // (typical real-world layout: no [default], just named profiles). The
-  // detector now honors AWS_PROFILE.
+test("AWS_PROFILE set → auto-detect bedrock regardless of config contents", () => {
+  // AWS_PROFILE is the user's signal that they want AWS. The detector picks
+  // bedrock without requiring CLAUDE_CODE_USE_BEDROCK=1. Pre-flight catches
+  // any actual SSO problems at run-creation time.
   process.env.AWS_PROFILE = "adx-dev";
   writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
   assert.equal(detectCredsMode(), "bedrock");
 });
 
-test("AWS_PROFILE points at a profile without SSO → oauth fallback", () => {
-  // Named profile exists but has no SSO config (static keys, role assumption,
-  // etc.). Auto-detect doesn't fire.
+test("AWS_PROFILE set even without SSO config → still bedrock (pre-flight catches misconfig)", () => {
+  // The detector doesn't second-guess AWS_PROFILE — if the user set it, that
+  // intent stands. validateCredsForNewRun handles the "but you have no SSO
+  // cache" case with a clear error message.
   process.env.AWS_PROFILE = "static";
   writeAwsConfig("[profile static]\naws_access_key_id = AKIA...\n");
-  assert.equal(detectCredsMode(), "anthropic-oauth");
+  assert.equal(detectCredsMode(), "bedrock");
 });
 
 test("AWS config without any SSO falls through to oauth", () => {
@@ -387,10 +388,11 @@ test("getAuthState: oauth default → health=ok, no identity, awsAvailable=false
   assert.equal(s.detail.awsAvailable, false);
 });
 
-test("getAuthState: oauth fallback + AWS configured (the Steven case) → awsAvailable=true", () => {
-  // Mode resolves to oauth because there's no AWS_PROFILE and no [default],
-  // but the config does have [profile adx-dev] with SSO. The popover hint
-  // surfaces this so the user knows bedrock is a sourcing-the-script away.
+test("getAuthState: oauth fallback + AWS configured but no AWS_PROFILE → awsAvailable=true", () => {
+  // Edge case: the host has [profile adx-dev] with SSO but the user hasn't
+  // exported AWS_PROFILE in this shell (so the detector picks oauth). The
+  // popover hint surfaces that AWS is available so the user knows to
+  // export AWS_PROFILE if they meant to use bedrock.
   writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
   const s = getAuthState();
   assert.equal(s.mode, "anthropic-oauth");

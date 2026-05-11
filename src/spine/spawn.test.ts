@@ -145,7 +145,12 @@ test("buildDockerArgs: anthropic-apikey mode passes the key, no AWS mount", () =
 });
 
 test("buildDockerArgs: anthropic-oauth mode mounts the OAuth volume, no AWS env", () => {
-  // No CLAUDE_CODE_USE_BEDROCK, no ANTHROPIC_API_KEY → falls through to oauth.
+  // No env signals (no CLAUDE_CODE_USE_BEDROCK, no ANTHROPIC_API_KEY, no
+  // AWS_PROFILE) AND an FORGE_AWS_DIR pointing at a path without an SSO-
+  // configured [default] profile → falls through to oauth. The /dev/null
+  // override is the simplest "definitely no SSO here" stub.
+  process.env.FORGE_AWS_DIR = "/dev/null";
+
   const args = _buildDockerArgs(ARGS_INPUT_BASE);
 
   const claudeMount = pickMount(args, "/home/agent/.claude");

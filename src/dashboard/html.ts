@@ -1389,10 +1389,9 @@ const CLIENT_JS = `
     } else if (a.mode === 'anthropic-oauth') {
       row('Source', 'forge auth login (OAuth subscription)');
       if (d.awsAvailable) {
-        // AWS is configured on this host but auto-detect missed it (likely no
-        // AWS_PROFILE in env). Surface it as a hint so the user knows bedrock
-        // is a sourced-script away — they probably wanted it.
-        row('Note', 'AWS SSO is configured on this host but not armed.');
+        // AWS is configured on this host but the user didn't export
+        // AWS_PROFILE. Tell them — they probably meant bedrock.
+        row('Note', 'AWS SSO is configured on this host but AWS_PROFILE isn\'t set.');
       }
     } else if (a.mode === 'anthropic-apikey') {
       row('Source', 'ANTHROPIC_API_KEY env var');
@@ -1415,7 +1414,7 @@ const CLIENT_JS = `
       if (d.awsAvailable) {
         footer.appendChild(el('div', { style: 'margin-top:6px;' }, [
           document.createTextNode('Use Bedrock instead: '),
-          el('code', null, '. ./scripts/use-bedrock.sh'),
+          el('code', null, 'export AWS_PROFILE=<profile>'),
           document.createTextNode(' (then restart dashboard).'),
         ]));
       }
