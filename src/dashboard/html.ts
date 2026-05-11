@@ -1387,8 +1387,13 @@ const CLIENT_JS = `
       }
       row('Watchdog', d.watchdogRunning ? 'running' : 'not running');
     } else if (a.mode === 'anthropic-oauth') {
-      row('Volume', d.oauthVolume || 'forge-claude-oauth');
-      row('Status', 'optimistic (volume not probed)');
+      row('Source', 'forge auth login (OAuth subscription)');
+      if (d.awsAvailable) {
+        // AWS is configured on this host but auto-detect missed it (likely no
+        // AWS_PROFILE in env). Surface it as a hint so the user knows bedrock
+        // is a sourced-script away — they probably wanted it.
+        row('Note', 'AWS SSO is configured on this host but not armed.');
+      }
     } else if (a.mode === 'anthropic-apikey') {
       row('Source', 'ANTHROPIC_API_KEY env var');
     }
@@ -1407,6 +1412,13 @@ const CLIENT_JS = `
         document.createTextNode('Re-auth: '),
         el('code', null, 'forge auth login'),
       ]));
+      if (d.awsAvailable) {
+        footer.appendChild(el('div', { style: 'margin-top:6px;' }, [
+          document.createTextNode('Use Bedrock instead: '),
+          el('code', null, '. ./scripts/use-bedrock.sh'),
+          document.createTextNode(' (then restart dashboard).'),
+        ]));
+      }
     }
     const switchBlock = el('div', { style: 'margin-top:6px;' });
     switchBlock.appendChild(document.createTextNode('To switch modes: '));

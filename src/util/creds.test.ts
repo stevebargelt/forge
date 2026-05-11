@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   detectCredsMode,
   hasAwsSsoConfigured,
+  hasAnyAwsSsoProfile,
   hasFreshSsoCache,
   resolveAwsProfile,
   resolveAwsRegion,
@@ -98,11 +99,28 @@ test("AWS config with sso_start_url in default profile auto-detects bedrock (leg
   assert.equal(detectCredsMode(), "bedrock");
 });
 
-test("AWS config with sso_session only in a named profile does NOT auto-detect bedrock", () => {
-  // sso_session in [profile work] doesn't help — auto-detect only fires when
-  // the default profile is SSO-configured, because resolveAwsProfile() returns
-  // 'default' when AWS_PROFILE isn't set.
+test("AWS config with sso_session only in a named profile + no AWS_PROFILE → oauth fallback", () => {
+  // No AWS_PROFILE in env, named profile has SSO. resolveAwsProfile()
+  // returns 'default', which has nothing in this config, so auto-detect
+  // doesn't fire. Falls through to oauth.
   writeAwsConfig("[profile work]\nsso_session = my-sso\n");
+  assert.equal(detectCredsMode(), "anthropic-oauth");
+});
+
+test("AWS_PROFILE points at an SSO-configured named profile → auto-detect bedrock", () => {
+  // The user has [profile adx-dev] with SSO and AWS_PROFILE=adx-dev in env
+  // (typical real-world layout: no [default], just named profiles). The
+  // detector now honors AWS_PROFILE.
+  process.env.AWS_PROFILE = "adx-dev";
+  writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
+  assert.equal(detectCredsMode(), "bedrock");
+});
+
+test("AWS_PROFILE points at a profile without SSO → oauth fallback", () => {
+  // Named profile exists but has no SSO config (static keys, role assumption,
+  // etc.). Auto-detect doesn't fire.
+  process.env.AWS_PROFILE = "static";
+  writeAwsConfig("[profile static]\naws_access_key_id = AKIA...\n");
   assert.equal(detectCredsMode(), "anthropic-oauth");
 });
 
@@ -139,11 +157,60 @@ test("hasAwsSsoConfigured tolerates extra whitespace around the = sign", () => {
   assert.equal(hasAwsSsoConfigured(), true);
 });
 
-test("hasAwsSsoConfigured doesn't false-match sso_session in a non-default profile", () => {
+test("hasAwsSsoConfigured (no AWS_PROFILE) only checks [default], not named profiles", () => {
+  // With no AWS_PROFILE in env, hasAwsSsoConfigured() resolves to checking
+  // [default]. SSO in [profile work] doesn't help.
   writeAwsConfig(
     "[default]\nregion = us-east-1\n[profile work]\nsso_session = work-sso\n"
   );
   assert.equal(hasAwsSsoConfigured(), false);
+});
+
+test("hasAwsSsoConfigured honors AWS_PROFILE when set", () => {
+  process.env.AWS_PROFILE = "work";
+  writeAwsConfig(
+    "[default]\nregion = us-east-1\n[profile work]\nsso_session = work-sso\n"
+  );
+  assert.equal(hasAwsSsoConfigured(), true);
+});
+
+test("hasAwsSsoConfigured accepts an explicit profile-name override", () => {
+  // Useful for callers that want to inspect a specific profile regardless
+  // of env state.
+  writeAwsConfig("[profile build]\nsso_session = build-sso\n");
+  assert.equal(hasAwsSsoConfigured("build"), true);
+  assert.equal(hasAwsSsoConfigured("nope"), false);
+});
+
+// -------- hasAnyAwsSsoProfile (popover hint) --------
+
+test("hasAnyAwsSsoProfile: false when no AWS config exists", () => {
+  assert.equal(hasAnyAwsSsoProfile(), false);
+});
+
+test("hasAnyAwsSsoProfile: true when [default] has SSO", () => {
+  writeAwsConfig("[default]\nsso_session = my-sso\n");
+  assert.equal(hasAnyAwsSsoProfile(), true);
+});
+
+test("hasAnyAwsSsoProfile: true when any named [profile X] has SSO", () => {
+  // The case Steven hit: [profile adx-dev] has SSO but no [default].
+  writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
+  assert.equal(hasAnyAwsSsoProfile(), true);
+});
+
+test("hasAnyAwsSsoProfile: ignores [sso-session X] sections (those declare sessions, not profiles)", () => {
+  writeAwsConfig(
+    "[sso-session adx-dev]\nsso_start_url = https://example.awsapps.com/start/\n"
+  );
+  assert.equal(hasAnyAwsSsoProfile(), false);
+});
+
+test("hasAnyAwsSsoProfile: false when only non-SSO profiles exist", () => {
+  writeAwsConfig(
+    "[default]\nregion = us-east-1\n[profile static]\naws_access_key_id = AKIA...\n"
+  );
+  assert.equal(hasAnyAwsSsoProfile(), false);
 });
 
 test("hasAwsSsoConfigured doesn't false-match sso_session as a key fragment", () => {
@@ -311,12 +378,23 @@ test("AUTH_ERROR_PREFIX is a stable string the dashboard sniffs for", () => {
 
 // -------- getAuthState (#97 indicator backend) --------
 
-test("getAuthState: oauth default → health=ok, no identity", () => {
+test("getAuthState: oauth default → health=ok, no identity, awsAvailable=false", () => {
   const s = getAuthState();
   assert.equal(s.mode, "anthropic-oauth");
   assert.equal(s.health, "ok");
   assert.equal(s.identity, "");
   assert.equal(s.remediation, "");
+  assert.equal(s.detail.awsAvailable, false);
+});
+
+test("getAuthState: oauth fallback + AWS configured (the Steven case) → awsAvailable=true", () => {
+  // Mode resolves to oauth because there's no AWS_PROFILE and no [default],
+  // but the config does have [profile adx-dev] with SSO. The popover hint
+  // surfaces this so the user knows bedrock is a sourcing-the-script away.
+  writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
+  const s = getAuthState();
+  assert.equal(s.mode, "anthropic-oauth");
+  assert.equal(s.detail.awsAvailable, true);
 });
 
 test("getAuthState: apikey mode → health=ok, no identity", () => {

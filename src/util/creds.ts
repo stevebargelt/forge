@@ -30,7 +30,8 @@ const OAUTH_VOLUME_NAME = "forge-claude-oauth";
 //   1. CLAUDE_CODE_USE_BEDROCK=1  → force bedrock
 //   2. CLAUDE_CODE_USE_BEDROCK=0  → force OFF bedrock, fall through to (3)/(4)/(5)
 //   3. ANTHROPIC_API_KEY set      → apikey
-//   4. ~/.aws/config has an SSO-backed default profile → auto-detect bedrock
+//   4. ~/.aws/config has SSO configured for the active profile → bedrock
+//      ("active profile" = $AWS_PROFILE if set, else [default])
 //   5. Fallback → oauth
 //
 // The auto-detect path means a host with AWS configured doesn't need to source
@@ -38,6 +39,10 @@ const OAUTH_VOLUME_NAME = "forge-claude-oauth";
 // it, so previously, forgetting to source the script silently broke every run.
 // The hard-off (CLAUDE_CODE_USE_BEDROCK=0) lets a user with AWS configured still
 // force oauth/apikey for a session without unsetting AWS env vars.
+//
+// Why we check $AWS_PROFILE instead of just [default]: real AWS configs often
+// have only named profiles like [profile adx-dev], no [default]. Checking
+// [default] alone misses these even when AWS_PROFILE points at the right one.
 export function detectCredsMode(): CredsMode {
   if (process.env.CLAUDE_CODE_USE_BEDROCK === "1") return "bedrock";
   const hardOff = process.env.CLAUDE_CODE_USE_BEDROCK === "0";
@@ -104,12 +109,44 @@ export function parseAwsProfile(profileName: string): Record<string, string> {
   return out;
 }
 
-// True when the default profile has SSO configured (either the AWS v2 form
-// sso_session or the legacy sso_start_url). Reused by detectCredsMode for the
-// auto-detect path.
-export function hasAwsSsoConfigured(): boolean {
-  const p = parseAwsProfile("default");
+// True when the *active* profile has SSO configured (either the AWS v2 form
+// sso_session or the legacy sso_start_url). The active profile is $AWS_PROFILE
+// when set, otherwise [default]. Reused by detectCredsMode for the auto-detect
+// path. Pass an explicit profile name to override.
+export function hasAwsSsoConfigured(profileName?: string): boolean {
+  const name = profileName ?? resolveAwsProfile();
+  const p = parseAwsProfile(name);
   return Boolean(p["sso_session"] || p["sso_start_url"]);
+}
+
+// True when *any* named profile in ~/.aws/config has SSO configured. Used by
+// the oauth popover to hint that bedrock is available on this host even though
+// auto-detect picked oauth (e.g. the user has [profile adx-dev] but no
+// AWS_PROFILE in env). Cheap: one fs read.
+export function hasAnyAwsSsoProfile(): boolean {
+  const configPath = join(awsConfigDir(), "config");
+  if (!existsSync(configPath)) return false;
+  let text: string;
+  try {
+    text = readFileSync(configPath, "utf8");
+  } catch {
+    return false;
+  }
+  const lines = text.split(/\r?\n/);
+  let inAnyProfile = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.startsWith("[")) {
+      // Match either [default] or [profile X]. Skip [sso-session X] — those
+      // declare reusable sessions, not profiles you'd auth as.
+      inAnyProfile = line === "[default]" || line.startsWith("[profile ");
+      continue;
+    }
+    if (!inAnyProfile) continue;
+    if (/^sso_session\s*=/.test(line)) return true;
+    if (/^sso_start_url\s*=/.test(line)) return true;
+  }
+  return false;
 }
 
 export function oauthVolumeName(): string {
@@ -268,6 +305,10 @@ export type AuthDetail = {
   watchdogRunning?: boolean;
   // oauth-only
   oauthVolume?: string;
+  // Hint surface (#97 follow-up). True when mode resolved to oauth but the
+  // host actually has AWS SSO configured for some profile — the dashboard
+  // user might have wanted bedrock and forgotten to arm it.
+  awsAvailable?: boolean;
 };
 
 export function getAuthState(): AuthState {
@@ -311,7 +352,10 @@ export function getAuthState(): AuthState {
     health: "ok",
     identity: "",
     remediation: "",
-    detail: { oauthVolume: oauthVolumeName() },
+    detail: {
+      oauthVolume: oauthVolumeName(),
+      awsAvailable: hasAnyAwsSsoProfile(),
+    },
   };
 }
 
