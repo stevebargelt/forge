@@ -137,9 +137,6 @@ Lean (a) once we get there — accuracy wins.
 
 **Caught:** 2026-05-11 — conversation traced through "node 9 fails and points to synthesize" → "should it not point to the retry?" → "everything, everywhere, real workflow."
 
-### #104 — GRAPH: Rejects + retries: design (system + UI) session — SUPERSEDED by #105
-**Status:** Closed 2026-05-11. Resolved-by-decision rather than work: the rule for the graph view is "render the real workflow — every task, every relationship." That eliminates the design-session framing (there's no separate set of decisions to make). Scope absorbed into #105.
-
 ### #102 — GRAPH: minimap (overview-with-viewport-rect)
 **Why:** Design's `ycyNE` minimap component sits bottom-right inside the modal canvas (160×100). Renders status-colored thumbnails of phase nodes (using the same fill colors as the main graph) plus a viewport-rect overlay showing where the user is currently panned/zoomed. For a 16-task expanded fanout the main canvas already overflows the modal vertically; the minimap is the natural "where am I" affordance. Today there's no orientation cue once you pan or zoom.
 **How to apply:** Cytoscape has community extensions for minimaps (`cytoscape-navigator` is the standard) but adding it pulls in another CDN dep and the styling won't match. Alternative: roll our own — a fixed-position 160×100 div anchored bottom-right inside `graph-modal-body`, render node thumbnails as colored rects positioned proportionally to their cy positions, draw a viewport rect from cy's pan + zoom state, update on `cy.on('pan zoom')`. Probably 80–120 lines of vanilla code; fewer surprises than the extension. Either way, defer until #100 lands and we know the layout is stable.
@@ -163,9 +160,6 @@ Lean (a) once we get there — accuracy wins.
 - (c) Skip: text summary is honest and at-a-glance enough; progress bar is visual noise we don't need.
 Lean (a) when the time comes — it's what the design is asking for and HTML overlays are well-documented in cytoscape.
 **Caught:** 2026-05-10 — deferred from #85 v1 fanout work for scope.
-
-### #99 — GRAPH: retry chains — SUPERSEDED by #105
-**Status:** Closed 2026-05-11. Was a narrow placeholder ("draw retry edges between failed-and-retried tasks"). The broader rewrite in #105 covers retry chains of any length + reds + every other task relationship, so this entry is no longer the right shape.
 
 ### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
 **Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
@@ -508,10 +502,6 @@ No prompt-tightening fix makes that ambiguity go away. Even with crisp instructi
 **Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
 
 
-### #25 — Validate `onReject` rationale-propagation end-to-end (legacy, partly obsolete)
-**Why:** `onReject` is documented but no workflow used it as of 2026-05-07. The code path (rationale propagation into the remediation phase) was fixed in `d075f9f` but never exercised. **#54's `review` phase will exercise this path** — when the human rejects a design, `onReject: "brief"` loops back and the prompt-author re-runs with `inputs.rejectedRationale` populated. Once #54 ships and a real run rejects a design, this entry can close.
-**How to apply:** Already covered by #54's review phase. Verify `inputs.rejectedRationale` and `inputs.rejectedTaskId` arrive at the brief phase's prompt-author task during the first real reject in a `ui-design` run.
-
 ### #27 — LiteLLM proxy: route each task to the model best suited to it
 **Why:** Today every task hits Anthropic-direct or Bedrock with whatever alias the workflow declared (`spec-writer` → Sonnet, `fast-orchestrator` → Haiku, `deep-thinker` → Opus). That hard-codes provider + family in the workflow. LiteLLM lets us declare model *capabilities* (cheap-fast, balanced, deep, cheap-summarize, etc.) and route per task without rewriting workflows. A reds panel might want a cheap fast model for triage and a stronger one for authoritative; a designer might want Opus for the discover phase and Sonnet for export. Today we can't express that without scattering provider IDs through the workflow files.
 **How to apply:** Run a LiteLLM proxy locally (already partially supported via `FORGE_USE_LITELLM=1`). Define logical aliases in LiteLLM's config that map to the actual best model per task type. Expand `_agentRefs.ts`'s alias set so workflows can pick something more specific than the current three (`spec-writer` / `fast-orchestrator` / `deep-thinker`). Bonus, *not* the goal: LiteLLM also reports per-call cost — wiring that into the empty `model_calls` table gives us a cost view for free, but that's secondary to the routing capability.
@@ -577,6 +567,18 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #104 — GRAPH: Rejects + retries design session — superseded by #105
+**Closed:** 2026-05-12. Resolved-by-decision rather than work: the rule for the graph view is "render the real workflow — every task, every relationship." That eliminates the design-session framing — there's no separate set of decisions to make. Scope absorbed into #105.
+
+### #99 — GRAPH: retry chains — superseded by #105
+**Closed:** 2026-05-12. Was a narrow placeholder ("draw retry edges between failed-and-retried tasks"). The broader rewrite in #105 covers retry chains of any length + reds + every other task relationship, so this entry is no longer the right shape.
+
+### #25 — Validate onReject rationale-propagation end-to-end
+**Closed:** 2026-05-12. Legacy entry from 2026-05-07. The original onReject implementation (#25 in archive — `d075f9f`) shipped years ago; this validation follow-up never got prioritized and the world has moved on. Three reasons to close rather than carry:
+1. ui-design's review-phase reject path has been exercised in real runs since 2026-05-08 (the `#54`-era prompt-author iterations). If it were broken end-to-end we'd have seen it.
+2. The `inputs.rejectedRationale` + `inputs.rejectedTaskId` propagation is unit-tested in `src/spine/gate.test.ts` ("gate reject on a review task triggers onReject and creates a brief task with rejectedRationale").
+3. The bigger reject-UX question — letting the human pick WHICH phase to loop back to — is captured by #93, which is the live ticket. #25's validation framing is subsumed there.
 
 ### #91 — Reconcile bypasses gate=human on recovery
 **Closed:** 2026-05-12 on commit `91f9e17`. **First end-to-end forge feature run that landed real spine code on forge itself.** Architect agent caught two material errors in the original brief (the fix needed to branch on `gate !== "auto"` not `gate === "human"` to also cover `gate: "verdict"`; and needed `markTaskAwaitingGate` not bare `setTaskStatus` to preserve the result payload for human review). Shipped fix:
