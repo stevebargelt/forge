@@ -17,7 +17,7 @@
 // agent run mounts the same volume read-only at /home/agent/.claude.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isWatchdogRunning } from "./sso-watchdog.js";
@@ -155,6 +155,161 @@ export function oauthVolumeName(): string {
 // Path to the host AWS dir that bedrock-mode containers mount RO.
 export function awsConfigDir(): string {
   return process.env.FORGE_AWS_DIR ?? join(homedir(), ".aws");
+}
+
+// -------- OAuth identity hint (#97 follow-up: oauth detail) --------
+//
+// Anthropic OAuth credentials live inside the forge-claude-oauth Docker
+// volume. The credentials file (.credentials.json) is in there; alongside it,
+// claude writes .claude.json containing identity info — email, org name,
+// plan tier, login timestamp. Reading either file requires spinning up a
+// container with the volume mounted (the host can't see the volume
+// contents directly), which costs ~1-2 seconds.
+//
+// To avoid paying that cost on every dashboard poll, we cache a small
+// non-secret subset of .claude.json on the host at ~/.forge/oauth-hint.json
+// and refresh only when the cache is stale. The hint is also written
+// directly by `forge auth login` (no probe needed there — the volume is
+// already mounted in that container).
+
+export type OauthHint = {
+  // Identifies the volume the hint was captured from. If the user's
+  // FORGE_OAUTH_VOLUME changes (rare), this won't match and the probe
+  // will re-run.
+  volumeName: string;
+  // When the hint was written. Used for stale-cache detection.
+  writtenAt: string;
+  // True when the volume has a usable .credentials.json. False is meaningful:
+  // it means we probed and there's no credential, so the dashboard should
+  // surface that instead of optimistic "ready."
+  credsPresent: boolean;
+  // Identity fields — populated only when credsPresent. From .claude.json's
+  // oauthAccount block.
+  email?: string;
+  organizationName?: string;
+  // Plan label that's human-friendly. We surface organizationType ("claude_max")
+  // for now; if Anthropic changes the field, this will need adjusting.
+  plan?: string;
+  // Login or subscription start. From subscriptionCreatedAt; gives "when was
+  // I logged in" context for the popover.
+  loggedInAt?: string;
+};
+
+function oauthHintPath(): string {
+  const forgeHome = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+  return join(forgeHome, "oauth-hint.json");
+}
+
+// Read the cached hint file. Returns null when missing or unparseable; the
+// caller's job to decide whether to re-probe.
+export function readOauthHint(): OauthHint | null {
+  const path = oauthHintPath();
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as OauthHint;
+    if (parsed.volumeName !== oauthVolumeName()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+// True when the cached hint exists, matches the active volume, and is younger
+// than the threshold (5 minutes by default). Used by callers that want to
+// avoid a docker probe when they can.
+export function isOauthHintFresh(maxAgeMs = 5 * 60 * 1000): boolean {
+  const hint = readOauthHint();
+  if (!hint) return false;
+  const age = Date.now() - Date.parse(hint.writtenAt);
+  return Number.isFinite(age) && age >= 0 && age < maxAgeMs;
+}
+
+// Write the hint atomically (write to temp + rename). Caller passes the
+// fields it has; volumeName + writtenAt are filled in here.
+export function writeOauthHint(fields: Omit<OauthHint, "volumeName" | "writtenAt">): void {
+  const forgeHome = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+  mkdirSync(forgeHome, { recursive: true });
+  const path = oauthHintPath();
+  const tmp = path + ".tmp";
+  const hint: OauthHint = {
+    ...fields,
+    volumeName: oauthVolumeName(),
+    writtenAt: new Date().toISOString(),
+  };
+  writeFileSync(tmp, JSON.stringify(hint, null, 2));
+  renameSync(tmp, path);
+}
+
+// Spin a one-shot container with the OAuth volume mounted and read both
+// .credentials.json (presence only) and .claude.json (identity fields) in a
+// single sh invocation. Returns null if docker isn't available or the probe
+// fails; returns a hint with credsPresent=false when the volume exists but
+// the credential file isn't there. The result is also persisted to the host
+// cache, so subsequent callers can use readOauthHint() instead.
+export function probeOauthVolume(): OauthHint | null {
+  const volume = oauthVolumeName();
+  let raw: string;
+  try {
+    // sh script: emit creds-presence flag, then either the .claude.json
+    // content or an empty marker. One docker run, two facts.
+    raw = execFileSync(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "-v",
+        `${volume}:/x:ro`,
+        "alpine",
+        "sh",
+        "-c",
+        // Output format: line 1 = "yes" or "no" for creds presence; lines
+        // 2+ = .claude.json content (or empty if missing). Plain text so we
+        // don't need a JSON parser inside the container's alpine image.
+        '[ -s /x/.credentials.json ] && echo yes || echo no; [ -f /x/.claude.json ] && cat /x/.claude.json || echo ""',
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" }
+    );
+  } catch {
+    // Docker not available, image missing, volume missing — all roll up to
+    // "we can't tell." Caller decides how to surface this.
+    return null;
+  }
+  const newlineIdx = raw.indexOf("\n");
+  if (newlineIdx === -1) return null;
+  const credsPresent = raw.slice(0, newlineIdx).trim() === "yes";
+  const claudeJsonRaw = raw.slice(newlineIdx + 1).trim();
+  let identity: Pick<OauthHint, "email" | "organizationName" | "plan" | "loggedInAt"> = {};
+  if (claudeJsonRaw) {
+    try {
+      const parsed = JSON.parse(claudeJsonRaw) as { oauthAccount?: Record<string, unknown> };
+      const oa = parsed.oauthAccount;
+      if (oa && typeof oa === "object") {
+        const get = (k: string): string | undefined => {
+          const v = oa[k];
+          return typeof v === "string" && v ? v : undefined;
+        };
+        identity = {
+          email: get("emailAddress"),
+          organizationName: get("organizationName"),
+          plan: get("organizationType"),
+          loggedInAt: get("subscriptionCreatedAt"),
+        };
+      }
+    } catch {
+      // Malformed .claude.json — ignore identity fields, keep credsPresent.
+    }
+  }
+  const fields = { credsPresent, ...identity };
+  try {
+    writeOauthHint(fields);
+  } catch {
+    // Cache write is best-effort; getAuthState falls back to probing next time.
+  }
+  return {
+    ...fields,
+    volumeName: volume,
+    writtenAt: new Date().toISOString(),
+  };
 }
 
 export function ensureCreds(): void {

@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,9 @@ import {
   resolveAwsRegion,
   validateCredsForNewRun,
   getAuthState,
+  readOauthHint,
+  isOauthHintFresh,
+  writeOauthHint,
   AUTH_ERROR_PREFIX,
 } from "./creds.js";
 
@@ -24,9 +27,12 @@ const KEYS = [
   "AWS_PROFILE",
   "AWS_REGION",
   "FORGE_AWS_DIR",
+  "FORGE_HOME",
+  "FORGE_OAUTH_VOLUME",
 ];
 let snapshot: Record<string, string | undefined> = {};
 let tmpAwsDir: string;
+let tmpForgeHome: string;
 
 beforeEach(() => {
   snapshot = {};
@@ -36,12 +42,15 @@ beforeEach(() => {
   }
   // Each test gets its own fake ~/.aws dir; tests that want SSO configured
   // write into it explicitly. Tests that want it absent leave it empty.
-  tmpAwsDir = join(
-    tmpdir(),
-    `forge-creds-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  );
+  const stamp = Date.now() + "-" + Math.random().toString(36).slice(2);
+  tmpAwsDir = join(tmpdir(), `forge-creds-test-${stamp}`);
   mkdirSync(tmpAwsDir, { recursive: true });
   process.env.FORGE_AWS_DIR = tmpAwsDir;
+  // Each test also gets its own FORGE_HOME so writeOauthHint() doesn't touch
+  // the user's real cache file.
+  tmpForgeHome = join(tmpdir(), `forge-home-test-${stamp}`);
+  mkdirSync(tmpForgeHome, { recursive: true });
+  process.env.FORGE_HOME = tmpForgeHome;
 });
 
 afterEach(() => {
@@ -50,6 +59,7 @@ afterEach(() => {
     else process.env[k] = snapshot[k];
   }
   rmSync(tmpAwsDir, { recursive: true, force: true });
+  rmSync(tmpForgeHome, { recursive: true, force: true });
 });
 
 function writeAwsConfig(content: string): void {
@@ -443,4 +453,100 @@ test("getAuthState: bedrock + no SSO cache → health=expired", () => {
   assert.equal(s.mode, "bedrock");
   assert.equal(s.health, "expired");
   assert.ok(s.remediation.includes("aws sso login"));
+});
+
+// -------- OAuth hint helpers (#97 follow-up) --------
+
+test("readOauthHint: returns null when hint file doesn't exist", () => {
+  assert.equal(readOauthHint(), null);
+});
+
+test("readOauthHint: returns null on malformed JSON", () => {
+  writeFileSync(join(tmpForgeHome, "oauth-hint.json"), "{not valid");
+  assert.equal(readOauthHint(), null);
+});
+
+test("readOauthHint: returns null when cached volume name doesn't match active", () => {
+  // The active volume is the default "forge-claude-oauth" but the cache was
+  // written for a different name. Treat as a stale hint.
+  writeFileSync(
+    join(tmpForgeHome, "oauth-hint.json"),
+    JSON.stringify({
+      volumeName: "some-other-volume",
+      writtenAt: new Date().toISOString(),
+      credsPresent: true,
+      email: "x@y.com",
+    })
+  );
+  assert.equal(readOauthHint(), null);
+});
+
+test("writeOauthHint + readOauthHint round-trips identity fields", () => {
+  writeOauthHint({
+    credsPresent: true,
+    email: "steve@example.com",
+    organizationName: "Example Org",
+    plan: "claude_max",
+    loggedInAt: "2025-07-26T21:46:20.660879Z",
+  });
+  const hint = readOauthHint();
+  assert.ok(hint);
+  assert.equal(hint!.credsPresent, true);
+  assert.equal(hint!.email, "steve@example.com");
+  assert.equal(hint!.organizationName, "Example Org");
+  assert.equal(hint!.plan, "claude_max");
+  assert.equal(hint!.loggedInAt, "2025-07-26T21:46:20.660879Z");
+  assert.equal(hint!.volumeName, "forge-claude-oauth");
+  assert.ok(hint!.writtenAt);
+});
+
+test("writeOauthHint creates FORGE_HOME if it doesn't exist", () => {
+  // Remove the auto-created dir, write should recreate it.
+  rmSync(tmpForgeHome, { recursive: true, force: true });
+  writeOauthHint({ credsPresent: false });
+  assert.equal(existsSync(join(tmpForgeHome, "oauth-hint.json")), true);
+});
+
+test("writeOauthHint writes atomically (no .tmp file left behind)", () => {
+  writeOauthHint({ credsPresent: true, email: "x@y.com" });
+  assert.equal(existsSync(join(tmpForgeHome, "oauth-hint.json")), true);
+  assert.equal(existsSync(join(tmpForgeHome, "oauth-hint.json.tmp")), false);
+});
+
+test("writeOauthHint can record credsPresent=false (probe ran, found nothing)", () => {
+  writeOauthHint({ credsPresent: false });
+  const hint = readOauthHint();
+  assert.ok(hint);
+  assert.equal(hint!.credsPresent, false);
+  assert.equal(hint!.email, undefined);
+});
+
+test("isOauthHintFresh: false when no hint exists", () => {
+  assert.equal(isOauthHintFresh(), false);
+});
+
+test("isOauthHintFresh: true for a just-written hint", () => {
+  writeOauthHint({ credsPresent: true, email: "x@y.com" });
+  assert.equal(isOauthHintFresh(), true);
+});
+
+test("isOauthHintFresh: false when hint is older than threshold", () => {
+  writeFileSync(
+    join(tmpForgeHome, "oauth-hint.json"),
+    JSON.stringify({
+      volumeName: "forge-claude-oauth",
+      writtenAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10m ago
+      credsPresent: true,
+    })
+  );
+  assert.equal(isOauthHintFresh(), false);
+  // But true if we lift the threshold:
+  assert.equal(isOauthHintFresh(15 * 60 * 1000), true);
+});
+
+test("writeOauthHint honors FORGE_OAUTH_VOLUME override in volumeName field", () => {
+  process.env.FORGE_OAUTH_VOLUME = "test-volume";
+  writeOauthHint({ credsPresent: true });
+  const raw = JSON.parse(readFileSync(join(tmpForgeHome, "oauth-hint.json"), "utf8")) as { volumeName: string };
+  assert.equal(raw.volumeName, "test-volume");
 });
