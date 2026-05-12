@@ -61,48 +61,6 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 ## Active
 
-### #111 — Verify phase blocked by native-module mismatch (HIGH PRIORITY)
-**Why:** Caught 2026-05-12 during the #91 verify task. **The verify phase cannot actually verify any change that touches the store layer** — and that's most spine changes. Every test that imports from `src/store/*` (which transitively imports `better-sqlite3`) fails inside the agent container with `ERR_DLOPEN_FAILED: invalid ELF header`. The host's `node_modules/better-sqlite3/build/Release/better_sqlite3.node` is a macOS arm64 native binary (built when forge was `npm install`'d on the Mac), but the agent-dev-worker container is Linux x86_64. Mounting the host project read-only carries the wrong-platform native module straight into the container; the dynamic loader rejects it on first store-touching `import`.
-
-**Concrete evidence:** Inside the container, running `npx tsx --test src/spine/reconcile.test.ts`:
-```
-not ok 1 - reconcile: running task with no result.json stays still_running
-  failureType: 'hookFailed'
-  error: '/project/node_modules/better-sqlite3/build/Release/better_sqlite3.node: invalid ELF header'
-  code: 'ERR_DLOPEN_FAILED'
-```
-All 13 reconcile tests fail identically; retry.test.ts and every other store-touching test file behave the same way. Same suite passes 328/328 on the host.
-
-**Impact:** Every PR that touches spine ships effectively unverified by reds at the test level. The verify agent does a static code review as a fallback (and was correct in its #91 review), but that's strictly weaker than running the tests. The agent's failure-mode signal ("0 of 13 tests passed") looks alarming in dashboard summaries even when the work is correct; humans have to read the evidence string to know it's infra, not regression.
-
-**Three approaches, each with trade-offs:**
-
-1. **Rebuild better-sqlite3 inside the container before tests run.** Add a step to the verify (and red) phase that runs `npm rebuild better-sqlite3 --build-from-source` (or `pnpm rebuild better-sqlite3`) before invoking the test runner. Cleanest semantically — same install on both platforms. Costs: 30-60s per container (gcc/python/node-gyp compile) AND requires build tools in the agent image (`build-essential` + `python3`, currently absent in agent-dev-worker). Either bake the prereqs into the image OR pull a prebuilt binary the second time the container runs.
-
-2. **Per-platform `node_modules` in a docker volume.** Mount the project read-only but install deps in the container's own writable layer (or a named volume keyed by container platform). Project files come from host; deps come from container. Adds setup time on first run; subsequent runs are fast. Complicates the "agent sees what the human sees" mental model — the agent's `node_modules/` ≠ the host's. May cause subtle version-drift bugs.
-
-3. **Replace better-sqlite3 with a pure-JS binding.** `sql.js` (WASM SQLite, no native compile) or `@libsql/client` (TypeScript native). Eliminates the platform-mismatch class of bug. Real cost: better-sqlite3 is fast and synchronous; alternatives are either async (libsql) or slow (sql.js). Forge uses the synchronous API extensively. Replacing it touches every file in `src/store/`.
-
-**Lean: option 1.** Honest about what the container does, doesn't change the codebase, fits forge's "containers run the same code as humans do" philosophy. Cost is acceptable for the verify phase (~1 minute extra per run; we already wait minutes for agents). Implementation:
-- Add `build-essential`, `python3`, `python-is-python3` to the agent-dev-worker Dockerfile.
-- Wrap the test invocation in the verify and red seeds with `npm rebuild better-sqlite3 --build-from-source >/dev/null 2>&1; npx tsx --test ...`.
-- Verify that other native deps in `node_modules` (none today, but check) don't have the same issue.
-
-**Acceptance:**
-- Verify phase runs `npm test` (or equivalent) inside the container and gets the same result as the host (328+ tests pass).
-- Red agents that run tests see them pass too (relevant for #109 transactional reconcile + future red tests).
-- New build adds ~30-60s per agent invocation; documented as acceptable.
-
-**Out of scope:**
-- Picking up other native deps if forge adds them later (we'll discover them the same way: a red verdict that reads "DLOPEN_FAILED" the moment they show up).
-- Switching SQLite bindings (option 3).
-
-**Composite with #109:** #109 wants to test transactional rollback with a fault-injection harness. That harness needs working tests inside the container — so #111 blocks #109.
-
-**Priority:** HIGH. Per Steven 2026-05-12: "feels like this is highest priority — after we finish the #91 run." File it so the next session starts here.
-
-**Caught:** 2026-05-12 by the #91 verify agent, surfaced clearly in its evidence string.
-
 ### #110 — Require rationale when advancing over a failed red (any gate type)
 **Why:** Caught 2026-05-12 during the #91 test run. red-backend (specialist) failed on task-build-aa57f1 with two findings. Dashboard's gate UI allowed advance with **no rationale text whatsoever** — just a click. The spine layer (`src/spine/gate.ts` lines 79-83) does enforce a rationale requirement when specialist reds have failed, but **only for `gate: "verdict"` phases** (gated by line 69's `phase.gate === "verdict"` outer check). For `gate: "human"` phases (like the architect/build/synthesize phases on most workflows), the check is skipped entirely.
 
@@ -824,6 +782,15 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #111 — Verify phase blocked by native-module mismatch
+**Closed:** 2026-05-12 on branch `verify-container-111` → merged to main as `da06410`. Test suite 328/328 passes inside the agent container, matching host. Shipped:
+- `docker/forge-test.sh`: wrapper that copies `/project` to `/tmp/forge-work`, rebuilds `better-sqlite3` for the container platform, runs tests there. ~30s overhead per container; host's `/project` is never mutated (works under `:ro` mount too — reds can now run tests).
+- `docker/agent-dev-worker.Dockerfile`: bakes the wrapper at `/usr/local/bin/forge-test`. `build-essential` + `python3` were already present so no other prereqs needed.
+- `docker/.dockerignore`: allows `forge-test.sh` into the build context.
+- `seeds/agents/verifier/CLAUDE.md`: documents `forge-test` usage and the platform-mismatch rationale, replacing the previous "agent figures out testing" looseness that produced #91's diagnostic-only verify behavior.
+**Approach taken:** option 1 from the original entry (rebuild in container) — chosen over per-platform `node_modules` volumes (option 2) or swapping the SQLite binding (option 3). Cost: ~30s per container, acceptable.
+**Unblocks:** #109 (transactional reconcile + fault-injection tests).
 
 ### #95 — Copy-id button next to run name in run-detail header
 **Closed:** 2026-05-09 overnight, on branch `graph-view-85` (251 tests, no test deltas — pure UI).
