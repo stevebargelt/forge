@@ -1061,7 +1061,6 @@ a { color: var(--accent); text-decoration: none; }
   margin-left: var(--space-sm);
 }
 .graph-modal-close {
-  margin-left: auto;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -3321,11 +3320,17 @@ const CLIENT_JS = `
     root.innerHTML = '';
     const overlay = el('div', { class: 'graph-modal-overlay' });
     const run = state.runDetail.run;
+    // #103 — status pill on the right of the modal header. Reuses the
+    // existing run-status badge palette so the graph-view label reads the
+    // same as the run-row badge in the sidebar. Active is rendered as
+    // "running" per the dashboard convention.
+    const runStatusLabel = rowDisplayStatus(run);
     overlay.appendChild(el('div', { class: 'graph-modal-header' }, [
       el('span', { class: 'graph-modal-title' }, [
         'GRAPH VIEW',
         el('span', { class: 'breadcrumb' }, run.workflow + ' · ' + run.id),
       ]),
+      el('span', { class: 'badge status-' + run.status, style: 'margin-left: auto;' }, runStatusLabel),
       el('button', {
         class: 'graph-modal-close',
         title: 'Close (esc)',
