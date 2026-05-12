@@ -106,32 +106,6 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 **Caught:** 2026-05-12 by red-backend on the #91 build. Real architectural concern, just not specific to #91.
 
-### #108 — Dashboard: gate-advance should auto-dispatch the next phase
-**Why:** Caught 2026-05-12. After gating advance through the dashboard (e.g. architect phase complete, reds pass, human clicks "Advance"), the run sits idle until the human ALSO clicks "Run Next." Two clicks for one mental action. Worse: the advance-preview line under the gate panel — added in #71 — literally says *"Advancing dispatches the architect phase (architect)."* That copy is a lie under current behavior. Gate only creates the next-phase tasks as `pending`; it's `next()` that actually spawns containers. Steven's exact words: "I thought we fixed this but after the architect (plus two red agents) I advanced then I still had to click Run Next."
-
-**Why it works this way today:** `gate()` and `next()` are deliberately separable primitives at the spine layer. CLI's `forge gate <id> advance` prints "Next: forge next <runId>" and stops — that's the right shape for CLI composability. But the dashboard is a different surface: when a human clicks Advance from a UI, they expect work to continue, not to have to re-engage with a second button. The split between gate-completion and dispatch is a model-layer concern that shouldn't leak through to the dashboard's UX.
-
-**Symptoms beyond the extra click:**
-- Advance-preview copy is misleading.
-- If the human walks away after clicking Advance assuming agents are running, they're not.
-- Fanout phases especially feel broken — "Advance, oh wait, also Run Next, now 16 tasks are spawning."
-
-**Fix (lean):** Dashboard's `handleGate` in `src/dashboard/server.ts` chains into `handleNext` after a successful `advance`. Both already shell out to the `forge` CLI; the change is to invoke `forge next <runId>` as a second step when decision === 'advance' AND `forge gate` exited 0 AND the run isn't already complete. The auth-error sniffing already exists for both calls — reuse it. CLI behavior stays unchanged (forge gate prints the "Next: forge next ..." line, user runs it manually) — that's idiomatic for CLI.
-
-**Edge cases to handle in the chain:**
-- Advance on a terminal phase → run completes via gate(); `forge next` becomes a no-op. Safe to call anyway.
-- Advance into a manual phase (`gate: "human"` with no agents, e.g. ui-review) → next-phase task is awaiting_human_input; `forge next` reports awaiting_human_input. Fine.
-- Advance into a fanout phase → `forge next` dispatches all N children. This is the case where users feel the bug most acutely today, and it'll work cleanly.
-- Gate fails (verdict aggregation fail, blocked_by_red without --force) → don't chain into next.
-
-**Out of scope for this entry:**
-- Spine-level "advance and dispatch" combined primitive. Would affect CLI semantics; current proposal keeps CLI composable as-is.
-- Auto-chaining `next` after `reject` or `request-changes` — those land in different states by design; the human should decide what's next.
-
-**Open question worth flagging:** the gate POST response today returns `{ taskId, decision, summary }`. After the chain lands, should the response also surface what `forge next` did — e.g. "dispatched architect phase (3 tasks)" — so the toast can confirm action? Likely yes; same pattern as advance-preview but as a confirmation rather than a preview.
-
-**Caught:** 2026-05-12. Real surface emerged during a live #91 test-run kick-off discussion.
-
 ### #105 — GRAPH: full task-graph rendering (every task, every relationship) — HOLD FOR DESIGNER
 **Why:** Caught 2026-05-11 while iterating #100's flat-node fanout in `graph-view-85`. After the cluster-shape question was resolved (keep flat, add curves), the next correctness issue surfaced: **the graph view shows a sanitized, summary-flavored projection of the workflow, not the real workflow.** Concretely, on `run-code-review-terry-workflow-586a86` (an investigation run), the expanded fanout shows 16 task nodes including one failed (`#9`) with no outgoing edge — but the actual run has **5 failed investigate tasks, each followed by a successful retry** (`task-investigate-cd2572.parentId = task-investigate-176b68` and four similar pairs), plus **2 red-investigate review tasks per successful task** (32 reds total). None of the retries or reds appear in the graph today. The human needs the graph view to be a *holistic picture of what happened/is happening*, not the pill-row's compact summary rendered as boxes.
 
@@ -782,6 +756,12 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #108 — Dashboard: gate-advance auto-dispatches the next phase
+**Closed:** 2026-05-12 on branch `auto-dispatch-108` → merged to main. Test suite at 333/333 (+5 server tests). Shipped:
+- `src/dashboard/server.ts`: `handleGate` chains into `forge next` after a successful `advance`. Skips the chain on reject/request-changes and on already-complete runs. Auth errors from the chained dispatch route to 400; other dispatch errors to 500 with a clear "Advanced X but dispatch failed" prefix. Response gains optional `dispatched: true` + `dispatchSummary` so the dashboard toast can confirm both halves happened.
+- `src/dashboard/server.test.ts`: 5 new tests covering happy chain, reject doesn't chain, complete-run doesn't chain, dispatch failure → 500, dispatch auth error → 400.
+- CLI behavior unchanged (`forge gate` still prints "Next: forge next ..." and exits). The chain is dashboard-only convenience, preserving CLI composability.
 
 ### #111 — Verify phase blocked by native-module mismatch
 **Closed:** 2026-05-12 on branch `verify-container-111` → merged to main as `da06410`. Test suite 328/328 passes inside the agent container, matching host. Shipped:
