@@ -6,58 +6,38 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**⚠️ READ FIRST — uncommitted WIP in working tree:**
-The graph view fanout cluster expansion (#85 v1) is partially built and **broken** in the working tree. `git status` will show `src/dashboard/html.ts`, `src/dashboard/graphView.ts`, `src/dashboard/graphView.test.ts` modified. **Do NOT discard these changes.** They are diagnosed in BACKLOG #100 with full iteration history + three hypotheses + bail-out plan. Resume there before starting anything else if graph view is the focus.
+**State at end of 2026-05-12.** Main is clean, 341/341 tests passing, typecheck green. The big graph-view-85 branch landed and 4 more feature branches landed on top of it. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
 
-Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showing the broken fanout layout. Use them as evidence; safe to delete after fix lands.
+**What shipped this multi-day session (most recent first):**
+- **#109** transactional reconcile writes (fault-injection tests + `_setReconcileFaultForTest` hook). Dispatch + gate writes split out to **#112** as follow-up.
+- **#103** GRAPH: run-status pill in graph-view header.
+- **#110** rationale required when advancing over a failed specialist red. Two-layer fix: spine extends the check beyond `gate: "verdict"` phases; dashboard surfaces red verdict cards + flips the Advance button to btn-warning with a required-rationale toast.
+- **#108** dashboard gate-advance auto-chains into `forge next` so the user doesn't need a second click.
+- **#111** verify-phase native-module mismatch — agent container now ships `/usr/local/bin/forge-test` that copies project to `/tmp/forge-work`, rebuilds better-sqlite3 for the container platform, runs tests there. Host's `/project` is never mutated; tests work under `:ro` mount (so reds can run tests too).
+- **#100** graph view fanout layout — flat-node model + curves + failed-children-as-dead-ends.
+- **#97** auth-mode indicator + popover. Bedrock shows full account/role/expiry detail; oauth shows email/org/plan from a host-side hint cache populated by `forge auth login`.
+- **#79** auto-detect bedrock from `~/.aws/config` + pre-flight checks at `forge new` and `forge next`.
 
----
+**Top of the active stack now:**
+1. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Has the fault-injection harness from #109 as a reference.
+2. **#105** (HOLD FOR DESIGNER) — full task-graph rendering. Don't start implementation until the designer's pass on the four Graph View frames in `~/code/forge-design/dashboard.pen` lands. The brief inside #105 captures the agreed direction: tasks not phases, free-form canvas, no bands.
+3. **#102** minimap and **#101** side panel — deferred awaiting #105 direction.
+4. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
+5. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 (specialist red + specialist implementer seeds) shipped overnight 2026-05-09 but aren't exercised end-to-end yet.
 
-**State at start of 2026-05-10 morning session:** Branch `graph-view-85` is 21 commits ahead of main (last night's 19 + this morning's 2 BACKLOG entries: #97 auth-mode picker + #100 graph fanout bug). 266 tests passing **with WIP applied** (260 without). Typecheck green at HEAD; WIP also typechecks but renders broken.
-
-**Playwright MCP is now available** via Docker Desktop (Steven configured 2026-05-10). Use it for the graph view fix — iterating blind via screenshots wasted hours of last session.
-
----
-
-**What shipped this morning (2026-05-10) before the WIP:**
-
-1. **`ca563a4` — BACKLOG #97 (auth-mode picker).** Captured: dashboard inherits parent shell's creds env at launch; manual override picker complements #79's auto-detect. Architecture-only; no code shipped.
-2. **`1e8c314` — BACKLOG #100 (graph view fanout broken — HIGH PRIORITY).** Comprehensive diagnosis of the WIP: collapsed view works (detach-on-collapse approach), expanded view has dagre layout-order bugs. Three hypotheses to try in order, with the flat-node-model bail-out as #C.
-
-**What shipped overnight 2026-05-09 (full list in `git log`):**
-
-- **#96 foundation** — six new agent seeds (red-frontend/backend/security + frontend/backend/infosec implementers), `RedConfig.additional` schema, specialist reds wired into `build` phase across feature*. **Not yet exercised by a real run.**
-- **Status Reference + Component Library alignment** — three awaiting_* badges collapse to single `awaiting · subtype` label, magenta blocked_by_red, complete (not success), pill iconography (⚖/👤/🚨/⊘/✕/✓).
-- **Graph view v0** — cytoscape + dagre via CDN, full-screen modal, status-coded phase nodes, linear forward edges + dashed magenta onReject back-edges, no fanout expansion (that's the WIP that broke).
-- **#95 copy-id button** next to run name.
-
----
-
-**Top of the stack now:**
-
-1. **Fix #100 graph view fanout layout (HIGH PRIORITY).** WIP is in working tree. Read #100, then iterate with Playwright eyes-on. Hypothesis A first: explicit width/height on compound parents before dagre. If A+B fail, fall back to Hypothesis C (flat node model — no compound nodes). **Don't commit until visually verified.**
-2. **Visual review of the morning's design alignment** (pill iconography, status-badge collapse, blocked_by_red magenta). Confirm via Playwright. Capture follow-up entries if anything is off.
-3. **Decide on merge path** for the 21-commit branch. Lean fast-forward as-is once #100 resolves. Alternative: cherry-pick the foundation work (#96 specialists + design alignment + #95) to main and leave the broken graph-view WIP on this branch until it's fixed.
-4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Daytime architectural conversation. Ready when you are.
-5. **#73 reds-as-reviewer architectural call.** Adjacent to #96 but distinct shape.
-
----
+**Useful runtime state:**
+- `forge auth status` will warn if the legacy `forge-claude-oauth` volume is still around (orphaned by #97's mount migration). Steven can `docker volume rm forge-claude-oauth` whenever.
+- DB backup at `~/.forge/forge.db.bak.before-110-test` from the #110 live-verification dance. Safe to delete.
+- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`. Any spawn after that gets the wrapper.
 
 **Honest flags:**
+- **Specialist reds wiring** (#96 sub-shifts 1+2) was exercised by the #91 forge run on 2026-05-12 — red-backend correctly raised a specialist-fail on transactional concerns. So they DO work end-to-end now.
+- **#25 + #32 still un-validated end-to-end** (reject/onReject flow, failed-result detection).
+- **#91 forge run** was the first real `feature` workflow run on forge itself. Architect agent correctly caught two material brief errors that would have shipped real bugs. That's the model working as designed.
 
-- **Specialist reds aren't tested end-to-end yet.** Wiring is correct, tests pass, but no real `feature*` run has exercised them since the foundation landed. First real run will be the smoke test.
-- **Graph view v0 (single-node phases, no fanout) DOES work.** That part shipped clean overnight. The WIP is specifically the v1 fanout-cluster-expansion layer on top.
+**Local-only file (gitignored):** none currently. The old `.overnight-plan-2026-05-09.md` was deleted.
 
-**Validation still pending from prior work:**
-- #25 (reject + `onReject` flow) — un-validated end-to-end.
-- #32 (failed-result detection) — code shipped, hasn't caught a real failure yet.
-- Specialist reds (overnight) — not yet run end-to-end.
-
-**Branch state:** `graph-view-85`, 21 commits ahead of main, WIP in working tree (uncommitted, broken layout per #100). 266 tests passing with WIP, 260 without.
-
-**Watchdog status:** works.
-
-**Local-only file (gitignored):** `.overnight-plan-2026-05-09.md` at repo root captures yesterday's plan. Safe to delete.
+**Branch hygiene:** local-only branches still around — `auto-dispatch-108`, `rationale-on-red-fail-110`, `graph-status-pill-103`, `transactional-writes-109`, `verify-container-111`, `graph-view-85`, `phase-flow-71`. Delete whenever via `git branch -d <name>`. Main carries all the work.
 
 ## Active
 
@@ -175,67 +155,6 @@ Lean (a) once we get there — accuracy wins.
 **Composite with #104, #99:** both retry conversations expect the side panel as their surface. Land #104 first to decide what the panel shows for retry-loaded tasks, then build #101.
 **Caught:** 2026-05-11 — design reconciliation. Steven's call: defer + write up.
 
-### #100 — GRAPH: fanout layout is broken (HIGH PRIORITY — needs Playwright eyes-on)
-**Why:** Caught 2026-05-10 morning. After landing #85 v1 fanout-cluster expansion, the layout breaks in ways I couldn't fix iterating blind via screenshots. Multiple rounds of changes shipped without browser verification; user confirmed "still off" after each. **Stopped iterating, captured this.**
-
-**Current uncommitted state** (working tree on `graph-view-85`):
-- `src/dashboard/html.ts` — fanout cluster expansion via detach-on-collapse approach (children stored in JS Map, added/removed on toggle, NOT compound nodes hidden via display:none)
-- `src/dashboard/graphView.ts` — emits child nodes with `data.parent` for fanout phases
-- `src/dashboard/graphView.test.ts` — 6 new tests for fanout (all passing, 266 total)
-- All typecheck + tests green; **layout visually wrong**
-
-**What works:**
-- Data layer is correct. Server emits the right shape (6 unit tests pass).
-- Collapsed view *with the detach approach* renders investigate as a single 220×60 node with summary label "▸ investigate (16, 15 done, 1 failed)". Confirmed by user.
-- Click-to-toggle interaction works — children get added on expand, removed on collapse.
-- Grid sub-layout produces a 4×4 of children for the 16-task case. Visible in screenshot.
-
-**What's broken (from user screenshots):**
-1. **Expanded view: frame-question overlaps the cluster.** dagre's top-level layout puts frame-question in the same horizontal lane as the expanded investigate cluster. The compound parent's bounding box at dagre time is too small.
-2. **Expanded view: synthesize sits 600+ pixels below the cluster.** dagre is leaving rank-space for the cluster's height but not its width.
-3. **Expanded view: linear edges cut diagonally through the cluster.** Even with `curve-style: taxi`, the routing is wrong. Edges should bend around cluster boundaries.
-
-**Iteration history (what I tried, in order):**
-1. v0 attempt: `display: none` on children, fixed width/height on collapsed parent. **Failed:** cytoscape's compound auto-sizing ignored the width/height rules — collapsed parent stayed sized to children's bounding box.
-2. v1 attempt: detach children entirely on collapse (cache in JS Map, add/remove via cy.add / cy.remove). **Worked for collapsed view.** Expanded view layout broke.
-3. v1.1: layout order swap — grid sub-layouts BEFORE dagre, so dagre sees correct compound parent sizes. Bumped rankSep 100→150, nodeSep 60→80. **Didn't fix overlap per user.**
-4. v1.2: `curve-style: taxi` on linear edges for orthogonal routing around clusters. **Didn't fix per user (still off).**
-
-**Where the bugs likely are (educated guesses, untested without Playwright):**
-
-**Hypothesis A: cytoscape-dagre doesn't respect compound parent bounding boxes correctly.** dagre.js handles top-level nodes; cytoscape-dagre extension wraps it but might not pass compound dimensions through. Real fix would be: compute each compound parent's effective size manually before dagre, then either:
-- Set explicit `width` / `height` on each compound parent before dagre runs
-- Or give dagre a custom `boundingBox` per compound
-
-**Hypothesis B: order of operations is still wrong.** Even after my swap, cytoscape may compute compound bounding boxes lazily — dagre asks for sizes, gets stale ones from before the grid sub-layout finished. Fix: force a `cy.style().update()` or similar between sub-layout and dagre. Or run dagre twice (initial + post-grid).
-
-**Hypothesis C: cytoscape compound nodes are the wrong primitive entirely.** Could render fanout as N peer top-level nodes between phases (no compound), with linear edges from upstream → each task → downstream. dagre handles that natively (parallel ranks). Less "cluster"-shaped visually but layout works. **This is the bail-out plan.**
-
-**What to try first when this resumes (with Playwright connected):**
-
-1. **Open `http://127.0.0.1:8022/` in Playwright.** Click into `run-code-review-terry-workflow-586a86` (investigation, 4 phases, 16-task fanout). Open graph view. Screenshot collapsed state. Click investigate. Screenshot expanded state.
-2. **Inspect compound parent size in console** after expand: `cy.$('#n:investigate').boundingBox()`. Compare to actual visual size. If they differ → Hypothesis A.
-3. **Try Hypothesis A fix:** after grid sub-layout, manually set `cy.$('node.fanout-parent:not(.collapsed)').forEach(p => { const bb = p.boundingBox(); p.style({ width: bb.w, height: bb.h }); })` before dagre runs.
-4. **If A doesn't work, try B:** add `cy.layout({...dagre}).run(); cy.layout({...dagre}).run();` — two dagre passes. The second pass sees the first pass's positions as inputs. Brutal but sometimes works.
-5. **If neither, fall back to Hypothesis C:** rewrite to flat node model. Children become top-level nodes; phase becomes a virtual concept marked by a label/color band. dagre is happy with parallel ranks.
-
-**Files touched (uncommitted):**
-- `src/dashboard/html.ts` — fanout-parent class, openGraphView modifications, relayoutGraph helper, fanoutCollapsedLabel, GRAPH_STATUS_COLORS, taxi edge style. ~150 lines added across the cytoscape config + helpers.
-- `src/dashboard/graphView.ts` — buildGraphData emits compound child nodes; CyNode.data gains `parent` field.
-- `src/dashboard/graphView.test.ts` — 6 fanout tests.
-
-**Suggest next session:**
-1. **Stash current state** (`git stash push -m "fanout v1 wip — expanded layout bug per #100"`) to keep main branch clean during diagnosis.
-2. **Connect Playwright MCP** (now configured via Docker Desktop per Steven 2026-05-10).
-3. **Pop the stash, iterate with Playwright eyes-on.** Validate Hypothesis A first; bail to C if A+B don't pan out.
-4. **Don't commit until visual review confirms** all three failure modes (overlap, gap, edge routing) are resolved.
-
-**Test count if reverting:** stash pop restores 266; without it 260 (no fanout tests).
-
-**Branch state:** `graph-view-85`, 20 commits ahead of main, working tree dirty with #100 WIP.
-
-**Caught:** 2026-05-10 morning. Steven's call: "I don't want to commit broken code." Documented + stashed; resume with browser feedback loop.
-
 ### #98 — GRAPH: fanout-collapsed node polish (progress bar + tags)
 **Why:** v1 fanout-cluster-expansion (this morning's work) renders the collapsed node as `name + "16 tasks · 15 done · 1 failed"` text. The design Component Library's `fanout-collapsed-node` atom has more — a thin progress bar (green-bar for done + red-sliver for failed) and chip tags (`15 done` `1 failed`) inside the node. v1 deferred those because cytoscape's native node-rendering doesn't have a clean primitive for in-node bars/chips.
 **How to apply:** Three options worth weighing:
@@ -247,44 +166,6 @@ Lean (a) when the time comes — it's what the design is asking for and HTML ove
 
 ### #99 — GRAPH: retry chains — SUPERSEDED by #105
 **Status:** Closed 2026-05-11. Was a narrow placeholder ("draw retry edges between failed-and-retried tasks"). The broader rewrite in #105 covers retry chains of any length + reds + every other task relationship, so this entry is no longer the right shape.
-
-### #97 — Auth-mode indicator in the dashboard chrome
-**Why:** Today the dashboard inherits whatever creds env the parent shell had at launch and surfaces nothing about it. If you forgot to source `use-bedrock.sh` first, every run created via the modal uses anthropic-oauth (or fails at SSO if you have AWS configured but no token). The failure shows up 30 seconds into the run, not at click-time. Visibility is the fix: make the dashboard's auth state glanceable so "what is this forge wired to right now" is never a guess.
-
-**Auth is a system property of the dashboard process, not a per-run setting.** Confirmed 2026-05-11: agents spin up without human interaction, and an agent has no business picking credentials. The container's env is frozen at spawn, so even in-flight changes wouldn't reach a running task. The dashboard process holds env once at launch; to change auth, you `pkill forge dashboard`, source different shell config, relaunch. (CLI invocations re-read env each call, so they don't need "restarting" — they just inherit the current shell.) In-flight tasks finish under their spawn-time auth regardless.
-
-**The indicator (this entry's only surface):**
-- **Location:** upper-left sidebar, between the FORGE wordmark (line 1214 in `html.ts`) and the search box (line 1218). Treated as system context — what this forge is wired to — before the user gets to the runs list.
-- **Content:** single line of geist-mono, small. Mode + identity hint + health dot. Examples:
-  - `● bedrock · sgws-poc` (green dot, fresh SSO)
-  - `● bedrock · sgws-poc` (amber dot, SSO expired — hover tooltip says "run `aws sso login --profile sgws-poc`")
-  - `● anthropic-oauth · ready` (green dot)
-  - `● anthropic-apikey · set` (green dot — no identity metadata available for API keys)
-  - `● no auth configured` (red dot)
-- **Interaction:** read-only. No click target, no popover, no override controls. Maybe a tooltip on hover that explains the state in more words. Changing auth = restart dashboard with different shell env.
-- **Identity sources** (cheap, no API calls):
-  - bedrock: `AWS_PROFILE` env var
-  - anthropic-oauth: presence of `forge-claude-oauth` docker volume (no identity beyond "ready")
-  - anthropic-apikey: presence of `ANTHROPIC_API_KEY` (no identity)
-- **Health detection** (cheap, no network):
-  - bedrock fresh: `~/.aws/sso/cache/*.json` exists AND `expiresAt` field is in the future
-  - bedrock expired: cache file exists but `expiresAt` is past, or cache is empty
-  - anthropic-oauth: docker volume exists (deeper validity check requires `claude` invocation — skip)
-  - anthropic-apikey: env var is non-empty (no remote validity check)
-
-**Design intent — hierarchical-ready display for #106's future:** Today there's one provider (Anthropic) in three credential flavors. The indicator's structure is `{provider} · {credential}` with provider implicit. When #106 (provider abstraction for OpenAI/Codex + future) lands, the indicator generalizes to show the active provider — no UI rewrite, just an additional segment.
-
-**Out of scope for this entry:**
-- Per-run auth override (rejected 2026-05-11 — agents don't pick auth, dashboard process does).
-- Auth setup flows inside the dashboard (`aws sso login`, `forge auth login`, paste-an-API-key). Still happens at the shell, outside forge.
-- Click-to-change-auth controls. Restart-the-dashboard is the change mechanism.
-- New providers (#106).
-
-**Composite with #79:** #79 auto-detects bedrock when the host has AWS configured but the shell didn't source the bedrock script. The indicator + #79 together mean: if AWS is configured, the indicator shows green-bedrock without ceremony; if AWS is misconfigured, the indicator shows amber/red and the user knows to fix something before clicking new-run. Land #79 first — the indicator's accuracy depends on the detector being smart.
-
-**Composite with #103 (run-status pill in graph view top-bar):** both are small status indicators with similar visual vocabulary (dot + label, status-coded). Worth a quick styling sweep when #103 lands so they feel like the same family.
-
-**Caught:** 2026-05-10 morning — original framing "auth-mode picker." 2026-05-11 conversation simplified to indicator-only after confirming auth is a dashboard-process property, not a per-run or per-agent setting.
 
 ### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
 **Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
@@ -517,24 +398,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 **Why:** Caught alongside #80. Validator looks for `<basename(designDir)>.pen`; with shared corpora the filename is meaningful (`dashboard.pen`), not derived. The seed-convention is too tight.
 **How to apply:** `submitValidators.ts` — replace fixed-name lookup with `readdirSync(designDir).filter(f => f.endsWith('.pen'))`. Error if zero (with a clear "did Pencil save?" message); error if multiple (ambiguity, list found files); pass if exactly one. The non-zero check still applies. ~10 lines.
 
-### #79 — Dashboard creds-mode parity: arm bedrock automatically + pre-flight check
-**Why:** Caught 2026-05-08 mid-phase-flow run. `forge new` from the dashboard runs as a child of the dashboard process; the dashboard inherits the env it was forked with. If the user *didn't* `. ./scripts/use-bedrock.sh` before launching the dashboard, every run created from the modal is broken — agent containers start without AWS creds and fail Bedrock auth ~3 minutes in with a 403. CLI runs are fine because the user happens to source bedrock at the prompt; dashboard runs are silently broken with no way to arm bedrock from the modal.
-**Symptom Steven hit:** task-brief-6cc6ca failed twice in a row with `403 The security token included in the request is expired`. Host AWS creds were valid; the dashboard process simply didn't have the bedrock env vars. Workaround: kill the dashboard, source use-bedrock.sh, relaunch the dashboard. Untenable.
-
-**Two-part fix (real, not workaround):**
-
-**Part A — auto-arm bedrock when AWS is configured.** Dashboard (and `forge` CLI more broadly) detects "this machine has AWS bedrock-style configuration" — heuristic: `~/.aws/config` exists AND the `AWS_PROFILE` env var is set OR a `default` profile exists with `sso_session` configured. When that's true, dashboard treats bedrock as the default mode regardless of whether `CLAUDE_CODE_USE_BEDROCK=1` was set in the launching shell. Effectively: if you have AWS configured for bedrock, you don't need to remember to source the script.
-- Implementation lives in `util/creds.ts`. `detectCredsMode()` becomes a smarter detector. `CLAUDE_CODE_USE_BEDROCK=1` stays as a hard override (force on); `CLAUDE_CODE_USE_BEDROCK=0` stays as a hard override (force off). Otherwise auto-detect.
-- Dashboard processes also need to launch the SSO watchdog if they detect bedrock — today the watchdog only starts via the run-time spawn flow. Auto-armed dashboard should kick off the watchdog the moment the first bedrock run is created, just like the CLI does.
-
-**Part B — pre-flight check at run-creation.** When `forge new` resolves a Bedrock model id but `~/.aws/sso/cache/*.json` is empty or stale (token expired), refuse to create the run with a clear error: "Bedrock mode active but no valid SSO token; run `aws sso login --profile <name>` and try again." This surfaces the failure mode before spawning a doomed container 3 minutes later. Lives in `cli/commands/new.ts` between `loadWorkflow` and `insertRun`.
-- Same check should happen at the modal POST handler — surface as a structured error to the dashboard so the toast says something actionable instead of "forge new exited 1."
-
-**Combined effect:** if AWS is configured, bedrock works from the dashboard without ceremony. If AWS *isn't* configured (token expired, profile missing), the failure is surfaced at run-creation time with a clear remediation path instead of failing 3 minutes into the agent's first API call.
-
-**Out of scope but worth noting:** picking creds-mode from the modal (option B from the discussion) is friction every time and not what we want. Auto-detect + pre-flight is the right shape.
-
-
 ### #77 — Evaluate Preact + htm for the dashboard
 **Why:** Caught 2026-05-08 — Steven: "I think we need to start thinking about using React." The elapsed-time bug (#76), smart-refresh (#72), input-value preservation, form state across re-renders, scroll preservation, optgroup vs flat-fallback fork — all symptoms of hand-rolling reactive primitives. Each individually is <50 lines; cumulatively the dashboard's html.ts is ~2000 lines doing what a real reactive layer would do for free. The dashboard is forge's primary UX (FORGE-DEC-015); investing in the right tool compounds.
 **Three options to weigh:**
@@ -562,22 +425,6 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 **Composite with #92:** if architect is properly scoped (#92), most architect-rejects will be "your scope was wrong, redo architect with fixed expectations" — looping to architect is the right target. Today's onReject loops to brief. Different outcomes; different right answers depending on what failed.
 
 **Caught the wrong way:** at 04:30 UTC, mid-run-shutdown. Architect output got rejected; brief re-spawned automatically; killed manually. Should have been: reject → "redo architect" picker → architect re-runs against the corrected seed.
-
-### #91 — Reconcile bypasses gate=human on recovery
-**Why:** Caught 2026-05-09 ~04:30 UTC during the architect phase of run-forge-phase-flow-visualization-f55801. The architect container exited cleanly + wrote 13KB of valid result.json, but the parent forge process never observed `close` (similar shape to #74). When reconcile recovered the orphan, it called `markTaskComplete` directly — skipping the `gate: "human"` step that the architect phase's config requires.
-
-**The bug:** in reconcile.ts (lines ~75 + the no-reds branch), recovery → `markTaskComplete` regardless of phase.gate. For a `gate: "human"` phase that's wrong; for a `gate: "auto"` phase it's correct. The same logic in dispatch.ts's normal path (lines ~107-112) DOES check phase.gate — auto → markComplete, human → setStatus(awaiting_gate). Reconcile should mirror that.
-
-**For phases with reds:** the right reconcile behavior is also more nuanced. If the phase has reds and they were never spawned (because the parent forge died before kicking them off), reconcile today doesn't spawn them either — it just marks complete. This means specialist reds get silently skipped on orphan recovery. For specialist (non-blocking) reds, that's mostly OK; for authoritative reds with gateOnVerdict, it's a real correctness issue.
-
-**Three things to fix:**
-1. `gate: "human"` recovery → `awaiting_gate` instead of `complete`. (Easiest.)
-2. `gate: "auto"` recovery → `complete` (current behavior, correct).
-3. Phase has reds + reds never ran → spawn reds during reconcile. Or, more conservatively, transition to `awaiting_gate` and let the human force-advance through; the missed reds are an audit gap that's surface-able. **Split out to #107** — separate design question, not part of this fix.
-
-**Manual recovery for the in-flight run (2026-05-09 04:30 UTC):** SQL `UPDATE tasks SET status='awaiting_gate' WHERE id='task-architect-c29474'` after reconcile flipped it to `complete`. Architect output landed correctly; just needs human gate.
-
-**Composite with #74:** the orphan-detection problem is upstream (forge loses the docker child); the gate-honoring problem is downstream (reconcile's recovery logic). Fixing one doesn't fix the other. Both worth doing.
 
 ### #107 — Reds-during-reconcile: missed-reds-on-orphan-recovery is a design question
 **Why:** Split from #91 (item 3) on 2026-05-12. When forge recovers an orphan task whose phase has reds attached, the reds may never have been spawned — the parent forge died before kicking them off. Reconcile today (post-#91) just transitions the task per its gate type and continues, silently skipping the reds. For **specialist reds** (gateOnVerdict: false, informational only) that's mostly fine — the audit is lossy but the workflow continues correctly. For **authoritative reds** (gateOnVerdict: true) that's a real correctness gap: reds were supposed to gate the advance, but their absence is invisible to the human.
@@ -730,6 +577,30 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #91 — Reconcile bypasses gate=human on recovery
+**Closed:** 2026-05-12 on commit `91f9e17`. **First end-to-end forge feature run that landed real spine code on forge itself.** Architect agent caught two material errors in the original brief (the fix needed to branch on `gate !== "auto"` not `gate === "human"` to also cover `gate: "verdict"`; and needed `markTaskAwaitingGate` not bare `setTaskStatus` to preserve the result payload for human review). Shipped fix:
+- `src/spine/reconcile.ts`: orphan blue recovery now branches on phase.gate — `auto` → `markTaskComplete`, otherwise → `markTaskAwaitingGate`. Red-task path unchanged (guarded by `!task.parentId`).
+- 3 new tests cover gate=auto, gate=human, gate=verdict paths; 2 pre-existing tests fixed to pin `gate: "auto"` so they actually exercise the auto branch (they were silently relying on the old broken behavior).
+**Item 3 (reds-during-reconcile)** split out as #107 — separate design question.
+
+### #100 — GRAPH: fanout layout broken
+**Closed:** 2026-05-11 on branch `graph-view-85` → merged to main as part of `ed7e8c5`. Three failure modes from the original capture (overlap, gap, edge-cut) resolved by shipping Hypothesis C — flat-node model, no cytoscape compound parents. Children of an expanded fanout phase are top-level peer nodes; dagre handles parallel ranks natively. Plus curved edges (`unbundled-bezier`) so the graph reads as flow not org-chart, plus failed children rendered as dead-ends (no outgoing edge to next phase) matching real workflow semantics. Original WIP (compound nodes + grid sub-layout) is gone.
+
+### #97 — Auth-mode indicator in the dashboard chrome
+**Closed:** 2026-05-11/12 across `0c58d65`, `5d4580e`, `d92c32f`, `81e0193`, `0748752`, `73b0bb8`, `2c1e6b4`, `487da9f`, `c39643c`. Shipped:
+- Read-only indicator under the FORGE wordmark in the sidebar. Single line of geist-mono: `● {mode} · {identity}` with the dot color-coded by health (green/amber/red).
+- Click opens a popover with mode-specific detail. Bedrock shows profile, account, role, region, SSO portal, token expiry + remaining time, watchdog status. OAuth shows account email, organization, plan tier, login date (sourced from a host-side hint cache populated by `forge auth login`). Apikey is intentionally bare — leaking key prefixes/suffixes was a security concern.
+- Polled every 60s; SSO-expires-mid-session auto-surfaces without a dashboard restart.
+- AWS_PROFILE env var alone now triggers bedrock auto-detect (no need to set CLAUDE_CODE_USE_BEDROCK=1). Migrated the OAuth volume mount from `/home/agent/.claude` to `/home/agent` so `.claude.json` (account info) is captured alongside `.credentials.json` (token); volume name bumped to `forge-claude-oauth-v2`.
+- Async-loaded Google Fonts via media-swap so a blocked `fonts.googleapis.com` (corp proxies) doesn't freeze paint.
+
+### #79 — Auto-detect bedrock + pre-flight check
+**Closed:** 2026-05-11/12 across `f3d2d76`, `8f1c464`, `7ab5231`. Shipped:
+- `detectCredsMode()` auto-detects bedrock when AWS_PROFILE is set or when `~/.aws/config` has SSO configured for the active profile. `CLAUDE_CODE_USE_BEDROCK=0` is the hard-off override.
+- Pre-flight validation at both `forge new` and `forge next` — bedrock SSO cache freshness check, apikey env-var presence check. Dashboard's POST routes auth errors via `AUTH_ERROR_PREFIX` to a 400 toast, not a generic 500.
+- New helpers: `resolveAwsProfile()` (defaults to "default"), `resolveAwsRegion()` (defaults to us-east-1), `hasAwsSsoConfigured()`, `hasFreshSsoCache()`, `hasAnyAwsSsoProfile()`.
+- 19+ new tests in `creds.test.ts` covering every detector branch.
 
 ### #109 — Transactional reconcile writes
 **Closed:** 2026-05-12 on branch `transactional-writes-109` → merged to main. Test suite 341/341 (+3 reconcile tests). Scoped to reconcile only; dispatch + gate split out to #112.
