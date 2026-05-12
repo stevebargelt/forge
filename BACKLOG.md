@@ -61,28 +61,29 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 ## Active
 
-### #109 — Transactional reconcile + dispatch writes
-**Why:** Caught 2026-05-12 by red-backend (specialist) on task-build-aa57f1's #91 build. `reconcile.ts:80-124` performs multiple DB writes per task: (1) markTaskComplete or markTaskAwaitingGate, (2) insertVerdict for red tasks, (3) setTaskStatus on the parent (awaiting_gate or blocked_by_red). These are *not* wrapped in a transaction. A crash, disk-full, or DB-constraint violation between writes leaves the database in an inconsistent state — e.g., red task marked complete but its verdict row never inserted, parent stuck in running. On retry, reconcile sees a complete red task and won't re-attempt, so the verdict is permanently lost.
+### #112 — Transactional dispatch + gate writes (reconcile-half landed as #109)
+**Why:** Caught 2026-05-12 alongside #109. The reconcile-half of "wrap multi-write per-task sequences in a transaction" shipped on `951824e` (3 writes per task, fault-injection tests, full rollback semantics). The same shape exists in:
 
-**Important context:** This is **NOT introduced by #91's fix.** The same shape existed before #91 — single `markTaskComplete` call, then verdict insert, then parent transition, all separate writes. #91 just changed the conditional logic around the first write. **dispatch.ts's normal-path has the same shape** — same lack of transactional wrapping. Fix should apply uniformly to both paths, not just reconcile.
+- **`src/spine/dispatch.ts:107-128`** — the happy-path tail after the agent container exits. Two writes (setTaskStatus + logEvent), or four if reds get spawned. Trickier than reconcile because the writes flank an async `spawnRed()` call; the transaction boundary has to wrap **only** the writes, not the docker work. Possible split: pre-spawn writes in one txn, post-spawn writes in another.
+- **`src/spine/gate.ts:96-122` + `:166-178`** — advance + reject paths. `gate.ts:96-122` performs `insertGate` + `setTaskStatus` + `createPhaseTasks` (which calls insertTask N times) + maybe `updateRunStatus` for terminal phases. All synchronous, all should be one transaction so an advance that fails to create downstream tasks rolls back the gate decision too.
 
-**Affected paths:**
-- `reconcile.ts:80-124` (orphan recovery, the path #91 just fixed).
-- `dispatch.ts:107-128` (normal happy-path after agent container exits).
-- Possibly `gate.ts:97-122` (advance creates next-phase tasks; multiple insertTask calls).
+**Why this didn't ship with #109:** scope. #109 as originally filed listed three paths; the right thing in practice was to focus the fault-injection harness on the orphan-recovery path (where the failure mode is most visible — `reconcile` is what re-runs after a crash, so any non-atomicity there gets stuck on retry). Dispatch + gate are less commonly the recovery point: if dispatch fails mid-writes, the next `forge next` re-dispatches; if gate fails mid-writes, the human re-clicks. But the cleanliness argument still stands — these should be wrapped.
 
-**Approach:** Wrap each per-task state-transition sequence in a SQLite transaction via `better-sqlite3`'s `db.transaction()` helper. Each function (the per-task body of reconcile/dispatch/gate) becomes a transaction. On any throw inside, the entire DB state for that task rolls back; the higher-level loop continues to the next task. Failure semantics: the partial DB state is gone; the task stays in whatever pre-transaction state it had (still running, awaiting agent exit, etc.); reconcile on next forge invocation re-attempts cleanly.
+**Approach (mirrors #109):**
+- Use `getDb().transaction(() => { ... })()` around each multi-write sequence.
+- Sprinkle a `_fault(at)` test hook at named points so tests can inject failures without monkey-patching the store.
+- Tests: fault-injection rollback + retry-pin (next call after a transient fault recovers cleanly).
 
 **Acceptance:**
-- Each multi-write sequence in reconcile/dispatch/gate is wrapped in a transaction.
-- Existing tests still pass.
-- New tests inject a fault between writes (e.g. mock insertVerdict to throw on first call) and assert the DB state rolls back — task still in pre-transaction state, no orphan verdict row, no partial parent transition.
+- Dispatch's post-spawn write block + (if applicable) its red-spawn-followup writes are each transactional.
+- Gate's advance + reject paths are each one transaction covering all writes including createPhaseTasks.
+- Each path has at least one fault-injection test asserting rollback + one retry test asserting subsequent recovery.
 
-**Open questions:**
-- Should `cy.layout`-style cascading writes inside transactions skip `logEvent` (which writes to its own table)? Probably yes — events are audit-log-style append-only and shouldn't fail with the transaction.
-- Are there cross-task writes that span multiple transactions (one task's gate creates next-phase tasks)? Yes — gate.ts:97-122 advances task A then inserts tasks B/C/D for the next phase. Probably want both halves in one transaction so an advance that fails to create downstream tasks rolls back.
+**Out of scope:**
+- Wrapping the async spawn/spawnRed calls themselves (they take minutes; a sync better-sqlite3 transaction would hold the DB lock the whole time).
+- Cross-task transactions (one big txn spanning many tasks). Per-task boundaries are the right granularity.
 
-**Caught:** 2026-05-12 by red-backend on the #91 build. Real architectural concern, just not specific to #91.
+**Caught:** 2026-05-12 — scope-split from #109 at land-time.
 
 ### #105 — GRAPH: full task-graph rendering (every task, every relationship) — HOLD FOR DESIGNER
 **Why:** Caught 2026-05-11 while iterating #100's flat-node fanout in `graph-view-85`. After the cluster-shape question was resolved (keep flat, add curves), the next correctness issue surfaced: **the graph view shows a sanitized, summary-flavored projection of the workflow, not the real workflow.** Concretely, on `run-code-review-terry-workflow-586a86` (an investigation run), the expanded fanout shows 16 task nodes including one failed (`#9`) with no outgoing edge — but the actual run has **5 failed investigate tasks, each followed by a successful retry** (`task-investigate-cd2572.parentId = task-investigate-176b68` and four similar pairs), plus **2 red-investigate review tasks per successful task** (32 reds total). None of the retries or reds appear in the graph today. The human needs the graph view to be a *holistic picture of what happened/is happening*, not the pill-row's compact summary rendered as boxes.
@@ -729,6 +730,13 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #109 — Transactional reconcile writes
+**Closed:** 2026-05-12 on branch `transactional-writes-109` → merged to main. Test suite 341/341 (+3 reconcile tests). Scoped to reconcile only; dispatch + gate split out to #112.
+- `src/spine/reconcile.ts`: per-task write batch wrapped in `getDb().transaction(...)`. Rollback on throw leaves the task in `running`; the next reconcile call re-attempts cleanly. Catch logs to stderr (not the DB — the failure may itself be a DB write failure).
+- Added a test-only `_setReconcileFaultForTest(step, error)` hook + named fault points (`after-mark-blue`, `after-log-completed`, `after-insert-verdict`, `after-log-verdict`). Lets fault-injection tests verify rollback without monkey-patching the store module.
+- 3 new tests: rollback on mid-sequence fault (after mark-blue) + rollback of both writes (verdict insert + parent transition) + retry-pin (subsequent reconcile succeeds).
+**Unblocked by #111** — needed in-container test runs to do fault-injection work end-to-end.
 
 ### #103 — GRAPH: top-bar run-status pill
 **Closed:** 2026-05-12 on branch `graph-status-pill-103` → merged to main. Suite at 338/338 (no test deltas — single-span chrome addition).
