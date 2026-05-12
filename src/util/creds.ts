@@ -411,10 +411,22 @@ export function validateCredsForNewRun(): void {
     }
     return;
   }
-  // oauth: defer to ensureCreds at spawn time. The docker-volume probe is
-  // expensive (spins up a container) and not worth running per `forge new`;
-  // the failure mode here is the user not having run `forge auth login`,
-  // which still surfaces clearly at the first task dispatch.
+  // oauth: consult the host-side hint cache. If the cache is fresh and says
+  // credsPresent=false, fail at click time rather than wedging a task ~30
+  // seconds into the first spawn. If the cache is stale or absent, probe
+  // the volume once (1-2s) and use that result. If even the probe can't
+  // tell us (docker down), defer to ensureCreds at spawn time — same as
+  // before.
+  let hint = readOauthHint();
+  if (!hint || !isOauthHintFresh()) {
+    const probed = probeOauthVolume();
+    if (probed) hint = probed;
+  }
+  if (hint && hint.credsPresent === false) {
+    throw new Error(
+      `${AUTH_ERROR_PREFIX}OAuth volume '${oauthVolumeName()}' has no credentials. Run \`forge auth login\` and try again.`
+    );
+  }
 }
 
 // Snapshot of the dashboard's auth state for the indicator (#97). Pure
@@ -457,8 +469,15 @@ export type AuthDetail = {
   ssoPortal?: string;      // host part of session cache's startUrl
   expiresAt?: string;      // ISO timestamp from the session cache
   watchdogRunning?: boolean;
-  // oauth-only
+  // oauth-only — populated from the host-side hint file (oauth-hint.json),
+  // which is written by `forge auth login` and refreshed by probeOauthVolume().
   oauthVolume?: string;
+  oauthEmail?: string;            // emailAddress from oauthAccount
+  oauthOrganization?: string;     // organizationName
+  oauthPlan?: string;             // organizationType (e.g. "claude_max")
+  oauthLoggedInAt?: string;       // subscriptionCreatedAt
+  oauthHintWrittenAt?: string;    // when the hint was last refreshed; "stale"
+                                  // pre-login users see this empty
   // Hint surface (#97 follow-up). True when mode resolved to oauth but the
   // host actually has AWS SSO configured for some profile — the dashboard
   // user might have wanted bedrock and forgotten to arm it.
@@ -498,18 +517,41 @@ export function getAuthState(): AuthState {
   if (mode === "anthropic-apikey") {
     return { mode, health: "ok", identity: "", remediation: "", detail: {} };
   }
-  // oauth: report 'ok' here. The docker-volume probe is too expensive to run
-  // on every dashboard load — if it's actually missing, run-creation surfaces
-  // a clear error. The indicator stays optimistic for oauth.
+  // oauth: read the host-side hint cache. If fresh, use it. Otherwise probe
+  // the volume once (1-2s) and write a new hint. The probe failure modes
+  // (docker not running, volume missing) leave us with a stale-or-absent
+  // hint; we still return a sensible state but mark health=missing.
+  let hint = readOauthHint();
+  if (!hint || !isOauthHintFresh()) {
+    const probed = probeOauthVolume();
+    if (probed) hint = probed;
+  }
+  const detail: AuthDetail = {
+    oauthVolume: oauthVolumeName(),
+    awsAvailable: hasAnyAwsSsoProfile(),
+  };
+  if (hint) {
+    detail.oauthHintWrittenAt = hint.writtenAt;
+    if (hint.email) detail.oauthEmail = hint.email;
+    if (hint.organizationName) detail.oauthOrganization = hint.organizationName;
+    if (hint.plan) detail.oauthPlan = hint.plan;
+    if (hint.loggedInAt) detail.oauthLoggedInAt = hint.loggedInAt;
+  }
+  if (hint && hint.credsPresent === false) {
+    return {
+      mode,
+      health: "missing",
+      identity: hint.email ?? "",
+      remediation: "forge auth login",
+      detail,
+    };
+  }
   return {
     mode,
     health: "ok",
-    identity: "",
+    identity: hint?.email ?? "",
     remediation: "",
-    detail: {
-      oauthVolume: oauthVolumeName(),
-      awsAvailable: hasAnyAwsSsoProfile(),
-    },
+    detail,
   };
 }
 

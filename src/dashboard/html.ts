@@ -1387,7 +1387,23 @@ const CLIENT_JS = `
       }
       row('Watchdog', d.watchdogRunning ? 'running' : 'not running');
     } else if (a.mode === 'anthropic-oauth') {
-      row('Source', 'forge auth login (OAuth subscription)');
+      // Identity rows come from the host-side hint cache (oauth-hint.json),
+      // written by forge auth login and refreshed by getAuthState's probe.
+      // Conditional rendering: pre-login users see Source + Status only;
+      // post-login they get the full account picture.
+      if (d.oauthEmail) row('Account', d.oauthEmail);
+      if (d.oauthOrganization) row('Organization', d.oauthOrganization);
+      if (d.oauthPlan) row('Plan', d.oauthPlan);
+      if (d.oauthLoggedInAt) {
+        const dt = new Date(d.oauthLoggedInAt);
+        const local = isNaN(dt.getTime()) ? d.oauthLoggedInAt : dt.toLocaleDateString();
+        row('Logged in', local);
+      }
+      if (!d.oauthEmail) {
+        // No identity in the hint — either the user hasn't run forge auth
+        // login yet, or the hint write failed. Surface that honestly.
+        row('Account', 'unknown (run forge auth login to populate)');
+      }
       if (d.awsAvailable) {
         // AWS is configured on this host but the user didn't export
         // AWS_PROFILE. Tell them — they probably meant bedrock.

@@ -365,19 +365,17 @@ test("validateCredsForNewRun: apikey + ANTHROPIC_API_KEY set → no throw", () =
   assert.doesNotThrow(() => validateCredsForNewRun());
 });
 
-test("validateCredsForNewRun: apikey mode forced by CLAUDE_CODE_USE_BEDROCK=0 + missing key → throws", () => {
-  process.env.CLAUDE_CODE_USE_BEDROCK = "0";
-  // Simulate "user wanted apikey but forgot to set ANTHROPIC_API_KEY". Mode
-  // resolves to oauth in this case (since the key isn't set), so the check
-  // doesn't throw — defer to spawn time. This test documents that intentional
-  // softness: validateCredsForNewRun() doesn't validate oauth.
+test("validateCredsForNewRun: oauth + fresh credsPresent=true hint → no throw", () => {
+  writeOauthHint({ credsPresent: true, email: "x@y.com" });
   assert.doesNotThrow(() => validateCredsForNewRun());
 });
 
-test("validateCredsForNewRun: oauth mode → no throw (deferred to spawn time)", () => {
-  // No AWS, no API key — falls to oauth. We don't probe the docker volume here
-  // because that costs 1-2 seconds; the spawn-time ensureCreds() handles it.
-  assert.doesNotThrow(() => validateCredsForNewRun());
+test("validateCredsForNewRun: oauth + fresh credsPresent=false hint → throws", () => {
+  writeOauthHint({ credsPresent: false });
+  assert.throws(
+    () => validateCredsForNewRun(),
+    (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("forge auth login")
+  );
 });
 
 test("AUTH_ERROR_PREFIX is a stable string the dashboard sniffs for", () => {
@@ -389,20 +387,43 @@ test("AUTH_ERROR_PREFIX is a stable string the dashboard sniffs for", () => {
 
 // -------- getAuthState (#97 indicator backend) --------
 
-test("getAuthState: oauth default → health=ok, no identity, awsAvailable=false", () => {
+test("getAuthState: oauth + fresh credsPresent hint → health=ok with identity", () => {
+  // Seed a fresh hint so getAuthState reads it instead of probing the volume
+  // (which would hit the host's real Docker — flaky in CI).
+  writeOauthHint({
+    credsPresent: true,
+    email: "test@example.com",
+    organizationName: "Test Org",
+    plan: "claude_max",
+    loggedInAt: "2025-07-26T21:46:20.660879Z",
+  });
   const s = getAuthState();
   assert.equal(s.mode, "anthropic-oauth");
   assert.equal(s.health, "ok");
-  assert.equal(s.identity, "");
+  assert.equal(s.identity, "test@example.com");
   assert.equal(s.remediation, "");
-  assert.equal(s.detail.awsAvailable, false);
+  assert.equal(s.detail.oauthEmail, "test@example.com");
+  assert.equal(s.detail.oauthOrganization, "Test Org");
+  assert.equal(s.detail.oauthPlan, "claude_max");
+  assert.equal(s.detail.oauthLoggedInAt, "2025-07-26T21:46:20.660879Z");
 });
 
-test("getAuthState: oauth fallback + AWS configured but no AWS_PROFILE → awsAvailable=true", () => {
-  // Edge case: the host has [profile adx-dev] with SSO but the user hasn't
-  // exported AWS_PROFILE in this shell (so the detector picks oauth). The
-  // popover hint surfaces that AWS is available so the user knows to
-  // export AWS_PROFILE if they meant to use bedrock.
+test("getAuthState: oauth + fresh credsPresent=false hint → health=missing", () => {
+  // Probe ran, found no creds. Indicator should surface "missing" + the
+  // remediation command, not the old optimistic "ready" lie.
+  writeOauthHint({ credsPresent: false });
+  const s = getAuthState();
+  assert.equal(s.mode, "anthropic-oauth");
+  assert.equal(s.health, "missing");
+  assert.equal(s.remediation, "forge auth login");
+});
+
+test("getAuthState: oauth + AWS configured but no AWS_PROFILE → awsAvailable=true", () => {
+  // Edge case: host has [profile adx-dev] with SSO but the user hasn't
+  // exported AWS_PROFILE in this shell. Detector picks oauth (no
+  // AWS_PROFILE signal). Indicator hint surfaces that AWS is available.
+  // Seed a hint so we don't probe the host's real volume.
+  writeOauthHint({ credsPresent: true, email: "x@y.com" });
   writeAwsConfig("[profile adx-dev]\nsso_session = adx-dev\nregion = us-east-1\n");
   const s = getAuthState();
   assert.equal(s.mode, "anthropic-oauth");
