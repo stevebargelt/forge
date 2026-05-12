@@ -153,8 +153,11 @@ test("buildDockerArgs: anthropic-oauth mode mounts the OAuth volume, no AWS env"
 
   const args = _buildDockerArgs(ARGS_INPUT_BASE);
 
-  const claudeMount = pickMount(args, "/home/agent/.claude");
-  assert.ok(claudeMount, "should mount /home/agent/.claude");
+  // Mount is at /home/agent (parent of .claude/) so claude's $HOME-level
+  // .claude.json is captured alongside .claude/.credentials.json — see the
+  // commit migrating the mount point.
+  const claudeMount = pickMount(args, "/home/agent");
+  assert.ok(claudeMount, "should mount /home/agent");
   // No AWS state in this mode
   const envPairs = pickEnvPairs(args);
   assert.equal(envPairs.AWS_PROFILE, undefined);

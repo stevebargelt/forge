@@ -24,7 +24,14 @@ import { isWatchdogRunning } from "./sso-watchdog.js";
 
 export type CredsMode = "bedrock" | "anthropic-oauth" | "anthropic-apikey";
 
-const OAUTH_VOLUME_NAME = "forge-claude-oauth";
+// Volume name carries a version suffix so the mount-point migration in #97
+// follow-up (was /home/agent/.claude, now /home/agent — captures .claude.json
+// for identity) doesn't try to retrofit existing v1 volumes. Anyone with the
+// old "forge-claude-oauth" volume just runs `forge auth login` once and the
+// new v2 volume gets populated; the old one is orphaned (manual cleanup via
+// `docker volume rm forge-claude-oauth`).
+const OAUTH_VOLUME_NAME = "forge-claude-oauth-v2";
+const LEGACY_OAUTH_VOLUME_NAME = "forge-claude-oauth";
 
 // Auto-detection precedence (#79):
 //   1. CLAUDE_CODE_USE_BEDROCK=1   → force bedrock
@@ -152,6 +159,12 @@ export function oauthVolumeName(): string {
   return process.env.FORGE_OAUTH_VOLUME ?? OAUTH_VOLUME_NAME;
 }
 
+// Surface the legacy volume name so `forge auth status` can warn the user
+// when an orphaned v1 volume is still present on the host.
+export function legacyOauthVolumeName(): string {
+  return LEGACY_OAUTH_VOLUME_NAME;
+}
+
 // Path to the host AWS dir that bedrock-mode containers mount RO.
 export function awsConfigDir(): string {
   return process.env.FORGE_AWS_DIR ?? join(homedir(), ".aws");
@@ -256,6 +269,10 @@ export function probeOauthVolume(): OauthHint | null {
   try {
     // sh script: emit creds-presence flag, then either the .claude.json
     // content or an empty marker. One docker run, two facts.
+    // Volume mounts at /home/agent (the user's home dir inside the agent
+    // container) — credentials live at $HOME/.claude/.credentials.json,
+    // account info at $HOME/.claude.json. Both captured by mounting the
+    // parent dir.
     raw = execFileSync(
       "docker",
       [
@@ -269,7 +286,7 @@ export function probeOauthVolume(): OauthHint | null {
         // Output format: line 1 = "yes" or "no" for creds presence; lines
         // 2+ = .claude.json content (or empty if missing). Plain text so we
         // don't need a JSON parser inside the container's alpine image.
-        '[ -s /x/.credentials.json ] && echo yes || echo no; [ -f /x/.claude.json ] && cat /x/.claude.json || echo ""',
+        '[ -s /x/.claude/.credentials.json ] && echo yes || echo no; [ -f /x/.claude.json ] && cat /x/.claude.json || echo ""',
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
@@ -347,9 +364,11 @@ export function ensureCreds(): void {
     return;
   }
 
-  // anthropic-oauth: ensure the named docker volume exists and contains a credentials file.
-  // The volume is created+populated by `forge auth login` (TODO); this check just gives a
-  // useful error if the user runs `forge next` before logging in.
+  // anthropic-oauth: ensure the named docker volume exists and contains a
+  // credentials file. The volume is created+populated by `forge auth login`;
+  // this check just gives a useful error if the user runs `forge next`
+  // before logging in. Mount point is /home/agent so .claude/.credentials.json
+  // (token) and .claude.json (identity) both land in the volume.
   const volume = oauthVolumeName();
   let credsPresent = false;
   try {
@@ -359,7 +378,7 @@ export function ensureCreds(): void {
         "run",
         "--rm",
         "-v",
-        `${volume}:/home/agent/.claude`,
+        `${volume}:/home/agent`,
         "agent-dev-worker",
         "test",
         "-s",

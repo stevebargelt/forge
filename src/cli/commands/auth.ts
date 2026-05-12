@@ -3,7 +3,7 @@ import { spawn as cpSpawn, execFileSync } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { oauthVolumeName, writeOauthHint } from "../../util/creds.js";
+import { oauthVolumeName, legacyOauthVolumeName, writeOauthHint } from "../../util/creds.js";
 
 // `forge auth` manages the Anthropic OAuth credential volume used by agent containers.
 // On macOS the host's Claude Code stores OAuth in the keychain — agents can't read that —
@@ -21,12 +21,17 @@ export function registerAuth(program: Command): void {
       console.log(`Logging in. Credential will persist in docker volume '${volume}'.`);
       console.log("When the prompt appears inside claude, run /login and follow the browser flow.");
       console.log("Type /exit when finished.\n");
+      // Volume mounts at /home/agent (the user's home inside the container)
+      // so claude's $HOME-level .claude.json AND the $HOME/.claude/ subtree
+      // both land in the volume. Earlier versions mounted only the .claude/
+      // subdir, which lost .claude.json (identity info) to the container's
+      // ephemeral writable layer.
       const code = await runInteractive("docker", [
         "run",
         "--rm",
         "-it",
         "-v",
-        `${volume}:/home/agent/.claude`,
+        `${volume}:/home/agent`,
         opts.image,
         "claude",
       ]);
@@ -44,11 +49,11 @@ export function registerAuth(program: Command): void {
           "run",
           "--rm",
           "-v",
-          `${volume}:/home/agent/.claude:ro`,
+          `${volume}:/home/agent:ro`,
           "alpine",
           "sh",
           "-c",
-          '[ -s /home/agent/.claude/.credentials.json ] && echo yes || echo no; [ -f /home/agent/.claude/.claude.json ] && cat /home/agent/.claude/.claude.json || echo ""',
+          '[ -s /home/agent/.claude/.credentials.json ] && echo yes || echo no; [ -f /home/agent/.claude.json ] && cat /home/agent/.claude.json || echo ""',
         ], { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
       } catch {
         console.log(`\n⚠ Could not verify volume '${volume}' (docker run failed).`);
@@ -104,7 +109,21 @@ export function registerAuth(program: Command): void {
         ? "bedrock"
         : process.env.ANTHROPIC_API_KEY ? "anthropic-apikey" : "anthropic-oauth";
       console.log(`Auth mode: ${mode}`);
-      if (mode === "anthropic-oauth") console.log(`OAuth volume: ${volume}`);
+      if (mode === "anthropic-oauth") {
+        console.log(`OAuth volume: ${volume}`);
+        // Warn about orphaned v1 volume from before the /home/agent mount
+        // migration. Harmless but taking up space; user may want to remove.
+        const legacy = legacyOauthVolumeName();
+        if (legacy !== volume) {
+          try {
+            execFileSync("docker", ["volume", "inspect", legacy], { stdio: "ignore" });
+            console.log(`\n⚠ Legacy volume '${legacy}' is still present (from before the mount-point migration).`);
+            console.log(`  Safe to remove: docker volume rm ${legacy}`);
+          } catch {
+            /* legacy volume doesn't exist — nothing to warn about */
+          }
+        }
+      }
       if (mode === "bedrock") console.log(`AWS_REGION:   ${process.env.AWS_REGION ?? "(unset)"}`);
     });
 

@@ -192,10 +192,13 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   } else if (mode === "anthropic-apikey") {
     args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
   } else {
-    // anthropic-oauth: mount the named volume that holds the OAuth credential file.
-    // Read-write — claude writes cache/history alongside the credentials. The volume is
-    // agent-scoped (not host-scoped); the blast radius of any agent write is the volume itself.
-    args.push("-v", `${oauthVolumeName()}:/home/agent/.claude`);
+    // anthropic-oauth: mount the named volume at /home/agent (the user's
+    // home dir inside the container), so both .claude/.credentials.json
+    // (token) and .claude.json (identity info written by claude at
+    // $HOME-level) land in the volume. Read-write — claude refreshes
+    // tokens and writes session state. The volume is agent-scoped (not
+    // host-scoped); the blast radius of any agent write is the volume itself.
+    args.push("-v", `${oauthVolumeName()}:/home/agent`);
   }
   if (process.env.FORGE_USE_LITELLM === "1") {
     args.push("-e", `ANTHROPIC_BASE_URL=${input.litellmUrl}`);

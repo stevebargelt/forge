@@ -488,8 +488,9 @@ test("readOauthHint: returns null on malformed JSON", () => {
 });
 
 test("readOauthHint: returns null when cached volume name doesn't match active", () => {
-  // The active volume is the default "forge-claude-oauth" but the cache was
-  // written for a different name. Treat as a stale hint.
+  // The active volume defaults to "forge-claude-oauth-v2" but the cache was
+  // written for a different name. Treat as a stale hint — covers both the
+  // user-set FORGE_OAUTH_VOLUME drift case and the v1→v2 migration.
   writeFileSync(
     join(tmpForgeHome, "oauth-hint.json"),
     JSON.stringify({
@@ -517,7 +518,7 @@ test("writeOauthHint + readOauthHint round-trips identity fields", () => {
   assert.equal(hint!.organizationName, "Example Org");
   assert.equal(hint!.plan, "claude_max");
   assert.equal(hint!.loggedInAt, "2025-07-26T21:46:20.660879Z");
-  assert.equal(hint!.volumeName, "forge-claude-oauth");
+  assert.equal(hint!.volumeName, "forge-claude-oauth-v2");
   assert.ok(hint!.writtenAt);
 });
 
@@ -555,7 +556,7 @@ test("isOauthHintFresh: false when hint is older than threshold", () => {
   writeFileSync(
     join(tmpForgeHome, "oauth-hint.json"),
     JSON.stringify({
-      volumeName: "forge-claude-oauth",
+      volumeName: "forge-claude-oauth-v2",
       writtenAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), // 10m ago
       credsPresent: true,
     })
