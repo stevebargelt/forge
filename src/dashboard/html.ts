@@ -2678,9 +2678,20 @@ const CLIENT_JS = `
     // confirming completion, not approving an agent's output. Different verbs.
     const phase = findPhaseShape(task.phase);
     const isHumanLed = phase && phase.isManual;
+    // #110 — when any specialist red has failed, advancing requires rationale
+    // (the spine enforces this; we surface it in the UI too so the user knows
+    // before clicking, instead of hitting a server error). Authoritative reds
+    // already drive task.status to blocked_by_red, handled separately above.
+    const specialistFails = (verdicts || []).filter(v => v.verdict === 'fail' && v.authority === 'specialist');
+    const advanceRequiresRationale = !isBlocked && specialistFails.length > 0;
     if (isBlocked && verdicts) {
       const failing = verdicts.filter(v => v.verdict === 'fail' && v.authority === 'authoritative');
       for (const v of failing) sec.appendChild(redVerdictCard(v));
+    }
+    if (advanceRequiresRationale && verdicts) {
+      // Show the specialist-fail cards too so the human sees what they're
+      // being asked to acknowledge.
+      for (const v of specialistFails) sec.appendChild(redVerdictCard(v));
     }
     // #63 — fresh-session warning for awaiting_gate brief tasks. The PROMPT.md
     // is rendered above; the human is reviewing it before running it. The
@@ -2693,21 +2704,26 @@ const CLIENT_JS = `
         el('span', null, 'Don\\'t paste it into a session already mid-task — long structured prompts can silently drop trailing sections when the running session compacts mid-run.'),
       ]));
     }
+    const rationalePlaceholder = isBlocked
+      ? 'Required for force-advance: explain why overriding this red verdict is justified…'
+      : (advanceRequiresRationale
+          ? 'Required to advance: a specialist red flagged concerns. Explain why advancing anyway is OK…'
+          : (isHumanLed
+              ? 'Notes about the design pass (optional for completion). Required if you\\'re sending it back or stopping.'
+              : 'Required for reject and request-changes — describe what to change. Optional for advance.'));
+    const rationaleHelperLabel = isBlocked
+      ? 'Rationale — required for force-advance'
+      : (advanceRequiresRationale
+          ? 'Rationale — required to advance over the specialist red(s) above'
+          : (isHumanLed
+              ? 'Notes — optional on confirm, required on send-back / stop'
+              : 'Rationale — required for reject + request-changes, optional for advance'));
     const rationaleField = el('textarea', {
       class: 'rationale',
-      placeholder: isBlocked
-        ? 'Required for force-advance: explain why overriding this red verdict is justified…'
-        : (isHumanLed
-            ? 'Notes about the design pass (optional for completion). Required if you\\'re sending it back or stopping.'
-            : 'Required for reject and request-changes — describe what to change. Optional for advance.'),
+      placeholder: rationalePlaceholder,
       id: 'rationale-' + task.id,
     });
-    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' },
-      isBlocked
-        ? 'Rationale — required for force-advance'
-        : (isHumanLed
-            ? 'Notes — optional on confirm, required on send-back / stop'
-            : 'Rationale — required for reject + request-changes, optional for advance')));
+    sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, rationaleHelperLabel));
     sec.appendChild(rationaleField);
     if (isBlocked) {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
@@ -2721,13 +2737,16 @@ const CLIENT_JS = `
       // expose only confirm + send-back, no middle option.
       sec.appendChild(el('div', { class: 'gate-actions' }, [
         el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ I\\'ve decided not to do this'),
-        el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: false }) }, '✓ I\\'ve done the work'),
+        el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: advanceRequiresRationale }) }, '✓ I\\'ve done the work'),
       ]));
     } else {
       sec.appendChild(el('div', { class: 'gate-actions' }, [
         el('button', { class: 'btn btn-reject', onclick: () => doGate(task.id, 'reject', { requireRationale: true }) }, '✕ Reject Run'),
         el('button', { class: 'btn btn-warning', onclick: () => doGate(task.id, 'request-changes', { requireRationale: true }) }, '↻ Request Changes'),
-        el('button', { class: 'btn btn-primary', onclick: () => doGate(task.id, 'advance', { requireRationale: false }) }, '→ Advance Run'),
+        el('button', {
+          class: advanceRequiresRationale ? 'btn btn-warning' : 'btn btn-primary',
+          onclick: () => doGate(task.id, 'advance', { requireRationale: advanceRequiresRationale }),
+        }, advanceRequiresRationale ? '⚠ Advance over red(s)' : '→ Advance Run'),
       ]));
     }
     return sec;

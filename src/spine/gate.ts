@@ -65,11 +65,19 @@ export async function gate(
   const phase = findPhase(workflow, task.phase);
   if (!phase) throw new Error(`Phase ${task.phase} not in workflow ${workflow.name}`);
 
-  // Verdict-gated phase: re-check verdicts on advance.
-  if (decision === "advance" && phase.gate === "verdict" && !opts.force) {
+  // Re-check verdicts on advance. Two checks:
+  //   1. Authoritative fail → block unless --force. Only applies to verdict-
+  //      gated phases (human-gated phases get authoritative-red protection
+  //      via the blocked_by_red status check at line 51).
+  //   2. Specialist fail → require rationale. Applies to BOTH gate types
+  //      (#110). Without this, a human-gated phase with a specialist red fail
+  //      lets the human advance without any audit trail for overriding the
+  //      red's objection. The whole point of attaching specialist reds is
+  //      that their fails should at least force the human to acknowledge.
+  if (decision === "advance" && !opts.force) {
     const verdicts = verdictsForTask(taskId);
     const agg = aggregateVerdicts(verdicts);
-    if (agg.verdict === "fail") {
+    if (phase.gate === "verdict" && agg.verdict === "fail") {
       throw new Error(
         `Cannot advance ${taskId}: verdict aggregation = fail. Authoritative fails: ${agg.authoritativeFails
           .map((v) => v.redRole)
@@ -78,7 +86,9 @@ export async function gate(
     }
     if (agg.specialistFails.length > 0 && !rationale) {
       throw new Error(
-        `Specialist red(s) failed on ${taskId}. Provide --rationale to advance over their objections.`
+        `Specialist red(s) failed on ${taskId}: ${agg.specialistFails
+          .map((v) => v.redRole)
+          .join(", ")}. Provide --rationale to advance over their objections.`
       );
     }
   }
