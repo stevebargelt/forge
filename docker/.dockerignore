@@ -3,3 +3,4 @@
 *
 !agent-dev-worker.Dockerfile
 !corp-root.pem
+!forge-test.sh

@@ -35,6 +35,13 @@ RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
 RUN npm install -g playwright \
     && npx --yes playwright install --with-deps chromium
 
+# forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
+# platform inside a writable scratch dir, then runs tests there. Works around
+# the host/container native-module mismatch without mutating /project's
+# node_modules. See docker/forge-test.sh for the rationale.
+COPY forge-test.sh /usr/local/bin/forge-test
+RUN chmod +x /usr/local/bin/forge-test
+
 # Non-root agent user (DEC-009): UID 1000, NOPASSWD sudo, ~/.claude pre-created.
 RUN useradd -m -s /bin/bash -u 1000 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
