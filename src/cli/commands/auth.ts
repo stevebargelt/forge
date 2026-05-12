@@ -1,6 +1,9 @@
 import type { Command } from "commander";
 import { spawn as cpSpawn, execFileSync } from "node:child_process";
-import { oauthVolumeName } from "../../util/creds.js";
+import { existsSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { oauthVolumeName, writeOauthHint } from "../../util/creds.js";
 
 // `forge auth` manages the Anthropic OAuth credential volume used by agent containers.
 // On macOS the host's Claude Code stores OAuth in the keychain — agents can't read that —
@@ -30,23 +33,66 @@ export function registerAuth(program: Command): void {
       if (code !== 0) {
         throw new Error(`claude exited ${code}. Volume may not contain credentials. Re-run \`forge auth login\` to retry.`);
       }
-      // Verify the credential file landed.
+      // Verify the credential file landed AND capture identity hint
+      // (#97 follow-up). One docker run reads both files in a single sh
+      // invocation; output is `<yes|no>\n<.claude.json content or empty>`.
+      // Same format probeOauthVolume() uses elsewhere — keep them in sync
+      // if you change it.
+      let raw = "";
       try {
-        execFileSync("docker", [
+        raw = execFileSync("docker", [
           "run",
           "--rm",
           "-v",
-          `${volume}:/home/agent/.claude`,
-          opts.image,
-          "test",
-          "-s",
-          "/home/agent/.claude/.credentials.json",
-        ], { stdio: "ignore" });
-        console.log(`\n✓ Credentials saved to volume '${volume}'.`);
+          `${volume}:/home/agent/.claude:ro`,
+          "alpine",
+          "sh",
+          "-c",
+          '[ -s /home/agent/.claude/.credentials.json ] && echo yes || echo no; [ -f /home/agent/.claude/.claude.json ] && cat /home/agent/.claude/.claude.json || echo ""',
+        ], { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
       } catch {
+        console.log(`\n⚠ Could not verify volume '${volume}' (docker run failed).`);
+        return;
+      }
+      const newlineIdx = raw.indexOf("\n");
+      const credsPresent = newlineIdx >= 0 && raw.slice(0, newlineIdx).trim() === "yes";
+      if (!credsPresent) {
         console.log(`\n⚠ No /home/agent/.claude/.credentials.json found in volume '${volume}'.`);
         console.log("  Did you run /login successfully? Try again with `forge auth login`.");
+        // Still write a hint so the dashboard knows we tried.
+        try { writeOauthHint({ credsPresent: false }); } catch { /* best-effort */ }
+        return;
       }
+      // Parse identity from .claude.json's oauthAccount block. Same field
+      // mapping as probeOauthVolume() — keep aligned.
+      let identity: { email?: string; organizationName?: string; plan?: string; loggedInAt?: string } = {};
+      const claudeJsonRaw = newlineIdx >= 0 ? raw.slice(newlineIdx + 1).trim() : "";
+      if (claudeJsonRaw) {
+        try {
+          const parsed = JSON.parse(claudeJsonRaw) as { oauthAccount?: Record<string, unknown> };
+          const oa = parsed.oauthAccount;
+          if (oa && typeof oa === "object") {
+            const str = (k: string) => (typeof oa[k] === "string" && oa[k] ? (oa[k] as string) : undefined);
+            identity = {
+              email: str("emailAddress"),
+              organizationName: str("organizationName"),
+              plan: str("organizationType"),
+              loggedInAt: str("subscriptionCreatedAt"),
+            };
+          }
+        } catch {
+          /* malformed; identity stays empty, credsPresent still true */
+        }
+      }
+      try {
+        writeOauthHint({ credsPresent: true, ...identity });
+      } catch {
+        /* hint write is best-effort */
+      }
+      console.log(`\n✓ Credentials saved to volume '${volume}'.`);
+      if (identity.email) console.log(`  Account: ${identity.email}`);
+      if (identity.organizationName) console.log(`  Org:     ${identity.organizationName}`);
+      if (identity.plan) console.log(`  Plan:    ${identity.plan}`);
     });
 
   auth
@@ -72,6 +118,15 @@ export function registerAuth(program: Command): void {
         console.log(`Removed volume ${volume}.`);
       } catch {
         console.log(`Volume ${volume} did not exist or could not be removed.`);
+      }
+      // Clear the host-side identity hint so the dashboard doesn't keep
+      // showing a stale email after logout.
+      try {
+        const forgeHome = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+        const hint = join(forgeHome, "oauth-hint.json");
+        if (existsSync(hint)) unlinkSync(hint);
+      } catch {
+        /* best-effort */
       }
     });
 }
