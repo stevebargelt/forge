@@ -13,9 +13,18 @@ export function dashboardHtml(): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Forge Dashboard</title>
+<!-- Fonts: async-load Geist via the media-swap trick so a blocked/slow
+     fonts.googleapis.com (corporate proxy, offline machine, etc.) can't
+     prevent the dashboard from painting. The page renders immediately with
+     system monospace; Geist swaps in when (or if) the stylesheet arrives.
+     The matching <noscript> fallback covers no-JS configurations. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'; this.onload=null;">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap"></noscript>
 <!-- #85 graph view: cytoscape.js for layered DAG layout. CDN-loaded so the
      dashboard stays vanilla-no-build. dagre extension provides hierarchical
      layout (top→bottom forward edges). -->

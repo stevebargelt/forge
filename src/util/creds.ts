@@ -243,9 +243,13 @@ export function writeOauthHint(fields: Omit<OauthHint, "volumeName" | "writtenAt
 // Spin a one-shot container with the OAuth volume mounted and read both
 // .credentials.json (presence only) and .claude.json (identity fields) in a
 // single sh invocation. Returns null if docker isn't available or the probe
-// fails; returns a hint with credsPresent=false when the volume exists but
-// the credential file isn't there. The result is also persisted to the host
-// cache, so subsequent callers can use readOauthHint() instead.
+// fails or times out; returns a hint with credsPresent=false when the volume
+// exists but the credential file isn't there. The result is also persisted
+// to the host cache, so subsequent callers can use readOauthHint() instead.
+//
+// Bounded by a hard 5-second timeout — on machines where Docker is slow or
+// not running, the probe must not block the dashboard's request loop. The
+// async wrapper kickProbeOauthVolume() is the preferred API for hot paths.
 export function probeOauthVolume(): OauthHint | null {
   const volume = oauthVolumeName();
   let raw: string;
@@ -267,11 +271,15 @@ export function probeOauthVolume(): OauthHint | null {
         // don't need a JSON parser inside the container's alpine image.
         '[ -s /x/.credentials.json ] && echo yes || echo no; [ -f /x/.claude.json ] && cat /x/.claude.json || echo ""',
       ],
-      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" }
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+        timeout: 5000, // hard cap so a hung docker daemon can't freeze the dashboard
+      }
     );
   } catch {
-    // Docker not available, image missing, volume missing — all roll up to
-    // "we can't tell." Caller decides how to surface this.
+    // Docker not available, image missing, volume missing, timeout exceeded —
+    // all roll up to "we can't tell." Caller decides how to surface this.
     return null;
   }
   const newlineIdx = raw.indexOf("\n");
