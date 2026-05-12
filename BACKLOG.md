@@ -222,16 +222,6 @@ The decision between (a)/(b)/(c) defers to actual fanout-implementer behavior �
 
 **Stretch goal worth flagging:** "skip architect" workflow flag. Some feature work (cheap features, refactors, isolated additions) doesn't need an architect phase. Today the workflow shape is fixed; turning architect off requires a new workflow file. Better: a workflow-level flag `phases.skipIf: <condition>`. Defer; architectural framing only.
 
-### #53 — `prompt-author` agent seed + ui-design PROMPT.md template
-**Why:** Per FORGE-DEC-014, forge's role in design becomes "author the prompt, the human runs it." The `prompt-author` agent is a generic prompt-elicitation primitive: interview the human about brief / screens / style / paths / constraints, fill the right template, output a `PROMPT.md` file path. ui-design is the first consumer; future consumers (marketing-copy, code-review, architecture-review) will use the same primitive with different templates.
-**How to apply:**
-- New seed: `seeds/agents/prompt-author/CLAUDE.md`. Interview structure: brief / screens (or sections) / style guidance / target paths / constraints / known gotchas. Output schema: `{status, promptPath: "...", brief, screens?, notes}`.
-- New seed: `seeds/agents/prompt-author/templates/ui-design.md` — parameterized PROMPT.md. Variables: `{{target_pen_file}}`, `{{output_dir}}`, `{{screens_list}}`, `{{style_guidance}}`, `{{brief}}`, `{{file_naming}}`. Encodes: touch precondition, open_document + verify, filePath everywhere, find_empty_space_on_canvas, export+rename, loud Cmd+S warning, stat-verification step.
-- A drafted, validated version lives at `~/code/forge-design/PROMPT.md` — use as the canonical reference when authoring the template.
-- The agent runs in `agent-dev-worker` (no special image). Standard blue-agent shape.
-Validated empirically tonight: this exact prompt produced a complete dashboard design in `~/code/forge-design/`.
-
-
 ### #59 — Track Pencil release notes for auto-save shipping
 **Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
 **How to apply:** Periodically run `npm view @pencil.dev/cli version` and check the changelog. When auto-save lands:
@@ -357,21 +347,6 @@ Lean (1) when actually doing the work. (2) is a stopgap if the propagate session
 4. For new components, normal full-frame design as today.
 
 **Composite with #80, #83:** the seed needs to read existing designDir state before authoring (#80), use existing PNG count for numbering (#83), AND distinguish new-vs-addition framing (#86). All three together make shared-corpus reuse work cleanly. Each one alone leaves drift.
-
-### #85 — Graph view: full workflow visualization as a separate screen
-**Why:** The phase pill row (#71) is the right shape for the always-visible header above the task list — compact, scannable, doesn't crowd the task list. But it can't show everything: branching (onReject loops back), fanout segment-by-segment over time, gate-decision history with rationale, the full topology of a complex workflow like `feature-ui-design-needed` (6 phases, mixed manual + agent + reds + onReject paths).
-**What it is:** a separate dashboard screen — possibly a modal-style overlay, possibly a new pane under "View > Graph", possibly a new tab — that renders the *whole workflow* for the selected run as a node-and-edge graph. Each phase is a node; gates are decision points; onReject is a back-edge; fanout shows the cluster of parallel tasks with per-task status. Animated state transitions if it's not too much (a task moving from running → awaiting_red → blocked_by_red → forced-advance → complete tells a story; the pill row condenses that).
-**Why a graph and not a Gantt or sankey:** Gantt is time-axis-first (right shape for "how long did each phase take"); sankey is flow-volume (right shape for "where does the data go"). Forge's interesting story is *control flow with branching* — onReject loops back, request-changes re-queues, retry creates a chain — that's a directed graph with cycles. Graph view is the honest shape.
-**What it adds beyond the pill row:**
-- Branching paths (onReject, request-changes, retry chains)
-- Per-task status within fanout (the pill row condenses to N dots; the graph view shows each as a node with full hover state)
-- Gate-decision audit thread overlaid on the relevant edge
-- The "what's possible from here" question — looking at a phase, you see all its outgoing edges (advance + reject + request-changes), labeled with the consequence
-**Caught:** 2026-05-08 reviewing screen 22 of phase-flow design run. Pill row is the right always-on header; graph view is the on-demand "show me everything" surface. Two different jobs, two different placements.
-**Sequencing:** lands AFTER #71 (the pill row) is implemented and live. No point designing a graph view before the pill row is real — the pill row is the canonical workflow representation in the dashboard, and the graph view should reuse the same status colors, gate icons, and node treatments. Defer the design step until then.
-**Open question:** is this its own ui-design run, or a phase added to the existing `forge phase flow visualization` corpus? Probably a separate run — different cognitive surface, different design language considerations (graph layout, edge routing, zoom, pan).
-
-**Affordance for opening the graph view (Steven 2026-05-08):** add a small graph-icon glyph to the pill row strip — clicking opens the graph view as a modal/overlay. The pill row is the canonical surface; the icon is the launchpad. Don't retrofit into screens 21/26 from this design corpus — design the icon + its placement properly during the #85 pass. Plus a keyboard shortcut (probably `g` or `cmd+shift+g`).
 
 ### #84 — Document the two-channel feedback model for design workflows
 **Why:** Caught 2026-05-08 — Steven's call when reviewing the phase-flow PNGs: "I'd argue that this is exactly what the human loop is for. I can work with claude/pencil to make the corrections." Right take, and worth pinning down so future sessions don't reflexively reach for forge-reject when the cheaper channel exists.
@@ -519,54 +494,25 @@ Related: #38 (capture resolved model on the task row) is the audit-trail compani
 Lean toward (1).
 
 
-### #39 — Audit the spawn → DB pipeline for missing fields (meta-task)
-**Why:** SQLite is supposed to be the canonical audit trail of a run, but several runtime-observable values never make it to the DB (resolved model #38, agent prose replies #32 partly, model_calls #27, container start time, watchdog state). Run an audit after #32/#38/#27 land to find what's still missing.
-**How to apply:** Walk `spawn.ts`, `dispatch.ts`, `spawnRed.ts`, `gate.ts`. For each runtime-observable piece of state, decide if it belongs in the DB. Output is a punch-list of additional schema fixes, not a rewrite. Each surfaced item becomes its own task.
-
 ### #42 — Rewrite docs/how-to-new-workflow.md with a workflow we don't already have
 **Why:** Current example is `code-review` which duplicates the existing `codebase-assessment` workflow. The doc reads as a paper exercise. Replace with a workflow forge actually doesn't have, ideally one that exercises a primitive we've built but not documented (`onReject` branching, gate=verdict + fanout combo, multi-authority red panels).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
-### #45 — `forge auth status` warns on stale bedrock vars
-**Why:** SSO sessions expire silently (1 hour at SGWS). The next spawn fails on auth. With FORGE-DEC-013 the watchdog usually prevents this, but `forge auth status` should still proactively detect-and-warn when bedrock creds are getting close to expiry, similar to the watchdog's threshold check.
-**How to apply:** When `detectCredsMode()` returns `bedrock`, call the same `_sso_min_remaining`-style check the watchdog uses. If under some threshold (15 min?), print a warning.
-
-### #49 — Design-reviewer red agent (future investigation)
-**Why:** Steven's call: skip reds for design work in v1 because aesthetic judgment is squishy. Worth revisiting once we have real human-review data — there may be objective things a red can catch (accessibility contrast, missing states, broken layout primitives, brand inconsistency).
-**How to apply:** Investigate after a few `ui-design` runs ship and we see what humans actually flag. Could be one specialist red ("a11y") rather than an authoritative aesthetic judge.
-
-### #50 — React Native code export from Pencil .pen files
-**Why:** v1 of #46 only exports HTML+Tailwind. Mobile design eventually needs RN. Harder than HTML because RN's layout primitives don't map cleanly from a free-form design tool — Flexbox-only, no grid, different typography model.
-**How to apply:** New phase or new `--target rn` flag on the `export-code` phase. Probably needs its own designer-export-rn role. Validate by exporting one screen end-to-end before committing to the approach.
-
-### #51 — `design-reviewer` agent: visual diff implemented UI vs design artifact
-**Why:** With #54 shipped, every `ui-design` run produces a known artifact pair: `result.pngFiles` (the canonical design from Pencil) + `result.htmlFiles` (the HTML/Tailwind code-export from the same prompt). Implementation work that follows references those designs. Today nothing verifies the implementation actually matches the design — humans eyeball it and trust the agent. A `design-reviewer` agent closes that loop: screenshot the implementation, compare against the design PNG, surface deltas.
-**Tolerance:** close, not pixel-perfect. The role's job is "would a reasonable designer say this matches?" — catches missing sections, wrong colors, wrong typography, broken layout primitives, missing states. Doesn't fail on a 4px gap or a slightly different shade. Output is a structured verdict + findings, not a binary diff.
-**How to apply:**
-1. **Capture mechanism — Puppeteer-Core CLI scripts in the agent container** (Steven's Q1 call 2026-05-08: container, not host — keeps the agents-in-containers invariant intact; chromium-headless adds maybe 100-200MB to the image, acceptable). Use Mario Zechner's pattern (https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/): five small scripts (`start.js`, `nav.js`, `eval.js`, `screenshot.js`, `pick.js`) that talk to headless Chrome over the DevTools port. Tiny tool surface (~225 tokens of docs), CLI over MCP. Fall back to Playwright MCP only if a specific interaction can't be expressed in the CLI subset.
-2. **Compare design.png ↔ impl.png.** Ship both images to the agent; let it diff visually + textually. Initial pass = "look at both and tell me where they diverge"; later we can layer pixel diff or component-tree diff if false negatives accumulate.
-3. **Targets:** v1 is web (headless Chrome). Electron renderer is Chromium-on-DevTools-protocol — same scripts work, modulo "how do we launch the app and find its DevTools port"; defer to v2. Mobile is genuinely different (no DevTools protocol; needs Maestro/Detox/native screenshotting); defer to v3, separate decision.
-4. **Invocation shapes — three patterns the workflow can pick from:**
-   - **Fanout-from-upstream.** A `verify` phase in `ui-design` (or a future `feature-implementation` workflow) declares `fanoutFromUpstream: { arrayKey: "pngFiles" }` and creates one design-reviewer task per PNG. Most natural fit for "as the work gets completed, the reviewer checks each screen." Already a forge primitive.
-   - **Specialist red on an implementation phase.** When a phase produces runnable UI (e.g. `export-code` or a `feature-ui-design-needed` build), attach `design-reviewer` as a specialist red. Non-blocking by default; failures warn the human at the gate.
-   - **Ad-hoc spot check.** A future `forge review <run-id> --screen home` command could spawn a one-off task outside planned phases. Not supported today; build only if the fanout/red shapes turn out to be too coarse.
-5. **Open question (defer):** how does the agent get the URL? Options: workflow-input field, `--target-url` on the invoking command, or upstream phase output. **Decided 2026-05-08 (Steven's Q2):** make this decision when we start developing — it's downstream of the agent's existence.
-**Input contract (locked, given #54 shipped):** the agent reads `inputs.upstream[*].result.pngFiles` (canonical designs) and either `inputs.upstream[*].result.htmlFiles` (static HTML files to screenshot via `file://`) OR a `targetUrl` input (running app, web/Electron). Output: `{verdict: "pass"|"fail"|"inconclusive", confidence, findings: [{severity, summary, evidence, hypothesis}], notes}` — same shape as other reds.
-**Sequence:** unblocked now that #54 is live. Worth a real `ui-design` run first (the in-progress validation) so we have a working artifact pair to test against — that's the natural input. Discuss before implementing: the diff prompt and "match" criteria need calibration.
-
-### #51b — Plan the `design-reviewer` agent in detail (FORGE-DEC-017?)
-**Why:** Splitting the planning question out so #51 doesn't grow into a multi-day item without a discussion checkpoint. Before any code lands, decide:
-- Container shape: fork `agent-dev-worker` or new `agent-design-reviewer-worker` image? (Headless Chrome + the 5 CLI scripts is a clean separation; arguments cut both ways.)
-- Diff prompt template: what does the agent read first (design PNG or impl screenshot)? How is "close enough" expressed in the system prompt?
-- Calibration data: collect 5-10 (design, impl, expected verdict) triples from real runs as the validation set before declaring v1 done.
-- Whether this warrants its own ADR (FORGE-DEC-017?) or is small enough to ship under #51's commit log alone.
-Don't start until the calibration question has a plan — uncalibrated visual judges produce noise that erodes trust in the whole reds layer.
-
-### #52 — Browser DevTools error capture for implementation review
-**Why:** "Did the page render without console errors?" is a binary signal that catches a lot of broken builds. Same Puppeteer-Core CLI scripts as #51 — different question. Useful as a specialist red on any phase that produces runnable web UI (`export-code` from #46, future `feature-ui-design-needed` builds that produce a page).
-**How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
-
 ## Done (recent)
+
+### Active-cleanup pass 2026-05-12 — 8 stale entries closed
+End-of-session sweep before a Claude upgrade. Each entry is genuinely dead or shipped:
+
+- **#85 — Graph view as a separate screen.** Parent of all the GRAPH: work that followed. #98 / #100 / #101 / #102 / #103 / #105 all came out of this. The original parent is dead; its children carry the work.
+- **#53 — prompt-author agent seed + ui-design template.** Shipped. `seeds/agents/prompt-author/CLAUDE.md` + `seeds/agents/prompt-author/templates/` exist. Validated empirically (note in the original entry confirmed this on 2026-05-07).
+- **#45 — `forge auth status` warns on stale bedrock vars.** Functionally shipped by #97 — the dashboard auth-mode popover renders the bedrock token's expiry timestamp + remaining time + amber/red health dot when stale. The original framing (a CLI flag) was made redundant by the always-on indicator.
+- **#39 — Audit the spawn → DB pipeline for missing fields.** Meta-task from 2026-05-08 that said "run an audit someday after #32/#38/#27 land." Never materialized into action. If a specific missing field comes up, file that directly; "do an audit" was perpetually-deferrable.
+- **#49 — Design-reviewer red agent (future investigation).** Predicated on FORGE-DEC-014-killed assumptions about the in-container designer. Re-evaluate when host-led-Pencil generates evidence worth catching.
+- **#50 — React Native code export from Pencil .pen files.** Dependent on the container-designer (#46) that FORGE-DEC-014 killed. Dead-parent → dead-child.
+- **#51 + #51b — design-reviewer agent: visual diff implemented UI vs design artifact.** Same FORGE-DEC-014 problem: the artifact pair (`pngFiles` + `htmlFiles`) the agent was supposed to consume comes from the killed `#46` container-designer flow. Worth revisiting once the host-led-Pencil + prompt-author flow has produced a few real design corpora that could feed a different reviewer shape.
+- **#52 — Browser DevTools error capture.** Tied to #51's Puppeteer-Core CLI scripts. Same FORGE-DEC-014 dependency. If a forge workflow ever needs "did the page render without errors" as a check, file fresh.
+
+Active dropped from 36 → 28.
 
 ### #104 — GRAPH: Rejects + retries design session — superseded by #105
 **Closed:** 2026-05-12. Resolved-by-decision rather than work: the rule for the graph view is "render the real workflow — every task, every relationship." That eliminates the design-session framing — there's no separate set of decisions to make. Scope absorbed into #105.
