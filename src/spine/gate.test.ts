@@ -4,6 +4,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
+import { insertVerdict } from "../store/verdicts.js";
 import { aggregateVerdicts, batchGate, gate } from "./gate.js";
 import { tasksForRunPhase, getTask } from "../store/tasks.js";
 import type { VerdictRow, RedAuthority, Run, Task } from "../types/index.js";
@@ -304,4 +305,194 @@ test("gate request-changes on a manual-phase task throws (no agent to re-run)", 
   // Task stays in awaiting_gate — the failed gate didn't mutate state inappropriately.
   const refreshed = getTask("t-review-2")!;
   assert.equal(refreshed.status, "awaiting_gate");
+});
+
+// ---- #110: rationale required when advancing over a specialist red fail ----
+//
+// Today's gate.ts protects authoritative red fails via the blocked_by_red
+// status check (line ~51) for any gate type. Specialist red fails — which
+// don't block the workflow but should still require human acknowledgment —
+// were previously only checked for gate:"verdict" phases. Human-gated phases
+// could advance with no audit trail. The fix applies the rationale-required
+// check to both gate types.
+
+const FEATURE_RUN: Run = {
+  id: "run-feature",
+  workflow: "feature",
+  title: "feature gate test",
+  status: "active",
+  createdAt: "2026-05-08T00:00:00Z",
+};
+
+function seedSpecialistFail(taskId: string, runId: string, phase: string): void {
+  // Verdict rows have FK constraints to tasks(id) on both task_id and
+  // red_task_id, so we need to insert a stub red task before the verdict.
+  const redTaskId = `red-${taskId}`;
+  insertTask({
+    id: redTaskId,
+    runId,
+    parentId: taskId,
+    phase,
+    agentRole: "red-backend",
+    status: "complete",
+    taskPackage: {
+      taskId: redTaskId,
+      runId,
+      phase,
+      role: "red-backend",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  insertVerdict({
+    id: `verdict-${taskId}-spec`,
+    taskId,
+    redTaskId,
+    redRole: "red-backend",
+    verdict: "fail",
+    confidence: 0.8,
+    authority: "specialist",
+    findings: [{ severity: "medium", summary: "test concern", evidence: "test evidence", hypothesis: "test hypothesis" }],
+    createdAt: new Date().toISOString(),
+  });
+}
+
+test("#110 gate=human advance with specialist fail requires rationale", async () => {
+  insertRun(FEATURE_RUN);
+  insertTask({
+    id: "t-human-spec-fail",
+    runId: FEATURE_RUN.id,
+    phase: "architect", // feature workflow's architect phase is gate:"human"
+    agentRole: "architect",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-human-spec-fail",
+      runId: FEATURE_RUN.id,
+      phase: "architect",
+      role: "architect",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  seedSpecialistFail("t-human-spec-fail", FEATURE_RUN.id, "architect");
+
+  // No rationale → should throw with the specialist-fail message.
+  await assert.rejects(
+    () => gate("t-human-spec-fail", "advance", undefined),
+    /Specialist red.*red-backend.*Provide --rationale/
+  );
+  // Task should still be awaiting_gate (the throw left state untouched).
+  assert.equal(getTask("t-human-spec-fail")!.status, "awaiting_gate");
+});
+
+test("#110 gate=human advance with specialist fail succeeds when rationale provided", async () => {
+  insertRun(FEATURE_RUN);
+  insertTask({
+    id: "t-human-spec-ok",
+    runId: FEATURE_RUN.id,
+    phase: "architect",
+    agentRole: "architect",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-human-spec-ok",
+      runId: FEATURE_RUN.id,
+      phase: "architect",
+      role: "architect",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  seedSpecialistFail("t-human-spec-ok", FEATURE_RUN.id, "architect");
+
+  // With rationale → advance succeeds.
+  const result = await gate("t-human-spec-ok", "advance", "acknowledged the concern, advancing anyway");
+  assert.equal(result.task.status, "complete");
+});
+
+test("#110 gate=verdict advance with specialist fail still requires rationale (regression check)", async () => {
+  // Verdict-gated case was already covered before #110; this test pins the
+  // behavior so the refactor (moving the check outside the verdict block)
+  // didn't regress it.
+  insertRun(FEATURE_RUN);
+  insertTask({
+    id: "t-verdict-spec-fail",
+    runId: FEATURE_RUN.id,
+    phase: "build", // feature workflow's build phase is gate:"verdict"
+    agentRole: "implementer",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-verdict-spec-fail",
+      runId: FEATURE_RUN.id,
+      phase: "build",
+      role: "implementer",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  seedSpecialistFail("t-verdict-spec-fail", FEATURE_RUN.id, "build");
+
+  await assert.rejects(
+    () => gate("t-verdict-spec-fail", "advance", undefined),
+    /Specialist red.*Provide --rationale/
+  );
+});
+
+test("#110 advance with no failed verdicts proceeds without rationale (gate=human)", async () => {
+  insertRun(FEATURE_RUN);
+  insertTask({
+    id: "t-clean-human",
+    runId: FEATURE_RUN.id,
+    phase: "architect",
+    agentRole: "architect",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-clean-human",
+      runId: FEATURE_RUN.id,
+      phase: "architect",
+      role: "architect",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  // No verdicts at all — clean advance.
+
+  const result = await gate("t-clean-human", "advance", undefined);
+  assert.equal(result.task.status, "complete");
+});
+
+test("#110 --force bypasses the specialist-fail rationale requirement", async () => {
+  // --force is the escape hatch for both authoritative and specialist
+  // checks; the explicit override is itself an audit signal.
+  insertRun(FEATURE_RUN);
+  insertTask({
+    id: "t-force-spec",
+    runId: FEATURE_RUN.id,
+    phase: "architect",
+    agentRole: "architect",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: "t-force-spec",
+      runId: FEATURE_RUN.id,
+      phase: "architect",
+      role: "architect",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    result: { status: "complete" },
+    createdAt: "2026-05-08T00:00:00Z",
+  });
+  seedSpecialistFail("t-force-spec", FEATURE_RUN.id, "architect");
+
+  // No rationale + --force → succeeds.
+  const result = await gate("t-force-spec", "advance", undefined, { force: true });
+  assert.equal(result.task.status, "complete");
 });
