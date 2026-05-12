@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertRun } from "../store/runs.js";
+import { insertRun, updateRunStatus } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
+import type { Task } from "../types/index.js";
 import { setQueryDbForTest } from "./queries.js";
 import { startDashboard, closeServerForTest, _setRunForgeOverrideForTest } from "./server.js";
 import type { Run } from "../types/index.js";
@@ -184,6 +186,126 @@ test("POST /api/gate surfaces non-zero exit as 500 with stderr", async () => {
     const res = await post("/api/gate/task-x", { decision: "advance" });
     assert.equal(res.status, 500);
     assert.match(res.body, /task not found/);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+  }
+});
+
+// ----- #108: gate-advance auto-dispatches the next phase -----
+
+function seedGateTask(id: string, runId: string): void {
+  const task: Task = {
+    id,
+    runId,
+    phase: "frame",
+    agentRole: "framer",
+    status: "awaiting_gate",
+    taskPackage: {
+      taskId: id,
+      runId,
+      phase: "frame",
+      role: "framer",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: "2026-05-12T00:00:00Z",
+  };
+  insertTask(task);
+}
+
+test("POST /api/gate advance chains into forge next when the run is active", async () => {
+  seedGateTask("task-chain-1", "run-srv");
+  const captured: string[][] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    captured.push(args);
+    return { exitCode: 0, stdout: "ok", stderr: "" };
+  });
+  try {
+    const res = await post("/api/gate/task-chain-1", { decision: "advance" });
+    assert.equal(res.status, 200);
+    const data = JSON.parse(res.body) as { dispatched?: boolean };
+    assert.equal(data.dispatched, true);
+    // Two invocations: gate first, then next chained automatically.
+    assert.equal(captured.length, 2);
+    assert.deepEqual(captured[0], ["gate", "task-chain-1", "advance"]);
+    assert.deepEqual(captured[1], ["next", "run-srv"]);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+  }
+});
+
+test("POST /api/gate does NOT chain into next on reject", async () => {
+  seedGateTask("task-chain-2", "run-srv");
+  const captured: string[][] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    captured.push(args);
+    return { exitCode: 0, stdout: "ok", stderr: "" };
+  });
+  try {
+    const res = await post("/api/gate/task-chain-2", { decision: "reject", rationale: "no" });
+    assert.equal(res.status, 200);
+    const data = JSON.parse(res.body) as { dispatched?: boolean };
+    assert.equal(data.dispatched, undefined);
+    // Only the gate call; no forge next.
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0]?.[0], "gate");
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+  }
+});
+
+test("POST /api/gate does NOT chain into next when the run is already complete", async () => {
+  seedGateTask("task-chain-3", "run-srv");
+  // Simulate gate.ts having finalized the run during advance (terminal phase).
+  updateRunStatus("run-srv", "complete");
+  const captured: string[][] = [];
+  _setRunForgeOverrideForTest(async (args) => {
+    captured.push(args);
+    return { exitCode: 0, stdout: "ok", stderr: "" };
+  });
+  try {
+    const res = await post("/api/gate/task-chain-3", { decision: "advance" });
+    assert.equal(res.status, 200);
+    const data = JSON.parse(res.body) as { dispatched?: boolean };
+    assert.equal(data.dispatched, undefined);
+    assert.equal(captured.length, 1);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+    // Restore for any later tests; in-memory DB is a singleton across this suite.
+    updateRunStatus("run-srv", "active");
+  }
+});
+
+test("POST /api/gate surfaces a 500 when the chained dispatch fails", async () => {
+  seedGateTask("task-chain-4", "run-srv");
+  let call = 0;
+  _setRunForgeOverrideForTest(async () => {
+    call++;
+    if (call === 1) return { exitCode: 0, stdout: "ok", stderr: "" }; // gate ok
+    return { exitCode: 1, stdout: "", stderr: "container crashed" };  // next fails
+  });
+  try {
+    const res = await post("/api/gate/task-chain-4", { decision: "advance" });
+    assert.equal(res.status, 500);
+    assert.match(res.body, /Advanced .* but dispatch failed/);
+    assert.match(res.body, /container crashed/);
+  } finally {
+    _setRunForgeOverrideForTest(undefined);
+  }
+});
+
+test("POST /api/gate surfaces a 400 when the chained dispatch hits an auth error", async () => {
+  seedGateTask("task-chain-5", "run-srv");
+  let call = 0;
+  _setRunForgeOverrideForTest(async () => {
+    call++;
+    if (call === 1) return { exitCode: 0, stdout: "ok", stderr: "" };
+    return { exitCode: 1, stdout: "", stderr: "Auth error: Bedrock token expired" };
+  });
+  try {
+    const res = await post("/api/gate/task-chain-5", { decision: "advance" });
+    assert.equal(res.status, 400);
+    assert.match(res.body, /Auth error/);
   } finally {
     _setRunForgeOverrideForTest(undefined);
   }
