@@ -8,6 +8,8 @@ import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
 import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, WORKFLOW_GROUPS, UNIVERSAL_FIELDS } from "./workflowSchema.js";
 import { AUTH_ERROR_PREFIX, getAuthState } from "../util/creds.js";
+import { getTask } from "../store/tasks.js";
+import { getRun } from "../store/runs.js";
 import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
@@ -199,7 +201,45 @@ async function handleGate(taskId: string, body: Record<string, unknown>, res: Se
   if (force) args.push("--force");
   const out = await invokeForge(args);
   if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge gate exited ${out.exitCode}`);
-  jsonOk(res, { taskId, decision, summary: tail(out.stdout) });
+
+  // #108: chain into next() on a successful advance so the user doesn't have
+  // to click "Run Next" right after "Advance." The CLI keeps gate/next as
+  // composable primitives; this is a dashboard-only convenience.
+  //
+  // Skip the chain when:
+  //   - decision wasn't advance (reject / request-changes land in different
+  //     states by design; the human should decide what's next)
+  //   - the run finalized (terminal advance — nothing left to dispatch)
+  //   - we can't resolve the runId (defensive; surface gate result anyway)
+  if (decision !== "advance") {
+    return jsonOk(res, { taskId, decision, summary: tail(out.stdout) });
+  }
+  const task = getTask(taskId);
+  if (!task) {
+    return jsonOk(res, { taskId, decision, summary: tail(out.stdout) });
+  }
+  const run = getRun(task.runId);
+  if (!run || run.status === "complete") {
+    return jsonOk(res, { taskId, decision, summary: tail(out.stdout) });
+  }
+  // project_dir is persisted on the run row from earlier; forge next reads
+  // it without needing --project on the chain.
+  const nextOut = await invokeForge(["next", task.runId]);
+  if (nextOut.exitCode !== 0) {
+    // Gate succeeded; dispatch failed. Surface both to the user — the gate
+    // decision is durable in the DB, only the dispatch needs another nudge.
+    if (nextOut.stderr.includes(AUTH_ERROR_PREFIX)) {
+      return jsonError(res, 400, `Advanced ${taskId} but dispatch failed: ${nextOut.stderr.trim()}`);
+    }
+    return jsonError(res, 500, `Advanced ${taskId} but dispatch failed: ${nextOut.stderr || `forge next exited ${nextOut.exitCode}`}`);
+  }
+  jsonOk(res, {
+    taskId,
+    decision,
+    summary: tail(out.stdout),
+    dispatched: true,
+    dispatchSummary: tail(nextOut.stdout),
+  });
 }
 
 async function handleNext(runId: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
