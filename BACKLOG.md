@@ -61,28 +61,6 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 ## Active
 
-### #110 — Require rationale when advancing over a failed red (any gate type)
-**Why:** Caught 2026-05-12 during the #91 test run. red-backend (specialist) failed on task-build-aa57f1 with two findings. Dashboard's gate UI allowed advance with **no rationale text whatsoever** — just a click. The spine layer (`src/spine/gate.ts` lines 79-83) does enforce a rationale requirement when specialist reds have failed, but **only for `gate: "verdict"` phases** (gated by line 69's `phase.gate === "verdict"` outer check). For `gate: "human"` phases (like the architect/build/synthesize phases on most workflows), the check is skipped entirely.
-
-**Bug exists on two layers:**
-
-1. **Spine (`src/spine/gate.ts:69-84`).** The whole specialist-fail-requires-rationale block is wrapped in the verdict-gated outer check. It should apply to `gate: "human"` too — the rationale requirement is about creating an audit trail for "human decided to override the red," not about which gate type is in play. Move the specialist-fail-requires-rationale check outside the verdict-only block, OR explicitly run it for both gate types.
-
-2. **Dashboard UI (`src/dashboard/html.ts` gate panel).** When a task has at least one failed verdict, the rationale textarea should be visually required — label changes from "Rationale (optional)" to "Rationale (required — red(s) failed)", and the advance button is disabled until non-empty. The spine throw is a backstop; the UI should prevent the wasted round-trip.
-
-**Acceptance:**
-- Advancing a `gate: "human"` task with one or more failed verdicts and no rationale throws an `AUTH_ERROR_PREFIX`-style structured error (same shape used by #79). Caught by spine OR client validation.
-- Dashboard rationale field is visually marked required when failed verdicts exist on the task; advance button stays disabled until non-empty text.
-- Tests in `gate.test.ts` cover both gate types (verdict, human) for the specialist-fail-requires-rationale case.
-
-**Out of scope:**
-- Authoritative red fails already block advance unless `--force` is used (existing behavior, line 72-78). This entry doesn't touch that.
-- Changing the verdict aggregation rule (`pass`/`fail`/`inconclusive`).
-
-**Composite with #108:** both are gate-UX bugs. Worth handling together if convenient — #108 chains gate→next; #110 adds a required-text guard before gate fires.
-
-**Caught:** 2026-05-12 during #91 test run.
-
 ### #109 — Transactional reconcile + dispatch writes
 **Why:** Caught 2026-05-12 by red-backend (specialist) on task-build-aa57f1's #91 build. `reconcile.ts:80-124` performs multiple DB writes per task: (1) markTaskComplete or markTaskAwaitingGate, (2) insertVerdict for red tasks, (3) setTaskStatus on the parent (awaiting_gate or blocked_by_red). These are *not* wrapped in a transaction. A crash, disk-full, or DB-constraint violation between writes leaves the database in an inconsistent state — e.g., red task marked complete but its verdict row never inserted, parent stuck in running. On retry, reconcile sees a complete red task and won't re-attempt, so the verdict is permanently lost.
 
@@ -756,6 +734,13 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #110 — Require rationale when advancing over a failed specialist red
+**Closed:** 2026-05-12 on branch `rationale-on-red-fail-110` → merged to main. Test suite 338/338 (+5 gate tests). Two-layer fix:
+- **Spine (`src/spine/gate.ts`):** specialist-fail-rationale check now applies to ANY gate type, not just verdict-gated phases. Previously a `gate: "human"` task with a failed specialist red could be advanced with no rationale at all — zero audit trail of the override. Authoritative-red protection (via the `blocked_by_red` status path) was already correct for all gate types and is unchanged.
+- **Dashboard (`src/dashboard/html.ts`):** gateActionsSection computes `advanceRequiresRationale` from the verdict list. When true: specialist red verdict cards are surfaced (same `redVerdictCard` used for `blocked_by_red`); helper text + textarea placeholder shift to "required to advance over the specialist red(s) above"; the Advance button becomes `⚠ Advance over red(s)` in btn-warning styling and passes `requireRationale: true`, triggering doGate's existing client-side toast on empty submission.
+- 5 new gate tests cover both gate types (human, verdict), happy/empty/forced paths.
+**Live-verified** by flipping `task-build-aa57f1` (the #91 build with a real red-backend specialist fail at 0.85) back to `awaiting_gate`, opening the dashboard, confirming the rendering + the empty-rationale toast + the non-empty-rationale path.
 
 ### #108 — Dashboard: gate-advance auto-dispatches the next phase
 **Closed:** 2026-05-12 on branch `auto-dispatch-108` → merged to main. Test suite at 333/333 (+5 server tests). Shipped:
