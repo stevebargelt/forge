@@ -61,7 +61,215 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 ## Active
 
-### #100 — Graph view fanout layout is broken (HIGH PRIORITY — needs Playwright eyes-on)
+### #111 — Verify phase blocked by native-module mismatch (HIGH PRIORITY)
+**Why:** Caught 2026-05-12 during the #91 verify task. **The verify phase cannot actually verify any change that touches the store layer** — and that's most spine changes. Every test that imports from `src/store/*` (which transitively imports `better-sqlite3`) fails inside the agent container with `ERR_DLOPEN_FAILED: invalid ELF header`. The host's `node_modules/better-sqlite3/build/Release/better_sqlite3.node` is a macOS arm64 native binary (built when forge was `npm install`'d on the Mac), but the agent-dev-worker container is Linux x86_64. Mounting the host project read-only carries the wrong-platform native module straight into the container; the dynamic loader rejects it on first store-touching `import`.
+
+**Concrete evidence:** Inside the container, running `npx tsx --test src/spine/reconcile.test.ts`:
+```
+not ok 1 - reconcile: running task with no result.json stays still_running
+  failureType: 'hookFailed'
+  error: '/project/node_modules/better-sqlite3/build/Release/better_sqlite3.node: invalid ELF header'
+  code: 'ERR_DLOPEN_FAILED'
+```
+All 13 reconcile tests fail identically; retry.test.ts and every other store-touching test file behave the same way. Same suite passes 328/328 on the host.
+
+**Impact:** Every PR that touches spine ships effectively unverified by reds at the test level. The verify agent does a static code review as a fallback (and was correct in its #91 review), but that's strictly weaker than running the tests. The agent's failure-mode signal ("0 of 13 tests passed") looks alarming in dashboard summaries even when the work is correct; humans have to read the evidence string to know it's infra, not regression.
+
+**Three approaches, each with trade-offs:**
+
+1. **Rebuild better-sqlite3 inside the container before tests run.** Add a step to the verify (and red) phase that runs `npm rebuild better-sqlite3 --build-from-source` (or `pnpm rebuild better-sqlite3`) before invoking the test runner. Cleanest semantically — same install on both platforms. Costs: 30-60s per container (gcc/python/node-gyp compile) AND requires build tools in the agent image (`build-essential` + `python3`, currently absent in agent-dev-worker). Either bake the prereqs into the image OR pull a prebuilt binary the second time the container runs.
+
+2. **Per-platform `node_modules` in a docker volume.** Mount the project read-only but install deps in the container's own writable layer (or a named volume keyed by container platform). Project files come from host; deps come from container. Adds setup time on first run; subsequent runs are fast. Complicates the "agent sees what the human sees" mental model — the agent's `node_modules/` ≠ the host's. May cause subtle version-drift bugs.
+
+3. **Replace better-sqlite3 with a pure-JS binding.** `sql.js` (WASM SQLite, no native compile) or `@libsql/client` (TypeScript native). Eliminates the platform-mismatch class of bug. Real cost: better-sqlite3 is fast and synchronous; alternatives are either async (libsql) or slow (sql.js). Forge uses the synchronous API extensively. Replacing it touches every file in `src/store/`.
+
+**Lean: option 1.** Honest about what the container does, doesn't change the codebase, fits forge's "containers run the same code as humans do" philosophy. Cost is acceptable for the verify phase (~1 minute extra per run; we already wait minutes for agents). Implementation:
+- Add `build-essential`, `python3`, `python-is-python3` to the agent-dev-worker Dockerfile.
+- Wrap the test invocation in the verify and red seeds with `npm rebuild better-sqlite3 --build-from-source >/dev/null 2>&1; npx tsx --test ...`.
+- Verify that other native deps in `node_modules` (none today, but check) don't have the same issue.
+
+**Acceptance:**
+- Verify phase runs `npm test` (or equivalent) inside the container and gets the same result as the host (328+ tests pass).
+- Red agents that run tests see them pass too (relevant for #109 transactional reconcile + future red tests).
+- New build adds ~30-60s per agent invocation; documented as acceptable.
+
+**Out of scope:**
+- Picking up other native deps if forge adds them later (we'll discover them the same way: a red verdict that reads "DLOPEN_FAILED" the moment they show up).
+- Switching SQLite bindings (option 3).
+
+**Composite with #109:** #109 wants to test transactional rollback with a fault-injection harness. That harness needs working tests inside the container — so #111 blocks #109.
+
+**Priority:** HIGH. Per Steven 2026-05-12: "feels like this is highest priority — after we finish the #91 run." File it so the next session starts here.
+
+**Caught:** 2026-05-12 by the #91 verify agent, surfaced clearly in its evidence string.
+
+### #110 — Require rationale when advancing over a failed red (any gate type)
+**Why:** Caught 2026-05-12 during the #91 test run. red-backend (specialist) failed on task-build-aa57f1 with two findings. Dashboard's gate UI allowed advance with **no rationale text whatsoever** — just a click. The spine layer (`src/spine/gate.ts` lines 79-83) does enforce a rationale requirement when specialist reds have failed, but **only for `gate: "verdict"` phases** (gated by line 69's `phase.gate === "verdict"` outer check). For `gate: "human"` phases (like the architect/build/synthesize phases on most workflows), the check is skipped entirely.
+
+**Bug exists on two layers:**
+
+1. **Spine (`src/spine/gate.ts:69-84`).** The whole specialist-fail-requires-rationale block is wrapped in the verdict-gated outer check. It should apply to `gate: "human"` too — the rationale requirement is about creating an audit trail for "human decided to override the red," not about which gate type is in play. Move the specialist-fail-requires-rationale check outside the verdict-only block, OR explicitly run it for both gate types.
+
+2. **Dashboard UI (`src/dashboard/html.ts` gate panel).** When a task has at least one failed verdict, the rationale textarea should be visually required — label changes from "Rationale (optional)" to "Rationale (required — red(s) failed)", and the advance button is disabled until non-empty. The spine throw is a backstop; the UI should prevent the wasted round-trip.
+
+**Acceptance:**
+- Advancing a `gate: "human"` task with one or more failed verdicts and no rationale throws an `AUTH_ERROR_PREFIX`-style structured error (same shape used by #79). Caught by spine OR client validation.
+- Dashboard rationale field is visually marked required when failed verdicts exist on the task; advance button stays disabled until non-empty text.
+- Tests in `gate.test.ts` cover both gate types (verdict, human) for the specialist-fail-requires-rationale case.
+
+**Out of scope:**
+- Authoritative red fails already block advance unless `--force` is used (existing behavior, line 72-78). This entry doesn't touch that.
+- Changing the verdict aggregation rule (`pass`/`fail`/`inconclusive`).
+
+**Composite with #108:** both are gate-UX bugs. Worth handling together if convenient — #108 chains gate→next; #110 adds a required-text guard before gate fires.
+
+**Caught:** 2026-05-12 during #91 test run.
+
+### #109 — Transactional reconcile + dispatch writes
+**Why:** Caught 2026-05-12 by red-backend (specialist) on task-build-aa57f1's #91 build. `reconcile.ts:80-124` performs multiple DB writes per task: (1) markTaskComplete or markTaskAwaitingGate, (2) insertVerdict for red tasks, (3) setTaskStatus on the parent (awaiting_gate or blocked_by_red). These are *not* wrapped in a transaction. A crash, disk-full, or DB-constraint violation between writes leaves the database in an inconsistent state — e.g., red task marked complete but its verdict row never inserted, parent stuck in running. On retry, reconcile sees a complete red task and won't re-attempt, so the verdict is permanently lost.
+
+**Important context:** This is **NOT introduced by #91's fix.** The same shape existed before #91 — single `markTaskComplete` call, then verdict insert, then parent transition, all separate writes. #91 just changed the conditional logic around the first write. **dispatch.ts's normal-path has the same shape** — same lack of transactional wrapping. Fix should apply uniformly to both paths, not just reconcile.
+
+**Affected paths:**
+- `reconcile.ts:80-124` (orphan recovery, the path #91 just fixed).
+- `dispatch.ts:107-128` (normal happy-path after agent container exits).
+- Possibly `gate.ts:97-122` (advance creates next-phase tasks; multiple insertTask calls).
+
+**Approach:** Wrap each per-task state-transition sequence in a SQLite transaction via `better-sqlite3`'s `db.transaction()` helper. Each function (the per-task body of reconcile/dispatch/gate) becomes a transaction. On any throw inside, the entire DB state for that task rolls back; the higher-level loop continues to the next task. Failure semantics: the partial DB state is gone; the task stays in whatever pre-transaction state it had (still running, awaiting agent exit, etc.); reconcile on next forge invocation re-attempts cleanly.
+
+**Acceptance:**
+- Each multi-write sequence in reconcile/dispatch/gate is wrapped in a transaction.
+- Existing tests still pass.
+- New tests inject a fault between writes (e.g. mock insertVerdict to throw on first call) and assert the DB state rolls back — task still in pre-transaction state, no orphan verdict row, no partial parent transition.
+
+**Open questions:**
+- Should `cy.layout`-style cascading writes inside transactions skip `logEvent` (which writes to its own table)? Probably yes — events are audit-log-style append-only and shouldn't fail with the transaction.
+- Are there cross-task writes that span multiple transactions (one task's gate creates next-phase tasks)? Yes — gate.ts:97-122 advances task A then inserts tasks B/C/D for the next phase. Probably want both halves in one transaction so an advance that fails to create downstream tasks rolls back.
+
+**Caught:** 2026-05-12 by red-backend on the #91 build. Real architectural concern, just not specific to #91.
+
+### #108 — Dashboard: gate-advance should auto-dispatch the next phase
+**Why:** Caught 2026-05-12. After gating advance through the dashboard (e.g. architect phase complete, reds pass, human clicks "Advance"), the run sits idle until the human ALSO clicks "Run Next." Two clicks for one mental action. Worse: the advance-preview line under the gate panel — added in #71 — literally says *"Advancing dispatches the architect phase (architect)."* That copy is a lie under current behavior. Gate only creates the next-phase tasks as `pending`; it's `next()` that actually spawns containers. Steven's exact words: "I thought we fixed this but after the architect (plus two red agents) I advanced then I still had to click Run Next."
+
+**Why it works this way today:** `gate()` and `next()` are deliberately separable primitives at the spine layer. CLI's `forge gate <id> advance` prints "Next: forge next <runId>" and stops — that's the right shape for CLI composability. But the dashboard is a different surface: when a human clicks Advance from a UI, they expect work to continue, not to have to re-engage with a second button. The split between gate-completion and dispatch is a model-layer concern that shouldn't leak through to the dashboard's UX.
+
+**Symptoms beyond the extra click:**
+- Advance-preview copy is misleading.
+- If the human walks away after clicking Advance assuming agents are running, they're not.
+- Fanout phases especially feel broken — "Advance, oh wait, also Run Next, now 16 tasks are spawning."
+
+**Fix (lean):** Dashboard's `handleGate` in `src/dashboard/server.ts` chains into `handleNext` after a successful `advance`. Both already shell out to the `forge` CLI; the change is to invoke `forge next <runId>` as a second step when decision === 'advance' AND `forge gate` exited 0 AND the run isn't already complete. The auth-error sniffing already exists for both calls — reuse it. CLI behavior stays unchanged (forge gate prints the "Next: forge next ..." line, user runs it manually) — that's idiomatic for CLI.
+
+**Edge cases to handle in the chain:**
+- Advance on a terminal phase → run completes via gate(); `forge next` becomes a no-op. Safe to call anyway.
+- Advance into a manual phase (`gate: "human"` with no agents, e.g. ui-review) → next-phase task is awaiting_human_input; `forge next` reports awaiting_human_input. Fine.
+- Advance into a fanout phase → `forge next` dispatches all N children. This is the case where users feel the bug most acutely today, and it'll work cleanly.
+- Gate fails (verdict aggregation fail, blocked_by_red without --force) → don't chain into next.
+
+**Out of scope for this entry:**
+- Spine-level "advance and dispatch" combined primitive. Would affect CLI semantics; current proposal keeps CLI composable as-is.
+- Auto-chaining `next` after `reject` or `request-changes` — those land in different states by design; the human should decide what's next.
+
+**Open question worth flagging:** the gate POST response today returns `{ taskId, decision, summary }`. After the chain lands, should the response also surface what `forge next` did — e.g. "dispatched architect phase (3 tasks)" — so the toast can confirm action? Likely yes; same pattern as advance-preview but as a confirmation rather than a preview.
+
+**Caught:** 2026-05-12. Real surface emerged during a live #91 test-run kick-off discussion.
+
+### #105 — GRAPH: full task-graph rendering (every task, every relationship) — HOLD FOR DESIGNER
+**Why:** Caught 2026-05-11 while iterating #100's flat-node fanout in `graph-view-85`. After the cluster-shape question was resolved (keep flat, add curves), the next correctness issue surfaced: **the graph view shows a sanitized, summary-flavored projection of the workflow, not the real workflow.** Concretely, on `run-code-review-terry-workflow-586a86` (an investigation run), the expanded fanout shows 16 task nodes including one failed (`#9`) with no outgoing edge — but the actual run has **5 failed investigate tasks, each followed by a successful retry** (`task-investigate-cd2572.parentId = task-investigate-176b68` and four similar pairs), plus **2 red-investigate review tasks per successful task** (32 reds total). None of the retries or reds appear in the graph today. The human needs the graph view to be a *holistic picture of what happened/is happening*, not the pill-row's compact summary rendered as boxes.
+
+**Steven's framing (2026-05-11):** "I want to show everything — the real flow. Reds need to figure out how to show them. I want a REAL representation of the workflow, not some half-assed attempt."
+
+**Design dependency — HOLD.** Designer is working on something related (likely follow-up to the four Graph View frames in `~/code/forge-design/dashboard.pen`). **Do not start implementation until the designer's pass lands and we have updated frames for retry + red rendering.** This entry captures the scope agreed on 2026-05-11 so the designer's deliverable can be checked against it.
+
+**Designer brief — answers to specific questions asked 2026-05-11:**
+- **Unit of node: tasks, not phases.** Every node in the graph is a task. Reds, retries, fanout sub-tasks, singletons — all peer nodes at the same level. No compound nodes, no parent-child containers.
+- **Forge doesn't really have phases as runtime entities.** Phases are a workflow-authoring concept — when you author a workflow file, you list phases like `["brief", "design", "build", "verify"]` to describe the shape of the work. At runtime the spine doesn't track "what phase the run is in" — there's no `phases` table, no phase-level state machine. Phase survives as a *column on the tasks table* (a label saying "this task came from the build step"). It's metadata, not an entity. The pill row aggregates tasks by phase for display; everything else operates on tasks.
+- **Free-form canvas.** Zoom, pan, drag nodes. The graph view is an interactive workspace where the user can rearrange the layout to suit their reading.
+- **No bands.** Because drag means nodes can move anywhere, any spatial grouping treatment (column headers, horizontal bands, framed clusters by phase) breaks the moment the user drags a node out of its group. Phase grouping has to live somewhere other than the canvas's spatial layout — designer's call where (node color/icon, filter UI, side panel, none of the above).
+
+**What's wrong with today's graph (post-#100, pre-#105):**
+- Fanout shows 16 "primary" task statuses (from `phaseShape.fanoutDots`). Failed tasks are visible but the retries that replaced them aren't.
+- Red review tasks (every fanout sub-task has 2 reds in this workflow) are completely absent from the graph.
+- Singleton tasks (frame-question, synthesize, recommend) appear as one node each, even if they retried.
+- The graph reflects the *pill row's* mental model (compact per-phase summary). The actual task table tells a much richer story.
+
+**Scope — the rewrite (NOT the patches we kept rejecting):**
+
+1. **New module `src/dashboard/taskGraph.ts` — pure function `buildTaskGraph(run, tasks, workflow): TaskGraph`.** Replaces the data-feed half of `graphView.ts` for the graph view's needs. (`phaseShape.ts` stays as-is for the pill row.)
+   - `TaskGraphNode = { taskId, phase, role, status, isRed: boolean, retryOf?: taskId, kind: 'task' | 'red' }` — one node per task in `tasks[]`, no filtering, no superseded collapse.
+   - `TaskGraphEdge = { source, target, kind: 'flow' | 'retry' | 'review' | 'reject' }`:
+     - **flow**: prev-phase task → this-phase task. For fanout phases, an upstream singleton fans out to each child (this is the only place we synthesize edges — the rest come from `parentId`).
+     - **retry**: failed task → its retry. Detected by `parentId` pointing to another task in the SAME phase with the SAME role and `status === 'failed'`. Chains of any length (A→B→C if A retried as B retried as C). All visible.
+     - **review**: primary task → red review task. Detected by red.`parentId` pointing to a non-red task. Reds get rendered but don't continue the flow.
+     - **reject**: existing onReject mechanism (workflow-level back-edge). Already in `graphView.ts`, port over.
+2. **Renderer (`src/dashboard/html.ts`) consumes TaskGraph, not phaseShape, for the graph view.**
+   - Collapsed view per phase: still a single summary node (this is the pill-row equivalent). Aggregated counts include retries + reds — "investigate · 21 tasks · 16 done · 5 retried · 32 reds done."
+   - Expanded view per phase: emit every task as a peer node. Retries appear *adjacent* to the failed task they replaced; reds appear *attached* to the primary task they reviewed (visual treatment TBD by designer).
+   - Per-phase expand/collapse toggle preserved (no all-or-nothing).
+   - Edge styles by kind:
+     - `flow`: bezier, status-colored (done=green, running=cyan, pending=dim) — see #4-revised note
+     - `retry`: dashed cyan or amber (designer call)
+     - `review`: dotted, dim violet — reds are quieter than primary flow
+     - `reject`: dashed magenta (existing)
+3. **Test coverage — new file `src/dashboard/taskGraph.test.ts`** with fixture task lists covering:
+   - clean fanout, no retries, no reds
+   - fanout with one retry (the "simple case")
+   - fanout with chain-of-3 retry (A→B→C, A and B failed, C succeeded)
+   - singleton task with retry (not a fanout)
+   - fanout with reds attached, no retries
+   - failed task with red review then retry (interaction case)
+   - onReject case
+   - non-fanout phase, no special structure (baseline)
+4. **Backward compatibility:** `graphView.ts` keeps its `buildGraphData` export for now (it's unit-tested + still used by the v0 path that doesn't expand fanout). #105's renderer chooses TaskGraph for fanout phases; phaseShape stays canonical for the pill row.
+
+**Layout open question (defer to implementation, not the designer):** dagre lays out edges into ranks; retries naturally land in the *next* rank (because they're downstream of the failure). That visually says "first attempt failed, second attempt succeeded later" — which is correct. But the retry is *not* the next phase, it's a same-phase task. Two options when implementation starts:
+- (a) Let dagre put retries in their own rank between the original phase and the next phase. Visually accurate to the time sequence but adds a column to the layout.
+- (b) Place retries in the same rank as their predecessor (need explicit dagre `rank` constraints). Tighter layout, less faithful to time.
+Lean (a) once we get there — accuracy wins.
+
+**Why this earns its scope (vs the patches we already shipped/declined):**
+- The "don't emit child→next for failed children" patch (shipped 2026-05-11 in #100's wake) was a band-aid: it made the failed node a visible dead-end, which is honest *if there was no retry* — but in real runs there usually IS a retry, so the dead-end framing is itself a lie.
+- Adding retry edges as a separate pass without restructuring the data layer would mean teaching `graphView.ts` to read `tasks[]` separately from `phaseShape`, and the two would drift. Cleaner to commit to one source of truth for the graph view.
+- Adding reds without a data-model change is impossible — `phaseShape.fanoutDots` doesn't know they exist.
+
+**Closes-on-land:** #99 (retry chains placeholder) and #104 (rejects + retries design session). Both were narrower placeholders; #105 is the actual implementation ticket.
+
+**Still relevant alongside:** #98 (collapsed-node atom polish — progress bar + chip tags), #101 (side panel — natural surface for per-task retry chain detail), #102 (minimap), #103 (top-bar run-status pill).
+
+**Resume order when designer is done:**
+1. Verify the designer's updated frames cover retry + red visual treatment. If not, ask before starting.
+2. Build `taskGraph.ts` data layer + tests first. Land tests-green as its own commit. Don't touch the renderer yet.
+3. Switch graph-view renderer to consume TaskGraph. Land that as second commit.
+4. Visual verification in Playwright on `run-code-review-terry-workflow-586a86` (the canonical complex run with retries + reds) — eyes-on at every renderer change per #100's hard-won lesson.
+
+**Branch state when captured:** `graph-view-85`, ~24 commits ahead of main, working tree includes the failed-child-no-outgoing-edge fix (small, kept).
+
+**Caught:** 2026-05-11 — conversation traced through "node 9 fails and points to synthesize" → "should it not point to the retry?" → "everything, everywhere, real workflow."
+
+### #104 — GRAPH: Rejects + retries: design (system + UI) session — SUPERSEDED by #105
+**Status:** Closed 2026-05-11. Resolved-by-decision rather than work: the rule for the graph view is "render the real workflow — every task, every relationship." That eliminates the design-session framing (there's no separate set of decisions to make). Scope absorbed into #105.
+
+### #103 — GRAPH: top-bar run-status pill
+**Why:** Design's `pXLG3` modal-topbar component pairs the title ("GRAPH VIEW — workflow · run_id") with a small status-coded pill ("running" / "complete" / "failed") on the right edge of the bar. Today the graph view's top bar shows title + close button only — the run's status has to be inferred from the colors of the phase nodes, which is fine for steady state but not glanceable when the modal is first opened. Cheap chrome addition; matches the dashboard's existing run-status badge vocabulary so no new palette work needed.
+**How to apply:** Add a status pill to the right side of the graph-modal-header in `src/dashboard/html.ts` between the breadcrumb and the close-x. Pulls from `state.runDetail.run.status`; reuses the existing dashboard run-status class palette (badge/complete, badge/running, badge/failed, badge/awaiting). Single inline span; no new component. Size to fit within the 44px header height.
+**Caught:** 2026-05-11 — design reconciliation. Confirmed by Steven as a yes-write-it-up.
+
+### #102 — GRAPH: minimap (overview-with-viewport-rect)
+**Why:** Design's `ycyNE` minimap component sits bottom-right inside the modal canvas (160×100). Renders status-colored thumbnails of phase nodes (using the same fill colors as the main graph) plus a viewport-rect overlay showing where the user is currently panned/zoomed. For a 16-task expanded fanout the main canvas already overflows the modal vertically; the minimap is the natural "where am I" affordance. Today there's no orientation cue once you pan or zoom.
+**How to apply:** Cytoscape has community extensions for minimaps (`cytoscape-navigator` is the standard) but adding it pulls in another CDN dep and the styling won't match. Alternative: roll our own — a fixed-position 160×100 div anchored bottom-right inside `graph-modal-body`, render node thumbnails as colored rects positioned proportionally to their cy positions, draw a viewport rect from cy's pan + zoom state, update on `cy.on('pan zoom')`. Probably 80–120 lines of vanilla code; fewer surprises than the extension. Either way, defer until #100 lands and we know the layout is stable.
+**Caught:** 2026-05-11 — design reconciliation. Steven's call: defer + write up.
+
+### #101 — GRAPH: side panel (selected-phase task list)
+**Why:** Design's `UTf00` graph-side-panel is a 460-wide right rail inside the modal that reflects whichever phase node is currently selected: header with phase name + status chip, meta line ("3 tasks · 2 done · 1 running · elapsed 0:14"), gate/red summary, then a per-task list with status-coded rows. Today the graph view is canvas-only; selecting a node has no visible effect, so the canvas is read-only-scenery. The side panel turns the graph into an interactive workspace — pick a phase, see its tasks, drill in further. Composite with #99 / #104 because the side panel is the natural home for per-task retry chains too.
+**How to apply:**
+- Modal layout change: split `graph-modal-body` into a 2-column flex — canvas fills, side panel fixed 460px right edge. Slides in/out when a node is selected; default state is canvas-fills-everything (no panel until selection).
+- Selection state: cytoscape's built-in selection works fine; bind to `cy.on('select unselect', 'node', ...)` to populate the panel. Reuse the existing `node/selected` design treatment (cyan glow shadow on the selected node).
+- Data: pull tasks for the selected phase from `state.runDetail.tasks` filtered by `task.phase === phaseName`. Already loaded; no API change.
+- Open question — does selecting a *child* task node (in an expanded fanout) populate the panel with that single task's detail, or does it stay at phase-level? Lean: child node selection shows that one task's detail (per-task retry chain candidate per #104).
+**Composite with #104, #99:** both retry conversations expect the side panel as their surface. Land #104 first to decide what the panel shows for retry-loaded tasks, then build #101.
+**Caught:** 2026-05-11 — design reconciliation. Steven's call: defer + write up.
+
+### #100 — GRAPH: fanout layout is broken (HIGH PRIORITY — needs Playwright eyes-on)
 **Why:** Caught 2026-05-10 morning. After landing #85 v1 fanout-cluster expansion, the layout breaks in ways I couldn't fix iterating blind via screenshots. Multiple rounds of changes shipped without browser verification; user confirmed "still off" after each. **Stopped iterating, captured this.**
 
 **Current uncommitted state** (working tree on `graph-view-85`):
@@ -122,7 +330,7 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 
 **Caught:** 2026-05-10 morning. Steven's call: "I don't want to commit broken code." Documented + stashed; resume with browser feedback loop.
 
-### #98 — Graph view fanout-collapsed node polish (progress bar + tags)
+### #98 — GRAPH: fanout-collapsed node polish (progress bar + tags)
 **Why:** v1 fanout-cluster-expansion (this morning's work) renders the collapsed node as `name + "16 tasks · 15 done · 1 failed"` text. The design Component Library's `fanout-collapsed-node` atom has more — a thin progress bar (green-bar for done + red-sliver for failed) and chip tags (`15 done` `1 failed`) inside the node. v1 deferred those because cytoscape's native node-rendering doesn't have a clean primitive for in-node bars/chips.
 **How to apply:** Three options worth weighing:
 - (a) Cytoscape HTML labels — render an HTML div overlay positioned over each fanout-collapsed node. Match the design exactly. Fragile across cytoscape/library versions.
@@ -131,20 +339,60 @@ Also untracked in repo root: three Screenshot PNGs from 2026-05-10 morning showi
 Lean (a) when the time comes — it's what the design is asking for and HTML overlays are well-documented in cytoscape.
 **Caught:** 2026-05-10 — deferred from #85 v1 fanout work for scope.
 
-### #99 — Graph view retry chains
-**Why:** v0 graph view collapses retry chains via phaseShape's supersededIds filter (a failed task with a successful retry shows only the terminal). The design has separate visual treatment for retry chains — forked edges between failed-and-retried tasks, "RETRY CHAIN ×N" cluster annotation in the design Component Library. v1 fanout-expansion shows N nodes per fanout phase; retry chains would expand that to also include the failed originals + retry edges.
-**How to apply:**
-- Data transformer (`graphView.ts`): query the run's tasks array (currently passed as `_tasks` parameter, unused). For each task with a `parentId` referencing a same-phase same-role failed task, emit a retry edge from parent to child.
-- Renderer: dashed cyan-or-green edge styling (the design might pin a color); maybe a small "↻" annotation on the edge.
-**Caught:** 2026-05-10 — deferred from #85 v1 work. Steven's call: ask designer if it's worth the complexity vs the audit-trail-via-task-list alternative.
-**Open question for designer:** is retry-chain visualization in the graph view valuable, or does the audit trail in the task list (RETRY OF / RETRIED AS rows from #78) carry enough? If audit-trail-only: close this entry and document the decision.
+### #99 — GRAPH: retry chains — SUPERSEDED by #105
+**Status:** Closed 2026-05-11. Was a narrow placeholder ("draw retry edges between failed-and-retried tasks"). The broader rewrite in #105 covers retry chains of any length + reds + every other task relationship, so this entry is no longer the right shape.
 
-### #97 — Auth-mode picker in the dashboard
-**Why:** Today the dashboard inherits whatever creds env the parent shell had at launch. If you forgot to source `use-bedrock.sh` first, every run created via the dashboard uses anthropic-direct (or fails at SSO if you have AWS configured but no token). #79 (auto-arm bedrock + pre-flight) is the auto-detect path; this entry is the opposite: let the user *explicitly choose* per-run or per-dashboard-session which auth mode to use.
-**Caught:** 2026-05-10 morning — Steven asked whether smoke-test dashboards source bedrock. They don't, which is fine for GET-only smoke but a real footgun for any run created via the modal.
-**How to apply (sketch):** Add an auth-mode selector somewhere prominent — likely in the new-run modal next to project/design-dir, or as a global indicator in the dashboard chrome (top-right, near settings). Three options: bedrock (default if `~/.aws` configured), anthropic-oauth (default if `forge-claude-oauth` volume exists), anthropic-apikey (if `ANTHROPIC_API_KEY` set). The selected mode passes through as an env override on the `forge new` subprocess.
-**Open questions:** Per-run choice (each new run picks) vs per-dashboard-session (set once, all subsequent runs use it)? Lean per-run — one user might have ongoing bedrock runs they don't want to interrupt while testing an api-key flow. UI: dropdown vs radio vs status-pill-with-click-to-edit? Defer the design decision; the architectural shape is "user-explicit auth-mode selection at run-creation time."
-**Composite with #79:** #79 auto-detects and arms; this picker is the manual override. Both can ship — auto-detect default, picker for explicit choice. Don't ship picker without auto-detect; the default-case user shouldn't have to fiddle.
+### #97 — Auth-mode indicator in the dashboard chrome
+**Why:** Today the dashboard inherits whatever creds env the parent shell had at launch and surfaces nothing about it. If you forgot to source `use-bedrock.sh` first, every run created via the modal uses anthropic-oauth (or fails at SSO if you have AWS configured but no token). The failure shows up 30 seconds into the run, not at click-time. Visibility is the fix: make the dashboard's auth state glanceable so "what is this forge wired to right now" is never a guess.
+
+**Auth is a system property of the dashboard process, not a per-run setting.** Confirmed 2026-05-11: agents spin up without human interaction, and an agent has no business picking credentials. The container's env is frozen at spawn, so even in-flight changes wouldn't reach a running task. The dashboard process holds env once at launch; to change auth, you `pkill forge dashboard`, source different shell config, relaunch. (CLI invocations re-read env each call, so they don't need "restarting" — they just inherit the current shell.) In-flight tasks finish under their spawn-time auth regardless.
+
+**The indicator (this entry's only surface):**
+- **Location:** upper-left sidebar, between the FORGE wordmark (line 1214 in `html.ts`) and the search box (line 1218). Treated as system context — what this forge is wired to — before the user gets to the runs list.
+- **Content:** single line of geist-mono, small. Mode + identity hint + health dot. Examples:
+  - `● bedrock · sgws-poc` (green dot, fresh SSO)
+  - `● bedrock · sgws-poc` (amber dot, SSO expired — hover tooltip says "run `aws sso login --profile sgws-poc`")
+  - `● anthropic-oauth · ready` (green dot)
+  - `● anthropic-apikey · set` (green dot — no identity metadata available for API keys)
+  - `● no auth configured` (red dot)
+- **Interaction:** read-only. No click target, no popover, no override controls. Maybe a tooltip on hover that explains the state in more words. Changing auth = restart dashboard with different shell env.
+- **Identity sources** (cheap, no API calls):
+  - bedrock: `AWS_PROFILE` env var
+  - anthropic-oauth: presence of `forge-claude-oauth` docker volume (no identity beyond "ready")
+  - anthropic-apikey: presence of `ANTHROPIC_API_KEY` (no identity)
+- **Health detection** (cheap, no network):
+  - bedrock fresh: `~/.aws/sso/cache/*.json` exists AND `expiresAt` field is in the future
+  - bedrock expired: cache file exists but `expiresAt` is past, or cache is empty
+  - anthropic-oauth: docker volume exists (deeper validity check requires `claude` invocation — skip)
+  - anthropic-apikey: env var is non-empty (no remote validity check)
+
+**Design intent — hierarchical-ready display for #106's future:** Today there's one provider (Anthropic) in three credential flavors. The indicator's structure is `{provider} · {credential}` with provider implicit. When #106 (provider abstraction for OpenAI/Codex + future) lands, the indicator generalizes to show the active provider — no UI rewrite, just an additional segment.
+
+**Out of scope for this entry:**
+- Per-run auth override (rejected 2026-05-11 — agents don't pick auth, dashboard process does).
+- Auth setup flows inside the dashboard (`aws sso login`, `forge auth login`, paste-an-API-key). Still happens at the shell, outside forge.
+- Click-to-change-auth controls. Restart-the-dashboard is the change mechanism.
+- New providers (#106).
+
+**Composite with #79:** #79 auto-detects bedrock when the host has AWS configured but the shell didn't source the bedrock script. The indicator + #79 together mean: if AWS is configured, the indicator shows green-bedrock without ceremony; if AWS is misconfigured, the indicator shows amber/red and the user knows to fix something before clicking new-run. Land #79 first — the indicator's accuracy depends on the detector being smart.
+
+**Composite with #103 (run-status pill in graph view top-bar):** both are small status indicators with similar visual vocabulary (dot + label, status-coded). Worth a quick styling sweep when #103 lands so they feel like the same family.
+
+**Caught:** 2026-05-10 morning — original framing "auth-mode picker." 2026-05-11 conversation simplified to indicator-only after confirming auth is a dashboard-process property, not a per-run or per-agent setting.
+
+### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
+**Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
+
+**Scope (high-level — needs design):**
+- A `Provider` interface in `src/types` or `src/spine`: identity, model vocabulary, credential detection, container env shape, CLI invocation pattern.
+- Refactor `spawn.ts` to ask the provider how to invoke the agent (not hardcode `claude --model`).
+- Refactor `creds.ts` to be provider-aware (today's three-mode detector becomes one provider's three credential flavors).
+- Container image (#75 territory): may need to host multiple provider CLIs side-by-side, or build per-provider images.
+- Workflow/agent declarations: `AgentRef.model` becomes provider-scoped (e.g., `provider: 'openai', model: 'gpt-5'`).
+
+**Not designed yet — this is a placeholder.** When forge actually needs OpenAI/Codex, this gets a real architecture-work session: read the spawn/creds/image code paths, sketch the Provider interface, decide whether providers share containers or get separate ones, plan migration of existing Claude-only code.
+
+**Caught:** 2026-05-11 — surfaced while talking through #97. Steven's call: leave room for OpenAI/Codex without designing it now.
 
 ### #96 — Build-phase decomposition: implementer fanout + orchestrator + planner-emits-deps
 **Why:** Today the `build` phase is a monolith — one `implementer` agent reads the plan, edits the codebase serially, produces one diff. That works for tasks small enough to fit in one agent's head, but it doesn't scale: parallel-safe steps run sequentially, the diff balloons until reds can barely review it, and there's no specialization (a frontend feature, a backend migration, and a security hardening pass all route through the same generic seed). Composite of multiple architectural shifts that share a lens — *the build phase needs to decompose into specialized fanout + coordination, the way other multi-phase forge primitives already work*.
@@ -419,11 +667,27 @@ Validates by experience: Steven shipped multiple in-Pencil corrections this sess
 **Three things to fix:**
 1. `gate: "human"` recovery → `awaiting_gate` instead of `complete`. (Easiest.)
 2. `gate: "auto"` recovery → `complete` (current behavior, correct).
-3. Phase has reds + reds never ran → spawn reds during reconcile. Or, more conservatively, transition to `awaiting_gate` and let the human force-advance through; the missed reds are an audit gap that's surface-able. This is the harder design question.
+3. Phase has reds + reds never ran → spawn reds during reconcile. Or, more conservatively, transition to `awaiting_gate` and let the human force-advance through; the missed reds are an audit gap that's surface-able. **Split out to #107** — separate design question, not part of this fix.
 
 **Manual recovery for the in-flight run (2026-05-09 04:30 UTC):** SQL `UPDATE tasks SET status='awaiting_gate' WHERE id='task-architect-c29474'` after reconcile flipped it to `complete`. Architect output landed correctly; just needs human gate.
 
 **Composite with #74:** the orphan-detection problem is upstream (forge loses the docker child); the gate-honoring problem is downstream (reconcile's recovery logic). Fixing one doesn't fix the other. Both worth doing.
+
+### #107 — Reds-during-reconcile: missed-reds-on-orphan-recovery is a design question
+**Why:** Split from #91 (item 3) on 2026-05-12. When forge recovers an orphan task whose phase has reds attached, the reds may never have been spawned — the parent forge died before kicking them off. Reconcile today (post-#91) just transitions the task per its gate type and continues, silently skipping the reds. For **specialist reds** (gateOnVerdict: false, informational only) that's mostly fine — the audit is lossy but the workflow continues correctly. For **authoritative reds** (gateOnVerdict: true) that's a real correctness gap: reds were supposed to gate the advance, but their absence is invisible to the human.
+
+**The two real options, both with tradeoffs:**
+
+1. **Spawn missed reds during reconcile.** Reconcile detects the gap (phase declares reds, no red tasks exist for this parent) and dispatches them as part of the recovery. Pros: workflow behaves as if forge had never died. Cons: reconcile becomes a dispatcher, not just a state-fixer — bigger surface, more failure modes. Also: the original task's container is gone, so the reds run against the post-hoc artifact rather than the live agent. That's actually fine for most red types (they read result.json), but a category to verify.
+
+2. **Force a human-visible audit gap.** Reconcile transitions the recovered task to `awaiting_gate` (regardless of the phase's actual gate type) and leaves a marker on the task that "reds did not run on recovery — review the diff manually." The human force-advances after eyeballing. Pros: simpler reconcile; the audit gap is surfaced rather than hidden. Cons: harder for the human (no red verdicts to lean on); workflow stalls on every recovery even for benign cases.
+
+**Open design questions to resolve before implementation:**
+- Does the answer differ for specialist vs authoritative reds? Probably yes — specialist can be silently skipped (option 2-lite: continue but log), authoritative MUST surface (option 1 or 2).
+- How does reconcile detect "reds were declared but not spawned"? Needs to compare `phase.reds` config to the actual red tasks in the DB — a small new query, doable.
+- Where does the audit marker live in option 2? A field on the task row? A separate notes table? The dashboard's task detail would need to render it.
+
+**Caught:** 2026-05-12 — separated from #91 so the simpler gate-honoring fix can ship without waiting on this conversation.
 
 ### #74 — Reconcile + watchdog can't catch zero-stdout orphans
 **Why:** Caught 2026-05-08 on `task-investigate-dace4f`. Container apparently died (no `docker ps` output) but the task stayed `running` in the DB indefinitely. Three failure modes stacked:
