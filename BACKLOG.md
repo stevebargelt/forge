@@ -159,11 +159,6 @@ Lean (a) once we get there — accuracy wins.
 ### #104 — GRAPH: Rejects + retries: design (system + UI) session — SUPERSEDED by #105
 **Status:** Closed 2026-05-11. Resolved-by-decision rather than work: the rule for the graph view is "render the real workflow — every task, every relationship." That eliminates the design-session framing (there's no separate set of decisions to make). Scope absorbed into #105.
 
-### #103 — GRAPH: top-bar run-status pill
-**Why:** Design's `pXLG3` modal-topbar component pairs the title ("GRAPH VIEW — workflow · run_id") with a small status-coded pill ("running" / "complete" / "failed") on the right edge of the bar. Today the graph view's top bar shows title + close button only — the run's status has to be inferred from the colors of the phase nodes, which is fine for steady state but not glanceable when the modal is first opened. Cheap chrome addition; matches the dashboard's existing run-status badge vocabulary so no new palette work needed.
-**How to apply:** Add a status pill to the right side of the graph-modal-header in `src/dashboard/html.ts` between the breadcrumb and the close-x. Pulls from `state.runDetail.run.status`; reuses the existing dashboard run-status class palette (badge/complete, badge/running, badge/failed, badge/awaiting). Single inline span; no new component. Size to fit within the 44px header height.
-**Caught:** 2026-05-11 — design reconciliation. Confirmed by Steven as a yes-write-it-up.
-
 ### #102 — GRAPH: minimap (overview-with-viewport-rect)
 **Why:** Design's `ycyNE` minimap component sits bottom-right inside the modal canvas (160×100). Renders status-colored thumbnails of phase nodes (using the same fill colors as the main graph) plus a viewport-rect overlay showing where the user is currently panned/zoomed. For a 16-task expanded fanout the main canvas already overflows the modal vertically; the minimap is the natural "where am I" affordance. Today there's no orientation cue once you pan or zoom.
 **How to apply:** Cytoscape has community extensions for minimaps (`cytoscape-navigator` is the standard) but adding it pulls in another CDN dep and the styling won't match. Alternative: roll our own — a fixed-position 160×100 div anchored bottom-right inside `graph-modal-body`, render node thumbnails as colored rects positioned proportionally to their cy positions, draw a viewport rect from cy's pan + zoom state, update on `cy.on('pan zoom')`. Probably 80–120 lines of vanilla code; fewer surprises than the extension. Either way, defer until #100 lands and we know the layout is stable.
@@ -734,6 +729,11 @@ Don't start until the calibration question has a plan — uncalibrated visual ju
 **How to apply:** Add an `eval.js`-style script that subscribes to `Runtime.consoleAPICalled` + `Runtime.exceptionThrown` over the CDP, navigates the page, waits for idle, and emits the error log as JSON. Wire into a red role (call it `console-checker` or fold into `verifier`). Treat as a specialist red — non-blocking warning unless rationale provided. Same blog-post primitives as #51, so build #51 first; this one is incremental.
 
 ## Done (recent)
+
+### #103 — GRAPH: top-bar run-status pill
+**Closed:** 2026-05-12 on branch `graph-status-pill-103` → merged to main. Suite at 338/338 (no test deltas — single-span chrome addition).
+- `src/dashboard/html.ts`: graph-modal-header gains a `.badge.status-<run.status>` span between the title and the close button. Reuses `rowDisplayStatus()` so `active` renders as "running" consistent with the sidebar run-row badge. Migrated `margin-left:auto` from `.graph-modal-close` to the new badge so both stay flush-right.
+**Live-verified** in the dashboard against a complete run; green-dot "complete" badge renders cleanly.
 
 ### #110 — Require rationale when advancing over a failed specialist red
 **Closed:** 2026-05-12 on branch `rationale-on-red-fail-110` → merged to main. Test suite 338/338 (+5 gate tests). Two-layer fix:
