@@ -7,7 +7,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
-import { reconcileRun } from "./reconcile.js";
+import { reconcileRun, _setReconcileFaultForTest } from "./reconcile.js";
 import { taskDir, RUNS_DIR } from "../util/paths.js";
 import type { Run, Task, Workflow, Phase, AgentRef } from "../types/index.js";
 
@@ -316,4 +316,104 @@ test("reconcile: orphan blue with gate: 'verdict' reconciles to status=awaiting_
   const t = getTask("task-verdict")!;
   assert.equal(t.status, "awaiting_gate");
   assert.deepEqual(t.result, { status: "complete", answer: "done" });
+});
+
+// ---- #109: transactional reconcile (fault-injection) ----
+//
+// The transaction wrapper guarantees that a failure mid-sequence rolls back
+// the entire per-task write batch — no half-written state where (e.g.) the
+// task is marked complete but its verdict wasn't recorded. The injected-
+// fault hook lets us simulate failure points without monkey-patching the
+// store module.
+
+test("#109 fault after mark-blue rolls back the task status", () => {
+  // Successful parse → would mark complete → fault → rollback.
+  insertTask(makeTask({ id: "task-fault-1", status: "running" }));
+  writeResultJson("task-fault-1", { status: "complete", answer: "yes" });
+  const phase: Phase = { name: "frame-question", agents: [BLUE_AGENT], gate: "auto" };
+  const wf = workflowWithPhase(phase);
+
+  _setReconcileFaultForTest("after-mark-blue", new Error("injected: disk full"));
+  try {
+    const out = reconcileRun(RUN.id, wf);
+    // Resolution surfaces as still_running because the txn rolled back.
+    assert.equal(out[0]!.resolution, "still_running");
+    // Task should be exactly as it was before reconcile — still running, no result stored.
+    const t = getTask("task-fault-1")!;
+    assert.equal(t.status, "running");
+    assert.equal(t.result, undefined);
+  } finally {
+    _setReconcileFaultForTest(null);
+  }
+});
+
+test("#109 fault between verdict insert and parent transition rolls back BOTH writes", () => {
+  // Set up a parent blue task + child red task. The red is running with a
+  // valid result.json. Reconcile would:
+  //   (1) mark the red task complete
+  //   (2) log task.completed for the red
+  //   (3) insert the verdict
+  //   (4) log verdict.received    <-- inject fault here
+  //   (5) transition parent to blocked_by_red or awaiting_gate
+  // The fault at step 4 should roll back steps 1-3, leaving the red task
+  // still running and no verdict row.
+  insertTask(makeTask({
+    id: "task-parent-fault",
+    phase: "build",
+    agentRole: "implementer",
+    status: "complete",
+    result: { status: "complete" },
+  }));
+  insertTask(makeTask({
+    id: "task-red-fault",
+    parentId: "task-parent-fault",
+    phase: "build",
+    agentRole: "red-wide",
+    status: "running",
+  }));
+  writeResultJson("task-red-fault", {
+    status: "complete",
+    verdict: "fail",
+    confidence: 0.9,
+    findings: [{ severity: "high", summary: "x", evidence: "y", hypothesis: "z" }],
+  });
+  const wf = workflowWithPhase(makePhaseAuthoritativeReds());
+
+  _setReconcileFaultForTest("after-log-verdict", new Error("injected: between writes"));
+  try {
+    const out = reconcileRun(RUN.id, wf);
+    assert.equal(out[0]!.resolution, "still_running");
+    // Red task should still be running (the mark-complete write rolled back).
+    assert.equal(getTask("task-red-fault")!.status, "running");
+    // No verdict row should exist.
+    assert.equal(verdictsForTask("task-parent-fault").length, 0);
+    // Parent stayed at its pre-reconcile state.
+    assert.equal(getTask("task-parent-fault")!.status, "complete");
+  } finally {
+    _setReconcileFaultForTest(null);
+  }
+});
+
+test("#109 next reconcile attempt re-processes the task after a transient fault", () => {
+  // Pin the recovery story: a fault rolls back state; the next reconcile
+  // call sees the same `running` task and re-attempts cleanly.
+  insertTask(makeTask({ id: "task-retry", status: "running" }));
+  writeResultJson("task-retry", { status: "complete", answer: "yes" });
+  const phase: Phase = { name: "frame-question", agents: [BLUE_AGENT], gate: "auto" };
+  const wf = workflowWithPhase(phase);
+
+  // First attempt fails.
+  _setReconcileFaultForTest("after-mark-blue", new Error("injected"));
+  try {
+    const out1 = reconcileRun(RUN.id, wf);
+    assert.equal(out1[0]!.resolution, "still_running");
+    assert.equal(getTask("task-retry")!.status, "running");
+  } finally {
+    _setReconcileFaultForTest(null);
+  }
+
+  // Second attempt without the fault succeeds.
+  const out2 = reconcileRun(RUN.id, wf);
+  assert.equal(out2[0]!.resolution, "complete");
+  assert.equal(getTask("task-retry")!.status, "complete");
 });
