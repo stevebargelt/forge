@@ -33,9 +33,11 @@ export type CyNode = {
     hasReds: boolean;
     redsAuthority?: PhaseShape["redsAuthority"];
     isManual: boolean;
-    // V1 will use this to draw per-task subnodes inside a cluster. V0
-    // ignores it.
     fanoutDots?: PhaseShape["fanoutDots"];
+    // Cytoscape compound-node parent reference. Set on per-task child
+    // nodes within a fanout phase; points to the phase node id. Renderer
+    // hides/shows children based on collapse/expand state.
+    parent?: string;
   };
 };
 
@@ -58,30 +60,57 @@ export type GraphData = {
   edges: CyEdge[];
 };
 
-// Build cytoscape data from the run's phase shape. V0: linear forward
-// edges only; phase nodes carry status + counts + metadata.
+// Build cytoscape data from the run's phase shape. v1 emits:
+//  - one parent node per phase (always)
+//  - per-task child nodes for fanout phases, parented to the phase node
+//    via cytoscape's compound-node mechanism (data.parent = phase id)
+//  - linear forward edges between sequential phases
+//  - onReject back-edges
 //
-// `_run` and `_tasks` are accepted but unused in v0 (they'll feed retry
-// chains and gate-decision labels in v1). Listed in the signature so the
-// caller doesn't need to refactor when v1 lands.
+// `_run` and `_tasks` are accepted but unused — they'll feed retry chains
+// (#99) and gate-decision labels in a later version. Listed in the
+// signature so the caller doesn't need to refactor when those land.
 export function buildGraphData(
   phaseShape: PhaseShape[],
   _run?: Run,
   _tasks?: Task[]
 ): GraphData {
-  const nodes: CyNode[] = phaseShape.map((p) => ({
-    data: {
-      id: nodeId(p.name),
-      label: p.name,
-      status: p.status,
-      taskCounts: p.taskCounts,
-      hasFanout: p.hasFanout,
-      hasReds: p.hasReds,
-      ...(p.redsAuthority !== undefined ? { redsAuthority: p.redsAuthority } : {}),
-      isManual: p.isManual,
-      ...(p.fanoutDots !== undefined ? { fanoutDots: p.fanoutDots } : {}),
-    },
-  }));
+  const nodes: CyNode[] = [];
+  for (const p of phaseShape) {
+    nodes.push({
+      data: {
+        id: nodeId(p.name),
+        label: p.name,
+        status: p.status,
+        taskCounts: p.taskCounts,
+        hasFanout: p.hasFanout,
+        hasReds: p.hasReds,
+        ...(p.redsAuthority !== undefined ? { redsAuthority: p.redsAuthority } : {}),
+        isManual: p.isManual,
+        ...(p.fanoutDots !== undefined ? { fanoutDots: p.fanoutDots } : {}),
+      },
+    });
+    // Fanout child nodes: one per task, parented to the phase node.
+    // Renderer can hide/show children to implement collapse/expand. Each
+    // child carries its own per-task status from fanoutDots (which is in
+    // task creation order — see phaseShape.ts).
+    if (p.hasFanout && p.fanoutDots && p.fanoutDots.length > 0) {
+      p.fanoutDots.forEach((dotStatus, i) => {
+        nodes.push({
+          data: {
+            id: childNodeId(p.name, i),
+            label: p.name + " · " + (i + 1),
+            status: dotStatus,
+            taskCounts: { total: 1, running: 0, complete: 0, failed: 0, pending: 0, awaitingGate: 0, awaitingRed: 0, awaitingHuman: 0, blockedByRed: 0 },
+            hasFanout: false,
+            hasReds: false,
+            isManual: false,
+            parent: nodeId(p.name),
+          },
+        });
+      });
+    }
+  }
 
   // Linear edges: phase[i] → phase[i+1].
   const edges: CyEdge[] = [];
@@ -121,6 +150,12 @@ export function buildGraphData(
 // Node + edge id helpers. Stable across renders so cytoscape's diff is cheap.
 function nodeId(phaseName: string): string {
   return "n:" + phaseName;
+}
+
+// Per-task child node id within a fanout phase. Index is the task's
+// position in fanoutDots (creation order).
+function childNodeId(phaseName: string, index: number): string {
+  return "n:" + phaseName + ":t" + index;
 }
 
 function edgeId(from: string, to: string, kind: CyEdge["data"]["kind"]): string {

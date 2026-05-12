@@ -131,3 +131,93 @@ test("isManual + redsAuthority preserved on node data when present", () => {
   assert.equal(g.nodes[1]!.data.isManual, false);
   assert.equal(g.nodes[1]!.data.redsAuthority, "authoritative");
 });
+
+// ---- v1 fanout cluster expansion ----
+
+test("fanout phase emits parent + per-task child nodes (compound)", () => {
+  const shape: PhaseShape[] = [
+    phase("frame-question", "done"),
+    phase("investigate", "running", {
+      hasFanout: true,
+      taskCounts: { total: 4, running: 2, complete: 2, failed: 0, pending: 0, awaitingGate: 0, awaitingRed: 0, awaitingHuman: 0, blockedByRed: 0 },
+      fanoutDots: ["done", "done", "running", "running"],
+    }),
+    phase("synthesize", "pending"),
+  ];
+  const g = buildGraphData(shape);
+  // 3 phase nodes + 4 fanout child nodes = 7 nodes total
+  assert.equal(g.nodes.length, 7);
+  // Children parented to the phase node
+  const children = g.nodes.filter((n) => n.data.parent === "n:investigate");
+  assert.equal(children.length, 4);
+});
+
+test("fanout child nodes carry per-task status from fanoutDots in order", () => {
+  const shape: PhaseShape[] = [
+    phase("investigate", "running", {
+      hasFanout: true,
+      taskCounts: { total: 3, running: 1, complete: 1, failed: 1, pending: 0, awaitingGate: 0, awaitingRed: 0, awaitingHuman: 0, blockedByRed: 0 },
+      fanoutDots: ["done", "running", "failed"],
+    }),
+  ];
+  const g = buildGraphData(shape);
+  const children = g.nodes.filter((n) => n.data.parent !== undefined);
+  assert.equal(children.length, 3);
+  assert.equal(children[0]!.data.status, "done");
+  assert.equal(children[1]!.data.status, "running");
+  assert.equal(children[2]!.data.status, "failed");
+});
+
+test("fanout child node ids are stable + indexed by position", () => {
+  const shape: PhaseShape[] = [
+    phase("investigate", "running", {
+      hasFanout: true,
+      taskCounts: { total: 2, running: 0, complete: 2, failed: 0, pending: 0, awaitingGate: 0, awaitingRed: 0, awaitingHuman: 0, blockedByRed: 0 },
+      fanoutDots: ["done", "done"],
+    }),
+  ];
+  const g = buildGraphData(shape);
+  const ids = g.nodes.map((n) => n.data.id).sort();
+  assert.deepEqual(ids, ["n:investigate", "n:investigate:t0", "n:investigate:t1"]);
+});
+
+test("non-fanout phase emits no child nodes", () => {
+  const shape: PhaseShape[] = [
+    phase("frame-question", "done"),
+    phase("synthesize", "running"),
+  ];
+  const g = buildGraphData(shape);
+  assert.equal(g.nodes.length, 2);
+  assert.ok(g.nodes.every((n) => n.data.parent === undefined));
+});
+
+test("fanout phase with empty fanoutDots emits parent only (no children)", () => {
+  const shape: PhaseShape[] = [
+    phase("investigate", "pending", {
+      hasFanout: true,
+      fanoutDots: [],
+    }),
+  ];
+  const g = buildGraphData(shape);
+  assert.equal(g.nodes.length, 1);
+  assert.equal(g.nodes[0]!.data.id, "n:investigate");
+});
+
+test("linear edges connect phase nodes only — not child fanout nodes", () => {
+  const shape: PhaseShape[] = [
+    phase("frame-question", "done"),
+    phase("investigate", "running", {
+      hasFanout: true,
+      fanoutDots: ["done", "running"],
+    }),
+    phase("synthesize", "pending"),
+  ];
+  const g = buildGraphData(shape);
+  const linear = g.edges.filter((e) => e.data.kind === "linear");
+  // 3 phases → 2 linear edges; none should reference child node ids.
+  assert.equal(linear.length, 2);
+  for (const e of linear) {
+    assert.ok(!e.data.source.includes(":t"), `edge source ${e.data.source} should be a phase node, not a child`);
+    assert.ok(!e.data.target.includes(":t"), `edge target ${e.data.target} should be a phase node, not a child`);
+  }
+});
