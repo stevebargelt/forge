@@ -22,7 +22,7 @@ export const workflow: Workflow = {
       },
       gate: "human",
       workflowAdditions:
-        "Produce the architecture document. Output {decisions, components, interfaces, openQuestions}.",
+        "Produce systems-level architectural assessment, NOT implementation guidance. Output {risks, constraints, boundaries, priorArt, openQuestions, notes}. Empty arrays are fine when a feature genuinely has no concerns at that level. Do not pick type names, function names, or file paths — that's the implementer's job with the code in front of them. See architect seed for the discipline.",
     },
     {
       name: "plan",
@@ -34,9 +34,20 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
+      // build phase reds: authoritative wide/narrow gate the task (block on
+      // fail), plus three specialist reds that contribute informational
+      // findings through discipline-specific lenses (#96 sub-shift 1).
+      // The specialists are gateOnVerdict: false implicitly — spawnRed
+      // records them as `specialist` authority regardless of this RedConfig
+      // setting, and they don't trigger blocked_by_red.
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
+        additional: [
+          agent("red-frontend", "fast-orchestrator"),
+          agent("red-backend", "fast-orchestrator"),
+          agent("red-security", "fast-orchestrator"),
+        ],
         parallel: true,
         authority: "authoritative",
         gateOnVerdict: true,

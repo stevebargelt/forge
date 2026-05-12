@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import { dashboardHtml } from "./html.js";
 import * as queries from "./queries.js";
 import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, WORKFLOW_GROUPS, UNIVERSAL_FIELDS } from "./workflowSchema.js";
+import { AUTH_ERROR_PREFIX, getAuthState } from "../util/creds.js";
 import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
@@ -91,6 +92,15 @@ function handleGet(path: string, res: ServerResponse): void {
   if (path === "/api/runs") {
     const runs = queries.listRunsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ runs }));
+    return;
+  }
+
+  if (path === "/api/auth-mode") {
+    // #97 — dashboard auth indicator. Read-only snapshot of the active mode +
+    // identity hint + health, computed from the dashboard process's env. Re-
+    // evaluated on every GET so the indicator catches SSO expiry without a
+    // dashboard restart (the dashboard polls this on a schedule client-side).
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(getAuthState()));
     return;
   }
 
@@ -197,7 +207,12 @@ async function handleNext(runId: string, body: Record<string, unknown>, res: Ser
   const args = ["next", runId];
   if (project) args.push("--project", project);
   const out = await invokeForge(args);
-  if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge next exited ${out.exitCode}`);
+  if (out.exitCode !== 0) {
+    if (out.stderr.includes(AUTH_ERROR_PREFIX)) {
+      return jsonError(res, 400, out.stderr.trim());
+    }
+    return jsonError(res, 500, out.stderr || `forge next exited ${out.exitCode}`);
+  }
   jsonOk(res, { runId, summary: tail(out.stdout) });
 }
 
@@ -230,6 +245,12 @@ async function handleNewRun(body: Record<string, unknown>, res: ServerResponse):
   const argv = buildForgeNewArgv(workflow as WorkflowName, validation.values);
   const out = await invokeForge(argv);
   if (out.exitCode !== 0) {
+    // Route auth pre-flight failures to a 400 so the frontend can render a
+    // useful toast (#79). The CLI's stderr will contain the AUTH_ERROR_PREFIX
+    // string for any failure that came from validateCredsForNewRun.
+    if (out.stderr.includes(AUTH_ERROR_PREFIX)) {
+      return jsonError(res, 400, out.stderr.trim());
+    }
     return jsonError(res, 500, out.stderr || `forge new exited ${out.exitCode}`);
   }
 

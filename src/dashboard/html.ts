@@ -13,9 +13,24 @@ export function dashboardHtml(): string {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Forge Dashboard</title>
+<!-- Fonts: async-load Geist via the media-swap trick so a blocked/slow
+     fonts.googleapis.com (corporate proxy, offline machine, etc.) can't
+     prevent the dashboard from painting. The page renders immediately with
+     system monospace; Geist swaps in when (or if) the stylesheet arrives.
+     The matching <noscript> fallback covers no-JS configurations. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap"
+      media="print"
+      onload="this.media='all'; this.onload=null;">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap"></noscript>
+<!-- #85 graph view: cytoscape.js for layered DAG layout. CDN-loaded so the
+     dashboard stays vanilla-no-build. dagre extension provides hierarchical
+     layout (top→bottom forward edges). -->
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
 <style>${BASE_CSS}</style>
 </head>
 <body>
@@ -147,6 +162,98 @@ a { color: var(--accent); text-decoration: none; }
 }
 .brand-name { font-weight: 700; letter-spacing: 0.1em; font-size: 12px; color: var(--foreground); }
 
+/* #97 auth-mode indicator — system context under the wordmark, before the runs list. */
+.auth-indicator {
+  padding: 8px var(--space-md);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--foreground-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.auth-indicator .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.auth-indicator.health-ok .dot { background: var(--success); }
+.auth-indicator.health-expired .dot { background: var(--warning); }
+.auth-indicator.health-missing .dot { background: var(--error); }
+.auth-indicator .mode { color: var(--foreground); font-weight: 600; }
+.auth-indicator .identity { color: var(--foreground-muted); }
+.auth-indicator .countdown { color: var(--foreground-muted); margin-left: auto; }
+.auth-indicator { cursor: pointer; }
+.auth-indicator:hover { background: var(--background-elevated); }
+
+/* #97 click-to-open auth popover. Anchored manually to the indicator; closes
+   on click-outside or Esc. */
+.auth-popover {
+  position: fixed;
+  background: var(--background-elevated);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px #00000088;
+  z-index: 100;
+  min-width: 320px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--foreground);
+}
+.auth-popover .pop-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  letter-spacing: 0.05em;
+}
+.auth-popover .pop-header .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.auth-popover.health-ok .pop-header .dot { background: var(--success); }
+.auth-popover.health-expired .pop-header .dot { background: var(--warning); }
+.auth-popover.health-missing .pop-header .dot { background: var(--error); }
+.auth-popover .pop-header .pop-mode { font-weight: 700; color: var(--foreground); }
+.auth-popover .pop-header .pop-status { color: var(--foreground-muted); margin-left: auto; font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; }
+.auth-popover .pop-rows {
+  padding: 8px 14px;
+}
+.auth-popover .pop-row {
+  display: flex;
+  gap: 12px;
+  padding: 3px 0;
+}
+.auth-popover .pop-row .pop-key {
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+  width: 88px;
+}
+.auth-popover .pop-row .pop-val {
+  color: var(--foreground);
+  word-break: break-all;
+}
+.auth-popover .pop-footer {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--foreground-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.auth-popover .pop-footer code {
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 10px;
+}
+
 .search {
   padding: var(--space-md);
   border-bottom: 1px solid var(--border);
@@ -251,10 +358,25 @@ a { color: var(--accent); text-decoration: none; }
 .badge.status-success, .badge.status-complete, .badge.verdict-pass { color: var(--success); }
 .badge.status-pending { color: var(--pending); }
 .badge.status-failed, .badge.verdict-fail { color: var(--error); }
-.badge.status-warning, .badge.status-awaiting_gate { color: var(--warning); }
-.badge.status-awaiting_human_input { color: var(--warning); background: var(--warning-bg, transparent); }
-.badge.status-awaiting_red { color: var(--running); background: var(--warning-bg, transparent); }
-.badge.status-blocked_by_red { color: var(--error); background: var(--error-bg); }
+.badge.status-warning { color: var(--warning); }
+/* Status Reference (~/code/forge-design/dashboard.pen): the three awaiting_*
+   states share a single badge treatment because the badge is a per-task
+   surface where the kind of waiting doesn't matter. The pill (per-phase)
+   keeps three distinct visual treatments because there the kind matters. */
+.badge.status-awaiting,
+.badge.status-awaiting_gate,
+.badge.status-awaiting_human_input,
+.badge.status-awaiting_red {
+  color: var(--warning);
+  background: var(--warning-bg, transparent);
+}
+/* blocked_by_red: magenta per Status Reference — distinguishes "system
+   stopped, you have override options" (magenta = action required) from
+   the failed state (red = dead end, retry-or-move-on). */
+.badge.status-blocked_by_red {
+  color: var(--accent-secondary);
+  background: rgba(191, 64, 255, 0.1);
+}
 .badge.status-approved { color: var(--success); }
 .badge.status-abandoned, .badge.verdict-inconclusive { color: var(--foreground-muted); }
 .badge.solid-running { background: var(--running); color: var(--background); }
@@ -709,6 +831,25 @@ a { color: var(--accent); text-decoration: none; }
   align-items: center;
   gap: var(--space-sm);
 }
+/* #85 — graph view launch button. Hugs the run-hint text rather than
+   floating to the far edge of the pane — keeps the button associated
+   with the workflow it visualizes. */
+.graph-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin-left: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--foreground-muted);
+  cursor: pointer;
+}
+.graph-btn:hover { color: var(--foreground); border-color: var(--border-bright); background: var(--surface-raised); }
+.graph-btn svg { display: block; }
 .phase-pill-row-wrap .phase-pill-row-label .run-hint {
   color: var(--foreground-muted);
   text-transform: none;
@@ -887,6 +1028,73 @@ a { color: var(--accent); text-decoration: none; }
   line-height: 1.5;
 }
 .advance-preview strong { font-style: normal; color: var(--foreground); font-weight: 600; }
+
+/* #85 graph view modal — full-screen overlay above the dashboard. */
+.graph-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--background);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+}
+.graph-modal-header {
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-shrink: 0;
+}
+.graph-modal-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--foreground-muted);
+  font-weight: 600;
+}
+.graph-modal-title .breadcrumb {
+  color: var(--foreground);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  margin-left: var(--space-sm);
+}
+.graph-modal-close {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--foreground-muted);
+  cursor: pointer;
+}
+.graph-modal-close:hover { color: var(--foreground); background: var(--surface); }
+.graph-modal-body {
+  flex: 1;
+  position: relative;
+  background: var(--background);
+  overflow: hidden;
+}
+#graph-cy-canvas {
+  position: absolute;
+  inset: 0;
+}
+.graph-modal-footer {
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: 11px;
+  color: var(--foreground-muted);
+  flex-shrink: 0;
+}
+.graph-modal-footer .kbd-hints { margin-left: auto; display: flex; gap: var(--space-md); }
 `;
 
 const CLIENT_JS = `
@@ -911,6 +1119,11 @@ const CLIENT_JS = `
     // bring back unchanged data become silent — solves the entire class of
     // "polling clobbers user input / scroll / focus" bugs.
     lastRender: { sidebar: null, pillrow: null, middle: null, detail: null },
+    // #97 — auth-mode snapshot from /api/auth-mode. Drives the indicator in
+    // the sidebar between FORGE and search. Refreshed on bootstrap + on a
+    // slow timer so SSO-expired transitions surface without a dashboard
+    // restart. Null before the first fetch completes.
+    authMode: null,
   };
 
   // ---------- helpers ----------
@@ -1033,13 +1246,13 @@ const CLIENT_JS = `
     _elapsedInterval = setInterval(tickElapsedCells, 1000);
   }
   function statusTone(status) {
-    if (status === 'success' || status === 'complete' || status === 'active') return 'success';
+    if (status === 'success' || status === 'complete' || status === 'active') return 'complete';
     if (status === 'running') return 'running';
     if (status === 'failed') return 'failed';
-    if (status === 'awaiting_gate') return 'warning';
-    if (status === 'awaiting_human_input') return 'awaiting_human_input';
-    if (status === 'awaiting_red') return 'awaiting_red';
-    if (status === 'blocked_by_red') return 'blocked_by_red';
+    // Three awaiting states share a single badge treatment per Status
+    // Reference. Subtype is preserved on the rendered label.
+    if (status === 'awaiting' || status === 'awaiting_gate' || status === 'awaiting_human_input' || status === 'awaiting_red') return 'awaiting';
+    if (status === 'blocked' || status === 'blocked_by_red') return 'blocked_by_red';
     if (status === 'pending') return 'pending';
     if (status === 'abandoned') return 'abandoned';
     return 'pending';
@@ -1048,8 +1261,20 @@ const CLIENT_JS = `
     if (run.status === 'active') return 'running';
     return run.status;
   }
+  // badge() accepts either a raw backend status (e.g. "awaiting_gate") or
+  // an already-formatted display label (e.g. "awaiting · gate"). The CSS
+  // class is derived from the category — for display labels with " · "
+  // we strip everything after to find the category prefix.
   function badge(status) {
-    return el('span', { class: 'badge status-' + statusTone(status) }, status);
+    const cls = statusTone(badgeCategory(status));
+    return el('span', { class: 'badge status-' + cls }, status);
+  }
+  function badgeCategory(s) {
+    if (typeof s !== 'string') return 'pending';
+    // Display labels like "awaiting · gate" → "awaiting"
+    const idx = s.indexOf(' · ');
+    if (idx > 0) return s.slice(0, idx);
+    return s;
   }
   function toast(msg, kind) {
     const root = $('toast-root');
@@ -1078,6 +1303,183 @@ const CLIENT_JS = `
     return data;
   }
 
+  // #97 — auth-mode indicator under the FORGE wordmark. Renders a status dot,
+  // the mode (e.g. "bedrock"), an identity hint (e.g. AWS profile name) when
+  // available, and a compact expiry countdown for bedrock when the token is
+  // fresh. Driven by /api/auth-mode (state.authMode); a fetch error or first-
+  // render-before-fetch shows a neutral "auth…" state. Click opens a popover
+  // with the full detail (see openAuthPopover). Read-only — changing auth
+  // means restarting the dashboard with a different shell env.
+  function renderAuthIndicator() {
+    const a = state.authMode;
+    if (!a) {
+      return el('div', { class: 'auth-indicator health-ok', title: 'auth status loading…' }, [
+        el('span', { class: 'dot' }),
+        el('span', { class: 'mode' }, 'auth…'),
+      ]);
+    }
+    const cls = 'auth-indicator health-' + (a.health || 'ok');
+    const parts = [
+      el('span', { class: 'dot' }),
+      el('span', { class: 'mode' }, a.mode),
+    ];
+    if (a.identity) {
+      parts.push(el('span', { class: 'identity' }, '· ' + a.identity));
+    }
+    // Bedrock + fresh token: surface the remaining time in the pill itself.
+    // The countdown text is computed each render and refreshed once a minute
+    // by the loadAuthMode poll, which is more than enough granularity.
+    if (a.mode === 'bedrock' && a.health === 'ok' && a.detail && a.detail.expiresAt) {
+      const left = formatExpiry(a.detail.expiresAt);
+      if (left) parts.push(el('span', { class: 'countdown' }, left));
+    }
+    const title = a.health === 'ok'
+      ? 'click for detail'
+      : (a.remediation || a.mode + ' (' + a.health + ')');
+    return el('div', { class: cls, title, onclick: openAuthPopover }, parts);
+  }
+
+  // Compact "Xh Ym" / "Ym" string for the inline countdown. Returns empty when
+  // the timestamp is unparseable or already past.
+  function formatExpiry(iso) {
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return '';
+    const ms = t - Date.now();
+    if (ms <= 0) return '';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return mins + 'm';
+    const hours = Math.floor(mins / 60);
+    const rem = mins - hours * 60;
+    return hours + 'h ' + rem + 'm';
+  }
+
+  // Click-to-open popover anchored to the indicator. Closes on click-outside
+  // or Esc. Renders mode-specific rows from state.authMode.detail plus a
+  // restart-the-dashboard footer (the only way to switch modes).
+  function openAuthPopover(e) {
+    if (e) e.stopPropagation();
+    const existing = document.querySelector('.auth-popover');
+    if (existing) {
+      existing.remove();
+      return;
+    }
+    const a = state.authMode;
+    if (!a) return;
+    const cls = 'auth-popover health-' + (a.health || 'ok');
+    const pop = el('div', { class: cls });
+    const statusLabel = a.health === 'ok'
+      ? 'READY'
+      : (a.health === 'expired' ? 'EXPIRED' : 'MISSING');
+    pop.appendChild(el('div', { class: 'pop-header' }, [
+      el('span', { class: 'dot' }),
+      el('span', { class: 'pop-mode' }, a.mode),
+      el('span', { class: 'pop-status' }, statusLabel),
+    ]));
+    const rows = el('div', { class: 'pop-rows' });
+    const d = a.detail || {};
+    const row = (k, v) => rows.appendChild(el('div', { class: 'pop-row' }, [
+      el('span', { class: 'pop-key' }, k),
+      el('span', { class: 'pop-val' }, v),
+    ]));
+    if (a.mode === 'bedrock') {
+      if (d.profile) row('Profile', d.profile);
+      if (d.accountId) row('Account', d.accountId);
+      if (d.roleName) row('Role', d.roleName);
+      if (d.region) row('Region', d.region);
+      if (d.ssoPortal) row('SSO portal', d.ssoPortal);
+      if (d.expiresAt) {
+        const left = formatExpiry(d.expiresAt);
+        const local = new Date(d.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        row('Token', left ? 'expires ' + local + ' (' + left + ')' : 'expires ' + local);
+      } else {
+        row('Token', 'expired — log in again');
+      }
+      row('Watchdog', d.watchdogRunning ? 'running' : 'not running');
+    } else if (a.mode === 'anthropic-oauth') {
+      // Identity rows come from the host-side hint cache (oauth-hint.json),
+      // written by forge auth login and refreshed by getAuthState's probe.
+      // Conditional rendering: pre-login users see Source + Status only;
+      // post-login they get the full account picture.
+      if (d.oauthEmail) row('Account', d.oauthEmail);
+      if (d.oauthOrganization) row('Organization', d.oauthOrganization);
+      if (d.oauthPlan) row('Plan', d.oauthPlan);
+      if (d.oauthLoggedInAt) {
+        const dt = new Date(d.oauthLoggedInAt);
+        const local = isNaN(dt.getTime()) ? d.oauthLoggedInAt : dt.toLocaleDateString();
+        row('Logged in', local);
+      }
+      if (!d.oauthEmail) {
+        // No identity in the hint — either the user hasn't run forge auth
+        // login yet, or the hint write failed. Surface that honestly.
+        row('Account', 'unknown (run forge auth login to populate)');
+      }
+      if (d.awsAvailable) {
+        // AWS is configured on this host but the user didn't export
+        // AWS_PROFILE. Tell them — they probably meant bedrock.
+        row('Note', 'AWS SSO is configured on this host but AWS_PROFILE is not set.');
+      }
+    } else if (a.mode === 'anthropic-apikey') {
+      row('Source', 'ANTHROPIC_API_KEY env var');
+    }
+    pop.appendChild(rows);
+
+    // Footer differs per mode — the actionable advice is "how do I change auth
+    // or refresh this?", and that's mode-specific.
+    const footer = el('div', { class: 'pop-footer' });
+    if (a.mode === 'bedrock' && a.health !== 'ok') {
+      footer.appendChild(el('div', null, [
+        document.createTextNode('Refresh: '),
+        el('code', null, 'aws sso login --profile ' + (d.profile || 'default')),
+      ]));
+    } else if (a.mode === 'anthropic-oauth') {
+      footer.appendChild(el('div', null, [
+        document.createTextNode('Re-auth: '),
+        el('code', null, 'forge auth login'),
+      ]));
+      if (d.awsAvailable) {
+        footer.appendChild(el('div', { style: 'margin-top:6px;' }, [
+          document.createTextNode('Use Bedrock instead: '),
+          el('code', null, 'export AWS_PROFILE=<profile>'),
+          document.createTextNode(' (then restart dashboard).'),
+        ]));
+      }
+    }
+    const switchBlock = el('div', { style: 'margin-top:6px;' });
+    switchBlock.appendChild(document.createTextNode('To switch modes: '));
+    switchBlock.appendChild(el('code', null, 'pkill -f "forge dashboard"'));
+    switchBlock.appendChild(document.createTextNode(', source different shell config, restart.'));
+    footer.appendChild(switchBlock);
+    pop.appendChild(footer);
+
+    // Anchor to the indicator. The indicator sits in the left sidebar; we
+    // position the popover to its right, vertically aligned with its top.
+    const anchor = document.querySelector('.auth-indicator');
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      pop.style.left = (rect.right + 8) + 'px';
+      pop.style.top = rect.top + 'px';
+    }
+    document.body.appendChild(pop);
+
+    // Dismiss handlers — clickaway + Esc. Use capture phase so the close fires
+    // before any inner click handlers on the popover content do anything.
+    const onClickAway = (ev) => {
+      if (!pop.contains(ev.target)) closeAuthPopover();
+    };
+    const onKey = (ev) => { if (ev.key === 'Escape') closeAuthPopover(); };
+    function closeAuthPopover() {
+      pop.remove();
+      document.removeEventListener('click', onClickAway, true);
+      document.removeEventListener('keydown', onKey);
+    }
+    // Defer the listener attachment so the click that opened us doesn't
+    // immediately close us.
+    setTimeout(() => {
+      document.addEventListener('click', onClickAway, true);
+      document.addEventListener('keydown', onKey);
+    }, 0);
+  }
+
   // ---------- render: sidebar (runs) ----------
   function renderSidebar() {
     const sidebar = $('sidebar');
@@ -1087,7 +1489,7 @@ const CLIENT_JS = `
       id: r.id, status: r.status, title: r.title, workflow: r.workflow,
       taskCount: r.taskCount, completedAt: r.completedAt,
     }));
-    const key = renderKey([slimRuns, state.searchQuery || '', state.selectedRunId]);
+    const key = renderKey([slimRuns, state.searchQuery || '', state.selectedRunId, state.authMode]);
     if (state.lastRender.sidebar === key) return;
     state.lastRender.sidebar = key;
     const prevScrollTop = readPaneScroll(sidebar);
@@ -1096,6 +1498,7 @@ const CLIENT_JS = `
       el('div', { class: 'brand-logo' }),
       el('span', { class: 'brand-name' }, 'FORGE'),
     ]));
+    sidebar.appendChild(renderAuthIndicator());
     sidebar.appendChild(el('div', { class: 'search' }, [
       el('input', { type: 'text', placeholder: 'search runs…', oninput: onSearchInput, id: 'search-input' }),
     ]));
@@ -1198,8 +1601,17 @@ const CLIENT_JS = `
     ]));
     const designDir = (run.metadata && typeof run.metadata.designDir === 'string') ? run.metadata.designDir : '';
     const headerBlock = el('div', { class: 'middle-header' }, [
+      // #95 — run id with inline copy button. Mirrors the task-id copy
+      // pattern in taskHeaderSection so terminal commands referencing this
+      // run id are one click away.
       el('div', { style: 'display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-sm);' }, [
         el('span', { style: 'font-weight: 600; color: var(--foreground);' }, run.id),
+        el('button', {
+          class: 'copy',
+          style: 'position: static;',
+          title: 'Copy run id',
+          onclick: (e) => copyText(e, run.id),
+        }, 'copy'),
         badge(rowDisplayStatus(run)),
       ]),
       run.title ? el('div', { style: 'color: var(--foreground); margin-bottom: var(--space-sm); font-size: 13px;' }, run.title) : null,
@@ -1318,6 +1730,16 @@ const CLIENT_JS = `
         el('code', null, run.workflow),
         run.title ? ' · ' + run.title : '',
       ]) : null,
+      // #85 — graph-btn from the design Component Library. Opens the
+      // full-screen graph view modal. Right-aligned via margin-left: auto
+      // so it sits at the far end of the label row. SVG mirrors lucide's
+      // 'workflow' icon (a node + connections) — the design's glyph.
+      el('button', {
+        class: 'graph-btn',
+        title: 'View workflow graph (cmd+shift+g)',
+        onclick: () => openGraphView(),
+        html: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>',
+      }),
     ]);
     wrap.appendChild(label);
     const row = el('div', { class: 'phase-pill-row' });
@@ -1352,14 +1774,14 @@ const CLIENT_JS = `
         renderMiddle();
       },
     });
-    // Top line: gate icon + phase name + (right-side) check or reds dot.
+    // Top line: status icon (or gate icon if no special state) + phase name +
+    // (right-side) check or reds dot.
     const top = el('div', { class: 'pill-top' });
-    top.appendChild(el('span', { class: 'pill-icon' }, gateIconChar(p)));
+    top.appendChild(el('span', { class: 'pill-icon' }, statusOrGateIcon(p)));
     top.appendChild(el('span', { class: 'pill-name' }, p.name));
     const trailing = el('div', { class: 'pill-trailing' });
-    if (p.status === 'done') {
-      trailing.appendChild(el('span', { class: 'pill-check' }, '✓'));
-    }
+    // The leading icon now conveys done/failed/awaiting/blocked status (see
+    // statusOrGateIcon) — the trailing checkmark would be redundant.
     if (p.hasReds) {
       trailing.appendChild(el('span', {
         class: 'pill-reds-dot' + (p.redsAuthority === 'specialist' ? ' specialist' : ''),
@@ -1386,8 +1808,23 @@ const CLIENT_JS = `
     }
     return pill;
   }
-  // ⚡ for agent-driven phases, 👤 for human-led (manual) phases. Visual cue
-  // before the user reads the name, matches the design.
+  // Pill leading icon. State takes priority over gate type — when a phase is
+  // in a specific awaiting state, that's what the user needs to see; when
+  // it's idle/running/done, fall back to gate-shape (manual vs agent).
+  // Awaiting-icon set matches the design Component Library's pill/awaiting-*
+  // entries: ⚖ awaiting-gate, 👤 awaiting-human, 🚨 awaiting-red.
+  function statusOrGateIcon(p) {
+    if (p.status === 'awaiting_gate') return '⚖';
+    if (p.status === 'awaiting_human_input') return '👤';
+    if (p.status === 'awaiting_red') return '🚨';
+    if (p.status === 'blocked_by_red') return '⊘';
+    if (p.status === 'failed') return '✕';
+    if (p.status === 'done') return '✓';
+    return gateIconChar(p);
+  }
+  // ⚡ for agent-driven phases, 👤 for human-led (manual) phases. Used as the
+  // pill's leading icon in idle / running / pending states (statusOrGateIcon
+  // takes over for awaiting/blocked/failed/done).
   function gateIconChar(p) {
     if (p.isManual) return '👤';
     return '⚡';
@@ -1470,8 +1907,15 @@ const CLIENT_JS = `
       ]),
     ]);
   }
+  // Per Status Reference: awaiting_* collapses to "awaiting" with a subtype
+  // suffix (gate / human / reds) so the badge surface is consistent while
+  // preserving information. complete renders as "complete" (was "success" —
+  // cleaned up to align with backend vocabulary).
   function displayTaskStatus(t) {
-    if (t.status === 'complete') return 'success';
+    if (t.status === 'awaiting_gate') return 'awaiting · gate';
+    if (t.status === 'awaiting_human_input') return 'awaiting · human';
+    if (t.status === 'awaiting_red') return 'awaiting · reds';
+    if (t.status === 'blocked_by_red') return 'blocked';
     return t.status;
   }
   // Sort key by attention level — lowest number first. Actionable states
@@ -1688,12 +2132,57 @@ const CLIENT_JS = `
     sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-bottom: var(--space-sm);' }, [
       'This is the prompt the agent would have you run. Review before advancing — the gate is your chance to push back if it picked wrong defaults.',
     ]));
-    sec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 480px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;' }, briefContext.promptMarkdown));
+    sec.appendChild(renderPromptBlocks(briefContext.promptMarkdown, 480));
     sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted); margin-top: var(--space-sm);' }, [
       'On disk: ',
       el('code', null, briefContext.promptPathHost),
     ]));
     return sec;
+  }
+  // Split a PROMPT.md into the human-only prefix (everything before the first
+  // standalone "---" separator) and the prompt body the agent should receive.
+  // The ui-design template puts a "READ THIS FIRST (the human running the
+  // prompt, not the model)" preamble above a "---" divider; that prefix
+  // shouldn't end up in the agent's context when the human pastes.
+  // Returns { meta, body } — meta may be empty if no separator is found.
+  function splitPromptMarkdown(md) {
+    const lines = String(md || '').split(/\\n/);
+    let i = 0;
+    while (i < lines.length) {
+      if (/^---\\s*$/.test(lines[i])) {
+        const meta = lines.slice(0, i).join('\\n').trim();
+        const body = lines.slice(i + 1).join('\\n').replace(/^\\n+/, '');
+        return { meta, body };
+      }
+      i++;
+    }
+    return { meta: '', body: String(md || '') };
+  }
+  // Render the PROMPT.md split into a (collapsible) human-only block and the
+  // agent prompt body with a copy button. Reused by awaiting_gate brief tasks
+  // and awaiting_human_input review tasks.
+  function renderPromptBlocks(md, maxHeight) {
+    const { meta, body } = splitPromptMarkdown(md);
+    const wrap = el('div');
+    if (meta) {
+      const details = el('details', { class: 'prompt-meta', style: 'margin-bottom: var(--space-sm); border: 1px dashed var(--border-bright); border-radius: var(--radius-sm); padding: 6px 10px; background: var(--background-elevated);' });
+      details.appendChild(el('summary', { style: 'cursor: pointer; font-size: 11px; color: var(--foreground-muted); user-select: none;' }, '⚠️ Instructions for you (NOT the prompt body — do not copy this part)'));
+      details.appendChild(el('pre', { style: 'margin-top: 6px; white-space: pre-wrap; word-wrap: break-word; font-family: var(--font-mono); font-size: 11px; color: var(--foreground-secondary);' }, meta));
+      wrap.appendChild(details);
+    }
+    const bodyBlock = el('pre', {
+      class: 'cli-block',
+      style: 'max-height: ' + (maxHeight || 480) + 'px; overflow: auto; white-space: pre-wrap; word-wrap: break-word;',
+    });
+    // Copy button copies the agent body only (not the meta preamble).
+    bodyBlock.appendChild(el('button', {
+      class: 'copy',
+      title: 'Copy prompt body (excludes the human-only instructions)',
+      onclick: (e) => copyText(e, body),
+    }, 'copy'));
+    bodyBlock.appendChild(document.createTextNode(body));
+    wrap.appendChild(bodyBlock);
+    return wrap;
   }
   // Retry section for failed tasks. Resets to pending; next forge-next (or
   // the dashboard "Run next" button) redispatches. Read-only fallback shows
@@ -1749,7 +2238,7 @@ const CLIENT_JS = `
       const promptSec = el('div', { class: 'detail-section', style: 'padding-top: var(--space-sm);' }, [
         el('h3', null, 'PROMPT.md'),
       ]);
-      promptSec.appendChild(el('pre', { class: 'cli-block', style: 'max-height: 360px; overflow: auto;' }, briefContext.promptMarkdown));
+      promptSec.appendChild(renderPromptBlocks(briefContext.promptMarkdown, 360));
       sec.appendChild(promptSec);
     } else if (briefContext) {
       sec.appendChild(el('div', { style: 'font-size: 11px; color: var(--foreground-muted);' }, [
@@ -2360,20 +2849,24 @@ const CLIENT_JS = `
       // by clicking Advance; making them click Run-next is asking permission twice.
       // Reject and request-changes don't chain (they need human follow-up).
       if (decision === 'advance' && state.selectedRunId) {
-        try {
-          await fetchJSON('/api/next/' + encodeURIComponent(state.selectedRunId), {
-            method: 'POST', body: {},
-          });
-          toast('Advanced + dispatched next phase.', 'success');
-        } catch (e) {
-          // Gate succeeded; next failed. Surface the next-failure but don't
-          // act like the gate didn't happen.
+        // Don't wait for forge next — the dispatched task can run for
+        // minutes. Fire-and-forget; refresh immediately so the now-running
+        // task shows up; let smart-refresh polling keep ticking.
+        toast('Advanced; dispatching next phase…', 'success');
+        const runId = state.selectedRunId;
+        const nextPromise = fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
+        setTimeout(() => { void refreshAll(); }, 250);
+        nextPromise.then(() => {
+          toast('Phase complete.', 'success');
+          void refreshAll();
+        }).catch((e) => {
           toast('Advanced. But next dispatch failed: ' + (e.message || 'unknown') + '. Click Run next to retry.', 'error');
-        }
+          void refreshAll();
+        });
       } else {
         toast('Gate decision recorded: ' + decision, 'success');
+        await refreshAll();
       }
-      await refreshAll();
     } catch (e) {
       toast('Gate failed: ' + (e.message || 'unknown error'), 'error');
     }
@@ -2402,14 +2895,24 @@ const CLIENT_JS = `
     }
   }
   async function runNext(runId) {
-    try {
-      const data = await fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
-      const summary = (data && data.summary) || 'Dispatched next phase.';
+    // forge next blocks until the dispatched task finishes — the spawn is sync.
+    // If we waited for the POST to return before refreshing the dashboard,
+    // the user would see "pending" for the entire task duration. Instead:
+    // fire-and-forget the POST, then refresh immediately so the now-running
+    // task lands in state. The smart-refresh poll (schedulePoll) keeps
+    // ticking every 3s while shouldPoll is true.
+    toast('Dispatching next phase…', 'success');
+    const promise = fetchJSON('/api/next/' + encodeURIComponent(runId), { method: 'POST', body: {} });
+    // Give the spine a moment to flip the task to running, then refresh.
+    setTimeout(() => { void refreshAll(); }, 250);
+    promise.then((data) => {
+      const summary = (data && data.summary) || 'Phase complete.';
       toast(summary, 'success');
-      await refreshAll();
-    } catch (e) {
+      void refreshAll();
+    }).catch((e) => {
       toast('Run-next failed: ' + (e.message || 'unknown error'), 'error');
-    }
+      void refreshAll();
+    });
   }
   async function refreshAll() {
     await loadRuns();
@@ -2443,6 +2946,19 @@ const CLIENT_JS = `
       renderSidebar();
     } catch (e) {
       toast('Failed to load runs: ' + e.message, 'error');
+    }
+  }
+  async function loadAuthMode() {
+    // #97 — silent on failure. The indicator shows a "?" mode while
+    // state.authMode is null; a transient fetch error just leaves the
+    // last-known state in place. No toast — auth status isn't actionable
+    // in-dashboard, restart-with-different-shell is.
+    try {
+      const data = await fetchJSON('/api/auth-mode');
+      state.authMode = data;
+      renderSidebar();
+    } catch (e) {
+      void e;
     }
   }
   async function loadRunDetail(runId) {
@@ -2693,6 +3209,406 @@ const CLIENT_JS = `
     document.querySelectorAll('.menu').forEach(m => m.remove());
   }
 
+  // ---------- graph view (#85) ----------
+  // Status → CSS color mapping for cytoscape node styling. Mirrors the
+  // Component Library's node/* atoms (node/complete = green border on
+  // dark-green bg, etc).
+  const GRAPH_STATUS_COLORS = {
+    pending:               { border: '#1E1E3A', bg: '#111124',          text: '#A1A1C0' },
+    running:               { border: '#00F2FF', bg: '#001A1F',          text: '#00F2FF' },
+    awaiting_red:          { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    awaiting_gate:         { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    awaiting_human_input:  { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
+    blocked_by_red:        { border: '#BF40FF', bg: 'rgba(191,64,255,0.1)', text: '#BF40FF' },
+    failed:                { border: '#EF4444', bg: '#200A0A',          text: '#EF4444' },
+    done:                  { border: '#22C55E', bg: '#0A2016',          text: '#F0F0FF' },
+  };
+
+  // Inline mirror of src/dashboard/graphView.ts buildGraphData. Server-side
+  // file is the source of truth + is unit-tested; this client copy stays
+  // in sync because phaseShape is the same shape on both sides. If this
+  // logic grows, refactor to ship the JSON over the API instead.
+  function buildGraphDataClient(phaseShape) {
+    const nodes = [];
+    for (const p of (phaseShape || [])) {
+      nodes.push({
+        data: {
+          id: 'n:' + p.name,
+          label: p.name,
+          status: p.status,
+          taskCounts: p.taskCounts,
+          hasFanout: p.hasFanout,
+          hasReds: p.hasReds,
+          redsAuthority: p.redsAuthority,
+          isManual: p.isManual,
+          fanoutDots: p.fanoutDots,
+        },
+      });
+      // Per-task child nodes for fanout phases (#85 v1). One per task in
+      // fanoutDots order; status is the per-task value.
+      if (p.hasFanout && Array.isArray(p.fanoutDots) && p.fanoutDots.length > 0) {
+        for (let i = 0; i < p.fanoutDots.length; i++) {
+          nodes.push({
+            data: {
+              id: 'n:' + p.name + ':t' + i,
+              label: (i + 1).toString(),
+              status: p.fanoutDots[i],
+              parent: 'n:' + p.name,
+              isFanoutChild: true,
+            },
+          });
+        }
+      }
+    }
+    const edges = [];
+    for (let i = 0; i < (phaseShape || []).length - 1; i++) {
+      const from = phaseShape[i];
+      const to = phaseShape[i + 1];
+      edges.push({
+        data: {
+          id: 'e:linear:' + from.name + '->' + to.name,
+          source: 'n:' + from.name,
+          target: 'n:' + to.name,
+          kind: 'linear',
+        },
+      });
+    }
+    for (const p of (phaseShape || [])) {
+      if (p.onReject) {
+        edges.push({
+          data: {
+            id: 'e:onReject:' + p.name + '->' + p.onReject,
+            source: 'n:' + p.name,
+            target: 'n:' + p.onReject,
+            kind: 'onReject',
+            label: 'reject',
+          },
+        });
+      }
+    }
+    return { nodes, edges };
+  }
+
+  function openGraphView() {
+    if (!state.runDetail || !Array.isArray(state.runDetail.phaseShape) || state.runDetail.phaseShape.length === 0) {
+      toast('No workflow shape to visualize.', 'error');
+      return;
+    }
+    if (typeof window.cytoscape !== 'function') {
+      toast('Graph library failed to load.', 'error');
+      return;
+    }
+    const root = $('modal-root');
+    root.innerHTML = '';
+    const overlay = el('div', { class: 'graph-modal-overlay' });
+    const run = state.runDetail.run;
+    overlay.appendChild(el('div', { class: 'graph-modal-header' }, [
+      el('span', { class: 'graph-modal-title' }, [
+        'GRAPH VIEW',
+        el('span', { class: 'breadcrumb' }, run.workflow + ' · ' + run.id),
+      ]),
+      el('button', {
+        class: 'graph-modal-close',
+        title: 'Close (esc)',
+        onclick: closeGraphView,
+      }, '✕'),
+    ]));
+    const body = el('div', { class: 'graph-modal-body' });
+    const canvas = el('div', { id: 'graph-cy-canvas' });
+    body.appendChild(canvas);
+    overlay.appendChild(body);
+    overlay.appendChild(el('div', { class: 'graph-modal-footer' }, [
+      el('span', null, 'drag to pan · scroll to zoom'),
+      el('div', { class: 'kbd-hints' }, [
+        el('span', null, 'esc: close'),
+      ]),
+    ]));
+    root.appendChild(overlay);
+
+    // Build graph data + render via cytoscape. The data transformer is the
+    // client-side mirror of src/dashboard/graphView.ts (unit-tested).
+    const data = buildGraphDataClient(state.runDetail.phaseShape);
+    // #85 v1: flat-node model for fanout. Compound nodes + dagre + grid
+    // sub-layouts fight each other (#100 iteration history). Instead, we
+    // keep every node top-level: a fanout phase renders as a single
+    // collapsed-summary node when collapsed, and as N peer task nodes
+    // (no parent reference) when expanded. Dagre handles parallel ranks
+    // natively, so children laid out at the same rank produce the visual
+    // cluster without any of the compound-sizing bugs.
+    //
+    // Caches needed for expand/collapse toggle:
+    //   - fanoutChildrenByPhase: phaseId → child CyNode[] (data only)
+    //   - phaseNeighbors: phaseId → { prev: prevPhaseId|null, next: nextPhaseId|null }
+    //   - linearEdgeIdByPair: "src->tgt" → edgeId (source-of-truth from
+    //     the data builder; lets us remove + re-add the right edges).
+    const fanoutChildrenByPhase = {};
+    const phaseNodeDataById = {}; // phaseId → original phase CyNode data
+    const phaseNeighbors = {};
+    const expandedPhases = new Set();
+    const phaseShape = state.runDetail.phaseShape;
+    for (let i = 0; i < phaseShape.length; i++) {
+      const p = phaseShape[i];
+      const id = 'n:' + p.name;
+      phaseNeighbors[id] = {
+        prev: i > 0 ? 'n:' + phaseShape[i - 1].name : null,
+        next: i < phaseShape.length - 1 ? 'n:' + phaseShape[i + 1].name : null,
+      };
+    }
+    const initialNodeData = [];
+    for (const n of data.nodes) {
+      if (n.data.parent) {
+        // child of a fanout phase — cache, don't render yet. Strip the
+        // .parent reference so when we add it later as a peer node, it
+        // doesn't become a compound child of an already-removed phase.
+        const pid = n.data.parent;
+        if (!fanoutChildrenByPhase[pid]) fanoutChildrenByPhase[pid] = [];
+        const flatData = Object.assign({}, n.data);
+        delete flatData.parent;
+        fanoutChildrenByPhase[pid].push({ data: flatData });
+        continue;
+      }
+      phaseNodeDataById[n.data.id] = n.data;
+      const cls = n.data.hasFanout ? 'fanout-parent collapsed' : '';
+      initialNodeData.push({ group: 'nodes', data: n.data, classes: cls });
+    }
+    const initialElements = [
+      ...initialNodeData,
+      ...data.edges.map(e => ({ group: 'edges', data: e.data })),
+    ];
+    const cy = window.cytoscape({
+      container: canvas,
+      elements: initialElements,
+      style: [
+        // Phase nodes (default — non-fanout-child) — rectangular with
+        // status-coded border + bg. Matches Component Library's node/*
+        // atoms.
+        {
+          selector: 'node',
+          style: {
+            'shape': 'round-rectangle',
+            'width': 220,
+            'height': 60,
+            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
+            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
+            'border-width': 2,
+            'label': (n) => fanoutCollapsedLabel(n),
+            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 11,
+            'font-weight': 600,
+            'text-valign': 'center',
+            'text-halign': 'center',
+          },
+        },
+        // Fanout child nodes — compact status-coded rectangles. One per
+        // task; rendered only while the parent phase is expanded
+        // (added/removed via the toggle handler). Smaller than phase
+        // nodes so 16+ children stack neatly within a single dagre rank.
+        {
+          selector: 'node.fanout-cluster',
+          style: {
+            'shape': 'round-rectangle',
+            'width': 110,
+            'height': 36,
+            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
+            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
+            'border-width': 1,
+            'label': 'data(label)',
+            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 10,
+            'font-weight': 500,
+            'text-valign': 'center',
+            'text-halign': 'center',
+          },
+        },
+        // Linear edges — solid arrows, gentle arc. Unbundled-bezier
+        // gives every edge a real curve even when it's the only one
+        // between its endpoints (plain bezier degenerates to a straight
+        // line for single source→target pairs). The arc reads as a
+        // living/moving system rather than a static org chart.
+        {
+          selector: 'edge[kind = "linear"]',
+          style: {
+            'curve-style': 'unbundled-bezier',
+            'control-point-distances': [40],
+            'control-point-weights': [0.5],
+            'target-arrow-shape': 'triangle',
+            'line-color': '#A1A1C0',
+            'target-arrow-color': '#A1A1C0',
+            'width': 1.5,
+          },
+        },
+        // onReject back-edges — dashed magenta, curved.
+        {
+          selector: 'edge[kind = "onReject"]',
+          style: {
+            'curve-style': 'unbundled-bezier',
+            'control-point-distances': [-80],
+            'control-point-weights': [0.5],
+            'line-style': 'dashed',
+            'target-arrow-shape': 'triangle',
+            'line-color': '#BF40FF',
+            'target-arrow-color': '#BF40FF',
+            'width': 1.5,
+            'label': 'data(label)',
+            'font-family': 'Geist Mono, monospace',
+            'font-size': 9,
+            'color': '#BF40FF',
+            'text-background-color': '#080810',
+            'text-background-padding': 3,
+            'text-background-opacity': 1,
+          },
+        },
+      ],
+      // No layout in constructor — relayoutGraph() below handles dagre
+      // (top level) + grid sub-layouts for expanded fanout clusters.
+      layout: { name: 'preset' },
+      minZoom: 0.3,
+      maxZoom: 3,
+      wheelSensitivity: 0.2,
+    });
+
+    // #85 v1: tap any node to toggle its fanout phase. Flat-node model
+    // — expand swaps the single phase node for N peer task nodes and
+    // rewires the linear edges so each child sits between the prev and
+    // next phase; collapse reverses it. Single global tap handler that
+    // routes by node class (the selector form cy.on('tap', 'node.x',
+    // ...) doesn't fire for elements added after registration in
+    // cytoscape 3.30, so we filter inside).
+    cy.on('tap', (evt) => {
+      const node = evt.target;
+      if (!node || node === cy || !node.isNode || !node.isNode()) return;
+      if (node.hasClass('fanout-parent')) {
+        expandFanoutPhase(cy, node.id(), fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
+        relayoutGraph(cy);
+        return;
+      }
+      if (node.hasClass('fanout-cluster')) {
+        const phaseId = node.id().replace(/:t\\d+$/, '');
+        collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
+        relayoutGraph(cy);
+        return;
+      }
+    });
+
+    // Initial layout: nothing is expanded, so dagre sees only phase
+    // nodes (one per phase) plus linear edges — a simple horizontal
+    // chain.
+    relayoutGraph(cy);
+
+    // Esc key closes.
+    document.addEventListener('keydown', graphEscHandler);
+  }
+  // Flat-node layout: dagre alone, no compound nodes. Children of an
+  // expanded fanout phase share a rank; dagre stacks them vertically
+  // (rankDir LR) with nodeSep between siblings. No grid sub-layout
+  // needed because there is no compound parent to size.
+  function relayoutGraph(cy) {
+    cy.layout({
+      name: 'dagre',
+      rankDir: 'LR',
+      nodeSep: 24,
+      rankSep: 120,
+      edgeSep: 12,
+      animate: false,
+      fit: true,
+      padding: 40,
+    }).run();
+  }
+
+  // Expand a fanout phase: replace the single phase node with N peer
+  // task nodes, and rewire the linear edges so prev → each child →
+  // next. The 'fanout-cluster' class on children lets the renderer
+  // group them visually (status-coded smaller nodes).
+  function expandFanoutPhase(cy, phaseId, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
+    const children = fanoutChildrenByPhase[phaseId] || [];
+    if (children.length === 0) return;
+    const { prev, next } = phaseNeighbors[phaseId] || { prev: null, next: null };
+    // Remove the phase node + its incident linear edges.
+    cy.$id(phaseId).connectedEdges('[kind = "linear"]').remove();
+    cy.$id(phaseId).remove();
+    // Add child nodes as peers.
+    cy.add(children.map(c => ({
+      group: 'nodes',
+      data: c.data,
+      classes: 'fanout-cluster',
+    })));
+    // Rewire edges: prev → each child, each child → next. Failed
+    // children are dead-ends — they didn't produce a result for the
+    // next phase to consume, so we omit the outgoing edge. The
+    // incoming edge stays so the failure is still visible as a branch
+    // from the upstream phase.
+    const newEdges = [];
+    for (const c of children) {
+      const cid = c.data.id;
+      if (prev) newEdges.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + cid, source: prev, target: cid, kind: 'linear' } });
+      if (next && c.data.status !== 'failed') newEdges.push({ group: 'edges', data: { id: 'e:linear:' + cid + '->' + next, source: cid, target: next, kind: 'linear' } });
+    }
+    if (newEdges.length > 0) cy.add(newEdges);
+    expandedPhases.add(phaseId);
+  }
+
+  // Collapse a fanout phase: remove its child nodes + their edges, and
+  // restore the single phase node + its two linear edges (prev → phase,
+  // phase → next).
+  function collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
+    const children = fanoutChildrenByPhase[phaseId] || [];
+    const neighbors = phaseNeighbors[phaseId] || { prev: null, next: null };
+    const prev = neighbors.prev;
+    const next = neighbors.next;
+    // Remove children + their incident edges.
+    for (const c of children) {
+      const node = cy.$id(c.data.id);
+      if (node.length > 0) {
+        node.connectedEdges().remove();
+        node.remove();
+      }
+    }
+    // Re-add the phase node.
+    const phaseData = phaseNodeDataById[phaseId];
+    if (phaseData) {
+      cy.add({ group: 'nodes', data: phaseData, classes: 'fanout-parent collapsed' });
+    }
+    // Re-add the two phase-level edges.
+    const edgesToAdd = [];
+    if (prev) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + phaseId, source: prev, target: phaseId, kind: 'linear' } });
+    if (next) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + phaseId + '->' + next, source: phaseId, target: next, kind: 'linear' } });
+    if (edgesToAdd.length > 0) cy.add(edgesToAdd);
+    expandedPhases.delete(phaseId);
+  }
+  // Label for fanout-parent nodes — collapsed shows summary; expanded shows
+  // phase name + chevron (children carry their own labels). Non-fanout nodes
+  // keep the default label.
+  // Single-line by design: cytoscape's multiline-via-\\n is finicky with
+  // text-wrap and caused rendering issues in earlier iterations. Compact
+  // single-line summary works.
+  function fanoutCollapsedLabel(n) {
+    if (!n.data('hasFanout')) return n.data('label');
+    if (n.hasClass('collapsed')) {
+      const tc = n.data('taskCounts') || {};
+      const total = tc.total || 0;
+      const done = tc.complete || 0;
+      const failed = tc.failed || 0;
+      let summary = ' (' + total;
+      if (done > 0) summary += ', ' + done + ' done';
+      if (failed > 0) summary += ', ' + failed + ' failed';
+      summary += ')';
+      return '▸ ' + n.data('label') + summary;
+    }
+    return '▾ ' + n.data('label');
+  }
+
+  function graphEscHandler(e) {
+    if (e.key === 'Escape') closeGraphView();
+  }
+
+  function closeGraphView() {
+    document.removeEventListener('keydown', graphEscHandler);
+    const root = $('modal-root');
+    if (root) root.innerHTML = '';
+  }
+
   // ---------- bootstrap ----------
   async function bootstrap() {
     // #89 dropped FORGE_DASHBOARD_INTERACTIVE in 2026-05-09 — the dashboard is
@@ -2700,11 +3616,26 @@ const CLIENT_JS = `
     // smart-refresh keys (#72) but its value is fixed at true.
     state.interactive = true;
     startElapsedTicker();
+    // #85 — cmd+shift+g (mac) / ctrl+shift+g (other) opens the graph view
+    // when a run is selected. Honored at the document level so it works
+    // regardless of focus.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'G' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
+        if (state.runDetail && Array.isArray(state.runDetail.phaseShape) && state.runDetail.phaseShape.length > 0) {
+          e.preventDefault();
+          openGraphView();
+        }
+      }
+    });
     renderSidebar();
     renderPillRowPane();
     renderMiddle();
     renderDetail();
     await loadRuns();
+    // #97 — auth indicator. Fetch once on bootstrap, then refresh every 60s
+    // so SSO-expiring-during-the-session transitions surface in the UI.
+    void loadAuthMode();
+    setInterval(loadAuthMode, 60000);
   }
   bootstrap();
 })();

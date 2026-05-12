@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Task, Workflow, Phase, RedAuthority } from "../types/index.js";
-import { tasksForRun, getTask, markTaskComplete, markTaskFailed, setTaskStatus } from "../store/tasks.js";
+import { tasksForRun, getTask, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { logEvent } from "../store/events.js";
 import { findPhase } from "./workflows.js";
@@ -77,7 +77,16 @@ function reconcileTask(task: Task, workflow: Workflow, allTasks: Task[]): Reconc
     return { taskId: task.id, resolution: "failed" };
   }
 
-  markTaskComplete(task.id, parsed);
+  if (!task.parentId) {
+    const taskPhase = findPhase(workflow, task.phase);
+    if (taskPhase?.gate === "auto") {
+      markTaskComplete(task.id, parsed);
+    } else {
+      markTaskAwaitingGate(task.id, parsed);
+    }
+  } else {
+    markTaskComplete(task.id, parsed);
+  }
   logEvent("task.completed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
 
   // If this is a red task (parent exists and parent's phase has reds), write the verdict

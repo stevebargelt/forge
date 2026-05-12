@@ -130,7 +130,8 @@ test("reconcile: running task with empty result.json stays still_running", () =>
 test("reconcile: running task with valid result.json transitions to complete", () => {
   insertTask(makeTask({ id: "task-3", status: "running" }));
   writeResultJson("task-3", { status: "complete", payload: 42 });
-  const wf = workflowWithPhase(makePhaseWithReds());
+  const phase: Phase = { name: "frame-question", agents: [BLUE_AGENT], gate: "auto" };
+  const wf = workflowWithPhase(phase);
   const out = reconcileRun(RUN.id, wf);
   assert.equal(out[0]!.resolution, "complete");
   const t = getTask("task-3")!;
@@ -245,7 +246,12 @@ test("reconcile: parent already gated (status=failed) is left alone", () => {
 test("reconcile: idempotent — running it twice produces the same end state", () => {
   insertTask(makeTask({ id: "task-idem", status: "running" }));
   writeResultJson("task-idem", { status: "complete", x: 1 });
-  const wf = workflowWithPhase(makePhaseWithReds());
+  const phase: Phase = {
+    name: "frame-question",
+    agents: [BLUE_AGENT],
+    gate: "auto",
+  };
+  const wf = workflowWithPhase(phase);
 
   reconcileRun(RUN.id, wf);
   const first = getTask("task-idem");
@@ -262,4 +268,52 @@ test("reconcile: skips tasks that are not in running status", () => {
   const wf = workflowWithPhase(makePhaseWithReds());
   const out = reconcileRun(RUN.id, wf);
   assert.equal(out.length, 0);
+});
+
+test("reconcile: orphan blue with gate: 'auto' reconciles to status=complete", () => {
+  insertTask(makeTask({ id: "task-auto", status: "running" }));
+  writeResultJson("task-auto", { status: "complete", answer: "yes" });
+  const phase: Phase = {
+    name: "frame-question",
+    agents: [BLUE_AGENT],
+    gate: "auto",
+  };
+  const wf = workflowWithPhase(phase);
+  const out = reconcileRun(RUN.id, wf);
+  assert.equal(out[0]!.resolution, "complete");
+  const t = getTask("task-auto")!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { status: "complete", answer: "yes" });
+});
+
+test("reconcile: orphan blue with gate: 'human' reconciles to status=awaiting_gate with result stored", () => {
+  insertTask(makeTask({ id: "task-human", status: "running" }));
+  writeResultJson("task-human", { status: "complete", answer: "done" });
+  const phase: Phase = {
+    name: "frame-question",
+    agents: [BLUE_AGENT],
+    gate: "human",
+  };
+  const wf = workflowWithPhase(phase);
+  const out = reconcileRun(RUN.id, wf);
+  assert.equal(out[0]!.resolution, "complete");
+  const t = getTask("task-human")!;
+  assert.equal(t.status, "awaiting_gate");
+  assert.deepEqual(t.result, { status: "complete", answer: "done" });
+});
+
+test("reconcile: orphan blue with gate: 'verdict' reconciles to status=awaiting_gate with result stored", () => {
+  insertTask(makeTask({ id: "task-verdict", status: "running" }));
+  writeResultJson("task-verdict", { status: "complete", answer: "done" });
+  const phase: Phase = {
+    name: "frame-question",
+    agents: [BLUE_AGENT],
+    gate: "verdict",
+  };
+  const wf = workflowWithPhase(phase);
+  const out = reconcileRun(RUN.id, wf);
+  assert.equal(out[0]!.resolution, "complete");
+  const t = getTask("task-verdict")!;
+  assert.equal(t.status, "awaiting_gate");
+  assert.deepEqual(t.result, { status: "complete", answer: "done" });
 });

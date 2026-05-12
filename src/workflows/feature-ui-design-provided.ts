@@ -5,7 +5,9 @@ import { agent } from "./_agentRefs.js";
 // exists (a .pen file, PRD-with-mocks, or earlier ui-design run). Architecture
 // review is always part of feature work (Steven 2026-05-08) — even when design
 // is provided, the architect phase reads the design as upstream context and
-// produces decisions/components/interfaces grounded in what's been drawn.
+// produces a systems-level architectural assessment (risks, constraints,
+// boundaries, prior art) grounded in what's been drawn. NOT implementation
+// guidance — see architect seed for the discipline.
 //
 // For feature work without UI design, see `feature`.
 // For feature work that needs UI design first, see `feature-ui-design-needed`.
@@ -25,7 +27,7 @@ export const workflow: Workflow = {
       },
       gate: "human",
       workflowAdditions:
-        "Produce the architecture document grounded in the provided UI design (inputs.prd or upstream design artifacts). Read the HTML files / PNGs if present. Output {decisions, components, interfaces, openQuestions}.",
+        "Produce systems-level architectural assessment grounded in the provided UI design (inputs.prd or upstream design artifacts). Read the HTML files / PNGs if present. Output {risks, constraints, boundaries, priorArt, openQuestions, notes} — NOT implementation guidance (no type names, no function names). See architect seed.",
     },
     {
       name: "plan",
@@ -37,9 +39,16 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
+      // Specialist reds added per #96 sub-shift 1 — informational discipline
+      // coverage alongside the authoritative wide/narrow.
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
+        additional: [
+          agent("red-frontend", "fast-orchestrator"),
+          agent("red-backend", "fast-orchestrator"),
+          agent("red-security", "fast-orchestrator"),
+        ],
         parallel: true,
         authority: "authoritative",
         gateOnVerdict: true,

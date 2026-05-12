@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "edit", "write", "bash"],
+  "notes": "Full read/write inside /project. Read-only on host (mounts enforce)."
+}

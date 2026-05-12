@@ -11,8 +11,10 @@ import { agent } from "./_agentRefs.js";
 //                onReject loops to brief (revise the prompt).
 //                FORGE-DEC-016 + #54 mechanics, identical to ui-design.
 //   architect  — reads upstream design artifacts (HTML/PNGs from ui-review)
-//                AND the brief, produces decisions/components/interfaces
-//                grounded in what's drawn. Specialist reds review.
+//                AND the brief, produces systems-level assessment (risks,
+//                constraints, boundaries, prior art) grounded in what's drawn.
+//                See architect seed: this is NOT implementation tutoring —
+//                no type names, no function names. Specialist reds review.
 //                onReject loops to brief (the design needs revising — note
 //                this skips ui-review; brief produces a fresh PROMPT.md and
 //                the human runs Pencil again. This matches Steven's call
@@ -58,7 +60,7 @@ export const workflow: Workflow = {
       gate: "human",
       onReject: "brief",
       workflowAdditions:
-        "Read the upstream design artifacts: inputs.upstream[*].result.htmlFiles (HTML/CSS reference exports) and inputs.upstream[*].result.pngFiles (canonical Pencil renders). Treat the design as the canonical UI — your architecture must support what's drawn. Your decisions/components/interfaces should reference the design's screens and states. Output {decisions, components, interfaces, openQuestions}.",
+        "Read the upstream design artifacts: inputs.upstream[*].result.htmlFiles (HTML/CSS reference exports) and inputs.upstream[*].result.pngFiles (canonical Pencil renders). Treat the design as the canonical UI — your architecture must support what's drawn. But your output is systems-level: risks/constraints/boundaries/priorArt/openQuestions about what supporting that design implies for the rest of the system, NOT implementation guidance (no type names, no function names). Output {risks, constraints, boundaries, priorArt, openQuestions, notes}. See architect seed.",
     },
     {
       name: "plan",
@@ -70,9 +72,16 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
+      // Specialist reds added per #96 sub-shift 1 — informational discipline
+      // coverage alongside the authoritative wide/narrow.
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
+        additional: [
+          agent("red-frontend", "fast-orchestrator"),
+          agent("red-backend", "fast-orchestrator"),
+          agent("red-security", "fast-orchestrator"),
+        ],
         parallel: true,
         authority: "authoritative",
         gateOnVerdict: true,

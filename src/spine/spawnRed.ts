@@ -45,10 +45,19 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
   const spec = upstreamPhaseOutput(workflow, phase, run.id);
   const artifact = blueTask.result ? JSON.stringify(blueTask.result, null, 2) : "(no blue result)";
 
-  const launches: Promise<{ ref: AgentRef; verdict: Verdict; redTaskId: string }>[] = [];
+  // Track launches with their associated authority so we can record verdicts
+  // correctly. Wide/narrow inherit RedConfig.authority; `additional` reds are
+  // always recorded as `specialist` (#96 — they're informational regardless
+  // of the parent's authoritative gate).
+  type LaunchPlan = {
+    promise: Promise<{ ref: AgentRef; verdict: Verdict; redTaskId: string }>;
+    authority: "specialist" | "authoritative" | "triage";
+    countsTowardGate: boolean;
+  };
+  const launches: LaunchPlan[] = [];
   if (redConfig.wide) {
-    launches.push(
-      runOneRed({
+    launches.push({
+      promise: runOneRed({
         ref: redConfig.wide,
         run,
         workflow,
@@ -58,12 +67,14 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
         spec,
         failureModes,
         projectDir,
-      })
-    );
+      }),
+      authority: redConfig.authority,
+      countsTowardGate: true,
+    });
   }
   if (redConfig.narrow) {
-    launches.push(
-      runOneRed({
+    launches.push({
+      promise: runOneRed({
         ref: redConfig.narrow,
         run,
         workflow,
@@ -73,16 +84,45 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
         spec,
         failureModes,
         projectDir,
-      })
-    );
+      }),
+      authority: redConfig.authority,
+      countsTowardGate: true,
+    });
+  }
+  // Specialist reds (#96 sub-shift 1). Always run with `specialist` authority
+  // and `countsTowardGate: false`, regardless of the parent RedConfig's
+  // gateOnVerdict setting. Their verdicts are informational — the human gate
+  // reviewer sees them, but they don't trigger blocked_by_red.
+  for (const additional of redConfig.additional ?? []) {
+    launches.push({
+      promise: runOneRed({
+        ref: additional,
+        run,
+        workflow,
+        phase,
+        blueTask,
+        artifact,
+        spec,
+        failureModes,
+        projectDir,
+      }),
+      authority: "specialist",
+      countsTowardGate: false,
+    });
   }
 
   const results = redConfig.parallel
-    ? await Promise.all(launches)
-    : await sequentially(launches);
+    ? await Promise.all(launches.map((l) => l.promise))
+    : await sequentially(launches.map((l) => l.promise));
 
   const verdicts: Verdict[] = [];
-  for (const r of results) {
+  // Verdicts that count toward the gate decision. Specialist additional reds
+  // contribute findings to the audit trail but their fail verdicts don't
+  // block the gate.
+  const gateRelevantVerdicts: Verdict[] = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]!;
+    const plan = launches[i]!;
     insertVerdict({
       id: newVerdictId(),
       taskId: blueTask.id,
@@ -90,23 +130,26 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
       redRole: r.ref.role,
       verdict: r.verdict.verdict,
       confidence: r.verdict.confidence,
-      authority: redConfig.authority,
+      authority: plan.authority,
       findings: r.verdict.findings,
       createdAt: nowIso(),
     });
     logEvent("verdict.received", {
       runId: run.id,
       taskId: blueTask.id,
-      payload: { redRole: r.ref.role, verdict: r.verdict.verdict },
+      payload: { redRole: r.ref.role, verdict: r.verdict.verdict, authority: plan.authority },
     });
     verdicts.push(r.verdict);
+    if (plan.countsTowardGate) gateRelevantVerdicts.push(r.verdict);
   }
 
-  // blocked_by_red: authoritative fail + gateOnVerdict ⇒ block the gate automatically.
+  // blocked_by_red: authoritative fail + gateOnVerdict ⇒ block the gate
+  // automatically. Specialist (additional) verdicts don't count here —
+  // they're informational. See #96 sub-shift 1.
   if (
     redConfig.gateOnVerdict &&
     redConfig.authority === "authoritative" &&
-    verdicts.some((v) => v.verdict === "fail")
+    gateRelevantVerdicts.some((v) => v.verdict === "fail")
   ) {
     setTaskStatus(blueTask.id, "blocked_by_red");
     logEvent("task.blocked_by_red", { runId: run.id, taskId: blueTask.id });
