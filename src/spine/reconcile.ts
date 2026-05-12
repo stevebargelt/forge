@@ -16,6 +16,29 @@ import { logEvent } from "../store/events.js";
 import { findPhase } from "./workflows.js";
 import { taskDir } from "../util/paths.js";
 import { newVerdictId, nowIso } from "../util/ids.js";
+import { getDb } from "../store/db.js";
+
+// Test seam: when set, this fault is thrown at the named point inside the
+// reconcileTask transaction. Lets fault-injection tests verify the txn
+// rolls back without resorting to monkey-patching the store module. Not
+// part of the public API; production code never sets this.
+let _injectedFault: { afterStep: ReconcileStep; error: Error } | null = null;
+type ReconcileStep =
+  | "after-mark-blue"
+  | "after-log-completed"
+  | "after-insert-verdict"
+  | "after-log-verdict";
+export function _setReconcileFaultForTest(
+  step: ReconcileStep | null,
+  error?: Error
+): void {
+  _injectedFault = step ? { afterStep: step, error: error ?? new Error("injected") } : null;
+}
+function _fault(at: ReconcileStep): void {
+  if (_injectedFault && _injectedFault.afterStep === at) {
+    throw _injectedFault.error;
+  }
+}
 
 export type ReconciledTask = {
   taskId: string;
@@ -47,83 +70,109 @@ function reconcileTask(task: Task, workflow: Workflow, allTasks: Task[]): Reconc
     return { taskId: task.id, resolution: "still_running" };
   }
   const parsed = tryParseJson(raw);
-  if (!parsed) {
-    markTaskFailed(task.id, "reconcile: result.json present but unparseable");
-    logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
-    return { taskId: task.id, resolution: "failed" };
-  }
 
-  const reportedStatus =
-    typeof (parsed as { status?: unknown }).status === "string"
-      ? ((parsed as { status: string }).status as string)
-      : undefined;
-
-  if (reportedStatus === "failed") {
-    const errMsg = (parsed as { error?: string }).error ?? "agent reported failure";
-    markTaskFailed(task.id, errMsg, parsed);
-    logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
-    return { taskId: task.id, resolution: "failed" };
-  }
-
-  if (reportedStatus !== "complete") {
-    // Same contract as spawn(): result without a recognized status is a failure, not
-    // a silent pass. Reconcile follows the same rule so orphaned tasks recovered later
-    // get the same treatment as live spawns.
-    const reason = reportedStatus
-      ? `reconcile: unrecognized_status:${reportedStatus}`
-      : "reconcile: missing_status";
-    markTaskFailed(task.id, reason, parsed);
-    logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true, reason } });
-    return { taskId: task.id, resolution: "failed" };
-  }
-
-  if (!task.parentId) {
-    const taskPhase = findPhase(workflow, task.phase);
-    if (taskPhase?.gate === "auto") {
-      markTaskComplete(task.id, parsed);
-    } else {
-      markTaskAwaitingGate(task.id, parsed);
+  // From here on, every branch performs multiple DB writes per task. Wrap in
+  // a transaction so a failure mid-sequence (disk full, constraint violation,
+  // testing fault injection) rolls back the whole task — no half-written
+  // state where status is updated but verdict/event aren't. Per #109. The
+  // transaction also speeds up the multi-write case slightly (one commit
+  // instead of N).
+  const tx = getDb().transaction((): ReconciledTask => {
+    if (!parsed) {
+      markTaskFailed(task.id, "reconcile: result.json present but unparseable");
+      logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
+      return { taskId: task.id, resolution: "failed" };
     }
-  } else {
-    markTaskComplete(task.id, parsed);
-  }
-  logEvent("task.completed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
 
-  // If this is a red task (parent exists and parent's phase has reds), write the verdict
-  // and transition the parent's status the way spawnRed() would.
-  if (task.parentId) {
-    const parent = allTasks.find((t) => t.id === task.parentId);
-    if (parent) {
-      const phase = findPhase(workflow, parent.phase);
-      if (phase?.reds) {
-        const verdict = parseVerdict(parsed);
-        insertVerdict({
-          id: newVerdictId(),
-          taskId: parent.id,
-          redTaskId: task.id,
-          redRole: task.agentRole,
-          verdict: verdict.verdict,
-          confidence: verdict.confidence,
-          authority: phase.reds.authority,
-          findings: verdict.findings,
-          createdAt: nowIso(),
-        });
-        logEvent("verdict.received", {
-          runId: task.runId,
-          taskId: parent.id,
-          payload: { redRole: task.agentRole, verdict: verdict.verdict, reconciled: true },
-        });
-        // Re-evaluate the parent's gate status. Only do this if the parent is still in a
-        // pre-gate state — if the user already gated it, leave it alone.
-        const refreshedParent = getTask(parent.id);
-        if (refreshedParent && (refreshedParent.status === "complete" || refreshedParent.status === "running")) {
-          maybeBlockOrAwait(parent, phase, verdict.verdict, phase.reds.authority);
+    const reportedStatus =
+      typeof (parsed as { status?: unknown }).status === "string"
+        ? ((parsed as { status: string }).status as string)
+        : undefined;
+
+    if (reportedStatus === "failed") {
+      const errMsg = (parsed as { error?: string }).error ?? "agent reported failure";
+      markTaskFailed(task.id, errMsg, parsed);
+      logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
+      return { taskId: task.id, resolution: "failed" };
+    }
+
+    if (reportedStatus !== "complete") {
+      // Same contract as spawn(): result without a recognized status is a failure, not
+      // a silent pass. Reconcile follows the same rule so orphaned tasks recovered later
+      // get the same treatment as live spawns.
+      const reason = reportedStatus
+        ? `reconcile: unrecognized_status:${reportedStatus}`
+        : "reconcile: missing_status";
+      markTaskFailed(task.id, reason, parsed);
+      logEvent("task.failed", { runId: task.runId, taskId: task.id, payload: { reconciled: true, reason } });
+      return { taskId: task.id, resolution: "failed" };
+    }
+
+    if (!task.parentId) {
+      const taskPhase = findPhase(workflow, task.phase);
+      if (taskPhase?.gate === "auto") {
+        markTaskComplete(task.id, parsed);
+      } else {
+        markTaskAwaitingGate(task.id, parsed);
+      }
+    } else {
+      markTaskComplete(task.id, parsed);
+    }
+    _fault("after-mark-blue");
+    logEvent("task.completed", { runId: task.runId, taskId: task.id, payload: { reconciled: true } });
+    _fault("after-log-completed");
+
+    // If this is a red task (parent exists and parent's phase has reds), write the verdict
+    // and transition the parent's status the way spawnRed() would.
+    if (task.parentId) {
+      const parent = allTasks.find((t) => t.id === task.parentId);
+      if (parent) {
+        const phase = findPhase(workflow, parent.phase);
+        if (phase?.reds) {
+          const verdict = parseVerdict(parsed);
+          insertVerdict({
+            id: newVerdictId(),
+            taskId: parent.id,
+            redTaskId: task.id,
+            redRole: task.agentRole,
+            verdict: verdict.verdict,
+            confidence: verdict.confidence,
+            authority: phase.reds.authority,
+            findings: verdict.findings,
+            createdAt: nowIso(),
+          });
+          _fault("after-insert-verdict");
+          logEvent("verdict.received", {
+            runId: task.runId,
+            taskId: parent.id,
+            payload: { redRole: task.agentRole, verdict: verdict.verdict, reconciled: true },
+          });
+          _fault("after-log-verdict");
+          // Re-evaluate the parent's gate status. Only do this if the parent is still in a
+          // pre-gate state — if the user already gated it, leave it alone.
+          const refreshedParent = getTask(parent.id);
+          if (refreshedParent && (refreshedParent.status === "complete" || refreshedParent.status === "running")) {
+            maybeBlockOrAwait(parent, phase, verdict.verdict, phase.reds.authority);
+          }
         }
       }
     }
-  }
 
-  return { taskId: task.id, resolution: "complete" };
+    return { taskId: task.id, resolution: "complete" };
+  });
+
+  try {
+    return tx();
+  } catch (err) {
+    // The transaction rolled back; the task stays in `running` and reconcile
+    // can re-attempt on a future invocation. Log so the failure is auditable.
+    // We deliberately don't write to the DB here because the failure may
+    // itself be a DB write failure.
+    process.stderr.write(
+      `[reconcile] transaction failed for task ${task.id}: ${(err as Error).message}\n`
+    );
+    return { taskId: task.id, resolution: "still_running" };
+  }
 }
 
 function maybeBlockOrAwait(
