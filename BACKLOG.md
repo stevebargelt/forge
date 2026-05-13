@@ -9,6 +9,7 @@ When you start a session, read this file. When you finish, update it: move close
 **State at end of 2026-05-12.** Main is clean, 346/346 tests passing, typecheck green. The big graph-view-85 branch landed and 5 more feature branches landed on top of it. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
 
 **What shipped this multi-day session (most recent first):**
+- **#114** mount `--design-dir` read-only at `/design` inside agent containers. Caught preparing #105's PRD run — the architect was being told to read host paths the container couldn't see. Small spine change (`spawn.ts` + `dispatch.ts` + `spawnRed.ts` + 2 seed updates). Three new tests.
 - **#113** specialist reds promoted to authoritative gating. `additional[]` reds now inherit RedConfig.authority + gateOnVerdict (red-frontend / red-backend / red-security block the gate on fail like wide/narrow do). Path A from the design — minimal change in `spawnRed.ts` via an extracted pure `buildLaunchPlan(redConfig)`; legacy verdicts written before the flip keep their `authority: 'specialist'` label and still trip the #110 rationale UI. Seeds reworded ("discipline red", not "specialist red"). Five new unit tests; existing 341 still green.
 - **#109** transactional reconcile writes (fault-injection tests + `_setReconcileFaultForTest` hook). Dispatch + gate writes split out to **#112** as follow-up.
 - **#103** GRAPH: run-status pill in graph-view header.
@@ -20,11 +21,10 @@ When you start a session, read this file. When you finish, update it: move close
 - **#79** auto-detect bedrock from `~/.aws/config` + pre-flight checks at `forge new` and `forge next`.
 
 **Top of the active stack now:**
-1. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Has the fault-injection harness from #109 as a reference.
-2. **#105** (HOLD FOR DESIGNER) — full task-graph rendering. Don't start implementation until the designer's pass on the four Graph View frames in `~/code/forge-design/dashboard.pen` lands. The brief inside #105 captures the agreed direction: tasks not phases, free-form canvas, no bands.
-3. **#102** minimap and **#101** side panel — deferred awaiting #105 direction.
-4. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
-5. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 (specialist red + specialist implementer seeds) shipped overnight 2026-05-09 but aren't exercised end-to-end yet.
+1. **#105** — System Map (formerly Graph View). Designs are done (system-map.png + system-map-fanout.png + system-map-reds-detail.png in `~/code/forge-design/designs/`). Brief is about to be written and run through forge as a feature-ui-design-provided workflow on this very repo. Layout engine: ELK via cytoscape-elk (drop dagre). One view, draggable, drag-stable per-run-while-viewing (no DB persistence). Reds always rendered as peer nodes — no drill-in. Old graph view gets deleted; no flag, no side-by-side.
+2. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Has the fault-injection harness from #109 as a reference.
+3. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
+4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 shipped overnight 2026-05-09, #113 promoted them to gating-authoritative 2026-05-12.
 
 **Useful runtime state:**
 - `forge auth status` will warn if the legacy `forge-claude-oauth` volume is still around (orphaned by #97's mount migration). Steven can `docker volume rm forge-claude-oauth` whenever.
@@ -137,21 +137,6 @@ Lean (a) once we get there — accuracy wins.
 **Branch state when captured:** `graph-view-85`, ~24 commits ahead of main, working tree includes the failed-child-no-outgoing-edge fix (small, kept).
 
 **Caught:** 2026-05-11 — conversation traced through "node 9 fails and points to synthesize" → "should it not point to the retry?" → "everything, everywhere, real workflow."
-
-### #102 — GRAPH: minimap (overview-with-viewport-rect)
-**Why:** Design's `ycyNE` minimap component sits bottom-right inside the modal canvas (160×100). Renders status-colored thumbnails of phase nodes (using the same fill colors as the main graph) plus a viewport-rect overlay showing where the user is currently panned/zoomed. For a 16-task expanded fanout the main canvas already overflows the modal vertically; the minimap is the natural "where am I" affordance. Today there's no orientation cue once you pan or zoom.
-**How to apply:** Cytoscape has community extensions for minimaps (`cytoscape-navigator` is the standard) but adding it pulls in another CDN dep and the styling won't match. Alternative: roll our own — a fixed-position 160×100 div anchored bottom-right inside `graph-modal-body`, render node thumbnails as colored rects positioned proportionally to their cy positions, draw a viewport rect from cy's pan + zoom state, update on `cy.on('pan zoom')`. Probably 80–120 lines of vanilla code; fewer surprises than the extension. Either way, defer until #100 lands and we know the layout is stable.
-**Caught:** 2026-05-11 — design reconciliation. Steven's call: defer + write up.
-
-### #101 — GRAPH: side panel (selected-phase task list)
-**Why:** Design's `UTf00` graph-side-panel is a 460-wide right rail inside the modal that reflects whichever phase node is currently selected: header with phase name + status chip, meta line ("3 tasks · 2 done · 1 running · elapsed 0:14"), gate/red summary, then a per-task list with status-coded rows. Today the graph view is canvas-only; selecting a node has no visible effect, so the canvas is read-only-scenery. The side panel turns the graph into an interactive workspace — pick a phase, see its tasks, drill in further. Composite with #99 / #104 because the side panel is the natural home for per-task retry chains too.
-**How to apply:**
-- Modal layout change: split `graph-modal-body` into a 2-column flex — canvas fills, side panel fixed 460px right edge. Slides in/out when a node is selected; default state is canvas-fills-everything (no panel until selection).
-- Selection state: cytoscape's built-in selection works fine; bind to `cy.on('select unselect', 'node', ...)` to populate the panel. Reuse the existing `node/selected` design treatment (cyan glow shadow on the selected node).
-- Data: pull tasks for the selected phase from `state.runDetail.tasks` filtered by `task.phase === phaseName`. Already loaded; no API change.
-- Open question — does selecting a *child* task node (in an expanded fanout) populate the panel with that single task's detail, or does it stay at phase-level? Lean: child node selection shows that one task's detail (per-task retry chain candidate per #104).
-**Composite with #104, #99:** both retry conversations expect the side panel as their surface. Land #104 first to decide what the panel shows for retry-loaded tasks, then build #101.
-**Caught:** 2026-05-11 — design reconciliation. Steven's call: defer + write up.
 
 ### #98 — GRAPH: fanout-collapsed node polish (progress bar + tags)
 **Why:** v1 fanout-cluster-expansion (this morning's work) renders the collapsed node as `name + "16 tasks · 15 done · 1 failed"` text. The design Component Library's `fanout-collapsed-node` atom has more — a thin progress bar (green-bar for done + red-sliver for failed) and chip tags (`15 done` `1 failed`) inside the node. v1 deferred those because cytoscape's native node-rendering doesn't have a clean primitive for in-node bars/chips.
@@ -500,6 +485,26 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #114 — Mount designDir read-only at /design inside agent containers
+**Closed:** 2026-05-12. Caught preparing the System Map (#105) PRD run: the architect agent in `feature-ui-design-needed` / `feature-ui-design-provided` was being told to "read upstream design artifacts" pointing at host paths that the container had no way to reach. `--design-dir` set `run.metadata.designDir` and `inputs.designDir`, both as host paths — but `spawn.ts` only mounted `/project` and `/task`. The seed instruction to "Read them" was a lie; the architect would have bluffed past it. This was the root cause behind shaping the PRD differently — fixed at the spine layer instead.
+
+**What shipped:**
+- `SpawnOptions.designDir` (optional, host path). When set, spawn adds `-v <designDir>:/design:ro`. **Always read-only**, even for blue agents whose `/project` is rw — the design corpus is human-curated via Pencil on the host; agents never write into it.
+- `dispatch.ts` reads `run.metadata.designDir` via new `designDirFor(run)` helper and passes through to both `spawn()` (blue) and `spawnRed()` (red).
+- `spawnRed.ts` propagates `designDir` to `runOneRed` → `spawn()` so reds reviewing design-adjacent artifacts (frontend, UI architecture) can read the same canonical PNGs/HTML the human approved.
+- `seeds/agents/architect/CLAUDE.md` — explicit instruction: design corpus is at `/design` inside the container; translate host paths from `inputs.upstream[*].result.{html,png}Files` and `inputs.designDir` to `/design/<relative>` before reading.
+- `seeds/agents/prompt-author/CLAUDE.md` — `inputs.designDir` clarified as **host path**: use it for paths *in the PROMPT.md you produce* (human-on-host Pencil runs that), but for in-container reads (e.g. inspecting existing PNGs per #80) use `/design`.
+- Three new buildDockerArgs tests covering: no mount when unset, mount with `:ro` when set, mount stays `:ro` even when `readOnlyProject: false`.
+
+**Forward-only.** Existing seeds had been *telling* agents to read host paths; if any actually tried, the failure was silent (file not found, agent improvises around it). Now the seeds give an honest container path. No DB migration; runs created before #114 simply don't get a `/design` mount (their architects never tried to read from it anyway).
+
+**Out of scope:** rewriting `inputs.designDir` itself to be the container path. That would diverge from `run.metadata.designDir` (which submit and dashboard use as host paths) and force a translation layer for prompt-author (which generates PROMPT.md with host paths for human-on-host execution). Two paths to know about is the right shape: one for human-environment context, one for in-container reads.
+
+349/349 tests passing (was 346, +3). Typecheck green.
+
+### #102, #101 — minimap + side panel closed: not in the designs
+**Closed:** 2026-05-12 during System Map design review. The new designs (system-map.png, system-map-fanout.png, system-map-reds-detail.png) don't include either a minimap or a side panel. The designer's call is one view, draggable, no secondary surfaces. If real-run density makes a "where am I" affordance necessary later, file fresh — the old `ycyNE` (minimap) and `UTf00` (side panel) components in the .pen library are stale-but-not-deleted.
 
 ### #113 — Promote specialist reds to authoritative (gateOnVerdict: true)
 **Closed:** 2026-05-12. Specialist `additional[]` reds (red-frontend / red-backend / red-security) now inherit RedConfig.authority + gateOnVerdict like wide/narrow do. A fail blocks the gate via `blocked_by_red`; override is the existing `--force --rationale` path.

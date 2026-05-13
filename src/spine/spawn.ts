@@ -13,6 +13,12 @@ export type SpawnOptions = {
   agentConfig: AgentRef;
   projectDir: string;
   readOnlyProject: boolean; // true for red agents
+  // Host path of the design corpus (run.metadata.designDir). Mounted read-only
+  // at /design inside the container. Agents that need to read PNGs / HTML /
+  // .pen artifacts use the /design mount; host-facing seeds (prompt-author
+  // generating PROMPT.md for human-on-host Pencil) keep using inputs.designDir
+  // which preserves the host path.
+  designDir?: string;
   litellmUrl?: string;       // default http://host.docker.internal:4000
   // Kill the container if no stdout for this many ms. Default 5min, override via
   // FORGE_AGENT_IDLE_TIMEOUT_MS env. 0 disables.
@@ -58,6 +64,7 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
     taskDir: dir,
     projectDir: opts.projectDir,
     readOnlyProject: opts.readOnlyProject,
+    designDir: opts.designDir,
     image: DEFAULT_IMAGE,
     litellmUrl: opts.litellmUrl ?? DEFAULT_LITELLM,
     model: opts.agentConfig.model,
@@ -159,6 +166,10 @@ type DockerArgsInput = {
   taskDir: string;
   projectDir: string;
   readOnlyProject: boolean;
+  // When set, mounted read-only at /design inside the container. Always RO
+  // regardless of readOnlyProject — the design corpus is curated by the human
+  // on the host (Pencil). Agents read; they never write.
+  designDir?: string;
   image: string;
   litellmUrl: string;
   model: string;
@@ -212,6 +223,11 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   // ensureTaskDirWritable() in the caller handles that.
   args.push("-v", `${input.taskDir}:/task`);
   args.push("-v", projectMount);
+  // #114 — design corpus mount. Always read-only; even blue agents in
+  // feature-ui-design-* don't write here (Pencil-on-host owns the corpus).
+  if (input.designDir) {
+    args.push("-v", `${input.designDir}:/design:ro`);
+  }
 
   args.push(input.image);
   args.push(

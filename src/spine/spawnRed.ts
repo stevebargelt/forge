@@ -23,12 +23,16 @@ export type SpawnRedArgs = {
   workflow: Workflow;
   phase: Phase;
   projectDir: string;
+  // #114 — same design corpus mount as blue agents see. Reds reviewing
+  // design-adjacent artifacts (frontend, UI architecture) need to read the
+  // canonical PNGs/HTML the human approved.
+  designDir?: string;
 };
 
 // Spawn wide and/or narrow reds in parallel, write verdicts, set blocked_by_red on
 // authoritative fail + gateOnVerdict, return the verdicts for caller use.
 export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
-  const { blueTask, redConfig, run, workflow, phase, projectDir } = args;
+  const { blueTask, redConfig, run, workflow, phase, projectDir, designDir } = args;
 
   // Build force-constraint anti-prompts for this role/workflow/phase — narrow red sees them
   // as failureModes.
@@ -66,6 +70,7 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
       spec,
       failureModes,
       projectDir,
+      designDir,
     }),
     authority: entry.authority,
     countsTowardGate: entry.countsTowardGate,
@@ -164,6 +169,7 @@ type RunOneRedArgs = {
   spec?: string;
   failureModes: string[];
   projectDir: string;
+  designDir?: string;
 };
 
 async function runOneRed(args: RunOneRedArgs): Promise<{
@@ -212,6 +218,7 @@ async function runOneRed(args: RunOneRedArgs): Promise<{
     agentConfig: args.ref,
     projectDir: args.projectDir,
     readOnlyProject: true, // OS-level enforcement for red agents
+    designDir: args.designDir,
   });
 
   const verdict = parseVerdict(result.output);

@@ -171,6 +171,34 @@ test("buildDockerArgs: task dir is mounted as a writable directory at /task", ()
   assert.equal(taskMount, "/tmp/x:/task", "should be a directory mount, no :ro flag");
 });
 
+test("buildDockerArgs: designDir absent → no /design mount (#114)", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  assert.equal(pickMount(args, "/design"), undefined, "no design mount when designDir unset");
+});
+
+test("buildDockerArgs: designDir set → mounts /design read-only (#114)", () => {
+  const args = _buildDockerArgs({ ...ARGS_INPUT_BASE, designDir: "/Users/test/widget-design" });
+  const designMount = pickMount(args, "/design");
+  assert.ok(designMount, "should mount /design when designDir set");
+  assert.equal(
+    designMount,
+    "/Users/test/widget-design:/design:ro",
+    "design mount must always be read-only (corpus is human-curated)"
+  );
+});
+
+test("buildDockerArgs: designDir is RO even when readOnlyProject is false (#114)", () => {
+  // Blue agents in feature-ui-design-* get rw on /project. /design stays ro
+  // unconditionally — the design corpus is host-curated, agents never write.
+  const args = _buildDockerArgs({
+    ...ARGS_INPUT_BASE,
+    readOnlyProject: false,
+    designDir: "/Users/test/widget-design",
+  });
+  const designMount = pickMount(args, "/design");
+  assert.match(designMount!, /:ro$/, "design mount stays ro for blue agents too");
+});
+
 test("resolveIdleTimeoutMs: explicit value wins over env and default", () => {
   const prev = process.env.FORGE_AGENT_IDLE_TIMEOUT_MS;
   process.env.FORGE_AGENT_IDLE_TIMEOUT_MS = "60000";
