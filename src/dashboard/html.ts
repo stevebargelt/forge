@@ -25,12 +25,11 @@ export function dashboardHtml(): string {
       media="print"
       onload="this.media='all'; this.onload=null;">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&family=Geist:wght@400;500;600;700&display=swap"></noscript>
-<!-- #85 graph view: cytoscape.js for layered DAG layout. CDN-loaded so the
-     dashboard stays vanilla-no-build. dagre extension provides hierarchical
-     layout (top→bottom forward edges). -->
+<!-- System Map: cytoscape.js + ELK layout engine + HTML-label plugin. -->
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<script src="https://unpkg.com/elkjs@0.9.3/lib/elk.bundled.js"></script>
+<script src="https://unpkg.com/cytoscape-elk@2.3.0/dist/cytoscape-elk.js"></script>
+<script src="https://unpkg.com/cytoscape-node-html-label@1.2.1/dist/cytoscape-node-html-label.js"></script>
 <style>${BASE_CSS}</style>
 </head>
 <body>
@@ -1029,23 +1028,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .advance-preview strong { font-style: normal; color: var(--foreground); font-weight: 600; }
 
-/* #85 graph view modal — full-screen overlay above the dashboard. */
-.graph-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--background);
-  z-index: 1000;
-  display: flex;
-  flex-direction: column;
-}
-.graph-modal-header {
-  padding: var(--space-md) var(--space-lg);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  flex-shrink: 0;
-}
+/* shared modal chrome — used by System Map */
 .graph-modal-title {
   font-size: 11px;
   text-transform: uppercase;
@@ -1073,27 +1056,114 @@ a { color: var(--accent); text-decoration: none; }
   cursor: pointer;
 }
 .graph-modal-close:hover { color: var(--foreground); background: var(--surface); }
-.graph-modal-body {
-  flex: 1;
-  position: relative;
-  background: var(--background);
-  overflow: hidden;
-}
-#graph-cy-canvas {
-  position: absolute;
+
+/* System Map modal — full-screen overlay, ELK-powered task-level graph. */
+.system-map-overlay {
+  position: fixed;
   inset: 0;
+  background: var(--background);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
 }
-.graph-modal-footer {
-  padding: var(--space-sm) var(--space-md);
-  border-top: 1px solid var(--border);
+.system-map-header {
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: var(--space-md);
-  font-size: 11px;
-  color: var(--foreground-muted);
   flex-shrink: 0;
 }
-.graph-modal-footer .kbd-hints { margin-left: auto; display: flex; gap: var(--space-md); }
+.system-map-body {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+#system-map-cy-canvas {
+  width: 100%;
+  height: 100%;
+}
+.system-map-footer {
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--border);
+  display: flex;
+  gap: var(--space-md);
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--foreground-muted);
+}
+.system-map-filter-chips {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+.system-map-filter-chip {
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--foreground-muted);
+  cursor: pointer;
+  font-size: 10px;
+  font-family: Geist Mono, monospace;
+  background: transparent;
+}
+.system-map-filter-chip.active {
+  border-color: var(--foreground);
+  color: var(--foreground);
+}
+.sm-node-label {
+  pointer-events: none;
+  font-family: Geist Mono, monospace;
+  width: 240px;       /* matches node width; horizontal padding bites in via box-sizing */
+  padding: 0 14px;
+  box-sizing: border-box;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.sm-node-label-row1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.sm-node-label-icon {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.sm-node-label-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.sm-node-label-meta {
+  font-size: 10px;
+  color: var(--foreground-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  letter-spacing: 0.02em;
+  font-weight: 400;
+}
+.sm-node-label-bar {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+.sm-node-label-bar-fill {
+  height: 100%;
+  background: currentColor;
+  transition: width 0.3s;
+}
 `;
 
 const CLIENT_JS = `
@@ -1124,6 +1194,10 @@ const CLIENT_JS = `
     // restart. Null before the first fetch completes.
     authMode: null,
   };
+
+  let dragOverrides = new Map();
+  let systemMapCy = null;
+  let systemMapOpen = false;
 
   // ---------- helpers ----------
   function $(id) { return document.getElementById(id); }
@@ -1735,8 +1809,8 @@ const CLIENT_JS = `
       // 'workflow' icon (a node + connections) — the design's glyph.
       el('button', {
         class: 'graph-btn',
-        title: 'View workflow graph (cmd+shift+g)',
-        onclick: () => openGraphView(),
+        title: 'System Map (cmd+shift+g)',
+        onclick: () => openSystemMap(),
         html: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>',
       }),
     ]);
@@ -2986,6 +3060,7 @@ const CLIENT_JS = `
       attachTaskCounts();
       renderPillRowPane();
       renderMiddle();
+      if (systemMapOpen) renderSystemMapGraph();
       schedulePoll();
     } catch (e) {
       if (e.status !== 404) toast('Failed to load run: ' + e.message, 'error');
@@ -3227,411 +3302,461 @@ const CLIENT_JS = `
     document.querySelectorAll('.menu').forEach(m => m.remove());
   }
 
-  // ---------- graph view (#85) ----------
-  // Status → CSS color mapping for cytoscape node styling. Mirrors the
-  // Component Library's node/* atoms (node/complete = green border on
-  // dark-green bg, etc).
-  const GRAPH_STATUS_COLORS = {
-    pending:               { border: '#1E1E3A', bg: '#111124',          text: '#A1A1C0' },
-    running:               { border: '#00F2FF', bg: '#001A1F',          text: '#00F2FF' },
-    awaiting_red:          { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
-    awaiting_gate:         { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
-    awaiting_human_input:  { border: '#F59E0B', bg: '#1A140A',          text: '#F59E0B' },
-    blocked_by_red:        { border: '#BF40FF', bg: 'rgba(191,64,255,0.1)', text: '#BF40FF' },
-    failed:                { border: '#EF4444', bg: '#200A0A',          text: '#EF4444' },
-    done:                  { border: '#22C55E', bg: '#0A2016',          text: '#F0F0FF' },
-  };
+  // ---------- system map ----------
+  let smExtRegistered = false;
 
-  // Inline mirror of src/dashboard/graphView.ts buildGraphData. Server-side
-  // file is the source of truth + is unit-tested; this client copy stays
-  // in sync because phaseShape is the same shape on both sides. If this
-  // logic grows, refactor to ship the JSON over the API instead.
-  function buildGraphDataClient(phaseShape) {
-    const nodes = [];
-    for (const p of (phaseShape || [])) {
-      nodes.push({
-        data: {
-          id: 'n:' + p.name,
-          label: p.name,
-          status: p.status,
-          taskCounts: p.taskCounts,
-          hasFanout: p.hasFanout,
-          hasReds: p.hasReds,
-          redsAuthority: p.redsAuthority,
-          isManual: p.isManual,
-          fanoutDots: p.fanoutDots,
-        },
-      });
-      // Per-task child nodes for fanout phases (#85 v1). One per task in
-      // fanoutDots order; status is the per-task value.
-      if (p.hasFanout && Array.isArray(p.fanoutDots) && p.fanoutDots.length > 0) {
-        for (let i = 0; i < p.fanoutDots.length; i++) {
-          nodes.push({
-            data: {
-              id: 'n:' + p.name + ':t' + i,
-              label: (i + 1).toString(),
-              status: p.fanoutDots[i],
-              parent: 'n:' + p.name,
-              isFanoutChild: true,
-            },
-          });
-        }
-      }
-    }
-    const edges = [];
-    for (let i = 0; i < (phaseShape || []).length - 1; i++) {
-      const from = phaseShape[i];
-      const to = phaseShape[i + 1];
-      edges.push({
-        data: {
-          id: 'e:linear:' + from.name + '->' + to.name,
-          source: 'n:' + from.name,
-          target: 'n:' + to.name,
-          kind: 'linear',
-        },
-      });
-    }
-    for (const p of (phaseShape || [])) {
-      if (p.onReject) {
-        edges.push({
-          data: {
-            id: 'e:onReject:' + p.name + '->' + p.onReject,
-            source: 'n:' + p.name,
-            target: 'n:' + p.onReject,
-            kind: 'onReject',
-            label: 'reject',
-          },
-        });
-      }
-    }
-    return { nodes, edges };
+  function systemMapEscHandler(e) {
+    if (e.key === 'Escape') closeSystemMap();
   }
 
-  function openGraphView() {
-    if (!state.runDetail || !Array.isArray(state.runDetail.phaseShape) || state.runDetail.phaseShape.length === 0) {
-      toast('No workflow shape to visualize.', 'error');
+  function closeSystemMap() {
+    document.removeEventListener('keydown', systemMapEscHandler);
+    $('modal-root').innerHTML = '';
+    systemMapCy = null;
+    systemMapOpen = false;
+  }
+
+  function openSystemMap() {
+    if (!state.runDetail) {
+      toast('No run selected.', 'error');
       return;
     }
-    if (typeof window.cytoscape !== 'function') {
-      toast('Graph library failed to load.', 'error');
+    // Require cytoscape + ELK. cytoscape-node-html-label registers via
+    // cytoscape's extension API (cy("core", "nodeHtmlLabel", ...)) which means
+    // the method is only available on cytoscape *instances*, not on the
+    // constructor or prototype — so we can't pre-check its presence. The
+    // registration ran at script-load time if cytoscape was defined; if it
+    // didn't, calling cy.nodeHtmlLabel(...) on the instance below throws.
+    if (!window.cytoscape || !window.cytoscapeElk) {
+      toast('System Map libraries not loaded — check your network / CDN access.', 'error');
       return;
+    }
+    if (!smExtRegistered) {
+      window.cytoscape.use(window.cytoscapeElk);
+      // cytoscape-node-html-label auto-registered itself; no .use() needed.
+      smExtRegistered = true;
     }
     const root = $('modal-root');
     root.innerHTML = '';
-    const overlay = el('div', { class: 'graph-modal-overlay' });
+    const overlay = el('div', { class: 'system-map-overlay' });
     const run = state.runDetail.run;
-    // #103 — status pill on the right of the modal header. Reuses the
-    // existing run-status badge palette so the graph-view label reads the
-    // same as the run-row badge in the sidebar. Active is rendered as
-    // "running" per the dashboard convention.
     const runStatusLabel = rowDisplayStatus(run);
-    overlay.appendChild(el('div', { class: 'graph-modal-header' }, [
+    const header = el('div', { class: 'system-map-header' }, [
       el('span', { class: 'graph-modal-title' }, [
-        'GRAPH VIEW',
+        'SYSTEM MAP',
         el('span', { class: 'breadcrumb' }, run.workflow + ' · ' + run.id),
       ]),
       el('span', { class: 'badge status-' + run.status, style: 'margin-left: auto;' }, runStatusLabel),
       el('button', {
         class: 'graph-modal-close',
         title: 'Close (esc)',
-        onclick: closeGraphView,
+        onclick: closeSystemMap,
       }, '✕'),
-    ]));
-    const body = el('div', { class: 'graph-modal-body' });
-    const canvas = el('div', { id: 'graph-cy-canvas' });
+    ]);
+    overlay.appendChild(header);
+    const body = el('div', { class: 'system-map-body' });
+    const canvas = el('div', { id: 'system-map-cy-canvas' });
     body.appendChild(canvas);
     overlay.appendChild(body);
-    overlay.appendChild(el('div', { class: 'graph-modal-footer' }, [
-      el('span', null, 'drag to pan · scroll to zoom'),
-      el('div', { class: 'kbd-hints' }, [
-        el('span', null, 'esc: close'),
-      ]),
-    ]));
+    const filterChips = el('div', { class: 'system-map-filter-chips' });
+    for (const label of ['All', 'Running', 'Failed', 'Pending', 'Reds']) {
+      const chip = el('button', {
+        class: 'system-map-filter-chip' + (label === 'All' ? ' active' : ''),
+        onclick: () => {
+          filterChips.querySelectorAll('.system-map-filter-chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+          activateSystemMapFilter(label);
+        },
+      }, label);
+      filterChips.appendChild(chip);
+    }
+    const footer = el('div', { class: 'system-map-footer' }, [
+      filterChips,
+      el('span', { style: 'margin-left: auto;' }, 'esc: close'),
+    ]);
+    overlay.appendChild(footer);
     root.appendChild(overlay);
 
-    // Build graph data + render via cytoscape. The data transformer is the
-    // client-side mirror of src/dashboard/graphView.ts (unit-tested).
-    const data = buildGraphDataClient(state.runDetail.phaseShape);
-    // #85 v1: flat-node model for fanout. Compound nodes + dagre + grid
-    // sub-layouts fight each other (#100 iteration history). Instead, we
-    // keep every node top-level: a fanout phase renders as a single
-    // collapsed-summary node when collapsed, and as N peer task nodes
-    // (no parent reference) when expanded. Dagre handles parallel ranks
-    // natively, so children laid out at the same rank produce the visual
-    // cluster without any of the compound-sizing bugs.
-    //
-    // Caches needed for expand/collapse toggle:
-    //   - fanoutChildrenByPhase: phaseId → child CyNode[] (data only)
-    //   - phaseNeighbors: phaseId → { prev: prevPhaseId|null, next: nextPhaseId|null }
-    //   - linearEdgeIdByPair: "src->tgt" → edgeId (source-of-truth from
-    //     the data builder; lets us remove + re-add the right edges).
-    const fanoutChildrenByPhase = {};
-    const phaseNodeDataById = {}; // phaseId → original phase CyNode data
-    const phaseNeighbors = {};
-    const expandedPhases = new Set();
-    const phaseShape = state.runDetail.phaseShape;
-    for (let i = 0; i < phaseShape.length; i++) {
-      const p = phaseShape[i];
-      const id = 'n:' + p.name;
-      phaseNeighbors[id] = {
-        prev: i > 0 ? 'n:' + phaseShape[i - 1].name : null,
-        next: i < phaseShape.length - 1 ? 'n:' + phaseShape[i + 1].name : null,
-      };
-    }
-    const initialNodeData = [];
-    for (const n of data.nodes) {
-      if (n.data.parent) {
-        // child of a fanout phase — cache, don't render yet. Strip the
-        // .parent reference so when we add it later as a peer node, it
-        // doesn't become a compound child of an already-removed phase.
-        const pid = n.data.parent;
-        if (!fanoutChildrenByPhase[pid]) fanoutChildrenByPhase[pid] = [];
-        const flatData = Object.assign({}, n.data);
-        delete flatData.parent;
-        fanoutChildrenByPhase[pid].push({ data: flatData });
-        continue;
-      }
-      phaseNodeDataById[n.data.id] = n.data;
-      const cls = n.data.hasFanout ? 'fanout-parent collapsed' : '';
-      initialNodeData.push({ group: 'nodes', data: n.data, classes: cls });
-    }
-    const initialElements = [
-      ...initialNodeData,
-      ...data.edges.map(e => ({ group: 'edges', data: e.data })),
-    ];
     const cy = window.cytoscape({
       container: canvas,
-      elements: initialElements,
-      style: [
-        // Phase nodes (default — non-fanout-child) — rectangular with
-        // status-coded border + bg. Matches Component Library's node/*
-        // atoms.
-        {
-          selector: 'node',
-          style: {
-            'shape': 'round-rectangle',
-            'width': 220,
-            'height': 60,
-            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
-            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
-            'border-width': 2,
-            'label': (n) => fanoutCollapsedLabel(n),
-            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
-            'font-family': 'Geist Mono, monospace',
-            'font-size': 11,
-            'font-weight': 600,
-            'text-valign': 'center',
-            'text-halign': 'center',
-          },
-        },
-        // Fanout child nodes — compact status-coded rectangles. One per
-        // task; rendered only while the parent phase is expanded
-        // (added/removed via the toggle handler). Smaller than phase
-        // nodes so 16+ children stack neatly within a single dagre rank.
-        {
-          selector: 'node.fanout-cluster',
-          style: {
-            'shape': 'round-rectangle',
-            'width': 110,
-            'height': 36,
-            'background-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).bg,
-            'border-color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).border,
-            'border-width': 1,
-            'label': 'data(label)',
-            'color': (n) => (GRAPH_STATUS_COLORS[n.data('status')] || GRAPH_STATUS_COLORS.pending).text,
-            'font-family': 'Geist Mono, monospace',
-            'font-size': 10,
-            'font-weight': 500,
-            'text-valign': 'center',
-            'text-halign': 'center',
-          },
-        },
-        // Linear edges — solid arrows, gentle arc. Unbundled-bezier
-        // gives every edge a real curve even when it's the only one
-        // between its endpoints (plain bezier degenerates to a straight
-        // line for single source→target pairs). The arc reads as a
-        // living/moving system rather than a static org chart.
-        {
-          selector: 'edge[kind = "linear"]',
-          style: {
-            'curve-style': 'unbundled-bezier',
-            'control-point-distances': [40],
-            'control-point-weights': [0.5],
-            'target-arrow-shape': 'triangle',
-            'line-color': '#A1A1C0',
-            'target-arrow-color': '#A1A1C0',
-            'width': 1.5,
-          },
-        },
-        // onReject back-edges — dashed magenta, curved.
-        {
-          selector: 'edge[kind = "onReject"]',
-          style: {
-            'curve-style': 'unbundled-bezier',
-            'control-point-distances': [-80],
-            'control-point-weights': [0.5],
-            'line-style': 'dashed',
-            'target-arrow-shape': 'triangle',
-            'line-color': '#BF40FF',
-            'target-arrow-color': '#BF40FF',
-            'width': 1.5,
-            'label': 'data(label)',
-            'font-family': 'Geist Mono, monospace',
-            'font-size': 9,
-            'color': '#BF40FF',
-            'text-background-color': '#080810',
-            'text-background-padding': 3,
-            'text-background-opacity': 1,
-          },
-        },
-      ],
-      // No layout in constructor — relayoutGraph() below handles dagre
-      // (top level) + grid sub-layouts for expanded fanout clusters.
+      elements: [],
       layout: { name: 'preset' },
-      minZoom: 0.3,
-      maxZoom: 3,
+      minZoom: 0.2,
+      maxZoom: 4,
       wheelSensitivity: 0.2,
     });
+    systemMapCy = cy;
+    systemMapOpen = true;
 
-    // #85 v1: tap any node to toggle its fanout phase. Flat-node model
-    // — expand swaps the single phase node for N peer task nodes and
-    // rewires the linear edges so each child sits between the prev and
-    // next phase; collapse reverses it. Single global tap handler that
-    // routes by node class (the selector form cy.on('tap', 'node.x',
-    // ...) doesn't fire for elements added after registration in
-    // cytoscape 3.30, so we filter inside).
-    cy.on('tap', (evt) => {
-      const node = evt.target;
-      if (!node || node === cy || !node.isNode || !node.isNode()) return;
-      if (node.hasClass('fanout-parent')) {
-        expandFanoutPhase(cy, node.id(), fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
-        relayoutGraph(cy);
-        return;
-      }
-      if (node.hasClass('fanout-cluster')) {
-        const phaseId = node.id().replace(/:t\\d+$/, '');
-        collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases);
-        relayoutGraph(cy);
-        return;
-      }
+    // Register the HTML-label extension once per cy instance. The plugin
+    // attached cy.nodeHtmlLabel via cytoscape's core extension API at script
+    // load time; calling it here installs the label template that will be
+    // applied to every node now and on every subsequent re-render.
+    if (typeof cy.nodeHtmlLabel === 'function') {
+      cy.nodeHtmlLabel([{
+        query: 'node',
+        halign: 'center',
+        valign: 'center',
+        tpl: htmlLabelTpl,
+      }]);
+    }
+
+    cy.on('dragfree', 'node', (evt) => {
+      const runId = state.runDetail.run.id;
+      if (!dragOverrides.has(runId)) dragOverrides.set(runId, new Map());
+      dragOverrides.get(runId).set(evt.target.id(), { x: evt.target.position().x, y: evt.target.position().y });
     });
 
-    // Initial layout: nothing is expanded, so dagre sees only phase
-    // nodes (one per phase) plus linear edges — a simple horizontal
-    // chain.
-    relayoutGraph(cy);
-
-    // Esc key closes.
-    document.addEventListener('keydown', graphEscHandler);
-  }
-  // Flat-node layout: dagre alone, no compound nodes. Children of an
-  // expanded fanout phase share a rank; dagre stacks them vertically
-  // (rankDir LR) with nodeSep between siblings. No grid sub-layout
-  // needed because there is no compound parent to size.
-  function relayoutGraph(cy) {
-    cy.layout({
-      name: 'dagre',
-      rankDir: 'LR',
-      nodeSep: 24,
-      rankSep: 120,
-      edgeSep: 12,
-      animate: false,
-      fit: true,
-      padding: 40,
-    }).run();
+    renderSystemMapGraph();
+    document.addEventListener('keydown', systemMapEscHandler);
   }
 
-  // Expand a fanout phase: replace the single phase node with N peer
-  // task nodes, and rewire the linear edges so prev → each child →
-  // next. The 'fanout-cluster' class on children lets the renderer
-  // group them visually (status-coded smaller nodes).
-  function expandFanoutPhase(cy, phaseId, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
-    const children = fanoutChildrenByPhase[phaseId] || [];
-    if (children.length === 0) return;
-    const { prev, next } = phaseNeighbors[phaseId] || { prev: null, next: null };
-    // Remove the phase node + its incident linear edges.
-    cy.$id(phaseId).connectedEdges('[kind = "linear"]').remove();
-    cy.$id(phaseId).remove();
-    // Add child nodes as peers.
-    cy.add(children.map(c => ({
-      group: 'nodes',
-      data: c.data,
-      classes: 'fanout-cluster',
-    })));
-    // Rewire edges: prev → each child, each child → next. Failed
-    // children are dead-ends — they didn't produce a result for the
-    // next phase to consume, so we omit the outgoing edge. The
-    // incoming edge stays so the failure is still visible as a branch
-    // from the upstream phase.
-    const newEdges = [];
-    for (const c of children) {
-      const cid = c.data.id;
-      if (prev) newEdges.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + cid, source: prev, target: cid, kind: 'linear' } });
-      if (next && c.data.status !== 'failed') newEdges.push({ group: 'edges', data: { id: 'e:linear:' + cid + '->' + next, source: cid, target: next, kind: 'linear' } });
+  function activateSystemMapFilter(label) {
+    if (!systemMapCy) return;
+    systemMapCy.batch(() => {
+      systemMapCy.nodes().forEach(n => {
+        let match = false;
+        if (label === 'All') {
+          match = true;
+        } else if (label === 'Running') {
+          match = n.data('status') === 'running';
+        } else if (label === 'Failed') {
+          match = n.data('status') === 'failed';
+        } else if (label === 'Pending') {
+          match = n.data('status') === 'pending';
+        } else if (label === 'Reds') {
+          match = n.data('isRed') === true;
+        }
+        n.style('opacity', match ? 1.0 : 0.15);
+      });
+      systemMapCy.edges().forEach(e => {
+        const srcOk = systemMapCy.$id(e.data('source')).style('opacity') !== '0.15';
+        const tgtOk = systemMapCy.$id(e.data('target')).style('opacity') !== '0.15';
+        e.style('opacity', (srcOk && tgtOk) ? 1.0 : 0.15);
+      });
+    });
+  }
+
+  function buildTaskGraphClient(tasks, phaseShape) {
+    const now = Date.now();
+    const taskById = {};
+    for (const t of tasks) taskById[t.id] = t;
+    // Fanout counts per (phase, agentRole) — non-red tasks only. Used by
+    // htmlLabelTpl to render the progress bar on running fanout nodes. Mirror
+    // of systemMap.ts logic. Singleton phases get 1/N; reds get 0/0 so the
+    // template progress-bar guard fails (no bar on red nodes).
+    const fanoutTotal = {};
+    const fanoutComplete = {};
+    for (const t of tasks) {
+      if (t.agentRole.startsWith('red-')) continue;
+      const key = t.phase + '|' + t.agentRole;
+      fanoutTotal[key] = (fanoutTotal[key] || 0) + 1;
+      if (t.status === 'complete') fanoutComplete[key] = (fanoutComplete[key] || 0) + 1;
     }
-    if (newEdges.length > 0) cy.add(newEdges);
-    expandedPhases.add(phaseId);
-  }
-
-  // Collapse a fanout phase: remove its child nodes + their edges, and
-  // restore the single phase node + its two linear edges (prev → phase,
-  // phase → next).
-  function collapseFanoutPhase(cy, phaseId, phaseNodeDataById, fanoutChildrenByPhase, phaseNeighbors, expandedPhases) {
-    const children = fanoutChildrenByPhase[phaseId] || [];
-    const neighbors = phaseNeighbors[phaseId] || { prev: null, next: null };
-    const prev = neighbors.prev;
-    const next = neighbors.next;
-    // Remove children + their incident edges.
-    for (const c of children) {
-      const node = cy.$id(c.data.id);
-      if (node.length > 0) {
-        node.connectedEdges().remove();
-        node.remove();
+    const nodes = [];
+    for (const t of tasks) {
+      let elapsed = '';
+      if (t.startedAt) {
+        const start = new Date(t.startedAt).getTime();
+        const end = t.completedAt ? new Date(t.completedAt).getTime() : now;
+        const ms = end - start;
+        if (ms >= 0) {
+          const s = Math.floor(ms / 1000);
+          if (s < 60) elapsed = s + 's';
+          else { const m = Math.floor(s / 60); if (m < 60) elapsed = m + 'm ' + (s % 60) + 's'; else elapsed = Math.floor(m / 60) + 'h ' + (m % 60) + 'm'; }
+        }
+      }
+      const isRed = t.agentRole.startsWith('red-');
+      const key = t.phase + '|' + t.agentRole;
+      nodes.push({
+        data: {
+          id: 't:' + t.id,
+          label: t.agentAlias || t.agentRole,
+          phase: t.phase,
+          agentRole: t.agentRole,
+          status: t.status,
+          elapsed,
+          isRed,
+          taskId: t.id,
+          parentTaskId: t.parentId,
+          _fanoutTotal: isRed ? 0 : (fanoutTotal[key] || 0),
+          _fanoutComplete: isRed ? 0 : (fanoutComplete[key] || 0),
+        },
+      });
+    }
+    const tasksByPhase = {};
+    for (const t of tasks) {
+      if (!tasksByPhase[t.phase]) tasksByPhase[t.phase] = [];
+      tasksByPhase[t.phase].push(t);
+    }
+    const edges = [];
+    for (let i = 0; i < (phaseShape || []).length - 1; i++) {
+      const fromPhase = phaseShape[i].name;
+      const toPhase = phaseShape[i + 1].name;
+      const fromTasks = (tasksByPhase[fromPhase] || []).filter(t => !t.agentRole.startsWith('red-'));
+      const toTasks = (tasksByPhase[toPhase] || []).filter(t => !t.agentRole.startsWith('red-'));
+      if (fromTasks.length === 0 || toTasks.length === 0) continue;
+      const fromTask = fromTasks[fromTasks.length - 1];
+      const toTask = toTasks[0];
+      edges.push({ data: { id: 'e:linear:t:' + fromTask.id + '->t:' + toTask.id, source: 't:' + fromTask.id, target: 't:' + toTask.id, kind: 'linear' } });
+    }
+    for (const t of tasks) {
+      if (!t.parentId) continue;
+      const parent = taskById[t.parentId];
+      if (!parent) continue;
+      if (parent.phase === t.phase && parent.agentRole === t.agentRole && parent.status === 'failed') {
+        edges.push({ data: { id: 'e:retry:t:' + parent.id + '->t:' + t.id, source: 't:' + parent.id, target: 't:' + t.id, kind: 'retry' } });
       }
     }
-    // Re-add the phase node.
-    const phaseData = phaseNodeDataById[phaseId];
-    if (phaseData) {
-      cy.add({ group: 'nodes', data: phaseData, classes: 'fanout-parent collapsed' });
+    for (const t of tasks) {
+      if (!t.agentRole.startsWith('red-') || !t.parentId) continue;
+      const parent = taskById[t.parentId];
+      if (!parent) continue;
+      const isRetry = parent.phase === t.phase && parent.agentRole === t.agentRole && parent.status === 'failed';
+      if (!isRetry) {
+        edges.push({ data: { id: 'e:red:t:' + parent.id + '->t:' + t.id, source: 't:' + parent.id, target: 't:' + t.id, kind: 'red' } });
+      }
     }
-    // Re-add the two phase-level edges.
-    const edgesToAdd = [];
-    if (prev) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + prev + '->' + phaseId, source: prev, target: phaseId, kind: 'linear' } });
-    if (next) edgesToAdd.push({ group: 'edges', data: { id: 'e:linear:' + phaseId + '->' + next, source: phaseId, target: next, kind: 'linear' } });
-    if (edgesToAdd.length > 0) cy.add(edgesToAdd);
-    expandedPhases.delete(phaseId);
-  }
-  // Label for fanout-parent nodes — collapsed shows summary; expanded shows
-  // phase name + chevron (children carry their own labels). Non-fanout nodes
-  // keep the default label.
-  // Single-line by design: cytoscape's multiline-via-\\n is finicky with
-  // text-wrap and caused rendering issues in earlier iterations. Compact
-  // single-line summary works.
-  function fanoutCollapsedLabel(n) {
-    if (!n.data('hasFanout')) return n.data('label');
-    if (n.hasClass('collapsed')) {
-      const tc = n.data('taskCounts') || {};
-      const total = tc.total || 0;
-      const done = tc.complete || 0;
-      const failed = tc.failed || 0;
-      let summary = ' (' + total;
-      if (done > 0) summary += ', ' + done + ' done';
-      if (failed > 0) summary += ', ' + failed + ' failed';
-      summary += ')';
-      return '▸ ' + n.data('label') + summary;
-    }
-    return '▾ ' + n.data('label');
+    return { nodes, edges };
   }
 
-  function graphEscHandler(e) {
-    if (e.key === 'Escape') closeGraphView();
+  function computeElkLayersClient(nodes, phaseShape) {
+    const phaseIndex = {};
+    for (let i = 0; i < (phaseShape || []).length; i++) phaseIndex[phaseShape[i].name] = i;
+    const nodeById = {};
+    for (const n of nodes) nodeById[n.data.id] = n;
+    const layerMap = {};
+    for (const n of nodes) {
+      if (!n.data.isRed) layerMap[n.data.id] = phaseIndex[n.data.phase] ?? 0;
+    }
+    for (const n of nodes) {
+      if (n.data.isRed) {
+        if (n.data.parentTaskId) {
+          const parentNode = nodeById['t:' + n.data.parentTaskId];
+          layerMap[n.data.id] = parentNode ? (layerMap[parentNode.data.id] ?? 0) : (phaseIndex[n.data.phase] ?? 0);
+        } else {
+          layerMap[n.data.id] = phaseIndex[n.data.phase] ?? 0;
+        }
+      }
+    }
+    return layerMap;
   }
 
-  function closeGraphView() {
-    document.removeEventListener('keydown', graphEscHandler);
-    const root = $('modal-root');
-    if (root) root.innerHTML = '';
+  function htmlLabelTpl(data) {
+    const escape = (s) => String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const palette = SYSTEM_MAP_STATUS_COLORS[data.status] || SYSTEM_MAP_STATUS_COLORS.pending;
+    const titleColor = palette.text;
+    const icon = palette.icon;
+    const title = escape(data.label);
+    const metaParts = [data.phase, data.agentRole, data.elapsed].filter(Boolean).map(escape);
+    const meta = metaParts.join(' · ');
+    let barHtml = '';
+    if (data.status === 'running' && data._fanoutTotal > 0) {
+      const pct = Math.round((data._fanoutComplete / data._fanoutTotal) * 100);
+      barHtml = '<div class="sm-node-label-bar" style="color:' + titleColor + '"><div class="sm-node-label-bar-fill" style="width:' + pct + '%"></div></div>';
+    }
+    return (
+      '<div class="sm-node-label">' +
+        '<div class="sm-node-label-row1">' +
+          '<span class="sm-node-label-icon" style="color:' + titleColor + '">' + icon + '</span>' +
+          '<span class="sm-node-label-title" style="color:' + titleColor + '">' + title + '</span>' +
+        '</div>' +
+        '<div class="sm-node-label-meta">' + meta + '</div>' +
+        barHtml +
+      '</div>'
+    );
   }
+
+  function renderSystemMapGraph() {
+    if (!systemMapOpen || !systemMapCy || !state.runDetail) return;
+    const tasks = state.runDetail.tasks || [];
+    const phaseShape = state.runDetail.phaseShape || [];
+    const runId = state.runDetail.run.id;
+    const { nodes, edges } = buildTaskGraphClient(tasks, phaseShape);
+    const layerMap = computeElkLayersClient(nodes, phaseShape);
+    const runDragOverrides = dragOverrides.get(runId);
+    const elements = [
+      ...nodes.map(n => {
+        const elem = { group: 'nodes', data: Object.assign({}, n.data, { label: '' }) };
+        if (runDragOverrides && runDragOverrides.has(n.data.id)) {
+          elem.position = runDragOverrides.get(n.data.id);
+        }
+        return elem;
+      }),
+      ...edges.map(e => ({ group: 'edges', data: e.data })),
+    ];
+    systemMapCy.json({ elements });
+    const hasDragOverrides = runDragOverrides && runDragOverrides.size > 0;
+    // Layout strategy (2026-05-13): let ELK lay out the *main flow* (non-red
+    // tasks linked by linear+retry edges). Reds get hand-placed afterward in
+    // layoutstop, fanned vertically off their parent task. Two reasons:
+    //   1. ELK's partitioning + layer-constraint paths didn't reliably keep
+    //      reds in their parent's column without overlap.
+    //   2. Reds-as-peers is a design constraint we own; ELK is for the part
+    //      where we don't.
+    systemMapCy.layout({
+      name: 'elk',
+      animate: false,
+      fit: !hasDragOverrides,
+      padding: 60,
+      elk: {
+        algorithm: 'layered',
+        'elk.direction': 'RIGHT',
+        'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+        'elk.layered.crossingMinimization.strategy': 'LAYER_SWEEP',
+        // Generous between-layer spacing so retry arrows (failed-task →
+        // retry, dashed amber) are visible between consecutive failed-plan
+        // tasks. With tighter spacing the arrows hide behind the boxes.
+        'elk.spacing.nodeNode': '80',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '240',
+        'elk.layered.spacing.edgeNodeBetweenLayers': '60',
+      },
+    }).on('layoutstop', () => {
+      // Hand-place reds: stack vertically above + below their parent in the
+      // SAME column. The design's reds-detail frame shows reds to the *right*
+      // of the parent, but that only works visually when the parent is the
+      // terminal-ish node; in a real multi-phase run, fanning right collides
+      // with the next phase's column. Stacking vertically keeps reds peer to
+      // their parent without colliding with downstream flow.
+      const RED_Y_STEP = 120;    // node height 80 + gap 40
+      const PARENT_GAP = 130;    // first red is ~1.5 node-heights away from parent — readable breathing room
+      // Group reds by parent task.
+      const redsByParent = new Map();
+      systemMapCy.nodes().forEach(n => {
+        if (n.data('isRed') && n.data('parentTaskId')) {
+          const pid = 't:' + n.data('parentTaskId');
+          if (!redsByParent.has(pid)) redsByParent.set(pid, []);
+          redsByParent.get(pid).push(n);
+        }
+      });
+      redsByParent.forEach((reds, parentId) => {
+        const parent = systemMapCy.$id(parentId);
+        if (parent.length === 0) return;
+        const ppos = parent.position();
+        // Split: first half above parent, second half below. Even N → equal
+        // split; odd N → one more below (consistent placement).
+        const aboveCount = Math.floor(reds.length / 2);
+        reds.forEach((red, i) => {
+          const isAbove = i < aboveCount;
+          if (isAbove) {
+            // Stack upward: index aboveCount-1 (last above) is closest to parent
+            red.position({
+              x: ppos.x,
+              y: ppos.y - PARENT_GAP - (aboveCount - 1 - i) * RED_Y_STEP,
+            });
+          } else {
+            const belowIdx = i - aboveCount;
+            red.position({
+              x: ppos.x,
+              y: ppos.y + PARENT_GAP + belowIdx * RED_Y_STEP,
+            });
+          }
+        });
+      });
+      // Re-apply user drag overrides last so they win over both ELK and the
+      // hand-placement above.
+      if (runDragOverrides) {
+        runDragOverrides.forEach((pos, nodeId) => {
+          const n = systemMapCy.$id(nodeId);
+          if (n.length > 0) n.position(pos);
+        });
+      }
+      if (!hasDragOverrides) systemMapCy.fit(undefined, 60);
+    }).run();
+    systemMapCy.style([
+      {
+        selector: 'node',
+        style: {
+          'shape': 'round-rectangle',
+          'width': 240,
+          'height': 80,
+          'background-color': (n) => (SYSTEM_MAP_STATUS_COLORS[n.data('status')] || SYSTEM_MAP_STATUS_COLORS.pending).bg,
+          'border-color': (n) => (SYSTEM_MAP_STATUS_COLORS[n.data('status')] || SYSTEM_MAP_STATUS_COLORS.pending).border,
+          'border-width': 1.5,
+          'label': '',
+        },
+      },
+      // Common edge styling — curve, arrow, width. Color is per-kind below.
+      {
+        selector: 'edge',
+        style: {
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': [40],
+          'control-point-weights': [0.5],
+          'target-arrow-shape': 'triangle',
+          'target-arrow-fill': 'filled',
+          'arrow-scale': 0.9,
+          'width': 1.5,
+        },
+      },
+      // Linear (phase-to-phase) edges follow source-node status color so the
+      // dominant flow narrative reads at a glance: green = completed, cyan =
+      // running, red = failed-cascade.
+      {
+        selector: 'edge[kind = "linear"]',
+        style: {
+          'line-color': (e) => {
+            const src = e.source();
+            const palette = SYSTEM_MAP_STATUS_COLORS[src.data('status')] || SYSTEM_MAP_STATUS_COLORS.pending;
+            return palette.border;
+          },
+          'target-arrow-color': (e) => {
+            const src = e.source();
+            const palette = SYSTEM_MAP_STATUS_COLORS[src.data('status')] || SYSTEM_MAP_STATUS_COLORS.pending;
+            return palette.border;
+          },
+          'opacity': 0.85,
+        },
+      },
+      // Retry edges (failed-task → its retry): dashed amber. Distinguishes
+      // recovery from cascade. Bow the arrow downward via control points so
+      // it visibly arcs below the row of failed-task boxes instead of running
+      // straight horizontally and getting hidden behind them.
+      {
+        selector: 'edge[kind = "retry"]',
+        style: {
+          'curve-style': 'unbundled-bezier',
+          'control-point-distances': [80],
+          'control-point-weights': [0.5],
+          'line-style': 'dashed',
+          'line-color': '#F59E0B',
+          'target-arrow-color': '#F59E0B',
+          'opacity': 1.0,
+          'width': 2,
+        },
+      },
+      // Red review edges (parent → red): magenta solid. Visually distinct
+      // from the main flow — these are review side-channels.
+      {
+        selector: 'edge[kind = "red"]',
+        style: {
+          'line-color': '#BF40FF',
+          'target-arrow-color': '#BF40FF',
+          'opacity': 0.7,
+          'width': 1,
+        },
+      },
+    ]);
+  }
+
+  // ---------- system map (#105) ----------
+  // Status → CSS color + icon mapping for cytoscape node styling. Mirrors the
+  // Component Library's node/* atoms (node/complete = green border on
+  // dark-green bg, etc). Keys must match TaskStatus values exactly:
+  //   pending | running | awaiting_red | awaiting_gate | awaiting_human_input |
+  //   blocked_by_red | failed | complete
+  // (NOT "done" — that was a renderer bug 2026-05-13 that made every
+  // complete task render as gray.)
+  const SYSTEM_MAP_STATUS_COLORS = {
+    pending:               { border: '#1E1E3A', bg: '#111124',              text: '#A1A1C0', icon: '○' },
+    running:               { border: '#00F2FF', bg: '#001A1F',              text: '#00F2FF', icon: '◉' },
+    awaiting_red:          { border: '#F59E0B', bg: '#1A140A',              text: '#F59E0B', icon: '◈' },
+    awaiting_gate:         { border: '#F59E0B', bg: '#1A140A',              text: '#F59E0B', icon: '⏳' },
+    awaiting_human_input:  { border: '#F59E0B', bg: '#1A140A',              text: '#F59E0B', icon: '✋' },
+    blocked_by_red:        { border: '#BF40FF', bg: 'rgba(191,64,255,0.1)', text: '#BF40FF', icon: '⬡' },
+    failed:                { border: '#EF4444', bg: '#200A0A',              text: '#EF4444', icon: '✗' },
+    complete:              { border: '#22C55E', bg: '#0A2016',              text: '#F0F0FF', icon: '✓' },
+  };
 
   // ---------- bootstrap ----------
   async function bootstrap() {
@@ -3647,7 +3772,7 @@ const CLIENT_JS = `
       if (e.key === 'G' && e.shiftKey && (e.metaKey || e.ctrlKey)) {
         if (state.runDetail && Array.isArray(state.runDetail.phaseShape) && state.runDetail.phaseShape.length > 0) {
           e.preventDefault();
-          openGraphView();
+          openSystemMap();
         }
       }
     });

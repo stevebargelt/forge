@@ -21,10 +21,11 @@ When you start a session, read this file. When you finish, update it: move close
 - **#79** auto-detect bedrock from `~/.aws/config` + pre-flight checks at `forge new` and `forge next`.
 
 **Top of the active stack now:**
-1. **#105** — System Map (formerly Graph View). Designs are done (system-map.png + system-map-fanout.png + system-map-reds-detail.png in `~/code/forge-design/designs/`). Brief is about to be written and run through forge as a feature-ui-design-provided workflow on this very repo. Layout engine: ELK via cytoscape-elk (drop dagre). One view, draggable, drag-stable per-run-while-viewing (no DB persistence). Reds always rendered as peer nodes — no drill-in. Old graph view gets deleted; no flag, no side-by-side.
-2. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Has the fault-injection harness from #109 as a reference.
-3. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
-4. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 shipped overnight 2026-05-09, #113 promoted them to gating-authoritative 2026-05-12.
+1. **#105** — System Map. In-flight: branch `system-map-105`, planner output `task-plan-ed425b` request-changes pending (4 corrections: kill phase compound nodes; don't inline-mirror buildTaskGraph; add a visual-fidelity step; pin cytoscape-elk versions). Layout engine ELK; one view, draggable; reds as peer nodes. Old graph view gets deleted at #10. Land first, merge to main, then #116 starts.
+2. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Starts after #105 + #112 land.
+3. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
+4. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
+5. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 shipped overnight 2026-05-09, #113 promoted them to gating-authoritative 2026-05-12. **Note:** if #116 lands first, these sub-shifts become YAML-schema decisions rather than TypeScript-type changes.
 
 **Useful runtime state:**
 - `forge auth status` will warn if the legacy `forge-claude-oauth` volume is still around (orphaned by #97's mount migration). Steven can `docker volume rm forge-claude-oauth` whenever.
@@ -41,6 +42,209 @@ When you start a session, read this file. When you finish, update it: move close
 **Branch hygiene:** local-only branches still around — `auto-dispatch-108`, `rationale-on-red-fail-110`, `graph-status-pill-103`, `transactional-writes-109`, `verify-container-111`, `graph-view-85`, `phase-flow-71`. #113 was implemented straight on main (no branch). Delete the stale ones whenever via `git branch -d <name>`. Main carries all the work.
 
 ## Active
+
+### #116 — Forge v2: YAML-driven orchestrator, keep SQLite + dashboard
+**Why:** Caught 2026-05-12. Steven's been carrying a "too complicated" feeling about the TypeScript control system for a while; this session surfaced the shape that resolves it. Two reference repos — `~/code/de-dev-adx-example-workspaces/jeffs-workspace-boilerplate/` and `~/code/local-adx-workspace-2/multi-agent-package/` — already run a productized version of the model Steven wants: `pipeline.yml` per project, `runtime-*.yml` per provider, agent markdown under `agents/<role>.md`, a small executor reading YAML and spawning containers. Jeff's model is deployed across 8+ live projects (analysis-code, mysg, atlas-hq, sgws-ops-dashboard, etc.) — not a sketch.
+
+**The hybrid.** Take Jeff's *shape* (declarative YAML, small executor); keep forge's *correctness layer + UX* (SQLite, dashboard, gate logic, reconcile, transactional writes). Workflows become YAML files. Providers (claude-bedrock, claude-oauth, claude-apikey, future codex/openai) become runtime YAML files. Agents stay markdown + settings.json, just relocate to `~/.forge/agents/`. The runner becomes ~400-600 lines of TypeScript that walks YAML steps and writes to the existing SQLite tables. Closes #106 (provider abstraction) as a side effect — adding a provider becomes a YAML file, not architecture work.
+
+**Decisions locked 2026-05-12:**
+- **Big-bang migration.** New branch `yaml-orchestrator-116`. TS spine code paths gone at land; YAML runner is the only orchestrator. No flag, no dual-path.
+- **TypeScript runner**, not Python. Keep forge mono-language; borrow Jeff's shape, not his language.
+- **YAML lives in both places with override**: `~/.forge/workflows/` + `<project>/.forge/pipeline.yml` (last-one-wins by filename match). Same for agents and runtimes.
+
+**What stays.** SQLite schema, dashboard, gate.ts (verdict aggregation, force-advance, blocked_by_red), reconcile.ts (orphan recovery, transactional writes #109, #112 if landed), constraints.ts (file-based constraints with frontmatter unchanged), the agent seed structure (just moved from `seeds/` to `~/.forge/agents/` at install time).
+
+**DAG-driven implementation fanout is in scope** (added 2026-05-13). v2's build phase is a step DAG, not a static agent list. Planner emits `depends_on` + `discipline` + `files_modified` per step; runner walks the DAG, parallelizes where deps allow, routes each step to the matching specialist implementer (frontend / backend / infosec / general). This **replaces #96 sub-shifts 3+4+5** — the fanout-in-build vision lands as the v2 default, not a v1 primitive. Specialist red seeds (#96 sub-shift 1, shipped 2026-05-09) and specialist implementer seeds (#96 sub-shift 2, shipped 2026-05-09) become v2 building blocks.
+
+**What goes.** `src/spine/{workflows,dispatch,spawn,spawnRed,next,composeSystemPrompt}.ts` (replaced by the runner + YAML loading). `src/workflows/*.ts` (translated to YAML). `src/util/creds.ts` (its detection logic moves into runtime YAML).
+
+**PRD:** `docs/prds/yaml-orchestrator-116.md` — full scope, reading list, architectural angles for the architect.
+
+**Sequencing.** This starts *after* #105 (System Map) lands and merges. The System Map is in-flight as of 2026-05-12; v1's dashboard work should land in main before v2 starts replacing the spine underneath it. #112 (transactional dispatch + gate writes) should also land first if possible — those transaction patterns become reference for the runner's gate-decision-write boundary.
+
+**Not running through forge.** Considered + rejected 2026-05-12. Three reasons: (1) forge v1 is the executor for v2's build — implementer mid-run editing the spine that's dispatching it is a real deadlock risk; (2) the hard work is design (YAML schema, runtime resolution, phases-vs-steps), not implementation, and the PRD already captures the framing — architect's value-add is weakest on already-thought-through problems; (3) step boundaries for a rewrite are themselves architectural decisions; planner would produce a decomposition but probably not the right one. Paired Steven+Claude session work instead, with small translation tasks possibly farmed out to agents once the schema is locked.
+
+**Caught:** 2026-05-12 — during architecture discussion after the System Map planner output rejection.
+
+### #126 — Replace Playwright MCP with shell-driven Chrome DevTools Protocol for UI verification
+**Why:** Caught 2026-05-13 during System Map (#105) renderer iteration. Playwright MCP went into a bad state mid-session — `browser_navigate` returned `TimeoutError: browserBackend.callTool: Timeout 60000ms exceeded`, then `browser_close` timed out too, then the next navigate stayed stuck. Once it stuck we couldn't recover without restarting the MCP. Lost ~10 minutes of iteration time fighting the tool instead of the renderer. This isn't the first occurrence — the MCP launches a fresh headless Chrome per session (the `--user-data-dir=/var/folders/...` profile dir), and on slow startup or transport hiccup the whole MCP gets wedged.
+
+Mario Zechner's article "What if you don't need MCP?" (https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/) makes the case: Chrome's `--remote-debugging-port` exposes the Chrome DevTools Protocol over plain HTTP+WebSocket. `curl` + a JSON-emitting websocket client cover the entire surface Playwright wraps: navigate, screenshot, eval, network requests, console messages. No MCP server, no Node-side abstraction, no transport-stuck failure mode — if the request fails you get an HTTP error you can diagnose and retry directly.
+
+**What the replacement would look like:**
+- `scripts/cdp/screenshot.sh <url> <output.png>` — launches/reuses a Chrome instance with `--remote-debugging-port=9222`, navigates, captures `Page.captureScreenshot`, writes PNG.
+- `scripts/cdp/eval.sh <url> <js-expression>` — `Runtime.evaluate` against a CDP target; returns JSON.
+- `scripts/cdp/console.sh <url>` — captures `Runtime.consoleAPICalled` over the WebSocket for a fixed duration.
+- One Chrome process held open per session (start via launchd or a forge subcommand); scripts attach to its already-listening port. No per-call launch.
+
+**For agents:** an agent in a container could call these scripts via its `Bash` tool without needing a Playwright MCP entry in `~/.claude.json`. Verify-phase seed gets an explicit "use `forge-screenshot <url> <path>` to capture the rendered page; attach the PNG path to `result.evidence`" line — matches the design-fidelity lesson from today's System Map verify gap.
+
+**For dev (Steven + Claude during sessions):** the same scripts cover the iteration I was trying to do today — drive the dashboard, screenshot, read console — but synchronously and resilient to transport hiccups.
+
+**Composite with #116 (forge v2):** v2's runtime YAML schema could declare per-runtime "browser verification" via a simple `screenshot` command instead of mounting an MCP. Removes one moving part from the MCP profile per project. Whether this lands inside v2 or before depends on appetite.
+
+**Out of scope:** replacing every Playwright MCP usage in user-facing Claude Code sessions. The MCP still works for "general-purpose browsing while pair-coding." This proposal is specifically for the *forge workflow* uses: dashboard verification, design-fidelity screenshots, console capture.
+
+**Caught:** 2026-05-13 — Playwright MCP stuck mid-System-Map-renderer iteration.
+
+### #125 — Implementer seeds don't mention `forge-test`; tests fail mysteriously in build phase
+**Why:** Caught 2026-05-13 reviewing the System Map (#105) build phase output. The implementer ran `npm test` inside its container, got 203 pass / 143 fail (better-sqlite3 ELF mismatch — host's darwin-arm64 binary doesn't load on container's linux-amd64), and reported them as "pre-existing failures unrelated to this change." On the host they're 345/345 green.
+
+**Root cause:** `seeds/agents/verifier/CLAUDE.md:28-38` documents `forge-test` (the wrapper that rebuilds better-sqlite3 in `/tmp/forge-work` per #111), but **none of the implementer seeds do**. Today's implementer happened to use forge-test for the new targeted test file (it discovered the wrapper somehow) but reverted to `npm test` for the full-suite check. Result: misleading failure numbers in result.json, confused agent narrative, no actual regression.
+
+**Affected seeds:**
+- `seeds/agents/implementer/CLAUDE.md`
+- `seeds/agents/frontend-implementer/CLAUDE.md`
+- `seeds/agents/backend-implementer/CLAUDE.md`
+- `seeds/agents/infosec-implementer/CLAUDE.md`
+
+**How to apply:** Copy the forge-test block from `seeds/agents/verifier/CLAUDE.md:23-40` (the "When running tests inside this container" section) into each implementer seed under its own testing guidance. Same language, same examples, same caveat about infra-vs-test failures. Plus an explicit "never run plain `npm test` — always `forge-test`" sentence; explicit-by-prohibition matches how #92 (architect scope) was tightened to good effect.
+
+**Why this is worth doing right now (not waiting for #116):** every build phase between today and v2 hits this same gap. The fix is ~10 lines in 4 files. Low risk, high signal-to-noise improvement in result.json narratives. In v2 (#116), the per-runtime guidance might move to a different place (runtime YAML? per-step task_file?), but the *content* survives — agents need to know about forge-test regardless of how the orchestrator dispatches them.
+
+**Caught:** 2026-05-13 — build phase result.json analysis.
+
+### #124 — System Map drag-overrides Map grows unbounded across run switches
+**Why:** Caught 2026-05-13 by red-build-337afd during System Map (#105) red review (severity: low). Module-level `dragOverrides = new Map()` is keyed by runId — opening the System Map on run A, dragging some nodes, closing, opening on run B, repeat — each runId accumulates its own inner Map of `{taskId → {x,y}}` and never gets cleaned up. Across a long dashboard session viewing many runs, the outer Map grows. Functionally fine: entries are tiny objects, no perceptible memory pressure even with hundreds of runs. But it's bounded-by-the-user's-patience, not bounded-by-anything-meaningful.
+**How to apply:** A few options worth weighing:
+- Cap the Map to N most-recently-used runs (10? 20?) with a simple LRU. Cheap.
+- Clear entries on `loadRunDetail` for runs other than the current one. Simpler — only the current run keeps its drag state. Slightly worse UX (switching back to a run you previously organized loses your layout).
+- Persist drag positions to DB per-run instead of in-memory. Counter to the explicit "drag-stable per-run-while-viewing only" decision in #105's PRD. Not the right move.
+Lean LRU at 10 runs. Caps without forcing UX loss.
+**Caught:** 2026-05-13 — red review of System Map build.
+
+### #123 — Dashboard a11y posture: System Map (and broader dashboard) lacks focus indicators, aria-labels, non-color status signals
+**Why:** Caught 2026-05-13 by red-build-5b7129 during System Map (#105) red review. Six findings on the System Map specifically: filter chips lack visible focus indicators for keyboard navigation; modal is a keyboard trap with no visible escape path in keyboard focus order; HTML node labels signal status via color only (no secondary indicators / no sufficient text contrast); filter chips + close button lack aria-labels; cytoscape canvas container is a generic div with no accessible semantics or labeling; progress bar has no accessible text alternative. **All legitimate**, but **not System-Map-specific** — this is the broader dashboard's a11y posture, which has never been audited. The findings would surface on any other dashboard view too.
+
+**Why not blocking #105:** the PRD didn't require a11y; the dashboard's existing surfaces have the same gaps; an a11y pass is a cross-cutting concern that deserves its own dedicated work, not a dashboard-feature-by-dashboard-feature bolt-on.
+
+**How to apply (when):**
+- Audit the dashboard as a whole, not the System Map in isolation. Pill row, task list, task detail, gate UI, run-new modal, auth indicator — every interactive surface gets the same treatment.
+- Focus indicators: `:focus-visible` styles via CSS for all interactive elements. Not specific to one view.
+- aria-labels on icon-only buttons + dynamic regions on the live-updating task pane.
+- Keyboard navigation map: confirm tab order makes sense, Esc closes modals, no traps.
+- Color + non-color status signaling: status badges already carry text ("complete" / "running"), so much of the color-only finding is incorrect-on-inspection — but the System Map's node label is the most color-heavy, would benefit from a glyph or text-label secondary signal.
+
+**Sequencing:** post-#105 cleanup. Probably 1-2 days of focused work; not urgent, not in scope until a real user with an accessibility need surfaces.
+
+**Caught:** 2026-05-13 — red review of System Map build.
+
+### #122 — Dashboard request-changes doesn't auto-dispatch the replacement task
+**Why:** Caught 2026-05-13 during System Map (#105) planner iteration. Workflow: click "Request changes" with rationale on the planner output. Spine inserts a new pending task for the same phase per `gate.ts:173-179` (re-queue with rationale injected as `inputs.requestedChanges`). Expected: dashboard automatically dispatches the new task (same way #108 chained gate-advance into `forge next`). Actual: the new task sits at `pending` until the human clicks "Run Next" a second time. Two clicks for what should be one action.
+
+**Why this is a real bug, not a UX preference:** Request-changes IS the human's "redo this" decision. There's no second decision pending; nothing else the human reasonably wants to do between "request changes" and "dispatch the redo." The two-click pattern adds friction without adding choice.
+
+**How to apply:** Look at how #108 wired advance auto-dispatch — same hook, same pattern. The dashboard's `/api/gate/:taskId` handler returns `nextTasks` from `gate()`; for advance, the dashboard chains into `next()`. The request-changes branch returns the replacement task in `nextTasks` too but the dashboard doesn't follow up. Probably 5-10 lines in the dashboard's gate handler — same auto-dispatch hook, just trigger on request-changes too.
+
+**Doesn't apply to:**
+- `reject` — that loops to a *different* phase via `onReject`; auto-dispatching could surprise the human (different phase, different agent, may want to pause).
+- `advance` — already auto-dispatches per #108.
+- `request-changes` to a manual phase — these throw at the spine layer per `gate.ts:152-157` so they can't reach this path.
+
+**Composite with #115** (middle pane misses task.created): if #122 ships first, the request-changes flow becomes "click, see new task running" — which only works correctly if the middle pane actually shows the new task. #115 fixes the rendering gap; #122 closes the auto-dispatch gap. Both needed for the flow to feel right end-to-end.
+
+**Not relevant for #116:** in the YAML orchestrator, request-changes is probably just a step-re-spawn, not a separate task-row insertion + dispatch. This is a v1 patch.
+
+**Caught:** 2026-05-13 — after iterating planner output three times on System Map run.
+
+### #121 — Adopt host-side STS export for short containers; mount-only for long-running (architectural)
+**Why:** Caught 2026-05-13 during root-cause analysis of #117/#118/#119/#120. After ~4 hours of failed task runs traced to a stale `~/.aws/credentials` file shadowing the SSO chain inside the bedrock-mode container, comparison with Jeff & Terry's pipeline shows a fundamentally different auth model that would have prevented today's failure entirely.
+
+**The architectural difference:**
+- **Forge today (FORGE-DEC-013):** mounts `~/.aws:/home/agent/.aws:ro` into the container. Container's AWS SDK reads SSO config + cache + (oops) any static `~/.aws/credentials` file and derives STS on its own. Pros: STS tokens can't go stale during a multi-hour container run. Cons: static credentials shadow SSO; container-SDK version differences are invisible; debugging splits between host and container.
+- **Jeff & Terry's pattern:** host calls `aws configure export-credentials --profile $AWS_PROFILE --format env-no-export` immediately before spawn, then passes `AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN` into the container as `-e` env vars. Container's SDK skips its credential chain entirely and uses the env-var creds. Pros: spawn-time-fresh; static credentials file ignored; pre-flight implicit (the export command itself fails loudly if SSO is broken); host SDK is the only one that needs to support `[sso-session]`. Cons: STS tokens are typically 1-hour TTL — long-running containers (multi-phase fanouts, design runs) age out mid-run.
+
+**The right shape: both, auto-selected.** STS env-var snapshot for predictably-short steps (the common case — most agent tasks finish in <30 minutes); `~/.aws` mount only when a step is *configured* to run long. The runtime YAML in #116 can declare which mode (e.g., `auth_mode: env-snapshot` vs `auth_mode: mount`). Default to env-snapshot since it's safer and matches the production deployment Jeff & Terry have proven across 8+ projects.
+
+**What this would have prevented today:**
+- The stale `~/.aws/credentials` file shadowing the SSO chain — env-snapshot reads from the host-side SDK's *active credential resolution*, not from whatever file exists on disk
+- The container-SDK silent failure — the host's `aws configure export-credentials` errors loudly when SSO is broken, before any container spawns
+- The "is forge auth status right?" question — pre-flight effectively becomes the export command itself
+
+**How to apply (mostly post-v2):**
+1. **Runtime YAML schema (part of #116):** each runtime declares its auth model. `runtime-claude-bedrock-env.yml` = env-snapshot mode; `runtime-claude-bedrock-mount.yml` = mount mode. Workspace default picks env-snapshot.
+2. **Pre-spawn step:** the runner calls `aws configure export-credentials` once per spawn, fails the task on non-zero exit (with the real AWS error surfaced), passes vars to docker.
+3. **Workflow declaration:** workflows or steps can opt into mount mode for known-long containers via a `long_running: true` step-level field. Default is false → env-snapshot.
+4. **Documentation update:** FORGE-DEC-013 gets a revisit note explaining that the mount-only choice was right *in isolation* but failed under the static-credentials-shadow case. The successor decision is the auto-selected hybrid.
+
+**Composite with #116, #117, #118, #119, #120.** #116 (YAML orchestrator) provides the YAML schema where this lives. #117/#118 are tactical fixes to the mount-mode path that remain useful as long as forge supports mount mode (long-running tasks). #119/#120 partially go away under env-snapshot (no STS cache to detect-stale-for, no `~/.aws/credentials` shadow possible); the parts that remain are about helpful diagnostics.
+
+**Decision still to make:** is FORGE-DEC-013 overturned outright (env-snapshot becomes the default, mount mode is opt-in), or are both modes peers? Lean **env-snapshot default**. The 1-hour-STS-expiry concern that drove DEC-013 is mitigated by Jeff & Terry's pattern in practice (the watchdog refreshes STS on the host before expiry; the env-snapshot reads the freshest creds at every spawn). Containers that genuinely run >1 hour without re-spawn are rare and can opt in to mount mode explicitly.
+
+**Caught:** 2026-05-13 — surfaced during architectural lessons review after hours of stalled task runs from #117/#119.
+
+### #120 — `forge auth status` is shallow + the underlying health probe is local-clock-only
+**Why:** Caught 2026-05-13 during diagnosis of #119. `forge auth status` for bedrock mode prints only `Auth mode: bedrock` + `AWS_REGION: us-east-1` — no SSO expiry, no STS cache state, no actual probe of whether the chain works. **Two bugs underneath:**
+
+1. **CLI doesn't call the existing `getAuthState()` probe.** `src/cli/commands/auth.ts:103-128` reads `process.env.CLAUDE_CODE_USE_BEDROCK` and stops. The richer probe (`src/util/creds.ts:514` `getAuthState()`) checks SSO session expiry, parses the profile, returns `health: ok|expired|missing` + a `remediation` string. The dashboard's auth indicator (#97) uses it. The CLI doesn't. One-line fix: replace the dumb printing in `auth.ts:103-128` with a call to `getAuthState()` and a structured print of its fields.
+
+2. **`getAuthState()` itself only checks the local clock**, not whether the credentials actually work. The bedrock branch (`creds.ts:516-542`) reads `~/.aws/sso/cache/*.json`, extracts `expiresAt`, returns `health: ok` if not clock-expired. That misses the failure mode from #119: AWS revokes the credential chain server-side when a new SSO session is minted; the old token's expiresAt is still in the future, so the probe says "ok" while STS returns 403.
+
+**How to apply:**
+- **#120a (small):** wire `auth.ts status` to `getAuthState()`. Print mode + health + identity + remediation + expiresAt + watchdog status + STS cache mtime. Cheap, makes the CLI useful immediately, doesn't fix the deeper probe gap but at least surfaces what we know.
+- **#120b (bigger):** make `getAuthState()` actually exercise the chain when called explicitly. Two options:
+  - (i) Call `aws sts get-caller-identity --profile <p>` as part of the probe. Adds ~500ms but is the only way to know whether the chain works. Probably too expensive for the dashboard's frequent-poll path; gate behind an explicit `--deep` flag or only run in the CLI's `status` command.
+  - (ii) Compare STS cache mtime against SSO session token mtime. If SSO session is newer, the STS cache is stale (per #119's diagnosis). Doesn't catch *all* failure modes but catches the common one without hitting AWS.
+
+Lean (i) for the CLI's `status` command (run once, user-initiated, the cost is acceptable). Lean (ii) for the dashboard's polled indicator (cheap, catches the common case).
+
+**Composite with #117 / #118 / #119:** all four are auth-failure failure modes. #117 (wrong watchdog profile) prevents prevention; #118 (no log) hides the evidence; #119 (manual SSO leaves STS cache stale) is the runtime symptom; #120 is "forge can't even tell you what's wrong." Fix all four and the SSO auth path becomes honest.
+
+**Caught:** 2026-05-13 — alongside #117/#118/#119 in same diagnosis session.
+
+### #117 — SSO watchdog default profile is hardcoded and wrong for most setups
+**Why:** Caught 2026-05-13. `scripts/run-sso-watchdog.sh:33` defaults `SSO_WATCHDOG_PROFILE` to `adx-dev-sso`. Steven's actual setup uses `adx-dev` (the sso-session is named `adx-dev`, the profile is `adx-dev`, no `-sso` suffix anywhere). The watchdog has been running overnight (PID 64730, started May 12 20:20) but refreshing the wrong profile name — `aws sso login --profile adx-dev-sso` fails because that profile doesn't exist in `~/.aws/config`. Watchdog's `stdio: 'ignore'` in `src/util/sso-watchdog.ts:42` swallows the error output, so the failure was invisible.
+
+**How to apply:** Two options worth weighing:
+- (a) Default `SSO_WATCHDOG_PROFILE` to `${AWS_PROFILE:-adx-dev-sso}` in the script. Simplest — the watchdog inherits whatever the user's shell already set, falling back to today's default only when AWS_PROFILE is unset.
+- (b) `src/util/sso-watchdog.ts` reads `process.env.AWS_PROFILE` at spawn time and passes it to the script as `SSO_WATCHDOG_PROFILE=<value>` in the child env. Marginally cleaner separation (script doesn't read env directly, forge controls the value).
+
+Lean (a). Minimal change, matches how the user already authenticates, no schema change.
+
+**Caught:** 2026-05-13 — diagnosing task-plan-7acda2 auth failure on the System Map (#105) run.
+
+### #118 — SSO watchdog has no log file; failures are invisible
+**Why:** Caught 2026-05-13 alongside #117. `src/util/sso-watchdog.ts:42` spawns the watchdog with `stdio: 'ignore'`. Any output the script produces (the `echo "[watchdog] ..."` lines for SSO-OK / refresh-attempt / refresh-failure) goes to `/dev/null`. When something goes wrong (wrong profile per #117, AWS CLI not installed, network blip), there's no on-disk record. Yesterday's #117 failure was undetectable until the container errored, which itself took hours.
+
+**How to apply:** Redirect the watchdog's stdout+stderr to a log file at `~/.forge/sso-watchdog.log` (or one log per runId, rotating). Trade-offs:
+- Single log: simpler; tail-able; old runs' entries linger
+- Per-run log: cleaner audit per run; more files; harder to grep across history
+
+Lean single log with a length cap (truncate-on-start or rotate at N MB). The script already prints timestamps, so a single log is grep-friendly.
+
+Implementation: in `src/util/sso-watchdog.ts`, replace `stdio: 'ignore'` with `stdio: ['ignore', logFd, logFd]` where `logFd` is `openSync('~/.forge/sso-watchdog.log', 'a')`. Add a `forge auth watchdog-tail` CLI subcommand or similar so the user can read it without remembering the path.
+
+**Caught:** 2026-05-13 — same diagnosis session as #117.
+
+### #119 — Manual `aws sso login` invalidates forge's STS cache but forge doesn't notice
+**Why:** Caught 2026-05-13. Failure mode: SSO session aged out overnight (watchdog wasn't refreshing per #117), Steven did `aws sso login --profile adx-dev` manually at 06:33 PDT. New SSO session minted. But `~/.aws/cli/cache/<hash>.json` still held STS credentials derived from the *old* SSO session — clock-valid (`Expiration: 2026-05-13T19:12:27Z`) but actually revoked by AWS the moment the new session was created. Container at 06:34 read the stale-but-clock-valid STS creds, sent them to Bedrock, got 403 "security token expired" on the first request and every retry. The container itself can't refresh — `~/.aws` is mounted read-only.
+
+**How to apply:** Three layers worth considering:
+1. **Pre-flight check in `forge new` / `forge next`:** beyond the existing #79 SSO-expiry check, verify the STS cache's underlying SSO session is the *current* one. Compare STS cache file mtime against SSO session token mtime: if SSO is newer, the STS cache is stale. Either fail the pre-flight with a clear message ("STS cache stale — run `aws sts get-caller-identity --profile $AWS_PROFILE` then retry") or auto-trigger STS re-derivation by calling that command from forge itself before spawn.
+2. **Document the gotcha in `forge auth status`:** if mismatch detected, surface it: "⚠ STS cache predates current SSO session — derive fresh creds with `aws sts get-caller-identity --profile $AWS_PROFILE`."
+3. **Container-side detection:** the agent gets 403 on first call; the agent could re-read the STS cache (still won't help since :ro mount), or forge could detect 403-on-first-call in container.stdout and surface it differently from "the agent itself errored" — currently the task just fails with no signal to the human that it was an auth-stale issue, not an agent issue.
+
+Lean (1) + (2). The container can't fix this from inside; forge has to either catch it pre-spawn or guide the human to fix it pre-spawn.
+
+**Composite with #117 + #118:** all three are SSO/STS auth-failure failure modes. #117 prevents the watchdog from doing its job; #118 hides the evidence; #119 is what happens when the human manually papers over the gap. Fixing #117 + #118 reduces how often #119 fires; fixing #119 makes the auth-stale state recoverable without container failure.
+
+**Caught:** 2026-05-13 — root-cause analysis of why task-plan-7acda2 failed despite a fresh `aws sso login`.
+
+### #115 — Dashboard task list middle pane misses task-state transitions (smart-refresh gap)
+**Why:** Caught 2026-05-12 during the System Map (#105) forge run. Two distinct cases, same underlying gap:
+
+1. **Status transition.** Clicked "Run Next", architect task transitioned pending → running. Task pane (right) showed running correctly; task list (middle) stayed at `pending`.
+2. **New downstream task.** Gate-advanced the architect, next-phase task was created via `createPhaseTasks` (gate.ts:120). Task pane reflected the new task; task list (middle) didn't show it until hard refresh.
+
+Both self-correct on Cmd+R. DB state is honest; the middle pane's smart-refresh (#72) is dropping at least two event classes: `task.started` and `task.created`.
+**How to apply:** Audit the middle pane's event subscriptions / render trigger. Likely one of:
+- Smart-refresh only listens for run-level events (run.created / run.completed), not task lifecycle
+- `task.started` + `task.created` events are emitted but the SSE/poll-derived state-update doesn't reach the middle-pane render path
+- The middle pane renders from a snapshot computed once at run-open time; subsequent task list changes don't invalidate the snapshot
+The two cases share a root cause — the middle pane isn't subscribed to the task-list-changed signal. Fix the subscription, both cases resolve.
+**Composite with #77:** exactly the failure mode #77 (Preact + htm) calls out — html.ts hand-rolling reactive primitives, missing edges between event and re-render. Fixing in place is fine; eventually #77 makes this class of bug structurally impossible.
+**Caught:** 2026-05-12 — during the #105 forge run.
 
 ### #112 — Transactional dispatch + gate writes (reconcile-half landed as #109)
 **Why:** Caught 2026-05-12 alongside #109. The reconcile-half of "wrap multi-write per-task sequences in a transaction" shipped on `951824e` (3 writes per task, fault-injection tests, full rollback semantics). The same shape exists in:
@@ -162,6 +366,8 @@ Lean (a) when the time comes — it's what the design is asking for and HTML ove
 **Caught:** 2026-05-11 — surfaced while talking through #97. Steven's call: leave room for OpenAI/Codex without designing it now.
 
 ### #96 — Build-phase decomposition: implementer fanout + orchestrator + planner-emits-deps
+**Sub-shifts 3+4+5 absorbed by #116** (2026-05-13). Forge v2 makes DAG-driven implementation fanout the default model, not an opt-in primitive — planner emits `depends_on` + `discipline` + `files_modified`, runner parallelizes via the DAG, routes per discipline. The sub-shifts below are the v1 framing; if v1 ships them before #116, they're still valuable. If #116 lands first, the v2 implementation makes sub-shifts 3+4+5 moot. Sub-shifts 1+2 (specialist red + implementer seeds, shipped 2026-05-09) survive in both worlds.
+
 **Why:** Today the `build` phase is a monolith — one `implementer` agent reads the plan, edits the codebase serially, produces one diff. That works for tasks small enough to fit in one agent's head, but it doesn't scale: parallel-safe steps run sequentially, the diff balloons until reds can barely review it, and there's no specialization (a frontend feature, a backend migration, and a security hardening pass all route through the same generic seed). Composite of multiple architectural shifts that share a lens — *the build phase needs to decompose into specialized fanout + coordination, the way other multi-phase forge primitives already work*.
 
 The shift has four sub-shifts. **#92 architect-scope rewrite (closed) is the precedent**: same shape — agent role definition matters more than prompt tweaking. **#73 reds-as-reviewer (open)** is also adjacent — both are "the agent has the wrong job description, not just a wrong prompt."
