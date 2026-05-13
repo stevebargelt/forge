@@ -6,40 +6,38 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-12.** Main is clean, 346/346 tests passing, typecheck green. The big graph-view-85 branch landed and 5 more feature branches landed on top of it. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
+**State at end of 2026-05-13.** Main is clean, 349/349 tests passing, typecheck green. Branches all merged + deleted; only `main` remains. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
 
-**What shipped this multi-day session (most recent first):**
-- **#114** mount `--design-dir` read-only at `/design` inside agent containers. Caught preparing #105's PRD run — the architect was being told to read host paths the container couldn't see. Small spine change (`spawn.ts` + `dispatch.ts` + `spawnRed.ts` + 2 seed updates). Three new tests.
-- **#113** specialist reds promoted to authoritative gating. `additional[]` reds now inherit RedConfig.authority + gateOnVerdict (red-frontend / red-backend / red-security block the gate on fail like wide/narrow do). Path A from the design — minimal change in `spawnRed.ts` via an extracted pure `buildLaunchPlan(redConfig)`; legacy verdicts written before the flip keep their `authority: 'specialist'` label and still trip the #110 rationale UI. Seeds reworded ("discipline red", not "specialist red"). Five new unit tests; existing 341 still green.
-- **#109** transactional reconcile writes (fault-injection tests + `_setReconcileFaultForTest` hook). Dispatch + gate writes split out to **#112** as follow-up.
-- **#103** GRAPH: run-status pill in graph-view header.
-- **#110** rationale required when advancing over a failed specialist red. Two-layer fix: spine extends the check beyond `gate: "verdict"` phases; dashboard surfaces red verdict cards + flips the Advance button to btn-warning with a required-rationale toast.
-- **#108** dashboard gate-advance auto-chains into `forge next` so the user doesn't need a second click.
-- **#111** verify-phase native-module mismatch — agent container now ships `/usr/local/bin/forge-test` that copies project to `/tmp/forge-work`, rebuilds better-sqlite3 for the container platform, runs tests there. Host's `/project` is never mutated; tests work under `:ro` mount (so reds can run tests too).
-- **#100** graph view fanout layout — flat-node model + curves + failed-children-as-dead-ends.
-- **#97** auth-mode indicator + popover. Bedrock shows full account/role/expiry detail; oauth shows email/org/plan from a host-side hint cache populated by `forge auth login`.
-- **#79** auto-detect bedrock from `~/.aws/config` + pre-flight checks at `forge new` and `forge next`.
+**What shipped today (2026-05-13):**
+- **#105** System Map view (replaces old graph view). Forge run + manual renderer fix-pass against the design frames after red review caught real gaps. Commit `5a44588`, merged to main as `6a1b6aa`. See the #105 Done entry for the full landed-features list.
+- **#114** mount `--design-dir` read-only at `/design` inside containers (commit `414b29b`). Architect + prompt-author seeds updated.
+- **#113** discipline reds (red-frontend / red-backend / red-security) gate the parent like wide/narrow (commit `79d6edf`). `buildLaunchPlan` extracted as pure function.
 
 **Top of the active stack now:**
-1. **#105** — System Map. In-flight: branch `system-map-105`, planner output `task-plan-ed425b` request-changes pending (4 corrections: kill phase compound nodes; don't inline-mirror buildTaskGraph; add a visual-fidelity step; pin cytoscape-elk versions). Layout engine ELK; one view, draggable; reds as peer nodes. Old graph view gets deleted at #10. Land first, merge to main, then #116 starts.
-2. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Starts after #105 + #112 land.
-3. **#112** — wrap remaining multi-write sequences (dispatch + gate) in transactions, same pattern as #109's reconcile half. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
-4. **#107** reds-during-reconcile design conversation. Split from #91 item 3. Architectural question, not implementation-ready.
-5. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator + planner-emits-deps). Multi-session architectural work; sub-shifts 1+2 shipped overnight 2026-05-09, #113 promoted them to gating-authoritative 2026-05-12. **Note:** if #116 lands first, these sub-shifts become YAML-schema decisions rather than TypeScript-type changes.
+1. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run. Starts when Steven's ready — System Map is done.
+2. **Auth fix cluster** (small, related, all caught 2026-05-13 during a painful 4-hour SSO chase): **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All small tactical fixes. #117 + #118 are ~30 min each; **#121** is the architectural lesson (host-side STS export pattern) — defer to #116.
+3. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
+4. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
+5. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught today; today's build used `forge-test` for the new test file but `npm test` for the full suite, producing misleading "143 failures" in result.json.
+6. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
+7. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model. Sub-shifts 1+2 shipped, #113 promoted them.
+8. **System Map polish:** **#127** red→parent arrow semantics (magenta arrow reads as flow when it should read as side-channel — file for designer feedback), **#124** drag-overrides Map LRU cap, **#123** a11y posture.
+9. **#126** replace Playwright MCP with shell-driven Chrome DevTools Protocol. Mario Zechner's article. Burned us ~10 min during System Map renderer iteration when Playwright wedged.
 
 **Useful runtime state:**
 - `forge auth status` will warn if the legacy `forge-claude-oauth` volume is still around (orphaned by #97's mount migration). Steven can `docker volume rm forge-claude-oauth` whenever.
 - DB backup at `~/.forge/forge.db.bak.before-110-test` from the #110 live-verification dance. Safe to delete.
-- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`. Any spawn after that gets the wrapper.
+- `~/.aws/credentials.old` and `~/.aws/credentials.backup.old` — moved aside during 2026-05-13 SSO debugging when a stale static-credentials file was shadowing the SSO chain inside containers. Safe to delete if AWS SSO works going forward.
+- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`.
 
 **Honest flags:**
-- **Specialist reds wiring** (#96 sub-shifts 1+2) was exercised by the #91 forge run on 2026-05-12 — red-backend correctly raised a specialist-fail on transactional concerns. So they DO work end-to-end. Now that #113 promoted them to gating-authoritative, the next real run that trips one will land the parent in `blocked_by_red` — verify the dashboard force-advance + rationale path on the first occurrence so we know the new flow looks right end-to-end.
+- **System Map renderer pass on 2026-05-13** was iterative — the agent build phase shipped a working data layer + a broken renderer (didn't open in a browser, didn't compare to design). The verify phase only tested the new file; full design fidelity came from a manual iteration session with Playwright + screenshots. **Lesson for #116:** verify-phase for UI work needs eyes-on-the-render, not just tests-green.
 - **#25 + #32 still un-validated end-to-end** (reject/onReject flow, failed-result detection).
-- **#91 forge run** was the first real `feature` workflow run on forge itself. Architect agent correctly caught two material brief errors that would have shipped real bugs. That's the model working as designed.
+- **The #105 forge run was forge running on forge itself** — second time (#91 was first). Worked, in a "5 retries on the planner phase + 4 of 5 reds failed in build" sense. Real architectural value at architect + planner; red review caught real renderer bugs but with a lot of noise (3 of 5 reds raised partly-wrong findings). The pattern works; the cost is real.
 
-**Local-only file (gitignored):** none currently. The old `.overnight-plan-2026-05-09.md` was deleted.
+**Local-only files (gitignored):** none currently.
 
-**Branch hygiene:** local-only branches still around — `auto-dispatch-108`, `rationale-on-red-fail-110`, `graph-status-pill-103`, `transactional-writes-109`, `verify-container-111`, `graph-view-85`, `phase-flow-71`. #113 was implemented straight on main (no branch). Delete the stale ones whenever via `git branch -d <name>`. Main carries all the work.
+**Branch hygiene:** All branches deleted 2026-05-13 after the System Map merge — only `main` remains.
 
 ## Active
 
@@ -288,87 +286,6 @@ The two cases share a root cause — the middle pane isn't subscribed to the tas
 - Cross-task transactions (one big txn spanning many tasks). Per-task boundaries are the right granularity.
 
 **Caught:** 2026-05-12 — scope-split from #109 at land-time.
-
-### #105 — GRAPH: full task-graph rendering (every task, every relationship) — HOLD FOR DESIGNER
-**Why:** Caught 2026-05-11 while iterating #100's flat-node fanout in `graph-view-85`. After the cluster-shape question was resolved (keep flat, add curves), the next correctness issue surfaced: **the graph view shows a sanitized, summary-flavored projection of the workflow, not the real workflow.** Concretely, on `run-code-review-terry-workflow-586a86` (an investigation run), the expanded fanout shows 16 task nodes including one failed (`#9`) with no outgoing edge — but the actual run has **5 failed investigate tasks, each followed by a successful retry** (`task-investigate-cd2572.parentId = task-investigate-176b68` and four similar pairs), plus **2 red-investigate review tasks per successful task** (32 reds total). None of the retries or reds appear in the graph today. The human needs the graph view to be a *holistic picture of what happened/is happening*, not the pill-row's compact summary rendered as boxes.
-
-**Steven's framing (2026-05-11):** "I want to show everything — the real flow. Reds need to figure out how to show them. I want a REAL representation of the workflow, not some half-assed attempt."
-
-**Design dependency — HOLD.** Designer is working on something related (likely follow-up to the four Graph View frames in `~/code/forge-design/dashboard.pen`). **Do not start implementation until the designer's pass lands and we have updated frames for retry + red rendering.** This entry captures the scope agreed on 2026-05-11 so the designer's deliverable can be checked against it.
-
-**Designer brief — answers to specific questions asked 2026-05-11:**
-- **Unit of node: tasks, not phases.** Every node in the graph is a task. Reds, retries, fanout sub-tasks, singletons — all peer nodes at the same level. No compound nodes, no parent-child containers.
-- **Forge doesn't really have phases as runtime entities.** Phases are a workflow-authoring concept — when you author a workflow file, you list phases like `["brief", "design", "build", "verify"]` to describe the shape of the work. At runtime the spine doesn't track "what phase the run is in" — there's no `phases` table, no phase-level state machine. Phase survives as a *column on the tasks table* (a label saying "this task came from the build step"). It's metadata, not an entity. The pill row aggregates tasks by phase for display; everything else operates on tasks.
-- **Free-form canvas.** Zoom, pan, drag nodes. The graph view is an interactive workspace where the user can rearrange the layout to suit their reading.
-- **No bands.** Because drag means nodes can move anywhere, any spatial grouping treatment (column headers, horizontal bands, framed clusters by phase) breaks the moment the user drags a node out of its group. Phase grouping has to live somewhere other than the canvas's spatial layout — designer's call where (node color/icon, filter UI, side panel, none of the above).
-
-**What's wrong with today's graph (post-#100, pre-#105):**
-- Fanout shows 16 "primary" task statuses (from `phaseShape.fanoutDots`). Failed tasks are visible but the retries that replaced them aren't.
-- Red review tasks (every fanout sub-task has 2 reds in this workflow) are completely absent from the graph.
-- Singleton tasks (frame-question, synthesize, recommend) appear as one node each, even if they retried.
-- The graph reflects the *pill row's* mental model (compact per-phase summary). The actual task table tells a much richer story.
-
-**Scope — the rewrite (NOT the patches we kept rejecting):**
-
-1. **New module `src/dashboard/taskGraph.ts` — pure function `buildTaskGraph(run, tasks, workflow): TaskGraph`.** Replaces the data-feed half of `graphView.ts` for the graph view's needs. (`phaseShape.ts` stays as-is for the pill row.)
-   - `TaskGraphNode = { taskId, phase, role, status, isRed: boolean, retryOf?: taskId, kind: 'task' | 'red' }` — one node per task in `tasks[]`, no filtering, no superseded collapse.
-   - `TaskGraphEdge = { source, target, kind: 'flow' | 'retry' | 'review' | 'reject' }`:
-     - **flow**: prev-phase task → this-phase task. For fanout phases, an upstream singleton fans out to each child (this is the only place we synthesize edges — the rest come from `parentId`).
-     - **retry**: failed task → its retry. Detected by `parentId` pointing to another task in the SAME phase with the SAME role and `status === 'failed'`. Chains of any length (A→B→C if A retried as B retried as C). All visible.
-     - **review**: primary task → red review task. Detected by red.`parentId` pointing to a non-red task. Reds get rendered but don't continue the flow.
-     - **reject**: existing onReject mechanism (workflow-level back-edge). Already in `graphView.ts`, port over.
-2. **Renderer (`src/dashboard/html.ts`) consumes TaskGraph, not phaseShape, for the graph view.**
-   - Collapsed view per phase: still a single summary node (this is the pill-row equivalent). Aggregated counts include retries + reds — "investigate · 21 tasks · 16 done · 5 retried · 32 reds done."
-   - Expanded view per phase: emit every task as a peer node. Retries appear *adjacent* to the failed task they replaced; reds appear *attached* to the primary task they reviewed (visual treatment TBD by designer).
-   - Per-phase expand/collapse toggle preserved (no all-or-nothing).
-   - Edge styles by kind:
-     - `flow`: bezier, status-colored (done=green, running=cyan, pending=dim) — see #4-revised note
-     - `retry`: dashed cyan or amber (designer call)
-     - `review`: dotted, dim violet — reds are quieter than primary flow
-     - `reject`: dashed magenta (existing)
-3. **Test coverage — new file `src/dashboard/taskGraph.test.ts`** with fixture task lists covering:
-   - clean fanout, no retries, no reds
-   - fanout with one retry (the "simple case")
-   - fanout with chain-of-3 retry (A→B→C, A and B failed, C succeeded)
-   - singleton task with retry (not a fanout)
-   - fanout with reds attached, no retries
-   - failed task with red review then retry (interaction case)
-   - onReject case
-   - non-fanout phase, no special structure (baseline)
-4. **Backward compatibility:** `graphView.ts` keeps its `buildGraphData` export for now (it's unit-tested + still used by the v0 path that doesn't expand fanout). #105's renderer chooses TaskGraph for fanout phases; phaseShape stays canonical for the pill row.
-
-**Layout open question (defer to implementation, not the designer):** dagre lays out edges into ranks; retries naturally land in the *next* rank (because they're downstream of the failure). That visually says "first attempt failed, second attempt succeeded later" — which is correct. But the retry is *not* the next phase, it's a same-phase task. Two options when implementation starts:
-- (a) Let dagre put retries in their own rank between the original phase and the next phase. Visually accurate to the time sequence but adds a column to the layout.
-- (b) Place retries in the same rank as their predecessor (need explicit dagre `rank` constraints). Tighter layout, less faithful to time.
-Lean (a) once we get there — accuracy wins.
-
-**Why this earns its scope (vs the patches we already shipped/declined):**
-- The "don't emit child→next for failed children" patch (shipped 2026-05-11 in #100's wake) was a band-aid: it made the failed node a visible dead-end, which is honest *if there was no retry* — but in real runs there usually IS a retry, so the dead-end framing is itself a lie.
-- Adding retry edges as a separate pass without restructuring the data layer would mean teaching `graphView.ts` to read `tasks[]` separately from `phaseShape`, and the two would drift. Cleaner to commit to one source of truth for the graph view.
-- Adding reds without a data-model change is impossible — `phaseShape.fanoutDots` doesn't know they exist.
-
-**Closes-on-land:** #99 (retry chains placeholder) and #104 (rejects + retries design session). Both were narrower placeholders; #105 is the actual implementation ticket.
-
-**Still relevant alongside:** #98 (collapsed-node atom polish — progress bar + chip tags), #101 (side panel — natural surface for per-task retry chain detail), #102 (minimap), #103 (top-bar run-status pill).
-
-**Resume order when designer is done:**
-1. Verify the designer's updated frames cover retry + red visual treatment. If not, ask before starting.
-2. Build `taskGraph.ts` data layer + tests first. Land tests-green as its own commit. Don't touch the renderer yet.
-3. Switch graph-view renderer to consume TaskGraph. Land that as second commit.
-4. Visual verification in Playwright on `run-code-review-terry-workflow-586a86` (the canonical complex run with retries + reds) — eyes-on at every renderer change per #100's hard-won lesson.
-
-**Branch state when captured:** `graph-view-85`, ~24 commits ahead of main, working tree includes the failed-child-no-outgoing-edge fix (small, kept).
-
-**Caught:** 2026-05-11 — conversation traced through "node 9 fails and points to synthesize" → "should it not point to the retry?" → "everything, everywhere, real workflow."
-
-### #98 — GRAPH: fanout-collapsed node polish (progress bar + tags)
-**Why:** v1 fanout-cluster-expansion (this morning's work) renders the collapsed node as `name + "16 tasks · 15 done · 1 failed"` text. The design Component Library's `fanout-collapsed-node` atom has more — a thin progress bar (green-bar for done + red-sliver for failed) and chip tags (`15 done` `1 failed`) inside the node. v1 deferred those because cytoscape's native node-rendering doesn't have a clean primitive for in-node bars/chips.
-**How to apply:** Three options worth weighing:
-- (a) Cytoscape HTML labels — render an HTML div overlay positioned over each fanout-collapsed node. Match the design exactly. Fragile across cytoscape/library versions.
-- (b) Cytoscape compound nodes with sub-rectangles for progress + tags. More native; less flexible.
-- (c) Skip: text summary is honest and at-a-glance enough; progress bar is visual noise we don't need.
-Lean (a) when the time comes — it's what the design is asking for and HTML overlays are well-documented in cytoscape.
-**Caught:** 2026-05-10 — deferred from #85 v1 fanout work for scope.
 
 ### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
 **Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
@@ -710,6 +627,29 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #105 — System Map view (replaces old graph view)
+**Closed:** 2026-05-13. Shipped via the System Map run forge ran on itself + a manual renderer-fix pass against the design frames after red review caught gaps. Commit `5a44588` on `system-map-105`; merged to main as `6a1b6aa`.
+
+**What landed:**
+- `src/dashboard/systemMap.ts` — pure `buildTaskGraph(tasks, phaseShape)` emitting nodes with `_fanoutTotal` / `_fanoutComplete` for in-node progress bars, plus three arrow kinds (linear, retry, red). `computeElkLayers` assigns ELK layer hints.
+- `src/dashboard/systemMap.test.ts` — 15 unit tests.
+- `src/dashboard/html.ts` — modal shell with header/canvas/footer, ELK layout via cytoscape-elk@2.3.0, reds hand-placed vertically in their parent's column post-layout, HTML labels via cytoscape-node-html-label@1.2.1 (auto-registers on cytoscape's core extension API, not a window global), drag-stable per-run via module-level `Map<runId, Map<taskId, {x,y}>>`, filter chips (All / Running / Failed / Pending / Reds), retry arrows arc below the row via bezier control points.
+- Old graph view deleted: `graphView.ts`, `graphView.test.ts`, the `buildGraphDataClient` mirror, `openGraphView` / `relayoutGraph` / `expandFanoutPhase` / `collapseFanoutPhase` from CLIENT_JS, the dagre + cytoscape-dagre CDN tags, and the old `.graph-modal-*` CSS.
+- `SYSTEM_MAP_STATUS_COLORS` extends the old map with `complete` (was `done` — wrong key, made every complete task render as gray) and adds icon glyphs per TaskStatus.
+
+**Renderer fixes after the agent build phase shipped (red review found these, hand-iterated against design):**
+- `_fanoutTotal` / `_fanoutComplete` referenced but never populated by the data layer.
+- cytoscape-elk URL was `@1.4.0` (404 — that version doesn't exist on unpkg).
+- `done` status key didn't match TaskStatus `complete`.
+- nodeHtmlLabel detection used a non-existent `window.cytoscapeNodeHtmlLabel` global.
+- ELK partitioning collided reds with downstream phases; switched to ELK-on-main-flow + hand-placement-for-reds.
+
+**Closes:** #102 minimap, #101 side panel (not in the new designs).
+**Follow-ups filed:** #115 (smart-refresh task-state gap, hit during this run), #123 (a11y posture), #124 (drag-overrides Map LRU), #125 (implementer seeds + forge-test), #126 (replace Playwright MCP with shell CDP — hit Playwright wedge during renderer iteration), #127 (red→parent arrow semantics — magenta arrow reads as flow when it should read as side-channel).
+
+### #98 — Fanout-collapsed node polish (progress bar + tags) — superseded by System Map
+**Closed:** 2026-05-13. The System Map (#105) has no collapsed-vs-expanded mode — every task renders as a peer node always. The "fanout-collapsed-node atom" concept was a v0 graph-view artifact; the new view's running-fanout progress bar is wired through `_fanoutTotal` / `_fanoutComplete` on individual running tasks. Anything left here is genuinely obsolete.
 
 ### #114 — Mount designDir read-only at /design inside agent containers
 **Closed:** 2026-05-12. Caught preparing the System Map (#105) PRD run: the architect agent in `feature-ui-design-needed` / `feature-ui-design-provided` was being told to "read upstream design artifacts" pointing at host paths that the container had no way to reach. `--design-dir` set `run.metadata.designDir` and `inputs.designDir`, both as host paths — but `spawn.ts` only mounted `/project` and `/task`. The seed instruction to "Read them" was a lie; the architect would have bluffed past it. This was the root cause behind shaping the PRD differently — fixed at the spine layer instead.
