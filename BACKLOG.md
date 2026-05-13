@@ -67,6 +67,25 @@ When you start a session, read this file. When you finish, update it: move close
 
 **Caught:** 2026-05-12 — during architecture discussion after the System Map planner output rejection.
 
+### #127 — System Map: red→parent arrow semantics don't match red review's actual relationship
+**Why:** Caught 2026-05-13 reviewing the System Map after #105 shipped. Reds currently render with a directional magenta arrow from parent → red. That's causally accurate (the red was created *from* the parent's artifact) but semantically misleading. Reds don't receive work the way the next phase does — they audit it. The directional arrow makes them look like downstream consumers when they're really sideways side-channels.
+
+**Six options worth weighing when this is revisited:**
+1. **Bidirectional arrow** (arrowheads on both ends) — reads as "paired dialogue." Risk: often also reads as "data flows both ways," which is wrong; reds only read from the parent's artifact.
+2. **No arrow at all, just a thin line** — quieter, matches "side-channel" framing. Risk: loses directionality cue when nodes get dragged.
+3. **UML association style** (tee or circle at parent end, arrowhead at red end) — most semantic, requires legend literacy.
+4. **No arrow; reds glued spatially next to parent** — visual proximity replaces the line. Risk: drag breaks the association.
+5. **Border ring on parents that have reds + reds standalone** — no line. Risk: fragile with multi-red parents.
+6. **Dotted, no-arrow, low-opacity magenta tether** — says "associated, not flow." (Steven's lean alternative)
+
+**Lean:** option 6 — dotted thin line, no arrowhead, opacity ~0.4, magenta. Falls out of magenta-already-means-red-review, drops the "active flow" connotation that bothered Steven.
+
+**Worth surfacing back to the designer.** "What's the visual treatment for the relationship between a parent task and its red reviewers?" The designer's answer in the current reds-detail frame uses status-colored arrows (red-narrow's failing arrow is red); the magenta-arrow choice was the implementer's interpretation, not the designer's spec.
+
+**Out of scope:** changing red-as-peer-node placement. That part works.
+
+**Caught:** 2026-05-13 — post-renderer-pass review of System Map.
+
 ### #126 — Replace Playwright MCP with shell-driven Chrome DevTools Protocol for UI verification
 **Why:** Caught 2026-05-13 during System Map (#105) renderer iteration. Playwright MCP went into a bad state mid-session — `browser_navigate` returned `TimeoutError: browserBackend.callTool: Timeout 60000ms exceeded`, then `browser_close` timed out too, then the next navigate stayed stuck. Once it stuck we couldn't recover without restarting the MCP. Lost ~10 minutes of iteration time fighting the tool instead of the renderer. This isn't the first occurrence — the MCP launches a fresh headless Chrome per session (the `--user-data-dir=/var/folders/...` profile dir), and on slow startup or transport hiccup the whole MCP gets wedged.
 
