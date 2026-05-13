@@ -39,8 +39,9 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
-      // Specialist reds added per #96 sub-shift 1 — informational discipline
-      // coverage alongside the authoritative wide/narrow.
+      // Discipline-specific reds (frontend, backend, security) alongside
+      // wide/narrow. All five gate the task per the RedConfig — #96 sub-shift
+      // 1 wiring, #113 gating semantics.
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),

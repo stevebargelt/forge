@@ -45,80 +45,40 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
   const spec = upstreamPhaseOutput(workflow, phase, run.id);
   const artifact = blueTask.result ? JSON.stringify(blueTask.result, null, 2) : "(no blue result)";
 
-  // Track launches with their associated authority so we can record verdicts
-  // correctly. Wide/narrow inherit RedConfig.authority; `additional` reds are
-  // always recorded as `specialist` (#96 — they're informational regardless
-  // of the parent's authoritative gate).
-  type LaunchPlan = {
+  // Build the launch plan and start each red. All reds in a RedConfig — wide,
+  // narrow, and `additional` — inherit RedConfig.authority and gateOnVerdict
+  // (#113). The `additional` field is just discipline-specific seed selection,
+  // not a separate gating semantics tier.
+  const plan = buildLaunchPlan(redConfig);
+  type Launch = {
     promise: Promise<{ ref: AgentRef; verdict: Verdict; redTaskId: string }>;
     authority: "specialist" | "authoritative" | "triage";
     countsTowardGate: boolean;
   };
-  const launches: LaunchPlan[] = [];
-  if (redConfig.wide) {
-    launches.push({
-      promise: runOneRed({
-        ref: redConfig.wide,
-        run,
-        workflow,
-        phase,
-        blueTask,
-        artifact,
-        spec,
-        failureModes,
-        projectDir,
-      }),
-      authority: redConfig.authority,
-      countsTowardGate: true,
-    });
-  }
-  if (redConfig.narrow) {
-    launches.push({
-      promise: runOneRed({
-        ref: redConfig.narrow,
-        run,
-        workflow,
-        phase,
-        blueTask,
-        artifact,
-        spec,
-        failureModes,
-        projectDir,
-      }),
-      authority: redConfig.authority,
-      countsTowardGate: true,
-    });
-  }
-  // Specialist reds (#96 sub-shift 1). Always run with `specialist` authority
-  // and `countsTowardGate: false`, regardless of the parent RedConfig's
-  // gateOnVerdict setting. Their verdicts are informational — the human gate
-  // reviewer sees them, but they don't trigger blocked_by_red.
-  for (const additional of redConfig.additional ?? []) {
-    launches.push({
-      promise: runOneRed({
-        ref: additional,
-        run,
-        workflow,
-        phase,
-        blueTask,
-        artifact,
-        spec,
-        failureModes,
-        projectDir,
-      }),
-      authority: "specialist",
-      countsTowardGate: false,
-    });
-  }
+  const launches: Launch[] = plan.map((entry) => ({
+    promise: runOneRed({
+      ref: entry.ref,
+      run,
+      workflow,
+      phase,
+      blueTask,
+      artifact,
+      spec,
+      failureModes,
+      projectDir,
+    }),
+    authority: entry.authority,
+    countsTowardGate: entry.countsTowardGate,
+  }));
 
   const results = redConfig.parallel
     ? await Promise.all(launches.map((l) => l.promise))
     : await sequentially(launches.map((l) => l.promise));
 
   const verdicts: Verdict[] = [];
-  // Verdicts that count toward the gate decision. Specialist additional reds
-  // contribute findings to the audit trail but their fail verdicts don't
-  // block the gate.
+  // Verdicts that count toward the gate decision. Today all launches set
+  // countsTowardGate: true (since #113); the field stays to keep room for
+  // future non-gating red roles (e.g. triage) without re-plumbing.
   const gateRelevantVerdicts: Verdict[] = [];
   for (let i = 0; i < results.length; i++) {
     const r = results[i]!;
@@ -144,8 +104,8 @@ export async function spawnRed(args: SpawnRedArgs): Promise<Verdict[]> {
   }
 
   // blocked_by_red: authoritative fail + gateOnVerdict ⇒ block the gate
-  // automatically. Specialist (additional) verdicts don't count here —
-  // they're informational. See #96 sub-shift 1.
+  // automatically. Since #113 this applies to every red in the RedConfig
+  // (wide, narrow, and additional discipline reds).
   if (
     redConfig.gateOnVerdict &&
     redConfig.authority === "authoritative" &&
@@ -167,6 +127,31 @@ async function sequentially<T>(promises: Promise<T>[]): Promise<T[]> {
   const out: T[] = [];
   for (const p of promises) out.push(await p);
   return out;
+}
+
+// Pure function describing how each red in a RedConfig should be recorded.
+// Exposed so tests can assert the policy without docker. Since #113, every
+// red in a RedConfig inherits the same authority + counts-toward-gate
+// behavior; the field is here to leave room for future non-gating reds
+// (e.g. triage) without re-plumbing.
+export type RedLaunchEntry = {
+  ref: AgentRef;
+  authority: "specialist" | "authoritative" | "triage";
+  countsTowardGate: boolean;
+};
+
+export function buildLaunchPlan(redConfig: RedConfig): RedLaunchEntry[] {
+  const entries: RedLaunchEntry[] = [];
+  const inherit = {
+    authority: redConfig.authority,
+    countsTowardGate: true,
+  };
+  if (redConfig.wide) entries.push({ ref: redConfig.wide, ...inherit });
+  if (redConfig.narrow) entries.push({ ref: redConfig.narrow, ...inherit });
+  for (const additional of redConfig.additional ?? []) {
+    entries.push({ ref: additional, ...inherit });
+  }
+  return entries;
 }
 
 type RunOneRedArgs = {

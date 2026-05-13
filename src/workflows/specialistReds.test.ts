@@ -1,8 +1,9 @@
-// Tests for specialist red wiring (#96 sub-shift 1) — the foundation that
-// supports build-phase decomposition. Confirms each `feature*` workflow's
-// build phase carries three specialist reds (frontend, backend, security)
-// in RedConfig.additional, and that the specialist agent constructor stamps
-// the discipline tag correctly.
+// Tests for discipline-specific red wiring (#96 sub-shift 1, gating semantics
+// promoted in #113). Confirms each `feature*` workflow's build phase carries
+// three discipline reds (frontend, backend, security) in RedConfig.additional,
+// and that the specialist agent constructor stamps the discipline tag
+// correctly. The "specialist" function/test names are kept for historical
+// continuity; the gating behavior matches wide/narrow now.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -40,12 +40,12 @@ export type AgentRef = {
 export type RedConfig = {
   wide?: AgentRef;
   narrow?: AgentRef;
-  // Specialist reds attached alongside wide/narrow. #96 sub-shift 1 — these
-  // run with `gateOnVerdict: false` semantics regardless of the parent
-  // RedConfig's gateOnVerdict (their fail verdicts are informational, the
-  // wide/narrow authoritative reds still control the gate). Unconfigured by
-  // default; workflows that want discipline-specific specialist coverage opt
-  // in by listing the agents.
+  // Discipline-specific reds attached alongside wide/narrow. #96 sub-shift 1.
+  // Inherit the parent RedConfig's authority and gateOnVerdict — they're red
+  // agents like any other, just specialized through a discipline lens (e.g.
+  // red-frontend, red-backend, red-security). #113 promoted these from
+  // informational-only to first-class gating. Unconfigured by default;
+  // workflows opt in by listing the agents.
   additional?: AgentRef[];
   parallel: boolean;
   authority: RedAuthority;

@@ -6,9 +6,10 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-12.** Main is clean, 341/341 tests passing, typecheck green. The big graph-view-85 branch landed and 4 more feature branches landed on top of it. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
+**State at end of 2026-05-12.** Main is clean, 346/346 tests passing, typecheck green. The big graph-view-85 branch landed and 5 more feature branches landed on top of it. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
 
 **What shipped this multi-day session (most recent first):**
+- **#113** specialist reds promoted to authoritative gating. `additional[]` reds now inherit RedConfig.authority + gateOnVerdict (red-frontend / red-backend / red-security block the gate on fail like wide/narrow do). Path A from the design — minimal change in `spawnRed.ts` via an extracted pure `buildLaunchPlan(redConfig)`; legacy verdicts written before the flip keep their `authority: 'specialist'` label and still trip the #110 rationale UI. Seeds reworded ("discipline red", not "specialist red"). Five new unit tests; existing 341 still green.
 - **#109** transactional reconcile writes (fault-injection tests + `_setReconcileFaultForTest` hook). Dispatch + gate writes split out to **#112** as follow-up.
 - **#103** GRAPH: run-status pill in graph-view header.
 - **#110** rationale required when advancing over a failed specialist red. Two-layer fix: spine extends the check beyond `gate: "verdict"` phases; dashboard surfaces red verdict cards + flips the Advance button to btn-warning with a required-rationale toast.
@@ -31,13 +32,13 @@ When you start a session, read this file. When you finish, update it: move close
 - `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`. Any spawn after that gets the wrapper.
 
 **Honest flags:**
-- **Specialist reds wiring** (#96 sub-shifts 1+2) was exercised by the #91 forge run on 2026-05-12 — red-backend correctly raised a specialist-fail on transactional concerns. So they DO work end-to-end now.
+- **Specialist reds wiring** (#96 sub-shifts 1+2) was exercised by the #91 forge run on 2026-05-12 — red-backend correctly raised a specialist-fail on transactional concerns. So they DO work end-to-end. Now that #113 promoted them to gating-authoritative, the next real run that trips one will land the parent in `blocked_by_red` — verify the dashboard force-advance + rationale path on the first occurrence so we know the new flow looks right end-to-end.
 - **#25 + #32 still un-validated end-to-end** (reject/onReject flow, failed-result detection).
 - **#91 forge run** was the first real `feature` workflow run on forge itself. Architect agent correctly caught two material brief errors that would have shipped real bugs. That's the model working as designed.
 
 **Local-only file (gitignored):** none currently. The old `.overnight-plan-2026-05-09.md` was deleted.
 
-**Branch hygiene:** local-only branches still around — `auto-dispatch-108`, `rationale-on-red-fail-110`, `graph-status-pill-103`, `transactional-writes-109`, `verify-container-111`, `graph-view-85`, `phase-flow-71`. Delete whenever via `git branch -d <name>`. Main carries all the work.
+**Branch hygiene:** local-only branches still around — `auto-dispatch-108`, `rationale-on-red-fail-110`, `graph-status-pill-103`, `transactional-writes-109`, `verify-container-111`, `graph-view-85`, `phase-flow-71`. #113 was implemented straight on main (no branch). Delete the stale ones whenever via `git branch -d <name>`. Main carries all the work.
 
 ## Active
 
@@ -499,6 +500,25 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #113 — Promote specialist reds to authoritative (gateOnVerdict: true)
+**Closed:** 2026-05-12. Specialist `additional[]` reds (red-frontend / red-backend / red-security) now inherit RedConfig.authority + gateOnVerdict like wide/narrow do. A fail blocks the gate via `blocked_by_red`; override is the existing `--force --rationale` path.
+
+**Shape that shipped:** Path A from the planning conversation — minimal, reversible, no schema change.
+- `src/spine/spawnRed.ts` — extracted `buildLaunchPlan(redConfig)` as a pure exported function. All reds in a RedConfig (wide / narrow / additional) get the same authority + countsTowardGate: true. Pre-#113, `additional` was hardcoded `specialist` / countsTowardGate: false.
+- `src/types/index.ts` — RedConfig.additional doc comment rewritten to reflect new gating semantics.
+- `src/workflows/feature.ts`, `feature-ui-design-needed.ts`, `feature-ui-design-provided.ts` — comments updated; no structural change (RedConfig was already `authority: "authoritative"` + `gateOnVerdict: true`).
+- `seeds/agents/red-{frontend,backend,security}/CLAUDE.md` — reworded from "specialist red, informational" to "discipline red, fail blocks the gate." Tone matches red-wide/red-narrow.
+- `src/spine/spawnRed.test.ts` — new file, 5 unit tests against `buildLaunchPlan` (inheritance for additional[], specialist-authority workflows still propagate specialist, empty/missing wide-narrow cases).
+- `src/workflows/specialistSeeds.test.ts` — assertion flipped from "CLAUDE.md says `gateOnVerdict: false`" to "CLAUDE.md self-identifies as discipline red + says fail blocks the gate."
+
+**Forward-only.** Legacy verdicts in the DB still carry `authority: 'specialist'`; the dashboard's #110 specialist-fail-rationale path remains intact for them. New runs write `authority: 'authoritative'` for discipline reds and trip the `blocked_by_red` + force-advance UI instead. The two paths coexist; no migration.
+
+**What's still load-bearing:** the `RedAuthority` type's `specialist` value, `gate.ts`'s `aggregateVerdicts` specialist-fails branch, and the dashboard's `v.authority === 'specialist'` checks all remain — they handle legacy verdicts and leave room for future non-gating reds (e.g. triage). Cleanup of that branch is a Path B future task, not filed yet because it's only worth doing once legacy verdicts have aged out.
+
+**Verification.** 346/346 tests passing (5 new), typecheck green. Real end-to-end verification needs a feature run where a discipline red fires — first occurrence will exercise the `blocked_by_red` + dashboard force-advance flow.
+
+**Tests of note still asserting old behavior:** the four #110 tests in `gate.test.ts` (`gate=human advance with specialist fail requires rationale`, etc.) still pass because they manually insert verdicts with `authority: 'specialist'` — that path is still real for legacy data, just not how new specialists are recorded. Intentional.
 
 ### Active-cleanup pass 2026-05-12 — 8 stale entries closed
 End-of-session sweep before a Claude upgrade. Each entry is genuinely dead or shipped:
