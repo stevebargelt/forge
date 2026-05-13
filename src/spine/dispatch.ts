@@ -67,7 +67,7 @@ export async function dispatch(
   while (queue.length > 0) {
     const batch = queue.splice(0, concurrency);
     const launched = await Promise.all(
-      batch.map((t) => runBlueTask(t, phase, run, workflow, opts.projectDir))
+      batch.map((t) => runBlueTask(t, phase, run, workflow, opts.projectDir, designDirFor(run)))
     );
     for (const r of launched) {
       taskIds.push(r.taskId);
@@ -85,7 +85,8 @@ async function runBlueTask(
   phase: Phase,
   run: Run,
   workflow: Workflow,
-  projectDir: string
+  projectDir: string,
+  designDir: string | undefined
 ): Promise<{ taskId: string; status: "complete" | "failed" }> {
   const agent = phase.agents.find((a) => a.role === task.agentRole) ?? phase.agents[0];
   if (!agent) throw new Error(`No agent found for task ${task.id}`);
@@ -95,6 +96,7 @@ async function runBlueTask(
     agentConfig: agent,
     projectDir,
     readOnlyProject: false,
+    designDir,
   });
 
   if (result.status === "failed") {
@@ -119,6 +121,7 @@ async function runBlueTask(
       workflow,
       phase,
       projectDir,
+      designDir: designDirFor(run),
     });
   } else if (phase.gate === "auto") {
     setTaskStatus(task.id, "complete");
@@ -134,4 +137,12 @@ function mostRedRole(phase: Phase): string | undefined {
   // Sentinel: dispatch() runs blue tasks; reds are spawned by spawnRed() within runBlueTask.
   // We never want dispatch to pick up a red task that lives in the same phase row.
   return phase.reds?.wide?.role ?? phase.reds?.narrow?.role;
+}
+
+// #114 — extract designDir from run metadata for /design mount. Optional; only
+// set on runs created with --design-dir. Forge passes it through to spawn /
+// spawnRed; spawn turns it into a -v <designDir>:/design:ro mount.
+function designDirFor(run: Run): string | undefined {
+  const dd = run.metadata?.designDir;
+  return typeof dd === "string" && dd.length > 0 ? dd : undefined;
 }

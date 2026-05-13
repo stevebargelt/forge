@@ -34,7 +34,7 @@ Your job is to take whatever inputs you have and **produce a PROMPT.md immediate
 Read `inputs` for everything the human passed at run creation:
 
 - `inputs.brief` — the only required field. The human's design brief.
-- `inputs.designDir` — the directory where this workflow's artifacts live (e.g. `/Users/x/code/forge-stats-widget`). Set automatically by `forge new` from `--design-dir` (explicit) or a sanitized-title default. Trust this value over your own derivation.
+- `inputs.designDir` — the **host path** to the directory where this workflow's artifacts live (e.g. `/Users/x/code/forge-stats-widget`). Set automatically by `forge new` from `--design-dir` (explicit) or a sanitized-title default. Trust this value over your own derivation. Use this for paths *in the PROMPT.md you produce* — the human runs that prompt on their host, where this path resolves. **For reads from inside your own container** (inspecting existing PNGs / .pen / HTML to inform your prompt — see #80), the same directory is mounted read-only at `/design`; read from there.
 - `inputs.template` — which template to use (e.g. `ui-design`). If unset, infer from the workflow name.
 - `inputs.screens` — optional explicit screen list.
 - `inputs.style` — optional Pencil-style hint.

@@ -63,18 +63,18 @@ test("specialist implementer seeds declare full read/write tools", () => {
   }
 });
 
-test("specialist red CLAUDE.md mentions specialist + gateOnVerdict: false", () => {
+test("discipline red CLAUDE.md self-identifies + declares gating behavior (#113)", () => {
   for (const role of ["red-frontend", "red-backend", "red-security"]) {
     const text = readFileSync(join(SEEDS_DIR, role, "CLAUDE.md"), "utf8");
     assert.match(
       text,
-      /specialist red/i,
-      `${role} CLAUDE.md should self-identify as specialist`
+      /discipline red/i,
+      `${role} CLAUDE.md should self-identify as discipline red`
     );
     assert.match(
       text,
-      /gateOnVerdict: false/,
-      `${role} CLAUDE.md should declare gateOnVerdict: false`
+      /blocks the gate/i,
+      `${role} CLAUDE.md should declare its fail blocks the gate (#113)`
     );
   }
 });

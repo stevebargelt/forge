@@ -34,12 +34,10 @@ export const workflow: Workflow = {
     {
       name: "build",
       agents: [agent("implementer", "spec-writer")],
-      // build phase reds: authoritative wide/narrow gate the task (block on
-      // fail), plus three specialist reds that contribute informational
-      // findings through discipline-specific lenses (#96 sub-shift 1).
-      // The specialists are gateOnVerdict: false implicitly — spawnRed
-      // records them as `specialist` authority regardless of this RedConfig
-      // setting, and they don't trigger blocked_by_red.
+      // build phase reds: wide/narrow + three discipline-specific reds
+      // (frontend, backend, security). All five inherit the RedConfig's
+      // authoritative + gateOnVerdict settings — any red's fail blocks the
+      // gate (#96 sub-shift 1 wiring, #113 gating semantics).
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
