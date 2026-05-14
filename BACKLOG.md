@@ -22,6 +22,8 @@ When you start a session, read this file. When you finish, update it: move close
 **Pending next-session action: merge `red-arrow-127` → `main`.** Fast-forward or `--no-ff`, your call. After merge: only `main` remains.
 
 **Top of the active stack now:**
+0. **#130** Bedrock concurrent-request starvation (kills a parallel red silently). Tactical: surface idle-timeout kills as `failed.reason=infra` distinct from `inconclusive`. Small change to spawn.ts + gate.ts. Composite with #74.
+0. **#131** Dashboard CLIENT_JS bundle stale until process restart. Blocks #128's verify-against-live-dashboard story. Lean: file-watcher restart loop in dev + a verifier-seed note about synthetic-render-fallback. Composite with #77.
 1. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run.
 2. **Auth fix cluster (REDUCED IN URGENCY by #121 landing).** **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All still real bugs, but they apply only to mount-mode (now opt-in via `FORGE_AUTH_MODE=mount`). Decide whether each is worth fixing or just deprecating mount mode further.
 3. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
@@ -32,9 +34,9 @@ When you start a session, read this file. When you finish, update it: move close
 8. **System Map polish:** **#124** drag-overrides Map LRU cap, **#123** a11y posture. (#127 closed today.)
 9. **#129** — shareable agent-skills pattern (future). Placeholder.
 
-**New issues caught during the #127 run, worth filing as their own tickets if not already:**
-- **Bedrock concurrency starvation.** 5 reds dispatched in parallel; red-security's container produced zero stdout for 5 minutes, idle-watchdog killed it. Verdict defaulted to `inconclusive`. Probably Bedrock throttling at the account-quota tier with no client-visible retry signal. Worth filing — small surface, recurring pattern likely.
-- **Dashboard server doesn't auto-restart on file change.** Verifier on #127 found that `host.docker.internal:8022` still served pre-diff code because `tsx` reloads on file changes but the bundled CLIENT_JS that ships to the browser doesn't reload until the dashboard process restarts. Verifier pivoted to a synthetic cytoscape render to validate. Worth filing — interferes with live-diff visual verification.
+**New issues filed during the #127 run:**
+- **#130** Bedrock concurrent-request starvation silently kills a parallel red — surfaced when red-security got zero stdout for 5 minutes and idle-watchdog killed it while four siblings ran fine.
+- **#131** Dashboard CLIENT_JS bundle is stale until process restart — verifier on #127 navigated to `host.docker.internal:8022` and saw pre-diff code; pivoted to synthetic cytoscape render.
 
 **Useful runtime state:**
 - `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`.
@@ -49,6 +51,45 @@ When you start a session, read this file. When you finish, update it: move close
 **Branch hygiene:** All branches deleted 2026-05-13 after the System Map merge — only `main` remains.
 
 ## Active
+
+### #131 — Dashboard CLIENT_JS bundle is stale until process restart; live diffs don't show
+**Why:** Caught 2026-05-13 during the #127 forge run. Verifier-phase agent navigated to `http://host.docker.internal:8022` (the running host dashboard), found the System Map view still rendering the *pre-diff* red-edge style (solid magenta arrow, opacity 0.7), and correctly noted in its findings: *"the host server process was started before the changes; server restart would pick up the changes, but the code in /project/src/dashboard/html.ts is correct."* It then pivoted to a self-contained synthetic cytoscape render to validate the styles directly.
+
+**Root cause:** The dashboard runs via `tsx` which hot-reloads server-side TypeScript on file change, BUT the dashboard's client-side bundle (`CLIENT_JS` inside `src/dashboard/html.ts` — a giant template literal that gets shipped to the browser) only gets re-evaluated when the server process restarts. Editing `html.ts` updates the file but the running dashboard keeps serving its captured-at-startup version of CLIENT_JS to the browser.
+
+**Why it matters:** This is friction for two distinct workflows:
+1. **Pair-coding iteration on the dashboard** — Steven + Claude editing `html.ts`, refreshing the browser, seeing no change, getting confused.
+2. **Forge verify-phase visual verification (#128)** — the verifier expects `host.docker.internal:8022` to reflect the diff so it can screenshot the actual rendered result. Today it can't; the verifier has to pivot to synthetic renders (as in the #127 run) or know to restart the dashboard (it can't — different process scope).
+
+**How to apply — options worth weighing:**
+1. **File-watcher restart loop.** A small `chokidar`-style watcher in dev that re-imports `html.ts` and restarts the server on `src/dashboard/**.ts` change. Probably 30 lines. Caveat: in-flight HTTP connections drop; for a dev surface that's fine.
+2. **Move CLIENT_JS out of the template literal into a separate served-on-each-request file.** The handler reads the file (or imports a fresh module) per request. Slower per request but always-fresh. Probably the cleaner refactor but bigger change.
+3. **Document the restart-needed gotcha.** Cheapest. Doesn't help the verify-phase case at all.
+4. **Verifier seed update: explicit guidance to use synthetic renders OR restart instruction.** This run's verifier pivoted naturally; codifying it lets future verifiers do it deliberately.
+
+Lean (1) for the dev surface + (4) for the verify-phase case in the short term. (2) is the right long-term shape but it's a real refactor and might be unnecessary if Preact migration (#77) reshapes how the client-side ships.
+
+**Composite with #77 (Preact migration), #128 (verifier render-check).** #77 likely reshapes how the client bundle ships; this might evaporate naturally. #128's verifier seed could note the workaround.
+
+**Caught:** 2026-05-13 — during the verify phase of the #127 forge run.
+
+### #130 — Bedrock concurrent-request starvation silently kills a parallel red
+**Why:** Caught 2026-05-13 during the #127 forge run's build phase. 5 reds dispatched in parallel (red-wide, red-narrow, red-frontend, red-backend, red-security) at 18:11. Four produced their first stdout within 30s of start. **red-security produced zero stdout for 5 full minutes**, hit forge's idle-watchdog kill at 18:16, container terminated. DB recorded the verdict as default-`inconclusive` (0.5 confidence, empty findings) because gate.ts handles "task failed without writing result.json" by inferring an inconclusive verdict.
+
+**Likely root cause:** Bedrock concurrent-request quotas at the account tier. claude-code retries silently on 429/throttling within its stream-json output mode — no client-visible signal that the first request never went through. Other 4 reds got their slot; red-security got starved. The starved request kept retrying internally but produced no token output, so forge's idle watchdog (no-stdout-for-300s) killed the container before retries succeeded.
+
+**Why this matters:** The gate semantics treat `inconclusive` as informational + advanceable-with-rationale. That's correct for legitimate inconclusive verdicts, but here it papers over an infra failure as if it were a content judgment. From the human's perspective, "one red went inconclusive" reads as "the red found something ambiguous"; the truth is "the red never actually ran."
+
+**How to apply — three layers worth considering:**
+1. **Detect zero-stdout idle-timeout kills + surface them differently from "agent reported inconclusive."** The reconcile / dispatch tail in spawn.ts knows the difference (idle-timeout exit code `137`, empty stdout, no result.json). Today it gets folded into `status='failed'` for the task and the gate aggregates it as default-inconclusive. Adding a `task.failed.reason='infra'` distinction would let the gate UI surface "this red didn't run; verdict not meaningful" instead of "this red was inconclusive."
+2. **Stagger or limit parallel red dispatch.** Today gate.ts dispatches all reds simultaneously. A semaphore (max 3-4 concurrent) would avoid the rate-limit edge while still being parallel. Adds latency to the build phase but stops the starvation. Probably wrong if the issue is account-tier quota — the 5th still hits the limit when it eventually fires.
+3. **Bedrock-side: request a quota increase** or move to a higher-tier model. Outside forge's control, but worth knowing as the architectural workaround.
+
+Lean (1) first — surfacing the failure mode honestly is cheap and the right shape regardless of how the root cause is mitigated. (2) is a tactical fix; (3) is the actual root cause.
+
+**Composite with #74** (reconcile + watchdog can't catch zero-stdout orphans). #74 caught the same shape of failure from a different angle — this is the same dataclass of bug.
+
+**Caught:** 2026-05-13 — during the build phase of the #127 forge run.
 
 ### #116 — Forge v2: YAML-driven orchestrator, keep SQLite + dashboard
 **Why:** Caught 2026-05-12. Steven's been carrying a "too complicated" feeling about the TypeScript control system for a while; this session surfaced the shape that resolves it. Two reference repos — `~/code/de-dev-adx-example-workspaces/jeffs-workspace-boilerplate/` and `~/code/local-adx-workspace-2/multi-agent-package/` — already run a productized version of the model Steven wants: `pipeline.yml` per project, `runtime-*.yml` per provider, agent markdown under `agents/<role>.md`, a small executor reading YAML and spawning containers. Jeff's model is deployed across 8+ live projects (analysis-code, mysg, atlas-hq, sgws-ops-dashboard, etc.) — not a sketch.
