@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
 import { taskDir } from "../util/paths.js";
-import { ensureCreds, detectCredsMode, oauthVolumeName, awsConfigDir, resolveAwsProfile, resolveAwsRegion } from "../util/creds.js";
+import { ensureCreds, detectCredsMode, oauthVolumeName, awsConfigDir, resolveAwsProfile, resolveAwsRegion, exportAwsCreds } from "../util/creds.js";
 import { logEvent } from "../store/events.js";
 import { markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 
@@ -198,15 +198,31 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   // Env vars + auth mounts depend on the resolved credentials mode.
   const mode = detectCredsMode();
   if (mode === "bedrock") {
-    // Profile-mount model (FORGE-DEC-013): pass AWS_PROFILE + AWS_REGION through and
-    // bind-mount ~/.aws read-only. The container's AWS SDK reads SSO cache + config
-    // from the mount on every Bedrock call, so a host-side watchdog refreshing the
-    // cache is enough to keep long-running containers authenticated. No env-var
-    // snapshot of STS tokens — those would go stale within an hour.
+    // STS env-snapshot model (#121, supersedes FORGE-DEC-013): derive fresh
+    // STS credentials on the host via `aws configure export-credentials`,
+    // pass them in as env vars. The container's AWS SDK uses the env-var
+    // creds directly and skips its own credential chain. Pros: spawn-time-
+    // fresh; matches the credential resolution the human sees on the host;
+    // no SDK-version drift between host and container; container's TLS
+    // proxy doesn't matter (no SDK call out to AWS for token exchange).
+    // Cons: STS TTL is typically 1 hour — containers running longer than
+    // that age out mid-run. Most forge tasks finish in minutes; this is
+    // acceptable. Long-running containers (multi-phase fanouts) may need
+    // to revisit; the runtime YAML in #116 can declare opt-in mount mode.
+    //
+    // FORGE_AUTH_MODE=mount falls back to the legacy ~/.aws mount, kept
+    // as escape hatch while we validate the env-snapshot default.
     args.push("-e", "CLAUDE_CODE_USE_BEDROCK=1");
-    args.push("-e", `AWS_PROFILE=${resolveAwsProfile()}`);
     args.push("-e", `AWS_REGION=${resolveAwsRegion()}`);
-    args.push("-v", `${awsConfigDir()}:/home/agent/.aws:ro`);
+    if (process.env.FORGE_AUTH_MODE === "mount") {
+      args.push("-e", `AWS_PROFILE=${resolveAwsProfile()}`);
+      args.push("-v", `${awsConfigDir()}:/home/agent/.aws:ro`);
+    } else {
+      const creds = exportAwsCreds(resolveAwsProfile());
+      args.push("-e", `AWS_ACCESS_KEY_ID=${creds.AWS_ACCESS_KEY_ID}`);
+      args.push("-e", `AWS_SECRET_ACCESS_KEY=${creds.AWS_SECRET_ACCESS_KEY}`);
+      args.push("-e", `AWS_SESSION_TOKEN=${creds.AWS_SESSION_TOKEN}`);
+    }
   } else if (mode === "anthropic-apikey") {
     args.push("-e", `ANTHROPIC_API_KEY=${process.env.ANTHROPIC_API_KEY}`);
   } else {
