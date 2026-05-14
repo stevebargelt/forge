@@ -6,27 +6,35 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-13.** Main is clean, 349/349 tests passing, typecheck green. Branches all merged + deleted; only `main` remains. No uncommitted WIP. End-of-session sweep deleted the stray repo-root PNGs, `~/.forge/forge.db.bak.before-110-test`, `~/.aws/credentials.{old,backup.old}`, and the legacy `forge-claude-oauth` docker volume; live oauth volume is `forge-claude-oauth-v2`.
+**State at end of 2026-05-13 (late).** `red-arrow-127` branch has three new commits ready to merge: `8e7306c` (#121 env-snapshot auth), `ec6a519` (#127 red arrow dotted tether), `fc59414` (verifier seed tighter render-check). `main` is at `520dd5b` (#128 container browser-tools). 355/355 tests passing on the branch.
 
-**What shipped today (2026-05-13):**
-- **#105** System Map view (replaces old graph view). Forge run + manual renderer fix-pass against the design frames after red review caught real gaps. Commit `5a44588`, merged to main as `6a1b6aa`. See the #105 Done entry for the full landed-features list.
-- **#114** mount `--design-dir` read-only at `/design` inside containers (commit `414b29b`). Architect + prompt-author seeds updated.
-- **#113** discipline reds (red-frontend / red-backend / red-security) gate the parent like wide/narrow (commit `79d6edf`). `buildLaunchPlan` extracted as pure function.
-- **#126** host-side pi-skills/browser-tools install + validation. No forge code change; pure pair-coding migration.
-- **#128** forge container-side browser-tools migration + Playwright MCP teardown. Chrome baked into `agent-dev-worker` image (Chromium-for-Testing via `@puppeteer/browsers`, image pinned to linux/amd64), `agent-entrypoint.sh` starts headless Chrome on `:9222`, `spawn.ts` mounts `~/pi-skills/browser-tools` read-only at the well-known skills path, verifier seed updated with render-check guidance, Playwright MCP fully torn down (launchd service stopped, `~/.claude.json` cleaned across 5 projects, Docker MCP registry pruned, memory rewritten). Backups kept for revival. 354/354 tests passing. Uncommitted in working tree.
-- **#129** spun out as future feature (shareable agent-skills pattern; placeholder, no work yet).
+**What shipped today (2026-05-13) — big day:**
+- **#105** System Map view (replaces old graph view). Commit `5a44588`, merged to main as `6a1b6aa`.
+- **#114** mount `--design-dir` read-only at `/design` inside containers (commit `414b29b`).
+- **#113** discipline reds gate the parent like wide/narrow (commit `79d6edf`).
+- **#126** host-side pi-skills/browser-tools install + validation (no forge code change).
+- **#128** forge container-side browser-tools migration + Playwright MCP teardown (commit `520dd5b` on main).
+- **#127** red→parent arrows now render as dotted magenta tether (commit `ec6a519` on `red-arrow-127`). **First forge run that exercised #128 end-to-end** — produced the change, verified via browser-tools screenshot.
+- **#121** env-snapshot bedrock auth (commit `8e7306c` on `red-arrow-127`). Landed earlier than the planned v2/#116 timing because it was the actual blocker on the #127 run.
+- **Verifier seed iteration** (commit `fc59414`) — first verify pass on #127 reasoned its way out of the render-check ("just CSS values"); the seed copy was rewritten as a hard file-extension rule with explicit anti-pattern callout. Second verify pass invoked browser-tools 22 times.
+- **#129** spun out as future feature (shareable agent-skills pattern; placeholder).
+
+**Pending next-session action: merge `red-arrow-127` → `main`.** Fast-forward or `--no-ff`, your call. After merge: only `main` remains.
 
 **Top of the active stack now:**
-1. **Commit + validate #128.** Working tree has 7 files modified + 1 new (Dockerfile, agent-entrypoint.sh, build.sh, .dockerignore, spawn.ts, spawn.test.ts, verifier seed, BACKLOG). Ship it, then prove the container side works in a real forge run that exercises verifier with a UI change. Without a real run we don't know if the verifier seed's render-check copy reads correctly to the agent.
-2. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run.
-3. **Auth fix cluster** (small, related, all caught 2026-05-13 during a painful 4-hour SSO chase): **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All small tactical fixes. #117 + #118 are ~30 min each; **#121** is the architectural lesson (host-side STS export pattern) — defer to #116.
-4. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
-5. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
-6. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught during #105; today's build used `forge-test` for the new test file but `npm test` for the full suite, producing misleading "143 failures" in result.json.
-7. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
-8. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model. Sub-shifts 1+2 shipped, #113 promoted them.
-9. **System Map polish:** **#127** red→parent arrow semantics (magenta arrow reads as flow when it should read as side-channel — file for designer feedback), **#124** drag-overrides Map LRU cap, **#123** a11y posture.
-10. **#129** — shareable agent-skills pattern (future). Placeholder; revisit when a second consumer of the host-symlink/container-mount pattern appears.
+1. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run.
+2. **Auth fix cluster (REDUCED IN URGENCY by #121 landing).** **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All still real bugs, but they apply only to mount-mode (now opt-in via `FORGE_AUTH_MODE=mount`). Decide whether each is worth fixing or just deprecating mount mode further.
+3. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
+4. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
+5. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught during #105.
+6. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
+7. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model.
+8. **System Map polish:** **#124** drag-overrides Map LRU cap, **#123** a11y posture. (#127 closed today.)
+9. **#129** — shareable agent-skills pattern (future). Placeholder.
+
+**New issues caught during the #127 run, worth filing as their own tickets if not already:**
+- **Bedrock concurrency starvation.** 5 reds dispatched in parallel; red-security's container produced zero stdout for 5 minutes, idle-watchdog killed it. Verdict defaulted to `inconclusive`. Probably Bedrock throttling at the account-quota tier with no client-visible retry signal. Worth filing — small surface, recurring pattern likely.
+- **Dashboard server doesn't auto-restart on file change.** Verifier on #127 found that `host.docker.internal:8022` still served pre-diff code because `tsx` reloads on file changes but the bundled CLIENT_JS that ships to the browser doesn't reload until the dashboard process restarts. Verifier pivoted to a synthetic cytoscape render to validate. Worth filing — interferes with live-diff visual verification.
 
 **Useful runtime state:**
 - `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`.
@@ -65,25 +73,6 @@ When you start a session, read this file. When you finish, update it: move close
 **Not running through forge.** Considered + rejected 2026-05-12. Three reasons: (1) forge v1 is the executor for v2's build — implementer mid-run editing the spine that's dispatching it is a real deadlock risk; (2) the hard work is design (YAML schema, runtime resolution, phases-vs-steps), not implementation, and the PRD already captures the framing — architect's value-add is weakest on already-thought-through problems; (3) step boundaries for a rewrite are themselves architectural decisions; planner would produce a decomposition but probably not the right one. Paired Steven+Claude session work instead, with small translation tasks possibly farmed out to agents once the schema is locked.
 
 **Caught:** 2026-05-12 — during architecture discussion after the System Map planner output rejection.
-
-### #127 — System Map: red→parent arrow semantics don't match red review's actual relationship
-**Why:** Caught 2026-05-13 reviewing the System Map after #105 shipped. Reds currently render with a directional magenta arrow from parent → red. That's causally accurate (the red was created *from* the parent's artifact) but semantically misleading. Reds don't receive work the way the next phase does — they audit it. The directional arrow makes them look like downstream consumers when they're really sideways side-channels.
-
-**Six options worth weighing when this is revisited:**
-1. **Bidirectional arrow** (arrowheads on both ends) — reads as "paired dialogue." Risk: often also reads as "data flows both ways," which is wrong; reds only read from the parent's artifact.
-2. **No arrow at all, just a thin line** — quieter, matches "side-channel" framing. Risk: loses directionality cue when nodes get dragged.
-3. **UML association style** (tee or circle at parent end, arrowhead at red end) — most semantic, requires legend literacy.
-4. **No arrow; reds glued spatially next to parent** — visual proximity replaces the line. Risk: drag breaks the association.
-5. **Border ring on parents that have reds + reds standalone** — no line. Risk: fragile with multi-red parents.
-6. **Dotted, no-arrow, low-opacity magenta tether** — says "associated, not flow." (Steven's lean alternative)
-
-**Lean:** option 6 — dotted thin line, no arrowhead, opacity ~0.4, magenta. Falls out of magenta-already-means-red-review, drops the "active flow" connotation that bothered Steven.
-
-**Worth surfacing back to the designer.** "What's the visual treatment for the relationship between a parent task and its red reviewers?" The designer's answer in the current reds-detail frame uses status-colored arrows (red-narrow's failing arrow is red); the magenta-arrow choice was the implementer's interpretation, not the designer's spec.
-
-**Out of scope:** changing red-as-peer-node placement. That part works.
-
-**Caught:** 2026-05-13 — post-renderer-pass review of System Map.
 
 ### #129 — Shareable agent-skills pattern (future feature)
 **Why:** While doing #126 (pair-coding side) on 2026-05-13, the pattern surfaced as something with reach beyond forge. The combination of Mario's Skills-format choice + the symlink-on-host / bind-mount-in-container duality is generally useful — any tool the human and an agent both want (screenshot, eval, search, transcript, calendar) wants both surfaces. The natural product is something like "use Mario's tools from this repo, with a small install dance for both surfaces."
@@ -158,32 +147,6 @@ Lean LRU at 10 runs. Caps without forcing UX loss.
 **Not relevant for #116:** in the YAML orchestrator, request-changes is probably just a step-re-spawn, not a separate task-row insertion + dispatch. This is a v1 patch.
 
 **Caught:** 2026-05-13 — after iterating planner output three times on System Map run.
-
-### #121 — Adopt host-side STS export for short containers; mount-only for long-running (architectural)
-**Why:** Caught 2026-05-13 during root-cause analysis of #117/#118/#119/#120. After ~4 hours of failed task runs traced to a stale `~/.aws/credentials` file shadowing the SSO chain inside the bedrock-mode container, comparison with Jeff & Terry's pipeline shows a fundamentally different auth model that would have prevented today's failure entirely.
-
-**The architectural difference:**
-- **Forge today (FORGE-DEC-013):** mounts `~/.aws:/home/agent/.aws:ro` into the container. Container's AWS SDK reads SSO config + cache + (oops) any static `~/.aws/credentials` file and derives STS on its own. Pros: STS tokens can't go stale during a multi-hour container run. Cons: static credentials shadow SSO; container-SDK version differences are invisible; debugging splits between host and container.
-- **Jeff & Terry's pattern:** host calls `aws configure export-credentials --profile $AWS_PROFILE --format env-no-export` immediately before spawn, then passes `AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN` into the container as `-e` env vars. Container's SDK skips its credential chain entirely and uses the env-var creds. Pros: spawn-time-fresh; static credentials file ignored; pre-flight implicit (the export command itself fails loudly if SSO is broken); host SDK is the only one that needs to support `[sso-session]`. Cons: STS tokens are typically 1-hour TTL — long-running containers (multi-phase fanouts, design runs) age out mid-run.
-
-**The right shape: both, auto-selected.** STS env-var snapshot for predictably-short steps (the common case — most agent tasks finish in <30 minutes); `~/.aws` mount only when a step is *configured* to run long. The runtime YAML in #116 can declare which mode (e.g., `auth_mode: env-snapshot` vs `auth_mode: mount`). Default to env-snapshot since it's safer and matches the production deployment Jeff & Terry have proven across 8+ projects.
-
-**What this would have prevented today:**
-- The stale `~/.aws/credentials` file shadowing the SSO chain — env-snapshot reads from the host-side SDK's *active credential resolution*, not from whatever file exists on disk
-- The container-SDK silent failure — the host's `aws configure export-credentials` errors loudly when SSO is broken, before any container spawns
-- The "is forge auth status right?" question — pre-flight effectively becomes the export command itself
-
-**How to apply (mostly post-v2):**
-1. **Runtime YAML schema (part of #116):** each runtime declares its auth model. `runtime-claude-bedrock-env.yml` = env-snapshot mode; `runtime-claude-bedrock-mount.yml` = mount mode. Workspace default picks env-snapshot.
-2. **Pre-spawn step:** the runner calls `aws configure export-credentials` once per spawn, fails the task on non-zero exit (with the real AWS error surfaced), passes vars to docker.
-3. **Workflow declaration:** workflows or steps can opt into mount mode for known-long containers via a `long_running: true` step-level field. Default is false → env-snapshot.
-4. **Documentation update:** FORGE-DEC-013 gets a revisit note explaining that the mount-only choice was right *in isolation* but failed under the static-credentials-shadow case. The successor decision is the auto-selected hybrid.
-
-**Composite with #116, #117, #118, #119, #120.** #116 (YAML orchestrator) provides the YAML schema where this lives. #117/#118 are tactical fixes to the mount-mode path that remain useful as long as forge supports mount mode (long-running tasks). #119/#120 partially go away under env-snapshot (no STS cache to detect-stale-for, no `~/.aws/credentials` shadow possible); the parts that remain are about helpful diagnostics.
-
-**Decision still to make:** is FORGE-DEC-013 overturned outright (env-snapshot becomes the default, mount mode is opt-in), or are both modes peers? Lean **env-snapshot default**. The 1-hour-STS-expiry concern that drove DEC-013 is mitigated by Jeff & Terry's pattern in practice (the watchdog refreshes STS on the host before expiry; the env-snapshot reads the freshest creds at every spawn). Containers that genuinely run >1 hour without re-spawn are rare and can opt in to mount mode explicitly.
-
-**Caught:** 2026-05-13 — surfaced during architectural lessons review after hours of stalled task runs from #117/#119.
 
 ### #120 — `forge auth status` is shallow + the underlying health probe is local-clock-only
 **Why:** Caught 2026-05-13 during diagnosis of #119. `forge auth status` for bedrock mode prints only `Auth mode: bedrock` + `AWS_REGION: us-east-1` — no SSO expiry, no STS cache state, no actual probe of whether the chain works. **Two bugs underneath:**
@@ -621,6 +584,33 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #127 — System Map: red→parent arrows render as dotted tether
+**Closed:** 2026-05-13. Shipped via forge feature run on `red-arrow-127` branch (the first forge run that exercised #128 end-to-end). Commit `ec6a519`.
+
+**What landed:** `src/dashboard/html.ts` red-edge style — `line-style: 'dotted'`, `target-arrow-shape: 'none'`, `opacity: 0.4` (was 0.7). Width unchanged at 1.
+
+**Option from the original entry:** option 6 (dotted thin line, no arrowhead, low-opacity magenta tether). Reads as "associated, not flow into" — matches reds-as-side-channel-audit, drops the misleading downstream-consumer connotation.
+
+**Notes on the forge run that produced this:** the architect caught two real gotchas the brief didn't flag — the base edge selector's `target-arrow-shape: 'triangle'` is inherited unless explicitly overridden, and Cytoscape distinguishes `dotted` from `dashed`. Implementer made exactly those three style changes plus the override. First verify-phase run skipped browser-tools (reasoned "small CSS = code, not UI"); second run after the seed tightened invoked browser-tools 22 times and produced a real screenshot — validates both the change and #128 end-to-end. See the #128 Done entry for the seed-copy iteration.
+
+**Co-shipped:** #121 (env-snapshot bedrock auth) commit `8e7306c`. The original run was blocked by stale STS cache under mount-mode auth — fixed by implementing Jeff & Terry's env-snapshot pattern. Originally filed as deferred-to-v2 in the BACKLOG; landed here because it was the actual blocker on this run.
+
+### #121 — Bedrock auth: env-snapshot via aws configure export-credentials
+**Closed:** 2026-05-13. Commit `8e7306c`.
+
+**What landed:**
+- `src/util/creds.ts` — new `exportAwsCreds(profile)` calls `aws configure export-credentials --profile <p> --format env-no-export` on the host and returns the parsed STS env vars. `FORGE_AWS_CREDS_FOR_TEST` escape hatch for unit tests.
+- `src/spine/spawn.ts` — bedrock branch now defaults to env-snapshot: pass `CLAUDE_CODE_USE_BEDROCK=1` + `AWS_REGION` + STS env vars; drop the `~/.aws` mount + `AWS_PROFILE`. `FORGE_AUTH_MODE=mount` reverts to legacy mount-mode as escape hatch.
+- Tests updated to assert env-snapshot is default, mount-mode falls back when toggled.
+
+**Why this landed earlier than the BACKLOG planned (v2/#116):** during the first #128 validation run on 2026-05-13, the bedrock-mode container hit `ExpiredToken` even with a freshly-derived STS cache visible inside the container (mtime current, expiry 8h out, file readable). Host-side `aws sts get-caller-identity` succeeded against the same on-disk state at the same instant. Empirically proved the failure-shape #121 described: the container's AWS SDK derivation chain doesn't reproduce the host's. Implementing the env-snapshot path unblocked the run.
+
+**Decision locked:** env-snapshot becomes the default. Mount mode is opt-in via `FORGE_AUTH_MODE=mount` for genuinely long-running containers (>1h, where the 1-hour STS TTL would expire mid-run). FORGE-DEC-013 is overturned in practice; its rationale (STS expiry mid-run) is mitigated by Jeff & Terry's pattern in their 8+ production projects and by the fact that forge tasks typically finish in minutes, not hours.
+
+**Validation:** 355/355 tests pass. The second-attempt #127 forge run completed all phases (architect → plan → build → 5 reds → verify) using env-snapshot auth without further auth incidents. (One red, red-security, starved on what looked like Bedrock concurrent-request limits — separate concern, not auth.)
+
+**Composite:** #117, #118, #119, #120 — these tactical mount-mode diagnostics remain useful only while mount mode exists. Under env-snapshot default, the failure modes they address (watchdog wrong profile, no log, manual `aws sso login` leaves STS stale, shallow auth status) become moot for the common path. Worth revisiting whether they're still worth fixing post-#121.
 
 ### #128 — Forge agent containers: bake Chrome, mount browser-tools skill, retire Playwright MCP
 **Closed:** 2026-05-13. All five steps shipped + Playwright MCP fully torn down. Container side now uses pi-skills/browser-tools same as host side (#126).

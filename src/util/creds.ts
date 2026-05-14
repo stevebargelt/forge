@@ -79,6 +79,68 @@ export function resolveAwsRegion(): string {
   return process.env.AWS_REGION ?? "us-east-1";
 }
 
+export type ExportedAwsCreds = {
+  AWS_ACCESS_KEY_ID: string;
+  AWS_SECRET_ACCESS_KEY: string;
+  AWS_SESSION_TOKEN: string;
+  AWS_CREDENTIAL_EXPIRATION?: string;
+};
+
+// #121: derive fresh STS credentials on the host and return them as env vars
+// for injection into a child container. Replaces FORGE-DEC-013's "mount
+// ~/.aws and let the container's SDK derive" approach because that approach
+// fails when the container's AWS SDK can't reproduce the host's credential
+// chain (corp TLS proxy, SDK version differences, static-creds shadow). Jeff
+// & Terry's pattern, proven in 8+ production projects.
+//
+// Calls `aws configure export-credentials --profile <p> --format env-no-export`.
+// Throws on non-zero exit — that's the "AWS is broken on the host" pre-flight,
+// surfaced as a real error before the container spawns. Caller decides
+// whether to fall back to mount mode or surface to the user.
+export function exportAwsCreds(profile: string): ExportedAwsCreds {
+  // Test escape hatch: FORGE_AWS_CREDS_FOR_TEST=KEY=v,SECRET=v,TOKEN=v
+  // skips shelling out to aws. Lets unit tests assert the wiring without
+  // requiring AWS CLI + a real SSO session.
+  const testOverride = process.env.FORGE_AWS_CREDS_FOR_TEST;
+  if (testOverride !== undefined) {
+    const parsed: Partial<ExportedAwsCreds> = {};
+    for (const pair of testOverride.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const k = pair.slice(0, eq).trim();
+      const v = pair.slice(eq + 1).trim();
+      if (k === "AWS_ACCESS_KEY_ID" || k === "AWS_SECRET_ACCESS_KEY" || k === "AWS_SESSION_TOKEN" || k === "AWS_CREDENTIAL_EXPIRATION") {
+        parsed[k] = v;
+      }
+    }
+    if (!parsed.AWS_ACCESS_KEY_ID || !parsed.AWS_SECRET_ACCESS_KEY || !parsed.AWS_SESSION_TOKEN) {
+      throw new Error("FORGE_AWS_CREDS_FOR_TEST missing one of AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN");
+    }
+    return parsed as ExportedAwsCreds;
+  }
+  const out = execFileSync(
+    "aws",
+    ["configure", "export-credentials", "--profile", profile, "--format", "env-no-export"],
+    { encoding: "utf8" }
+  );
+  const parsed: Partial<ExportedAwsCreds> = {};
+  for (const line of out.split(/\r?\n/)) {
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const k = line.slice(0, eq);
+    const v = line.slice(eq + 1);
+    if (k === "AWS_ACCESS_KEY_ID" || k === "AWS_SECRET_ACCESS_KEY" || k === "AWS_SESSION_TOKEN" || k === "AWS_CREDENTIAL_EXPIRATION") {
+      parsed[k] = v;
+    }
+  }
+  if (!parsed.AWS_ACCESS_KEY_ID || !parsed.AWS_SECRET_ACCESS_KEY || !parsed.AWS_SESSION_TOKEN) {
+    throw new Error(
+      `aws configure export-credentials returned incomplete output for profile '${profile}': missing one of AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN`
+    );
+  }
+  return parsed as ExportedAwsCreds;
+}
+
 // Parse ~/.aws/config and return the key/value pairs of the given profile
 // section. AWS config uses [default] for the default profile and [profile X]
 // for named profiles, so callers pass profileName='default' / profileName='work'

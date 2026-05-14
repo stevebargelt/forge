@@ -4,6 +4,7 @@ dist/
 .DS_Store
 projects/
 .overnight-plan-*.md
+.claude/
 
 # Debugging artifacts — Playwright traces + ad-hoc dashboard screenshots
 .playwright-mcp/

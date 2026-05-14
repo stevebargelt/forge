@@ -95,6 +95,8 @@ beforeEach(() => {
     AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
     FORGE_AWS_DIR: process.env.FORGE_AWS_DIR,
     FORGE_USE_LITELLM: process.env.FORGE_USE_LITELLM,
+    FORGE_AUTH_MODE: process.env.FORGE_AUTH_MODE,
+    FORGE_AWS_CREDS_FOR_TEST: process.env.FORGE_AWS_CREDS_FOR_TEST,
   };
   // Wipe so each test sets only what it needs.
   for (const k of Object.keys(envSnapshot)) delete process.env[k];
@@ -107,30 +109,55 @@ afterEach(() => {
   }
 });
 
-test("buildDockerArgs: bedrock mode mounts ~/.aws RO and passes AWS_PROFILE", () => {
+test("buildDockerArgs: bedrock default = env-snapshot (#121) — STS env vars, no .aws mount", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "adx-dev";
   process.env.AWS_REGION = "us-east-1";
-  process.env.FORGE_AWS_DIR = "/Users/test/.aws"; // override so the test isn't host-specific
+  process.env.FORGE_AWS_DIR = "/Users/test/.aws"; // shouldn't be consulted in env-snapshot mode
+  process.env.FORGE_AWS_CREDS_FOR_TEST =
+    "AWS_ACCESS_KEY_ID=ASIATESTKEY," +
+    "AWS_SECRET_ACCESS_KEY=test-secret," +
+    "AWS_SESSION_TOKEN=test-token";
 
   const args = _buildDockerArgs(ARGS_INPUT_BASE);
-
-  // Must set bedrock flag and the profile
   const envPairs = pickEnvPairs(args);
+
+  // Bedrock flag + region must always be set
   assert.equal(envPairs.CLAUDE_CODE_USE_BEDROCK, "1");
-  assert.equal(envPairs.AWS_PROFILE, "adx-dev");
   assert.equal(envPairs.AWS_REGION, "us-east-1");
 
-  // Must NOT pass STS env vars — they would go stale
+  // env-snapshot: STS env vars passed in
+  assert.equal(envPairs.AWS_ACCESS_KEY_ID, "ASIATESTKEY");
+  assert.equal(envPairs.AWS_SECRET_ACCESS_KEY, "test-secret");
+  assert.equal(envPairs.AWS_SESSION_TOKEN, "test-token");
+
+  // env-snapshot: no AWS_PROFILE (container's SDK uses env, not profile)
+  assert.equal(envPairs.AWS_PROFILE, undefined);
+
+  // env-snapshot: no ~/.aws mount (container does not derive STS itself)
+  assert.equal(pickMount(args, "/home/agent/.aws"), undefined);
+});
+
+test("buildDockerArgs: bedrock + FORGE_AUTH_MODE=mount falls back to legacy ~/.aws mount", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "adx-dev";
+  process.env.AWS_REGION = "us-east-1";
+  process.env.FORGE_AWS_DIR = "/Users/test/.aws";
+  process.env.FORGE_AUTH_MODE = "mount";
+
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  const envPairs = pickEnvPairs(args);
+
+  // Mount mode: AWS_PROFILE present, no STS env vars
+  assert.equal(envPairs.AWS_PROFILE, "adx-dev");
   assert.equal(envPairs.AWS_ACCESS_KEY_ID, undefined);
   assert.equal(envPairs.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(envPairs.AWS_SESSION_TOKEN, undefined);
 
-  // Must mount ~/.aws RO
+  // Mount mode: ~/.aws mounted RO
   const awsMount = pickMount(args, "/home/agent/.aws");
-  assert.ok(awsMount, "should mount /home/agent/.aws");
+  assert.ok(awsMount, "should mount /home/agent/.aws in mount mode");
   assert.match(awsMount, /:\/home\/agent\/\.aws:ro$/);
-  assert.match(awsMount, /^\/Users\/test\/\.aws:/);
 });
 
 test("buildDockerArgs: anthropic-apikey mode passes the key, no AWS mount", () => {
@@ -302,10 +329,11 @@ test("buildDockerArgs: bedrock without AWS_REGION falls back to us-east-1", () =
   // No AWS_REGION set — resolveAwsRegion() supplies the default so the
   // container always has a region to call against (matches use-bedrock.sh).
   process.env.FORGE_AWS_DIR = "/tmp/.aws";
+  process.env.FORGE_AWS_CREDS_FOR_TEST =
+    "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
 
   const args = _buildDockerArgs(ARGS_INPUT_BASE);
   const envPairs = pickEnvPairs(args);
-  assert.equal(envPairs.AWS_PROFILE, "adx-dev");
   assert.equal(envPairs.AWS_REGION, "us-east-1", "AWS_REGION defaults to us-east-1 when not in env");
 });
 
