@@ -7,7 +7,8 @@ import type { Run, Task, RunStatus, TaskStatus, TaskPackage } from "../types/ind
 import type { VerdictRow, Finding, RedAuthority } from "../types/index.js";
 import type { GateRow } from "../store/gates.js";
 import type { GateDecision } from "../types/index.js";
-import { type PhaseShape } from "./phaseShape.js";
+import { buildPhaseShape, type PhaseShape } from "./phaseShape.js";
+import { loadWorkflow } from "../v2/loader.js";
 
 let _db: DatabaseInstance | null = null;
 
@@ -162,13 +163,20 @@ export async function getRunWithShouldPoll(
     verdicts[task.id] = vRows.map(rowToVerdict);
   }
 
-  // Phase shape — v1 phaseShape used the TS Workflow object. v2 loads from
-  // YAML; the dashboard's pill row needs a v2-aware rewrite (filed as a
-  // fast-follow). For now we fall through with empty phaseShape so the
-  // run page still renders the task table — just without the pill row.
-  // TODO(#TBD): v2-aware buildPhaseShape from src/v2/schema Workflow.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const phaseShape: PhaseShape[] = [];
+  // Phase shape — load the run's workflow YAML and build the pill-row data.
+  // try/catch fall-through: a workflow rename or missing YAML leaves the run
+  // page renderable (just without pills) instead of 500'ing. Same tolerance
+  // as v1.
+  let phaseShape: PhaseShape[] = [];
+  try {
+    const projectDir = typeof run.projectDir === "string" ? run.projectDir : undefined;
+    const wf = projectDir
+      ? loadWorkflow(run.workflow, { projectDir })
+      : loadWorkflow(run.workflow);
+    phaseShape = buildPhaseShape(wf, tasks);
+  } catch {
+    // Unknown workflow / parse error → empty pills, run page still works.
+  }
 
   const shouldPoll = tasks.some((t) => t.status === "running");
 

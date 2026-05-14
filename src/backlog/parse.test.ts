@@ -53,12 +53,12 @@ test("parser preserves ticket bodies as raw markdown (no interpretation)", () =>
   const original = readFileSync(BACKLOG_PATH, "utf8");
   const b = parseBacklog(original);
 
-  const active = b.sections.get("Active")!;
-  const t134 = active.find((t) => t.id === 134);
-  assert.ok(t134, "Active should contain #134");
-  // #134's body should mention forge gate and the fix line count.
-  assert.match(t134!.body, /forge gate/);
-  assert.match(t134!.body, /Trivial/);
+  // #116 is in Done (recent) — verify its body preserved the v2-cutover prose.
+  const doneRecent = b.sections.get("Done (recent)")!;
+  const t116 = doneRecent.find((t) => t.id === 116);
+  assert.ok(t116, "Done (recent) should contain #116");
+  assert.match(t116!.body, /v2 runner core/);
+  assert.match(t116!.body, /YAML/);
 });
 
 test("parser throws when Notes heading is missing", () => {
