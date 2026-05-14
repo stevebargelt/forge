@@ -15,7 +15,7 @@ inputs:
     required: true
     type: text
     help: "What the feature does AND how the UI should feel. Feeds the design step AND the architect."
-  - name: design_dir
+  - name: design-dir
     required: true
     type: path
     help: "Where the .pen, designs/, and code/ artifacts live."

@@ -14,7 +14,7 @@ inputs:
     required: true
     type: text
     help: "What the UI should be / do."
-  - name: design_dir
+  - name: design-dir
     required: true
     type: path
     help: "Where the .pen, designs/, and code/ artifacts will live."
