@@ -10,7 +10,6 @@ import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, 
 import { AUTH_ERROR_PREFIX, getAuthState } from "../util/creds.js";
 import { getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
-import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
 
@@ -153,8 +152,6 @@ function handlePost(path: string, req: IncomingMessage, res: ServerResponse): vo
     if (gateMatch) return handleGate(gateMatch[1]!, body, res);
     const nextMatch = path.match(/^\/api\/next\/([^/]+)$/);
     if (nextMatch) return handleNext(nextMatch[1]!, body, res);
-    const submitMatch = path.match(/^\/api\/submit\/([^/]+)$/);
-    if (submitMatch) return handleSubmit(submitMatch[1]!, body, res);
     const retryMatch = path.match(/^\/api\/retry\/([^/]+)$/);
     if (retryMatch) return handleRetry(retryMatch[1]!, res);
     if (path === "/api/runs") return handleNewRun(body, res);
@@ -262,15 +259,6 @@ async function handleRetry(taskId: string, res: ServerResponse): Promise<void> {
   jsonOk(res, { taskId, summary: tail(out.stdout) });
 }
 
-async function handleSubmit(taskId: string, body: Record<string, unknown>, res: ServerResponse): Promise<void> {
-  const notes = typeof body.notes === "string" ? body.notes.trim() : "";
-  const args = ["submit", taskId];
-  if (notes) args.push("--notes", notes);
-  const out = await invokeForge(args);
-  if (out.exitCode !== 0) return jsonError(res, 500, out.stderr || `forge submit exited ${out.exitCode}`);
-  jsonOk(res, { taskId, summary: tail(out.stdout) });
-}
-
 async function handleNewRun(body: Record<string, unknown>, res: ServerResponse): Promise<void> {
   const workflow = typeof body.workflow === "string" ? body.workflow : "";
   if (!workflow) {
@@ -282,7 +270,7 @@ async function handleNewRun(body: Record<string, unknown>, res: ServerResponse):
     return jsonValidation(res, validation.errors);
   }
 
-  const argv = buildForgeNewArgv(workflow as WorkflowName, validation.values);
+  const argv = buildForgeNewArgv(workflow, validation.values);
   const out = await invokeForge(argv);
   if (out.exitCode !== 0) {
     // Route auth pre-flight failures to a 400 so the frontend can render a

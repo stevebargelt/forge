@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { adviseRun } from "../../spine/advise.js";
+import { adviseRun } from "../../v2/advise.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getRun } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";

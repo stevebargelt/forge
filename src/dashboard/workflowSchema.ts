@@ -4,7 +4,6 @@
 // in dashboard/ rather than types/ — it's a UX schema, not a runtime contract;
 // the CLI keeps its Commander flag declarations as the source of truth there.
 
-import type { WorkflowName } from "../types/index.js";
 
 export type FieldType = "text" | "textarea" | "path";
 
@@ -24,7 +23,7 @@ export type FieldSpec = {
 };
 
 export type WorkflowSpec = {
-  name: WorkflowName;
+  name: string;
   // Short description rendered when the workflow is selected.
   description: string;
   // Fields beyond the universal {title, project}. Order = render order.
@@ -52,13 +51,11 @@ export const UNIVERSAL_FIELDS: FieldSpec[] = [
   },
 ];
 
-// Per-workflow extras. Required-ness here mirrors the CLI's expectations:
-// - investigation needs --question
-// - feature-ui-design-provided needs --prd
-// - feature / feature-ui-design-needed / ui-design / ui-design-revise need --brief
-// - feature-ui-design-needed / ui-design / ui-design-revise need --design-dir
-// - codebase-assessment has no extras
-export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
+// Per-workflow extras. Required-ness here mirrors the CLI's expectations.
+// v2: only the three `feature*` workflows are pipelines; investigation,
+// codebase-assessment, ui-design, ui-design-revise are orchestrator-driven
+// via `forge invoke` under the RACI model and don't appear here.
+export const WORKFLOW_SPECS: Record<string, WorkflowSpec> = {
   feature: {
     name: "feature",
     description: "Build a feature with no UI/UX design step (CLI, API, library, internal refactor). Architect → plan → build → verify.",
@@ -69,7 +66,7 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
         type: "textarea",
         required: true,
         help: "What you want built, in your own words. Architect produces systems-level concerns (risks, constraints, boundaries) — not implementation guidance.",
-        placeholder: "Add a forge submit --dry-run flag that validates artifacts without transitioning the task…",
+        placeholder: "Add a forge --version flag that reads from package.json…",
       },
     ],
   },
@@ -109,91 +106,20 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
       },
     ],
   },
-  investigation: {
-    name: "investigation",
-    description: "Investigate a question or hypothesis; produces claims + experiments.",
-    fields: [
-      {
-        name: "question",
-        label: "--question",
-        type: "textarea",
-        required: true,
-        help: "The framing question — single-sentence is fine, multi-paragraph also fine.",
-        placeholder: "Why is the build slow on CI but not locally?",
-      },
-    ],
-  },
-  "codebase-assessment": {
-    name: "codebase-assessment",
-    description: "Multi-lens assessment of an existing codebase; framer scopes, lens agents fan out.",
-    fields: [],
-  },
-  "ui-design": {
-    name: "ui-design",
-    description: "Design a UI from a brief. prompt-author writes PROMPT.md; you run it against Pencil; submit artifacts back.",
-    fields: [
-      {
-        name: "brief",
-        label: "--brief",
-        type: "textarea",
-        required: true,
-        help: "What the UI should look like and feel like — be opinionated about style.",
-        placeholder: "A small dashboard widget showing live forge stats; monospace, dense, terminal-adjacent.",
-      },
-      {
-        name: "designDir",
-        label: "--design-dir",
-        type: "path",
-        required: true,
-        help: "Where the .pen, designs/, and code/ artifacts live. Absolute path. Default: ~/code/<title-slug>/.",
-        placeholder: "/Users/you/code/your-design-dir",
-      },
-    ],
-  },
-  "ui-design-revise": {
-    name: "ui-design-revise",
-    description: "Revise a prior ui-design run. Same designDir; opens the existing .pen and applies changes.",
-    fields: [
-      {
-        name: "brief",
-        label: "--brief (revision)",
-        type: "textarea",
-        required: true,
-        help: "What to change. Reference the existing screens; the prompt-author opens the prior .pen.",
-        placeholder: "Tighten the awaiting-gate emphasis; add a third state: error/stale.",
-      },
-      {
-        name: "designDir",
-        label: "--design-dir",
-        type: "path",
-        required: true,
-        help: "Existing design dir from the prior ui-design run. Absolute path.",
-        placeholder: "/Users/you/code/your-design-dir",
-      },
-    ],
-  },
 };
 
-// Workflow groups for the modal picker (Steven 2026-05-08 — phase grouping
-// in the modal). Each group has a label + ordered workflow names. Render
-// order within a group is intentional (most-common variant first).
-export const WORKFLOW_GROUPS: { label: string; workflows: WorkflowName[] }[] = [
+// Workflow groups for the modal picker. v2: only the build-features group
+// remains; investigate/audit/design are orchestrator-driven (`forge invoke`)
+// rather than pipeline-driven.
+export const WORKFLOW_GROUPS: { label: string; workflows: string[] }[] = [
   {
     label: "Build features",
     workflows: ["feature", "feature-ui-design-needed", "feature-ui-design-provided"],
   },
-  {
-    label: "Design UI",
-    workflows: ["ui-design", "ui-design-revise"],
-  },
-  {
-    label: "Investigate or audit",
-    workflows: ["investigation", "codebase-assessment"],
-  },
 ];
 
 // Flat order — derived from WORKFLOW_GROUPS so the two stay in sync.
-export const WORKFLOW_ORDER: WorkflowName[] = WORKFLOW_GROUPS.flatMap((g) => g.workflows);
+export const WORKFLOW_ORDER: string[] = WORKFLOW_GROUPS.flatMap((g) => g.workflows);
 
 // ---------- validation ----------
 
@@ -206,7 +132,7 @@ export type ValidationError = {
 // not shell-injection-shaped" on paths and "non-empty" on required text;
 // downstream `forge new` handles real existence checks.
 export function validateNewRunBody(
-  workflow: WorkflowName | string,
+  workflow: string | string,
   body: Record<string, unknown>
 ): { ok: true; values: Record<string, string> } | { ok: false; errors: ValidationError[] } {
   const errors: ValidationError[] = [];
@@ -248,7 +174,7 @@ export function validateNewRunBody(
 // Universal fields title + project come first (title is positional after workflow);
 // per-workflow flags follow. Returned argv is suitable for cpSpawn directly — no
 // shell, no quoting concerns.
-export function buildForgeNewArgv(workflow: WorkflowName, values: Record<string, string>): string[] {
+export function buildForgeNewArgv(workflow: string, values: Record<string, string>): string[] {
   const argv: string[] = ["new", workflow, values.title ?? ""];
   if (values.project) argv.push("--project", values.project);
   if (values.brief) argv.push("--brief", values.brief);

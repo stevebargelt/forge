@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { gate, batchGate } from "../../spine/gate.js";
+import { gate, batchGate } from "../../v2/gate.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getTask } from "../../store/tasks.js";
 import { getRun } from "../../store/runs.js";
@@ -26,7 +26,7 @@ export function registerGate(program: Command): void {
         });
         if (r.skippedBlocked.length > 0) {
           console.log(
-            `Skipping ${r.skippedBlocked.length} blocked_by_red task(s) — gate those individually with --force --rationale "...":`
+            `Skipping ${r.skippedBlocked.length} blocked_by_red task(s) — gate those individually with --force --rationale "...":`,
           );
           for (const s of r.skippedBlocked) console.log(`  ✗ ${s.taskId} (${s.phase})`);
         }
@@ -39,19 +39,18 @@ export function registerGate(program: Command): void {
         for (const f of r.failed) console.log(`  ✗ ${f.taskId} — ${f.error}`);
         const totalFollowups = r.gated.reduce((acc, g) => acc + g.followups, 0);
         console.log(
-          `\nGated ${r.gated.length} task(s)${r.failed.length > 0 ? `, ${r.failed.length} failed` : ""}.`
+          `\nGated ${r.gated.length} task(s)${r.failed.length > 0 ? `, ${r.failed.length} failed` : ""}.`,
         );
         if (totalFollowups > 0) {
           console.log(`${totalFollowups} follow-up task(s) created.`);
-          console.log(`\nNext:\n  forge next ${id}`);
         }
+        console.log(`\nNext:\n  forge next ${id}`);
         return;
       }
 
-      // Single-task path. Disambiguate accidental run-id usage with a clearer error.
       if (!getTask(id) && getRun(id)) {
         throw new Error(
-          `'${id}' is a run id, not a task id. Use --all to batch-gate every awaiting_gate task in the run.`
+          `'${id}' is a run id, not a task id. Use --all to batch-gate every awaiting_gate task in the run.`,
         );
       }
 
@@ -63,7 +62,7 @@ export function registerGate(program: Command): void {
       if (result.nextTasks.length > 0) {
         console.log(`Created ${result.nextTasks.length} follow-up task(s):`);
         for (const t of result.nextTasks) console.log(`  - ${t.id} (${t.phase}/${t.agentRole})`);
-        console.log(`\nNext:\n  forge next ${result.task.runId}`);
       }
+      console.log(`\nNext:\n  forge next ${result.task.runId}`);
     });
 }

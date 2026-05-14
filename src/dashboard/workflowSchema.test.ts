@@ -1,4 +1,6 @@
-// Validation + argv-building for the new-run modal (#66).
+// Validation + argv-building for the new-run modal.
+// v2: only the three feature* workflows are pipelines; investigate/audit/design
+// are orchestrator-driven via `forge invoke` and don't appear in the modal.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,17 +15,22 @@ test("validateNewRunBody: unknown workflow → workflow error", () => {
   }
 });
 
-test("validateNewRunBody: codebase-assessment with universals only → ok", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "audit", project: "/code/x" });
+test("validateNewRunBody: feature with universals + brief → ok", () => {
+  const r = validateNewRunBody("feature", {
+    title: "version-flag",
+    project: "/code/forge",
+    brief: "Add a --version flag",
+  });
   assert.equal(r.ok, true);
   if (r.ok) {
-    assert.equal(r.values.title, "audit");
-    assert.equal(r.values.project, "/code/x");
+    assert.equal(r.values.title, "version-flag");
+    assert.equal(r.values.project, "/code/forge");
+    assert.equal(r.values.brief, "Add a --version flag");
   }
 });
 
 test("validateNewRunBody: missing title → required error", () => {
-  const r = validateNewRunBody("codebase-assessment", { project: "/x" });
+  const r = validateNewRunBody("feature", { project: "/x", brief: "x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     assert.ok(r.errors.find((e) => e.field === "title"));
@@ -31,15 +38,23 @@ test("validateNewRunBody: missing title → required error", () => {
 });
 
 test("validateNewRunBody: missing project → required error", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "x" });
+  const r = validateNewRunBody("feature", { title: "x", brief: "x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     assert.ok(r.errors.find((e) => e.field === "project"));
   }
 });
 
-test("validateNewRunBody: ui-design requires brief + designDir + the universals", () => {
-  const r = validateNewRunBody("ui-design", { title: "widget", project: "/x" });
+test("validateNewRunBody: feature requires --brief", () => {
+  const r = validateNewRunBody("feature", { title: "x", project: "/x" });
+  assert.equal(r.ok, false);
+  if (r.ok === false) {
+    assert.ok(r.errors.find((e) => e.field === "brief"));
+  }
+});
+
+test("validateNewRunBody: feature-ui-design-needed requires brief + designDir + the universals", () => {
+  const r = validateNewRunBody("feature-ui-design-needed", { title: "widget", project: "/x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     assert.ok(r.errors.find((e) => e.field === "brief"));
@@ -47,8 +62,8 @@ test("validateNewRunBody: ui-design requires brief + designDir + the universals"
   }
 });
 
-test("validateNewRunBody: ui-design with all required fields → ok", () => {
-  const r = validateNewRunBody("ui-design", {
+test("validateNewRunBody: feature-ui-design-needed with all required fields → ok", () => {
+  const r = validateNewRunBody("feature-ui-design-needed", {
     title: "widget",
     project: "/code/forge",
     brief: "a thing",
@@ -62,14 +77,6 @@ test("validateNewRunBody: ui-design with all required fields → ok", () => {
   }
 });
 
-test("validateNewRunBody: investigation requires --question", () => {
-  const r = validateNewRunBody("investigation", { title: "q", project: "/x" });
-  assert.equal(r.ok, false);
-  if (r.ok === false) {
-    assert.ok(r.errors.find((e) => e.field === "question"));
-  }
-});
-
 test("validateNewRunBody: feature-ui-design-provided requires --prd", () => {
   const r = validateNewRunBody("feature-ui-design-provided", { title: "f", project: "/x" });
   assert.equal(r.ok, false);
@@ -79,7 +86,7 @@ test("validateNewRunBody: feature-ui-design-provided requires --prd", () => {
 });
 
 test("validateNewRunBody: relative path on a path field → error", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "x", project: "code/x" });
+  const r = validateNewRunBody("feature", { title: "x", project: "code/x", brief: "x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     const err = r.errors.find((e) => e.field === "project")!;
@@ -88,12 +95,12 @@ test("validateNewRunBody: relative path on a path field → error", () => {
 });
 
 test("validateNewRunBody: tilde-prefixed path is accepted (loose mode)", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "x", project: "~/code/x" });
+  const r = validateNewRunBody("feature", { title: "x", project: "~/code/x", brief: "x" });
   assert.equal(r.ok, true);
 });
 
 test("validateNewRunBody: shell-meta in path → rejected", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "x", project: "/x; rm -rf /" });
+  const r = validateNewRunBody("feature", { title: "x", project: "/x; rm -rf /", brief: "x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     const err = r.errors.find((e) => e.field === "project")!;
@@ -102,7 +109,7 @@ test("validateNewRunBody: shell-meta in path → rejected", () => {
 });
 
 test("validateNewRunBody: whitespace-only required field → required error", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "   ", project: "/x" });
+  const r = validateNewRunBody("feature", { title: "   ", project: "/x", brief: "x" });
   assert.equal(r.ok, false);
   if (r.ok === false) {
     assert.ok(r.errors.find((e) => e.field === "title"));
@@ -110,16 +117,17 @@ test("validateNewRunBody: whitespace-only required field → required error", ()
 });
 
 test("validateNewRunBody: trims whitespace on accepted values", () => {
-  const r = validateNewRunBody("codebase-assessment", { title: "  audit  ", project: "  /x  " });
+  const r = validateNewRunBody("feature", { title: "  audit  ", project: "  /x  ", brief: "  x  " });
   assert.equal(r.ok, true);
   if (r.ok) {
     assert.equal(r.values.title, "audit");
     assert.equal(r.values.project, "/x");
+    assert.equal(r.values.brief, "x");
   }
 });
 
-test("buildForgeNewArgv: ui-design produces full argv in expected order", () => {
-  const argv = buildForgeNewArgv("ui-design", {
+test("buildForgeNewArgv: feature-ui-design-needed produces full argv in expected order", () => {
+  const argv = buildForgeNewArgv("feature-ui-design-needed", {
     title: "widget",
     project: "/code/forge",
     brief: "a thing",
@@ -127,7 +135,7 @@ test("buildForgeNewArgv: ui-design produces full argv in expected order", () => 
   });
   assert.deepEqual(argv, [
     "new",
-    "ui-design",
+    "feature-ui-design-needed",
     "widget",
     "--project", "/code/forge",
     "--brief", "a thing",
@@ -135,23 +143,27 @@ test("buildForgeNewArgv: ui-design produces full argv in expected order", () => 
   ]);
 });
 
-test("buildForgeNewArgv: codebase-assessment produces minimal argv", () => {
-  const argv = buildForgeNewArgv("codebase-assessment", { title: "audit", project: "/code/x" });
-  assert.deepEqual(argv, ["new", "codebase-assessment", "audit", "--project", "/code/x"]);
+test("buildForgeNewArgv: feature produces minimal argv (brief required)", () => {
+  const argv = buildForgeNewArgv("feature", { title: "x", project: "/code/x", brief: "do thing" });
+  assert.deepEqual(argv, [
+    "new", "feature", "x",
+    "--project", "/code/x",
+    "--brief", "do thing",
+  ]);
 });
 
-test("buildForgeNewArgv: investigation includes --question", () => {
-  const argv = buildForgeNewArgv("investigation", {
-    title: "q",
+test("buildForgeNewArgv: feature-ui-design-provided includes --prd", () => {
+  const argv = buildForgeNewArgv("feature-ui-design-provided", {
+    title: "f",
     project: "/x",
-    question: "why is the build slow?",
+    prd: "/x/docs/feature.md",
   });
   assert.deepEqual(argv, [
     "new",
-    "investigation",
-    "q",
+    "feature-ui-design-provided",
+    "f",
     "--project", "/x",
-    "--question", "why is the build slow?",
+    "--prd", "/x/docs/feature.md",
   ]);
 });
 

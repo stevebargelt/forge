@@ -1,0 +1,74 @@
+# forge v2 — claude-apikey runtime
+#
+# Claude via direct Anthropic API with ANTHROPIC_API_KEY env var. Escape
+# hatch from oauth + bedrock; useful for CI, scripts, or when you want a
+# specific account's API quota.
+#
+# Installed at ~/.forge/runtimes/claude-apikey.yml by install-seeds.sh.
+
+name: claude-apikey
+description: |
+  Claude via Anthropic API key. Activated when ANTHROPIC_API_KEY is set
+  in the env at spawn time. The key is passed to the container as -e.
+
+detect:
+  env:
+    - ANTHROPIC_API_KEY
+  files: []
+
+image: agent-dev-worker:latest
+
+models:
+  spec-writer: claude-sonnet-4-6
+  fast-orchestrator: claude-haiku-4-5
+  default: claude-sonnet-4-6
+
+auth:
+  mode: apikey   # injects ANTHROPIC_API_KEY=<host value> as -e; container's
+  # claude CLI reads it directly. No mount, no volume. Spawn-time fresh.
+
+env: {}
+
+mounts:
+  - host: "${TASK_DIR}"
+    container: /task
+    mode: rw
+
+  - host: "${PROJECT_DIR}"
+    container: /project
+    mode: "${PROJECT_MODE:-rw}"
+
+  - host: "${DESIGN_DIR}"
+    container: /design
+    mode: ro
+    optional: true
+
+  - host: "${FORGE_BROWSER_TOOLS_DIR:-~/pi-skills/browser-tools}"
+    container: /home/agent/.claude/skills/browser-tools
+    mode: ro
+    optional: true
+
+invocation:
+  command: claude
+  args:
+    - --model
+    - "${MODEL}"
+    - --append-system-prompt
+    - "${SYSTEM_PROMPT}"
+    - --dangerously-skip-permissions
+    - --output-format
+    - stream-json
+    - --verbose
+    - --include-partial-messages
+    - --print
+  stdin: "${TASK_PACKAGE_MARKDOWN}"
+
+container:
+  name: "forge-${TASK_ID}"
+  remove_on_exit: true
+  idle_timeout_seconds: 300
+
+result:
+  file: /task/result.json
+  stdout_log: container.stdout.log
+  stderr_log: container.stderr.log

@@ -1,139 +1,76 @@
 import type { Command } from "commander";
-import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
-import { ensureForgeDirs, runDir, sanitizeTitleForFilename, expandTildePath } from "../../util/paths.js";
 import { mkdirSync } from "node:fs";
-import { insertRun } from "../../store/runs.js";
-import { insertTask } from "../../store/tasks.js";
-import { logEvent } from "../../store/events.js";
-import { loadWorkflow } from "../../spine/workflows.js";
+import { ensureForgeDirs, sanitizeTitleForFilename, expandTildePath } from "../../util/paths.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
-import type { Run, Task, TaskPackage, WorkflowName } from "../../types/index.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { startRun } from "../../v2/startRun.js";
 
-const VALID: WorkflowName[] = [
-  "feature",
-  "feature-ui-design-needed",
-  "feature-ui-design-provided",
-  "investigation",
-  "codebase-assessment",
-  "ui-design",
-  "ui-design-revise",
-];
+// v2: workflow names are arbitrary YAML files in ~/.forge/workflows/.
+// We don't enforce a fixed list; the loader raises if the YAML is missing.
 
 export function registerNew(program: Command): void {
   program
     .command("new")
-    .argument("<workflow>", `one of: ${VALID.join(", ")}`)
+    .argument("<workflow>", "workflow name — looks up ~/.forge/workflows/<name>.yml (or <project>/.forge/workflows/<name>.yml)")
     .argument("<title>", "human-readable run title (used to derive the run id)")
-    .option("--question <q>", "for investigation: the framing question")
-    .option("--prd <path>", "path to a PRD/spec file")
-    .option("--brief <text>", "for feature / feature-ui-design-* / ui-design / ui-design-revise: the design or feature brief")
-    .option("--design-dir <path>", "for ui-design / ui-design-revise / feature-ui-design-needed: directory for the .pen file + designs/ + code/. Defaults to ~/code/<sanitized-title>/.")
-    .option("--project <path>", "project directory mounted at /project on agent containers. Defaults to cwd. Subsequent forge next calls reuse this without --project.")
+    .option("--brief <text>", "freeform brief input passed into the workflow")
+    .option("--question <q>", "question input (legacy: investigation workflows)")
+    .option("--prd <path>", "PRD path input (legacy: feature-ui-design-provided)")
+    .option("--design-dir <path>", "design artifact directory; mounted RO at /design in agent containers")
+    .option("--project <path>", "project directory mounted at /project (default: cwd; persisted on run)")
     .option("--meta <json>", "extra run metadata as JSON")
-    .description("Create a new workflow run")
-    .action(async (workflow: string, title: string, options) => {
-      if (!VALID.includes(workflow as WorkflowName)) {
-        throw new Error(`Unknown workflow '${workflow}'. Valid: ${VALID.join(", ")}`);
-      }
-      // Pre-flight (#79): surface auth problems at run-creation time rather
-      // than 30 seconds into the first container spawn. Bedrock mode catches
-      // expired SSO tokens; apikey mode checks the env var. Oauth defers to
-      // spawn-time (docker-volume probe is too expensive per `forge new`).
+    .description("Create a new workflow run (v2 YAML-driven)")
+    .action(async (workflowName: string, title: string, options) => {
       validateCredsForNewRun();
       ensureForgeDirs();
-      const wf = await loadWorkflow(workflow as WorkflowName);
-      const runId = newRunId(title);
-      const metadata: Record<string, unknown> = options.meta ? JSON.parse(options.meta) : {};
-      if (options.question) metadata.question = options.question;
-      if (options.prd) metadata.prd = options.prd;
-      if (options.brief) metadata.brief = options.brief;
-      // Expand ~ at run creation. Forge passes paths verbatim to docker -v
-      // and fs.existsSync downstream; neither does shell expansion. The
-      // dashboard's POST body also never traverses a shell. Expand once here
-      // so everything sees an absolute path from this point on.
-      const designDirRaw =
-        (options as { designDir?: string }).designDir ?? deriveDefaultDesignDir(workflow as WorkflowName, title);
-      const designDir = designDirRaw ? expandTildePath(designDirRaw) : undefined;
-      if (designDir) {
-        metadata.designDir = designDir;
-        // Pre-create the conventional layout so the prompt-author and submit
-        // validator both have something to point at. Idempotent — reusing an
-        // existing designDir (per #67) leaves prior artifacts untouched.
-        mkdirSync(designDir, { recursive: true });
-        mkdirSync(`${designDir}/designs`, { recursive: true });
-        mkdirSync(`${designDir}/code`, { recursive: true });
-      }
 
       const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
 
-      const run: Run = {
-        id: runId,
-        workflow: wf.name,
+      // Load YAML (workspace default with project override).
+      const workflow = loadWorkflow(workflowName, { projectDir });
+
+      // Build the inputs object from the workflow's declared inputs + CLI flags.
+      // The runner validates required inputs in startRun.
+      const inputs: Record<string, unknown> = options.meta ? JSON.parse(options.meta) : {};
+      if (options.brief) inputs["brief"] = options.brief;
+      if (options.question) inputs["question"] = options.question;
+      if (options.prd) inputs["prd"] = options.prd;
+
+      // Resolve --design-dir or derive a default for workflows that name suggests
+      // (kept matching v1 ergonomics — the new RACI model means design is now
+      // a host-led activity, but `feature-ui-design-needed` still uses /design).
+      const designDirRaw =
+        (options as { designDir?: string }).designDir
+        ?? deriveDefaultDesignDir(workflowName, title);
+      const designDir = designDirRaw ? expandTildePath(designDirRaw) : undefined;
+      if (designDir) {
+        mkdirSync(designDir, { recursive: true });
+        mkdirSync(`${designDir}/designs`, { recursive: true });
+        mkdirSync(`${designDir}/code`, { recursive: true });
+        inputs["designDir"] = designDir;
+      }
+
+      const { runId } = startRun({
+        workflow,
         title,
-        status: "active",
-        createdAt: nowIso(),
-        metadata,
+        inputs,
         projectDir,
-      };
-      insertRun(run);
-      mkdirSync(runDir(runId), { recursive: true });
-      logEvent("run.created", { runId, payload: { workflow: wf.name, title } });
-
-      // Seed first-phase tasks (one per agent).
-      const firstPhase = wf.phases[0];
-      if (!firstPhase) {
-        throw new Error(`Workflow ${wf.name} has no phases.`);
-      }
-      const seedInputs: Record<string, unknown> = {};
-      if (options.question) seedInputs.question = options.question;
-      if (options.prd) seedInputs.prd = options.prd;
-      if (options.brief) seedInputs.brief = options.brief;
-      if (designDir) seedInputs.designDir = designDir;
-
-      for (const agent of firstPhase.agents) {
-        const taskId = newTaskId(firstPhase.name);
-        const taskPackage: TaskPackage = {
-          taskId,
-          runId,
-          phase: firstPhase.name,
-          role: agent.role,
-          inputs: seedInputs,
-          composedSystemPrompt: "",
-        };
-        const task: Task = {
-          id: taskId,
-          runId,
-          phase: firstPhase.name,
-          agentRole: agent.role,
-          agentAlias: agent.alias,
-          agentModel: agent.model,
-          status: "pending",
-          taskPackage,
-          createdAt: nowIso(),
-        };
-        insertTask(task);
-        logEvent("task.created", { runId, taskId });
-      }
+        designDir,
+      });
 
       console.log(`Created run ${runId}`);
-      console.log(`Workflow: ${wf.name}`);
+      console.log(`Workflow: ${workflow.name}`);
       console.log(`Title:    ${title}`);
-      console.log(`First phase: ${firstPhase.name} (${firstPhase.agents.length} task(s) seeded)`);
       console.log(`Project:  ${projectDir}`);
       if (designDir) console.log(`Design dir: ${designDir}`);
       console.log(`\nNext:\n  forge next ${runId}`);
     });
 }
 
-// Default design-dir convention: ~/code/<sanitized-title>/. Slug rule lives in
-// util/paths.ts so `forge submit`'s artifact validator uses the same convention
-// the run was created with.
-function deriveDefaultDesignDir(workflow: WorkflowName, title: string): string | undefined {
-  if (
-    workflow !== "ui-design" &&
-    workflow !== "ui-design-revise" &&
-    workflow !== "feature-ui-design-needed"
-  ) return undefined;
+// Default design-dir convention: ~/code/<sanitized-title>/. Matches v1 ergonomics
+// for the feature-ui-design-needed workflow.
+function deriveDefaultDesignDir(workflowName: string, title: string): string | undefined {
+  if (!workflowName.includes("ui-design") && !workflowName.includes("design-needed")) return undefined;
   const home = process.env.HOME ?? "~";
   return `${home}/code/${sanitizeTitleForFilename(title)}`;
 }

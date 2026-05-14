@@ -1,7 +1,7 @@
 ---
 id: personal-coding-conventions
 level: suggest
-roles: [implementer, planner, architect]
+roles: [engineer, tech-lead, architecture-advisor]
 workflows: []
 ---
 

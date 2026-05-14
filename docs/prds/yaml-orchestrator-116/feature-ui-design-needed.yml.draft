@@ -1,0 +1,120 @@
+# forge v2 — `feature-ui-design-needed` workflow translated to YAML
+# Source: src/workflows/feature-ui-design-needed.ts
+#
+# forge's most complex shape today: manual phase (ui-review, no agent — human
+# runs Pencil + Claude Code on the host and submits artifacts), gated with
+# onReject to brief. Plus the standard architect → plan → build → verify.
+
+name: feature-ui-design-needed
+description: |
+  Build a feature that needs UI design. brief → ui-review → architect → plan →
+  build → verify. The design and implementation share a designDir.
+
+inputs:
+  - name: brief
+    required: true
+    type: text
+    help: "What the feature does AND how the UI should feel. Feeds the design step AND the architect."
+  - name: design-dir
+    required: true
+    type: path
+    help: "Where the .pen, designs/, and code/ artifacts live."
+
+steps:
+  - id: brief
+    agent: prompt-author
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      inputs.brief contains the feature + UI brief. Use the ui-design template at
+      templates/ui-design.md. Interview the human to fill any missing parameters
+      (target_pen_file, output_dir, file_naming, style, screens). Write the
+      produced PROMPT.md to /task/PROMPT.md. Output {status, promptPath:
+      '/task/PROMPT.md', brief, template: 'ui-design', parameters, openQuestions,
+      notes}.
+
+  # Manual phase — no agent runs. Human runs PROMPT.md against Pencil + Claude
+  # Code on the host, submits artifacts back via `forge submit`. Schema flags it
+  # with `manual: true`. Runner skips agent dispatch entirely.
+  - id: ui-review
+    manual: true
+    depends_on: [brief]
+    gate: human
+    on_reject: brief
+
+  - id: architect
+    agent: architecture-advisor
+    model: spec-writer
+    depends_on: [ui-review]
+    gate: human
+    on_reject: brief    # architect reject → redo brief (revise design first)
+    workflow_additions: |
+      Read the upstream design artifacts: inputs.upstream[*].result.htmlFiles
+      (HTML/CSS reference exports) and inputs.upstream[*].result.pngFiles
+      (canonical Pencil renders). Treat the design as the canonical UI — your
+      architecture must support what's drawn. But your output is systems-level:
+      risks/constraints/boundaries/priorArt/openQuestions about what supporting
+      that design implies for the rest of the system, NOT implementation
+      guidance (no type names, no function names).
+      Output {risks, constraints, boundaries, priorArt, openQuestions, notes}.
+      See architect seed.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: plan
+    agent: tech-lead
+    model: spec-writer
+    depends_on: [architect]
+    gate: human
+    workflow_additions: |
+      Translate the architecture document into a step-by-step plan. The plan
+      should reference design artifact paths where relevant.
+      Output {steps: [{id, summary, files, acceptance}]}.
+
+  - id: build
+    agent: engineer
+    model: spec-writer
+    depends_on: [plan]
+    gate: verdict
+    workflow_additions: |
+      Implement the plan. The HTML files in upstream design artifacts are
+      reference, not implementation — match the design's spacing, palette, and
+      DOM hierarchy where reasonable, but use the project's actual stack idioms.
+      Output {steps_completed, diff_summary, files_modified}.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-frontend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-backend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-security
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+
+  - id: verify
+    agent: qa-engineer
+    model: spec-writer
+    depends_on: [build]
+    gate: human
+    workflow_additions: |
+      Run the test plan against the build.
+      Output {tests_run, tests_passed, tests_failed, evidence}.

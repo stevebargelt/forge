@@ -1,0 +1,80 @@
+# forge v2 — `investigation` workflow translated to YAML
+# Source: src/workflows/investigation.ts
+#
+# This workflow USES FANOUT today (per-claim investigators). The fanout primitive
+# is therefore not deferrable — it's already in production. Schema models it as
+# `fanout` on a step.
+
+name: investigation
+description: Multi-phase research — frame question, fan out per-claim investigators, synthesize, recommend.
+
+inputs:
+  - name: question
+    required: true
+    type: text
+    help: "The framing question — single-sentence or multi-paragraph."
+
+steps:
+  - id: frame-question
+    agent: framer
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      Output JSON with `claims: string[]` and `experiments: string[]`. Each claim
+      becomes one investigator task in the next phase.
+
+  - id: investigate
+    agent: research-specialist
+    model: spec-writer
+    depends_on: [frame-question]
+    gate: human
+    # Fanout: spawn one investigator container per element of the upstream step's
+    # `claims` array. Each container gets that element bound to `inputs.claim`.
+    # Failure mode `continue` means individual failures don't block siblings or
+    # the phase as a whole. max_concurrency caps parallel container count.
+    fanout:
+      from_upstream:
+        step: frame-question
+        array_key: claims
+        input_key: claim
+      max_concurrency: 4
+      failure_mode: continue   # alternatives: fail-phase | retry-once
+    workflow_additions: |
+      You receive ONE claim in inputs.claim. Validate it with concrete evidence.
+      Output {claim, evidence, conclusion: 'supported'|'refuted'|'inconclusive', notes}.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: synthesize
+    agent: synthesizer
+    model: spec-writer
+    depends_on: [investigate]
+    gate: human
+    workflow_additions: |
+      Aggregate all investigate outputs and the original question into a synthesis.
+      Output {architecturalImplications, antiFindings, openQuestions}.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: recommend
+    agent: recommender
+    model: spec-writer
+    depends_on: [synthesize]
+    gate: auto    # auto-advance, no human review; final output is the recommendation doc
+    workflow_additions: |
+      Produce the final verdict document as Markdown in result.recommendation.
+      Include rationale tied to specific evidence.

@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Research specialist may read project files and run shell commands inside the container."
+}

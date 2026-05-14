@@ -1,0 +1,51 @@
+# forge v2 — `codebase-assessment` workflow translated to YAML
+# Source: src/workflows/codebase-assessment.ts
+#
+# Same fanout shape as investigation: scoping phase emits an array of lenses,
+# assess phase fans out one container per lens. Read-only project mount.
+
+name: codebase-assessment
+description: Read-only multi-lens review of an existing codebase, ending in a structured report.
+
+# No required inputs at workflow level — the framer derives lenses from the
+# project structure itself. Could accept an optional `focus` text input later.
+inputs: []
+
+steps:
+  - id: scope
+    agent: framer
+    model: fast-orchestrator
+    gate: human
+    workflow_additions: |
+      Define the assessment lenses (security, performance, testability, etc.).
+      Output {lenses: string[], priorities: string[]}.
+
+  - id: assess
+    agent: assessor
+    model: spec-writer
+    depends_on: [scope]
+    gate: human
+    fanout:
+      from_upstream:
+        step: scope
+        array_key: lenses
+        input_key: lens
+      max_concurrency: 4
+      failure_mode: continue
+    workflow_additions: |
+      You receive ONE lens in inputs.lens. Produce {lens, findings:
+      [{severity, area, summary, evidence, recommendation}]} for that lens only.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: report
+    agent: reporter
+    model: spec-writer
+    depends_on: [assess]
+    gate: auto
+    workflow_additions: |
+      Aggregate the per-lens assessments into a single report.
+      Output {report: markdown, prioritizedFindings}.

@@ -20,7 +20,7 @@ let prev: DatabaseInstance | null;
 
 const RUN: Run = {
   id: "run-dash",
-  workflow: "investigation",
+  workflow: "feature",
   title: "dashboard test run",
   status: "active",
   createdAt: "2026-05-06T00:00:00Z",
@@ -102,7 +102,7 @@ test("getRunWithShouldPoll returns shouldPoll=true when at least one task is run
 test("getRunWithShouldPoll returns shouldPoll=false when no tasks are running", async () => {
   const run2: Run = {
     id: "run-done",
-    workflow: "investigation",
+    workflow: "feature",
     title: "done run",
     status: "complete",
     createdAt: "2026-05-06T00:00:00Z",
@@ -128,21 +128,14 @@ test("getRunWithShouldPoll returns undefined for unknown run id", async () => {
   assert.equal(result, undefined);
 });
 
-test("getRunWithShouldPoll returns phaseShape from the workflow", async () => {
+test("getRunWithShouldPoll returns empty phaseShape (v2 pill row pending)", async () => {
+  // v2 cutover: buildPhaseShape from the v1 Workflow object is gone; the v2
+  // YAML-aware rebuild is a fast-follow. queries.ts returns an empty array;
+  // the pill row renders zero pills. Run page still works (task table).
   const result = await getRunWithShouldPoll(RUN.id);
   assert.ok(result);
   assert.ok(Array.isArray(result.phaseShape));
-  // investigation has 4 phases.
-  assert.equal(result.phaseShape.length, 4);
-  const frame = result.phaseShape[0]!;
-  // The two tasks above are phase=frame (one complete, one running).
-  // Note: investigation.ts now uses "frame-question", but the test fixture
-  // inserts tasks with phase="frame" (legacy). Phase shape merges by the
-  // workflow's phase names, so frame-question's tasks list will be empty.
-  assert.equal(frame.name, "frame-question");
-  assert.equal(frame.gate, "human");
-  // No tasks land on this phase under that name → status = pending.
-  assert.equal(frame.status, "pending");
+  assert.equal(result.phaseShape.length, 0);
 });
 
 test("getTaskDetail returns task with verdicts and gates", () => {

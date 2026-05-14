@@ -15,7 +15,7 @@ let serverPort: number;
 
 const RUN: Run = {
   id: "run-srv",
-  workflow: "investigation",
+  workflow: "feature",
   title: "server test run",
   status: "active",
   createdAt: "2026-05-06T00:00:00Z",
@@ -389,17 +389,15 @@ test("GET /api/workflows returns the schema with order, groups, universal, workf
     workflows: Record<string, unknown>;
   };
   assert.ok(Array.isArray(data.order));
-  assert.ok(data.order.includes("ui-design"));
+  assert.ok(data.order.includes("feature"));
   assert.ok(Array.isArray(data.groups));
   assert.ok(data.groups.some((g) => g.label === "Build features"));
-  assert.ok(data.groups.some((g) => g.label === "Design UI"));
-  assert.ok(data.groups.some((g) => g.label === "Investigate or audit"));
   assert.ok(Array.isArray(data.universal));
-  assert.ok(data.workflows["ui-design"]);
+  assert.ok(data.workflows["feature"]);
 });
 
 test("POST /api/runs validates and returns 400 with field errors when fields missing", async () => {
-  const res = await post("/api/runs", { workflow: "ui-design", title: "x", project: "/x" });
+  const res = await post("/api/runs", { workflow: "feature-ui-design-needed", title: "x", project: "/x" });
   assert.equal(res.status, 400);
   const data = JSON.parse(res.body) as { errors: { field: string; message: string }[] };
   assert.ok(Array.isArray(data.errors));
@@ -421,24 +419,29 @@ test("POST /api/runs missing workflow → 400 with field=workflow", async () => 
   assert.equal(data.errors[0]!.field, "workflow");
 });
 
-test("POST /api/runs shells out to `forge new` with the right argv (codebase-assessment)", async () => {
+test("POST /api/runs shells out to `forge new` with the right argv (feature)", async () => {
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
-    return { exitCode: 0, stdout: "Created run run-audit-abc123\nWorkflow: codebase-assessment\n", stderr: "" };
+    return { exitCode: 0, stdout: "Created run run-feat-abc123\nWorkflow: feature\n", stderr: "" };
   });
   try {
-    const res = await post("/api/runs", { workflow: "codebase-assessment", title: "audit", project: "/code/x" });
+    const res = await post("/api/runs", {
+      workflow: "feature",
+      title: "feat",
+      project: "/code/x",
+      brief: "build a thing",
+    });
     assert.equal(res.status, 200);
-    assert.deepEqual(capturedArgs, ["new", "codebase-assessment", "audit", "--project", "/code/x"]);
+    assert.deepEqual(capturedArgs, ["new", "feature", "feat", "--project", "/code/x", "--brief", "build a thing"]);
     const data = JSON.parse(res.body) as { runId: string };
-    assert.equal(data.runId, "run-audit-abc123");
+    assert.equal(data.runId, "run-feat-abc123");
   } finally {
     _setRunForgeOverrideForTest(undefined);
   }
 });
 
-test("POST /api/runs argv shape for ui-design includes brief + design-dir", async () => {
+test("POST /api/runs argv shape for feature-ui-design-needed includes brief + design-dir", async () => {
   let capturedArgs: string[] = [];
   _setRunForgeOverrideForTest(async (args) => {
     capturedArgs = args;
@@ -446,7 +449,7 @@ test("POST /api/runs argv shape for ui-design includes brief + design-dir", asyn
   });
   try {
     await post("/api/runs", {
-      workflow: "ui-design",
+      workflow: "feature-ui-design-needed",
       title: "widget",
       project: "/code/forge",
       brief: "a stats widget",
@@ -454,7 +457,7 @@ test("POST /api/runs argv shape for ui-design includes brief + design-dir", asyn
     });
     assert.deepEqual(capturedArgs, [
       "new",
-      "ui-design",
+      "feature-ui-design-needed",
       "widget",
       "--project", "/code/forge",
       "--brief", "a stats widget",
@@ -472,7 +475,12 @@ test("POST /api/runs surfaces forge new failure as 500 with stderr", async () =>
     stderr: "forge: workflow already exists",
   }));
   try {
-    const res = await post("/api/runs", { workflow: "codebase-assessment", title: "x", project: "/x" });
+    const res = await post("/api/runs", {
+      workflow: "feature",
+      title: "x",
+      project: "/x",
+      brief: "x",
+    });
     assert.equal(res.status, 500);
     assert.match(res.body, /workflow already exists/);
   } finally {
@@ -481,59 +489,6 @@ test("POST /api/runs surfaces forge new failure as 500 with stderr", async () =>
 });
 
 test("POST /api/runs without X-Forge-Request → 403", async () => {
-  const res = await post("/api/runs", { workflow: "codebase-assessment" }, { withHeader: false });
+  const res = await post("/api/runs", { workflow: "feature" }, { withHeader: false });
   assert.equal(res.status, 403);
-});
-
-// ---------- /api/submit (FORGE-DEC-016) ----------
-
-test("POST /api/submit/:taskId without X-Forge-Request returns 403", async () => {
-  const res = await post("/api/submit/task-x", {}, { withHeader: false });
-  assert.equal(res.status, 403);
-});
-
-test("POST /api/submit/:taskId shells out to `forge submit <id>` with no notes", async () => {
-  let capturedArgs: string[] = [];
-  _setRunForgeOverrideForTest(async (args) => {
-    capturedArgs = args;
-    return { exitCode: 0, stdout: "Submitted: task-x", stderr: "" };
-  });
-  try {
-    const res = await post("/api/submit/task-x", {});
-    assert.equal(res.status, 200);
-    assert.deepEqual(capturedArgs, ["submit", "task-x"]);
-    const data = JSON.parse(res.body) as { taskId: string };
-    assert.equal(data.taskId, "task-x");
-  } finally {
-    _setRunForgeOverrideForTest(undefined);
-  }
-});
-
-test("POST /api/submit/:taskId forwards --notes when provided", async () => {
-  let capturedArgs: string[] = [];
-  _setRunForgeOverrideForTest(async (args) => {
-    capturedArgs = args;
-    return { exitCode: 0, stdout: "ok", stderr: "" };
-  });
-  try {
-    await post("/api/submit/task-y", { notes: "tried two color variants" });
-    assert.deepEqual(capturedArgs, ["submit", "task-y", "--notes", "tried two color variants"]);
-  } finally {
-    _setRunForgeOverrideForTest(undefined);
-  }
-});
-
-test("POST /api/submit surfaces non-zero exit as 500 with stderr", async () => {
-  _setRunForgeOverrideForTest(async () => ({
-    exitCode: 1,
-    stdout: "",
-    stderr: "Pencil source not found at /x.pen",
-  }));
-  try {
-    const res = await post("/api/submit/task-x", {});
-    assert.equal(res.status, 500);
-    assert.match(res.body, /Pencil source not found/);
-  } finally {
-    _setRunForgeOverrideForTest(undefined);
-  }
 });

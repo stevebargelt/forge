@@ -1,0 +1,103 @@
+# forge v2 — `claude-bedrock` runtime
+#
+# Declares how to spawn an agent container under AWS Bedrock auth.
+# When v2 lands, this becomes ~/.forge/runtimes/claude-bedrock.yml.
+#
+# Inspired by:
+#   ~/code/local-adx-workspace-2/multi-agent-package/multi-agent-framework/scripts/orchestration/multi-agent/runtime-claude-bedrock.yml
+# but adapted to forge's container model + Anthropic Skills format + #121 env-snapshot auth.
+
+name: claude-bedrock
+description: |
+  Claude via AWS Bedrock. Auth uses host-side STS export (#121) by default;
+  FORGE_AUTH_MODE=mount falls back to the legacy ~/.aws bind mount for
+  multi-hour containers.
+
+# Pre-flight: detects whether this runtime is applicable. Runner picks the first
+# runtime whose detection clauses are satisfied. Today's detectCredsMode() logic
+# folds in here.
+detect:
+  env:
+    - CLAUDE_CODE_USE_BEDROCK=1
+  files:
+    - ~/.aws/config
+
+# Container image to run agent tasks in.
+image: agent-dev-worker:latest
+
+# Default model aliases — referenced by steps as `model: <alias>`. Resolved at
+# spawn time. Aliases let workflow YAML stay model-version-agnostic.
+models:
+  spec-writer: us.anthropic.claude-opus-4-7
+  fast-orchestrator: us.anthropic.claude-haiku-4-5-20251001
+  default: us.anthropic.claude-sonnet-4-6
+
+# Auth mode. env-snapshot is default per #121. mount is opt-in for genuinely
+# long-running containers (>1h, STS would expire mid-run). The TS runner reads
+# FORGE_AUTH_MODE env override at spawn time.
+auth:
+  mode: env-snapshot   # alternative: mount
+  # env-snapshot: host calls `aws configure export-credentials` before docker run,
+  # injects AWS_ACCESS_KEY_ID/SECRET/TOKEN as -e vars. Container's SDK skips its
+  # own credential chain. Spawn-time fresh; immune to container-side SDK quirks.
+  # mount: bind-mount ~/.aws read-only at /home/agent/.aws. Container's SDK
+  # derives STS from the on-disk SSO cache. Survives multi-hour runs but is
+  # the failure mode #121 documents.
+
+# Required env vars passed unconditionally.
+env:
+  CLAUDE_CODE_USE_BEDROCK: "1"
+  AWS_REGION: "${AWS_REGION:-us-east-1}"
+
+# Mounts. Order matters: per-task at /task, project at /project, design corpus
+# (when set) at /design, agent-tools (browser-tools etc.) at the skill path.
+mounts:
+  - host: "${TASK_DIR}"
+    container: /task
+    mode: rw
+
+  - host: "${PROJECT_DIR}"
+    container: /project
+    mode: "${PROJECT_MODE:-rw}"      # 'ro' for red agents; runner sets per-step
+
+  - host: "${DESIGN_DIR}"
+    container: /design
+    mode: ro
+    optional: true                    # skip if DESIGN_DIR unset
+
+  - host: "${FORGE_BROWSER_TOOLS_DIR:-~/pi-skills/browser-tools}"
+    container: /home/agent/.claude/skills/browser-tools
+    mode: ro
+    optional: true                    # skip if dir doesn't exist on host
+
+# Claude CLI invocation. Runner constructs `claude ARGS` and execs via the
+# container's entrypoint (agent-entrypoint.sh starts Chromium first then execs).
+# ${MODEL} resolved from the step's `model:` field via the models map above.
+# ${SYSTEM_PROMPT} composed from agent CLAUDE.md + step workflow_additions
+# + filtered constraints (constraints.ts unchanged).
+invocation:
+  command: claude
+  args:
+    - --model
+    - "${MODEL}"
+    - --append-system-prompt
+    - "${SYSTEM_PROMPT}"
+    - --dangerously-skip-permissions
+    - --output-format
+    - stream-json
+    - --verbose
+    - --include-partial-messages
+    - --print
+  stdin: "${TASK_PACKAGE_MARKDOWN}"  # piped in; matches today's spawn.ts
+
+# Container lifecycle.
+container:
+  name: "forge-${TASK_ID}"
+  remove_on_exit: true
+  idle_timeout_seconds: 300   # FORGE_AGENT_IDLE_TIMEOUT_MS env still overrides
+
+# Where the agent writes results. Used by the runner + reconcile.
+result:
+  file: /task/result.json
+  stdout_log: container.stdout.log
+  stderr_log: container.stderr.log

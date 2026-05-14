@@ -1,5 +1,5 @@
 import { getDb } from "./db.js";
-import type { Run, RunStatus, WorkflowName } from "../types/index.js";
+import type { Run, RunStatus } from "../types/index.js";
 import { nowIso } from "../util/ids.js";
 
 type RunRow = {
@@ -16,7 +16,7 @@ type RunRow = {
 function rowToRun(row: RunRow): Run {
   return {
     id: row.id,
-    workflow: row.workflow as WorkflowName,
+    workflow: row.workflow,
     title: row.title,
     status: row.status as RunStatus,
     createdAt: row.created_at,
