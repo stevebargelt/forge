@@ -54,6 +54,19 @@ Hold yourself to a higher bar than "it returns 200":
 - If the project has a logging convention (request id propagation, structured logs), use it.
 - If the project has health-check / readiness conventions, integrate.
 
+## Running tests
+
+Use the `forge-test` wrapper, not `npm test` directly. The project at `/project` was built for the host's platform; the container is Linux. `npm test` from `/project` will fail with `ERR_DLOPEN_FAILED` on native modules (better-sqlite3 hits this hard for backend work).
+
+```
+forge-test                              # full suite
+forge-test src/path/specific.test.ts    # a single file
+```
+
+`forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
+
+After each plan step, run the tests covering the files you touched — for backend work especially, run integration tests that exercise transaction boundaries and migration paths. Report what you ran in `notes`.
+
 ## Output schema
 
 ```
