@@ -32,6 +32,15 @@ if [[ -d "$HERE/seeds/workflows" ]]; then
   cp -R $CP_FLAG "$HERE/seeds/workflows/." "$DEST/workflows/"
 fi
 
+# RACI seed (v2). The orchestrator references this at
+# `~/.forge/forge-raci.md` to classify prompts and route work.
+if [[ -f "$HERE/seeds/forge-raci.md" ]]; then
+  if [[ "$CP_FLAG" == "-f" || ! -f "$DEST/forge-raci.md" ]]; then
+    echo "Installing forge-raci.md into $DEST/"
+    cp "$HERE/seeds/forge-raci.md" "$DEST/forge-raci.md"
+  fi
+fi
+
 # Orphan-warning for pre-rename seed dirs. After the v2 agent rename
 # (architect → architecture-advisor, etc.), users with prior installs will
 # have the old dirs sitting alongside the new ones. They're harmless but
