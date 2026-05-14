@@ -3732,7 +3732,9 @@ const CLIENT_JS = `
         style: {
           'line-color': '#BF40FF',
           'target-arrow-color': '#BF40FF',
-          'opacity': 0.7,
+          'line-style': 'dotted',
+          'target-arrow-shape': 'none',
+          'opacity': 0.4,
           'width': 1,
         },
       },
