@@ -42,11 +42,20 @@ test("WorkflowSchema accepts a minimal feature workflow", () => {
 test("WorkflowSchema applies defaults to omitted fields", () => {
   const r = WorkflowSchema.parse(minimalWorkflow);
   const step = r.steps[0]!;
+  // gate explicitly set to 'human' in the fixture; preserved verbatim
   assert.equal(step.gate, "human");
   assert.equal(step.manual, false);
   assert.deepEqual(step.depends_on, []);
   assert.deepEqual(step.reds, []);
   assert.equal(step.runtime, "claude");
+});
+
+test("Step.gate defaults to 'auto' when omitted (v2 flip from v1 default)", () => {
+  const r = WorkflowSchema.parse({
+    ...minimalWorkflow,
+    steps: [{ id: "architect", agent: "architect" }], // no gate field
+  });
+  assert.equal(r.steps[0]!.gate, "auto");
 });
 
 // ------------------------------------------------------------------

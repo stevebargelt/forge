@@ -74,16 +74,14 @@ parallel (runner's choice, not the schema's concern).
 
 ### Gate semantics
 
-- `gate: human` — pause; show in dashboard; wait for advance/reject/request-changes.
-- `gate: verdict` — wait for all `reds` to complete, aggregate verdicts (see
-  `authority`), then auto-advance if all authoritative reds pass. Human can
-  still force-advance over a failed authoritative red with rationale (#110).
-- `gate: auto` — advance immediately on step completion. No human pause.
-- `gate: none` (default) — same as `auto` but reserved framing for steps that
-  are part of an implicit pipeline without conceptual gating.
+- `gate: auto` (**default**) — advance immediately on step completion. The orchestrator (host-side Claude Code talking to the user) reads the artifact and decides whether to escalate to the human or let the pipeline proceed. No SQLite pause; no dashboard wait.
+- `gate: human` — pause; write `awaiting_gate` to SQLite; show in dashboard; wait for explicit advance/reject/request-changes from the human. Use when human taste is irreducible (final approval, UI design review).
+- `gate: verdict` — wait for all `reds` to complete, aggregate verdicts (see `authority`), then auto-advance if all authoritative reds pass. Human can still force-advance over a failed authoritative red with rationale (#110).
+- `gate: none` — same as `auto`. Kept in the schema for explicit "no gate intended" annotation when readability matters.
 
-The distinction between `auto` and `none` is presentational only today; the
-runner treats them identically. Kept in the schema for future use.
+**Default flip from v1.** Forge today defaults every phase to `gate: human`, producing 5 human gates per feature run. v2 flips this: `gate: auto` is the default and the orchestrator becomes the gate-verifier-by-default. Workflows declare `gate: human` explicitly on steps that genuinely need human taste. See STATUS.md "Conversational entry — orchestrator pattern" for the full rationale.
+
+**Orchestrator-mediated gate behavior:** when a step completes with `gate: auto`, the runner writes the task as `complete` (not `awaiting_gate`). The orchestrator queries `forge status` periodically, reads the just-completed step's `result.json`, forms an opinion, and either dispatches the next step via `forge next` or surfaces a concern to the human ("planner output looks thin in step 3 — want me to reject?"). This matches Jeff's autonomous-gate-handling pattern, which is proven production behavior.
 
 ### Reds block
 

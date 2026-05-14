@@ -53,7 +53,11 @@ const FanoutDefSchema = z.object({
   failure_mode: z.enum(["fail-phase", "retry-once", "continue"]).default("fail-phase"),
 });
 
-const GateSchema = z.enum(["human", "verdict", "auto", "none"]).default("none");
+// Default `auto` (orchestrator-mediated). v1 defaulted every phase to human
+// gates; v2 flips to autonomous-by-default with explicit opt-in to human.
+// See SCHEMA.md "Gate semantics" + STATUS.md "Gate defaults" for the
+// rationale (modeled after Jeff's `approval: final` pattern).
+const GateSchema = z.enum(["human", "verdict", "auto", "none"]).default("auto");
 
 const StepSchema = z
   .object({
