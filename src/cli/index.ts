@@ -11,6 +11,7 @@ import { registerSubmit } from "./commands/submit.js";
 import { registerRetry } from "./commands/retry.js";
 import { registerInit } from "./commands/init.js";
 import { registerWatch } from "./commands/watch.js";
+import { registerUpgrade } from "./commands/upgrade.js";
 
 const program = new Command();
 program
@@ -30,6 +31,7 @@ registerSubmit(program);
 registerRetry(program);
 registerInit(program);
 registerWatch(program);
+registerUpgrade(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
