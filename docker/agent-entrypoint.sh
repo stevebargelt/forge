@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Start headless Chromium on :9222 in the background, then exec the agent
+# command. browser-tools scripts (mounted at /home/agent/.claude/skills/browser-tools)
+# attach via puppeteer-core. Container teardown kills Chromium.
+#
+# Skipped when FORGE_NO_BROWSER=1 — useful for tests of spawn() that don't
+# need browser tooling.
+set -eu
+
+if [ "${FORGE_NO_BROWSER:-0}" != "1" ] && command -v chromium >/dev/null 2>&1; then
+  CHROMIUM_DATA_DIR="${CHROMIUM_DATA_DIR:-$HOME/.cache/browser-tools}"
+  mkdir -p "$CHROMIUM_DATA_DIR"
+  # --no-sandbox: required inside a container without a sandbox-capable kernel
+  # config (containers usually don't have user namespaces enabled).
+  # --disable-dev-shm-usage: /dev/shm is tiny in Docker by default; Chromium
+  # crashes without this on screenshot-heavy workloads.
+  # --headless=new: Chromium's modern headless mode; supports CDP fully.
+  chromium \
+    --headless=new \
+    --no-sandbox \
+    --disable-dev-shm-usage \
+    --remote-debugging-port=9222 \
+    --remote-debugging-address=127.0.0.1 \
+    --user-data-dir="$CHROMIUM_DATA_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    >/tmp/chromium.log 2>&1 &
+fi
+
+exec "$@"

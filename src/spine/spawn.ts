@@ -1,5 +1,6 @@
 import { spawn as cpSpawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { AgentRef, AgentResult, TaskPackage } from "../types/index.js";
@@ -65,6 +66,7 @@ export async function spawn(opts: SpawnOptions): Promise<AgentResult> {
     projectDir: opts.projectDir,
     readOnlyProject: opts.readOnlyProject,
     designDir: opts.designDir,
+    browserToolsDir: resolveBrowserToolsDir(),
     image: DEFAULT_IMAGE,
     litellmUrl: opts.litellmUrl ?? DEFAULT_LITELLM,
     model: opts.agentConfig.model,
@@ -170,6 +172,11 @@ type DockerArgsInput = {
   // regardless of readOnlyProject — the design corpus is curated by the human
   // on the host (Pencil). Agents read; they never write.
   designDir?: string;
+  // #128: host path of the pi-skills/browser-tools skill dir. When set,
+  // mounted read-only at /home/agent/.claude/skills/browser-tools. Skipped
+  // when the source dir doesn't exist on the host (caller's responsibility
+  // to resolve).
+  browserToolsDir?: string;
   image: string;
   litellmUrl: string;
   model: string;
@@ -227,6 +234,15 @@ function buildDockerArgs(input: DockerArgsInput): string[] {
   // feature-ui-design-* don't write here (Pencil-on-host owns the corpus).
   if (input.designDir) {
     args.push("-v", `${input.designDir}:/design:ro`);
+  }
+  // #128 — browser-tools skill mount. Mounted read-only at the well-known
+  // skills path so headless `claude --print` discovers it on startup. The
+  // entrypoint script in the image starts headless Chromium on :9222 so the
+  // skill's puppeteer-core scripts can attach. Skipped if the host source
+  // doesn't exist (e.g. pi-skills not installed); agents that don't use the
+  // browser are unaffected.
+  if (input.browserToolsDir) {
+    args.push("-v", `${input.browserToolsDir}:/home/agent/.claude/skills/browser-tools:ro`);
   }
 
   args.push(input.image);
@@ -341,6 +357,20 @@ export function resolveIdleTimeoutMs(explicit: number | undefined): number {
     if (Number.isFinite(n) && n >= 0) return n;
   }
   return DEFAULT_IDLE_TIMEOUT_MS;
+}
+
+// #128: resolve the host path of the browser-tools skill source. Default
+// `~/pi-skills/browser-tools` matches Mario's documented install
+// (`git clone badlogic/pi-skills ~/pi-skills`). Override via
+// FORGE_BROWSER_TOOLS_DIR. Returns undefined when the directory doesn't
+// exist on the host — spawn skips the mount silently so agents without the
+// skill installed are unaffected.
+export function resolveBrowserToolsDir(): string | undefined {
+  const explicit = process.env.FORGE_BROWSER_TOOLS_DIR;
+  const candidate = explicit && explicit.length > 0
+    ? explicit
+    : join(homedir(), "pi-skills", "browser-tools");
+  return existsSync(candidate) ? candidate : undefined;
 }
 
 // Exported for unit testing the envelope-parsing logic. Not part of the public API.

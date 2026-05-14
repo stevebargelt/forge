@@ -6,28 +6,29 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-13.** Main is clean, 349/349 tests passing, typecheck green. Branches all merged + deleted; only `main` remains. No uncommitted WIP. Three stray PNGs at the repo root (`aws-users.png`, `i103-status-pill.png`, `i110-gate-with-specialist-fail.png`) all match `.gitignore` patterns; delete whenever.
+**State at end of 2026-05-13.** Main is clean, 349/349 tests passing, typecheck green. Branches all merged + deleted; only `main` remains. No uncommitted WIP. End-of-session sweep deleted the stray repo-root PNGs, `~/.forge/forge.db.bak.before-110-test`, `~/.aws/credentials.{old,backup.old}`, and the legacy `forge-claude-oauth` docker volume; live oauth volume is `forge-claude-oauth-v2`.
 
 **What shipped today (2026-05-13):**
 - **#105** System Map view (replaces old graph view). Forge run + manual renderer fix-pass against the design frames after red review caught real gaps. Commit `5a44588`, merged to main as `6a1b6aa`. See the #105 Done entry for the full landed-features list.
 - **#114** mount `--design-dir` read-only at `/design` inside containers (commit `414b29b`). Architect + prompt-author seeds updated.
 - **#113** discipline reds (red-frontend / red-backend / red-security) gate the parent like wide/narrow (commit `79d6edf`). `buildLaunchPlan` extracted as pure function.
+- **#126** host-side pi-skills/browser-tools install + validation. No forge code change; pure pair-coding migration.
+- **#128** forge container-side browser-tools migration + Playwright MCP teardown. Chrome baked into `agent-dev-worker` image (Chromium-for-Testing via `@puppeteer/browsers`, image pinned to linux/amd64), `agent-entrypoint.sh` starts headless Chrome on `:9222`, `spawn.ts` mounts `~/pi-skills/browser-tools` read-only at the well-known skills path, verifier seed updated with render-check guidance, Playwright MCP fully torn down (launchd service stopped, `~/.claude.json` cleaned across 5 projects, Docker MCP registry pruned, memory rewritten). Backups kept for revival. 354/354 tests passing. Uncommitted in working tree.
+- **#129** spun out as future feature (shareable agent-skills pattern; placeholder, no work yet).
 
 **Top of the active stack now:**
-1. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run. Starts when Steven's ready — System Map is done.
-2. **Auth fix cluster** (small, related, all caught 2026-05-13 during a painful 4-hour SSO chase): **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All small tactical fixes. #117 + #118 are ~30 min each; **#121** is the architectural lesson (host-side STS export pattern) — defer to #116.
-3. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
-4. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
-5. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught today; today's build used `forge-test` for the new test file but `npm test` for the full suite, producing misleading "143 failures" in result.json.
-6. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
-7. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model. Sub-shifts 1+2 shipped, #113 promoted them.
-8. **System Map polish:** **#127** red→parent arrow semantics (magenta arrow reads as flow when it should read as side-channel — file for designer feedback), **#124** drag-overrides Map LRU cap, **#123** a11y posture.
-9. **#126** replace Playwright MCP with shell-driven Chrome DevTools Protocol. Mario Zechner's article. Burned us ~10 min during System Map renderer iteration when Playwright wedged.
+1. **Commit + validate #128.** Working tree has 7 files modified + 1 new (Dockerfile, agent-entrypoint.sh, build.sh, .dockerignore, spawn.ts, spawn.test.ts, verifier seed, BACKLOG). Ship it, then prove the container side works in a real forge run that exercises verifier with a UI change. Without a real run we don't know if the verifier seed's render-check copy reads correctly to the agent.
+2. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run.
+3. **Auth fix cluster** (small, related, all caught 2026-05-13 during a painful 4-hour SSO chase): **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All small tactical fixes. #117 + #118 are ~30 min each; **#121** is the architectural lesson (host-side STS export pattern) — defer to #116.
+4. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
+5. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
+6. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught during #105; today's build used `forge-test` for the new test file but `npm test` for the full suite, producing misleading "143 failures" in result.json.
+7. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
+8. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model. Sub-shifts 1+2 shipped, #113 promoted them.
+9. **System Map polish:** **#127** red→parent arrow semantics (magenta arrow reads as flow when it should read as side-channel — file for designer feedback), **#124** drag-overrides Map LRU cap, **#123** a11y posture.
+10. **#129** — shareable agent-skills pattern (future). Placeholder; revisit when a second consumer of the host-symlink/container-mount pattern appears.
 
 **Useful runtime state:**
-- `forge auth status` will warn if the legacy `forge-claude-oauth` volume is still around (orphaned by #97's mount migration). Steven can `docker volume rm forge-claude-oauth` whenever.
-- DB backup at `~/.forge/forge.db.bak.before-110-test` from the #110 live-verification dance. Safe to delete.
-- `~/.aws/credentials.old` and `~/.aws/credentials.backup.old` — moved aside during 2026-05-13 SSO debugging when a stale static-credentials file was shadowing the SSO chain inside containers. Safe to delete if AWS SSO works going forward.
 - `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`.
 
 **Honest flags:**
@@ -84,26 +85,19 @@ When you start a session, read this file. When you finish, update it: move close
 
 **Caught:** 2026-05-13 — post-renderer-pass review of System Map.
 
-### #126 — Replace Playwright MCP with shell-driven Chrome DevTools Protocol for UI verification
-**Why:** Caught 2026-05-13 during System Map (#105) renderer iteration. Playwright MCP went into a bad state mid-session — `browser_navigate` returned `TimeoutError: browserBackend.callTool: Timeout 60000ms exceeded`, then `browser_close` timed out too, then the next navigate stayed stuck. Once it stuck we couldn't recover without restarting the MCP. Lost ~10 minutes of iteration time fighting the tool instead of the renderer. This isn't the first occurrence — the MCP launches a fresh headless Chrome per session (the `--user-data-dir=/var/folders/...` profile dir), and on slow startup or transport hiccup the whole MCP gets wedged.
+### #129 — Shareable agent-skills pattern (future feature)
+**Why:** While doing #126 (pair-coding side) on 2026-05-13, the pattern surfaced as something with reach beyond forge. The combination of Mario's Skills-format choice + the symlink-on-host / bind-mount-in-container duality is generally useful — any tool the human and an agent both want (screenshot, eval, search, transcript, calendar) wants both surfaces. The natural product is something like "use Mario's tools from this repo, with a small install dance for both surfaces."
 
-Mario Zechner's article "What if you don't need MCP?" (https://mariozechner.at/posts/2025-11-02-what-if-you-dont-need-mcp/) makes the case: Chrome's `--remote-debugging-port` exposes the Chrome DevTools Protocol over plain HTTP+WebSocket. `curl` + a JSON-emitting websocket client cover the entire surface Playwright wraps: navigate, screenshot, eval, network requests, console messages. No MCP server, no Node-side abstraction, no transport-stuck failure mode — if the request fails you get an HTTP error you can diagnose and retry directly.
+**Not designed yet — this is a placeholder.** Open shape questions:
+- Is the deliverable a new repo (`forge-skills`, `agent-browser-stack`), a documented section in forge README pointing at pi-skills, or something else?
+- Provisioning model: `install.sh` that takes a list of skills + lays down host symlinks + npm-installs + emits a container mount manifest? A YAML config that forge v2's runtime YAML (#116) consumes? Both?
+- What's forge-specific vs. general: `spawn.ts` mount injection and v2 runtime YAML wiring are forge-specific. The Skills-format choice, host-symlink/container-mount duality, and pi-skills install dance are general.
 
-**What the replacement would look like:**
-- `scripts/cdp/screenshot.sh <url> <output.png>` — launches/reuses a Chrome instance with `--remote-debugging-port=9222`, navigates, captures `Page.captureScreenshot`, writes PNG.
-- `scripts/cdp/eval.sh <url> <js-expression>` — `Runtime.evaluate` against a CDP target; returns JSON.
-- `scripts/cdp/console.sh <url>` — captures `Runtime.consoleAPICalled` over the WebSocket for a fixed duration.
-- One Chrome process held open per session (start via launchd or a forge subcommand); scripts attach to its already-listening port. No per-call launch.
+**Don't extract prematurely.** Ship #128 (forge container-side use) first. When a second consumer appears (another project, another team, someone else hitting the same Playwright-MCP token-tax pain), revisit and extract.
 
-**For agents:** an agent in a container could call these scripts via its `Bash` tool without needing a Playwright MCP entry in `~/.claude.json`. Verify-phase seed gets an explicit "use `forge-screenshot <url> <path>` to capture the rendered page; attach the PNG path to `result.evidence`" line — matches the design-fidelity lesson from today's System Map verify gap.
+**Composes with #116 (forge v2):** runtime YAML may be the natural home for "this runtime gets these skills mounted." That's where to design provisioning if the answer becomes "config-driven."
 
-**For dev (Steven + Claude during sessions):** the same scripts cover the iteration I was trying to do today — drive the dashboard, screenshot, read console — but synchronously and resilient to transport hiccups.
-
-**Composite with #116 (forge v2):** v2's runtime YAML schema could declare per-runtime "browser verification" via a simple `screenshot` command instead of mounting an MCP. Removes one moving part from the MCP profile per project. Whether this lands inside v2 or before depends on appetite.
-
-**Out of scope:** replacing every Playwright MCP usage in user-facing Claude Code sessions. The MCP still works for "general-purpose browsing while pair-coding." This proposal is specifically for the *forge workflow* uses: dashboard verification, design-fidelity screenshots, console capture.
-
-**Caught:** 2026-05-13 — Playwright MCP stuck mid-System-Map-renderer iteration.
+**Caught:** 2026-05-13.
 
 ### #125 — Implementer seeds don't mention `forge-test`; tests fail mysteriously in build phase
 **Why:** Caught 2026-05-13 reviewing the System Map (#105) build phase output. The implementer ran `npm test` inside its container, got 203 pass / 143 fail (better-sqlite3 ELF mismatch — host's darwin-arm64 binary doesn't load on container's linux-amd64), and reported them as "pre-existing failures unrelated to this change." On the host they're 345/345 green.
@@ -627,6 +621,67 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #128 — Forge agent containers: bake Chrome, mount browser-tools skill, retire Playwright MCP
+**Closed:** 2026-05-13. All five steps shipped + Playwright MCP fully torn down. Container side now uses pi-skills/browser-tools same as host side (#126).
+
+**What landed (forge repo):**
+- `docker/agent-dev-worker.Dockerfile` — replaced Playwright Chromium with Chromium-for-Testing via `npx @puppeteer/browsers install chrome@stable`. Added Chromium system deps (`libnss3`, `libgbm1`, etc.). `chmod` and ENTRYPOINT lines for the new entrypoint script. Pre-creates `/home/agent/.claude/skills/` for the bind mount.
+- `docker/agent-entrypoint.sh` (new) — starts headless Chromium on `127.0.0.1:9222` in the background, then `exec`s the agent command. `--headless=new --no-sandbox --disable-dev-shm-usage`. `FORGE_NO_BROWSER=1` skips Chrome startup (test escape hatch).
+- `docker/build.sh` — pinned image to `--platform linux/amd64`. Chrome doesn't ship Linux/arm64; image runs under Rosetta on Apple Silicon. Trade-off accepted: avoids dragging Playwright back in just for its arm64 bundle.
+- `docker/.dockerignore` — allow `agent-entrypoint.sh` into build context.
+- `src/spine/spawn.ts` — added `browserToolsDir` to `DockerArgsInput`, `resolveBrowserToolsDir()` resolver (env override via `FORGE_BROWSER_TOOLS_DIR`, default `~/pi-skills/browser-tools`, returns `undefined` when the source doesn't exist). Mount is `-v <dir>:/home/agent/.claude/skills/browser-tools:ro`. Mount is RO regardless of `readOnlyProject` — same invariant as `/design`.
+- `src/spine/spawn.test.ts` — 5 new tests covering mount-absent, mount-present, RO-for-blue-agents, resolver-with-bad-path, resolver-with-good-path.
+- `seeds/agents/verifier/CLAUDE.md` — new "Visual verification (UI changes)" section telling the verifier to use `browser-tools` when the plan touches UI. Cites the #105 lesson (tests-green ≠ render-correct) directly.
+
+**What did NOT need touching:**
+- `red-frontend` seed — reds declare `tools: ["read"]` only. Invoking browser-tools needs bash. Right role boundary: verifier opens the page; reds audit the artifact the implementer produced. Considered, rejected.
+- `frontend-implementer` / `red-wide` / `red-narrow` — builder roles or read-only reds, neither needs the render-check invariant.
+
+**Step 5 teardown (host-side, separate from forge repo):**
+- Stopped + removed launchd service `com.sgws.playwright-mcp` (plist renamed to `.bak-before-128` in `~/Library/LaunchAgents/`).
+- Removed Playwright from 5 project scopes in `~/.claude.json` (forge, forge-design, three OneDrive/obsidian projects). Backup at `~/.claude.json.bak-before-128`.
+- Removed `playwright: ref: ""` stub from `~/.docker/mcp/registry.yaml`. Backup at `~/.docker/mcp/registry.yaml.bak-before-128`.
+- Memory `reference_playwright_mcp_launchd.md` rewritten as "RETIRED 2026-05-13" with full restore instructions in case revival is ever needed.
+
+**Validation:**
+- 354/354 tests pass (5 new for #128).
+- Live container test: `docker run` with skill bind mount, watched Chromium start in ~1.5s under Rosetta, ran `browser-screenshot.js` inside container, `docker cp`'d the PNG out, verified it's a valid screenshot (about:blank, 1906 bytes).
+- The "still connecting" notice on this session's playwright MCP confirmed teardown took effect; future sessions will not see the playwright tools at all.
+
+**Image size impact:** ~280MB for Chromium-for-Testing + system libs, roughly comparable to the Playwright Chromium that came out. Net wash.
+
+**Open follow-up (lower priority, low scope):**
+- **Upstream PR to pi-skills.** `browser-start.js` is Mac-hardcoded; a Linux-aware version (detect Chrome binary from env or PATH) would close the gap. Composes with #129.
+
+**Composite with #116 (forge v2):** v2's runtime YAML inherits a working browser-tools surface to declare per-runtime. The `resolveBrowserToolsDir` + `browserToolsDir` mount pattern is a candidate for "declare this in the runtime YAML, runner translates to docker args."
+
+**Caught:** 2026-05-13 (spun out of #126). **Closed:** 2026-05-13.
+
+### #126 — Replace Playwright MCP with pi-skills browser-tools (host side)
+**Closed:** 2026-05-13. **No forge code change** — pure host-side install. Pair-coding surface migrated; forge container side spun out to #128.
+
+**What landed (host side only):**
+- Cloned `badlogic/pi-skills` (MIT, https://github.com/badlogic/pi-skills) to `~/pi-skills`.
+- `npm install` inside `~/pi-skills/browser-tools/` (puppeteer-core + helpers).
+- Symlinked `~/pi-skills/browser-tools` → `~/.claude/skills/browser-tools`.
+- Verified end-to-end on the running forge dashboard: `browser-start.js` → `browser-nav.js http://localhost:8022/` → `browser-screenshot.js` → Read returned path. ~3 seconds. No MCP, no transport, no wedge.
+
+**Validations along the way:**
+- Skills discovery works in headless `claude --print` mode — the mode forge uses (init message includes `skills:[...]`; bodies load only on invocation). `--add-dir` does NOT install skills; well-known paths only.
+- Validated inside `agent-dev-worker:latest` container with the exact docker invocation pattern forge uses today; bedrock auth; skill mounted read-only at `/home/agent/.claude/skills/<name>` discovered and fired correctly. (This is the proof point #128 builds on.)
+- Mario's evolution traced: `badlogic/browser-tools` → `badlogic/agent-tools` → **`badlogic/pi-skills`** (current). He migrated from PATH-alias + README to the Anthropic Skills format because it's cross-agent (Claude Code, Codex CLI, Amp, Droid all consume `SKILL.md`).
+- Token cost win measured: Playwright MCP = 13.7k tokens per spawn; Chrome DevTools MCP = 18k; Skills format = ~225 tokens (description in init, body loaded only on invoke). Two orders of magnitude.
+
+**Memory updates:**
+- New: `reference_pi_skills_browser_tools.md` — install state + pattern shape + iteration loop.
+- Updated: `reference_playwright_mcp_launchd.md` — flagged "still live, slated for teardown by #126/#128."
+
+**Spun out:**
+- **#128** — container-side migration (bake Linux Chrome, entrypoint, `spawn.ts` mount, seed updates, Playwright MCP teardown). Architecture locked here; that's the build.
+- **#129** — shareable pattern future feature ("use Mario's tools from this repo, with a small install dance"); placeholder for when a second consumer appears.
+
+**Caught:** 2026-05-13 during Playwright MCP wedge mid-#105 renderer iteration.
 
 ### #105 — System Map view (replaces old graph view)
 **Closed:** 2026-05-13. Shipped via the System Map run forge ran on itself + a manual renderer-fix pass against the design frames after red review caught gaps. Commit `5a44588` on `system-map-105`; merged to main as `6a1b6aa`.

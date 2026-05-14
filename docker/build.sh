@@ -20,5 +20,10 @@ fi
 # Trap cleans up the staged cert even on failure.
 trap 'rm -f "$HERE/corp-root.pem"' EXIT
 
-docker build -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
+# Pinned to linux/amd64 (#128): Google Chrome / Chromium-for-Testing don't
+# ship Linux/arm64 binaries. The browser-tools skill needs headless Chrome on
+# :9222. On Apple Silicon, this image runs under Rosetta — acceptable Chrome
+# perf trade-off vs. dragging Playwright's bundled arm64 build back in just
+# for its Chromium. amd64 hosts run native.
+docker build --platform linux/amd64 -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
 echo "Built agent-dev-worker."

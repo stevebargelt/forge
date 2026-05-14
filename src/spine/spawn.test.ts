@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startIdleWatchdog, _buildDockerArgs, _readResultJson, resolveIdleTimeoutMs } from "./spawn.js";
+import { startIdleWatchdog, _buildDockerArgs, _readResultJson, resolveIdleTimeoutMs, resolveBrowserToolsDir } from "./spawn.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -197,6 +197,65 @@ test("buildDockerArgs: designDir is RO even when readOnlyProject is false (#114)
   });
   const designMount = pickMount(args, "/design");
   assert.match(designMount!, /:ro$/, "design mount stays ro for blue agents too");
+});
+
+test("buildDockerArgs: browserToolsDir absent → no skill mount (#128)", () => {
+  const args = _buildDockerArgs(ARGS_INPUT_BASE);
+  assert.equal(
+    pickMount(args, "/home/agent/.claude/skills/browser-tools"),
+    undefined,
+    "no skill mount when browserToolsDir unset"
+  );
+});
+
+test("buildDockerArgs: browserToolsDir set → mounts browser-tools skill RO (#128)", () => {
+  const args = _buildDockerArgs({
+    ...ARGS_INPUT_BASE,
+    browserToolsDir: "/Users/test/pi-skills/browser-tools",
+  });
+  const skillMount = pickMount(args, "/home/agent/.claude/skills/browser-tools");
+  assert.equal(
+    skillMount,
+    "/Users/test/pi-skills/browser-tools:/home/agent/.claude/skills/browser-tools:ro",
+    "skill mount must be read-only — agents never modify the skill source"
+  );
+});
+
+test("buildDockerArgs: browser-tools mount is RO even for blue agents (#128)", () => {
+  // Mirrors the /design invariant: regardless of readOnlyProject, the skill
+  // source on the host is never agent-writable.
+  const args = _buildDockerArgs({
+    ...ARGS_INPUT_BASE,
+    readOnlyProject: false,
+    browserToolsDir: "/Users/test/pi-skills/browser-tools",
+  });
+  const skillMount = pickMount(args, "/home/agent/.claude/skills/browser-tools");
+  assert.match(skillMount!, /:ro$/, "skill mount stays ro for blue agents too");
+});
+
+test("resolveBrowserToolsDir: returns undefined when neither env nor default exists", () => {
+  const prev = process.env.FORGE_BROWSER_TOOLS_DIR;
+  process.env.FORGE_BROWSER_TOOLS_DIR = "/definitely/does/not/exist/anywhere-xyz";
+  try {
+    assert.equal(resolveBrowserToolsDir(), undefined);
+  } finally {
+    if (prev === undefined) delete process.env.FORGE_BROWSER_TOOLS_DIR;
+    else process.env.FORGE_BROWSER_TOOLS_DIR = prev;
+  }
+});
+
+test("resolveBrowserToolsDir: returns the path when env points at an existing dir", () => {
+  const prev = process.env.FORGE_BROWSER_TOOLS_DIR;
+  const tmp = join(tmpdir(), `forge-browser-tools-test-${Date.now()}`);
+  mkdirSync(tmp, { recursive: true });
+  process.env.FORGE_BROWSER_TOOLS_DIR = tmp;
+  try {
+    assert.equal(resolveBrowserToolsDir(), tmp);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+    if (prev === undefined) delete process.env.FORGE_BROWSER_TOOLS_DIR;
+    else process.env.FORGE_BROWSER_TOOLS_DIR = prev;
+  }
 });
 
 test("resolveIdleTimeoutMs: explicit value wins over env and default", () => {

@@ -37,6 +37,21 @@ forge-test src/spine/*.test.ts          # a glob
 
 If `forge-test` fails for reasons unrelated to the test outcome (e.g. rebuild error, missing scratch dir), surface that in `evidence` rather than reporting test failures — those are infra failures, not regressions.
 
+## Visual verification (UI changes)
+
+If the task plan includes UI changes — pages, components, layouts, anything a human looks at — running tests is not enough. Tests pass on broken renderers (the #105 System Map shipped a working data layer with a non-functional renderer because tests-green was the entire verification). Open the rendered page in a browser before declaring complete.
+
+The `browser-tools` skill is available — invoke it to capture the rendered page. The skill's SKILL.md documents the full surface; the minimal pattern for verify is:
+
+```
+browser-nav.js <url>           # navigate to the dev server / dashboard / preview page
+browser-screenshot.js          # returns a /tmp/screenshot-*.png path
+```
+
+A headless Chrome is running on `localhost:9222` inside this container; the scripts attach to it. Read the returned PNG to see what the human will see. If the screenshot doesn't match what the plan said the change should produce, that's a `failed` regardless of test results.
+
+Attach the screenshot path to `evidence` when a UI change is in scope. Include the URL you navigated to and one sentence on what the screenshot shows vs. what was expected.
+
 ## Output schema
 
 ```

@@ -31,9 +31,25 @@ ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
     && npm install -g @anthropic-ai/claude-code
 
-# Playwright Chromium. Agents that need firefox/webkit can install on demand.
-RUN npm install -g playwright \
-    && npx --yes playwright install --with-deps chromium
+# Headless Chrome for the browser-tools skill (#128): Ubuntu 22.04's
+# chromium-browser apt package is a snap-stub that doesn't work in containers,
+# and google-chrome-stable is amd64-only (we build arm64 on Apple Silicon and
+# need multi-arch long-term). Chromium-for-Testing ships both arm64 and amd64
+# builds; install via @puppeteer/browsers (the canonical headless-Chrome
+# installer puppeteer-core itself uses). System libs first so Chromium has
+# what it needs to start under --headless=new.
+RUN apt-get update && apt-get install -y \
+    fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 \
+    libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 \
+    libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1 libxdamage1 \
+    libxext6 libxfixes3 libxkbcommon0 libxrandr2 xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PUPPETEER_CACHE_DIR=/opt/puppeteer-cache
+RUN npx --yes @puppeteer/browsers install chrome@stable --path "$PUPPETEER_CACHE_DIR" \
+    && CHROME_PATH=$(find "$PUPPETEER_CACHE_DIR" -type f -name chrome -executable | head -1) \
+    && test -n "$CHROME_PATH" \
+    && ln -sf "$CHROME_PATH" /usr/local/bin/chromium
 
 # forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
 # platform inside a writable scratch dir, then runs tests there. Works around
@@ -42,11 +58,22 @@ RUN npm install -g playwright \
 COPY forge-test.sh /usr/local/bin/forge-test
 RUN chmod +x /usr/local/bin/forge-test
 
+# Browser-tools entrypoint (#128): start headless Chromium on :9222 in the
+# background, then exec the agent's command line. browser-tools scripts
+# (mounted at /home/agent/.claude/skills/browser-tools) attach to :9222 via
+# puppeteer-core. The script noop-skips Chrome startup when FORGE_NO_BROWSER=1
+# is set or chromium is missing; this keeps tests of spawn() that don't care
+# about the browser fast.
+COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint
+RUN chmod +x /usr/local/bin/agent-entrypoint
+
 # Non-root agent user (DEC-009): UID 1000, NOPASSWD sudo, ~/.claude pre-created.
 RUN useradd -m -s /bin/bash -u 1000 agent \
     && echo "agent ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-    && mkdir -p /home/agent/.claude \
+    && mkdir -p /home/agent/.claude/skills \
     && chown -R agent:agent /home/agent
 
 USER agent
 WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/agent-entrypoint"]
