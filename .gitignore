@@ -13,3 +13,4 @@ graph-*.png
 auth-*.png
 sm-*.png
 system-map-render*.png
+.env
