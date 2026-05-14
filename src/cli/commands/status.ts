@@ -4,14 +4,12 @@ import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { loadWorkflow } from "../../spine/workflows.js";
-import { reconcileRun } from "../../spine/reconcile.js";
 
 export function registerStatus(program: Command): void {
   program
     .command("status")
     .argument("[run-id]", "show one run, or omit to list all")
-    .option("--read-only", "open the DB read-only (skips reconcile; never blocks a running `forge next`)")
+    .option("--read-only", "open the DB read-only")
     .option("--json", "emit structured JSON instead of human-readable text")
     .description("Show run status. Always works against whatever has been built so far.")
     .action(async (runId: string | undefined, opts: { readOnly?: boolean; json?: boolean }) => {
@@ -32,7 +30,7 @@ export function registerStatus(program: Command): void {
           return;
         }
         if (runs.length === 0) {
-          console.log("No runs yet. Try: forge new investigation \"my-question\" --question \"...\"");
+          console.log("No runs yet. Try: forge new feature \"my-feature\" --brief \"...\"");
           return;
         }
         for (const r of runs) {
@@ -43,18 +41,6 @@ export function registerStatus(program: Command): void {
 
       const run = getRun(runId);
       if (!run) throw new Error(`Run not found: ${runId}`);
-
-      if (!opts.readOnly) {
-        try {
-          const wf = await loadWorkflow(run.workflow);
-          const reconciled = reconcileRun(runId, wf).filter((r) => r.resolution !== "still_running");
-          if (!opts.json && reconciled.length > 0) {
-            console.log(`(reconciled ${reconciled.length} orphaned task(s) before reporting)`);
-          }
-        } catch {
-          // If the workflow can't load (deleted/renamed), skip reconciliation but still show status.
-        }
-      }
 
       const tasks = tasksForRun(runId);
 

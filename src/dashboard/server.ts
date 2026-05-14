@@ -10,7 +10,6 @@ import { validateNewRunBody, buildForgeNewArgv, WORKFLOW_SPECS, WORKFLOW_ORDER, 
 import { AUTH_ERROR_PREFIX, getAuthState } from "../util/creds.js";
 import { getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
-import type { WorkflowName } from "../types/index.js";
 
 let _server: Server | null = null;
 
@@ -282,7 +281,7 @@ async function handleNewRun(body: Record<string, unknown>, res: ServerResponse):
     return jsonValidation(res, validation.errors);
   }
 
-  const argv = buildForgeNewArgv(workflow as WorkflowName, validation.values);
+  const argv = buildForgeNewArgv(workflow, validation.values);
   const out = await invokeForge(argv);
   if (out.exitCode !== 0) {
     // Route auth pre-flight failures to a 400 so the frontend can render a

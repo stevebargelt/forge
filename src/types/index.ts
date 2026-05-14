@@ -1,107 +1,14 @@
-// Forge core types — see Harness Spine Sketch for authoritative definitions.
-
-export type WorkflowName =
-  | "feature"
-  | "feature-ui-design-needed"
-  | "feature-ui-design-provided"
-  | "investigation"
-  | "codebase-assessment"
-  | "ui-design"
-  | "ui-design-revise";
+// Forge core types. v2 — workflow names are arbitrary YAML strings, not a fixed
+// union. Phase/AgentRef/RedConfig/FanoutConfig types removed; v2 uses schema.ts.
 
 export type GateType = "human" | "auto" | "verdict";
 
 export type RedAuthority = "triage" | "specialist" | "authoritative";
 
-// Optional discipline tag on an AgentRef. Set on specialist engineers
-// (frontend-specialist, backend-specialist, security-advisor,
-// agentic-platform-builder) so fanout / routing logic can pick the right
-// specialist per plan-step. Optional + additive: existing agents have no
-// discipline; specialists carry one. See BACKLOG #96 for the build-phase
-// decomposition arc this enables.
-//
-// `platform` is for cross-cutting work that spans multiple layers (frontend +
-// backend + infra together) where splitting into single-discipline specialists
-// would create coordination overhead.
+// Optional discipline tag carried on a task. Set when the agent role is a
+// specialist (frontend-specialist, backend-specialist, security-advisor,
+// agentic-platform-builder). Threads through audit + future routing logic.
 export type AgentDiscipline = "frontend" | "backend" | "infosec" | "platform";
-
-export type AgentRef = {
-  role: string;
-  agentDir: string;
-  // Logical model name as declared in the workflow (e.g. "spec-writer",
-  // "fast-orchestrator"). Preserved on the AgentRef for audit-trail purposes
-  // (#38) so a task can record both alias and resolved model.
-  alias: string;
-  // Resolved model id — what's actually passed to claude --model. Determined
-  // at agent-ref construction time from BEDROCK_MAP / DIRECT_MAP / env var
-  // overrides / LiteLLM passthrough. See workflows/_agentRefs.ts.
-  model: string;
-  // Optional. Set on specialist implementer agents (#96 sub-shift 2). Future
-  // implementer-fanout (#96 sub-shift 3) reads this to route plan steps to
-  // the right specialist.
-  discipline?: AgentDiscipline;
-};
-
-export type RedConfig = {
-  wide?: AgentRef;
-  narrow?: AgentRef;
-  // Discipline-specific reds attached alongside wide/narrow. #96 sub-shift 1.
-  // Inherit the parent RedConfig's authority and gateOnVerdict — they're red
-  // agents like any other, just specialized through a discipline lens (e.g.
-  // red-frontend, red-backend, red-security). #113 promoted these from
-  // informational-only to first-class gating. Unconfigured by default;
-  // workflows opt in by listing the agents.
-  additional?: AgentRef[];
-  parallel: boolean;
-  authority: RedAuthority;
-  gateOnVerdict: boolean;
-};
-
-export type FanoutConfig = {
-  maxConcurrency: number;
-  failureMode: "fail-phase" | "retry-once" | "continue";
-};
-
-export type ConstraintRef = {
-  path: string;
-};
-
-export type Phase = {
-  name: string;
-  agents: AgentRef[];
-  reds?: RedConfig;
-  gate: GateType;
-  fanout?: FanoutConfig;
-  workflowAdditions?: string;
-  onReject?: string;
-  // Fanout-from-upstream: when this phase is created, read the named array key
-  // from the upstream phase's task result and create one task per array entry.
-  // The entry is placed in inputs under `fanoutInputKey` (defaults to the singular
-  // form of the array key — "claims" → "claim", "lenses" → "lens").
-  fanoutFromUpstream?: {
-    arrayKey: string;       // key in the upstream task's result, e.g. "claims" or "lenses"
-    inputKey?: string;      // key in this task's inputs; default: singular(arrayKey)
-  };
-};
-
-export type Workflow = {
-  name: WorkflowName;
-  description: string;
-  phases: Phase[];
-  constraints?: ConstraintRef[];
-};
-
-export type ConstraintLevel = "suggest" | "force";
-
-export type Constraint = {
-  id: string;
-  level: ConstraintLevel;
-  roles: string[];
-  workflows: WorkflowName[];
-  phases?: string[];
-  body: string;
-  antiPrompt?: string;
-};
 
 export type TaskInputs = { [key: string]: unknown };
 
@@ -151,7 +58,8 @@ export type TaskStatus =
 
 export type Run = {
   id: string;
-  workflow: WorkflowName;
+  // v2: workflow is an arbitrary YAML name (see seeds/workflows/*.yml).
+  workflow: string;
   title: string;
   status: RunStatus;
   createdAt: string;

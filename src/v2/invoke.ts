@@ -209,7 +209,7 @@ function createInvokeRun(
 
   const run: Run = {
     id: runId,
-    workflow: "invoke" as never,  // sentinel; not a registered workflow
+    workflow: "invoke",  // sentinel; not a registered workflow
     title,
     status: "active",
     createdAt: new Date().toISOString(),

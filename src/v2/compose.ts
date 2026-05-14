@@ -14,7 +14,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { filterConstraints, loadAllConstraints } from "../spine/constraints.js";
+import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import type { Workflow, Step } from "./schema.js";
 
 const FRAMING = `## Output contract
@@ -57,12 +57,9 @@ export function composeSystemPrompt(args: ComposeArgs): string {
   }
 
   const all = loadAllConstraints(args.constraintsDir ?? defaultConstraintsDir());
-  // filterConstraints's `workflow` field is typed as v1's WorkflowName union.
-  // v2 workflow names are arbitrary YAML strings. Cast at the boundary;
-  // when the v1 spine is deleted at cutover, this widens to `string` cleanly.
   const suggest = filterConstraints(all, {
     role: args.role,
-    workflow: args.workflow.name as never,
+    workflow: args.workflow.name,
     phase: args.step.id,  // v1's "phase" maps 1:1 to v2's "step.id"
     level: "suggest",
   });

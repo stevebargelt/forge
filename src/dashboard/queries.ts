@@ -3,12 +3,11 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { existsSync, readFileSync } from "node:fs";
 import { DB_PATH, briefPromptHostPath } from "../util/paths.js";
 import { SCHEMA_SQL } from "../store/schema.js";
-import type { Run, Task, RunStatus, WorkflowName, TaskStatus, TaskPackage } from "../types/index.js";
+import type { Run, Task, RunStatus, TaskStatus, TaskPackage } from "../types/index.js";
 import type { VerdictRow, Finding, RedAuthority } from "../types/index.js";
 import type { GateRow } from "../store/gates.js";
 import type { GateDecision } from "../types/index.js";
-import { loadWorkflow } from "../spine/workflows.js";
-import { buildPhaseShape, type PhaseShape } from "./phaseShape.js";
+import { type PhaseShape } from "./phaseShape.js";
 
 let _db: DatabaseInstance | null = null;
 
@@ -78,7 +77,7 @@ type GateDbRow = {
 function rowToRun(row: RunRow): Run {
   return {
     id: row.id,
-    workflow: row.workflow as WorkflowName,
+    workflow: row.workflow,
     title: row.title,
     status: row.status as RunStatus,
     createdAt: row.created_at,
@@ -163,19 +162,13 @@ export async function getRunWithShouldPoll(
     verdicts[task.id] = vRows.map(rowToVerdict);
   }
 
-  // Phase shape — workflow definition + per-phase task aggregates. Loaded
-  // every request because workflow files are TS imports that Node caches in
-  // memory after first import; cost is one Map lookup, not a re-parse.
-  // Wrapped in try/catch because a workflow rename could leave a run pointing
-  // at an unknown workflow name; the dashboard should still render the run
-  // (just without the pill row) rather than 500.
-  let phaseShape: PhaseShape[] = [];
-  try {
-    const wf = await loadWorkflow(run.workflow);
-    phaseShape = buildPhaseShape(wf, tasks);
-  } catch {
-    // Fall through with empty phaseShape — client renders zero pills.
-  }
+  // Phase shape — v1 phaseShape used the TS Workflow object. v2 loads from
+  // YAML; the dashboard's pill row needs a v2-aware rewrite (filed as a
+  // fast-follow). For now we fall through with empty phaseShape so the
+  // run page still renders the task table — just without the pill row.
+  // TODO(#TBD): v2-aware buildPhaseShape from src/v2/schema Workflow.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const phaseShape: PhaseShape[] = [];
 
   const shouldPoll = tasks.some((t) => t.status === "running");
 

@@ -4,7 +4,6 @@
 // in dashboard/ rather than types/ — it's a UX schema, not a runtime contract;
 // the CLI keeps its Commander flag declarations as the source of truth there.
 
-import type { WorkflowName } from "../types/index.js";
 
 export type FieldType = "text" | "textarea" | "path";
 
@@ -24,7 +23,7 @@ export type FieldSpec = {
 };
 
 export type WorkflowSpec = {
-  name: WorkflowName;
+  name: string;
   // Short description rendered when the workflow is selected.
   description: string;
   // Fields beyond the universal {title, project}. Order = render order.
@@ -58,7 +57,7 @@ export const UNIVERSAL_FIELDS: FieldSpec[] = [
 // - feature / feature-ui-design-needed / ui-design / ui-design-revise need --brief
 // - feature-ui-design-needed / ui-design / ui-design-revise need --design-dir
 // - codebase-assessment has no extras
-export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
+export const WORKFLOW_SPECS: Record<string, WorkflowSpec> = {
   feature: {
     name: "feature",
     description: "Build a feature with no UI/UX design step (CLI, API, library, internal refactor). Architect → plan → build → verify.",
@@ -177,7 +176,7 @@ export const WORKFLOW_SPECS: Record<WorkflowName, WorkflowSpec> = {
 // Workflow groups for the modal picker (Steven 2026-05-08 — phase grouping
 // in the modal). Each group has a label + ordered workflow names. Render
 // order within a group is intentional (most-common variant first).
-export const WORKFLOW_GROUPS: { label: string; workflows: WorkflowName[] }[] = [
+export const WORKFLOW_GROUPS: { label: string; workflows: string[] }[] = [
   {
     label: "Build features",
     workflows: ["feature", "feature-ui-design-needed", "feature-ui-design-provided"],
@@ -193,7 +192,7 @@ export const WORKFLOW_GROUPS: { label: string; workflows: WorkflowName[] }[] = [
 ];
 
 // Flat order — derived from WORKFLOW_GROUPS so the two stay in sync.
-export const WORKFLOW_ORDER: WorkflowName[] = WORKFLOW_GROUPS.flatMap((g) => g.workflows);
+export const WORKFLOW_ORDER: string[] = WORKFLOW_GROUPS.flatMap((g) => g.workflows);
 
 // ---------- validation ----------
 
@@ -206,7 +205,7 @@ export type ValidationError = {
 // not shell-injection-shaped" on paths and "non-empty" on required text;
 // downstream `forge new` handles real existence checks.
 export function validateNewRunBody(
-  workflow: WorkflowName | string,
+  workflow: string | string,
   body: Record<string, unknown>
 ): { ok: true; values: Record<string, string> } | { ok: false; errors: ValidationError[] } {
   const errors: ValidationError[] = [];
@@ -248,7 +247,7 @@ export function validateNewRunBody(
 // Universal fields title + project come first (title is positional after workflow);
 // per-workflow flags follow. Returned argv is suitable for cpSpawn directly — no
 // shell, no quoting concerns.
-export function buildForgeNewArgv(workflow: WorkflowName, values: Record<string, string>): string[] {
+export function buildForgeNewArgv(workflow: string, values: Record<string, string>): string[] {
   const argv: string[] = ["new", workflow, values.title ?? ""];
   if (values.project) argv.push("--project", values.project);
   if (values.brief) argv.push("--brief", values.brief);

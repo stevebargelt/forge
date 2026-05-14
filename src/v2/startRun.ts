@@ -44,7 +44,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
 
   const run: Run = {
     id: runId,
-    workflow: args.workflow.name as never, // RunStatus's WorkflowName is v1-typed; v2 names are arbitrary
+    workflow: args.workflow.name,
     title: args.title,
     status: "active",
     createdAt: new Date().toISOString(),

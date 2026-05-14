@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { retry } from "../../spine/retry.js";
+import { retry } from "../../v2/retry.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 
 export function registerRetry(program: Command): void {
