@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { version } from "../../package.json" with { type: "json" };
 import { registerNew } from "./commands/new.js";
 import { registerNext } from "./commands/next.js";
 import { registerGate } from "./commands/gate.js";
@@ -18,7 +19,7 @@ const program = new Command();
 program
   .name("forge")
   .description("Multi-agent workflow orchestrator")
-  .version("0.1.0");
+  .version(version);
 
 registerNew(program);
 registerNext(program);
