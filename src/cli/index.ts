@@ -13,6 +13,7 @@ import { registerInit } from "./commands/init.js";
 import { registerWatch } from "./commands/watch.js";
 import { registerUpgrade } from "./commands/upgrade.js";
 import { registerInvoke } from "./commands/invoke.js";
+import { registerBacklog } from "./commands/backlog.js";
 
 const program = new Command();
 program
@@ -33,6 +34,7 @@ registerInit(program);
 registerWatch(program);
 registerUpgrade(program);
 registerInvoke(program);
+registerBacklog(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
