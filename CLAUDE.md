@@ -6,11 +6,22 @@ This is the forge CLI repo. If you're a Claude Code session working in this dire
 
 A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.
 
-## Session start: read BACKLOG.md
+## Session start: use `forge backlog`, don't read BACKLOG.md whole
 
-`BACKLOG.md` at the repo root is the canonical task list. Read it on session entry. The "Notes for next session" prose at the top is the narrative handoff (what was just done, what to do next). The structured sections below — Active / In progress / Done — hold every open and recently-closed task with **sticky numbers** (e.g. `#33`, `#41`) that are referenced from commit messages and ADRs. New tasks always land in BACKLOG.md with the next sticky number; never renumber.
+`BACKLOG.md` at the repo root is the canonical task list. It is large (~170KB). **Use the `forge backlog` CLI** instead of reading the file directly — same data, ~30x less context.
 
-The TaskCreate harness tool is for ephemeral within-session working state. The durable record is BACKLOG.md.
+Standard session-start sequence:
+```
+forge backlog notes show                    # narrative handoff from last session
+forge backlog list --status active          # open tickets (titles only)
+forge backlog show <id>                     # full body when you need one
+```
+
+`forge backlog --help` lists the rest (`file`, `close`, `move`, `notes add`, `notes replace`). Only read BACKLOG.md whole if you genuinely need to scan across many ticket bodies at once — typically you don't.
+
+Sticky numbers (e.g. `#33`, `#41`) are stable across sessions and referenced from commit messages and ADRs. New tasks land via `forge backlog file "<title>"` (auto-assigns the next sticky); never renumber.
+
+The TaskCreate harness tool is for ephemeral within-session working state. The durable record is BACKLOG.md (via `forge backlog`).
 
 ## Conventions
 
