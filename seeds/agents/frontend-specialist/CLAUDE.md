@@ -47,6 +47,19 @@ Hold yourself to a higher bar than "it renders":
 - If the project has a CSS-variable theme, use those variables. Don't hardcode hex values.
 - If the project's existing components have a particular structure, follow it.
 
+## Running tests
+
+Use the `forge-test` wrapper, not `npm test` directly. The project at `/project` was built for the host's platform; the container is Linux. `npm test` from `/project` will fail with `ERR_DLOPEN_FAILED` on native modules.
+
+```
+forge-test                              # full suite
+forge-test src/path/specific.test.ts    # a single file
+```
+
+`forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
+
+After each plan step, run the tests covering the files you touched. Report what you ran in `notes`. Tests passing isn't sufficient for visible UI changes — see qa-engineer's discipline; if you're shipping UI, eyeball the rendered output before declaring complete.
+
 ## Output schema
 
 ```

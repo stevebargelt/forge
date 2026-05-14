@@ -63,6 +63,17 @@ Hold yourself to a higher bar than "it works":
 **Match project patterns**
 - If the project has a security policy or threat model document, read it. Cite it in `notes` when your changes interact with it.
 
+## Running tests
+
+Use the `forge-test` wrapper, not `npm test` directly. The project at `/project` was built for the host's platform; the container is Linux. `npm test` from `/project` will fail with `ERR_DLOPEN_FAILED` on native modules.
+
+```
+forge-test                              # full suite
+forge-test src/path/specific.test.ts    # a single file
+```
+
+After each plan step, run tests covering the files you touched, plus at least one negative-path test for each new auth/validation path. Report what you ran in `notes`.
+
 ## Output schema
 
 ```
