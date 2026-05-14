@@ -38,15 +38,15 @@ test("parser identifies sections + ticket counts on BACKLOG.md", () => {
     assert.ok(b.sections.has(name), `section ${name} should be present`);
   }
 
-  // Active should have at least #132 (the v2 fast-follow ticket).
+  // Active should be non-empty (real running project).
   const active = b.sections.get("Active")!;
-  const ids = active.map((t) => t.id);
-  assert.ok(ids.includes(132), "Active should contain #132");
+  assert.ok(active.length > 0, "Active should contain tickets");
 
-  // Done (recent) should have #116 (v2 cutover).
+  // Done (recent) should have #116 (v2 cutover) and #132 (backlog CLI).
   const doneRecent = b.sections.get("Done (recent)")!;
   const doneIds = doneRecent.map((t) => t.id);
   assert.ok(doneIds.includes(116), "Done (recent) should contain #116");
+  assert.ok(doneIds.includes(132), "Done (recent) should contain #132");
 });
 
 test("parser preserves ticket bodies as raw markdown (no interpretation)", () => {
