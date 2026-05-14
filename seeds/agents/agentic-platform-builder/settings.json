@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "edit", "write", "bash"],
+  "notes": "Agentic platform builder — full read/write inside /project. Cross-layer specialist for steps spanning frontend + backend + infra."
+}

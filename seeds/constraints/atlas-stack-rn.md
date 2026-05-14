@@ -1,7 +1,7 @@
 ---
 id: atlas-stack-rn
 level: force
-roles: [architect, implementer]
+roles: [architecture-advisor, engineer]
 workflows: [feature-design-provided, feature-design-needed]
 phases: [architect, build]
 antiPrompt: "Demonstrate that this design uses any frontend stack other than React Native + TypeScript + @atlas/ui + Re.Pack 5.x"

@@ -13,12 +13,17 @@ export type GateType = "human" | "auto" | "verdict";
 
 export type RedAuthority = "triage" | "specialist" | "authoritative";
 
-// Optional discipline tag on an AgentRef. Set on specialist implementers
-// (frontend-implementer, backend-implementer, infosec-implementer) so future
-// fanout / routing logic can pick the right specialist per plan-step. Optional
-// + additive: existing agents have no discipline; specialists carry one. See
-// BACKLOG #96 for the build-phase decomposition arc this enables.
-export type AgentDiscipline = "frontend" | "backend" | "infosec";
+// Optional discipline tag on an AgentRef. Set on specialist engineers
+// (frontend-specialist, backend-specialist, security-advisor,
+// agentic-platform-builder) so fanout / routing logic can pick the right
+// specialist per plan-step. Optional + additive: existing agents have no
+// discipline; specialists carry one. See BACKLOG #96 for the build-phase
+// decomposition arc this enables.
+//
+// `platform` is for cross-cutting work that spans multiple layers (frontend +
+// backend + infra together) where splitting into single-discipline specialists
+// would create coordination overhead.
+export type AgentDiscipline = "frontend" | "backend" | "infosec" | "platform";
 
 export type AgentRef = {
   role: string;

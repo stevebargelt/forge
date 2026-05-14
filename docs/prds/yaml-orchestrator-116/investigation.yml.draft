@@ -24,7 +24,7 @@ steps:
       becomes one investigator task in the next phase.
 
   - id: investigate
-    agent: investigator
+    agent: research-specialist
     model: spec-writer
     depends_on: [frame-question]
     gate: human

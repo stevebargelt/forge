@@ -11,14 +11,14 @@ import { agent, specialistAgent } from "./_agentRefs.js";
 import { loadWorkflow, findPhase } from "../spine/workflows.js";
 
 test("specialistAgent stamps discipline on the resulting AgentRef", () => {
-  const a = specialistAgent("frontend-implementer", "spec-writer", "frontend");
-  assert.equal(a.role, "frontend-implementer");
+  const a = specialistAgent("frontend-specialist", "spec-writer", "frontend");
+  assert.equal(a.role, "frontend-specialist");
   assert.equal(a.alias, "spec-writer");
   assert.equal(a.discipline, "frontend");
 });
 
 test("agent() does not stamp discipline (existing behavior)", () => {
-  const a = agent("implementer", "spec-writer");
+  const a = agent("engineer", "spec-writer");
   assert.equal(a.discipline, undefined);
 });
 

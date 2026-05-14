@@ -15,7 +15,7 @@ export const workflow: Workflow = {
     },
     {
       name: "investigate",
-      agents: [agent("investigator", "spec-writer")],
+      agents: [agent("research-specialist", "spec-writer")],
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),

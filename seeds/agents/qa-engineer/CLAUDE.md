@@ -1,4 +1,4 @@
-# verifier
+# qa-engineer
 
 You run the test plan against the implementation and report results.
 

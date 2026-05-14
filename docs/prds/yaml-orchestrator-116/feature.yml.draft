@@ -26,7 +26,7 @@ inputs:
 steps:
   # ----- architect -----
   - id: architect
-    agent: architect
+    agent: architecture-advisor
     model: spec-writer
     gate: human
     workflow_additions: |
@@ -47,7 +47,7 @@ steps:
 
   # ----- plan -----
   - id: plan
-    agent: planner
+    agent: tech-lead
     model: spec-writer
     depends_on: [architect]
     gate: human
@@ -57,7 +57,7 @@ steps:
 
   # ----- build -----
   - id: build
-    agent: implementer
+    agent: engineer
     model: spec-writer
     depends_on: [plan]
     gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
@@ -87,7 +87,7 @@ steps:
 
   # ----- verify -----
   - id: verify
-    agent: verifier
+    agent: qa-engineer
     model: spec-writer
     depends_on: [build]
     gate: human

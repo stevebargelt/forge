@@ -1,6 +1,8 @@
-// Tests confirming the six new agent seeds (#96 foundation) exist in the
-// repo's seeds/ directory with the expected file structure (CLAUDE.md +
-// settings.json). These guard against accidental seed deletion or rename.
+// Tests confirming the six new agent seeds (#96 foundation, renamed in v2)
+// exist in the repo's seeds/ directory with the expected file structure
+// (CLAUDE.md + settings.json). These guard against accidental seed deletion
+// or rename. Names were updated as part of the v2 Jeff-vocabulary rename
+// pass (architect → architecture-advisor, etc.).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,14 +16,14 @@ const REPO_ROOT = join(here, "..", "..");
 const SEEDS_DIR = join(REPO_ROOT, "seeds", "agents");
 
 const SPECIALIST_SEEDS = [
-  // Specialist reds — discipline-specific informational reviewers
+  // Specialist reds — discipline-specific reviewers
   "red-frontend",
   "red-backend",
   "red-security",
-  // Specialist implementers — discipline-specific implementer agents
-  "frontend-implementer",
-  "backend-implementer",
-  "infosec-implementer",
+  // Specialist engineers — discipline-specific implementer agents (renamed v2)
+  "frontend-specialist",
+  "backend-specialist",
+  "security-advisor",
 ];
 
 for (const seed of SPECIALIST_SEEDS) {
@@ -46,11 +48,11 @@ test("specialist red seeds declare read-only tools", () => {
   }
 });
 
-test("specialist implementer seeds declare full read/write tools", () => {
+test("specialist engineer seeds declare full read/write tools", () => {
   for (const role of [
-    "frontend-implementer",
-    "backend-implementer",
-    "infosec-implementer",
+    "frontend-specialist",
+    "backend-specialist",
+    "security-advisor",
   ]) {
     const settings = JSON.parse(
       readFileSync(join(SEEDS_DIR, role, "settings.json"), "utf8")
@@ -58,7 +60,7 @@ test("specialist implementer seeds declare full read/write tools", () => {
     assert.deepEqual(
       settings.tools.sort(),
       ["bash", "edit", "read", "write"],
-      `${role} should declare full read/write/bash tools (matches implementer pattern)`
+      `${role} should declare full read/write/bash tools (matches engineer pattern)`
     );
   }
 });
@@ -79,11 +81,11 @@ test("discipline red CLAUDE.md self-identifies + declares gating behavior (#113)
   }
 });
 
-test("specialist implementer CLAUDE.md declares discipline in output schema", () => {
+test("specialist engineer CLAUDE.md declares discipline in output schema", () => {
   const expected: Record<string, string> = {
-    "frontend-implementer": '"discipline": "frontend"',
-    "backend-implementer": '"discipline": "backend"',
-    "infosec-implementer": '"discipline": "infosec"',
+    "frontend-specialist": '"discipline": "frontend"',
+    "backend-specialist": '"discipline": "backend"',
+    "security-advisor": '"discipline": "infosec"',
   };
   for (const [role, marker] of Object.entries(expected)) {
     const text = readFileSync(join(SEEDS_DIR, role, "CLAUDE.md"), "utf8");

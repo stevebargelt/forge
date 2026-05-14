@@ -43,7 +43,7 @@ steps:
     on_reject: brief
 
   - id: architect
-    agent: architect
+    agent: architecture-advisor
     model: spec-writer
     depends_on: [ui-review]
     gate: human
@@ -69,7 +69,7 @@ steps:
         gate_on_verdict: false
 
   - id: plan
-    agent: planner
+    agent: tech-lead
     model: spec-writer
     depends_on: [architect]
     gate: human
@@ -79,7 +79,7 @@ steps:
       Output {steps: [{id, summary, files, acceptance}]}.
 
   - id: build
-    agent: implementer
+    agent: engineer
     model: spec-writer
     depends_on: [plan]
     gate: verdict
@@ -111,7 +111,7 @@ steps:
         gate_on_verdict: true
 
   - id: verify
-    agent: verifier
+    agent: qa-engineer
     model: spec-writer
     depends_on: [build]
     gate: human

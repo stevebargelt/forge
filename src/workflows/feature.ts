@@ -12,7 +12,7 @@ export const workflow: Workflow = {
   phases: [
     {
       name: "architect",
-      agents: [agent("architect", "spec-writer")],
+      agents: [agent("architecture-advisor", "spec-writer")],
       reds: {
         wide: agent("red-wide", "fast-orchestrator"),
         narrow: agent("red-narrow", "fast-orchestrator"),
@@ -26,14 +26,14 @@ export const workflow: Workflow = {
     },
     {
       name: "plan",
-      agents: [agent("planner", "spec-writer")],
+      agents: [agent("tech-lead", "spec-writer")],
       gate: "human",
       workflowAdditions:
         "Translate the architecture document into a step-by-step plan. Output {steps: [{id, summary, files, acceptance}]}.",
     },
     {
       name: "build",
-      agents: [agent("implementer", "spec-writer")],
+      agents: [agent("engineer", "spec-writer")],
       // build phase reds: wide/narrow + three discipline-specific reds
       // (frontend, backend, security). All five inherit the RedConfig's
       // authoritative + gateOnVerdict settings — any red's fail blocks the
@@ -56,7 +56,7 @@ export const workflow: Workflow = {
     },
     {
       name: "verify",
-      agents: [agent("verifier", "spec-writer")],
+      agents: [agent("qa-engineer", "spec-writer")],
       gate: "human",
       workflowAdditions:
         "Run the test plan against the build. Output {tests_run, tests_passed, tests_failed, evidence}.",
