@@ -10,6 +10,7 @@ import { registerAdvise } from "./commands/advise.js";
 import { registerSubmit } from "./commands/submit.js";
 import { registerRetry } from "./commands/retry.js";
 import { registerInit } from "./commands/init.js";
+import { registerWatch } from "./commands/watch.js";
 
 const program = new Command();
 program
@@ -28,6 +29,7 @@ registerAdvise(program);
 registerSubmit(program);
 registerRetry(program);
 registerInit(program);
+registerWatch(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
