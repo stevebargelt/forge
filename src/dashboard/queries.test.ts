@@ -20,7 +20,7 @@ let prev: DatabaseInstance | null;
 
 const RUN: Run = {
   id: "run-dash",
-  workflow: "investigation",
+  workflow: "feature",
   title: "dashboard test run",
   status: "active",
   createdAt: "2026-05-06T00:00:00Z",
@@ -102,7 +102,7 @@ test("getRunWithShouldPoll returns shouldPoll=true when at least one task is run
 test("getRunWithShouldPoll returns shouldPoll=false when no tasks are running", async () => {
   const run2: Run = {
     id: "run-done",
-    workflow: "investigation",
+    workflow: "feature",
     title: "done run",
     status: "complete",
     createdAt: "2026-05-06T00:00:00Z",
