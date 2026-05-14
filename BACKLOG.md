@@ -71,17 +71,6 @@ Installs separately. Runs as `forge-dashboard` or `npx forge-dashboard` on its o
 
 **Caught:** 2026-05-14 — during post-v2 reflection on dashboard scope.
 
-### #136 — Rebuild v2-aware pill row in the dashboard
-**Why:** v2 cutover deleted the v1 Workflow TypeScript type that `buildPhaseShape()` consumed. `src/dashboard/queries.ts` now returns `phaseShape: []` unconditionally; the run page renders zero pills. Task table still works.
-
-**What's needed:** a `buildPhaseShape(workflow: v2.Workflow, tasks: Task[])` against `src/v2/schema`'s Workflow shape. The v1 Phase fields the dashboard consumes are: `name`, `agents[].role`, `gate`, `fanout`, `fanoutFromUpstream`, `reds`. v2's equivalent: `steps[].id`, `steps[].agent`, `steps[].gate`, `steps[].fanout`, `steps[].reds`. Mostly a renaming exercise.
-
-**Composes with #137** — if the dashboard moves to its own repo, this work happens there instead. Decide between them before starting.
-
-**Where to start:** `src/dashboard/phaseShape.ts` (currently stubbed to return `[]`). The old logic lives in git history at `b818f27^` if you want to compare. queries.ts:165 has the TODO marker for the rewrite point.
-
-**Caught:** 2026-05-14 — stubbed deliberately during v2 cutover to ship the rest.
-
 ### #131 — Dashboard CLIENT_JS bundle is stale until process restart; live diffs don't show
 **Why:** Caught 2026-05-13 during the #127 forge run. Verifier-phase agent navigated to `http://host.docker.internal:8022` (the running host dashboard), found the System Map view still rendering the *pre-diff* red-edge style (solid magenta arrow, opacity 0.7), and correctly noted in its findings: *"the host server process was started before the changes; server restart would pick up the changes, but the code in /project/src/dashboard/html.ts is correct."* It then pivoted to a self-contained synthetic cytoscape render to validate the styles directly.
 
@@ -631,6 +620,19 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #136 — Rebuild v2-aware pill row in the dashboard
+**Closed:** 2026-05-14. Commit `277ee18`.
+
+**Why:** v2 cutover deleted the v1 Workflow TypeScript type that `buildPhaseShape()` consumed. `src/dashboard/queries.ts` now returns `phaseShape: []` unconditionally; the run page renders zero pills. Task table still works.
+
+**What's needed:** a `buildPhaseShape(workflow: v2.Workflow, tasks: Task[])` against `src/v2/schema`'s Workflow shape. The v1 Phase fields the dashboard consumes are: `name`, `agents[].role`, `gate`, `fanout`, `fanoutFromUpstream`, `reds`. v2's equivalent: `steps[].id`, `steps[].agent`, `steps[].gate`, `steps[].fanout`, `steps[].reds`. Mostly a renaming exercise.
+
+**Composes with #137** — if the dashboard moves to its own repo, this work happens there instead. Decide between them before starting.
+
+**Where to start:** `src/dashboard/phaseShape.ts` (currently stubbed to return `[]`). The old logic lives in git history at `b818f27^` if you want to compare. queries.ts:165 has the TODO marker for the rewrite point.
+
+**Caught:** 2026-05-14 — stubbed deliberately during v2 cutover to ship the rest.
 
 ### #135 — Build reds review the wrong artifact (commit metadata, not the diff)
 **Closed:** 2026-05-14. Commit `4b67e8a`.
