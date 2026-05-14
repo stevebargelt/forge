@@ -23,7 +23,9 @@ detect:
 image: agent-dev-worker:latest
 
 models:
-  spec-writer: claude-sonnet-4-6
+  # Personal Claude Pro: Opus 4.7 is available; use it for thinking work.
+  # Reds + ambient work use Haiku. Default lands on Sonnet as the middle ground.
+  spec-writer: claude-opus-4-7
   fast-orchestrator: claude-haiku-4-5
   default: claude-sonnet-4-6
 
