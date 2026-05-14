@@ -125,10 +125,12 @@ shows the full task graph with verdicts. Output documents live at `~/.forge/runs
 
 ## 8. Dashboard (optional)
 
-For a web view of one or more runs alongside the CLI:
+The web view lives in a separate repo, `forge-dashboard`. It shows agent activity across every project on the host and live-polls every 2s.
 
 ```bash
-./bin/forge dashboard            # default port 3737
+cd ~/code/forge-dashboard
+npm install
+npm start            # default port 8024
 ```
 
-Open `http://127.0.0.1:3737`. Read-only — the dashboard opens the DB read-only (FORGE-DEC-012) so it can run during an active `forge next` without contention. Useful for browsing per-task results, reading agent markdown reports as rendered HTML, and seeing verdicts side-by-side. Refresh the page to see new state; the dashboard does not auto-update today.
+Open `http://127.0.0.1:8024`. Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Schema contract: `docs/SCHEMA-CONTRACT.md` in this repo.

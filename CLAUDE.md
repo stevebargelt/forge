@@ -47,7 +47,7 @@ The vault's DEC-006 (host file mount) does NOT work on macOS — Claude Code sto
 
 ```
 src/
-├── cli/            CLI entry + commands (new, next, gate, show, status, auth, dashboard)
+├── cli/            CLI entry + commands (new, next, gate, show, status, auth, backlog, invoke, watch)
 ├── spine/          dispatch, next, spawn, spawnRed, gate, composeSystemPrompt, workflows, constraints
 ├── store/          SQLite schema + accessors per table
 ├── types/          Authoritative TypeScript types (matches the sketch)

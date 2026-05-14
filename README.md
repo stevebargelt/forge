@@ -1,6 +1,8 @@
 # forge
 
-A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `new`, `next`, `gate`, `show`, `status`, plus `auth` for personal-Mac OAuth and `dashboard` for the read-only web view.
+A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `new`, `next`, `gate`, `show`, `status`, `invoke`, `backlog`, plus `auth` for personal-Mac OAuth.
+
+For the web view, install [`forge-dashboard`](../forge-dashboard) (separate repo). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
 
 ## Prerequisites
 
@@ -26,12 +28,15 @@ Full walkthrough: `docs/quick-start.md`.
 
 ## Dashboard
 
+The web dashboard lives in a separate repo, [`forge-dashboard`](../forge-dashboard). Install it once on the host:
+
 ```bash
-./bin/forge dashboard            # default port 3737
-./bin/forge dashboard --port 8080
+cd ~/code/forge-dashboard
+npm install
+npm start            # default port 8024
 ```
 
-Open `http://127.0.0.1:3737`. Read-only web view of all runs, tasks, verdicts, and gate decisions backed by the same `~/.forge/forge.db` the CLI uses. Renders agent markdown reports as HTML. Safe to run alongside an active run — the dashboard opens the DB read-only and never blocks `forge next` (FORGE-DEC-012). Refresh the page to pick up new state; there are no live updates today.
+Open `http://127.0.0.1:8024`. Shows agent outputs across every project on the host, live-polling every 2s. Reads `~/.forge/forge.db` directly (read-only); mutating actions shell to `forge` so the CLI's auth + validation stay the single entrypoint for state changes. Schema contract is documented at `docs/SCHEMA-CONTRACT.md`.
 
 ## Where things live
 
