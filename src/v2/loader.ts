@@ -62,15 +62,30 @@ export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {
 }
 
 export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
+  // Sentinel: `claude` means "auto-detect from env" — but only if no literal
+  // `claude.yml` exists at the workspace path. This keeps tests and ad-hoc
+  // installs working with a single `claude.yml` while production seeds ship
+  // claude-bedrock.yml / claude-oauth.yml / claude-apikey.yml for detection.
+  let resolvedName = name;
+  if (name === "claude") {
+    const literalProject = ctx.projectDir
+      ? join(ctx.projectDir, ".forge", "runtimes", "claude.yml")
+      : undefined;
+    const literalWorkspace = join(forgeHome(), "runtimes", "claude.yml");
+    if (!(literalProject && existsSync(literalProject)) && !existsSync(literalWorkspace)) {
+      resolvedName = detectRuntimeName(ctx);
+    }
+  }
+
   const projectPath = ctx.projectDir
-    ? join(ctx.projectDir, ".forge", "runtimes", `${name}.yml`)
+    ? join(ctx.projectDir, ".forge", "runtimes", `${resolvedName}.yml`)
     : undefined;
-  const workspacePath = join(forgeHome(), "runtimes", `${name}.yml`);
+  const workspacePath = join(forgeHome(), "runtimes", `${resolvedName}.yml`);
 
   const path = projectPath && existsSync(projectPath) ? projectPath : workspacePath;
   if (!existsSync(path)) {
     throw new Error(
-      `runtime '${name}' not found at ${projectPath ?? workspacePath} (or workspace default)`
+      `runtime '${resolvedName}' not found at ${projectPath ?? workspacePath} (or workspace default)`
     );
   }
   const raw = readFileSync(path, "utf8");
@@ -78,13 +93,24 @@ export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
   try {
     parsed = parseYaml(raw);
   } catch (e) {
-    throw new Error(`runtime '${name}' (${path}): YAML parse error — ${(e as Error).message}`);
+    throw new Error(`runtime '${resolvedName}' (${path}): YAML parse error — ${(e as Error).message}`);
   }
   const result = RuntimeSchema.safeParse(parsed);
   if (!result.success) {
-    throw new Error(formatZodError(`runtime '${name}' (${path})`, result.error));
+    throw new Error(formatZodError(`runtime '${resolvedName}' (${path})`, result.error));
   }
   return result.data;
+}
+
+// Resolves `runtime: claude` (the schema default) into a concrete runtime name
+// by reading env. Order mirrors v1's detectCredsMode():
+//   1. Bedrock: CLAUDE_CODE_USE_BEDROCK=1
+//   2. API key: ANTHROPIC_API_KEY set
+//   3. OAuth (default)
+function detectRuntimeName(_ctx: LoadContext): string {
+  if (process.env.CLAUDE_CODE_USE_BEDROCK === "1") return "claude-bedrock";
+  if (process.env.ANTHROPIC_API_KEY) return "claude-apikey";
+  return "claude-oauth";
 }
 
 function formatZodError(prefix: string, err: import("zod").ZodError): string {

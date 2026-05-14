@@ -1,82 +1,61 @@
 import type { Command } from "commander";
-import { next } from "../../spine/next.js";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { getRun, setRunProjectDir } from "../../store/runs.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { runNext } from "../../v2/runNext.js";
 
 export function registerNext(program: Command): void {
   program
     .command("next")
     .argument("<run-id>", "run identifier")
     .option("--project <path>", "project directory to mount into agent containers (persisted on first use; reused on subsequent calls)")
-    .description("Advance the run: dispatch pending tasks, or surface what's blocking progress")
+    .description("Dispatch one wave of ready steps in the run. Re-run to advance further.")
     .action(async (runId: string, options) => {
       ensureForgeDirs();
-      // Pre-flight (#79): catch expired SSO tokens before spawning a doomed
-      // container. Same validator as `forge new`, so a run whose auth has
-      // gone stale between create and dispatch surfaces at the CLI rather
-      // than as a 403 inside the agent's first API call.
       validateCredsForNewRun();
+
+      const run = getRun(runId);
+      if (!run) throw new Error(`Run not found: ${runId}`);
       const projectDir = resolveProjectDir(runId, options.project as string | undefined);
-      const result = await next(runId, { projectDir });
-      switch (result.kind) {
-        case "running":
-          console.log(`Run ${runId}: ${result.tasks.length} task(s) running.`);
-          for (const t of result.tasks) console.log(`  ⟳ ${t.id} (${t.phase}/${t.agentRole})`);
-          break;
-        case "awaiting_gate":
-          console.log(`Run ${runId}: ${result.tasks.length} task(s) awaiting gate.`);
-          for (const t of result.tasks) {
-            console.log(`  ⚠ ${t.id} (${t.phase})  →  forge gate ${t.id} advance | reject | request-changes`);
-          }
-          break;
-        case "awaiting_human_input":
-          console.log(`Run ${runId}: ${result.tasks.length} task(s) awaiting your design work.`);
-          for (const t of result.tasks) {
-            console.log(`  ▢ ${t.id} (${t.phase})  →  forge submit ${t.id}`);
-          }
-          break;
-        case "awaiting_red":
-          console.log(`Run ${runId}: ${result.tasks.length} task(s) awaiting red verdicts. Wait for reds to finish.`);
-          for (const t of result.tasks) console.log(`  ⏵ ${t.id} (${t.phase}/${t.agentRole})`);
-          break;
-        case "blocked_by_red":
-          console.log(`Run ${runId}: BLOCKED by red verdicts.`);
-          for (const t of result.tasks) {
-            console.log(`  ✗ ${t.id} (${t.phase})  →  forge show ${t.id}  to view findings`);
-            console.log(`    override: forge gate ${t.id} advance --force --rationale "..."`);
-          }
-          break;
-        case "crashed":
-          console.log(`Run ${runId}: container crash detected.`);
-          for (const t of result.tasks) console.log(`  ☠ ${t.id} (${t.phase}) — ${t.error}`);
-          console.log(`Inspect ~/.forge/runs/${runId}/<task-id>/container.stderr.log`);
-          break;
-        case "dispatched":
-          console.log(`Run ${runId}: dispatched phase ${result.phase} (${result.tasks.length} tasks).`);
-          console.log(`\nNext:\n  forge next ${runId}`);
-          break;
-        case "advanced":
-          console.log(`Run ${runId}: advanced to phase ${result.phase} (${result.tasks.length} task(s) created).`);
-          console.log(`\nNext:\n  forge next ${runId}`);
-          break;
-        case "complete":
-          console.log(`Run ${runId}: complete.`);
-          break;
+
+      const workflow = loadWorkflow(run.workflow, { projectDir });
+      const result = await runNext({ runId, workflow });
+
+      if (result.dispatchedSteps.length === 0) {
+        console.log(`Run ${runId}: nothing ready to dispatch.`);
+        if (result.runStatus === "complete") {
+          console.log(`Run is complete.`);
+        } else {
+          console.log(`Status: ${result.runStatus}.`);
+          console.log(`Use 'forge status ${runId}' to see what's blocked.`);
+        }
+        return;
+      }
+
+      console.log(`Run ${runId}: wave dispatched.`);
+      if (result.completedSteps.length > 0) {
+        console.log(`  ✓ completed: ${result.completedSteps.join(", ")}`);
+      }
+      if (result.awaitingGate.length > 0) {
+        console.log(`  ⚠ awaiting gate: ${result.awaitingGate.join(", ")}`);
+      }
+      if (result.failedSteps.length > 0) {
+        console.log(`  ✗ failed: ${result.failedSteps.join(", ")}`);
+      }
+      if (result.runStatus === "complete") {
+        console.log(`\nRun complete.`);
+      } else {
+        console.log(`\nStatus: ${result.runStatus}.`);
+        console.log(`Next:\n  forge next ${runId}`);
       }
     });
 }
 
-// Resolve project_dir: explicit --project wins (and persists on the run for
-// next time); otherwise read the previously-stored value; otherwise fall back
-// to process.cwd() and persist that. Warns if the explicit value differs from
-// the stored one — a real change is fine, but the user should know they're
-// reassigning the run's project root.
 function resolveProjectDir(runId: string, explicit: string | undefined): string {
   const run = getRun(runId);
   if (!run) throw new Error(`Run not found: ${runId}`);
   if (explicit) {
-    // Expand ~ before persisting so docker -v / spawn never see a tilde.
     const expanded = expandTildePath(explicit);
     const prev = setRunProjectDir(runId, expanded);
     if (prev && prev !== expanded) {
@@ -85,8 +64,6 @@ function resolveProjectDir(runId: string, explicit: string | undefined): string 
     return expanded;
   }
   if (run.projectDir) return run.projectDir;
-  // First-ever call without --project: fall back to cwd and persist so subsequent
-  // calls (CLI or dashboard) can omit the flag.
   const cwd = process.cwd();
   setRunProjectDir(runId, cwd);
   console.error(`[forge] no --project supplied; persisting cwd as project_dir: ${cwd}`);
