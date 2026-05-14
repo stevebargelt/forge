@@ -1,0 +1,39 @@
+# forge v2 — `ui-design` workflow translated to YAML
+# Source: src/workflows/ui-design.ts (FORGE-DEC-014, FORGE-DEC-016)
+#
+# Two phases: agent-driven prompt authoring + manual human-led Pencil session.
+
+name: ui-design
+description: |
+  Design a UI from a brief. prompt-author writes a PROMPT.md; the human runs that
+  PROMPT.md in their own Claude Code + Pencil session and submits artifacts back
+  to forge.
+
+inputs:
+  - name: brief
+    required: true
+    type: text
+    help: "What the UI should be / do."
+  - name: design_dir
+    required: true
+    type: path
+    help: "Where the .pen, designs/, and code/ artifacts will live."
+
+steps:
+  - id: brief
+    agent: prompt-author
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      inputs.brief contains the design brief. Use the ui-design template at
+      templates/ui-design.md (already in your seed). Interview the human to fill
+      any missing parameters (target_pen_file, output_dir, file_naming, style,
+      screens). Write the produced PROMPT.md to /task/PROMPT.md.
+      Output {status, promptPath: '/task/PROMPT.md', brief, template:
+      'ui-design', parameters, openQuestions, notes}.
+
+  - id: ui-review
+    manual: true
+    depends_on: [brief]
+    gate: human
+    on_reject: brief

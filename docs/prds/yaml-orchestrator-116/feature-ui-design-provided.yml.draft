@@ -1,0 +1,79 @@
+# forge v2 — `feature-ui-design-provided` workflow translated to YAML
+# Source: src/workflows/feature-ui-design-provided.ts
+
+name: feature-ui-design-provided
+description: Feature work with UI design already in hand. Architect → plan → build → verify.
+
+inputs:
+  - name: prd
+    required: true
+    type: path
+    help: "Absolute path to the PRD / design doc / spec file."
+
+steps:
+  - id: architect
+    agent: architect
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      Produce systems-level architectural assessment grounded in the provided UI
+      design (inputs.prd or upstream design artifacts). Read the HTML files / PNGs
+      if present. Output {risks, constraints, boundaries, priorArt, openQuestions,
+      notes} — NOT implementation guidance (no type names, no function names).
+      See architect seed.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: plan
+    agent: planner
+    model: spec-writer
+    depends_on: [architect]
+    gate: human
+    workflow_additions: |
+      Translate the architecture document into a step-by-step plan.
+      Output {steps: [{id, summary, files, acceptance}]}.
+
+  - id: build
+    agent: implementer
+    model: spec-writer
+    depends_on: [plan]
+    gate: verdict
+    workflow_additions: |
+      Implement the plan. Output {steps_completed, diff_summary, files_modified}.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-frontend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-backend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-security
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+
+  - id: verify
+    agent: verifier
+    model: spec-writer
+    depends_on: [build]
+    gate: human
+    workflow_additions: |
+      Run the test plan against the build.
+      Output {tests_run, tests_passed, tests_failed, evidence}.

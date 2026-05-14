@@ -1,0 +1,96 @@
+# forge v2 — `feature` workflow translated to YAML
+#
+# Source of truth: src/workflows/feature.ts (the TypeScript Workflow object).
+# This draft is the proposed YAML shape for that same workflow under #116.
+# When v2 lands, this becomes ~/.forge/workflows/feature.yml.
+#
+# Schema decisions locked 2026-05-13 (paired session, no individual call):
+#   - Per-project override: <project>/.forge/workflows/<name>.yml (matches workspace structure)
+#   - Reds-block shape: list of dicts (most explicit, most extensible)
+#   - Gate field: step-level `gate: human|verdict|none` (reads where the decision lives)
+#   - DAG schema today, linear-or-wave runner now (#116 plan: walk topologically with parallel
+#     within wave; today's reds-as-parallel-children is also expressed as DAG implicitly)
+
+name: feature
+description: Feature work without UI/UX design. Architect → plan → build → verify.
+
+# What inputs `forge new` must collect for this workflow.
+# Maps to today's CLI flags: --brief here, --question for investigation, --prd for
+# feature-ui-design-provided, etc. Runner validates required fields are present.
+inputs:
+  - name: brief
+    required: true
+    type: text
+    help: "What you want built, in your own words."
+
+steps:
+  # ----- architect -----
+  - id: architect
+    agent: architect
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      Produce systems-level architectural assessment, NOT implementation guidance.
+      Output {risks, constraints, boundaries, priorArt, openQuestions, notes}.
+      Empty arrays are fine when a feature genuinely has no concerns at that level.
+      Do not pick type names, function names, or file paths — that's the implementer's
+      job with the code in front of them. See architect seed for the discipline.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist     # informational; doesn't block the gate on its own
+        gate_on_verdict: false
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  # ----- plan -----
+  - id: plan
+    agent: planner
+    model: spec-writer
+    depends_on: [architect]
+    gate: human
+    workflow_additions: |
+      Translate the architecture document into a step-by-step plan.
+      Output {steps: [{id, summary, files, acceptance}]}.
+
+  # ----- build -----
+  - id: build
+    agent: implementer
+    model: spec-writer
+    depends_on: [plan]
+    gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
+    workflow_additions: |
+      Implement the plan. Output {steps_completed, diff_summary, files_modified}.
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-narrow
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-frontend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-backend
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-security
+        model: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+
+  # ----- verify -----
+  - id: verify
+    agent: verifier
+    model: spec-writer
+    depends_on: [build]
+    gate: human
+    workflow_additions: |
+      Run the test plan against the build.
+      Output {tests_run, tests_passed, tests_failed, evidence}.
