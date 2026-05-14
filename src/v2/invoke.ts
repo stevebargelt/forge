@@ -140,6 +140,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolveModel(step.model, runtime),
     SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
+    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task),
     DESIGN_DIR: args.designDir,
   };
 

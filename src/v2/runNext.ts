@@ -84,6 +84,7 @@ export async function runNext(args: {
       step,
       projectDir: run.projectDir!,
       designDir,
+      runMetadata: run.metadata ?? {},
       dockerExec: args.dockerExec,
     }))
   );
@@ -139,6 +140,7 @@ async function dispatchStep(args: {
   step: Step;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
 }): Promise<string> {
   const step = args.step;
@@ -159,6 +161,7 @@ async function dispatchStep(args: {
       fanout: step.fanout,
       projectDir: args.projectDir,
       designDir: args.designDir,
+      runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
     });
   }
@@ -169,6 +172,7 @@ async function dispatchStep(args: {
     step,
     projectDir: args.projectDir,
     designDir: args.designDir,
+    runMetadata: args.runMetadata,
     dockerExec: args.dockerExec,
   });
 }
@@ -181,6 +185,7 @@ async function dispatchSingleStep(args: {
   step: Step;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
   parentId?: string;            // set when this dispatch is a fanout child
   fanoutInput?: { key: string; value: unknown };  // forwarded into task inputs
@@ -207,7 +212,14 @@ async function dispatchSingleStep(args: {
     runDir: join(homeForge(), "runs", args.runId),
   });
 
-  const inputs: Record<string, unknown> = { upstream };
+  // Inputs precedence (low → high):
+  //   1. Run metadata (brief, question, prd, custom keys from --meta) — global to the run
+  //   2. upstream (always present, may be empty array)
+  //   3. fanoutInput (per-child key/value for fanout dispatches)
+  // designDir is intentionally NOT poured into inputs — it's a mount, not a task field.
+  const inputs: Record<string, unknown> = { ...args.runMetadata, upstream };
+  // designDir lives at the docker mount layer; don't expose it as an input value.
+  delete (inputs as Record<string, unknown>)["designDir"];
   if (args.fanoutInput) {
     inputs[args.fanoutInput.key] = args.fanoutInput.value;
   }
@@ -465,6 +477,7 @@ async function dispatchFanoutStep(args: {
   fanout: FanoutDef;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
 }): Promise<string> {
   const step = args.step;
@@ -576,6 +589,7 @@ async function dispatchFanoutStep(args: {
         value: entry.value,
         projectDir: args.projectDir,
         designDir: args.designDir,
+        runMetadata: args.runMetadata,
         dockerExec: args.dockerExec,
       })),
     );
@@ -600,6 +614,7 @@ async function dispatchFanoutStep(args: {
           value: c.value,
           projectDir: args.projectDir,
           designDir: args.designDir,
+          runMetadata: args.runMetadata,
           dockerExec: args.dockerExec,
         })),
       );
@@ -650,6 +665,7 @@ async function runFanoutChild(args: {
   value: unknown;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
 }): Promise<ChildOutcome> {
   const step = args.step;
@@ -665,16 +681,19 @@ async function runFanoutChild(args: {
   });
 
   const inputKey = args.fanout.from_upstream.input_key;
+  const childInputs: Record<string, unknown> = {
+    ...args.runMetadata,
+    upstream,
+    [inputKey]: args.value,
+    fanoutIndex: args.index,
+  };
+  delete childInputs["designDir"];
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
     runId: args.runId,
     phase: step.id,
     role: agentRole,
-    inputs: {
-      upstream,
-      [inputKey]: args.value,
-      fanoutIndex: args.index,
-    },
+    inputs: childInputs,
     composedSystemPrompt: composeSystemPrompt({
       role: agentRole,
       workflow: args.workflow,
@@ -767,6 +786,7 @@ async function runContainer(args: {
     PROJECT_MODE: args.projectMode,
     MODEL: resolveModel(args.model, runtime),
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
+    TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,
   };
 

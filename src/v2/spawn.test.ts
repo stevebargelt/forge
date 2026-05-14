@@ -36,6 +36,7 @@ const BASE_CTX: SpawnContext = {
   PROJECT_MODE: "rw",
   MODEL: "claude-sonnet-4-6",
   SYSTEM_PROMPT: "system",
+  TASK_PACKAGE_MARKDOWN: "# Task task-x\n",
 };
 
 let envSnap: Record<string, string | undefined>;

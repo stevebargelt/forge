@@ -30,7 +30,7 @@ models:
   # Work-account Bedrock: Opus is NOT available. spec-writer maps to Sonnet 4.6
   # (the strongest available model). Reds + ambient work use Haiku.
   spec-writer: us.anthropic.claude-sonnet-4-6
-  fast-orchestrator: us.anthropic.claude-haiku-4-5-20251001
+  fast-orchestrator: us.anthropic.claude-haiku-4-5-20251001-v1:0
   default: us.anthropic.claude-sonnet-4-6
 
 # Auth mode. env-snapshot is default per #121. mount is opt-in for genuinely

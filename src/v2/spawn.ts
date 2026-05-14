@@ -33,6 +33,9 @@ export type SpawnContext = SubstContext & {
   PROJECT_MODE: "rw" | "ro";
   MODEL: string;
   SYSTEM_PROMPT: string;
+  // Rendered task-package markdown; piped to the container as stdin per the
+  // runtime YAML's `invocation.stdin` field. Mirrors v1 spine's behavior.
+  TASK_PACKAGE_MARKDOWN: string;
   // DESIGN_DIR is optional — empty string when --design-dir wasn't passed.
   DESIGN_DIR?: string;
 };
