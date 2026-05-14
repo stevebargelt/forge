@@ -62,45 +62,59 @@ redispatch" status required.
 **Alternative I rejected:** a separate "pending" → "queued" → "running"
 transition. Three states instead of two; more state machine to maintain.
 
-### Decision 5 — Reds NOT IMPLEMENTED yet in this first pass
+### Decision 5 — Reds IMPLEMENTED (2026-05-14)
 
-When a step declares `reds: [...]`, the runner marks the primary task
-`awaiting_gate` after the primary completes — but does NOT spawn reds.
+When a step declares `reds: [...]`, after the primary's container produces
+`result.json` successfully, the runner spawns each red as a child task
+(`parentId = primaryTaskId`) in parallel via `Promise.all`. Each red runs
+read-only against the primary's result as artifact. Verdicts are parsed and
+written to the `verdicts` table.
 
-**Why:** scope. Reds dispatch is its own architectural decision (timeout
-semantics, what "awaiting_red" status really means in v2, how verdicts
-aggregate). Wanted to ship the topology + dispatch core first; reds are
-additive.
+**Aggregation policy** (mirrors v1 `spawnRed.ts`):
+- Any red with `authority: authoritative` + `gate_on_verdict: true` returning
+  `verdict: fail` ⇒ primary status `blocked_by_red`. Orchestrator surfaces.
+- Otherwise, primary status follows the step's `gate`:
+  - `gate: auto` ⇒ `complete` (specialist verdicts are advisory only — recorded
+    but don't block)
+  - `gate: human` ⇒ `awaiting_gate`
+  - `gate: verdict` ⇒ `awaiting_gate` (orchestrator reads verdicts to decide)
+- A red whose container crashes produces an `inconclusive` verdict; the red
+  task itself is marked `failed`, but it doesn't block the gate.
 
-**What's missing:**
-- Spawning red containers in parallel after primary completes
-- Writing verdict rows
-- Aggregating verdicts for `gate: verdict` decisions
-- Status transitions `awaiting_red` / `blocked_by_red`
+**State transitions:** per FORGE-DEC-017, the primary moves through
+`running → awaiting_red → (awaiting_gate | blocked_by_red | complete)`.
+The intermediate `awaiting_red` is set explicitly between primary completion
+and red dispatch, then transitions on aggregation.
 
-**How to add:** after `dispatchStep` reads `result.json` successfully, before
-the gate-decision switch, iterate `step.reds` and Promise.all spawn each as
-a child task with `parentId = primaryTaskId`. Each red's result is a Verdict;
-write to verdicts table via `insertVerdict`. Then evaluate aggregate and set
-the primary's status to `awaiting_gate` (verdict mode) or `blocked_by_red`
-(if authoritative fail). Roughly 60-80 LoC.
+### Decision 6 — Fanout IMPLEMENTED (2026-05-14)
 
-### Decision 6 — Fanout NOT IMPLEMENTED yet in this first pass
+A step with `fanout: {...}` reads the upstream array from
+`fanout.from_upstream.step`'s result at `array_key`, then spawns one child
+task per element (`parentId = primaryTaskId`). Children get the per-element
+value injected into `inputs` under `fanout.from_upstream.input_key`, plus
+the normal upstream array.
 
-A step with `fanout: {...}` is treated by the runner like a normal step
-right now (single dispatch). The fanout block in YAML is parsed but ignored
-at dispatch time.
+**Concurrency**: `max_concurrency` controls batch size (default 4). The
+runner processes the array in order, up to N children at a time. The "primary"
+of a fanout is a synthesized parent row (no container of its own) that
+aggregates child results once they all settle.
 
-**Why:** same as reds — scope. Fanout's failure_mode policies (`fail-phase` /
-`retry-once` / `continue`) have non-trivial semantics. The investigation /
-codebase-assessment workflows DO use fanout today via the v1 spine, so this
-is a real gap before v2 cutover.
+**Failure modes**:
+- `fail-phase` (default): if any child in a batch fails, abort further
+  batches and mark the parent `failed`. Already-launched children in the
+  failing batch complete normally before short-circuit.
+- `retry-once`: after the initial pass, re-dispatch any failed children
+  exactly once. Replace the child outcomes with retry outcomes.
+- `continue`: all children run; parent's status reflects whether ALL
+  completed (per gate semantics), but partial success is preserved in the
+  aggregated result.
 
-**How to add:** before `dispatchStep`'s main logic, check `step.fanout`. If
-set, read the upstream array (per `fanout.from_upstream`), generate one task
-per array element with synthetic step ids (`<stepId>-<index>`), apply
-`max_concurrency` via a semaphore around `Promise.all`. Apply `failure_mode`
-after all children complete. Roughly 100-150 LoC.
+**Edge cases**:
+- Upstream array missing or empty ⇒ parent marked `failed` with explanatory
+  error (the ready-queue should normally prevent this since fanout depends
+  on the upstream step being complete).
+- Children's results are aggregated into the parent's result as
+  `{ status, children: [{ index, status, childTaskId, result }] }`.
 
 ### Decision 7 — Run terminal status: only `complete`, never `failed`
 
@@ -146,7 +160,7 @@ runDocker function. ~50 LoC.
 
 - `ready-queue.test.ts`: 8 cases covering linear, parallel, diamond, retry-pending, dep-not-met.
 - `inputs.test.ts`: 7 cases covering empty deps, multi-dep, latest-primary, child task filtering, missing/malformed result.json.
-- `runNext.test.ts`: 6 cases covering linear two-step, human gate, manual step, parallel-within-wave (diamond), empty queue, failed step.
+- `runNext.test.ts`: 12 cases — linear two-step, human gate, manual step, parallel-within-wave (diamond), empty queue, failed step; reds all-pass, reds authoritative-fail (blocked_by_red), reds specialist-fail (advisory only); fanout success aggregation, fanout fail-phase short-circuit, fanout missing-array.
 - `startRun.test.ts`: 4 cases covering input validation, designDir metadata.
 
 All run with stubbed docker exec. No real containers spawned.
@@ -154,8 +168,8 @@ All run with stubbed docker exec. No real containers spawned.
 ## What's NOT tested
 
 - Real docker integration (waiting on the cutover decision)
-- Reds (not implemented)
-- Fanout (not implemented)
+- Fanout `retry-once` failure mode (logic implemented; needs a test pass)
+- Fanout `continue` failure mode (logic implemented; needs a test pass)
 - Reconcile interaction (the runner doesn't call reconcile; if reconcile runs
   concurrently, behavior is undefined — needs a real test pass)
 - gate.ts interaction (deliberate; runner doesn't call it)
@@ -178,9 +192,8 @@ All run with stubbed docker exec. No real containers spawned.
    v2's `step.on_reject: <step-id>` field needs gate.ts updated to read it.
    Roughly 10 LoC change.
 
-4. **Reds + Fanout.** Mark these blockers for v2 cutover. The investigation
-   and codebase-assessment workflows DO use fanout in production. Cutting
-   over without fanout would break those two workflows.
+4. **Reds + Fanout** — IMPLEMENTED. See Decisions 5 + 6 above. No longer
+   blockers for cutover.
 
 5. **The orphan-warning in install-seeds.sh.** Triggers on every install when
    pre-rename agent dirs exist. After Steven runs cleanup once, this stops
@@ -209,15 +222,17 @@ while (true) {
 }
 ```
 
-This works today (with reds and fanout disabled). The same shape will work in
-the wired CLI; the wrapping is the only difference.
+This works today, including reds + fanout. The same shape will work in the
+wired CLI; the wrapping is the only difference.
 
 ## What this commit is NOT
 
 - A v2 cutover. v1 spine is untouched.
-- Production-ready. Reds + fanout missing. No real-docker integration test.
+- Production-ready re: real-docker integration. The exec stub model is
+  tested end-to-end; the real `docker run` path is wired but not exercised
+  in tests.
 - The orchestrator's entry point. Orchestrator template + forge init are
   separate commits. They don't depend on this runner; they wrap the v1 CLI
   for now and will switch to the v2 CLI at cutover.
 
-Status: 456/456 tests passing. Typecheck clean. Branch: `yaml-orchestrator-116`.
+Status: 473/473 tests passing. Typecheck clean. Branch: `yaml-orchestrator-116`.

@@ -17,11 +17,12 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { spawn as cpSpawn } from "node:child_process";
 import { join } from "node:path";
-import type { Task, TaskPackage } from "../types/index.js";
-import type { Workflow, Step, Runtime } from "./schema.js";
+import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
+import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
-import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate } from "../store/tasks.js";
+import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { insertVerdict } from "../store/verdicts.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
@@ -29,7 +30,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime } from "./loader.js";
-import { newTaskId } from "../util/ids.js";
+import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 export type RunNextResult = {
   dispatchedSteps: string[];      // step ids that got dispatched this call
@@ -111,11 +112,11 @@ export async function runNext(args: {
 
   let runStatus: string = run.status;
   if (readyAfter.length === 0 && allStepsHaveTasks && noPendingWork) {
-    const anyFailed = tasksAfter.some((t) => t.status === "failed" && t.parentId === undefined);
     // RunStatus union is "active" | "complete" | "abandoned" — there's no
     // "failed" state for runs. Mark complete regardless; the human / orchestrator
     // reads task statuses to know whether the run failed. Aligns with how the
     // v1 spine treats run completion.
+    const anyFailed = tasksAfter.some((t) => t.status === "failed" && t.parentId === undefined);
     runStatus = "complete";
     updateRunStatus(args.runId, "complete");
     logEvent("run.completed", { runId: args.runId, payload: { anyFailed } });
@@ -148,15 +149,56 @@ async function dispatchStep(args: {
     return dispatchManualStep(args.runId, step);
   }
 
-  // For non-manual: agent must be declared (schema enforces this).
+  // Fanout: one parent task, N children. Each child runs the same agent
+  // against a single array element. Aggregation policy follows failure_mode.
+  if (step.fanout) {
+    return dispatchFanoutStep({
+      runId: args.runId,
+      workflow: args.workflow,
+      step,
+      fanout: step.fanout,
+      projectDir: args.projectDir,
+      designDir: args.designDir,
+      dockerExec: args.dockerExec,
+    });
+  }
+
+  return dispatchSingleStep({
+    runId: args.runId,
+    workflow: args.workflow,
+    step,
+    projectDir: args.projectDir,
+    designDir: args.designDir,
+    dockerExec: args.dockerExec,
+  });
+}
+
+// Standard single-agent dispatch. Spawns primary, then any reds (in parallel),
+// aggregates verdicts, sets final status per gate + verdict policy.
+async function dispatchSingleStep(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  projectDir: string;
+  designDir?: string;
+  dockerExec?: DockerExecFn;
+  parentId?: string;            // set when this dispatch is a fanout child
+  fanoutInput?: { key: string; value: unknown };  // forwarded into task inputs
+  syntheticPhase?: string;      // override phase id for fanout children (e.g. "build-0")
+}): Promise<string> {
+  const step = args.step;
   const agentRole = step.agent!;
+  const phase = args.syntheticPhase ?? step.id;
 
   // Find or create a pending task row for this step. If a pending row exists
-  // (e.g. from request-changes), reuse it; otherwise create fresh.
-  const existing = tasksForRun(args.runId).find(
-    (t) => t.phase === step.id && t.status === "pending" && t.parentId === undefined
-  );
-  const taskId = existing?.id ?? newTaskId(step.id);
+  // (e.g. from request-changes), reuse it; otherwise create fresh. Reuse only
+  // applies to primary (non-child) dispatch — fanout children are always fresh.
+  const existing = args.parentId === undefined
+    ? tasksForRun(args.runId).find(
+        (t) => t.phase === phase && t.status === "pending" && t.parentId === undefined
+      )
+    : undefined;
+  const taskId = existing?.id ?? newTaskId(phase);
 
   const allTasks = tasksForRun(args.runId);
   const upstream = deriveUpstream({
@@ -165,12 +207,17 @@ async function dispatchStep(args: {
     runDir: join(homeForge(), "runs", args.runId),
   });
 
+  const inputs: Record<string, unknown> = { upstream };
+  if (args.fanoutInput) {
+    inputs[args.fanoutInput.key] = args.fanoutInput.value;
+  }
+
   const taskPackage: TaskPackage = {
     taskId,
     runId: args.runId,
-    phase: step.id,
+    phase,
     role: agentRole,
-    inputs: { upstream } as Record<string, unknown>,
+    inputs,
     composedSystemPrompt: composeSystemPrompt({
       role: agentRole,
       workflow: args.workflow,
@@ -182,7 +229,8 @@ async function dispatchStep(args: {
     const task: Task = {
       id: taskId,
       runId: args.runId,
-      phase: step.id,
+      parentId: args.parentId,
+      phase,
       agentRole,
       agentAlias: step.model,
       status: "pending",
@@ -192,33 +240,533 @@ async function dispatchStep(args: {
     insertTask(task);
   }
 
-  // Materialize files on disk: task dir, CLAUDE.md, package.md, result.json.
-  const dir = taskDir(args.runId, taskId);
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
-  writeFileSync(join(dir, "package.md"), renderTaskPackage(taskPackage));
-  writeFileSync(join(dir, "result.json"), "");
-  chmodSync(dir, 0o777);
+  const dispatchResult = await runContainer({
+    taskId,
+    runId: args.runId,
+    projectDir: args.projectDir,
+    projectMode: "rw",
+    designDir: args.designDir,
+    taskPackage,
+    runtimeName: step.runtime,
+    model: step.model,
+    dockerExec: args.dockerExec,
+  });
 
-  markTaskRunning(taskId);
-  logEvent("task.started", { runId: args.runId, taskId });
-
-  // Spawn the container.
-  let runtime: Runtime;
-  try {
-    runtime = loadRuntime(step.runtime);
-  } catch (e) {
-    markTaskFailed(taskId, `loadRuntime failed: ${(e as Error).message}`);
+  if (dispatchResult.kind === "failed") {
     return "failed";
   }
 
+  const result = dispatchResult.result;
+
+  // Reds: spawn after primary completes. Each red is a child task.
+  // Aggregate verdicts then set primary status per policy.
+  if (step.reds.length > 0) {
+    // Per FORGE-DEC-017: blue is done, reds are about to run.
+    setTaskStatus(taskId, "awaiting_red");
+    logEvent("task.awaiting_red", { runId: args.runId, taskId });
+
+    const aggregate = await dispatchReds({
+      runId: args.runId,
+      workflow: args.workflow,
+      step,
+      primaryTaskId: taskId,
+      primaryResult: result,
+      projectDir: args.projectDir,
+      designDir: args.designDir,
+      dockerExec: args.dockerExec,
+    });
+
+    // Aggregation policy mirrors v1 gate.ts:
+    //   - any authoritative fail with gate_on_verdict ⇒ blocked_by_red
+    //   - otherwise (verdict gate) ⇒ awaiting_gate (orchestrator/human reads verdicts)
+    //   - gate: auto with no authoritative fail ⇒ complete
+    if (aggregate.authoritativeFail) {
+      setTaskStatus(taskId, "blocked_by_red");
+      logEvent("task.blocked_by_red", { runId: args.runId, taskId });
+      // Persist the result.json content too (test assertions need it).
+      markTaskAwaitingGate(taskId, result);
+      // markTaskAwaitingGate just wrote status=awaiting_gate; restore the block.
+      setTaskStatus(taskId, "blocked_by_red");
+      return "blocked_by_red";
+    }
+    // No authoritative fail — proceed to normal gate semantics.
+    return finalizePrimary(taskId, step.gate, result);
+  }
+
+  return finalizePrimary(taskId, step.gate, result);
+}
+
+// Final status write for a primary task (no reds path, or reds passed).
+function finalizePrimary(taskId: string, gate: Step["gate"], result: unknown): string {
+  switch (gate) {
+    case "auto":
+    case "none":
+      markTaskComplete(taskId, result);
+      return "complete";
+    case "human":
+      markTaskAwaitingGate(taskId, result);
+      return "awaiting_gate";
+    case "verdict":
+      // Schema enforces reds.length > 0 for gate=verdict, so this is reached
+      // only when all reds passed (or none authoritative-failed). Aggregate
+      // outcome is the orchestrator's call; pause for it.
+      markTaskAwaitingGate(taskId, result);
+      return "awaiting_gate";
+  }
+}
+
+// Spawn reds for a primary task. Each red runs in parallel, in a read-only
+// container, against the primary's result.json as the artifact. Returns
+// aggregate verdict summary.
+async function dispatchReds(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  primaryTaskId: string;
+  primaryResult: unknown;
+  projectDir: string;
+  designDir?: string;
+  dockerExec?: DockerExecFn;
+}): Promise<{ verdicts: Verdict[]; authoritativeFail: boolean }> {
+  const artifact = JSON.stringify(args.primaryResult, null, 2);
+  const launches = args.step.reds.map((red) =>
+    runOneRed({
+      runId: args.runId,
+      workflow: args.workflow,
+      step: args.step,
+      red,
+      primaryTaskId: args.primaryTaskId,
+      artifact,
+      projectDir: args.projectDir,
+      designDir: args.designDir,
+      dockerExec: args.dockerExec,
+    }),
+  );
+  const results = await Promise.all(launches);
+
+  let authoritativeFail = false;
+  const verdicts: Verdict[] = [];
+  for (const r of results) {
+    verdicts.push(r.verdict);
+    insertVerdict({
+      id: newVerdictId(),
+      taskId: args.primaryTaskId,
+      redTaskId: r.redTaskId,
+      redRole: r.red.agent,
+      verdict: r.verdict.verdict,
+      confidence: r.verdict.confidence,
+      authority: r.red.authority as RedAuthority,
+      findings: r.verdict.findings,
+      createdAt: nowIso(),
+    });
+    logEvent("verdict.received", {
+      runId: args.runId,
+      taskId: args.primaryTaskId,
+      payload: { redRole: r.red.agent, verdict: r.verdict.verdict, authority: r.red.authority },
+    });
+    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && r.verdict.verdict === "fail") {
+      authoritativeFail = true;
+    }
+  }
+  return { verdicts, authoritativeFail };
+}
+
+async function runOneRed(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  red: RedDef;
+  primaryTaskId: string;
+  artifact: string;
+  projectDir: string;
+  designDir?: string;
+  dockerExec?: DockerExecFn;
+}): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string }> {
+  const redTaskId = newTaskId(`red-${args.step.id}`);
+  const taskPackage: TaskPackage = {
+    taskId: redTaskId,
+    runId: args.runId,
+    phase: args.step.id,
+    role: args.red.agent,
+    inputs: {},
+    composedSystemPrompt: composeSystemPrompt({
+      role: args.red.agent,
+      workflow: args.workflow,
+      step: args.step,
+    }),
+    artifact: args.artifact,
+  };
+  insertTask({
+    id: redTaskId,
+    runId: args.runId,
+    parentId: args.primaryTaskId,
+    phase: args.step.id,
+    agentRole: args.red.agent,
+    agentAlias: args.red.model,
+    status: "pending",
+    taskPackage,
+    createdAt: nowIso(),
+  });
+  logEvent("task.created", { runId: args.runId, taskId: redTaskId });
+
+  const result = await runContainer({
+    taskId: redTaskId,
+    runId: args.runId,
+    projectDir: args.projectDir,
+    projectMode: "ro",
+    designDir: args.designDir,
+    taskPackage,
+    runtimeName: args.step.runtime,
+    model: args.red.model,
+    dockerExec: args.dockerExec,
+  });
+
+  if (result.kind === "failed") {
+    // A red that fails to produce a verdict counts as inconclusive — don't let
+    // a broken container block the gate. runContainer already marked the task
+    // failed.
+    return {
+      red: args.red,
+      redTaskId,
+      verdict: { verdict: "inconclusive", confidence: 0, findings: [] },
+    };
+  }
+
+  markTaskComplete(redTaskId, result.result);
+  return { red: args.red, redTaskId, verdict: parseVerdict(result.result) };
+}
+
+function parseVerdict(output: unknown): Verdict {
+  const obj = (output ?? {}) as Record<string, unknown>;
+  const verdict =
+    obj["verdict"] === "pass" || obj["verdict"] === "fail" || obj["verdict"] === "inconclusive"
+      ? obj["verdict"]
+      : "inconclusive";
+  const confidence =
+    typeof obj["confidence"] === "number" && obj["confidence"] >= 0 && obj["confidence"] <= 1
+      ? obj["confidence"]
+      : 0.5;
+  const findings: Finding[] = Array.isArray(obj["findings"]) ? (obj["findings"] as Finding[]) : [];
+  return {
+    verdict,
+    confidence,
+    findings,
+    notes: typeof obj["notes"] === "string" ? obj["notes"] : undefined,
+  };
+}
+
+// Fanout dispatch: read the upstream array, spawn N child tasks (max_concurrency
+// at a time), apply failure_mode policy, mark a synthetic parent task that
+// aggregates child results.
+async function dispatchFanoutStep(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  fanout: FanoutDef;
+  projectDir: string;
+  designDir?: string;
+  dockerExec?: DockerExecFn;
+}): Promise<string> {
+  const step = args.step;
+  const fanout = args.fanout;
+
+  // Find or reuse a parent task for this fanout step. We always need one
+  // primary row to represent the step in tasks-for-run; fanout children
+  // hang off it via parentId.
+  const allTasks = tasksForRun(args.runId);
+  const existingParent = allTasks.find(
+    (t) => t.phase === step.id && t.parentId === undefined,
+  );
+  const parentId = existingParent?.id ?? newTaskId(step.id);
+
+  // Read the upstream array. The fanout source is fanout.from_upstream.step,
+  // and the value lives at result[array_key].
+  const upstreamTask = allTasks
+    .filter((t) => t.phase === fanout.from_upstream.step && t.parentId === undefined && t.status === "complete")
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .pop();
+  if (!upstreamTask) {
+    // Upstream hasn't completed; ready-queue logic should have prevented this.
+    if (!existingParent) {
+      insertTask({
+        id: parentId,
+        runId: args.runId,
+        phase: step.id,
+        agentRole: step.agent ?? "fanout",
+        status: "failed",
+        taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
+        createdAt: nowIso(),
+        error: "fanout: upstream not complete",
+      });
+    } else {
+      markTaskFailed(parentId, "fanout: upstream not complete");
+    }
+    return "failed";
+  }
+
+  const upstreamResult = (upstreamTask.result ?? {}) as Record<string, unknown>;
+  const rawArray = upstreamResult[fanout.from_upstream.array_key];
+  if (!Array.isArray(rawArray) || rawArray.length === 0) {
+    if (!existingParent) {
+      insertTask({
+        id: parentId,
+        runId: args.runId,
+        phase: step.id,
+        agentRole: step.agent ?? "fanout",
+        status: "failed",
+        taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
+        createdAt: nowIso(),
+        error: `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`,
+      });
+    } else {
+      markTaskFailed(parentId, `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`);
+    }
+    return "failed";
+  }
+
+  // Insert parent row first time we see this step. Status starts pending and
+  // becomes complete/failed once children settle.
+  if (!existingParent) {
+    insertTask({
+      id: parentId,
+      runId: args.runId,
+      phase: step.id,
+      agentRole: step.agent ?? "fanout",
+      status: "running",
+      taskPackage: {
+        taskId: parentId,
+        runId: args.runId,
+        phase: step.id,
+        role: step.agent ?? "fanout",
+        inputs: {
+          fanout: {
+            from_upstream: fanout.from_upstream,
+            count: rawArray.length,
+          },
+        },
+        composedSystemPrompt: "",
+      },
+      createdAt: nowIso(),
+    });
+    logEvent("task.created", { runId: args.runId, taskId: parentId, payload: { fanoutParent: true, count: rawArray.length } });
+  } else {
+    markTaskRunning(parentId);
+  }
+
+  // Dispatch children with max_concurrency. We process the array in order,
+  // up to N at a time. failure_mode === "fail-phase" short-circuits once any
+  // child fails; retry-once re-dispatches a single failure; continue lets
+  // failures coexist with successes.
+  const maxConc = fanout.max_concurrency ?? 4;
+  const childOutcomes: ChildOutcome[] = [];
+
+  let queue = rawArray.map((value, idx) => ({ value, idx }));
+  let aborted = false;
+
+  while (queue.length > 0 && !aborted) {
+    const batch = queue.splice(0, maxConc);
+    const results = await Promise.all(
+      batch.map((entry) => runFanoutChild({
+        runId: args.runId,
+        workflow: args.workflow,
+        step,
+        fanout,
+        parentId,
+        index: entry.idx,
+        value: entry.value,
+        projectDir: args.projectDir,
+        designDir: args.designDir,
+        dockerExec: args.dockerExec,
+      })),
+    );
+    childOutcomes.push(...results);
+    if (fanout.failure_mode === "fail-phase" && results.some((r) => r.status === "failed")) {
+      aborted = true;
+    }
+  }
+
+  // retry-once: re-dispatch any failed child a single time.
+  if (fanout.failure_mode === "retry-once") {
+    const failed = childOutcomes.filter((c) => c.status === "failed");
+    if (failed.length > 0) {
+      const retried = await Promise.all(
+        failed.map((c) => runFanoutChild({
+          runId: args.runId,
+          workflow: args.workflow,
+          step,
+          fanout,
+          parentId,
+          index: c.index,
+          value: c.value,
+          projectDir: args.projectDir,
+          designDir: args.designDir,
+          dockerExec: args.dockerExec,
+        })),
+      );
+      // Replace failed outcomes with retry outcomes.
+      for (const r of retried) {
+        const existingIdx = childOutcomes.findIndex((c) => c.index === r.index && c.status === "failed");
+        if (existingIdx >= 0) childOutcomes[existingIdx] = r;
+      }
+    }
+  }
+
+  // Aggregate child results into the parent's result.
+  const parentResult = {
+    status: childOutcomes.every((c) => c.status === "complete") ? "complete" : "partial",
+    children: childOutcomes.map((c) => ({
+      index: c.index,
+      status: c.status,
+      childTaskId: c.childTaskId,
+      result: c.result,
+    })),
+  };
+
+  // failure_mode determines whether a partial result fails the parent.
+  const anyFailed = childOutcomes.some((c) => c.status === "failed");
+  if (anyFailed && fanout.failure_mode === "fail-phase") {
+    markTaskFailed(parentId, "fanout: at least one child failed (failure_mode=fail-phase)", parentResult);
+    return "failed";
+  }
+
+  return finalizePrimary(parentId, step.gate, parentResult);
+}
+
+type ChildOutcome = {
+  index: number;
+  value: unknown;
+  childTaskId: string;
+  status: "complete" | "failed";
+  result?: unknown;
+};
+
+async function runFanoutChild(args: {
+  runId: string;
+  workflow: Workflow;
+  step: Step;
+  fanout: FanoutDef;
+  parentId: string;
+  index: number;
+  value: unknown;
+  projectDir: string;
+  designDir?: string;
+  dockerExec?: DockerExecFn;
+}): Promise<ChildOutcome> {
+  const step = args.step;
+  const agentRole = step.agent!;
+  const syntheticPhase = `${step.id}-${args.index}`;
+  const childTaskId = newTaskId(syntheticPhase);
+
+  const allTasks = tasksForRun(args.runId);
+  const upstream = deriveUpstream({
+    step,
+    allTasks,
+    runDir: join(homeForge(), "runs", args.runId),
+  });
+
+  const inputKey = args.fanout.from_upstream.input_key;
+  const taskPackage: TaskPackage = {
+    taskId: childTaskId,
+    runId: args.runId,
+    phase: step.id,
+    role: agentRole,
+    inputs: {
+      upstream,
+      [inputKey]: args.value,
+      fanoutIndex: args.index,
+    },
+    composedSystemPrompt: composeSystemPrompt({
+      role: agentRole,
+      workflow: args.workflow,
+      step,
+    }),
+  };
+
+  insertTask({
+    id: childTaskId,
+    runId: args.runId,
+    parentId: args.parentId,
+    phase: step.id,
+    agentRole,
+    agentAlias: step.model,
+    status: "pending",
+    taskPackage,
+    createdAt: nowIso(),
+  });
+  logEvent("task.created", { runId: args.runId, taskId: childTaskId, payload: { fanoutChild: true, index: args.index } });
+
+  const dispatchResult = await runContainer({
+    taskId: childTaskId,
+    runId: args.runId,
+    projectDir: args.projectDir,
+    projectMode: "rw",
+    designDir: args.designDir,
+    taskPackage,
+    runtimeName: step.runtime,
+    model: step.model,
+    dockerExec: args.dockerExec,
+  });
+
+  if (dispatchResult.kind === "failed") {
+    return { index: args.index, value: args.value, childTaskId, status: "failed" };
+  }
+
+  markTaskComplete(childTaskId, dispatchResult.result);
+  return {
+    index: args.index,
+    value: args.value,
+    childTaskId,
+    status: "complete",
+    result: dispatchResult.result,
+  };
+}
+
+// Materializes a task on disk, spawns the container, reads result.json,
+// transitions task to running/failed. Returns the parsed result on success;
+// the caller writes the final status (complete vs awaiting_gate vs blocked).
+//
+// This is the shared core used by primary, red, and fanout-child dispatches.
+type ContainerOutcome =
+  | { kind: "ok"; result: unknown }
+  | { kind: "failed"; error: string };
+
+async function runContainer(args: {
+  taskId: string;
+  runId: string;
+  projectDir: string;
+  projectMode: "rw" | "ro";
+  designDir?: string;
+  taskPackage: TaskPackage;
+  runtimeName: string;
+  model: string | undefined;
+  dockerExec?: DockerExecFn;
+}): Promise<ContainerOutcome> {
+  const dir = taskDir(args.runId, args.taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "CLAUDE.md"), args.taskPackage.composedSystemPrompt);
+  writeFileSync(join(dir, "package.md"), renderTaskPackage(args.taskPackage));
+  writeFileSync(join(dir, "result.json"), "");
+  chmodSync(dir, 0o777);
+
+  markTaskRunning(args.taskId);
+  logEvent("task.started", { runId: args.runId, taskId: args.taskId });
+
+  let runtime: Runtime;
+  try {
+    runtime = loadRuntime(args.runtimeName);
+  } catch (e) {
+    const msg = `loadRuntime failed: ${(e as Error).message}`;
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
+  }
+
   const spawnCtx: SpawnContext = {
-    TASK_ID: taskId,
+    TASK_ID: args.taskId,
     TASK_DIR: dir,
     PROJECT_DIR: args.projectDir,
-    PROJECT_MODE: "rw", // reds get ro; this is the primary agent
-    MODEL: resolveModel(step.model, runtime),
-    SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
+    PROJECT_MODE: args.projectMode,
+    MODEL: resolveModel(args.model, runtime),
+    SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
     DESIGN_DIR: args.designDir,
   };
 
@@ -226,11 +774,11 @@ async function dispatchStep(args: {
   try {
     dockerArgs = buildDockerArgs(runtime, spawnCtx);
   } catch (e) {
-    markTaskFailed(taskId, `buildDockerArgs failed: ${(e as Error).message}`);
-    return "failed";
+    const msg = `buildDockerArgs failed: ${(e as Error).message}`;
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
   }
 
-  // Either use the injected dockerExec (tests) or invoke real docker.
   const exec = args.dockerExec ?? defaultDockerExec;
   let exitCode: number;
   try {
@@ -241,53 +789,33 @@ async function dispatchStep(args: {
       stderrPath: join(dir, "container.stderr.log"),
     });
   } catch (e) {
-    markTaskFailed(taskId, `docker exec threw: ${(e as Error).message}`);
-    return "failed";
+    const msg = `docker exec threw: ${(e as Error).message}`;
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
   }
 
-  // Read result.json. If empty/missing/malformed, mark failed.
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
   if (exitCode !== 0 && !resultRaw) {
-    markTaskFailed(taskId, `container_crash (exit ${exitCode})`);
-    return "failed";
+    const msg = `container_crash (exit ${exitCode})`;
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
   }
-  let result: unknown = undefined;
+  let result: unknown;
   try {
     if (resultRaw.length > 0) result = JSON.parse(resultRaw);
   } catch {
-    markTaskFailed(taskId, `result.json malformed`);
-    return "failed";
+    const msg = "result.json malformed";
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
   }
   if (!result) {
-    markTaskFailed(taskId, "no_result_json");
-    return "failed";
+    const msg = "no_result_json";
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
   }
 
-  // Reds: not implemented in this first pass. Tracked in DECISIONS.md.
-  if (step.reds.length > 0) {
-    // For now, treat as "primary completed; reds pending".
-    // Real reds dispatch will be the next iteration. Mark awaiting_gate so
-    // the run pauses cleanly instead of plowing forward without verdicts.
-    markTaskAwaitingGate(taskId, result);
-    return "awaiting_gate";
-  }
-
-  // Status mapping based on step.gate:
-  switch (step.gate) {
-    case "auto":
-    case "none":
-      markTaskComplete(taskId, result);
-      return "complete";
-    case "human":
-      markTaskAwaitingGate(taskId, result);
-      return "awaiting_gate";
-    case "verdict":
-      // Schema enforces reds.length > 0 for gate=verdict, so we shouldn't
-      // reach here. But defensively:
-      markTaskAwaitingGate(taskId, result);
-      return "awaiting_gate";
-  }
+  return { kind: "ok", result };
 }
 
 function dispatchManualStep(runId: string, step: Step): string {
@@ -356,6 +884,17 @@ function homeForge(): string {
   return process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge");
 }
 
+function emptyTaskPackage(taskId: string, runId: string, phase: string, role: string): TaskPackage {
+  return {
+    taskId,
+    runId,
+    phase,
+    role,
+    inputs: {},
+    composedSystemPrompt: "",
+  };
+}
+
 function renderTaskPackage(tp: TaskPackage): string {
   return [
     `# Task ${tp.taskId}`,
@@ -378,6 +917,6 @@ function renderTaskPackage(tp: TaskPackage): string {
 }
 
 function resolveModel(alias: string | undefined, runtime: Runtime): string {
-  if (!alias) return runtime.models.default!;
-  return runtime.models[alias] ?? runtime.models.default!;
+  if (!alias) return runtime.models["default"]!;
+  return runtime.models[alias] ?? runtime.models["default"]!;
 }
