@@ -72,27 +72,27 @@ mounts:
 
 # Claude CLI invocation. Runner constructs `claude ARGS` and execs via the
 # container's entrypoint (agent-entrypoint.sh starts Chromium first then execs).
-# {{MODEL}} resolved from the step's `model:` field via the models map above.
-# {{SYSTEM_PROMPT}} composed from agent CLAUDE.md + step workflow_additions
+# ${MODEL} resolved from the step's `model:` field via the models map above.
+# ${SYSTEM_PROMPT} composed from agent CLAUDE.md + step workflow_additions
 # + filtered constraints (constraints.ts unchanged).
 invocation:
   command: claude
   args:
     - --model
-    - "{{MODEL}}"
+    - "${MODEL}"
     - --append-system-prompt
-    - "{{SYSTEM_PROMPT}}"
+    - "${SYSTEM_PROMPT}"
     - --dangerously-skip-permissions
     - --output-format
     - stream-json
     - --verbose
     - --include-partial-messages
     - --print
-  stdin: "{{TASK_PACKAGE_MARKDOWN}}"  # piped in; matches today's spawn.ts
+  stdin: "${TASK_PACKAGE_MARKDOWN}"  # piped in; matches today's spawn.ts
 
 # Container lifecycle.
 container:
-  name: "forge-{{TASK_ID}}"
+  name: "forge-${TASK_ID}"
   remove_on_exit: true
   idle_timeout_seconds: 300   # FORGE_AGENT_IDLE_TIMEOUT_MS env still overrides
 
