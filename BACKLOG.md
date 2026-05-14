@@ -6,49 +6,47 @@ When you start a session, read this file. When you finish, update it: move close
 
 ## Notes for next session
 
-**State at end of 2026-05-13 (late).** `red-arrow-127` branch has three new commits ready to merge: `8e7306c` (#121 env-snapshot auth), `ec6a519` (#127 red arrow dotted tether), `fc59414` (verifier seed tighter render-check). `main` is at `520dd5b` (#128 container browser-tools). 355/355 tests passing on the branch.
+**State at end of 2026-05-14.** **v2 cutover shipped.** `main` is at `b818f27` (the `yaml-orchestrator-116` merge). 279/279 tests passing.
 
-**What shipped today (2026-05-13) — big day:**
-- **#105** System Map view (replaces old graph view). Commit `5a44588`, merged to main as `6a1b6aa`.
-- **#114** mount `--design-dir` read-only at `/design` inside containers (commit `414b29b`).
-- **#113** discipline reds gate the parent like wide/narrow (commit `79d6edf`).
-- **#126** host-side pi-skills/browser-tools install + validation (no forge code change).
-- **#128** forge container-side browser-tools migration + Playwright MCP teardown (commit `520dd5b` on main).
-- **#127** red→parent arrows now render as dotted magenta tether (commit `ec6a519` on `red-arrow-127`). **First forge run that exercised #128 end-to-end** — produced the change, verified via browser-tools screenshot.
-- **#121** env-snapshot bedrock auth (commit `8e7306c` on `red-arrow-127`). Landed earlier than the planned v2/#116 timing because it was the actual blocker on the #127 run.
-- **Verifier seed iteration** (commit `fc59414`) — first verify pass on #127 reasoned its way out of the render-check ("just CSS values"); the seed copy was rewritten as a hard file-extension rule with explicit anti-pattern callout. Second verify pass invoked browser-tools 22 times.
-- **#129** spun out as future feature (shareable agent-skills pattern; placeholder).
-
-**Pending next-session action: merge `red-arrow-127` → `main`.** Fast-forward or `--no-ff`, your call. After merge: only `main` remains.
+**What shipped today (2026-05-14) — the biggest day:**
+- **#116 v2 cutover complete.** 23 commits on `yaml-orchestrator-116` merged to `main` as `b818f27`. v1 spine is gone (13 modules + 8 TS workflows deleted). v2 is the only orchestrator.
+- **`forge invoke`** — single-agent dispatch primitive, the RACI bread-and-butter (commit `f54d8d5`).
+- **RACI seed + orchestrator template rewrite** — `seeds/forge-raci.md` classifies prompts into 11 work types; implementation routes through the pipeline, everything else through invoke (commits `75b912f`, `56480b7`).
+- **Reds + fanout in the v2 runner** — step 3 of the 2,1,3 sequence (commit `3af1cd3`).
+- **CLI cutover** — `forge new`/`next`/`gate` now route to v2; reconcile + submit deleted (commit `5ad0061`).
+- **First real forge v2 run end-to-end** — `run-smoke-v3-491805`. Architect → plan → build (engineer + 5 reds parallel) → verify, producing the `--version` flag diff committed as `51a3c64`. Validates DAG dispatch, Bedrock containers, brief/upstream input threading, parallel reds, gate transitions, verdict aggregation.
+- **Bugs caught + fixed during smoke testing** (commit `b83329f`): TASK_PACKAGE_MARKDOWN missing from SpawnContext, Haiku Bedrock model ID typo, run-metadata not folding into task inputs.
+- **Model mapping fix** (commit `b0cdc09`): bedrock `spec-writer` = Sonnet 4.6 (Opus restricted on work account), oauth `spec-writer` = Opus 4.7 (personal Pro).
+- **Dashboard trim** (commit `bd8a4af`): removed 4 obsolete workflow options + `/api/submit` endpoint; only `feature*` workflows remain.
 
 **Top of the active stack now:**
-0. **#130** Bedrock concurrent-request starvation (kills a parallel red silently). Tactical: surface idle-timeout kills as `failed.reason=infra` distinct from `inconclusive`. Small change to spawn.ts + gate.ts. Composite with #74.
-0. **#131** Dashboard CLIENT_JS bundle stale until process restart. Blocks #128's verify-against-live-dashboard story. Lean: file-watcher restart loop in dev + a verifier-seed note about synthetic-render-fallback. Composite with #77.
-1. **#116** — **Forge v2.** YAML-driven orchestrator replaces the TypeScript spine. Keep SQLite + dashboard + gate.ts + reconcile.ts. PRD at `docs/prds/yaml-orchestrator-116.md`. Big-bang, TypeScript runner, YAML in both `~/.forge/` and `<project>/.forge/` with override. Closes #106 (provider abstraction) as a side effect. Paired Steven+Claude work, not a forge run.
-2. **Auth fix cluster (REDUCED IN URGENCY by #121 landing).** **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All still real bugs, but they apply only to mount-mode (now opt-in via `FORGE_AUTH_MODE=mount`). Decide whether each is worth fixing or just deprecating mount mode further.
-3. **#115** dashboard task list smart-refresh gap. Two cases (task.started transition + new task creation). Composite with #77 (Preact migration).
-4. **#112** transactional dispatch + gate writes. Worth landing before #116 since the runner's gate-decision-write boundary references this pattern.
-5. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Caught during #105.
-6. **#107** reds-during-reconcile design conversation. Architectural question, not implementation-ready.
-7. **#96 sub-shifts 3+4+5** (implementer fanout + orchestrator). **Absorbed by #116** — v2 makes DAG-driven implementation fanout the default model.
-8. **System Map polish:** **#124** drag-overrides Map LRU cap, **#123** a11y posture. (#127 closed today.)
-9. **#129** — shareable agent-skills pattern (future). Placeholder.
-
-**New issues filed during the #127 run:**
-- **#130** Bedrock concurrent-request starvation silently kills a parallel red — surfaced when red-security got zero stdout for 5 minutes and idle-watchdog killed it while four siblings ran fine.
-- **#131** Dashboard CLIENT_JS bundle is stale until process restart — verifier on #127 navigated to `host.docker.internal:8022` and saw pre-diff code; pivoted to synthetic cytoscape render.
+0. **#137 — Dashboard split into its own repo.** Steven's call 2026-05-14: dashboard should be a separate, optional project that views all forge runs across all projects on the system. Big rewrite. Don't conflate with v2 cutover.
+1. **#136 — Rebuild v2-aware pill row in the dashboard.** Stubbed out during v2 cutover; queries.ts returns empty phaseShape. Lower priority than #137 (the split) — but if doing #137 means starting fresh, build pill row in the new repo instead. Decide which first.
+2. **#135 — Build reds review the wrong artifact (commit metadata, not the diff).** Surfaced on `run-smoke-v3-491805`: red-wide on the build step reviewed commit `b83329f` (the *previous* commit) instead of the engineer's actual diff in result.json. The architecture is right (red gets artifact = primary's result.json), but the engineer's result.json contains a summary, not the diff. Seed needs the red to grep the working tree / git diff.
+3. **#134 — Gate UX: don't suggest `forge next` when run is complete.** Cosmetic — `forge gate <id> advance` on the terminal step prints "Next: forge next <run-id>" even when the run flipped to `complete`. Trivial fix in `src/cli/commands/gate.ts`.
+4. **#132 — `forge backlog` CLI (fast-follow to v2).** Move BACKLOG.md operations behind a CLI surface; storage swap (SQLite or external tracker) later. Filed 2026-05-14 during v2 RACI design.
+5. **#130** Bedrock concurrent-request starvation — surface idle-timeout kills as `failed.reason=infra`. Composite with #74.
+6. **#131** Dashboard CLIENT_JS bundle stale until process restart. Likely absorbed by #137 (the dashboard rewrite) but still real today. Composite with #77.
+7. **Auth fix cluster (REDUCED IN URGENCY by #121 landing).** **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All still real bugs, but they apply only to mount-mode (now opt-in via `FORGE_AUTH_MODE=mount`).
+8. **#115** dashboard task list smart-refresh gap — composite with #137.
+9. **#112** transactional dispatch + gate writes. v2's gate.ts is a fresh write; reference the v1 reconcile transactional patterns when getting to this.
+10. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Re-check whether v2 specialist seeds inherited the gap.
+11. **#107** reds-during-reconcile — v2 has no reconcile yet, so this is on ice until reconcile gets re-added (if ever).
+12. **#129** — shareable agent-skills pattern (future). Placeholder.
 
 **Useful runtime state:**
-- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`.
+- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`. Still current.
+- Node 22 (LTS). Don't `brew upgrade` to Node 26 — better-sqlite3 has no prebuilts; you'll get cert errors on node-gyp.
 
 **Honest flags:**
-- **System Map renderer pass on 2026-05-13** was iterative — the agent build phase shipped a working data layer + a broken renderer (didn't open in a browser, didn't compare to design). The verify phase only tested the new file; full design fidelity came from a manual iteration session with Playwright + screenshots. **Lesson for #116:** verify-phase for UI work needs eyes-on-the-render, not just tests-green.
-- **#25 + #32 still un-validated end-to-end** (reject/onReject flow, failed-result detection).
-- **The #105 forge run was forge running on forge itself** — second time (#91 was first). Worked, in a "5 retries on the planner phase + 4 of 5 reds failed in build" sense. Real architectural value at architect + planner; red review caught real renderer bugs but with a lot of noise (3 of 5 reds raised partly-wrong findings). The pattern works; the cost is real.
+- **v2's first full run produced quality output** (architect → tech-lead → engineer → qa-engineer with reds) but red-wide and red-narrow were both "inconclusive" because they reviewed the wrong artifact (see #135). The pipeline itself works; the red discipline at the build step needs a seed update.
+- **Reconcile gone.** v1's orphan-task recovery is deleted. If a container produces result.json but Node loses track of the docker close event, the task sits in `running` forever. `forge retry <id>` is the manual escape. File a v2 reconcile back if the bug shows up.
+- **Dashboard pill row stubbed** — the run page renders the task table fine, but no pills. Tracked as #136.
+- **#25 + #32 still un-validated end-to-end** under v2 (reject/onReject flow, failed-result detection). v2's gate.ts has an `on_reject` code path written but never exercised in a real run.
 
 **Local-only files (gitignored):** none currently.
 
-**Branch hygiene:** All branches deleted 2026-05-13 after the System Map merge — only `main` remains.
+**Branch hygiene:** `yaml-orchestrator-116` has been merged; safe to delete locally. Only `main` should remain.
 
 ## Active
 
@@ -94,6 +92,59 @@ When you start a session, read this file. When you finish, update it: move close
 
 **Caught:** 2026-05-14 — during the v2 RACI design conversation, the "Informed = file" question surfaced that BACKLOG.md was being used as both a notification target AND project state, and neither fits cleanly.
 
+### #137 — Split the dashboard into its own optional project
+**Why:** Steven's call 2026-05-14, post-v2-cutover. The dashboard inside the forge monorepo couples release cadence (UI iteration is faster than runner iteration), forces every install to carry ~4K LoC of UI + htmx + server.ts whether they use it or not, and — most importantly — scopes the dashboard to "this project's runs" when it actually wants to be a *user-level tool* that views every forge run across every project on the host. `~/.forge/forge.db` is already host-global; the dashboard just needs to read it directly.
+
+**Target shape:**
+```
+forge/              (this repo) — CLI + v2 runner + seeds
+forge-dashboard/    (new repo)   — web UI; reads ~/.forge/forge.db; shells `forge` for actions
+```
+Installs separately. Runs as `forge-dashboard` or `npx forge-dashboard` on its own port. Discovers runs from `~/.forge/`; groups by `run.projectDir` for multi-project view.
+
+**Trade you're making:** the SQLite schema + filesystem layout become a contract between the two repos. Today you can change a column + update queries.ts in one PR; after the split, schema changes need to think about dashboard compatibility. Worth paying, but name it.
+
+**Three lock-points before doing the split:**
+1. **Schema contract.** Write `docs/SCHEMA-CONTRACT.md` capturing what the dashboard reads from `forge.db` + filesystem (Run/Task/Verdict/Gate/Event tables; `~/.forge/runs/<runId>/<taskId>/{result.json,container.stdout.log,...}`). Once split, that document is the API. Anything outside it is implementation detail forge can change freely.
+2. **Pill row first or last?** The current pill row is broken (stubbed from v2 deletion — see #136). Option (a): rebuild in this repo against v2 schema, then split. Option (b): split now with the pill row still stubbed; rebuild it in the new repo as its first feature. **Lean (b)** — splitting is the bigger architectural decision; don't gate it on one feature.
+3. **`forge invoke` rendering.** Single-task invokes show up today as run rows with workflow="invoke". The dashboard should keep showing them, but they have no pipeline shape. Decide before split: render as single-pill "task" view, or special-case the layout.
+
+**Not blocking anything else.** v2 ships without it; this is a future arc. Probably comes after #136 (or absorbs it).
+
+**Caught:** 2026-05-14 — during post-v2 reflection on dashboard scope.
+
+### #136 — Rebuild v2-aware pill row in the dashboard
+**Why:** v2 cutover deleted the v1 Workflow TypeScript type that `buildPhaseShape()` consumed. `src/dashboard/queries.ts` now returns `phaseShape: []` unconditionally; the run page renders zero pills. Task table still works.
+
+**What's needed:** a `buildPhaseShape(workflow: v2.Workflow, tasks: Task[])` against `src/v2/schema`'s Workflow shape. The v1 Phase fields the dashboard consumes are: `name`, `agents[].role`, `gate`, `fanout`, `fanoutFromUpstream`, `reds`. v2's equivalent: `steps[].id`, `steps[].agent`, `steps[].gate`, `steps[].fanout`, `steps[].reds`. Mostly a renaming exercise.
+
+**Composes with #137** — if the dashboard moves to its own repo, this work happens there instead. Decide between them before starting.
+
+**Where to start:** `src/dashboard/phaseShape.ts` (currently stubbed to return `[]`). The old logic lives in git history at `b818f27^` if you want to compare. queries.ts:165 has the TODO marker for the rewrite point.
+
+**Caught:** 2026-05-14 — stubbed deliberately during v2 cutover to ship the rest.
+
+### #135 — Build reds review the wrong artifact (commit metadata, not the diff)
+**Why:** Surfaced on `run-smoke-v3-491805` (forge v2's first full real run). The build step's red-wide and red-narrow agents both came back as `inconclusive` because they reviewed the **previous commit** (`b83329f` — the v2 fix commit that pre-dated this run) instead of the engineer's actual diff in `src/cli/index.ts`. The pipeline isn't broken: the architecture sends each red the primary's `result.json` as `artifact`. But the engineer's `result.json` contains a textual *summary* of the diff, not the diff itself.
+
+**Notes from the failing red:** *"Commit claims three fixes: (1) TASK_PACKAGE_MARKDOWN added to SpawnContext ✓ Verified—was missing, now present in both runNext.ts and invoke.ts; (2) Bedrock Haiku model ID fixed ✓ Verified; (3) runMetadata threaded through ✓ Verified. Tests updated (BASE_CTX, spawn.test.ts). All three claimed fix..."* — proves the red verified the *prior* commit, not the engineer's output.
+
+**The fix:** seed update for `red-wide` / `red-narrow` (and probably the discipline reds) — when reviewing a build step's output, the red should:
+1. Read the engineer's `files_modified` array from result.json
+2. `git diff HEAD` or read each file via the `/project` mount (already there)
+3. Review the actual code change, not the engineer's prose summary
+
+**Sequencing:** before the next end-to-end forge run. Easy seed-only change (~5 lines in 2 seed CLAUDE.mds); no code change to the runner.
+
+**Caught:** 2026-05-14 — during forge v2 smoke test post-merge.
+
+### #134 — Gate UX: don't suggest `forge next` when run is complete
+**Why:** After gating the terminal step (`verify` in the feature workflow), `forge gate <taskId> advance` still prints `Next: forge next <run-id>` — but the runner already flipped the run to `complete` in `finalizeRunIfDone()`. The follow-up `forge next` would just print "nothing ready to dispatch."
+
+**The fix:** in `src/cli/commands/gate.ts`, after the gate decision, check `getRun(task.runId).status` — if `complete`, print "Run complete." instead of "Next: forge next ...". Trivial (~5 lines).
+
+**Caught:** 2026-05-14 — during forge v2 smoke test post-merge.
+
 ### #131 — Dashboard CLIENT_JS bundle is stale until process restart; live diffs don't show
 **Why:** Caught 2026-05-13 during the #127 forge run. Verifier-phase agent navigated to `http://host.docker.internal:8022` (the running host dashboard), found the System Map view still rendering the *pre-diff* red-edge style (solid magenta arrow, opacity 0.7), and correctly noted in its findings: *"the host server process was started before the changes; server restart would pick up the changes, but the code in /project/src/dashboard/html.ts is correct."* It then pivoted to a self-contained synthetic cytoscape render to validate the styles directly.
 
@@ -132,30 +183,6 @@ Lean (1) first — surfacing the failure mode honestly is cheap and the right sh
 **Composite with #74** (reconcile + watchdog can't catch zero-stdout orphans). #74 caught the same shape of failure from a different angle — this is the same dataclass of bug.
 
 **Caught:** 2026-05-13 — during the build phase of the #127 forge run.
-
-### #116 — Forge v2: YAML-driven orchestrator, keep SQLite + dashboard
-**Why:** Caught 2026-05-12. Steven's been carrying a "too complicated" feeling about the TypeScript control system for a while; this session surfaced the shape that resolves it. Two reference repos — `~/code/de-dev-adx-example-workspaces/jeffs-workspace-boilerplate/` and `~/code/local-adx-workspace-2/multi-agent-package/` — already run a productized version of the model Steven wants: `pipeline.yml` per project, `runtime-*.yml` per provider, agent markdown under `agents/<role>.md`, a small executor reading YAML and spawning containers. Jeff's model is deployed across 8+ live projects (analysis-code, mysg, atlas-hq, sgws-ops-dashboard, etc.) — not a sketch.
-
-**The hybrid.** Take Jeff's *shape* (declarative YAML, small executor); keep forge's *correctness layer + UX* (SQLite, dashboard, gate logic, reconcile, transactional writes). Workflows become YAML files. Providers (claude-bedrock, claude-oauth, claude-apikey, future codex/openai) become runtime YAML files. Agents stay markdown + settings.json, just relocate to `~/.forge/agents/`. The runner becomes ~400-600 lines of TypeScript that walks YAML steps and writes to the existing SQLite tables. Closes #106 (provider abstraction) as a side effect — adding a provider becomes a YAML file, not architecture work.
-
-**Decisions locked 2026-05-12:**
-- **Big-bang migration.** New branch `yaml-orchestrator-116`. TS spine code paths gone at land; YAML runner is the only orchestrator. No flag, no dual-path.
-- **TypeScript runner**, not Python. Keep forge mono-language; borrow Jeff's shape, not his language.
-- **YAML lives in both places with override**: `~/.forge/workflows/` + `<project>/.forge/pipeline.yml` (last-one-wins by filename match). Same for agents and runtimes.
-
-**What stays.** SQLite schema, dashboard, gate.ts (verdict aggregation, force-advance, blocked_by_red), reconcile.ts (orphan recovery, transactional writes #109, #112 if landed), constraints.ts (file-based constraints with frontmatter unchanged), the agent seed structure (just moved from `seeds/` to `~/.forge/agents/` at install time).
-
-**DAG-driven implementation fanout is in scope** (added 2026-05-13). v2's build phase is a step DAG, not a static agent list. Planner emits `depends_on` + `discipline` + `files_modified` per step; runner walks the DAG, parallelizes where deps allow, routes each step to the matching specialist implementer (frontend / backend / infosec / general). This **replaces #96 sub-shifts 3+4+5** — the fanout-in-build vision lands as the v2 default, not a v1 primitive. Specialist red seeds (#96 sub-shift 1, shipped 2026-05-09) and specialist implementer seeds (#96 sub-shift 2, shipped 2026-05-09) become v2 building blocks.
-
-**What goes.** `src/spine/{workflows,dispatch,spawn,spawnRed,next,composeSystemPrompt}.ts` (replaced by the runner + YAML loading). `src/workflows/*.ts` (translated to YAML). `src/util/creds.ts` (its detection logic moves into runtime YAML).
-
-**PRD:** `docs/prds/yaml-orchestrator-116.md` — full scope, reading list, architectural angles for the architect.
-
-**Sequencing.** This starts *after* #105 (System Map) lands and merges. The System Map is in-flight as of 2026-05-12; v1's dashboard work should land in main before v2 starts replacing the spine underneath it. #112 (transactional dispatch + gate writes) should also land first if possible — those transaction patterns become reference for the runner's gate-decision-write boundary.
-
-**Not running through forge.** Considered + rejected 2026-05-12. Three reasons: (1) forge v1 is the executor for v2's build — implementer mid-run editing the spine that's dispatching it is a real deadlock risk; (2) the hard work is design (YAML schema, runtime resolution, phases-vs-steps), not implementation, and the PRD already captures the framing — architect's value-add is weakest on already-thought-through problems; (3) step boundaries for a rewrite are themselves architectural decisions; planner would produce a decomposition but probably not the right one. Paired Steven+Claude session work instead, with small translation tasks possibly farmed out to agents once the schema is locked.
-
-**Caught:** 2026-05-12 — during architecture discussion after the System Map planner output rejection.
 
 ### #129 — Shareable agent-skills pattern (future feature)
 **Why:** While doing #126 (pair-coding side) on 2026-05-13, the pattern surfaced as something with reach beyond forge. The combination of Mario's Skills-format choice + the symlink-on-host / bind-mount-in-container duality is generally useful — any tool the human and an agent both want (screenshot, eval, search, transcript, calendar) wants both surfaces. The natural product is something like "use Mario's tools from this repo, with a small install dance for both surfaces."
@@ -667,6 +694,45 @@ Lean toward (1).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
 ## Done (recent)
+
+### #116 — Forge v2: YAML-driven orchestrator (cutover complete)
+**Closed:** 2026-05-14. Merge commit `b818f27` on `main` (the `yaml-orchestrator-116` branch merge). 23 commits on the branch; net `+1,113 / -6,228` LoC. 279/279 tests passing.
+
+**What landed:**
+- **v2 runner core**: schema (Zod) + YAML loader + ready-queue + DAG dispatcher (`src/v2/{schema,loader,ready-queue,inputs,runNext}.ts`). Wave-per-call shape; orchestrator calls `runNext` in a loop. Parallel-within-wave via `Promise.all`.
+- **Reds + fanout in the runner**: reds spawn as child tasks after primary completes, verdicts persisted, authoritative-fail blocks via `blocked_by_red`; fanout reads upstream array, spawns N children with `max_concurrency`, applies failure_mode (`fail-phase` / `retry-once` / `continue`).
+- **v2 gate**: `src/v2/gate.ts` — marks complete/fail; for reject + on_reject inserts pending in the on_reject step; for request-changes inserts pending in same step. Runner picks up successors via ready-queue (no proactive task creation).
+- **`forge invoke`**: single-agent dispatch primitive (`src/v2/invoke.ts`, `src/cli/commands/invoke.ts`). The RACI orchestrator's bread-and-butter. Synchronous; returns when the agent completes.
+- **RACI seed** (`seeds/forge-raci.md`): 11 work types, R+A+C+I rows, Path = in-session / invoke / pipeline. Implementation routes through pipeline; everything else through invoke.
+- **Orchestrator template** (`seeds/orchestrator-template.md`) rewritten RACI-first: classify prompt → look up RACI → route. Multi-agent composition via chained `forge invoke` in the conversation, not a workflow file.
+- **CLI cutover**: `forge new`/`next`/`gate` route to v2. `forge invoke` / `forge upgrade` / `forge init` / `forge watch` added.
+- **3 workflow YAMLs**: `feature`, `feature-ui-design-needed`, `feature-ui-design-provided` in `seeds/workflows/`.
+- **3 runtime YAMLs**: `claude-bedrock`, `claude-oauth`, `claude-apikey` with `detect` blocks. `runtime: claude` (schema default) auto-resolves via env at spawn time.
+- **First real forge v2 run end-to-end** (`run-smoke-v3-491805`): architect → plan → build (engineer + 5 reds parallel) → verify, producing the `forge --version` flag diff committed as `51a3c64`.
+
+**Deletions:**
+- `src/spine/` (13 modules) + `src/workflows/` (8 v1 workflows + tests). v1 is gone.
+- `forge submit` + submitValidators — ui-design is host-led under RACI; no manual phase needed.
+- `reconcile` — orphaned-task safety net; v2 doesn't have one. `forge retry` is the manual escape.
+- v1 types: `WorkflowName`, `Workflow`, `Phase`, `AgentRef`, `RedConfig`, `FanoutConfig`.
+- Dashboard: 4 obsolete workflow options (investigation, codebase-assessment, ui-design, ui-design-revise) + `/api/submit` endpoint.
+
+**Bugs caught + fixed during smoke testing:**
+- `TASK_PACKAGE_MARKDOWN` was missing from `SpawnContext` (runtime YAML expected it via `${TASK_PACKAGE_MARKDOWN}` template).
+- Bedrock Haiku model ID was missing the `-v1:0` suffix in `claude-bedrock.yml`.
+- Run metadata (`brief`, `question`, `prd`) wasn't being folded into the first task's inputs.
+
+**Model mapping (was inverted at one point during the day):**
+- Bedrock `spec-writer` → Sonnet 4.6 (work account; Opus restricted).
+- OAuth `spec-writer` → Opus 4.7 (personal Pro account).
+- Both `fast-orchestrator` → Haiku 4.5.
+
+**Honest flags:**
+- **Reconcile is gone.** If a container produces result.json but Node loses the docker-close event, the task sits in `running` forever. Use `forge retry <id>`. File a v2 reconcile back if the bug shows up.
+- **Dashboard pill row stubbed** — tracked as #136. Run page still works (task table fine; no pills).
+- **Reds reviewed the wrong artifact on `run-smoke-v3-491805`** — tracked as #135. Architecture is right (red gets primary's result.json as artifact); seed needs to make the red consult `files_modified` + `git diff` rather than the engineer's summary text.
+
+**Composes with:** closes #106 (provider abstraction is now a YAML file). Absorbed #96 sub-shifts 3+4+5 (implementer fanout) into the v2 DAG default model.
 
 ### #127 — System Map: red→parent arrows render as dotted tether
 **Closed:** 2026-05-13. Shipped via forge feature run on `red-arrow-127` branch (the first forge run that exercised #128 end-to-end). Commit `ec6a519`.
