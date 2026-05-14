@@ -44,7 +44,12 @@ export function registerGate(program: Command): void {
         if (totalFollowups > 0) {
           console.log(`${totalFollowups} follow-up task(s) created.`);
         }
-        console.log(`\nNext:\n  forge next ${id}`);
+        const runAfter = getRun(id);
+        if (runAfter?.status === "complete") {
+          console.log(`\nRun complete.`);
+        } else {
+          console.log(`\nNext:\n  forge next ${id}`);
+        }
         return;
       }
 
@@ -63,6 +68,13 @@ export function registerGate(program: Command): void {
         console.log(`Created ${result.nextTasks.length} follow-up task(s):`);
         for (const t of result.nextTasks) console.log(`  - ${t.id} (${t.phase}/${t.agentRole})`);
       }
-      console.log(`\nNext:\n  forge next ${result.task.runId}`);
+      // If the gate finished the run (terminal step, no work remaining),
+      // surface that — don't suggest `forge next` for a completed run.
+      const runAfter = getRun(result.task.runId);
+      if (runAfter?.status === "complete") {
+        console.log(`\nRun complete.`);
+      } else {
+        console.log(`\nNext:\n  forge next ${result.task.runId}`);
+      }
     });
 }
