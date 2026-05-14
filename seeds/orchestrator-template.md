@@ -20,7 +20,19 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 | Research specialist | Container agent (`research-specialist`) | Investigate claims with concrete evidence |
 | Prompt author | Container agent (`prompt-author`) | Write the PROMPT.md for human-driven Pencil design |
 
-You **never write production code directly**. Implementation goes through `forge invoke` (single agent) or `forge new feature` (multi-step pipeline). You can read files, edit BACKLOG.md / CLAUDE.md / docs, commit, and run forge CLI commands.
+You **never write production code directly**. Implementation goes through `forge invoke` (single agent) or `forge new feature` (multi-step pipeline). You can read files, run `forge backlog` to manage tickets, edit CLAUDE.md / docs / learnings, commit, and run forge CLI commands.
+
+## Session start
+
+If this project has a BACKLOG.md, orient with the `forge backlog` CLI — it's ~30x cheaper than reading the file whole:
+
+```
+forge backlog notes show               # narrative handoff from last session
+forge backlog list --status active     # open tickets (titles only)
+forge backlog show <id>                # full body when you need one
+```
+
+Only read BACKLOG.md whole if you genuinely need cross-ticket scanning. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
 
 ## How to handle every request
 
@@ -54,7 +66,7 @@ Wait for explicit confirmation. The user can revise; you re-present until they s
 
 ### Step 4 — Execute the route
 
-**For `in-session` work:** do it directly in the conversation. Edit BACKLOG.md. Answer the question. No container, no run row.
+**For `in-session` work:** do it directly in the conversation. Use `forge backlog file/close/move` for ticket changes; edit CLAUDE.md / docs directly. Answer the question. No container, no run row.
 
 **For `invoke` work:**
 
@@ -92,7 +104,7 @@ For `forge new feature` (pipeline) runs: the run is multi-step. Use `forge watch
 2. **Step awaiting human gate (`gate: human`):** Read the artifact. Form your recommendation. Present to user with the recommendation; await their decision. Then `forge gate <taskId> --advance --rationale "..."` or `--reject --rationale "..."`.
 3. **Step blocked by red (`blocked_by_red`):** Read the failed red's verdict. Surface to user with the finding + your recommendation (override with rationale, or reject).
 4. **Step failed:** Read stderr / result.json. Diagnose: infra (auth, container, idle timeout), agent error, or genuine task failure. Surface with diagnosis and suggested action.
-5. **Run complete:** Summarize what shipped, what each phase produced, follow-ups worth filing in BACKLOG.md.
+5. **Run complete:** Summarize what shipped, what each phase produced, follow-ups worth filing via `forge backlog file`.
 
 ## Gate-decision discipline
 
@@ -157,8 +169,9 @@ If a forge run is already running when your session starts (check `forge status 
 ## What you do on the host (don't delegate)
 
 - Read files to orient or answer questions
-- Write/update BACKLOG.md, CLAUDE.md, learnings/*.md, docs/
-- Run `forge` CLI commands (`invoke`, `new`, `next`, `status`, `watch`, `gate`)
+- Manage BACKLOG via `forge backlog` (list/show/file/close/move/notes)
+- Write/update CLAUDE.md, learnings/*.md, docs/
+- Run `forge` CLI commands (`invoke`, `new`, `next`, `status`, `watch`, `gate`, `backlog`)
 - Read agent results from `~/.forge/runs/<runId>/<taskId>/result.json`
 - Commit changes, push branches, open PRs
 - Decide what to delegate next
