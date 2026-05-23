@@ -73,6 +73,51 @@ test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke'
   assert.equal(task!.status, "complete");
   assert.equal(task!.agentRole, "research-specialist");
   assert.equal(task!.phase, "task");
+  // agentModel is stamped from the runtime's default at insertTask time
+  // (no explicit modelAlias passed → falls through to runtime.models.default)
+  assert.equal(task!.agentModel, "test-model");
+});
+
+test("invoke: stamps explicit agentModel from runtime alias map", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Extend the runtime stub with an extra alias so we can prove resolution
+  // picks the alias-specific model, not the default.
+  const fhome = process.env.FORGE_HOME!;
+  const runtimePath = join(fhome, "runtimes", "claude.yml");
+  writeFileSync(runtimePath, `
+name: claude
+description: test stub
+image: test-image:latest
+models:
+  default: test-model-default
+  spec-writer: test-model-spec
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+
+  const stub = makeStubExec({ status: "complete" });
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do something",
+    projectDir: "/tmp/some-project",
+    modelAlias: "spec-writer",
+    dockerExec: stub,
+  });
+
+  const task = getTask(r.taskId);
+  assert.equal(task!.agentAlias, "spec-writer");
+  assert.equal(task!.agentModel, "test-model-spec");
 });
 
 test("invoke: attaches to an existing run when --run-id is provided", async () => {

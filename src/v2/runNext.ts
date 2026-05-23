@@ -29,7 +29,7 @@ import { computeReadyQueue } from "./ready-queue.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { loadRuntime } from "./loader.js";
+import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 export type RunNextResult = {
@@ -245,6 +245,7 @@ async function dispatchSingleStep(args: {
       phase,
       agentRole,
       agentAlias: step.model,
+      agentModel: resolveModelForTask(step.runtime, step.model),
       status: "pending",
       taskPackage,
       createdAt: new Date().toISOString(),
@@ -415,6 +416,7 @@ async function runOneRed(args: {
     phase: args.step.id,
     agentRole: args.red.agent,
     agentAlias: args.red.model,
+    agentModel: resolveModelForTask(args.step.runtime, args.red.model),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),
@@ -708,6 +710,7 @@ async function runFanoutChild(args: {
     phase: step.id,
     agentRole,
     agentAlias: step.model,
+    agentModel: resolveModelForTask(step.runtime, step.model),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),

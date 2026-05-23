@@ -102,6 +102,30 @@ export function loadRuntime(name: string, ctx: LoadContext = {}): Runtime {
   return result.data;
 }
 
+/** Stamp the resolved model id at task-create time. Loads the runtime YAML,
+ *  resolves alias → concrete model id (e.g. `spec-writer` → `us.anthropic.claude-sonnet-4-6`),
+ *  returns it. Returns undefined if the runtime fails to load — we don't want
+ *  a model-lookup failure to block task creation; the task itself will fail
+ *  at dispatch with a clearer error.
+ *
+ *  Use this at every insertTask site where a real container will run, so the
+ *  task row records which model was intended. The dashboard reads this for
+ *  per-task model badges; orchestrators / debuggers read it via `forge show`.
+ */
+export function resolveModelForTask(
+  runtimeName: string,
+  alias: string | undefined,
+  ctx: LoadContext = {}
+): string | undefined {
+  try {
+    const runtime = loadRuntime(runtimeName, ctx);
+    if (!alias) return runtime.models["default"];
+    return runtime.models[alias] ?? runtime.models["default"];
+  } catch {
+    return undefined;
+  }
+}
+
 // Resolves `runtime: claude` (the schema default) into a concrete runtime name
 // by reading env. Order mirrors v1's detectCredsMode():
 //   1. Bedrock: CLAUDE_CODE_USE_BEDROCK=1
