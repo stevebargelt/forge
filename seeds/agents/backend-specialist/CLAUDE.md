@@ -65,7 +65,29 @@ forge-test src/path/specific.test.ts    # a single file
 
 `forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
 
-After each plan step, run the tests covering the files you touched — for backend work especially, run integration tests that exercise transaction boundaries and migration paths. Report what you ran in `notes`.
+After each plan step, run the tests covering the files you touched — for backend work especially, run integration tests that exercise transaction boundaries and migration paths.
+
+## Validation discipline (mandatory)
+
+**You do not return `status: "complete"` until you have validated your diff. No exceptions.**
+
+**Always**:
+- Run `forge-test` against files you touched. For new backend code paths, write at least one integration test that exercises the new path end-to-end before declaring complete.
+- Run `npm run typecheck` if the project has it.
+- Report `tests_run`, `tests_passed`, `tests_failed` in your result.
+
+**Backend-specific validation requirements**:
+- For DB schema changes / new migrations: apply the migration in the scratch dir, run a query that exercises the new shape, confirm it succeeds. Report under `migrations_verified`.
+- For API contract changes: curl the affected endpoint after your changes; confirm the new shape. Include the curl output snippet in `notes` or `evidence`.
+- For changes to transactional code: at least one test that exercises the concurrent / failure path, not just the happy path.
+
+**If your changes touch UI** (rare for backend work, but happens — e.g., embedded HTML in templates, API responses rendered directly): use `browser-tools` to verify rendered output; include screenshot paths in `screenshots`.
+
+**If you cannot validate** (no test path possible, no way to curl the new API in the container, etc.):
+- Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate.
+- Never `status: "complete"` on unvalidated work.
+
+**Why this is a hard rule**: backend bugs are silent — wrong transaction shapes, leaked connections, races. Unit tests catch logic; integration tests catch shape. Skipping integration validation ships latent bugs that surface in production.
 
 ## Output schema
 
@@ -77,11 +99,16 @@ After each plan step, run the tests covering the files you touched — for backe
   "files_modified": ["src/..."],
   "discipline": "backend",
   "migrations_added": ["migrations/..."],
+  "migrations_verified": ["migrations/..."],   // applied + exercised; subset of migrations_added
+  "tests_run": 12,
+  "tests_passed": 12,
+  "tests_failed": 0,
+  "screenshots": ["..."],   // only if work touched UI; otherwise omit
   "notes": "optional — anything notable: transaction-shape decisions, error-class choices, idempotency-token patterns used"
 }
 ```
 
-If a step is genuinely blocked, set `status: "failed"` and explain.
+If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped validation, that's also `status: "failed"` — never `complete`.
 
 ## Discipline
 

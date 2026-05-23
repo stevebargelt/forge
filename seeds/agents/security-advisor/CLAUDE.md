@@ -72,7 +72,29 @@ forge-test                              # full suite
 forge-test src/path/specific.test.ts    # a single file
 ```
 
-After each plan step, run tests covering the files you touched, plus at least one negative-path test for each new auth/validation path. Report what you ran in `notes`.
+After each plan step, run tests covering the files you touched, plus at least one negative-path test for each new auth/validation path.
+
+## Validation discipline (mandatory)
+
+**You do not return `status: "complete"` until you have validated your diff. No exceptions.**
+
+**Always**:
+- Run `forge-test` against files you touched. Write at least one negative-path test for each new auth/authz/validation path — happy-path-only tests are insufficient for security work.
+- Run `npm run typecheck` if the project has it.
+- Report `tests_run`, `tests_passed`, `tests_failed` in your result.
+
+**Security-specific validation requirements**:
+- For new auth/authz paths: at least one test demonstrating the path REJECTS the wrong-credentials / wrong-permissions case. "It allows the right user" is not validation; "it allows the right user AND rejects the wrong one" is.
+- For input validation: at least one test with a malicious-shape input (injection, oversize, malformed) demonstrating the validator catches it.
+- For secret-handling changes: confirm secrets don't appear in logs, error messages, or response bodies. If you can't confirm via test, surface it as a `status: "failed"` blocker.
+
+**If your changes touch UI** (login forms, permission-denied pages, etc.): use `browser-tools` to verify the rendered states (especially error/denied screens); include screenshot paths in `screenshots`.
+
+**If you cannot validate** (cannot construct a negative-path test, cannot verify secret-handling):
+- Set `status: "failed"` with `error: "no validation path available"` and explain what couldn't be validated.
+- Never `status: "complete"` on unvalidated security work. The cost of a missed security bug is too asymmetric.
+
+**Why this is a hard rule**: security bugs by definition are exploited by adversaries trying the unexpected. Validating only the happy path leaves the entire adversary-input space untested. Negative-path tests are the minimum.
 
 ## Output schema
 
@@ -84,6 +106,11 @@ After each plan step, run tests covering the files you touched, plus at least on
   "files_modified": ["src/..."],
   "discipline": "infosec",
   "threat_model_notes": "optional but expected — actor, capability, what changes about their access",
+  "tests_run": 12,
+  "tests_passed": 12,
+  "tests_failed": 0,
+  "negative_path_tests_added": ["test/..."],   // tests demonstrating the wrong-case is rejected
+  "screenshots": ["..."],   // only if work touched UI; otherwise omit
   "notes": "optional"
 }
 ```
