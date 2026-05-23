@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import Database from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertRun, getRun, setRunProjectDir } from "./runs.js";
+import { insertRun, getRun, setRunProjectDir, listRunsForWorkspace } from "./runs.js";
 import type { Run } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -36,6 +36,38 @@ test("insertRun: persists projectDir when set, omits when undefined", () => {
 
   assert.equal(withPd?.projectDir, "/Users/x/code/foo");
   assert.equal(withoutPd?.projectDir, undefined);
+});
+
+test("listRunsForWorkspace: matches by projectDir", () => {
+  insertRun({ ...RUN, id: "run-a", projectDir: "/Users/x/code/foo" });
+  insertRun({ ...RUN, id: "run-b", projectDir: "/Users/x/code/bar" });
+  insertRun({ ...RUN, id: "run-c", projectDir: "/Users/x/code/foo" });
+
+  const out = listRunsForWorkspace("/Users/x/code/foo").map((r) => r.id).sort();
+  assert.deepEqual(out, ["run-a", "run-c"]);
+});
+
+test("listRunsForWorkspace: matches by metadata.workspace (audit-workspace case)", () => {
+  insertRun({
+    ...RUN,
+    id: "run-audit",
+    projectDir: "/Users/x/code/external-repo",
+    metadata: { workspace: "/Users/x/code/audit-workspace" },
+  });
+
+  // Querying the workspace dir picks up the audit run even though its
+  // projectDir is elsewhere.
+  const workspaceMatches = listRunsForWorkspace("/Users/x/code/audit-workspace").map((r) => r.id);
+  assert.deepEqual(workspaceMatches, ["run-audit"]);
+
+  // Querying the external repo also finds it (projectDir match).
+  const projectMatches = listRunsForWorkspace("/Users/x/code/external-repo").map((r) => r.id);
+  assert.deepEqual(projectMatches, ["run-audit"]);
+});
+
+test("listRunsForWorkspace: returns empty when no run matches the workspace", () => {
+  insertRun({ ...RUN, id: "run-x", projectDir: "/Users/x/code/somewhere" });
+  assert.deepEqual(listRunsForWorkspace("/Users/x/code/other").map((r) => r.id), []);
 });
 
 test("setRunProjectDir: writes the value and returns the previous (undefined on first set)", () => {

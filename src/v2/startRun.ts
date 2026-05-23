@@ -22,6 +22,11 @@ export type StartRunArgs = {
   inputs: Record<string, unknown>;
   projectDir: string;
   designDir?: string;
+  /** The orchestrator's home directory — used by `forge status` to filter
+   *  runs to the current workspace. Distinct from projectDir when an audit
+   *  workspace's orchestrator runs against an external target repo. Defaults
+   *  to projectDir at the CLI layer when not set explicitly. */
+  workspace?: string;
 };
 
 export type StartRunResult = {
@@ -41,6 +46,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
   const runId = newRunId(args.title);
   const metadata: Record<string, unknown> = { ...args.inputs };
   if (args.designDir) metadata["designDir"] = args.designDir;
+  if (args.workspace) metadata["workspace"] = args.workspace;
 
   const run: Run = {
     id: runId,

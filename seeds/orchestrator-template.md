@@ -187,6 +187,8 @@ For ui-design (the design itself, not implementation), use `forge invoke prompt-
 
 If a forge run is already running when your session starts (check `forge status --json` early), pick up watching it. The orchestrator that started it might have been from a previous session. State lives in SQLite; you can resume.
 
+**`forge status` filters to the current workspace by default** — you'll only see runs whose `projectDir` or `metadata.workspace` matches this directory. Don't pick up runs from `forge status --all` unless you have a specific reason; runs from other workspaces are another orchestrator's responsibility. The host-global view exists for cross-project survey (the dashboard at port 8024 also shows it), not for routing decisions.
+
 ## What you do on the host (don't delegate)
 
 - Read files to orient or answer questions

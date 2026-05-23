@@ -18,6 +18,7 @@ export function registerNew(program: Command): void {
     .option("--prd <path>", "PRD path input (legacy: feature-ui-design-provided)")
     .option("--design-dir <path>", "design artifact directory; mounted RO at /design in agent containers")
     .option("--project <path>", "project directory mounted at /project (default: cwd; persisted on run)")
+    .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--meta <json>", "extra run metadata as JSON")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
@@ -25,6 +26,7 @@ export function registerNew(program: Command): void {
       ensureForgeDirs();
 
       const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
+      const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
 
       // Load YAML (workspace default with project override).
       const workflow = loadWorkflow(workflowName, { projectDir });
@@ -56,6 +58,7 @@ export function registerNew(program: Command): void {
         inputs,
         projectDir,
         designDir,
+        workspace,
       });
 
       console.log(`Created run ${runId}`);

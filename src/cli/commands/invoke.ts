@@ -18,6 +18,7 @@ export function registerInvoke(program: Command): void {
     .option("--read-only", "mount /project read-only (default for adversarial / review work)")
     .option("--run <run-id>", "attach this invocation as a task in an existing run; otherwise a new one is created")
     .option("--run-title <text>", "title for the new run when --run is not provided")
+    .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--json", "emit the result.json verbatim to stdout instead of a human-readable summary")
     .action(async (agentRole: string, opts: {
       task?: string;
@@ -29,6 +30,7 @@ export function registerInvoke(program: Command): void {
       readOnly?: boolean;
       run?: string;
       runTitle?: string;
+      workspace?: string;
       json?: boolean;
     }) => {
       ensureForgeDirs();
@@ -43,6 +45,7 @@ export function registerInvoke(program: Command): void {
       if (!existsSync(projectDir)) {
         throw new Error(`project dir does not exist: ${projectDir}`);
       }
+      const workspace = resolve(opts.workspace ?? process.cwd());
 
       const result = await invoke({
         agentRole,
@@ -54,6 +57,7 @@ export function registerInvoke(program: Command): void {
         readOnlyProject: opts.readOnly,
         runId: opts.run,
         runTitle: opts.runTitle,
+        workspace,
       });
 
       if (opts.json) {
