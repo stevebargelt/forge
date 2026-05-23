@@ -48,6 +48,8 @@ When you start a session, read this file. When you finish, update it: move close
 
 **Branch hygiene:** `yaml-orchestrator-116` has been merged; safe to delete locally. Only `main` should remain.
 
+2026-05-23: shipped validation-discipline-seeds (commit 9ddfe45). All 5 implementer seeds now refuse status=complete without tests + screenshots for visual work. qa-engineer repositioned as second line. Orchestrator template updated to verify seed enforcement. Reinstalled seeds; refreshed orchestrator blocks in audit-workspace + forge-dashboard. Restart any running orchestrator sessions to pick up new CLAUDE.md.
+
 ## Active
 
 ### #131 — Dashboard CLIENT_JS bundle is stale until process restart; live diffs don't show
