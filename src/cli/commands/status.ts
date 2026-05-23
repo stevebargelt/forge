@@ -1,5 +1,6 @@
 import type { Command } from "commander";
-import { listRuns, getRun } from "../../store/runs.js";
+import { resolve } from "node:path";
+import { listRuns, listRunsForWorkspace, getRun } from "../../store/runs.js";
 import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
@@ -10,14 +11,19 @@ export function registerStatus(program: Command): void {
     .command("status")
     .argument("[run-id]", "show one run, or omit to list all")
     .option("--read-only", "open the DB read-only")
+    .option("--all", "show runs from every project + workspace on this host (default: filter to current workspace)")
+    .option("--workspace <path>", "workspace to filter by (default: cwd). Ignored with --all.")
     .option("--json", "emit structured JSON instead of human-readable text")
-    .description("Show run status. Always works against whatever has been built so far.")
-    .action(async (runId: string | undefined, opts: { readOnly?: boolean; json?: boolean }) => {
+    .description("Show run status. Filters to the current workspace by default; use --all for the cross-project view.")
+    .action(async (runId: string | undefined, opts: { readOnly?: boolean; all?: boolean; workspace?: string; json?: boolean }) => {
       ensureForgeDirs();
       if (opts.readOnly) getDb({ readOnly: true });
 
       if (!runId) {
-        const runs = listRuns();
+        // Default: filter to the current workspace. --all bypasses the filter
+        // for the cross-project survey case (matches the dashboard behavior).
+        const workspace = resolve(opts.workspace ?? process.cwd());
+        const runs = opts.all ? listRuns() : listRunsForWorkspace(workspace);
         if (opts.json) {
           console.log(JSON.stringify({ runs: runs.map((r) => ({
             id: r.id,
@@ -30,7 +36,11 @@ export function registerStatus(program: Command): void {
           return;
         }
         if (runs.length === 0) {
-          console.log("No runs yet. Try: forge new feature \"my-feature\" --brief \"...\"");
+          if (opts.all) {
+            console.log("No runs yet. Try: forge new feature \"my-feature\" --brief \"...\"");
+          } else {
+            console.log("No runs in this workspace. Use --all to see runs from other projects.");
+          }
           return;
         }
         for (const r of runs) {

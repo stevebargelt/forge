@@ -42,6 +42,12 @@ export type InvokeArgs = {
   readOnlyProject?: boolean; // mount /project ro (default: false)
   runId?: string;            // attach to existing run; if absent, create a new one
   runTitle?: string;         // used only when creating a new run
+  /** The orchestrator's home directory. When set, `forge status` filters
+   *  this run into the current-workspace view even if projectDir points
+   *  elsewhere (audit-workspace pattern: workspace=~/code/audit-workspace,
+   *  projectDir=~/code/audit-workspace/repos/team-payments). Defaults at
+   *  the CLI layer to cwd. */
+  workspace?: string;
   // Injected for tests; real callers leave undefined → docker is used.
   dockerExec?: DockerExecFn;
 };
@@ -56,7 +62,7 @@ export type InvokeResult = {
 
 export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Resolve / create the run.
-  const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle);
+  const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace);
   const run = getRun(runId);
   if (!run) throw new Error(`invoke: run not found: ${runId}`);
 
@@ -201,12 +207,14 @@ function createInvokeRun(
   agentRole: string,
   projectDir: string,
   designDir: string | undefined,
-  titleOverride: string | undefined
+  titleOverride: string | undefined,
+  workspace: string | undefined
 ): string {
   const title = titleOverride ?? `invoke ${agentRole}`;
   const runId = newRunId(title);
   const metadata: Record<string, unknown> = { invokeAgent: agentRole };
   if (designDir) metadata["designDir"] = designDir;
+  if (workspace) metadata["workspace"] = workspace;
 
   const run: Run = {
     id: runId,

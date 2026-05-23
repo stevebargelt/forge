@@ -66,6 +66,22 @@ export function listRuns(): Run[] {
   return rows.map(rowToRun);
 }
 
+/** Runs whose projectDir OR metadata.workspace matches the given directory.
+ *  Used by `forge status` to filter out runs from other workspaces by default
+ *  (per #138). The metadata.workspace clause handles audit-workspace runs
+ *  where the orchestrator's workspace ≠ the target repo's projectDir. */
+export function listRunsForWorkspace(workspace: string): Run[] {
+  // Filter in-process rather than in SQL — metadata is JSON-encoded TEXT, and
+  // adding a SQL JSON predicate makes the query non-portable for what is at
+  // most O(hundreds) of runs in practice.
+  return listRuns().filter((r) => {
+    if (r.projectDir === workspace) return true;
+    const ws = r.metadata?.["workspace"];
+    if (typeof ws === "string" && ws === workspace) return true;
+    return false;
+  });
+}
+
 export function updateRunStatus(id: string, status: RunStatus): void {
   const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
   getDb()
