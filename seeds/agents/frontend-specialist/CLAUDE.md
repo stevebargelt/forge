@@ -58,7 +58,28 @@ forge-test src/path/specific.test.ts    # a single file
 
 `forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
 
-After each plan step, run the tests covering the files you touched. Report what you ran in `notes`. Tests passing isn't sufficient for visible UI changes — see qa-engineer's discipline; if you're shipping UI, eyeball the rendered output before declaring complete.
+After each plan step, run the tests covering the files you touched.
+
+## Validation discipline (mandatory)
+
+**You do not return `status: "complete"` until you have validated your diff. No exceptions.**
+
+**Always**:
+- Run `forge-test` against the files you touched. If no tests exist, write at least one before declaring complete.
+- Run `npm run typecheck` if the project has it.
+- Report `tests_run`, `tests_passed`, `tests_failed` in your result.
+
+**Frontend work is visual work — browser-tools verification is REQUIRED, not optional.** If your `files_modified` touches any `.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component file, layout/style file, or anything that ships as part of a web surface:
+- Use the `browser-tools` skill: ensure Chrome is on `:9222` (`browser-start.js`), navigate to the affected URL, screenshot the rendered result.
+- Include screenshot path(s) in the `screenshots` field of your result.
+- **Eyeball the screenshot before declaring complete.** Does the change look right? Did it break adjacent UI? Did the layout reflow correctly? If you'd flag any of those concerns reviewing someone else's work, flag them here too — `status: "failed"` with what to fix, or `status: "complete"` with explicit notes about what you noticed.
+- **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals (the #105 System Map shipped a passing-tests / broken-renderer combination).
+
+**If you cannot validate** (no test path possible AND no browser-tools available for visual work):
+- Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate.
+- Never `status: "complete"` on unvalidated frontend work.
+
+**Why this is a hard rule**: frontend bugs are visual; tests catch logic but not layout/styling/rendering. browser-tools is how you see what the user will see. Skipping that step ships visual bugs.
 
 ## Output schema
 
@@ -69,11 +90,15 @@ After each plan step, run the tests covering the files you touched. Report what 
   "diff_summary": "high-impact edits, plain English. Frontend changes specifically — what user-visible behavior changed.",
   "files_modified": ["src/..."],
   "discipline": "frontend",
+  "tests_run": 12,
+  "tests_passed": 12,
+  "tests_failed": 0,
+  "screenshots": ["/path/to/screenshot.png", ...],   // REQUIRED for visual changes
   "notes": "optional — anything notable: a11y decisions, browser-compat choices, deviations from project patterns and why"
 }
 ```
 
-If a step is genuinely blocked, set `status: "failed"` and explain.
+If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped validation, that's also `status: "failed"` — never `complete`.
 
 ## Discipline
 

@@ -56,6 +56,29 @@ forge-test src/path/specific.test.ts    # single file
 
 If `forge-test` fails for infra reasons, surface that in `evidence` instead of reporting test failures.
 
+## Validation discipline (mandatory)
+
+**You do not return `status: "complete"` until you have validated your diff. No exceptions.**
+
+Cross-cutting work means cross-cutting validation. You touched multiple layers; you validate each.
+
+**Always**:
+- Run `forge-test` against files you touched. If new code paths span layers, write at least one integration test that exercises the end-to-end path across them.
+- Run `npm run typecheck` if the project has it.
+- Report `tests_run`, `tests_passed`, `tests_failed` in your result.
+
+**Per-layer validation**:
+- **Frontend / UI touched** (`.html`, `.css`, `.tsx`, `.jsx`, component files): use `browser-tools` to screenshot the rendered result. Include paths in `screenshots`. Tests-green is not sufficient.
+- **Backend / API touched**: curl the affected endpoint, confirm the new shape. Snippet in `notes` or `evidence`.
+- **DB / migrations touched**: apply migration in scratch dir, run a query exercising the new shape. Report under `migrations_verified`.
+- **Cross-layer wiring** (e.g., new API consumed by new frontend): exercise the path end-to-end — frontend triggers, backend serves, DB persists. Don't accept "each layer's tests pass" as substitute for "the integration works."
+
+**If you cannot validate** a particular layer:
+- Set `status: "failed"` with `error: "no validation path available for <layer>"` — name which layer and why.
+- Never `status: "complete"` on partially-validated cross-layer work. Half-validation is what platform bugs are made of.
+
+**Why this is a hard rule**: platform bugs live at boundaries. Frontend works in isolation, backend works in isolation, but the wire shape between them is wrong. Only end-to-end validation catches that. Skipping it ships latent integration bugs that nobody owns when they surface.
+
 ## Output schema
 
 ```json
@@ -65,6 +88,11 @@ If `forge-test` fails for infra reasons, surface that in `evidence` instead of r
   "diff_summary": "<one-paragraph summary of what changed across all layers touched>",
   "files_modified": ["<path>", ...],
   "discipline": "platform",
+  "tests_run": 12,
+  "tests_passed": 12,
+  "tests_failed": 0,
+  "screenshots": ["..."],   // required if files_modified touched UI
+  "migrations_verified": ["migrations/..."],   // required if you added migrations
   "notes": "optional — anything notable about cross-layer concerns, ordering, or what you deliberately did NOT do"
 }
 ```
