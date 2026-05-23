@@ -29,7 +29,7 @@ import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { loadRuntime } from "./loader.js";
+import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 
 export type InvokeArgs = {
@@ -107,6 +107,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     phase: "task",
     agentRole: args.agentRole,
     agentAlias: args.modelAlias,
+    agentModel: resolveModelForTask(args.runtimeName ?? "claude", args.modelAlias),
     status: "pending",
     taskPackage,
     createdAt: new Date().toISOString(),
