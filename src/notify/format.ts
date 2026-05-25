@@ -32,6 +32,23 @@ export function formatRunNotification(
   return `${prefix}${truncated}${suffix}`;
 }
 
+// ----- Subscription flow SMS bodies (#145) -----
+//
+// All three include "Reply STOP to opt out" per A2P 10DLC best practice.
+// All three stay well under 160 chars (one SMS segment).
+
+export function subscribeRequestBody(code: string): string {
+  return `forge: confirm subscription with: forge notify confirm ${code}. Code expires in 10 min. Reply STOP to opt out.`;
+}
+
+export function subscribeConfirmedBody(): string {
+  return `forge: subscribed. You'll be notified on workflow completion. Reply STOP to opt out.`;
+}
+
+export function unsubscribeBody(): string {
+  return `forge: unsubscribed. No more messages.`;
+}
+
 // Used internally + by trigger.ts when computing elapsed run time.
 export function formatDuration(ms: number): string {
   if (ms < 0) ms = 0;

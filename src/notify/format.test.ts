@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatRunNotification, formatDuration } from "./format.js";
+import { formatRunNotification, formatDuration, subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody } from "./format.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -66,4 +66,24 @@ test("formatDuration: an hour or more returns HhMmSs", () => {
 
 test("formatDuration: clamps negative input to 0", () => {
   assert.equal(formatDuration(-1000), "0s");
+});
+
+test("subscribeRequestBody: includes code and STOP guidance; fits in one SMS segment", () => {
+  const body = subscribeRequestBody("4827");
+  assert.match(body, /forge notify confirm 4827/);
+  assert.match(body, /Reply STOP to opt out/);
+  assert.ok(body.length <= 160, `body too long: ${body.length}`);
+});
+
+test("subscribeConfirmedBody: includes STOP guidance; fits in one SMS segment", () => {
+  const body = subscribeConfirmedBody();
+  assert.match(body, /subscribed/);
+  assert.match(body, /Reply STOP to opt out/);
+  assert.ok(body.length <= 160);
+});
+
+test("unsubscribeBody: confirms unsubscribe; fits in one SMS segment", () => {
+  const body = unsubscribeBody();
+  assert.match(body, /unsubscribed/);
+  assert.ok(body.length <= 160);
 });

@@ -2,7 +2,7 @@
 
 Get pinged when a forge workflow finishes. Opt-in, off by default. One provider today (Twilio); if you add a second later it'll get its own page.
 
-This doc covers the **forge** side only — env vars, the test command, what triggers a notification. It does NOT cover setting up a Twilio account or buying a phone number; see [twilio.com](https://www.twilio.com/) for that.
+This doc covers the **forge** side only — credentials, the opt-in flow, the test command, what triggers a notification. It does NOT cover setting up a Twilio account or buying a phone number; see [twilio.com](https://www.twilio.com/) for that.
 
 ## What it does
 
@@ -24,9 +24,11 @@ forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s
 
 ## Setup
 
-**Recommended:** put the config in `~/.forge/notify.env`. Forge loads this file at every CLI invocation; no shell reload needed, no global env pollution, no risk of accidentally committing into a repo.
+Two parts: **credentials** in a config file (one-time), then **subscribe** the destination number via a double opt-in flow.
 
-Create the file with these contents:
+### 1. Credentials
+
+Put your Twilio account info in `~/.forge/notify.env`. Forge loads this file at every CLI invocation; no shell reload, no global env pollution, no risk of accidentally committing into a repo.
 
 ```
 # ~/.forge/notify.env
@@ -34,41 +36,80 @@ FORGE_NOTIFY=twilio
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_FROM=+15551234567
-TWILIO_TO=+15559876543
 ```
 
-Format: bash-style `KEY=value` per line. Blank lines and `# comments` are ignored. Surrounding `"..."` or `'...'` around values is stripped if present (matches what you'll paste from Twilio's console).
+Note: **don't** put `TWILIO_TO` here. The subscribe flow (next step) writes it for you after the recipient confirms via SMS code. Compliance with Twilio A2P 10DLC needs an explicit consent record (see [SMS terms](sms-terms.md) and the consent log section below).
 
-The file lives alongside the rest of forge's host-global state (`forge.db`, `agents/`, `constraints/`). Outside any repo, no `.gitignore` to maintain.
+Format: bash-style `KEY=value` per line. Blank lines and `# comments` are ignored. Surrounding `"..."` or `'...'` around values is stripped.
 
-**Alternative: shell env vars.** If you'd rather export these in `~/.zshrc` (or already have `TWILIO_*` exported for another tool that uses Twilio), that works too:
+### 2. Subscribe (double opt-in)
 
 ```bash
-export FORGE_NOTIFY=twilio
-export TWILIO_ACCOUNT_SID="AC..."
-# ... etc
+forge notify subscribe +15559876543
 ```
 
-Shell-set env vars **take precedence** over `~/.forge/notify.env` — useful for temporary overrides or for sharing creds across tools without duplicating.
+That sends a confirmation SMS to `+15559876543` with a 4-digit code, e.g.:
+```
+forge: confirm subscription with: forge notify confirm 4827. Code expires in 10 min. Reply STOP to opt out.
+```
 
-## Verify
+You (or whoever owns the destination number) then runs:
+
+```bash
+forge notify confirm 4827
+```
+
+That:
+- Writes `TWILIO_TO=+15559876543` into `~/.forge/notify.env`.
+- Appends a `subscribe-confirmed` event to `~/.forge/notify-consent.log` (append-only audit trail; Twilio campaign approval references this).
+- Sends a final SMS: `forge: subscribed. You'll be notified on workflow completion. Reply STOP to opt out.`
+
+The code expires in 10 minutes. Wrong codes are rejected with no lockout — just try again or re-run `subscribe`.
+
+### Verify
 
 ```bash
 forge notify test                          # send a test SMS to TWILIO_TO
 forge notify test --to "+15550000000"      # send to a different number for this one call
+forge notify status                        # show current subscription + state
 ```
 
-On success:
-```
-✓ SMS sent (sid: SM1234567890abcdef)
+`forge notify test` produces `✓ SMS sent (sid: SM...)` on success. The test SMS goes to the confirmed `TWILIO_TO` (or `--to` if overridden) and is body `forge: test message from <hostname>`.
+
+### Unsubscribe
+
+```bash
+forge notify unsubscribe                   # sends a goodbye SMS first
+forge notify unsubscribe --silent          # skip the goodbye
 ```
 
-You should receive the SMS within a few seconds: `forge: test message from <your-hostname>`. If not, check the troubleshooting section.
+Clears `TWILIO_TO` from `notify.env`, logs an `unsubscribe` event to the consent log, and (unless `--silent`) sends `forge: unsubscribed. No more messages.` to the now-former recipient.
 
-If env vars are missing, the command fails cleanly:
+Twilio also handles `STOP` keyword carrier-side automatically: replying STOP to the From number blocks all future sends to that pair, no forge action needed.
+
+## Consent records
+
+`~/.forge/notify-consent.log` is an append-only JSON-lines file capturing every subscribe / confirm / unsubscribe event. Sample:
+
 ```
-forge notify: not configured. Set FORGE_NOTIFY=twilio and all four TWILIO_* env vars ...
+{"event":"subscribe-requested","to":"+15559876543","at":"2026-05-25T17:25:00.000Z"}
+{"event":"subscribe-confirmed","to":"+15559876543","at":"2026-05-25T17:26:30.000Z","method":"cli-double-opt-in"}
+{"event":"unsubscribe","to":"+15559876543","at":"2026-06-01T09:00:00.000Z"}
 ```
+
+This is the file you point Twilio at if their A2P 10DLC reviewers ask for proof of recipient opt-in. Never edit it manually; it's append-only by contract.
+
+## Advanced: manual `TWILIO_TO`
+
+If you really want to skip the subscribe flow (you're scripting, or migrating from an earlier version), you can put `TWILIO_TO=...` directly in `notify.env`. Notifications still fire. But:
+- No consent record exists, so Twilio campaign review will lack evidence for this destination.
+- `forge notify status` flags the situation and tells you to run subscribe for compliance.
+
+Generally use the CLI flow.
+
+## Shell env vars as an alternative
+
+If you'd rather export `TWILIO_*` in `~/.zshrc` (e.g. you already have them set for another tool that uses Twilio), that works too. Shell-set env vars **take precedence** over `~/.forge/notify.env`. But the subscribe / confirm flow only writes to `notify.env` — if you want the consent log entry, run subscribe; the env var path doesn't create one.
 
 ## Customizing the trigger set
 
@@ -81,11 +122,11 @@ export FORGE_NOTIFY_ON="complete"                   # quietest mode: only succes
 
 Comma-separated. Unrecognized values are silently ignored. Empty / unset = use the default set.
 
-## Opt out
+## Opt out (master switch)
 
-If using `~/.forge/notify.env`: delete the file, or comment out the `FORGE_NOTIFY=twilio` line, or change it to `FORGE_NOTIFY=`.
-
-If using shell env vars: `unset FORGE_NOTIFY` (current shell) or remove the export from `~/.zshrc` and reload.
+To stop all notifications without unsubscribing the number:
+- Edit `~/.forge/notify.env` and change `FORGE_NOTIFY=twilio` to `FORGE_NOTIFY=` (or comment it out).
+- Or in a single-shell context: `unset FORGE_NOTIFY`.
 
 Notifications immediately stop on the next forge invocation. The other `TWILIO_*` values can stay set; they're inert without the master switch.
 
@@ -98,15 +139,31 @@ Notifications immediately stop on the next forge invocation. The other `TWILIO_*
 
 ## Troubleshooting
 
+### `forge notify subscribe` fails with "doesn't look like E.164"
+
+The number must be `+<country code><number>`, digits only. No spaces, no dashes, no parentheses. Example: `+15551234567`, not `+1 (555) 123-4567`.
+
+### `forge notify subscribe` succeeds but no SMS arrives at the destination
+
+- **Wrong number format that passes the local check** but Twilio rejects internally. Check Twilio Console → Monitor → Logs → Messaging for the message status + error code.
+- **Twilio trial account.** Trial accounts can only send to verified numbers. Check Twilio Console → Phone Numbers → Verified Caller IDs.
+- **A2P 10DLC campaign not yet approved.** US destinations require a registered campaign. Pre-approval, Twilio returns success at the API level but carrier filtering drops the message (status `failed` / `undelivered` with code 30034 or similar).
+
+### `forge notify confirm` says "no pending subscription"
+
+The subscribe flow either wasn't run, or the pending state was cleared (timeout, or `unsubscribe` of a different number in between). Re-run `forge notify subscribe <number>`.
+
+### `forge notify confirm` says "code expired"
+
+Codes are valid for 10 minutes. Re-run `forge notify subscribe <number>` to get a new one.
+
 ### `forge notify test` returns "✓ SMS sent" but no SMS arrives
 
-- **Wrong number format.** `TWILIO_TO` must be E.164 (`+15551234567`, no spaces, no dashes). Twilio accepts the API call but silently fails to deliver if the number is malformed for the destination country.
-- **Twilio trial account.** Trial accounts can only send to verified numbers. Check the Twilio console → Phone Numbers → Verified Caller IDs.
-- **Carrier filtering.** Some carriers (esp. US T-Mobile) filter SMS from short codes or unregistered long codes. Check the Twilio console → Monitor → Logs → Messaging for the message status.
+Same as the subscribe-but-no-SMS-arrives section above. The Twilio API accepting the call and the recipient actually getting the SMS are different things — check Twilio Console → Monitor → Logs → Messaging.
 
 ### `forge notify test` returns "✗ SMS failed: HTTP 401"
 
-Bad credentials. Re-check `TWILIO_ACCOUNT_SID` (starts with `AC`) and `TWILIO_AUTH_TOKEN` against the Twilio console. If you recently rotated the token, you need to update the env var and reload your shell.
+Bad credentials. Re-check `TWILIO_ACCOUNT_SID` (starts with `AC`) and `TWILIO_AUTH_TOKEN` in `notify.env`. If you recently rotated the token, update the file and re-run.
 
 ### `forge notify test` returns "✗ SMS failed: HTTP 400: ... (code 21211)"
 
@@ -123,11 +180,11 @@ Local network or DNS issue. Confirm `curl https://api.twilio.com/` from the same
 ### A real workflow completed but no SMS came
 
 1. Run `forge notify test` first — confirms the path works at all.
-2. Check `FORGE_NOTIFY` is still set in the current shell session (`echo $FORGE_NOTIFY` should print `twilio`).
-3. Check `FORGE_NOTIFY_ON` — if you set it explicitly, the run's terminal state might not be in your filter set.
-4. Look at stderr from the `forge next` invocation that completed the run — notification failures print to stderr (`forge notify: SMS failed — ...`).
+2. Check `forge notify status` — confirms `FORGE_NOTIFY=twilio` is loaded and a subscription is active.
+3. Check `FORGE_NOTIFY_ON` if you set it explicitly — the run's terminal state might not be in your filter set.
+4. Look at stderr from the `forge next` invocation that completed the run — notification failures print there.
 
-### How to silence notifications for one run without unsetting env vars
+### How to silence notifications for one run without unsubscribing
 
 ```bash
 FORGE_NOTIFY= forge new feature "..." --brief "..."
@@ -141,3 +198,4 @@ Setting `FORGE_NOTIFY=` (empty) for the one command keeps your shell-wide config
 - **Retry on SMS failure** — explicitly not. Log + continue. SMS isn't transactionally important.
 - **Rate limiting** — Twilio handles this account-side. Forge doesn't add its own.
 - **Custom message templates** — not yet. The current format is fixed. If multiple users start asking for different formats, we'll add a config knob.
+- **HELP keyword auto-response on the forge side** — not needed; Twilio handles HELP carrier-side for 10DLC numbers.
