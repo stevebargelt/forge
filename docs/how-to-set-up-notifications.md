@@ -24,19 +24,32 @@ forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s
 
 ## Setup
 
-Add these to `~/.zshrc` (or your shell's equivalent rc file):
+**Recommended:** put the config in `~/.forge/notify.env`. Forge loads this file at every CLI invocation; no shell reload needed, no global env pollution, no risk of accidentally committing into a repo.
+
+Create the file with these contents:
+
+```
+# ~/.forge/notify.env
+FORGE_NOTIFY=twilio
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM=+15551234567
+TWILIO_TO=+15559876543
+```
+
+Format: bash-style `KEY=value` per line. Blank lines and `# comments` are ignored. Surrounding `"..."` or `'...'` around values is stripped if present (matches what you'll paste from Twilio's console).
+
+The file lives alongside the rest of forge's host-global state (`forge.db`, `agents/`, `constraints/`). Outside any repo, no `.gitignore` to maintain.
+
+**Alternative: shell env vars.** If you'd rather export these in `~/.zshrc` (or already have `TWILIO_*` exported for another tool that uses Twilio), that works too:
 
 ```bash
 export FORGE_NOTIFY=twilio
-export TWILIO_ACCOUNT_SID="AC..."          # from your Twilio console
-export TWILIO_AUTH_TOKEN="..."             # from your Twilio console (rotate via console if exposed)
-export TWILIO_FROM="+15551234567"          # the Twilio number you bought (E.164 format)
-export TWILIO_TO="+15559876543"            # your destination cell (E.164 format)
+export TWILIO_ACCOUNT_SID="AC..."
+# ... etc
 ```
 
-Reload: `source ~/.zshrc` (or open a new terminal).
-
-Why env vars vs. a config file: credentials never end up in `~/.forge/`, never get checked in, never sit in a file readable by other processes that walk your home dir's config directories. Standard practice for outbound API tokens.
+Shell-set env vars **take precedence** over `~/.forge/notify.env` — useful for temporary overrides or for sharing creds across tools without duplicating.
 
 ## Verify
 
@@ -70,11 +83,11 @@ Comma-separated. Unrecognized values are silently ignored. Empty / unset = use t
 
 ## Opt out
 
-```bash
-unset FORGE_NOTIFY
-```
+If using `~/.forge/notify.env`: delete the file, or comment out the `FORGE_NOTIFY=twilio` line, or change it to `FORGE_NOTIFY=`.
 
-(Or remove the line from `~/.zshrc` and reload.) Notifications immediately stop on the next forge invocation. The other `TWILIO_*` env vars can stay set; they're inert without the master switch.
+If using shell env vars: `unset FORGE_NOTIFY` (current shell) or remove the export from `~/.zshrc` and reload.
+
+Notifications immediately stop on the next forge invocation. The other `TWILIO_*` values can stay set; they're inert without the master switch.
 
 ## What forge does NOT notify on
 

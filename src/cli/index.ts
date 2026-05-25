@@ -15,6 +15,12 @@ import { registerInvoke } from "./commands/invoke.js";
 import { registerBacklog } from "./commands/backlog.js";
 import { registerDashboard } from "./commands/dashboard.js";
 import { registerNotify } from "./commands/notify.js";
+import { loadNotifyEnv } from "../notify/load-env.js";
+
+// Populate process.env from ~/.forge/notify.env before any command runs. Shell
+// env vars win over the file (file is fallback, not override). Silent no-op
+// if the file doesn't exist — opt-in by creating it.
+loadNotifyEnv();
 
 const program = new Command();
 program

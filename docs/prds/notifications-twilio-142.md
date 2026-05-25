@@ -1,7 +1,12 @@
 # SPEC — Twilio SMS notifications on terminal run-state transitions (#142)
 
-**Status:** draft, awaiting confirmation
+**Status:** shipped in commit `277279c`. Follow-up: post-ship the config surface was changed from "env vars in `~/.zshrc`" to "`~/.forge/notify.env` file (preferred), shell env vars as override." A small loader at `src/notify/load-env.ts` populates `process.env` from the file at CLI startup; shell-set vars take precedence. Same code paths in `twilio.ts` / `trigger.ts` unchanged. Reason for the change: keeps notification creds inside forge's config dir alongside the rest of host-global state, doesn't pollute every shell, no accidental-commit risk.
+
 **Backlog linkage:** closes #142.
+
+---
+
+**Original draft below (preserved for context — pre-loader change):**
 
 ## Objective
 
