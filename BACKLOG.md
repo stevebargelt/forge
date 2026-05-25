@@ -576,6 +576,55 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+### #143 — Dashboard: per-project label + color on every task card
+Filed 2026-05-25. As multi-project use grows (post-#138 workspace scoping + #140 dashboard re-merge), the dashboard's cross-project survey surface needs visual project labeling. Today there's none — task cards/rows from different projects look identical, and it gets confusing fast.
+
+**Why filed.** Lived experience: running several projects through forge produces a homogeneous activity feed that doesn't say which project each task belongs to. The data is already populated (queries.ts puts `projectDir` on every ActivityEntry + InFlightEntry); the client just doesn't render it.
+
+**Fix shape (shape 2 from the design conversation — label + color).**
+
+1. **Label.** Show basename of `projectDir` on every card/row (e.g. `forge`, `my-app`). Full `projectDir` shown on hover via title attribute. Empty/null projectDir gets `—` or `(no project)`.
+
+2. **Color.** Each project gets a consistent visual identity:
+   - **Preferred source:** read `<projectDir>/.vscode/settings.json` and extract `workbench.colorCustomizations["titleBar.activeBackground"]`. Matches the color the user already assigns to that project's VS Code window for the same purpose (window identification). Reusing the editor color means zero new mental load.
+   - **Fallback:** if no .vscode color (file missing, key absent, JSON malformed, or projectDir doesn't exist on disk), hash projectDir → HSL hue with fixed saturation/lightness tuned for legibility against the dashboard's dark background.
+   - Cache per projectDir to avoid re-reading on every request.
+
+3. **Where rendered.** Activity feed cards (small badge at top-left of each card). In-flight strip (color stripe on the side, or chip in the corner). Task detail view (header chip with the project name + color).
+
+**Out of scope here.**
+- Project filter UI (chip row / dropdown to filter "show only this project"). Worth doing later if label+color alone isn't enough.
+- User-overridable project colors (e.g. dashboard-side color config). The .vscode source + hash fallback covers the natural case.
+- Reading any other .vscode value (e.g. titleBar.activeForeground for contrast). Just the background for now; the dashboard chooses its own text color for legibility.
+
+**Implementation surface.** Probably ~80 LoC total: a small project-meta helper in `dashboard/src/queries.ts` (or a sibling file) that resolves project metadata (basename + color) with caching, the API response includes it per entry, and `dashboard/client/renderers.js` renders the chip. Tests: file present, file missing, malformed JSON, key absent — verify the color resolution falls back cleanly in each case.
+
+**Caught:** 2026-05-25 in conversation — observation that the feed gets confusing across multiple projects.
+
+
+### #144 — Auto-tint iTerm2 background to match forge project on cd / forge invocation (research)
+Filed 2026-05-25 as a research ticket.
+
+**Idea.** Compose with the dashboard-color ticket (#143 — per-project label + color, sourced from .vscode/settings.json titleBar.activeBackground when present). Same idea, extended to the terminal: when you cd into a project (or run forge there), iTerm2's window background subtly tints to that project's color. Combined with the VS Code titlebar already being that color and the dashboard cards being that color, you get one consistent visual cue for "which project am I in right now?" across editor / terminal / dashboard.
+
+**Research questions:**
+1. Does iTerm2 support runtime background color changes via the command line? Likely yes via proprietary escape codes (`\033]1337;SetColors=bg=...\007`) or the iTerm2 Python API. Confirm exact syntax + edge cases (does it persist? per-tab vs per-window? does it survive a new tab? does Ghostty / kitty / other terminals expose anything equivalent for portability?).
+2. What's the right trigger? Options:
+   - **chpwd hook in zsh** — fires on every cd. Wire a function that reads `<cwd>/.vscode/settings.json` and tints accordingly. Most natural; zero forge involvement.
+   - **forge CLI tint-on-invoke** — forge runs a `tintTerminal()` call at startup based on cwd's color. Tighter integration but only fires when forge runs (so terminal stays untinted between commands).
+   - **Separate shell helper** — `forge-tint` or similar binary that the user wires into their shell config however they want.
+3. How to handle "no color in .vscode/settings.json"? Don't tint? Use a hash-based default like the dashboard does? Reset to the iTerm2 profile default?
+4. Subtle vs. obvious? A 5% saturation tint might be readable without being distracting; a 30% tint might be obnoxious. Test in practice.
+
+**Sized as:** small to medium for research; the implementation is small either way (escape codes are stable).
+
+**Composite with #143** (dashboard project color). Same color source, same lookup, same caching opportunity — if both land, factor out a `getProjectColor(projectDir)` helper they share. If just one lands, it's still useful standalone.
+
+**Out of scope until research:** anything beyond iTerm2. Other terminals (Ghostty, kitty, Alacritty, plain Terminal.app) have varying levels of support. Don't try to be portable until iTerm2 is proven.
+
+**Caught:** 2026-05-25 in conversation about dashboard project colors.
+
+
 ## Done (recent)
 
 ### #142 — Twilio SMS notifications on terminal run-state transitions
