@@ -46,7 +46,7 @@ fi
 # have the old dirs sitting alongside the new ones. They're harmless but
 # confusing. Surface them.
 ORPHANS=()
-for old in architect planner implementer verifier frontend-implementer backend-implementer infosec-implementer investigator; do
+for old in architect planner implementer verifier frontend-implementer backend-implementer infosec-implementer investigator framer recommender assessor reporter; do
   if [[ -d "$DEST/agents/$old" ]]; then
     ORPHANS+=("$old")
   fi

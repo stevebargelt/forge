@@ -1,4 +1,0 @@
-{
-  "tools": ["read", "bash"],
-  "notes": "Assessor reads code; mount is enforced read-only on the host side."
-}
