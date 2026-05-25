@@ -576,7 +576,11 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+## Done (recent)
+
 ### #142 — Twilio SMS notifications on terminal run-state transitions
+**Closed:** 2026-05-25. Commit `277279cba7919e86243e9959f8ea112505d9c86a`.
+
 Filed 2026-05-25. Add an opt-in notification surface to forge so the host gets pinged when a workflow finishes (or otherwise stops making autonomous progress).
 
 **Why filed.** Today a forge workflow ends silently. The user has to keep tabs on the orchestrator or refresh the dashboard to know when a run finished. For long-running multi-phase work (architect → plan → build with fanout → verify), that's friction: kick off, walk away, no signal when it's done. A Stop hook in Claude Code is the wrong tool (fires per orchestrator chat turn, not per workflow); the right signal is run-state transitions inside forge.
@@ -610,8 +614,6 @@ Includes: run id (so `forge show <id>` resolves), state, workflow name + title, 
 
 **Caught:** 2026-05-25 conversation about Claude Code Stop hooks vs. forge-side notification.
 
-
-## Done (recent)
 
 ### #139 — Wire build-step fanout in feature.yml + teach tech-lead to emit depends_on per plan-step
 **Closed:** 2026-05-25. Commit `63b9f61`.
