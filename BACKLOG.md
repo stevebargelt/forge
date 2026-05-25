@@ -561,7 +561,7 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 ## Done (recent)
 
 ### #122 — Dashboard request-changes doesn't auto-dispatch the replacement task
-**Closed:** 2026-05-25.
+**Closed:** 2026-05-25. Obsolete — the dashboard is read-only now; all gate decisions go through the orchestrator session, not dashboard clicks. There is no "request changes" button left to fix.
 
 **Why:** Caught 2026-05-13 during System Map (#105) planner iteration. Workflow: click "Request changes" with rationale on the planner output. Spine inserts a new pending task for the same phase per `gate.ts:173-179` (re-queue with rationale injected as `inputs.requestedChanges`). Expected: dashboard automatically dispatches the new task (same way #108 chained gate-advance into `forge next`). Actual: the new task sits at `pending` until the human clicks "Run Next" a second time. Two clicks for what should be one action.
 
