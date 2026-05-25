@@ -66,18 +66,27 @@ function App() {
   `;
 }
 
+function ProjectChip({ entry }) {
+  if (!entry.projectLabel || !entry.projectColor) return null;
+  return html`
+    <span class="project-chip" style=${{ background: entry.projectColor }} title=${entry.projectDir ?? ""}>
+      ${entry.projectLabel}
+    </span>
+  `;
+}
+
 function InFlightItem({ task, onClick }) {
-  const projectLabel = task.projectDir ? task.projectDir.split("/").slice(-2).join("/") : "—";
   return html`
     <div class="item" onClick=${onClick}>
       <span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>
       <div>
         <div>
+          <${ProjectChip} entry=${task} />
           <strong>${task.agentRole}</strong>
           ${task.agentModel ? html`<span class="model-badge">${task.agentModel}</span>` : null}
           <span class="faint"> ·</span> <span class="muted">${task.runTitle}</span>
         </div>
-        <div class="faint mono" style="font-size: 11px;">${projectLabel} · ${task.phase} · ${task.taskId}</div>
+        <div class="faint mono" style="font-size: 11px;">${task.phase} · ${task.taskId}</div>
       </div>
       <div class="muted mono" style="font-size: 11px;">${formatRelativeTime(task.startedAt)}</div>
     </div>
@@ -85,11 +94,11 @@ function InFlightItem({ task, onClick }) {
 }
 
 function FeedCard({ entry, onClick }) {
-  const projectLabel = entry.projectDir ? entry.projectDir.split("/").slice(-2).join("/") : "—";
   return html`
     <div class="card" onClick=${onClick}>
       <div class="head">
         <div>
+          <${ProjectChip} entry=${entry} />
           <span class="agent">${entry.agentRole}</span>
           ${entry.agentModel ? html`<span class="model-badge">${entry.agentModel}</span>` : null}
           <span class="faint"> · </span>
@@ -101,7 +110,7 @@ function FeedCard({ entry, onClick }) {
         </div>
       </div>
       <div class="context faint mono" style="font-size: 11px; margin-bottom: 8px;">
-        ${projectLabel} · ${entry.workflow} · ${entry.phase}
+        ${entry.workflow} · ${entry.phase}
       </div>
       ${renderPreview(entry)}
     </div>

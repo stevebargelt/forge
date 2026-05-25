@@ -136,6 +136,22 @@ section.feed { margin-top: 24px; }
   margin-left: 6px;
   vertical-align: middle;
 }
+/* Per-project identity chip. Background color is injected inline from the
+ * resolved projectColor (.vscode titleBar.activeBackground or hash fallback);
+ * white text is hard-coded because dashboard's dark theme guarantees the
+ * project colors will be saturated mid-tones. See #143. */
+.project-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  margin-right: 8px;
+  vertical-align: middle;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.35);
+  cursor: default;
+}
 .badge.status-complete, .badge.status-pass { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
 .badge.status-failed, .badge.status-fail { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 .badge.status-awaiting_gate { background: rgba(250, 204, 21, 0.15); color: var(--warn); }

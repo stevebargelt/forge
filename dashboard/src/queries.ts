@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
+import { resolveProjectMeta } from "./project-meta.js";
 
 const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 const DB_PATH = join(FORGE_HOME, "forge.db");
@@ -36,6 +37,11 @@ export type ActivityEntry = {
   runTitle: string;
   workflow: string;
   projectDir: string | null;
+  // Resolved at query time. label = basename(projectDir); color = .vscode
+  // titleBar.activeBackground OR a deterministic hash fallback. Both null
+  // when projectDir is null. See project-meta.ts.
+  projectLabel: string | null;
+  projectColor: string | null;
   agentRole: string;
   agentModel: string | null;
   phase: string;
@@ -79,20 +85,25 @@ export function recentActivity(limit = 100, sinceIso?: string): ActivityEntry[] 
     project_dir: string | null;
   }>;
 
-  return rows.map((r) => ({
-    taskId: r.id,
-    runId: r.run_id,
-    runTitle: r.title,
-    workflow: r.workflow,
-    projectDir: r.project_dir,
-    agentRole: r.agent_role,
-    agentModel: r.agent_model,
-    phase: r.phase,
-    status: r.status,
-    completedAt: r.completed_at,
-    parentId: r.parent_id,
-    result: r.result ? safeJsonParse(r.result) : null,
-  }));
+  return rows.map((r) => {
+    const meta = resolveProjectMeta(r.project_dir);
+    return {
+      taskId: r.id,
+      runId: r.run_id,
+      runTitle: r.title,
+      workflow: r.workflow,
+      projectDir: r.project_dir,
+      projectLabel: meta?.label ?? null,
+      projectColor: meta?.color ?? null,
+      agentRole: r.agent_role,
+      agentModel: r.agent_model,
+      phase: r.phase,
+      status: r.status,
+      completedAt: r.completed_at,
+      parentId: r.parent_id,
+      result: r.result ? safeJsonParse(r.result) : null,
+    };
+  });
 }
 
 export type InFlightEntry = {
@@ -100,6 +111,8 @@ export type InFlightEntry = {
   runTitle: string;
   workflow: string;
   projectDir: string | null;
+  projectLabel: string | null;
+  projectColor: string | null;
   taskId: string;
   agentRole: string;
   agentModel: string | null;
@@ -132,18 +145,23 @@ export function inFlight(): InFlightEntry[] {
     project_dir: string | null;
   }>;
 
-  return rows.map((r) => ({
-    runId: r.run_id,
-    runTitle: r.title,
-    workflow: r.workflow,
-    projectDir: r.project_dir,
-    taskId: r.id,
-    agentRole: r.agent_role,
-    agentModel: r.agent_model,
-    phase: r.phase,
-    status: r.status,
-    startedAt: r.started_at,
-  }));
+  return rows.map((r) => {
+    const meta = resolveProjectMeta(r.project_dir);
+    return {
+      runId: r.run_id,
+      runTitle: r.title,
+      workflow: r.workflow,
+      projectDir: r.project_dir,
+      projectLabel: meta?.label ?? null,
+      projectColor: meta?.color ?? null,
+      taskId: r.id,
+      agentRole: r.agent_role,
+      agentModel: r.agent_model,
+      phase: r.phase,
+      status: r.status,
+      startedAt: r.started_at,
+    };
+  });
 }
 
 /** Full task detail including container.stdout.log + verdicts + gates. */
@@ -202,12 +220,15 @@ export function taskDetail(taskId: string): TaskDetail | null {
     | undefined;
   if (!taskRow) return null;
 
+  const taskMeta = resolveProjectMeta(taskRow.project_dir);
   const task: ActivityEntry = {
     taskId: taskRow.id,
     runId: taskRow.run_id,
     runTitle: taskRow.title,
     workflow: taskRow.workflow,
     projectDir: taskRow.project_dir,
+    projectLabel: taskMeta?.label ?? null,
+    projectColor: taskMeta?.color ?? null,
     agentRole: taskRow.agent_role,
     agentModel: taskRow.agent_model,
     phase: taskRow.phase,
