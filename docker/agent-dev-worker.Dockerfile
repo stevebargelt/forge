@@ -31,6 +31,13 @@ ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
     && npm install -g @anthropic-ai/claude-code
 
+# Alternate package managers commonly used by projects forge runs against (#146).
+# pnpm: required by Next.js / modern Node projects (e.g. harebrained-apps).
+# yarn: still common in older projects. Both small; install in one layer.
+# bun deliberately excluded — it's a separate JS runtime, not just a pm,
+# and conflicts more than it helps. Add later if a project actually needs it.
+RUN npm install -g pnpm@10 yarn
+
 # Headless Chrome for the browser-tools skill (#128): Ubuntu 22.04's
 # chromium-browser apt package is a snap-stub that doesn't work in containers,
 # and google-chrome-stable is amd64-only (we build arm64 on Apple Silicon and
