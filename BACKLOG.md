@@ -599,7 +599,11 @@ Filed 2026-05-25 as a research ticket.
 **Caught:** 2026-05-25 in conversation about dashboard project colors.
 
 
+## Done (recent)
+
 ### #145 — Twilio SMS double opt-in flow: subscribe/confirm/unsubscribe + consent log
+**Closed:** 2026-05-25. Commit `4a6ebc6`.
+
 Filed 2026-05-25. Follow-on to #142 (Twilio SMS notifications shipped). Adds an explicit consent flow so the campaign-approval story is defensible.
 
 **Why filed.** Twilio's A2P 10DLC campaign approval requires proof of recipient opt-in, even for one-person personal use. The current setup (edit notify.env with your TWILIO_TO and you're done) works mechanically but doesn't generate an audit trail. Shape 3 from the design conversation (CLI subscribe/confirm/unsubscribe) was preferred over self-attestation because it's safer: every subscription has a timestamped consent record + the recipient actively confirmed via SMS code.
@@ -642,8 +646,6 @@ Append-only so the audit trail can't be silently rewritten. Twilio support can b
 
 **Caught:** 2026-05-25 conversation about Twilio campaign-approval compliance.
 
-
-## Done (recent)
 
 ### #143 — Dashboard: per-project label + color on every task card
 **Closed:** 2026-05-25. Commit `e84dc63`.
