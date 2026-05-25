@@ -4,9 +4,19 @@ Glossary of forge terms. One paragraph each, with a concrete example from `run-l
 
 ## Run
 
-A single workflow invocation. Created by `forge new`, given a unique id like `run-litellm-eval-96a1da`. Recorded in the `runs` table with status `active` | `complete` | `abandoned`. SQLite is the resume state — a run that's parked at a gate survives reboots.
+A single workflow invocation. Created by `forge new`, given a unique id like `run-litellm-eval-96a1da`. Recorded in the `runs` table with status `active` | `complete` | `abandoned`, plus the `projectDir` of the directory it was created from. SQLite is the resume state — a run that's parked at a gate survives reboots.
 
 Example: `forge new investigation "litellm-eval" --question "Does LiteLLM solve provider routing?"` creates one run.
+
+## Project
+
+The directory mounted at `/project` in the agent container. Recorded on each run as `runs.project_dir`. Defaults to the cwd at `forge new` / `forge invoke` time; override with `--project <dir>`. Implementer agents see it read-write; red agents see it read-only at the OS level (FORGE-DEC-006).
+
+Example: a run created via `cd ~/code/my-app && forge new feature "add login" --brief "..."` has `projectDir = /Users/you/code/my-app`. Every container spawned for that run mounts that path at `/project`.
+
+## Workspace
+
+The cwd of the human running `forge`. For most runs the workspace equals the project (you're in `~/code/my-app` and the run drives changes to `~/code/my-app`). They diverge when an orchestrator session in one directory drives runs against a different project — e.g. `~/code/audit-workspace` orchestrating runs whose `projectDir` is `~/code/forge`. `forge new` and `forge invoke` stamp the workspace into `metadata.workspace` (default: cwd; override with `--workspace`). `forge status` filters by workspace (matching either `projectDir == cwd` or `metadata.workspace == cwd`) by default; use `--all` to see runs across every project on the host.
 
 ## Task
 

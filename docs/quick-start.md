@@ -1,26 +1,29 @@
 # Quick start
 
-End-to-end: install → first run → gate → result. Uses `run-litellm-eval` throughout.
+End-to-end: install once, then run forge against your project. The walkthrough uses a generic `~/code/my-app` to make it concrete; replace with whichever project you actually want to work on.
 
-## 1. Install
+## 1. Install (once per machine)
 
 ```bash
 cd ~/code/forge
 npm install
+npm link                    # puts `forge` on $PATH
 ./scripts/install-seeds.sh
 ./docker/build.sh           # one-time, ~5–10 min
 ```
 
-`install-seeds.sh` copies the default agent role directories and example constraints into `~/.forge/`. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000).
+`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000). `npm link` symlinks `./bin/forge` into a directory on your `$PATH` (typically `/usr/local/bin`), so `forge <cmd>` works from any cwd.
 
-## 2. Set up credentials
+Verify: `which forge` should print a path; `forge --help` should list the commands.
+
+## 2. Set up credentials (once per machine)
 
 Three modes (FORGE-DEC-007). Forge auto-selects based on environment:
 
 ### Personal Mac (Anthropic Pro, includes Opus 4.7)
 
 ```bash
-./bin/forge auth login
+forge auth login
 ```
 
 This launches an interactive `claude` inside an agent container. Run `/login` at the prompt, follow the browser flow, then `/exit`. Credentials persist in docker volume `forge-claude-oauth` and are reused on every subsequent agent spawn.
@@ -31,7 +34,7 @@ Verify with `forge auth status`. To switch accounts, `forge auth logout` then `f
 
 ```bash
 aws sso login --profile adx-dev
-. ./scripts/use-bedrock.sh         # arms AWS_PROFILE + CLAUDE_CODE_USE_BEDROCK=1 + the SSO watchdog
+. ~/code/forge/scripts/use-bedrock.sh       # arms AWS_PROFILE + CLAUDE_CODE_USE_BEDROCK=1 + the SSO watchdog
 ```
 
 Sourcing (not running) the script is required so the env vars stay set in your shell. The script does NOT snapshot STS env vars — agent containers read SSO state directly from a mounted `~/.aws` and a host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh in the background. See FORGE-DEC-013 for why.
@@ -44,86 +47,115 @@ For multi-hour runs the watchdog refreshes silently every 5 minutes via the SSO 
 export ANTHROPIC_API_KEY=sk-...
 ```
 
-## 3. Create a run
+## 3. Set up your project (once per project)
 
 ```bash
-./bin/forge new investigation "litellm-evaluation" \
-  --question "Does LiteLLM solve provider routing and aggregate cost tracking for our harness?"
+cd ~/code/my-app
+forge init
+```
+
+This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creating the file if needed) and creates a `~/code/my-app/.forge/` directory for project-level workflow overrides. The orchestrator block tells Claude Code sessions in this project how to route work through forge agents instead of editing files directly.
+
+Re-run `forge init` any time you upgrade forge — the block is fence-marked and replaces in place.
+
+## 4. Pick a path: orchestrator-led or direct CLI
+
+After `forge init`, you have two ways to drive forge in this project. They're equally valid and use the same underlying runs/tasks/gates — the difference is who decides which agent to call.
+
+**Orchestrator-led (the conversational path).** Start `claude` in `~/code/my-app`. The orchestrator block in `CLAUDE.md` makes that session the project's forge orchestrator. You say *"add OAuth login using the existing user table"*, the orchestrator classifies the request (implementation work), picks the right workflow (`feature`), constructs the brief, calls `forge new feature` for you, watches the run, presents each gate with a recommendation, and reports the final result. You never type a `forge` command yourself. This is the recommended path for ad-hoc work.
+
+**Direct CLI (the scripted path).** Run `forge new` / `forge invoke` yourself. Useful when you're automating, repeating the same workflow many times, or driving forge from outside a Claude Code session. Steps 5–8 below walk this path explicitly.
+
+You can mix freely — drive most work conversationally, drop to the CLI for a one-off scripted invocation, then go back to chat.
+
+## 5. Create a run (direct CLI path)
+
+The remaining steps show the direct-CLI walkthrough; if you're using the orchestrator-led path, your `claude` session handles all of this and you can read along for orientation only.
+
+From your project directory:
+
+```bash
+cd ~/code/my-app
+forge new feature "add login" \
+  --brief "wire OAuth into the existing user table; reuse the session middleware"
 ```
 
 Output:
 ```
-Created run run-litellm-evaluation-96a1da
-Workflow: investigation
-Title:    litellm-evaluation
-First phase: frame (1 task(s) seeded)
+Created run run-add-login-7c2a91
+Workflow: feature
+Title:    add login
+Project:  /Users/you/code/my-app
 
-Next: forge next run-litellm-evaluation-96a1da
+Next:
+  forge next run-add-login-7c2a91
 ```
 
-Note your run id — you'll use it for every subsequent command.
+`forge new` records the current directory as the run's `projectDir`. Agent containers will mount it at `/project` (read-write for implementers, read-only for reds). You can override with `--project <dir>` if you want to drive a run for a different repo from your current cwd.
 
-## 4. Dispatch the first phase
+## 6. Dispatch the first phase
 
 ```bash
-./bin/forge next run-litellm-evaluation-96a1da
+forge next run-add-login-7c2a91
 ```
 
-Forge picks up the pending `frame` task, launches an agent container, captures the result. The framer produces the claims and experiments that drive the investigation.
+Forge picks up the pending `architect` task, launches an agent container, captures the result. The architecture-advisor surfaces risks, constraints, and boundaries before the tech-lead plans steps.
 
 While running:
 ```
-Run run-litellm-evaluation-96a1da: 1 task(s) running.
-  ⟳ task-frame-f68eb8 (frame/framer)
+Run run-add-login-7c2a91: 1 task(s) running.
+  ⟳ task-architect-f68eb8 (architect/architecture-advisor)
 ```
 
 When done:
 ```
-Run run-litellm-evaluation-96a1da: 1 task(s) awaiting gate.
-  ⚠ task-frame-f68eb8 (frame)  →  forge gate task-frame-f68eb8 advance | reject | request-changes
+Run run-add-login-7c2a91: 1 task(s) awaiting gate.
+  ⚠ task-architect-f68eb8 (architect)  →  forge gate task-architect-f68eb8 advance | reject | request-changes
 ```
 
-## 5. Review and gate
+## 7. Review and gate
 
 ```bash
-./bin/forge show task-frame-f68eb8
+forge show task-architect-f68eb8
 ```
 
-Shows the framer's claims and experiments. If the framing is good:
-```bash
-./bin/forge gate task-frame-f68eb8 advance
-```
-
-Forge creates one investigator task per claim under the next phase.
-
-## 6. Continue
+Shows the architecture-advisor's risks and constraints. If looks good:
 
 ```bash
-./bin/forge next run-litellm-evaluation-96a1da
+forge gate task-architect-f68eb8 advance
 ```
 
-The investigators fan out (default `maxConcurrency: 4`). Each gets its claim as input. Reds run after each investigator (wide + narrow, parallel, specialist authority — they inform the gate but don't block).
+Forge creates the `plan` task under the next phase.
 
-After all investigators complete:
-```
-Run run-litellm-evaluation-96a1da: 5 task(s) awaiting gate.
-  ⚠ task-investigate-... (investigate)  →  forge gate ...
-  ...
-```
-
-Gate each one with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
-
-## 7. End of run
-
-The synthesize and recommend phases run the same way. After `recommend` completes (auto-gate), the run is marked `complete`.
+## 8. Continue
 
 ```bash
-./bin/forge status run-litellm-evaluation-96a1da
+forge next run-add-login-7c2a91
 ```
 
-shows the full task graph with verdicts. Output documents live at `~/.forge/runs/run-litellm-evaluation-96a1da/<task-id>/result.json`.
+The pipeline runs phase-by-phase: architect → tech-lead (plan) → engineer (build, with reds in parallel) → qa-engineer (verify). Gate each step with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
 
-## 8. Dashboard (optional)
+## 9. End of run
+
+After `verify` completes (auto-gate), the run is marked `complete`.
+
+```bash
+forge status run-add-login-7c2a91
+```
+
+shows the full task graph with verdicts. Output documents live at `~/.forge/runs/run-add-login-7c2a91/<task-id>/result.json`.
+
+## 10. Status across projects
+
+```bash
+forge status                  # runs in the current workspace (cwd-scoped)
+forge status --all            # all runs across every project on the host
+forge status --workspace <p>  # runs for an explicit workspace path
+```
+
+If you're standing in `~/code/my-app` and have runs going in other projects too, the default cwd-scoped view keeps your terminal focused on this project. See `docs/how-to-use-forge-across-projects.md` for the multi-project story.
+
+## 11. Dashboard (optional)
 
 The web view lives in a separate repo, `forge-dashboard`. It shows agent activity across every project on the host and live-polls every 2s.
 

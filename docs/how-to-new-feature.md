@@ -9,9 +9,9 @@ This doc walks the design-needed flow with a concrete example. The design-provid
 You have a PRD at `~/code/atlas/prd/clock-skew-fix.md`. You don't have a design yet.
 
 ```bash
-./bin/forge new feature-design-needed "clock-skew-fix" \
+forge new feature-design-needed "clock-skew-fix" \
   --prd ~/code/atlas/prd/clock-skew-fix.md
-./bin/forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
+forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
 ```
 
 `--project` is the directory mounted into agent containers. Blue agents get it `rw`; reds get it `ro`.
@@ -27,9 +27,9 @@ Reds: wide + narrow, specialist authority (informs but doesn't block). The narro
 Gate: `human`.
 
 ```bash
-./bin/forge show task-architect-<suffix>
-./bin/forge gate task-architect-<suffix> advance
-./bin/forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
+forge show task-architect-<suffix>
+forge gate task-architect-<suffix> advance
+forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
 ```
 
 ### `plan`
@@ -43,7 +43,7 @@ Output: `{steps_completed, diff_summary, files_modified}`. The implementer edits
 Reds: wide + narrow, **authoritative authority + `gateOnVerdict: true`**. If either red returns `fail`, the task is set to `blocked_by_red` and the run halts. To override:
 
 ```bash
-./bin/forge gate task-build-<suffix> advance --force --rationale "specific reason for overriding the red"
+forge gate task-build-<suffix> advance --force --rationale "specific reason for overriding the red"
 ```
 
 Gate: `verdict`. The phase advances automatically if reds pass.

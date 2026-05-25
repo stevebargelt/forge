@@ -72,8 +72,8 @@ You can also add the role as a blue agent in a fanout phase to run a focused sec
 
 ```bash
 npm run typecheck
-./bin/forge new feature-design-needed "test-security-reviewer" --prd /tmp/test.md
-./bin/forge next run-test-security-reviewer-<suffix> --project /tmp/test-project
+forge new feature-design-needed "test-security-reviewer" --prd /tmp/test.md
+forge next run-test-security-reviewer-<suffix> --project /tmp/test-project
 ```
 
 Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed prompt looks right (Tier 1 base + any Tier 2 workflowAdditions + Tier 3 suggest constraints).

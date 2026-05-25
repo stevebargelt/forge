@@ -5,9 +5,9 @@ Use this for structured multi-phase research with verdicts and an audit trail. F
 ## Example
 
 ```bash
-./bin/forge new investigation "litellm-evaluation" \
+forge new investigation "litellm-evaluation" \
   --question "Does LiteLLM solve provider routing and aggregate cost tracking for our harness?"
-./bin/forge next run-litellm-evaluation-<suffix>
+forge next run-litellm-evaluation-<suffix>
 ```
 
 No `--project` is required — investigation agents don't need a project mount.
@@ -23,7 +23,7 @@ Output: `{claims: string[], experiments: string[]}`.
 Gate: `human`. Review with `forge show`, then advance:
 
 ```bash
-./bin/forge gate task-frame-<suffix> advance
+forge gate task-frame-<suffix> advance
 ```
 
 On advance, forge fans out one investigator task per claim under the next phase.
@@ -39,11 +39,11 @@ Reds: wide + narrow, specialist authority — they probe each finding for "did t
 Gate: `human` per task. Each investigator must be gated independently. Forge will not advance to `synthesize` until all five investigate tasks are gated.
 
 ```bash
-./bin/forge gate task-investigate-001 advance
-./bin/forge gate task-investigate-003 advance --rationale "narrow red flagged thin evidence; accepting"
-./bin/forge gate task-investigate-004 reject --rationale "cost tracking work_id incomplete"
+forge gate task-investigate-001 advance
+forge gate task-investigate-003 advance --rationale "narrow red flagged thin evidence; accepting"
+forge gate task-investigate-004 reject --rationale "cost tracking work_id incomplete"
 # ... etc
-./bin/forge next run-litellm-evaluation-<suffix>
+forge next run-litellm-evaluation-<suffix>
 ```
 
 ### 3. `synthesize`

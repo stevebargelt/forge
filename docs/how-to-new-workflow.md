@@ -81,8 +81,8 @@ You should see your phases printed.
 ### Step 5: invoke
 
 ```bash
-./bin/forge new code-review "atlas-clock-skew-review" --meta '{"lenses":["security","performance"]}'
-./bin/forge next run-atlas-clock-skew-review-<suffix> --project ~/code/atlas
+forge new code-review "atlas-clock-skew-review" --meta '{"lenses":["security","performance"]}'
+forge next run-atlas-clock-skew-review-<suffix> --project ~/code/atlas
 ```
 
 ## Notes
