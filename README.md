@@ -79,4 +79,4 @@ When forge has new commits, run `forge upgrade` from any project. It pulls the f
 
 ## Docs
 
-`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), and `docs/how-to-*.md` for adding new agents/workflows.
+`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-set-up-notifications.md` (SMS pings when workflows finish), and `docs/how-to-*.md` for adding new agents/workflows.

@@ -88,6 +88,29 @@ Files in this commit: src/v2/schema.ts, src/v2/schema.test.ts, src/v2/runNext.ts
 
 Next-session orientation: end-to-end smoke run of #139 is the natural next thing if you want to validate the round trip live. Or pick up #141 (drift fix), or any of the other active tickets.
 
+2026-05-25 (notifications): shipped Twilio SMS notifications on terminal run-state transitions (#142). Spec at docs/prds/notifications-twilio-142.md.
+
+What landed:
+- **New src/notify/ module** — three files: format.ts (pure SMS body composition, truncates to one segment), twilio.ts (network POST via built-in fetch, never throws, env-vars read at call time), trigger.ts (composition + FORGE_NOTIFY_ON filtering).
+- **Two hook points** — src/store/runs.ts::updateRunStatus fires on terminal complete/abandoned (with previous-status check to skip idempotent re-saves). src/v2/runNext.ts wires the blocked_by_red site at the verdict-aggregation path. Both fire-and-forget (void Promise) so notifications never block or crash a run.
+- **`forge notify test` subcommand** at src/cli/commands/notify.ts. Supports --to override. Fails cleanly with a guidance message when env not configured.
+- **Docs:** new docs/how-to-set-up-notifications.md (top-level how-to: setup, verify, triggers, opt-out, troubleshooting for common Twilio error codes). One-line pointer added to README Docs list. Quick-start NOT touched (notifications are orthogonal to the main flow).
+
+Honest scope deviations from the spec:
+- **notifyOnTaskBlockedByRed signature simplified** from `(task, run)` to `(run)` — the Task param was never used in the body. Cleaner.
+- **No event-log integration.** The spec suggested logging notify success/failure via the existing events.ts. I went with console.error for failures only (simpler, more user-visible). Successes are silent — the SMS itself is the success signal.
+
+Default OFF — no env vars = zero behavior change, zero network calls. Defense in depth: notifyTwilio re-checks isTwilioEnabled before any network attempt, even though all callers guard upstream.
+
+Tests: 262/262 pass (+22 new across format, twilio, and trigger modules). Real-SMS verification is user-side (requires Twilio creds + phone) — `forge notify test` is the gate.
+
+Cleanup TODO for the user:
+- Add the five env vars to ~/.zshrc (FORGE_NOTIFY=twilio + the four TWILIO_*). source ~/.zshrc.
+- Run `forge notify test` to confirm the path.
+- Kick off any real workflow to confirm end-to-end (terminal transition fires SMS).
+
+Next-session orientation: forge has a complete optional notification surface now. #141 (SQL schema single-source-of-truth, drift fix) is still queued. Other tickets in the active list are mostly Pencil/design-corpus stuff (#80, #81, #84, #86, #87, #88), v1/v2 infra debt (#74, #107, #112), or longer-term architectural (#106, #129).
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -551,6 +574,41 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Sizing.** Small for option (1) — probably one focused session. Medium-large for (2) or (3).
 
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
+
+
+### #142 — Twilio SMS notifications on terminal run-state transitions
+Filed 2026-05-25. Add an opt-in notification surface to forge so the host gets pinged when a workflow finishes (or otherwise stops making autonomous progress).
+
+**Why filed.** Today a forge workflow ends silently. The user has to keep tabs on the orchestrator or refresh the dashboard to know when a run finished. For long-running multi-phase work (architect → plan → build with fanout → verify), that's friction: kick off, walk away, no signal when it's done. A Stop hook in Claude Code is the wrong tool (fires per orchestrator chat turn, not per workflow); the right signal is run-state transitions inside forge.
+
+**Scope (opt-in, off by default).** No notification fires unless `FORGE_NOTIFY=twilio` is set. Provider-specific creds (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM`, `TWILIO_TO`) come from env vars; never stored in `~/.forge/` or committed. Optional `FORGE_NOTIFY_ON=complete,failed,blocked_by_red` overrides the default trigger set.
+
+**Trigger set (defaults).** Three terminal-ish transitions:
+1. `runs.status` flips to `complete` — workflow shipped.
+2. `runs.status` flips to `abandoned` — workflow died/killed.
+3. Any task transitions to `blocked_by_red` — run parked, needs the human.
+
+Excludes `awaiting_gate` by default (would ping during normal gate flow — noisy). Customizable via FORGE_NOTIFY_ON.
+
+**Message format.** Single SMS segment, ~70 chars:
+```
+forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s
+```
+Includes: run id (so `forge show <id>` resolves), state, workflow name + title, duration.
+
+**Verification surface.** New `forge notify test` subcommand — sends a fixed "forge: test message from <hostname>" SMS so users can confirm the path works without waiting for a real workflow.
+
+**Out of scope for this ticket.**
+- Other providers (Pushover, ntfy, Slack, etc.). If they're needed later, refactor to a provider abstraction at that time. Single provider today.
+- Retry on SMS failure. Log + continue. SMS reliability isn't worth complicating the run path.
+- Rate limiting on forge side. Twilio's limits are high; personal use won't hit them.
+- Notification for non-forge work (long Claude sessions outside any forge run). Separate concern.
+
+**Sizing.** Small. ~80 LoC for the notify module + the call-site wiring + the test command. Plus the doc.
+
+**Docs.** New `docs/how-to-set-up-notifications.md` (top-level how-to) covering: which env vars to set, how to verify with `forge notify test`, what triggers a notification, how to opt out, troubleshooting. NOT how to set up Twilio itself — users figure that out from Twilio docs.
+
+**Caught:** 2026-05-25 conversation about Claude Code Stop hooks vs. forge-side notification.
 
 
 ## Done (recent)

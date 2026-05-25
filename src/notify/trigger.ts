@@ -1,0 +1,82 @@
+// Glue layer: composes format + twilio, applies the transition filter from
+// FORGE_NOTIFY_ON, and fires the SMS. Never throws — notification failures
+// must not crash a forge run. Surfaces failures via console.error so the
+// human sees them without forge crashing.
+
+import type { Run } from "../types/index.js";
+import { formatRunNotification, type NotifyState } from "./format.js";
+import { isTwilioEnabled, notifyTwilio } from "./twilio.js";
+
+const DEFAULT_NOTIFY_ON = new Set<NotifyState>(["complete", "failed", "blocked_by_red"]);
+
+// Maps the run.status / task.status value to the NotifyState used in the
+// SMS body. Returns null for transitions we don't notify on (e.g. "active").
+function statusToNotifyState(status: string): NotifyState | null {
+  if (status === "complete") return "complete";
+  if (status === "abandoned") return "failed";
+  if (status === "blocked_by_red") return "blocked_by_red";
+  return null;
+}
+
+function parseNotifyOn(): Set<NotifyState> {
+  const raw = process.env["FORGE_NOTIFY_ON"];
+  if (!raw || raw.trim().length === 0) return DEFAULT_NOTIFY_ON;
+  const valid: NotifyState[] = ["complete", "failed", "blocked_by_red"];
+  const filter = new Set<NotifyState>();
+  for (const part of raw.split(",")) {
+    const trimmed = part.trim();
+    if ((valid as readonly string[]).includes(trimmed)) {
+      filter.add(trimmed as NotifyState);
+    }
+  }
+  return filter.size > 0 ? filter : DEFAULT_NOTIFY_ON;
+}
+
+function computeDurationMs(run: Run): number | undefined {
+  if (!run.completedAt) return undefined;
+  const start = new Date(run.createdAt).getTime();
+  const end = new Date(run.completedAt).getTime();
+  if (isNaN(start) || isNaN(end)) return undefined;
+  return Math.max(0, end - start);
+}
+
+export async function notifyOnRunTransition(
+  run: Run,
+  newStatus: string,
+  previousStatus?: string,
+): Promise<void> {
+  // Defense in depth: short-circuit before mapping if notify isn't even on.
+  if (!isTwilioEnabled()) return;
+
+  // Idempotent re-saves: same-status writes shouldn't double-notify.
+  if (previousStatus !== undefined && newStatus === previousStatus) return;
+
+  const state = statusToNotifyState(newStatus);
+  if (state === null) return;
+
+  const filter = parseNotifyOn();
+  if (!filter.has(state)) return;
+
+  const body = formatRunNotification(run, state, computeDurationMs(run));
+  const result = await notifyTwilio(body);
+  if (!result.ok) {
+    console.error(`forge notify: SMS failed — ${result.error}`);
+  }
+}
+
+export async function notifyOnTaskBlockedByRed(run: Run): Promise<void> {
+  if (!isTwilioEnabled()) return;
+
+  // Only fire if blocked_by_red is in the user's filter set.
+  const filter = parseNotifyOn();
+  if (!filter.has("blocked_by_red")) return;
+
+  // The task's block doesn't end the run (run.status stays active), so don't
+  // pass durationMs — it would be misleading. Caller can `forge status <runId>`
+  // for the per-task detail.
+  const body = formatRunNotification(run, "blocked_by_red");
+  const result = await notifyTwilio(body);
+  if (!result.ok) {
+    console.error(`forge notify: SMS failed — ${result.error}`);
+  }
+}

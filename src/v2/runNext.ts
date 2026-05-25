@@ -21,6 +21,7 @@ import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
+import { notifyOnTaskBlockedByRed } from "../notify/trigger.js";
 import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { logEvent } from "../store/events.js";
@@ -313,6 +314,9 @@ async function dispatchSingleStep(args: {
       markTaskAwaitingGate(taskId, result);
       // markTaskAwaitingGate just wrote status=awaiting_gate; restore the block.
       setTaskStatus(taskId, "blocked_by_red");
+      // Fire-and-forget SMS notification (no-op unless FORGE_NOTIFY=twilio).
+      const runForNotify = getRun(args.runId);
+      if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
       return "blocked_by_red";
     }
     // No authoritative fail — proceed to normal gate semantics.

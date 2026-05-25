@@ -1,6 +1,7 @@
 import { getDb } from "./db.js";
 import type { Run, RunStatus } from "../types/index.js";
 import { nowIso } from "../util/ids.js";
+import { notifyOnRunTransition } from "../notify/trigger.js";
 
 type RunRow = {
   id: string;
@@ -83,8 +84,24 @@ export function listRunsForWorkspace(workspace: string): Run[] {
 }
 
 export function updateRunStatus(id: string, status: RunStatus): void {
+  // Read the previous status so notifyOnRunTransition can short-circuit on
+  // idempotent re-saves (same-status writes). Cheap — same row we're about to
+  // update.
+  const prev = getDb()
+    .prepare(`SELECT status FROM runs WHERE id = ?`)
+    .get(id) as { status: string } | undefined;
   const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
   getDb()
     .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
     .run(status, completedAt, id);
+
+  // Notification: fires on terminal transitions only (complete/abandoned).
+  // Reads the just-updated row so durationMs reflects the completed_at write.
+  // Async fire-and-forget — never throws, never blocks the caller.
+  if (status === "complete" || status === "abandoned") {
+    const updated = getRun(id);
+    if (updated) {
+      void notifyOnRunTransition(updated, status, prev?.status);
+    }
+  }
 }

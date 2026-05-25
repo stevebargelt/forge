@@ -14,6 +14,7 @@ import { registerUpgrade } from "./commands/upgrade.js";
 import { registerInvoke } from "./commands/invoke.js";
 import { registerBacklog } from "./commands/backlog.js";
 import { registerDashboard } from "./commands/dashboard.js";
+import { registerNotify } from "./commands/notify.js";
 
 const program = new Command();
 program
@@ -35,6 +36,7 @@ registerUpgrade(program);
 registerInvoke(program);
 registerBacklog(program);
 registerDashboard(program);
+registerNotify(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
