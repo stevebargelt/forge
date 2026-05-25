@@ -58,7 +58,13 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     const body = readFileSync(filePath);
-    const ct = filePath.endsWith(".js") ? "application/javascript; charset=utf-8" : "application/octet-stream";
+    const ct =
+      filePath.endsWith(".js")  ? "application/javascript; charset=utf-8" :
+      filePath.endsWith(".svg") ? "image/svg+xml" :
+      filePath.endsWith(".css") ? "text/css; charset=utf-8" :
+      filePath.endsWith(".png") ? "image/png" :
+      filePath.endsWith(".ico") ? "image/x-icon" :
+      "application/octet-stream";
     res.writeHead(200, { "Content-Type": ct, "Cache-Control": "no-cache" }).end(body);
     return;
   }

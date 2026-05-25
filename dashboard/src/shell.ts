@@ -60,6 +60,11 @@ header.topbar {
   display: flex; justify-content: space-between; align-items: center;
   padding-bottom: 16px; border-bottom: 1px solid var(--border);
 }
+header.topbar h1 { display: flex; align-items: center; gap: 10px; }
+header.topbar .brand-mark {
+  width: 32px; height: 32px;
+  flex: 0 0 auto;
+}
 header.topbar .status-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   background: var(--ok); margin-right: 6px;

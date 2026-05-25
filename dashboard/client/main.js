@@ -39,7 +39,10 @@ function App() {
   return html`
     <div class="app">
       <header class="topbar">
-        <h1><span class="status-dot"></span>forge activity</h1>
+        <h1>
+          <img src="/client/logo-mark.svg" width="32" height="32" class="brand-mark" alt="forge" />
+          <span class="status-dot"></span>activity
+        </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
       </header>
 

@@ -1,4 +1,6 @@
-# forge
+<p align="left">
+  <img src="./assets/logo-wordmark.svg" alt="forge" width="320">
+</p>
 
 A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `init`, `new`, `next`, `gate`, `show`, `status`, `invoke`, `backlog`, plus `auth` for personal-Mac OAuth.
 
