@@ -1,0 +1,279 @@
+// Direct better-sqlite3 reads of ~/.forge/forge.db.
+//
+// Row types are re-exported from forge's @forge/types so the dashboard and
+// forge share the same shape. The inline `as Array<{...}>` casts in each
+// query function still hardcode snake_case column names — until forge
+// introduces a single source of truth for the SQL schema, those casts are
+// the remaining drift surface (column rename = runtime failure, not compile
+// error). Documented in docs/SCHEMA-CONTRACT.md.
+
+import Database from "better-sqlite3";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { Run, Task } from "@forge/types";
+
+const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+const DB_PATH = join(FORGE_HOME, "forge.db");
+const RUNS_DIR = join(FORGE_HOME, "runs");
+
+let _db: Database.Database | null = null;
+function db(): Database.Database {
+  if (_db) return _db;
+  if (!existsSync(DB_PATH)) {
+    throw new Error(`forge DB not found at ${DB_PATH}. Has forge run yet?`);
+  }
+  _db = new Database(DB_PATH, { readonly: true });
+  // WAL readers don't block writers (forge uses WAL); no contention.
+  return _db;
+}
+
+export type { Run, Task };
+
+export type ActivityEntry = {
+  taskId: string;
+  runId: string;
+  runTitle: string;
+  workflow: string;
+  projectDir: string | null;
+  agentRole: string;
+  agentModel: string | null;
+  phase: string;
+  status: string;
+  completedAt: string;
+  result: unknown | null; // parsed JSON
+  parentId: string | null;
+};
+
+/** Recent completed/failed agent outputs across all projects.
+ *  Used for the activity feed. */
+export function recentActivity(limit = 100, sinceIso?: string): ActivityEntry[] {
+  let sql = `
+    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
+           r.title, r.workflow, r.project_dir
+    FROM tasks t
+    JOIN runs r ON r.id = t.run_id
+    WHERE t.completed_at IS NOT NULL
+      AND t.status IN ('complete', 'failed', 'blocked_by_red', 'awaiting_gate')
+  `;
+  const params: unknown[] = [];
+  if (sinceIso) {
+    sql += ` AND t.completed_at > ?`;
+    params.push(sinceIso);
+  }
+  sql += ` ORDER BY t.completed_at DESC LIMIT ?`;
+  params.push(limit);
+
+  const rows = db().prepare(sql).all(...params) as Array<{
+    id: string;
+    run_id: string;
+    parent_id: string | null;
+    phase: string;
+    agent_role: string;
+    agent_model: string | null;
+    status: string;
+    result: string | null;
+    completed_at: string;
+    title: string;
+    workflow: string;
+    project_dir: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    taskId: r.id,
+    runId: r.run_id,
+    runTitle: r.title,
+    workflow: r.workflow,
+    projectDir: r.project_dir,
+    agentRole: r.agent_role,
+    agentModel: r.agent_model,
+    phase: r.phase,
+    status: r.status,
+    completedAt: r.completed_at,
+    parentId: r.parent_id,
+    result: r.result ? safeJsonParse(r.result) : null,
+  }));
+}
+
+export type InFlightEntry = {
+  runId: string;
+  runTitle: string;
+  workflow: string;
+  projectDir: string | null;
+  taskId: string;
+  agentRole: string;
+  agentModel: string | null;
+  phase: string;
+  status: string;
+  startedAt: string | null;
+};
+
+/** Tasks currently running, awaiting gate, awaiting red, or awaiting human input.
+ *  Includes both primary tasks and red children. */
+export function inFlight(): InFlightEntry[] {
+  const rows = db().prepare(`
+    SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
+           r.title, r.workflow, r.project_dir
+    FROM tasks t
+    JOIN runs r ON r.id = t.run_id
+    WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'awaiting_human_input', 'blocked_by_red')
+      AND r.status = 'active'
+    ORDER BY t.started_at DESC NULLS LAST, t.created_at DESC
+  `).all() as Array<{
+    id: string;
+    run_id: string;
+    phase: string;
+    agent_role: string;
+    agent_model: string | null;
+    status: string;
+    started_at: string | null;
+    title: string;
+    workflow: string;
+    project_dir: string | null;
+  }>;
+
+  return rows.map((r) => ({
+    runId: r.run_id,
+    runTitle: r.title,
+    workflow: r.workflow,
+    projectDir: r.project_dir,
+    taskId: r.id,
+    agentRole: r.agent_role,
+    agentModel: r.agent_model,
+    phase: r.phase,
+    status: r.status,
+    startedAt: r.started_at,
+  }));
+}
+
+/** Full task detail including container.stdout.log + verdicts + gates. */
+export type TaskDetail = {
+  task: ActivityEntry;
+  stdoutLog: string | null;
+  stderrLog: string | null;
+  verdicts: VerdictRow[];
+  gates: GateRow[];
+};
+
+export type VerdictRow = {
+  id: string;
+  taskId: string;
+  redTaskId: string;
+  redRole: string;
+  verdict: string;
+  confidence: number;
+  authority: string;
+  findings: unknown;
+};
+
+export type GateRow = {
+  id: string;
+  taskId: string;
+  decision: string;
+  rationale: string | null;
+  decidedAt: string;
+  decidedBy: string;
+};
+
+export function taskDetail(taskId: string): TaskDetail | null {
+  const taskRow = db().prepare(`
+    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
+           t.error,
+           r.title, r.workflow, r.project_dir
+    FROM tasks t
+    JOIN runs r ON r.id = t.run_id
+    WHERE t.id = ?
+  `).get(taskId) as
+    | {
+        id: string;
+        run_id: string;
+        parent_id: string | null;
+        phase: string;
+        agent_role: string;
+        agent_model: string | null;
+        status: string;
+        result: string | null;
+        completed_at: string | null;
+        error: string | null;
+        title: string;
+        workflow: string;
+        project_dir: string | null;
+      }
+    | undefined;
+  if (!taskRow) return null;
+
+  const task: ActivityEntry = {
+    taskId: taskRow.id,
+    runId: taskRow.run_id,
+    runTitle: taskRow.title,
+    workflow: taskRow.workflow,
+    projectDir: taskRow.project_dir,
+    agentRole: taskRow.agent_role,
+    agentModel: taskRow.agent_model,
+    phase: taskRow.phase,
+    status: taskRow.status,
+    completedAt: taskRow.completed_at ?? "",
+    parentId: taskRow.parent_id,
+    result: taskRow.result ? safeJsonParse(taskRow.result) : null,
+  };
+
+  const stdoutPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stdout.log");
+  const stderrPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stderr.log");
+  const stdoutLog = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : null;
+  const stderrLog = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8") : null;
+
+  const verdicts = db().prepare(`
+    SELECT id, task_id, red_task_id, red_role, verdict, confidence, authority, findings
+    FROM verdicts WHERE task_id = ? ORDER BY created_at ASC
+  `).all(taskId) as Array<{
+    id: string;
+    task_id: string;
+    red_task_id: string;
+    red_role: string;
+    verdict: string;
+    confidence: number;
+    authority: string;
+    findings: string;
+  }>;
+
+  const gates = db().prepare(`
+    SELECT id, task_id, decision, rationale, decided_at, decided_by
+    FROM gates WHERE task_id = ? ORDER BY decided_at ASC
+  `).all(taskId) as Array<{
+    id: string;
+    task_id: string;
+    decision: string;
+    rationale: string | null;
+    decided_at: string;
+    decided_by: string;
+  }>;
+
+  return {
+    task,
+    stdoutLog,
+    stderrLog,
+    verdicts: verdicts.map((v) => ({
+      id: v.id,
+      taskId: v.task_id,
+      redTaskId: v.red_task_id,
+      redRole: v.red_role,
+      verdict: v.verdict,
+      confidence: v.confidence,
+      authority: v.authority,
+      findings: safeJsonParse(v.findings),
+    })),
+    gates: gates.map((g) => ({
+      id: g.id,
+      taskId: g.task_id,
+      decision: g.decision,
+      rationale: g.rationale,
+      decidedAt: g.decided_at,
+      decidedBy: g.decided_by,
+    })),
+  };
+}
+
+function safeJsonParse(s: string): unknown {
+  try { return JSON.parse(s); }
+  catch { return s; }
+}

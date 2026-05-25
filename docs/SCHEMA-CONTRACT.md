@@ -1,8 +1,8 @@
-# Schema contract — what forge-dashboard reads from forge
+# Schema contract — what the dashboard reads from forge
 
-The `forge-dashboard` repo (separate project, lives at `~/code/forge-dashboard/`) reads forge's SQLite DB and run-directory filesystem directly. Forge writes; the dashboard reads. **This document is the API between them.**
+The `forge-dashboard` package (workspace at `dashboard/` inside this repo as of #140) reads forge's SQLite DB and run-directory filesystem directly. Forge writes; the dashboard reads. **This document is the API between them.**
 
-If forge changes any of the shapes below, the dashboard breaks. Change advisedly. If you need to break the contract, version-bump it in this doc and update the dashboard at the same time.
+As of the #140 workspace merge, dashboard's `src/queries.ts` imports `Run` and `Task` types from `@forge/types` (aliased to forge's `src/types/index.ts`). That gets us cleanup of duplicate type definitions, but full compile-time drift protection isn't there yet — the inline `as Array<{...}>` row casts in queries.ts still hardcode snake_case column names. Changing a column name on the forge side surfaces as a dashboard runtime failure, not a build error. **A future ticket should introduce a single source of truth for SQL schema (typed column-name constants or a schema-as-code library) so that any forge schema change forces a dashboard typecheck failure.** Until that lands, treat this doc as the canonical reference and update it in the same commit as any schema change.
 
 ## SQLite contract
 

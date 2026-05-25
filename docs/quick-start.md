@@ -157,12 +157,11 @@ If you're standing in `~/code/my-app` and have runs going in other projects too,
 
 ## 11. Dashboard (optional)
 
-The web view lives in a separate repo, `forge-dashboard`. It shows agent activity across every project on the host and live-polls every 2s.
+The web view ships as an npm workspace in the forge repo (`dashboard/`). One install from step 1 covered both forge and the dashboard; no separate setup.
 
 ```bash
-cd ~/code/forge-dashboard
-npm install
-npm start            # default port 8024
+forge dashboard start              # boots http://127.0.0.1:8024
+forge dashboard start --port 8025  # custom port
 ```
 
-Open `http://127.0.0.1:8024`. Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Schema contract: `docs/SCHEMA-CONTRACT.md` in this repo.
+Reads `~/.forge/forge.db` directly (read-only — won't contend with `forge next`). Renders agent results as markdown cards by agent type (architect risks, tech-lead plans, engineer diffs, red verdicts). Always cross-project: the dashboard intentionally shows runs across every project on the host (the cross-project survey surface), independent of `forge status`'s workspace filter. Schema contract: `docs/SCHEMA-CONTRACT.md`.

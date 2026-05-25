@@ -1,0 +1,15 @@
+{
+  "name": "forge-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Activity feed + agent-output inbox for forge runs across all projects on the host.",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "marked": "^14.1.4"
+  }
+}

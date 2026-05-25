@@ -4,7 +4,7 @@ A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machin
 
 Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md` and creates a `.forge/` directory for project-level workflow overrides.
 
-For the web view, install [`forge-dashboard`](../forge-dashboard) (separate repo). It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
+The web view ships as a workspace package (`dashboard/`) — boot with `forge dashboard start`. It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
 
 ## Prerequisites
 
@@ -49,21 +49,21 @@ Full walkthrough: `docs/quick-start.md`. Multi-project specifics: `docs/how-to-u
 
 ## Dashboard
 
-The web dashboard lives in a separate repo, [`forge-dashboard`](../forge-dashboard). Install it once on the host:
+The web view ships as an npm workspace inside this repo (`dashboard/`). One install, one binary.
 
 ```bash
-cd ~/code/forge-dashboard
-npm install
-npm start            # default port 8024
+forge dashboard start              # boots http://127.0.0.1:8024
+forge dashboard start --port 8025  # custom port
 ```
 
-Open `http://127.0.0.1:8024`. Shows agent outputs across every project on the host, live-polling every 2s. Reads `~/.forge/forge.db` directly (read-only); mutating actions shell to `forge` so the CLI's auth + validation stay the single entrypoint for state changes. Schema contract is documented at `docs/SCHEMA-CONTRACT.md`.
+Shows agent outputs across every project on the host, live-polling every 2s. Reads `~/.forge/forge.db` directly (read-only); mutating actions shell to `forge` so the CLI's auth + validation stay the single entrypoint for state changes. Schema coupling between forge and the dashboard is enforced via TypeScript imports (`dashboard/src/queries.ts` re-exports forge's `Run`/`Task` types from `@forge/types`); see `docs/SCHEMA-CONTRACT.md` for the full contract.
 
 ## Where things live
 
 | Path | Purpose |
 |---|---|
 | `src/` | TypeScript source: types, store, spine, CLI |
+| `dashboard/` | Web dashboard workspace (server + client + design corpus) |
 | `seeds/` | Default agent dirs, constraints, runtimes, workflows (copied into `~/.forge/`) |
 | `docker/agent-dev-worker.Dockerfile` | Agent container image |
 | `docs/` | How-tos and concepts |
