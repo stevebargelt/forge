@@ -32,6 +32,19 @@ import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
+// Resolve the agent role for a fanout child. When fanout.agent_map is set and
+// the input value carries a discipline string that's in the map, route to the
+// mapped specialist. Otherwise fall back to step.agent. Exported for testing.
+export function resolveChildAgent(step: Step, fanout: FanoutDef, value: unknown): string {
+  const fallback = step.agent!;
+  if (!fanout.agent_map) return fallback;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return fallback;
+  const key = fanout.discipline_key ?? "discipline";
+  const discipline = (value as Record<string, unknown>)[key];
+  if (typeof discipline !== "string") return fallback;
+  return fanout.agent_map[discipline] ?? fallback;
+}
+
 export type RunNextResult = {
   dispatchedSteps: string[];      // step ids that got dispatched this call
   completedSteps: string[];       // step ids that completed (auto gate)
@@ -671,7 +684,7 @@ async function runFanoutChild(args: {
   dockerExec?: DockerExecFn;
 }): Promise<ChildOutcome> {
   const step = args.step;
-  const agentRole = step.agent!;
+  const agentRole = resolveChildAgent(step, args.fanout, args.value);
   const syntheticPhase = `${step.id}-${args.index}`;
   const childTaskId = newTaskId(syntheticPhase);
 

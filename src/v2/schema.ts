@@ -51,6 +51,14 @@ const FanoutDefSchema = z.object({
   from_upstream: FanoutFromUpstreamSchema,
   max_concurrency: z.number().int().positive().optional(),
   failure_mode: z.enum(["fail-phase", "retry-once", "continue"]).default("fail-phase"),
+  // discipline_key names the field on each upstream-array element that carries
+  // the routing key. Default at runtime is "discipline" (matches the
+  // AgentDiscipline type in src/types/); kept optional in the schema so
+  // existing fanout fixtures don't have to declare it.
+  discipline_key: z.string().min(1).optional(),
+  // agent_map maps discipline values to agent role names. Unmatched values
+  // (or any input that isn't an object) fall back to step.agent.
+  agent_map: z.record(z.string(), z.string()).optional(),
 });
 
 // Default `auto` (orchestrator-mediated). v1 defaulted every phase to human

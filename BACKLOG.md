@@ -66,7 +66,54 @@ Cleanup TODOs still on the user:
 
 Branch is 2 commits ahead of origin/main: 07693dc + d148962. 230/230 tests pass, both typechecks clean.
 
+2026-05-24 (later session, #139 fanout shipped): wired build-step fanout in feature.yml with discipline-based agent routing per child task. Spec at docs/prds/build-fanout-discipline-139.md.
+
+What landed:
+- **`FanoutDefSchema` extension** in src/v2/schema.ts: optional `agent_map: Record<string, string>` (discipline → agent role) and `discipline_key: string` (default at runtime "discipline"). Both optional → backwards compatible.
+- **`resolveChildAgent` helper** in src/v2/runNext.ts (pure, exported for testing). Wires `step.agent` as fallback when input isn't an object, when discipline_key field is missing or non-string, or when discipline isn't in agent_map.
+- **Tech-lead seed update** at seeds/agents/tech-lead/CLAUDE.md: output schema gains `discipline` per step; new "Steps must be file-independent" section (load-bearing); discipline-classification guidance.
+- **feature.yml build step** now has `fanout: {from_upstream: {step: plan, array_key: steps, input_key: step}, agent_map: {frontend → frontend-specialist, backend → backend-specialist, infosec → security-advisor, platform → agentic-platform-builder}, max_concurrency: 4, failure_mode: fail-phase}`. Reds stay on the parent (per-parent dispatch, unchanged). Fallback agent is `engineer`.
+- **Docs:** new "Fanout" entry in docs/concepts.md; new "Fanout with discipline-based agent routing" section in docs/how-to-new-workflow.md with the feature build canonical example.
+
+Also filed this session:
+- **#141** (SQL schema single-source-of-truth) — drift-fix follow-up from #140. Three options laid out in the body; option 1 (typed column constants) recommended as smallest first step.
+
+Verified:
+- npm run typecheck — clean (root + dashboard)
+- npm test — 238/238 pass (+8 new: 2 schema, 6 resolveChildAgent)
+- Workflow load: feature.yml's build step parses to {agent: engineer, fanout.agent_map: {4 disciplines}, reds_count: 5}
+- End-to-end smoke run deliberately deferred — real container dispatch has cost. User can run `forge new feature "..." --brief "..."` when ready to validate the planner-seed-emits-discipline + fanout-routes-correctly round trip. If the tech-lead's first plan doesn't split cleanly by discipline, that's a seed-tuning loop, not a code bug.
+
+Files in this commit: src/v2/schema.ts, src/v2/schema.test.ts, src/v2/runNext.ts, src/v2/runNext.test.ts, seeds/agents/tech-lead/CLAUDE.md, seeds/workflows/feature.yml, docs/concepts.md, docs/how-to-new-workflow.md, docs/prds/build-fanout-discipline-139.md (NEW), BACKLOG.md.
+
+Next-session orientation: end-to-end smoke run of #139 is the natural next thing if you want to validate the round trip live. Or pick up #141 (drift fix), or any of the other active tickets.
+
 ## Active
+
+### #139 — Wire build-step fanout in feature.yml + teach tech-lead to emit depends_on per plan-step
+**Why:** The v2 runner has full fanout machinery (see src/v2/runNext.ts dispatchFanoutStep + runFanoutChild — DAG-driven, max_concurrency, failure_mode, per-discipline routing). But the actual feature workflow doesn't use it: \`seeds/workflows/feature.yml\` build step is a single \`engineer\` invocation, no \`fanout:\` block. The infrastructure shipped (closed #96 sub-shifts 3+4+5 absorbed by #116) but the workflow-level wiring + planner support never landed.
+
+**Two-part fix:**
+
+1. **Tech-lead seed update.** Today the planner outputs flat \`steps: [{id, summary, files, acceptance}]\`. For fanout the planner needs to add:
+   - \`depends_on: string[]\` (other step ids this step blocks on)
+   - \`discipline: "frontend" | "backend" | "infosec" | "platform" | "general"\` (which specialist routes the step)
+   - \`files_modified\` must be honest at planning time — multiple containers writing to overlapping files is a race condition the runner can't catch
+   
+   Updated seed needs an example of dependency-graph shape + a load-bearing note that lying about \`files_modified\` independence breaks the world.
+
+2. **feature.yml build step.** Add a \`fanout:\` block reading the tech-lead's \`steps\` array. Each plan-step becomes one fanout child task. Specialist routing via the discipline field — the runner needs to honor it (today \`dispatchFanoutStep\` calls \`runFanoutChild\` which uses \`step.agent\` from the workflow YAML — needs to be teachable that the discipline value picks the agent per child).
+
+**Open question on shape:** the runner's current fanout assumes one agent per fanout step (you fan one agent across N items). Discipline-driven routing is different — different agents per child based on the child's data. That might need a small runner change (\`fanout.agent_from_input\` or similar). Worth a design pass before just wiring.
+
+**Why this matters:** today the feature workflow's build phase is serial through one engineer agent. Multi-discipline features (frontend + backend + infra in one feature) all funnel through generic engineer, losing the specialist seeds we built. Wiring fanout makes the specialists earn their tokens.
+
+**Sized as:** medium. Tech-lead seed update is small; feature.yml is small; the runner change for discipline-routed fanout is the real work.
+
+**Composite with:** the v2 cutover (#116, closed). This is the unfinished tail.
+
+**Caught:** 2026-05-23 — during quick-fix backlog triage; #96's deeper goal (build-phase decomposition) didn't fully land with v2.
+
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
 **Why:** Caught 2026-05-13 during the #127 forge run's build phase. 5 reds dispatched in parallel (red-wide, red-narrow, red-frontend, red-backend, red-security) at 18:11. Four produced their first stdout within 30s of start. **red-security produced zero stdout for 5 full minutes**, hit forge's idle-watchdog kill at 18:16, container terminated. DB recorded the verdict as default-`inconclusive` (0.5 confidence, empty findings) because gate.ts handles "task failed without writing result.json" by inferring an inconclusive verdict.
@@ -505,29 +552,30 @@ Lean toward (1).
 **Why:** Current example is `code-review` which duplicates the existing `codebase-assessment` workflow. The doc reads as a paper exercise. Replace with a workflow forge actually doesn't have, ideally one that exercises a primitive we've built but not documented (`onReject` branching, gate=verdict + fanout combo, multi-authority red panels).
 **How to apply:** Brainstorm the right new workflow first. Candidates: a workflow that uses `onReject` (also closes #25 validation); a workflow with both authoritative and specialist reds across phases; a workflow that genuinely needs a new role (forces also exercising `how-to-new-agent.md`).
 
-### #139 — Wire build-step fanout in feature.yml + teach tech-lead to emit depends_on per plan-step
-**Why:** The v2 runner has full fanout machinery (see src/v2/runNext.ts dispatchFanoutStep + runFanoutChild — DAG-driven, max_concurrency, failure_mode, per-discipline routing). But the actual feature workflow doesn't use it: \`seeds/workflows/feature.yml\` build step is a single \`engineer\` invocation, no \`fanout:\` block. The infrastructure shipped (closed #96 sub-shifts 3+4+5 absorbed by #116) but the workflow-level wiring + planner support never landed.
+### #141 — SQL schema single-source-of-truth (compile-time drift protection for dashboard + future readers)
+Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-on to a scope caveat called out in docs/SCHEMA-CONTRACT.md.
 
-**Two-part fix:**
+**Why filed.** After #140 merged the dashboard back as an npm workspace, dashboard/src/queries.ts now re-exports forge's Run/Task types via @forge/types. That cleaned up duplicate type *exports*, but the actual drift surface — the inline `as Array<{...}>` row casts inside each query function — still hardcodes snake_case SQL column names (project_dir, agent_role, run_id, started_at, completed_at, etc.). A column rename on forge's side is still a dashboard runtime failure, not a build error. The drift protection #140's spec promised is only half there.
 
-1. **Tech-lead seed update.** Today the planner outputs flat \`steps: [{id, summary, files, acceptance}]\`. For fanout the planner needs to add:
-   - \`depends_on: string[]\` (other step ids this step blocks on)
-   - \`discipline: "frontend" | "backend" | "infosec" | "platform" | "general"\` (which specialist routes the step)
-   - \`files_modified\` must be honest at planning time — multiple containers writing to overlapping files is a race condition the runner can't catch
-   
-   Updated seed needs an example of dependency-graph shape + a load-bearing note that lying about \`files_modified\` independence breaks the world.
+**Same risk in forge itself, not just the dashboard.** src/store/runs.ts and src/store/tasks.ts have private RowToX functions that mirror SQL column names in their type definitions. Forge's own store layer breaks too if a column gets renamed — it just breaks closer to the change, so the bug is found faster. Dashboard is the canary because it lives across a workspace boundary.
 
-2. **feature.yml build step.** Add a \`fanout:\` block reading the tech-lead's \`steps\` array. Each plan-step becomes one fanout child task. Specialist routing via the discipline field — the runner needs to honor it (today \`dispatchFanoutStep\` calls \`runFanoutChild\` which uses \`step.agent\` from the workflow YAML — needs to be teachable that the discipline value picks the agent per child).
+**Fix shape — three options to consider:**
 
-**Open question on shape:** the runner's current fanout assumes one agent per fanout step (you fan one agent across N items). Discipline-driven routing is different — different agents per child based on the child's data. That might need a small runner change (\`fanout.agent_from_input\` or similar). Worth a design pass before just wiring.
+1. **Typed column-name constants.** Single TS file (probably src/store/schema.ts) exports const objects like `RUNS_COLS = { id: 'id', projectDir: 'project_dir', ... } as const`. Every SQL query string is built from these constants; every row cast type references them. Forge changes a column → update the constant → typecheck breaks everywhere wrong. Lowest-disruption shape — doesn't change the SQL strings, just typing what's in them.
 
-**Why this matters:** today the feature workflow's build phase is serial through one engineer agent. Multi-discipline features (frontend + backend + infra in one feature) all funnel through generic engineer, losing the specialist seeds we built. Wiring fanout makes the specialists earn their tokens.
+2. **Schema-as-code via a library.** Drizzle, Kysely, sql-template-strings, etc. Generate types from a TS-declared schema; queries become typed at the call site. More invasive — rewrite the store layer — but gives compile-time guarantees on JOIN shapes, WHERE clauses, etc. Probably worth it if forge's store layer is going to grow.
 
-**Sized as:** medium. Tech-lead seed update is small; feature.yml is small; the runner change for discipline-routed fanout is the real work.
+3. **Code generation from CREATE TABLE.** Parse the SQL in src/store/db.ts, emit a TS module with column-name constants and row types. Compile-time hook (or a manual `npm run codegen`). No new runtime dep. Maintenance burden is the parser.
 
-**Composite with:** the v2 cutover (#116, closed). This is the unfinished tail.
+**Why option (1) first.** Lowest blast radius, smallest commit. Wraps the existing SQL in a thin type layer without rewriting any query logic. If #112 (transactional dispatch + gate writes) lands later and demands a heavier abstraction, (2) or (3) can build on top.
 
-**Caught:** 2026-05-23 — during quick-fix backlog triage; #96's deeper goal (build-phase decomposition) didn't fully land with v2.
+**Composite with #112** (transactional dispatch + gate writes — touches the same store layer). If both land in the same window, do (1) first; #112's writes also benefit from the typed column constants.
+
+**Out of scope explicitly.** This isn't a runtime change. No DB migration. No new dependencies (for option 1). The dashboard's queries.ts and forge's store/*.ts get a typing pass; the SQL itself stays.
+
+**Sizing.** Small for option (1) — probably one focused session. Medium-large for (2) or (3).
+
+**Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
 ## Done (recent)

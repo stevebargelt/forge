@@ -85,6 +85,37 @@ forge new code-review "atlas-clock-skew-review" --meta '{"lenses":["security","p
 forge next run-atlas-clock-skew-review-<suffix> --project ~/code/atlas
 ```
 
+## Fanout with discipline-based agent routing
+
+If a step fans out (one upstream-array element per child) and you want different agents per child based on a per-input field, declare `agent_map` on the `fanout:` block. The canonical example is `feature.yml`'s build step:
+
+```yaml
+- id: build
+  agent: engineer                    # fallback for unmapped disciplines
+  depends_on: [plan]
+  gate: verdict
+  fanout:
+    from_upstream:
+      step: plan
+      array_key: steps
+      input_key: step
+    agent_map:
+      frontend: frontend-specialist
+      backend: backend-specialist
+      infosec: security-advisor
+      platform: agentic-platform-builder
+    max_concurrency: 4
+    failure_mode: fail-phase
+  reds:
+    # ... reds attach to the parent, run once on the aggregate diff
+```
+
+Each plan-step (`{id, summary, files, acceptance, discipline}`) becomes one child task. The runner reads `step.discipline` (or whatever you set `discipline_key` to) and looks it up in `agent_map`. Hits route to the mapped agent; misses fall back to `step.agent`. Inputs that aren't objects (or where the discipline_key field is missing/non-string) also fall back.
+
+The upstream agent (here, `tech-lead`) must emit the discipline field on each element. See `seeds/agents/tech-lead/CLAUDE.md` for the output-schema example.
+
+**Reds on fanout:** today reds always attach to the parent fanout step and run once after children settle — there's no per-child red dispatch. This matches the cost tradeoff for the `feature` build (5 children × 5 reds would be 25 containers per build); if a workflow ever needs per-child reds, that'd be a separate schema change.
+
 ## Notes
 
 - Each phase can carry `workflowAdditions` (Tier 2 of `composeSystemPrompt`) — phase-specific framing appended to the agent's base CLAUDE.md.

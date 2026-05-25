@@ -115,6 +115,53 @@ test("Workflow: fanout referencing unknown step is rejected", () => {
   assert.match(JSON.stringify(r.error!.issues), /fanout.from_upstream references unknown step 'missing'/);
 });
 
+test("Workflow: fanout with agent_map and discipline_key parses cleanly", () => {
+  const r = WorkflowSchema.safeParse({
+    ...minimalWorkflow,
+    steps: [
+      { id: "plan", agent: "tech-lead", gate: "human" },
+      {
+        id: "build",
+        agent: "engineer",
+        depends_on: ["plan"],
+        gate: "verdict",
+        reds: [{ agent: "red-wide", authority: "authoritative" }],
+        fanout: {
+          from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+          agent_map: { frontend: "frontend-specialist", backend: "backend-specialist" },
+          discipline_key: "discipline",
+        },
+      },
+    ],
+  });
+  assert.ok(r.success, JSON.stringify(r.error?.issues));
+  const buildStep = r.data!.steps[1]!;
+  assert.deepEqual(buildStep.fanout?.agent_map, { frontend: "frontend-specialist", backend: "backend-specialist" });
+  assert.equal(buildStep.fanout?.discipline_key, "discipline");
+});
+
+test("Workflow: fanout without agent_map still validates (backwards compat); both new fields are optional", () => {
+  const r = WorkflowSchema.safeParse({
+    ...minimalWorkflow,
+    steps: [
+      { id: "plan", agent: "tech-lead", gate: "human" },
+      {
+        id: "build",
+        agent: "engineer",
+        depends_on: ["plan"],
+        gate: "human",
+        fanout: {
+          from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+        },
+      },
+    ],
+  });
+  assert.ok(r.success, JSON.stringify(r.error?.issues));
+  const buildStep = r.data!.steps[1]!;
+  assert.equal(buildStep.fanout?.agent_map, undefined);
+  assert.equal(buildStep.fanout?.discipline_key, undefined);
+});
+
 test("Workflow: cycle in depends_on is rejected", () => {
   const r = WorkflowSchema.safeParse({
     ...minimalWorkflow,

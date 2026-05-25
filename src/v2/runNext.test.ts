@@ -10,12 +10,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { runNext, type DockerExecFn } from "./runNext.js";
+import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { verdictsForTask } from "../store/verdicts.js";
-import type { Workflow } from "./schema.js";
+import type { Workflow, Step, FanoutDef } from "./schema.js";
 
 // Stub docker exec that writes a fixed result.json and returns 0. The runner's
 // container.stdout/stderr.log paths must be writable from this exec, so create
@@ -673,3 +673,64 @@ test("runNext: fanout — missing array_key on upstream marks parent failed", as
   assert.match(researchParent.error ?? "", /no array/);
 });
 
+// ------------------------------------------------------------------
+// resolveChildAgent (#139) — pure function unit tests
+// ------------------------------------------------------------------
+
+const _step: Step = {
+  id: "build",
+  agent: "engineer",
+  runtime: "claude",
+  depends_on: [],
+  gate: "human",
+  manual: false,
+  reds: [],
+};
+
+function fanoutWith(over: Partial<FanoutDef>): FanoutDef {
+  return {
+    from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+    failure_mode: "fail-phase",
+    ...over,
+  };
+}
+
+test("resolveChildAgent: returns mapped agent when discipline matches", () => {
+  const fanout = fanoutWith({ agent_map: { frontend: "frontend-specialist", backend: "backend-specialist" } });
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "frontend" }), "frontend-specialist");
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "backend" }), "backend-specialist");
+});
+
+test("resolveChildAgent: falls back to step.agent when discipline not in map", () => {
+  const fanout = fanoutWith({ agent_map: { frontend: "frontend-specialist" } });
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "general" }), "engineer");
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "unknown" }), "engineer");
+});
+
+test("resolveChildAgent: falls back to step.agent when discipline key missing on input", () => {
+  const fanout = fanoutWith({ agent_map: { frontend: "frontend-specialist" } });
+  assert.equal(resolveChildAgent(_step, fanout, { id: "1", summary: "x" }), "engineer");
+});
+
+test("resolveChildAgent: falls back to step.agent when input is not an object", () => {
+  const fanout = fanoutWith({ agent_map: { frontend: "frontend-specialist" } });
+  assert.equal(resolveChildAgent(_step, fanout, "frontend"), "engineer");
+  assert.equal(resolveChildAgent(_step, fanout, 42), "engineer");
+  assert.equal(resolveChildAgent(_step, fanout, null), "engineer");
+  assert.equal(resolveChildAgent(_step, fanout, ["frontend"]), "engineer");
+});
+
+test("resolveChildAgent: respects custom discipline_key (not default 'discipline')", () => {
+  const fanout = fanoutWith({
+    agent_map: { fe: "frontend-specialist" },
+    discipline_key: "track",
+  });
+  assert.equal(resolveChildAgent(_step, fanout, { track: "fe" }), "frontend-specialist");
+  // The default key 'discipline' should NOT be consulted when discipline_key is set.
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "fe" }), "engineer");
+});
+
+test("resolveChildAgent: returns step.agent when agent_map is undefined (backwards compat)", () => {
+  const fanout = fanoutWith({});
+  assert.equal(resolveChildAgent(_step, fanout, { discipline: "frontend" }), "engineer");
+});

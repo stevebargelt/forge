@@ -56,13 +56,29 @@ steps:
       Output {steps: [{id, summary, files, acceptance}]}.
 
   # ----- build -----
+  # Fanout: one child task per plan-step, agent routed by step.discipline.
+  # Reds stay on the parent — they review the aggregate diff once all children
+  # settle (per-parent dispatch, not per-child). See #139 for the design call.
   - id: build
-    agent: engineer
+    agent: engineer                    # fallback for steps with discipline=general or unmapped
     model: spec-writer
     depends_on: [plan]
     gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
     workflow_additions: |
-      Implement the plan. Output {steps_completed, diff_summary, files_modified}.
+      Implement your assigned plan-step (passed via inputs.step). Output {step_completed, diff_summary, files_modified}.
+      The tech-lead asserts your step's files are independent of every other step's files in this build; do not touch files outside your step.files list.
+    fanout:
+      from_upstream:
+        step: plan
+        array_key: steps
+        input_key: step
+      agent_map:
+        frontend: frontend-specialist
+        backend: backend-specialist
+        infosec: security-advisor
+        platform: agentic-platform-builder
+      max_concurrency: 4
+      failure_mode: fail-phase
     reds:
       - agent: red-wide
         model: fast-orchestrator
