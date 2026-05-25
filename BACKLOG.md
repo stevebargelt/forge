@@ -111,6 +111,10 @@ Cleanup TODO for the user:
 
 Next-session orientation: forge has a complete optional notification surface now. #141 (SQL schema single-source-of-truth, drift fix) is still queued. Other tickets in the active list are mostly Pencil/design-corpus stuff (#80, #81, #84, #86, #87, #88), v1/v2 infra debt (#74, #107, #112), or longer-term architectural (#106, #129).
 
+2026-05-25 (design-workflow audit): closed #81, #59, #90 from the Pencil cluster. Remaining 6 design-workflow tickets (#67, #80, #84, #86, #87, #88) stay queued — all real if the ui-design / feature-ui-design-needed workflows get used again.
+
+Steve flagged a future direction: rework the UI/UX design workflow. Not specced yet — exploratory. Key constraint noted: on the work machine, Pencil is only available as a VS Code extension; on personal Mac, desktop Pencil is an option. The desktop version may mitigate some of the queued issues (#81's stale-handle bug is VS-Code-specific). When the rework starts, the right first move is probably to decide which Pencil surface to commit to (VS Code, desktop, or both) and then re-evaluate which of #67/#80/#84/#86/#87/#88 are still real.
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -256,14 +260,6 @@ Lean (1) + (2). The container can't fix this from inside; forge has to either ca
 
 **Caught:** 2026-05-11 — surfaced while talking through #97. Steven's call: leave room for OpenAI/Codex without designing it now.
 
-### #59 — Track Pencil release notes for auto-save shipping
-**Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
-**How to apply:** Periodically run `npm view @pencil.dev/cli version` and check the changelog. When auto-save lands:
-- Update the prompt-author template to drop the loud Cmd+S warning + the stat-verification step.
-- Test that the .pen file persists without human Cmd+S in a real run.
-- Update FORGE-DEC-014 with a "Revisited" note pointing at the simpler flow.
-Lightweight: probably one check every couple of months unless we hear about it sooner.
-
 ### #60 — Use `pass` for host-side secret storage (was previously #47, kept here as it now applies to PROMPT.md design output)
 **Why:** Same as the original #47 — secrets like `PENCIL_CLI_KEY` shouldn't sit in a `.env` file forever. With FORGE-DEC-014 the consumer of `PENCIL_CLI_KEY` moves *out* of forge entirely (it's used by the human's host-side Claude Code, not by a forge container). But forge still touches host-side env in `forge auth` and possibly in future host-side tools. Keeping the entry but renumbered to reflect the architectural pivot.
 **How to apply:** When forge needs another host-side secret (e.g., for a future GitHub or Slack integration), build the `pass` wrapper then. Until then, this is dormant.
@@ -300,35 +296,6 @@ Caught 2026-05-08 during #53 validation. Belongs in #57's iteration backlog alon
 5. Add a per-screen-pair Cmd+S reminder, not just an end-of-run warning. Pencil sessions crash mid-run (verified 2026-05-08); the loud end-of-run save is too late if the crash happens between screens 24 and 26 of a 26-screen design (which is exactly what just happened).
 **Validation done so far:** prompt-author DOES tell Pencil to OPEN-the-existing-file and ADD frames (good — this part of the seed worked). Numbering and filename inference are the gaps.
 **Composite with #79 + #82 (validator-glob-pen below):** these three together make shared-designDir reuse robust. Without all three, every reuse run hits a different sharp edge.
-
-### #81 — Pencil MCP server stale-handle failure mode (workaround documented)
-**Why:** Caught 2026-05-08 mid-phase-flow run. Pencil-Claude reported successful MCP calls (`open_document`, frame inserts, etc) and exported PNGs to disk, but the `dashboard.pen` tab in VS Code showed no dirty marker — meaning the in-memory edits were landing in *some* document, just not the one VS Code was showing. End-of-run Cmd+S did nothing because there was nothing dirty in the visible doc. Net result: PNGs exported, `.pen` source not updated, design lost on session close.
-
-**Hypothesis:** Pencil's MCP server holds per-session in-memory document handles. If an earlier MCP call (or the `touch <wrong-name>.pen` precondition step that created an empty stub) activated a *different* in-memory document, subsequent calls with `filePath: <correct path>` silently routed to the stale handle instead of the file the human had open. The MCP tool reports success because it operated on *some* doc, just not the right one.
-
-**Fix that worked:** restart VS Code → restart Claude session → re-run prompt. Cleared the handle map. Subsequent run shows dirty marker on `dashboard.pen` immediately on first MCP call (verified 2026-05-08).
-
-**What forge / the prompt-author seed can't defend against:** this is Pencil-internal state. No external tool can introspect Pencil's MCP handle map. The seed's existing `get_editor_state` after `open_document` step is supposed to catch the wrong-active-editor case, but if MCP misroutes silently it would still report the right path.
-
-**What the human can do:** watch the VS Code dirty marker as the live correctness indicator. If it doesn't appear within seconds of the first MCP call, the session is broken. Stop, restart VS Code + Claude, re-run.
-
-**Add to PROMPT.md template:** a step early in the prompt that says "after the first `open_document` call, the human watching VS Code should see a dirty marker (●) appear on the target file's tab. If no marker appears within 10 seconds of the first edit, the MCP session is broken — restart VS Code and Claude, then re-run this prompt."
-
-**Composite with #80:** #80's per-screen Cmd+S reminders are still good (Pencil sessions can also crash mid-run for unrelated reasons). The dirty-marker check is an *earlier* tripwire — catches the failure within seconds of starting, not after 24 screens of wasted work.
-
-### #90 — Submit captures corpus-level artifacts, not run-level deliverables
-**Why:** Caught 2026-05-08 reviewing phase-flow submit. The validator globs `*.png` / `*.html` across designDir/{designs,code}/ and stores all matches in `result.pngFiles` / `result.htmlFiles`. With shared-corpus reuse (#67), that's the *whole corpus*, not just this run's deliverables. The phase-flow run's review task captured 24 PNGs + ~25 HTMLs — 20 of each from earlier runs that have nothing to do with the phase flow widget. Architect agent reads `inputs.upstream[*].result.pngFiles` and gets the full list as input, including 20 unrelated screens.
-
-**For this run it's fine** (architect needs full corpus context to integrate the new component into the existing dashboard). For other features where designDir has unrelated history, it'd be noise.
-
-**Three options:**
-1. **Snapshot at brief-time, diff at submit-time.** When `forge new` creates a run with `--design-dir`, snapshot the existing file list to `run.metadata.designDirSnapshot`. At submit, compute "new since snapshot" and store both: `result.allPngFiles` (full corpus) and `result.newPngFiles` (just this run's). Architect prompt could choose which to read.
-2. **mtime threshold.** Submit only captures files newer than `run.createdAt`. Cleaner; doesn't require run-creation-time bookkeeping. Edge case: if the human iterates in Pencil for a long time and the corpus had files added meanwhile (e.g. another forge run finished mid-Pencil-session), they'd show up as "new." Probably rare enough to ignore.
-3. **Leave as-is.** Architect prompt updated to "when there are 20+ artifacts, distinguish 'just this run' from 'pre-existing context' by looking at filename numbering patterns." Frail; punts the problem to the agent.
-
-**Lean (2)** — mtime threshold. Simple, no schema change, agent gets clean input most of the time. Composite with #88 (corpus consistency) makes the corpus-vs-deliverable distinction operational at multiple layers.
-
-**Sequencing:** wait until we see this become an actual problem in a real run. For phase-flow specifically, the full-corpus context is appropriate. Capture and defer.
 
 ### #88 — Corpus consistency: propagate new components into affected existing screens
 **Why:** Caught 2026-05-08 reviewing phase-flow design output. The pill row (#71) is a new component that, once implemented, will appear above the task list in many existing dashboard screens — 02 (task-list), 03 (task-detail-generic), 05 (task-detail-gate), 08 (task-detail-blocked-by-red), 11, 17, 18, 19, 20, etc. The current design corpus shows those screens *without* pills (drawn pre-pill-row). After implementation: live dashboard shows pills everywhere, corpus shows pills in isolation only. Mismatch.
@@ -559,6 +526,49 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 
 
 ## Done (recent)
+
+### #90 — Submit captures corpus-level artifacts, not run-level deliverables
+**Closed:** 2026-05-25. Deferred-by-design per the ticket's own "wait until it becomes a real problem in a real run" guidance. The mtime-threshold fix (option 2) is well-scoped; re-file as actionable when corpus noise actually shows up in a feature run that isn't design-bootstrap.
+
+**Why:** Caught 2026-05-08 reviewing phase-flow submit. The validator globs `*.png` / `*.html` across designDir/{designs,code}/ and stores all matches in `result.pngFiles` / `result.htmlFiles`. With shared-corpus reuse (#67), that's the *whole corpus*, not just this run's deliverables. The phase-flow run's review task captured 24 PNGs + ~25 HTMLs — 20 of each from earlier runs that have nothing to do with the phase flow widget. Architect agent reads `inputs.upstream[*].result.pngFiles` and gets the full list as input, including 20 unrelated screens.
+
+**For this run it's fine** (architect needs full corpus context to integrate the new component into the existing dashboard). For other features where designDir has unrelated history, it'd be noise.
+
+**Three options:**
+1. **Snapshot at brief-time, diff at submit-time.** When `forge new` creates a run with `--design-dir`, snapshot the existing file list to `run.metadata.designDirSnapshot`. At submit, compute "new since snapshot" and store both: `result.allPngFiles` (full corpus) and `result.newPngFiles` (just this run's). Architect prompt could choose which to read.
+2. **mtime threshold.** Submit only captures files newer than `run.createdAt`. Cleaner; doesn't require run-creation-time bookkeeping. Edge case: if the human iterates in Pencil for a long time and the corpus had files added meanwhile (e.g. another forge run finished mid-Pencil-session), they'd show up as "new." Probably rare enough to ignore.
+3. **Leave as-is.** Architect prompt updated to "when there are 20+ artifacts, distinguish 'just this run' from 'pre-existing context' by looking at filename numbering patterns." Frail; punts the problem to the agent.
+
+**Lean (2)** — mtime threshold. Simple, no schema change, agent gets clean input most of the time. Composite with #88 (corpus consistency) makes the corpus-vs-deliverable distinction operational at multiple layers.
+
+**Sequencing:** wait until we see this become an actual problem in a real run. For phase-flow specifically, the full-corpus context is appropriate. Capture and defer.
+
+### #59 — Track Pencil release notes for auto-save shipping
+**Closed:** 2026-05-25. Not work, just a watch reminder — closing as such. Re-file as actionable when Pencil ships auto-save (or any 0.3+ release that affects the PROMPT.md template's Cmd+S/stat-verification scaffolding).
+
+**Why:** Pencil 0.2.5 has no auto-save (https://docs.pencil.dev/troubleshooting). Our PROMPT.md template has a load-bearing "Cmd+S to save dashboard.pen" warning + a stat-verification step. When Pencil ships auto-save, the warning becomes obsolete.
+**How to apply:** Periodically run `npm view @pencil.dev/cli version` and check the changelog. When auto-save lands:
+- Update the prompt-author template to drop the loud Cmd+S warning + the stat-verification step.
+- Test that the .pen file persists without human Cmd+S in a real run.
+- Update FORGE-DEC-014 with a "Revisited" note pointing at the simpler flow.
+Lightweight: probably one check every couple of months unless we hear about it sooner.
+
+### #81 — Pencil MCP server stale-handle failure mode (workaround documented)
+**Closed:** 2026-05-25. Documented bug in Pencil 0.2.5 (VS Code extension specifically); workaround in PROMPT.md template tells the human to watch for the dirty marker. Nothing for forge to fix — upstream Pencil owns it. Steve flagged 2026-05-25 that desktop Pencil may not have this MCP-handle issue; if the design workflow rework moves toward desktop, this whole class of bug may be moot. Re-file as actionable if the failure mode shows up in a non-VS-Code Pencil session.
+
+**Why:** Caught 2026-05-08 mid-phase-flow run. Pencil-Claude reported successful MCP calls (`open_document`, frame inserts, etc) and exported PNGs to disk, but the `dashboard.pen` tab in VS Code showed no dirty marker — meaning the in-memory edits were landing in *some* document, just not the one VS Code was showing. End-of-run Cmd+S did nothing because there was nothing dirty in the visible doc. Net result: PNGs exported, `.pen` source not updated, design lost on session close.
+
+**Hypothesis:** Pencil's MCP server holds per-session in-memory document handles. If an earlier MCP call (or the `touch <wrong-name>.pen` precondition step that created an empty stub) activated a *different* in-memory document, subsequent calls with `filePath: <correct path>` silently routed to the stale handle instead of the file the human had open. The MCP tool reports success because it operated on *some* doc, just not the right one.
+
+**Fix that worked:** restart VS Code → restart Claude session → re-run prompt. Cleared the handle map. Subsequent run shows dirty marker on `dashboard.pen` immediately on first MCP call (verified 2026-05-08).
+
+**What forge / the prompt-author seed can't defend against:** this is Pencil-internal state. No external tool can introspect Pencil's MCP handle map. The seed's existing `get_editor_state` after `open_document` step is supposed to catch the wrong-active-editor case, but if MCP misroutes silently it would still report the right path.
+
+**What the human can do:** watch the VS Code dirty marker as the live correctness indicator. If it doesn't appear within seconds of the first MCP call, the session is broken. Stop, restart VS Code + Claude, re-run.
+
+**Add to PROMPT.md template:** a step early in the prompt that says "after the first `open_document` call, the human watching VS Code should see a dirty marker (●) appear on the target file's tab. If no marker appears within 10 seconds of the first edit, the MCP session is broken — restart VS Code and Claude, then re-run this prompt."
+
+**Composite with #80:** #80's per-screen Cmd+S reminders are still good (Pencil sessions can also crash mid-run for unrelated reasons). The dirty-marker check is an *earlier* tripwire — catches the failure within seconds of starting, not after 24 screens of wasted work.
 
 ### #122 — Dashboard request-changes doesn't auto-dispatch the replacement task
 **Closed:** 2026-05-25. Obsolete — the dashboard is read-only now; all gate decisions go through the orchestrator session, not dashboard clicks. There is no "request changes" button left to fix.
