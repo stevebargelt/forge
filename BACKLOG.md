@@ -576,7 +576,11 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+## Done (recent)
+
 ### #146 — Engineer container missing pnpm (and likely yarn) on PATH — forces per-run workarounds
+**Closed:** 2026-05-25. Commit `5913c1b5a7b26ec0e39b8c9f42f1da0eecb36ca0`.
+
 Filed 2026-05-25. Recurring per-session friction on pnpm-based projects.
 
 **Problem.** The agent-dev-worker container ships with Node 20 + npm but not pnpm. Any project using pnpm as its package manager (e.g. harebrained-apps, modern Next.js projects) hits this — the engineer cannot run the project's test commands until they self-install pnpm, OR they substitute a different validation path and leave a gap.
@@ -597,8 +601,6 @@ Also worth adding: \`yarn\` (Yarn 1 / classic). Many older projects still use it
 
 **Caught:** 2026-05-25 during back-to-back harebrained-apps runs.
 
-
-## Done (recent)
 
 ### #144 — Auto-tint iTerm2 background to match forge project on cd / forge invocation (research)
 **Closed:** 2026-05-25. Commit `029a8d357709fba1d2d85d6ec8ffd6bd815a2804`.
