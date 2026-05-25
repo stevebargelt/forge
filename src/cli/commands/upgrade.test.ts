@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
-import { tryGitPull } from "./upgrade.js";
+import { writeFileSync } from "node:fs";
+import { tryGitPull, tryNpmInstall } from "./upgrade.js";
 
 let dir: string;
 
@@ -67,4 +68,15 @@ test("tryGitPull: returns 'error' when not a git repo", () => {
   // Either kind: "error" or kind: "no-remote" is acceptable; git status fails
   // before we get to the remote check.
   assert.ok(r.kind === "error" || r.kind === "no-remote");
+});
+
+test("tryNpmInstall: returns 'no-package-json' when the dir has no package.json", () => {
+  const r = tryNpmInstall(dir, /* dryRun */ false);
+  assert.equal(r.kind, "no-package-json");
+});
+
+test("tryNpmInstall: dry-run with package.json returns 'ok' without invoking npm", () => {
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", version: "0.0.0" }));
+  const r = tryNpmInstall(dir, /* dryRun */ true);
+  assert.equal(r.kind, "ok");
 });

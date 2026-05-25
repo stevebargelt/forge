@@ -155,7 +155,19 @@ forge status --workspace <p>  # runs for an explicit workspace path
 
 If you're standing in `~/code/my-app` and have runs going in other projects too, the default cwd-scoped view keeps your terminal focused on this project. See `docs/how-to-use-forge-across-projects.md` for the multi-project story.
 
-## 11. Dashboard (optional)
+## 11. Upgrading later
+
+When new forge commits arrive (new agents, workflows, CLI behavior), run `forge upgrade` from any project to refresh everything in one step:
+
+```bash
+cd ~/code/my-app
+forge upgrade           # pulls forge, runs npm install, refreshes ~/.forge/, re-inits this project's CLAUDE.md
+forge upgrade --dry-run # see what would change without doing it
+```
+
+Full doc: `docs/how-to-upgrade.md` (flags, multi-project loop, manual recipe).
+
+## 12. Dashboard (optional)
 
 The web view ships as an npm workspace in the forge repo (`dashboard/`). One install from step 1 covered both forge and the dashboard; no separate setup.
 

@@ -73,6 +73,10 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 | `<project>/.forge/workflows/<name>.yml` | Optional per-project workflow override |
 | `<project>/CLAUDE.md` | Per-project orchestrator block (installed by `forge init`) |
 
+## Upgrading
+
+When forge has new commits, run `forge upgrade` from any project. It pulls the forge repo, runs `npm install`, refreshes `~/.forge/` seeds, and re-inits the current project's orchestrator block. See `docs/how-to-upgrade.md` for flags and the multi-project flow.
+
 ## Docs
 
-`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), and `docs/how-to-*.md` for adding new agents/workflows.
+`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), and `docs/how-to-*.md` for adding new agents/workflows.

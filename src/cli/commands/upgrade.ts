@@ -28,14 +28,16 @@ const DEFAULT_FORGE_REPO_DIR = join(homedir(), "code", "forge");
 export function registerUpgrade(program: Command): void {
   program
     .command("upgrade")
-    .description("Refresh forge: git pull the forge repo, refresh seeds in ~/.forge/, and re-init the current project's CLAUDE.md")
+    .description("Refresh forge: git pull the forge repo, npm install, refresh seeds in ~/.forge/, and re-init the current project's CLAUDE.md")
     .option("--dry-run", "show what would change without doing anything")
     .option("--skip-git", "skip the git pull step (useful when testing local-only changes)")
+    .option("--skip-npm", "skip the npm install step (useful when deps haven't changed and you want a fast loop)")
     .option("--skip-project", "skip re-initing the current project's CLAUDE.md")
     .option("--forge-repo <dir>", "path to the forge source repo (default: $FORGE_REPO_DIR or ~/code/forge)")
     .action((options: {
       dryRun?: boolean;
       skipGit?: boolean;
+      skipNpm?: boolean;
       skipProject?: boolean;
       forgeRepo?: string;
     }) => {
@@ -63,34 +65,53 @@ export function registerUpgrade(program: Command): void {
 
       // Step 1: git pull
       if (options.skipGit) {
-        console.log(`[1/3] git pull: skipped (--skip-git)`);
+        console.log(`[1/4] git pull: skipped (--skip-git)`);
       } else {
         const pullResult = tryGitPull(forgeRepoDir, dryRun);
         switch (pullResult.kind) {
           case "ok":
-            console.log(`[1/3] git pull: ${pullResult.message}`);
+            console.log(`[1/4] git pull: ${pullResult.message}`);
             break;
           case "no-remote":
-            console.log(`[1/3] git pull: skipped (no remote configured — set up upstream when ready)`);
+            console.log(`[1/4] git pull: skipped (no remote configured — set up upstream when ready)`);
             break;
           case "dirty":
-            console.log(`[1/3] git pull: SKIPPED (working tree has uncommitted changes in forge repo)`);
+            console.log(`[1/4] git pull: SKIPPED (working tree has uncommitted changes in forge repo)`);
             console.log(`        Commit or stash in ${forgeRepoDir}, then re-run.`);
             // Don't return — let the user still refresh seeds + project if they want.
             break;
           case "error":
-            console.log(`[1/3] git pull: FAILED — ${pullResult.message}`);
+            console.log(`[1/4] git pull: FAILED — ${pullResult.message}`);
             // Don't return — seeds + project may still work.
             break;
         }
       }
 
-      // Step 2: install-seeds.sh FORCE=1
+      // Step 2: npm install (picks up new deps + workspace symlinks)
+      if (options.skipNpm) {
+        console.log(`[2/4] npm install: skipped (--skip-npm)`);
+      } else {
+        const npmResult = tryNpmInstall(forgeRepoDir, dryRun);
+        switch (npmResult.kind) {
+          case "ok":
+            console.log(`[2/4] npm install: ${npmResult.message}`);
+            break;
+          case "no-package-json":
+            console.log(`[2/4] npm install: SKIPPED (no package.json at ${forgeRepoDir})`);
+            break;
+          case "error":
+            console.log(`[2/4] npm install: FAILED — ${npmResult.message}`);
+            // Don't return — seeds + project may still work; user can re-run npm install manually.
+            break;
+        }
+      }
+
+      // Step 3: install-seeds.sh FORCE=1
       const installScript = join(forgeRepoDir, "scripts", "install-seeds.sh");
       if (!existsSync(installScript)) {
-        console.log(`[2/3] install-seeds.sh: NOT FOUND at ${installScript}`);
+        console.log(`[3/4] install-seeds.sh: NOT FOUND at ${installScript}`);
       } else if (dryRun) {
-        console.log(`[2/3] install-seeds.sh: would run with FORCE=1`);
+        console.log(`[3/4] install-seeds.sh: would run with FORCE=1`);
       } else {
         try {
           const out = execFileSync("bash", [installScript], {
@@ -100,7 +121,7 @@ export function registerUpgrade(program: Command): void {
           // Emit a compact summary, not the full output
           const lines = out.trim().split("\n");
           const installedLines = lines.filter((l) => l.startsWith("Installing"));
-          console.log(`[2/3] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
+          console.log(`[3/4] install-seeds.sh: ${installedLines.length} component(s) refreshed`);
           for (const line of installedLines) {
             console.log(`        ${line.replace("Installing ", "")}`);
           }
@@ -115,28 +136,28 @@ export function registerUpgrade(program: Command): void {
             }
           }
         } catch (e) {
-          console.log(`[2/3] install-seeds.sh: FAILED — ${(e as Error).message}`);
+          console.log(`[3/4] install-seeds.sh: FAILED — ${(e as Error).message}`);
         }
       }
 
-      // Step 3: re-init current project's CLAUDE.md
+      // Step 4: re-init current project's CLAUDE.md
       if (!willReinitProject) {
-        console.log(`[3/3] project init: skipped`);
+        console.log(`[4/4] project init: skipped`);
       } else {
         const templatePath = join(forgeRepoDir, "seeds", "orchestrator-template.md");
         if (!existsSync(templatePath)) {
-          console.log(`[3/3] project init: FAILED — template not found at ${templatePath}`);
+          console.log(`[4/4] project init: FAILED — template not found at ${templatePath}`);
         } else {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
           const next = applyOrchestratorBlock(existing, template);
           if (next === existing) {
-            console.log(`[3/3] project init: already current (no change)`);
+            console.log(`[4/4] project init: already current (no change)`);
           } else if (dryRun) {
-            console.log(`[3/3] project init: would update orchestrator block in ${projectClaudeMd}`);
+            console.log(`[4/4] project init: would update orchestrator block in ${projectClaudeMd}`);
           } else {
             writeFileSync(projectClaudeMd, next);
-            console.log(`[3/3] project init: updated orchestrator block`);
+            console.log(`[4/4] project init: updated orchestrator block`);
             // Ensure .forge/ exists for project overrides (init does this too).
             const projForgeDir = join(cwd, ".forge");
             if (!existsSync(projForgeDir)) {
@@ -191,5 +212,33 @@ export function tryGitPull(repoDir: string, dryRun: boolean): PullResult {
     return { kind: "ok", message: compact };
   } catch (e) {
     return { kind: "error", message: `git pull failed: ${(e as Error).message}` };
+  }
+}
+
+type NpmInstallResult =
+  | { kind: "ok"; message: string }
+  | { kind: "no-package-json" }
+  | { kind: "error"; message: string };
+
+// Exported for testing. Runs `npm install` in the forge repo, picking up any
+// new top-level deps + new workspace deps. Needed since #140 added the
+// dashboard workspace + the `marked` dep; a user who only pulled would have
+// a broken dashboard.
+export function tryNpmInstall(repoDir: string, dryRun: boolean): NpmInstallResult {
+  if (!existsSync(join(repoDir, "package.json"))) {
+    return { kind: "no-package-json" };
+  }
+  if (dryRun) return { kind: "ok", message: "would run npm install" };
+  try {
+    const out = execSync("npm install --silent", { cwd: repoDir, encoding: "utf8" });
+    // npm install's success output is typically one or two lines about packages
+    // added/audited. Compact it down to the most informative line.
+    const lines = out.trim().split("\n").filter((l) => l.trim().length > 0);
+    const summary = lines.find((l) => /added|removed|changed|audited|up to date/.test(l))
+      ?? lines[lines.length - 1]
+      ?? "complete";
+    return { kind: "ok", message: summary };
+  } catch (e) {
+    return { kind: "error", message: `npm install failed: ${(e as Error).message}` };
   }
 }
