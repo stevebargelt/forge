@@ -576,7 +576,11 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+## Done (recent)
+
 ### #144 — Auto-tint iTerm2 background to match forge project on cd / forge invocation (research)
+**Closed:** 2026-05-25. Commit `029a8d357709fba1d2d85d6ec8ffd6bd815a2804`.
+
 Filed 2026-05-25 as a research ticket.
 
 **Idea.** Compose with the dashboard-color ticket (#143 — per-project label + color, sourced from .vscode/settings.json titleBar.activeBackground when present). Same idea, extended to the terminal: when you cd into a project (or run forge there), iTerm2's window background subtly tints to that project's color. Combined with the VS Code titlebar already being that color and the dashboard cards being that color, you get one consistent visual cue for "which project am I in right now?" across editor / terminal / dashboard.
@@ -598,8 +602,6 @@ Filed 2026-05-25 as a research ticket.
 
 **Caught:** 2026-05-25 in conversation about dashboard project colors.
 
-
-## Done (recent)
 
 ### #145 — Twilio SMS double opt-in flow: subscribe/confirm/unsubscribe + consent log
 **Closed:** 2026-05-25. Commit `4a6ebc6`.
