@@ -525,7 +525,42 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+### #148 — red-narrow investigation: 6 of 7 verdicts are process-noise; rework or retire
+Filed 2026-05-26 based on the same audit as #147.
+
+**Why filed (data).** Of 7 red-narrow verdicts in the corpus:
+- 6 are \"inconclusive with zero or one ungrounded findings\" — the red couldn't actually evaluate the artifact against its anti-prompt framing.
+- 1 was a \`pass\` verdict with 8 ungrounded findings (no file:line citations).
+- ZERO produced a confident actionable verdict.
+
+red-narrow's design is to consume force-level constraints as anti-prompts and check whether the artifact violates them. The data suggests either:
+1. The constraints rarely match what artifacts touch (so red-narrow has nothing to say most of the time → process noise).
+2. The seed prompt doesn't translate constraint→finding effectively (so even when relevant, no actionable verdict emerges).
+3. The narrow framing doesn't produce file:line citations the way other reds do.
+
+**What to investigate:**
+- Pull the force-level constraints currently in \`~/.forge/constraints/\`. How many are there? How specific are they?
+- For each red-narrow verdict in the corpus, what constraint did it consume? Was the artifact even in the constraint's scope?
+- Does the seed prompt require file:line citations? If not, that explains the lack of citations.
+- Read red-narrow's seed (\`seeds/agents/red-narrow/CLAUDE.md\`) and compare to the other red seeds' structure.
+
+**Possible outcomes:**
+1. **Rework the seed** to be more permissive (still anti-prompt-driven, but more willing to flag concerns + emit citations). Most likely.
+2. **Demote red-narrow to advisory authority by default** (specialist instead of authoritative). It can't BLOCK what it can't evaluate.
+3. **Retire red-narrow entirely** if investigation shows the anti-prompt framing fundamentally doesn't fit how artifacts arrive at the gate.
+
+**Composite with #147** (evidence-anchored output schema). After #147 ships, red-narrow's ungrounded findings will all be dropped automatically, and its verdicts will naturally land at inconclusive. That may be sufficient — the noise self-mitigates without needing a separate rework. If the data still looks bad post-#147, this ticket revives as a real investigation.
+
+**Suggested sequencing:** do #147 first; revisit this ticket once we have 30+ post-#147 verdicts to see whether red-narrow's signal-to-noise actually improves.
+
+**Caught:** 2026-05-26 audit of red verdicts.
+
+
+## Done (recent)
+
 ### #147 — Reds: evidence-anchored output schema + post-validation to catch hallucinated citations
+**Closed:** 2026-05-26. Commit `2cbcc05d133dab6603ab9e15b2dd967ba33f7267`.
+
 Filed 2026-05-26 based on empirical audit of all 23 red verdicts in ~/.forge/forge.db.
 
 **Why filed (data).** Of 23 red verdicts in the DB:
@@ -560,39 +595,6 @@ The pattern: reds emit confident, well-structured-looking findings with file:lin
 
 **Caught:** 2026-05-26 audit of red verdicts; cross-referenced with FP-mitigation literature survey at /tmp/red-false-positives-research.md.
 
-
-### #148 — red-narrow investigation: 6 of 7 verdicts are process-noise; rework or retire
-Filed 2026-05-26 based on the same audit as #147.
-
-**Why filed (data).** Of 7 red-narrow verdicts in the corpus:
-- 6 are \"inconclusive with zero or one ungrounded findings\" — the red couldn't actually evaluate the artifact against its anti-prompt framing.
-- 1 was a \`pass\` verdict with 8 ungrounded findings (no file:line citations).
-- ZERO produced a confident actionable verdict.
-
-red-narrow's design is to consume force-level constraints as anti-prompts and check whether the artifact violates them. The data suggests either:
-1. The constraints rarely match what artifacts touch (so red-narrow has nothing to say most of the time → process noise).
-2. The seed prompt doesn't translate constraint→finding effectively (so even when relevant, no actionable verdict emerges).
-3. The narrow framing doesn't produce file:line citations the way other reds do.
-
-**What to investigate:**
-- Pull the force-level constraints currently in \`~/.forge/constraints/\`. How many are there? How specific are they?
-- For each red-narrow verdict in the corpus, what constraint did it consume? Was the artifact even in the constraint's scope?
-- Does the seed prompt require file:line citations? If not, that explains the lack of citations.
-- Read red-narrow's seed (\`seeds/agents/red-narrow/CLAUDE.md\`) and compare to the other red seeds' structure.
-
-**Possible outcomes:**
-1. **Rework the seed** to be more permissive (still anti-prompt-driven, but more willing to flag concerns + emit citations). Most likely.
-2. **Demote red-narrow to advisory authority by default** (specialist instead of authoritative). It can't BLOCK what it can't evaluate.
-3. **Retire red-narrow entirely** if investigation shows the anti-prompt framing fundamentally doesn't fit how artifacts arrive at the gate.
-
-**Composite with #147** (evidence-anchored output schema). After #147 ships, red-narrow's ungrounded findings will all be dropped automatically, and its verdicts will naturally land at inconclusive. That may be sufficient — the noise self-mitigates without needing a separate rework. If the data still looks bad post-#147, this ticket revives as a real investigation.
-
-**Suggested sequencing:** do #147 first; revisit this ticket once we have 30+ post-#147 verdicts to see whether red-narrow's signal-to-noise actually improves.
-
-**Caught:** 2026-05-26 audit of red verdicts.
-
-
-## Done (recent)
 
 ### #90 — Submit captures corpus-level artifacts, not run-level deliverables
 **Closed:** 2026-05-25. Deferred-by-design per the ticket's own "wait until it becomes a real problem in a real run" guidance. The mtime-threshold fix (option 2) is well-scoped; re-file as actionable when corpus noise actually shows up in a feature run that isn't design-bootstrap.
