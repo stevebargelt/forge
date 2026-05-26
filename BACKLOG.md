@@ -637,6 +637,198 @@ The flag is opt-in. Gate without \`--feedback\` works exactly as today. Adoption
 **Caught:** 2026-05-26 cross-track research session.
 
 
+### #151 — Friendly project name override via .forge/project.json
+Filed 2026-05-26. Smallest piece of the project-registry / orchestrator-tracking arc; ships first since both later features (forge projects CLI, dashboard Projects view) consume it.
+
+**Problem.** Project labels in the dashboard chip + future registry derive from basename(projectDir). Some projects' directory names aren't friendly ("pocket-v1" → "Pocket — typing tutor"). User needs a way to override.
+
+**Shape.** Optional file at \`<projectDir>/.forge/project.json\`:
+
+\`\`\`json
+{
+  "name": "Pocket — typing tutor",
+  "description": "split-keyboard pen-down trainer"
+}
+\`\`\`
+
+Both fields optional. Missing file OR missing field → fall back to basename behavior (current).
+
+Lives in \`.forge/\` (already created by \`forge init\`). No new directory.
+
+**Why JSON over YAML.** Dashboard already parses JSON for .vscode color; no new parser needed. The shape is trivially flat; YAML's structural advantages don't apply.
+
+**Why not piggyback on .vscode/settings.json** (where we get the color from): VS Code-specific. Some users / machines won't have VS Code. \`.forge/project.json\` is forge-native and works regardless.
+
+**Implementation surface (small, ~30 LoC):**
+- \`dashboard/src/project-meta.ts\` — extend the existing resolver. Read \`<projectDir>/.forge/project.json\` after the .vscode lookup. Return \`{label, color, description?}\`. \`label\` becomes \`name\` if present, basename otherwise.
+- Dashboard \`ProjectChip\` already uses the resolved \`label\` — picks up the override automatically.
+- Existing project-meta.test.ts adds 3-4 tests: project.json present with name only, with name + description, missing file (basename fallback), malformed JSON (basename fallback).
+
+**Out of scope this ticket:**
+- CLI to set the name (\`forge projects set\`). For now, edit the file by hand — fine for personal use.
+- Reading project.json from anywhere outside the dashboard. The future forge projects list CLI will need it too; at that point refactor into a shared module. Don't preemptively move code.
+- Caching invalidation when project.json changes mid-process — restart dashboard to pick up.
+- Description anywhere — it's read but only stored on the entry; rendering it is for the future Projects view ticket.
+
+**Composite with:**
+- #(future) forge projects list — registry CLI. Reads the same resolver.
+- #(future) orchestrator heartbeats — \`~/.forge/orchestrators/\` driven by Claude Code SessionStart/Stop hooks.
+- #(future) dashboard Projects view — composes registry + heartbeats + friendly names.
+
+These three are listed in the 2026-05-26 conversation; will file separately.
+
+**Sizing.** Tiny. One focused session.
+
+**Caught:** 2026-05-26 design conversation about project-registry / orchestrator-visibility feature arc.
+
+
+### #152 — forge projects list CLI: registry derived from runs DB + filesystem scan
+Filed 2026-05-26. Second piece of the project-registry / orchestrator-tracking arc; needs #151 (friendly name override) shipped to consume the project.json names.
+
+**Problem.** User comes back from a break (travel, vacation) and can't easily remember every directory that is an active forge project, what state each is in, where on disk they live. No registry today.
+
+**Shape — implicit registry, no new persistent state.** A "forge project" is detectable from existing signals:
+- **DB:** \`SELECT DISTINCT project_dir FROM runs WHERE project_dir IS NOT NULL\` — every projectDir forge has ever dispatched against.
+- **Filesystem:** scan a configurable root (default \`~/code\`, bounded depth) for directories whose \`CLAUDE.md\` contains the \`<!-- forge:orchestrator-start -->\` marker. Catches forge-init'd projects that haven't yet had a run.
+
+Union, dedupe, sort by last activity. No \`forge projects add\` ceremony; \`forge init\` (or first \`forge new\` against a dir) effectively registers via these signals. Deleting a project drops it out naturally.
+
+**Per-project metadata (no new tracking):**
+- Friendly name (from \`.forge/project.json\` per #151) or basename
+- Description (from \`.forge/project.json\`)
+- Project color (from \`.vscode/settings.json\` titleBar.activeBackground — already resolved by dashboard/src/project-meta.ts)
+- Last forge activity (max created_at across all runs/tasks for this projectDir)
+- Total run count
+- In-flight count (active runs + awaiting-gate runs)
+- BACKLOG.md presence (\`<project>/BACKLOG.md\` exists?)
+- README first line, if a README exists (the "what is this?" reminder)
+- Last git commit timestamp (\`git log -1 --format=%ct\` cross-check, optional — guards against the case where forge.db says "active 6 months ago" but git shows "yesterday")
+
+**CLI surfaces:**
+\`\`\`
+forge projects list                              # table sorted by last activity
+forge projects list --sort=name                  # alphabetical
+forge projects list --json                       # for scripting / dashboard
+forge projects show <name>                       # detailed view of one project
+forge projects show <name> --json                # detailed JSON
+\`\`\`
+
+Filesystem scan root configurable via env var (\`FORGE_PROJECT_SCAN_ROOTS=~/code,~/work\`) and \`--scan-root\` flag. Default \`~/code\` with max depth 3 (bounded to prevent runaway scans on large hierarchies).
+
+**Implementation surface (~80-100 LoC):**
+- New \`src/cli/commands/projects.ts\` — subcommand registration + handler logic.
+- Refactor \`dashboard/src/project-meta.ts\` into a shared location (probably \`src/util/project-meta.ts\` with a re-export from the dashboard alias). Both CLI + dashboard read project.json + .vscode color from the same code.
+- New SQL helper (in src/store/runs.ts or sibling): \`uniqueProjectDirs(): Array<{projectDir, lastRunAt, runCount, inFlightCount}>\`.
+- Filesystem scan helper — pure-ish, recursive walk with depth bound, looks for CLAUDE.md + orchestrator marker.
+- Tests for the SQL helper, the filesystem scanner, and the CLI command's pure formatting logic.
+
+**Out of scope:**
+- Dashboard Projects page (separate ticket — #154).
+- Orchestrator-heartbeat integration (separate ticket — #153).
+- \`forge projects add / remove\` (none needed — implicit registry).
+- \`forge projects set <field> <value>\` to mutate project.json. For now, edit the file.
+
+**Sizing.** Small-medium. One focused session.
+
+**Caught:** 2026-05-26 design conversation.
+
+
+### #153 — Orchestrator heartbeats: track live Claude Code sessions running forge orchestrator
+Filed 2026-05-26. Third piece of the project-registry / orchestrator-tracking arc.
+
+**Problem.** Forge doesn't know which projects have a live Claude Code orchestrator session open. The dashboard / future Projects view can show "this project had recent forge activity" but can't show "the user has a terminal open in this project RIGHT NOW driving forge."
+
+The user explicitly asked for the latter in 2026-05-26 conversation. Two interpretations were considered:
+- A. "Projects with recent forge activity" — derivable from existing DB. Approximate (a project can have an active in-flight run with no open terminal, or an open terminal with no recent dispatch). User rejected; wants the literal answer.
+- B. "Live Claude Code sessions running the forge orchestrator block" — needs the orchestrator to actively announce itself.
+
+This ticket implements B.
+
+**Shape.** Heartbeat-driven liveness via Claude Code hooks installed by \`forge init\`:
+
+1. **SessionStart hook** — when Claude Code starts in a project with the forge orchestrator block, the hook writes \`~/.forge/orchestrators/<session-id>.json\`:
+\`\`\`json
+{
+  "sessionId": "abc123",
+  "projectDir": "/Users/steve/code/my-app",
+  "startedAt": "2026-05-26T10:00:00Z",
+  "lastSeen": "2026-05-26T10:00:00Z"
+}
+\`\`\`
+
+2. **Stop hook** (fires after every agent turn) — touches \`lastSeen\` in the same file.
+
+3. **SessionEnd hook** — deletes the file.
+
+4. **Liveness rule** (read side): a session with \`lastSeen\` newer than N minutes is "live"; older is "stale" (the SessionEnd hook didn't fire — terminal force-killed, etc.). Stale entries can be auto-garbage-collected after some threshold.
+
+**Installation:**
+- \`forge init\` writes the hook config to \`<project>/.claude/settings.json\`, alongside existing project setup (CLAUDE.md, .forge/).
+- \`--no-install-hooks\` flag (already exists for commit-msg) extends to also suppress this hook install.
+- Hook script lives at \`scripts/claude-hooks/orchestrator-heartbeat\` (shell, ~30 LoC) and is symlinked into projects.
+
+**Composes with:**
+- #152 (projects registry) — Projects view displays a "🟢 live now" badge on the card for any project with a fresh heartbeat.
+- #154 (dashboard Projects page) — renders the live status.
+
+**Out of scope:**
+- Live-streaming the orchestrator's CONVERSATION (just liveness, not content).
+- Showing what the orchestrator is doing right now (just "alive y/n").
+- Multi-user / multi-machine orchestrator visibility — single Mac, single user.
+
+**Sizing.** Medium. Hook scripts + install flow + tests + dashboard cross-reference.
+
+**Tradeoff to flag at implementation time:** every \`forge init\`'d project gets a Claude Code hook installed in \`<project>/.claude/settings.json\`. Some users may find that intrusive. The \`--no-install-hooks\` opt-out covers it.
+
+**Caught:** 2026-05-26 design conversation.
+
+
+### #154 — Dashboard Projects view: registry + orchestrator status as one page
+Filed 2026-05-26. Fourth piece of the project-registry / orchestrator-tracking arc; consumes #151, #152, #153.
+
+**Problem.** The dashboard today only surfaces individual runs + in-flight tasks. There's no project-level view that answers "what projects do I have?" or "where am I actively working right now?".
+
+**Shape.** New top-level dashboard page or tile: "Projects". Each project rendered as a card.
+
+**Per-card content:**
+- Project chip (color from .vscode, name from .forge/project.json if present)
+- Description (from .forge/project.json) if present
+- Last activity timestamp (relative: "2 hours ago", "3 days ago", "6 months ago")
+- Run count + in-flight count
+- 🟢 LIVE badge if \`~/.forge/orchestrators/\` has a fresh heartbeat for this projectDir (#153)
+- Click → drills into the runs view filtered to this project
+
+**Sort order:** by last activity, descending. Live projects float to the top (their last activity is "now").
+
+**Visual states:**
+- Live (orchestrator open + recent forge activity)
+- Active (recent forge activity, no open orchestrator)
+- Idle (no activity in >N days, no orchestrator)
+- Stale (>6 months, dimmed but still visible)
+
+**Implementation surface:**
+- Dashboard server: new \`/api/projects\` endpoint returning the registry data + heartbeat status. Shape mirrors what \`forge projects list --json\` (from #152) returns, plus the heartbeat read.
+- Dashboard client: new \`<ProjectsView />\` component. Uses the existing chip styling from #143.
+- Routing: add a "Projects" link to the dashboard nav (alongside the existing activity feed).
+
+**Composes with:**
+- #143 (project chip color resolution) — reused for project cards.
+- #151 (friendly name) — display name source.
+- #152 (registry CLI) — same data source (refactored helper).
+- #153 (orchestrator heartbeats) — live status badge.
+
+**Out of scope:**
+- Editing projects from the dashboard. The dashboard is read-only; mutations stay in CLI.
+- Filtering / search beyond sort order. Add if it becomes painful.
+- Per-project drill-down view richer than the existing runs view (yet — maybe later as a follow-up).
+
+**Sizing.** Medium. The API endpoint is small; the client view is the bulk.
+
+**Sequencing.** Needs #151, #152, #153 all shipped first. Comes last in the arc.
+
+**Caught:** 2026-05-26 design conversation.
+
+
 ## Done (recent)
 
 ### #147 — Reds: evidence-anchored output schema + post-validation to catch hallucinated citations

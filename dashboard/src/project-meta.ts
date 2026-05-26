@@ -1,5 +1,12 @@
-// Resolves a project's display metadata (label + color) for dashboard rendering.
-// Color source preference:
+// Resolves a project's display metadata (label + color + optional description)
+// for dashboard rendering.
+//
+// Label source preference (#151):
+//   1. <projectDir>/.forge/project.json → `name` field. Override for projects
+//      whose dir basename isn't friendly ("pocket-v1" → "Pocket — typing tutor").
+//   2. basename(projectDir).
+//
+// Color source preference (#143):
 //   1. <projectDir>/.vscode/settings.json → workbench.colorCustomizations
 //      .titleBar.activeBackground (matches the color the user already uses to
 //      identify the project's VS Code window).
@@ -7,13 +14,20 @@
 //      against the dashboard's dark background at the chosen S/L values.
 //
 // Cache lives for the lifetime of the dashboard process — restart `forge
-// dashboard start` to pick up .vscode/settings.json changes. Hot-reload via
-// fs.watch is out of scope (see #143 spec).
+// dashboard start` to pick up .vscode/settings.json or .forge/project.json
+// changes. Hot-reload via fs.watch is out of scope (see #143 spec).
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
-export type ProjectMeta = { label: string; color: string };
+export type ProjectMeta = {
+  label: string;
+  color: string;
+  // Optional one-line "what this project is" string from .forge/project.json.
+  // Read by the resolver but not surfaced through ActivityEntry/InFlightEntry —
+  // the future Projects view (#154) consumes it; per-task cards don't.
+  description?: string;
+};
 
 const cache = new Map<string, ProjectMeta>();
 
@@ -21,9 +35,11 @@ export function resolveProjectMeta(projectDir: string | null): ProjectMeta | nul
   if (!projectDir) return null;
   const cached = cache.get(projectDir);
   if (cached) return cached;
+  const overrides = readProjectJson(projectDir);
   const meta: ProjectMeta = {
-    label: basename(projectDir),
+    label: overrides?.name ?? basename(projectDir),
     color: readVscodeColor(projectDir) ?? hashColor(projectDir),
+    ...(overrides?.description ? { description: overrides.description } : {}),
   };
   cache.set(projectDir, meta);
   return meta;
@@ -34,6 +50,25 @@ export function resolveProjectMeta(projectDir: string | null): ProjectMeta | nul
 // production code paths.
 export function _clearCacheForTesting(): void {
   cache.clear();
+}
+
+function readProjectJson(projectDir: string): { name?: string; description?: string } | null {
+  const path = join(projectDir, ".forge", "project.json");
+  if (!existsSync(path)) return null;
+  try {
+    const raw = readFileSync(path, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: { name?: string; description?: string } = {};
+    if (typeof parsed["name"] === "string" && parsed["name"].length > 0) {
+      result.name = parsed["name"];
+    }
+    if (typeof parsed["description"] === "string" && parsed["description"].length > 0) {
+      result.description = parsed["description"];
+    }
+    return result;
+  } catch {
+    return null;
+  }
 }
 
 function readVscodeColor(projectDir: string): string | null {
