@@ -18,6 +18,7 @@ import { registerNotify } from "./commands/notify.js";
 import { registerProjects } from "./commands/projects.js";
 import { registerUsage } from "./commands/usage.js";
 import { registerSweep } from "./commands/sweep.js";
+import { registerClaude } from "./commands/claude.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -29,7 +30,12 @@ const program = new Command();
 program
   .name("forge")
   .description("Multi-agent workflow orchestrator")
-  .version(version);
+  .version(version)
+  // Required for `forge claude` to passThroughOptions (i.e. forward unknown
+  // flags like --continue / --model / --add-dir straight to the `claude`
+  // binary). Affects only commands that opt into passThroughOptions; others
+  // parse normally.
+  .enablePositionalOptions();
 
 registerNew(program);
 registerNext(program);
@@ -49,6 +55,7 @@ registerNotify(program);
 registerProjects(program);
 registerUsage(program);
 registerSweep(program);
+registerClaude(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
