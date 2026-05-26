@@ -114,7 +114,7 @@ export function registerInit(program: Command): void {
       console.log(`Note: .claude/settings.local.json and .claude/commands/ are per-developer.`);
       console.log(`      Other contributors run \`forge init\` after cloning to bootstrap their local copies.`);
       console.log(``);
-      console.log(`Next: run 'claude' from this directory to talk to the forge orchestrator.`);
+      console.log(`Next: run 'forge claude' from this directory to talk to the forge orchestrator.`);
       console.log(`Try /orient to load session state and /handoff before you stop.`);
     });
 }
