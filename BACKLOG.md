@@ -5,115 +5,49 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
+**Last session ended 2026-05-26.** All 15 commits pushed to origin/main. 406/406 tests green.
 
-**State at end of 2026-05-14.** **v2 cutover shipped.** `main` is at `b818f27` (the `yaml-orchestrator-116` merge). 279/279 tests passing.
+**Where we left off:** Finished the day's last user-visible piece — `forge claude` launcher (commit `e556f47`) wraps the claude-code CLI with project auto-name + chdir-to-root + status banner + pre-flight checks. User chose explicit `forge claude` invocation (Option A, no shell alias). Conversation closed with this handoff.
 
-**What shipped today (2026-05-14) — the biggest day:**
-- **#116 v2 cutover complete.** 23 commits on `yaml-orchestrator-116` merged to `main` as `b818f27`. v1 spine is gone (13 modules + 8 TS workflows deleted). v2 is the only orchestrator.
-- **`forge invoke`** — single-agent dispatch primitive, the RACI bread-and-butter (commit `f54d8d5`).
-- **RACI seed + orchestrator template rewrite** — `seeds/forge-raci.md` classifies prompts into 11 work types; implementation routes through the pipeline, everything else through invoke (commits `75b912f`, `56480b7`).
-- **Reds + fanout in the v2 runner** — step 3 of the 2,1,3 sequence (commit `3af1cd3`).
-- **CLI cutover** — `forge new`/`next`/`gate` now route to v2; reconcile + submit deleted (commit `5ad0061`).
-- **First real forge v2 run end-to-end** — `run-smoke-v3-491805`. Architect → plan → build (engineer + 5 reds parallel) → verify, producing the `--version` flag diff committed as `51a3c64`. Validates DAG dispatch, Bedrock containers, brief/upstream input threading, parallel reds, gate transitions, verdict aggregation.
-- **Bugs caught + fixed during smoke testing** (commit `b83329f`): TASK_PACKAGE_MARKDOWN missing from SpawnContext, Haiku Bedrock model ID typo, run-metadata not folding into task inputs.
-- **Model mapping fix** (commit `b0cdc09`): bedrock `spec-writer` = Sonnet 4.6 (Opus restricted on work account), oauth `spec-writer` = Opus 4.7 (personal Pro).
-- **Dashboard trim** (commit `bd8a4af`): removed 4 obsolete workflow options + `/api/submit` endpoint; only `feature*` workflows remain.
+**Picked up next (do these in order):**
+1. **#156 — dashboard usage view.** The payoff piece for #155. Spec lives in the ticket. New `/api/usage` endpoint reusing the SQL shape from `src/cli/commands/usage.ts`; new `<UsageView />` tab alongside activity/projects in `dashboard/`. Headline metric (likely cache hit rate or weighted-tokens last-7d with delta). Comparison views (project vs project, workflow vs workflow, model mix per role). Cache efficiency callouts flag workflows with hit-rate < 80% or reuse-ratio < 5x. Time series for trend tracking (per day per project, rolling 30d). NO dollar amounts — this is unitless weighted-tokens. User explicitly flagged #155 (data) is a waste without #156 (view); ship soon.
+2. **#158 — `forge claude --bedrock`.** Auto-arm bedrock auth without sourcing `scripts/use-bedrock.sh`. Spec in the ticket. Adds `.forge/project.json` `auth: "bedrock"` field (sticky per-project) + `--bedrock` flag (per-invocation override). `forge claude` spawns claude-code with CLAUDE_CODE_USE_BEDROCK=1 + resolved AWS_PROFILE in child env. Real friction removal for the bedrock workflow.
+3. **#88 — corpus-consistency propagate.** Out of scope on today's design-corpus arc (#67/#80/#86/#87 shipped); ticket still open. Cross-cutting components (pill row, toasts) need a retrofit pass after design. Possibly its own workflow primitive `ui-design-propagate`. Pick up if doing UI design work.
 
-**Top of the active stack now:**
-0. **#137 — Dashboard split into its own repo.** Steven's call 2026-05-14: dashboard should be a separate, optional project that views all forge runs across all projects on the system. Big rewrite. Don't conflate with v2 cutover.
-1. **#136 — Rebuild v2-aware pill row in the dashboard.** Stubbed out during v2 cutover; queries.ts returns empty phaseShape. Lower priority than #137 (the split) — but if doing #137 means starting fresh, build pill row in the new repo instead. Decide which first.
-2. **#135 — Build reds review the wrong artifact (commit metadata, not the diff).** Surfaced on `run-smoke-v3-491805`: red-wide on the build step reviewed commit `b83329f` (the *previous* commit) instead of the engineer's actual diff in result.json. The architecture is right (red gets artifact = primary's result.json), but the engineer's result.json contains a summary, not the diff. Seed needs the red to grep the working tree / git diff.
-3. **#134 — Gate UX: don't suggest `forge next` when run is complete.** Cosmetic — `forge gate <id> advance` on the terminal step prints "Next: forge next <run-id>" even when the run flipped to `complete`. Trivial fix in `src/cli/commands/gate.ts`.
-4. **#132 — `forge backlog` CLI (fast-follow to v2).** Move BACKLOG.md operations behind a CLI surface; storage swap (SQLite or external tracker) later. Filed 2026-05-14 during v2 RACI design.
-5. **#130** Bedrock concurrent-request starvation — surface idle-timeout kills as `failed.reason=infra`. Composite with #74.
-6. **#131** Dashboard CLIENT_JS bundle stale until process restart. Likely absorbed by #137 (the dashboard rewrite) but still real today. Composite with #77.
-7. **Auth fix cluster (REDUCED IN URGENCY by #121 landing).** **#117** watchdog default profile hardcoded wrong, **#118** watchdog has no log, **#119** manual `aws sso login` leaves STS cache stale, **#120** `forge auth status` is shallow. All still real bugs, but they apply only to mount-mode (now opt-in via `FORGE_AUTH_MODE=mount`).
-8. **#115** dashboard task list smart-refresh gap — composite with #137.
-9. **#112** transactional dispatch + gate writes. v2's gate.ts is a fresh write; reference the v1 reconcile transactional patterns when getting to this.
-10. **#125** implementer seeds don't mention `forge-test` — ~10 lines in 4 seed files. Re-check whether v2 specialist seeds inherited the gap.
-11. **#107** reds-during-reconcile — v2 has no reconcile yet, so this is on ice until reconcile gets re-added (if ever).
-12. **#129** — shareable agent-skills pattern (future). Placeholder.
+**External state to remember:**
+- Twilio SMS campaign still awaiting approval (submitted 2026-05-26). Once approved, verify `forge notify test` still works.
+- 34 phantom-active runs cleaned via `forge sweep` today; dashboard live-indicator + `forge projects` counts now accurate. New invokes self-close per #157 fix.
 
-**Useful runtime state:**
-- `agent-dev-worker:latest` was rebuilt during #111 to bake `forge-test`. Still current.
-- Node 22 (LTS). Don't `brew upgrade` to Node 26 — better-sqlite3 has no prebuilts; you'll get cert errors on node-gyp.
+**Decisions worth not relitigating:**
+- LiteLLM (#27) closed as unreliable; capability-routing rebuilt as token-telemetry (#155) instead. If routing later wanted, build directly against provider SDKs, not through proxy.
+- Dashboard a11y (#123) deferred — no real users; solo-developer-on-localhost doesn't pay for production a11y hygiene yet.
+- Reconcile-era tickets (#74 #107) closed stale — reconcile gone in v2 cutover; re-file if v2 ever grows orphan recovery.
+- `.claude/commands/` and `.claude/settings.local.json` are PER-DEVELOPER (gitignored); project-shared `.claude/settings.json` stays untouched by forge. Documented in concepts.md.
+- Role-level model default (agent settings.json `model:` field) deferred — workflow YAML is the right surface with only 3 workflows; revisit at N>5.
+- Cache numbers stored as raw token counts, NOT dollars. OAuth has no per-token cost; Anthropic/Bedrock price drift makes hardcoded tables stale. Weighted-tokens formula is the unitless proxy (input + 1.25 × cache_create + 0.1 × cache_read + 5 × output).
 
-**Honest flags:**
-- **v2's first full run produced quality output** (architect → tech-lead → engineer → qa-engineer with reds) but red-wide and red-narrow were both "inconclusive" because they reviewed the wrong artifact (see #135). The pipeline itself works; the red discipline at the build step needs a seed update.
-- **Reconcile gone.** v1's orphan-task recovery is deleted. If a container produces result.json but Node loses track of the docker close event, the task sits in `running` forever. `forge retry <id>` is the manual escape. File a v2 reconcile back if the bug shows up.
-- **Dashboard pill row stubbed** — the run page renders the task table fine, but no pills. Tracked as #136.
-- **#25 + #32 still un-validated end-to-end** under v2 (reject/onReject flow, failed-result detection). v2's gate.ts has an `on_reject` code path written but never exercised in a real run.
+**Lessons saved as memories this session:**
+- `feedback_shared_db_schema_changes.md` — schema changes to ~/.forge/forge.db have machine-wide blast radius; flag and ask before shipping. Caught after the #155 migration broke other live forge runs on this machine.
 
-**Local-only files (gitignored):** none currently.
+**Shipped today (for reference; git log is canonical):**
+- #117 #118 #119 #120 SSO/STS reliability arc (commit `f9360b0`)
+- #67 #80 #86 #87 shared design-corpus arc (commit `2baac2d`)
+- Slash commands /orient + /handoff (commit `350d1ac`)
+- Workflow YAML downgrades — plan/build/verify → Sonnet; architect stays on Opus (commit `0088737`)
+- #155 token + cache telemetry (capture, backfill, CLI) (commit `34d4fbd`)
+- Per-developer .claude/ convention + auto-migration (commit `df7ed78`)
+- #157 invoke run-close + forge sweep + getDb readonly-cache fix (commit `da91ec8`)
+- `forge claude` launcher + commit-msg hook strip-list extension (commit `e556f47`)
+- Grooming closes: #27 #65 #93 #77 #74 #107 #123
 
-**Branch hygiene:** `yaml-orchestrator-116` has been merged; safe to delete locally. Only `main` should remain.
-
-2026-05-23: shipped validation-discipline-seeds (commit 9ddfe45). All 5 implementer seeds now refuse status=complete without tests + screenshots for visual work. qa-engineer repositioned as second line. Orchestrator template updated to verify seed enforcement. Reinstalled seeds; refreshed orchestrator blocks in audit-workspace + forge-dashboard. Restart any running orchestrator sessions to pick up new CLAUDE.md.
-
-2026-05-24 (post-rebase reconciliation): Two parallel implementations of #138 collided on origin. Steven's work-laptop session shipped the full 3-part fix (commit 14d4637, merged via 741e6f2) with --workspace flag + listRunsForWorkspace + metadata.workspace stamping. Our local Mac session shipped a partial 2-part fix (--project flag + listRunsForProject) plus a docs rewrite and the dashboard un-split.
-
-Reconciled by Option A: hard-reset local to origin/main, then layered just the unique work on top:
-- 07693dc: docs commit (cross-project install path + workspace UX + new how-to). Picked up README, quick-start, concepts, the new how-to-use-forge-across-projects.md, surgical ./bin/forge → forge in 4 how-to-*.md, plus the SPEC PRD with a historical-note header. Adapted all `--project` references in status filtering to `--workspace` to match origin's actual ship.
-- d148962: dashboard un-split (#140), cherry-picked from local 78d6a68 with a BACKLOG.md conflict resolution (took origin's HEAD; #140 filed fresh).
-
-The local 2320404's code work (--project flag, listRunsForProject, countRunsForeignTo, resolveStatusFilter helper, status.test.ts) is GONE — superseded by origin's better implementation. The PRD at docs/prds/cross-project-usability-138.md preserved for historical context with a header noting the divergence.
-
-#139 (which our session filed for the deferred piece b) is moot — origin's 14d4637 already shipped piece b. Origin had already assigned #139 to a different ticket (build-step fanout) so there's no conflict to clean up; our #139 just never materialized in main.
-
-Cleanup TODOs still on the user:
-- Delete ~/code/forge-dashboard/ locally (safe — workspace works end-to-end, source in GitHub)
-- Archive forge-dashboard GitHub repo (UI action)
-
-Branch is 2 commits ahead of origin/main: 07693dc + d148962. 230/230 tests pass, both typechecks clean.
-
-2026-05-24 (later session, #139 fanout shipped): wired build-step fanout in feature.yml with discipline-based agent routing per child task. Spec at docs/prds/build-fanout-discipline-139.md.
-
-What landed:
-- **`FanoutDefSchema` extension** in src/v2/schema.ts: optional `agent_map: Record<string, string>` (discipline → agent role) and `discipline_key: string` (default at runtime "discipline"). Both optional → backwards compatible.
-- **`resolveChildAgent` helper** in src/v2/runNext.ts (pure, exported for testing). Wires `step.agent` as fallback when input isn't an object, when discipline_key field is missing or non-string, or when discipline isn't in agent_map.
-- **Tech-lead seed update** at seeds/agents/tech-lead/CLAUDE.md: output schema gains `discipline` per step; new "Steps must be file-independent" section (load-bearing); discipline-classification guidance.
-- **feature.yml build step** now has `fanout: {from_upstream: {step: plan, array_key: steps, input_key: step}, agent_map: {frontend → frontend-specialist, backend → backend-specialist, infosec → security-advisor, platform → agentic-platform-builder}, max_concurrency: 4, failure_mode: fail-phase}`. Reds stay on the parent (per-parent dispatch, unchanged). Fallback agent is `engineer`.
-- **Docs:** new "Fanout" entry in docs/concepts.md; new "Fanout with discipline-based agent routing" section in docs/how-to-new-workflow.md with the feature build canonical example.
-
-Also filed this session:
-- **#141** (SQL schema single-source-of-truth) — drift-fix follow-up from #140. Three options laid out in the body; option 1 (typed column constants) recommended as smallest first step.
-
-Verified:
-- npm run typecheck — clean (root + dashboard)
-- npm test — 238/238 pass (+8 new: 2 schema, 6 resolveChildAgent)
-- Workflow load: feature.yml's build step parses to {agent: engineer, fanout.agent_map: {4 disciplines}, reds_count: 5}
-- End-to-end smoke run deliberately deferred — real container dispatch has cost. User can run `forge new feature "..." --brief "..."` when ready to validate the planner-seed-emits-discipline + fanout-routes-correctly round trip. If the tech-lead's first plan doesn't split cleanly by discipline, that's a seed-tuning loop, not a code bug.
-
-Files in this commit: src/v2/schema.ts, src/v2/schema.test.ts, src/v2/runNext.ts, src/v2/runNext.test.ts, seeds/agents/tech-lead/CLAUDE.md, seeds/workflows/feature.yml, docs/concepts.md, docs/how-to-new-workflow.md, docs/prds/build-fanout-discipline-139.md (NEW), BACKLOG.md.
-
-Next-session orientation: end-to-end smoke run of #139 is the natural next thing if you want to validate the round trip live. Or pick up #141 (drift fix), or any of the other active tickets.
-
-2026-05-25 (notifications): shipped Twilio SMS notifications on terminal run-state transitions (#142). Spec at docs/prds/notifications-twilio-142.md.
-
-What landed:
-- **New src/notify/ module** — three files: format.ts (pure SMS body composition, truncates to one segment), twilio.ts (network POST via built-in fetch, never throws, env-vars read at call time), trigger.ts (composition + FORGE_NOTIFY_ON filtering).
-- **Two hook points** — src/store/runs.ts::updateRunStatus fires on terminal complete/abandoned (with previous-status check to skip idempotent re-saves). src/v2/runNext.ts wires the blocked_by_red site at the verdict-aggregation path. Both fire-and-forget (void Promise) so notifications never block or crash a run.
-- **`forge notify test` subcommand** at src/cli/commands/notify.ts. Supports --to override. Fails cleanly with a guidance message when env not configured.
-- **Docs:** new docs/how-to-set-up-notifications.md (top-level how-to: setup, verify, triggers, opt-out, troubleshooting for common Twilio error codes). One-line pointer added to README Docs list. Quick-start NOT touched (notifications are orthogonal to the main flow).
-
-Honest scope deviations from the spec:
-- **notifyOnTaskBlockedByRed signature simplified** from `(task, run)` to `(run)` — the Task param was never used in the body. Cleaner.
-- **No event-log integration.** The spec suggested logging notify success/failure via the existing events.ts. I went with console.error for failures only (simpler, more user-visible). Successes are silent — the SMS itself is the success signal.
-
-Default OFF — no env vars = zero behavior change, zero network calls. Defense in depth: notifyTwilio re-checks isTwilioEnabled before any network attempt, even though all callers guard upstream.
-
-Tests: 262/262 pass (+22 new across format, twilio, and trigger modules). Real-SMS verification is user-side (requires Twilio creds + phone) — `forge notify test` is the gate.
-
-Cleanup TODO for the user:
-- Add the five env vars to ~/.zshrc (FORGE_NOTIFY=twilio + the four TWILIO_*). source ~/.zshrc.
-- Run `forge notify test` to confirm the path.
-- Kick off any real workflow to confirm end-to-end (terminal transition fires SMS).
-
-Next-session orientation: forge has a complete optional notification surface now. #141 (SQL schema single-source-of-truth, drift fix) is still queued. Other tickets in the active list are mostly Pencil/design-corpus stuff (#80, #81, #84, #86, #87, #88), v1/v2 infra debt (#74, #107, #112), or longer-term architectural (#106, #129).
-
-2026-05-25 (design-workflow audit): closed #81, #59, #90 from the Pencil cluster. Remaining 6 design-workflow tickets (#67, #80, #84, #86, #87, #88) stay queued — all real if the ui-design / feature-ui-design-needed workflows get used again.
-
-Steve flagged a future direction: rework the UI/UX design workflow. Not specced yet — exploratory. Key constraint noted: on the work machine, Pencil is only available as a VS Code extension; on personal Mac, desktop Pencil is an option. The desktop version may mitigate some of the queued issues (#81's stale-handle bug is VS-Code-specific). When the rework starts, the right first move is probably to decide which Pencil surface to commit to (VS Code, desktop, or both) and then re-evaluate which of #67/#80/#84/#86/#87/#88 are still real.
+**Useful CLI commands surfaced this session:**
+- `forge backlog notes show|replace` — the orient/handoff data path
+- `forge backlog list --status active|done` — bounded interface; do NOT Read BACKLOG.md
+- `forge projects list` — cross-project status with live indicator + chip
+- `forge usage --by role|workflow|project|model|alias [--since 7d] [--json]` — token/cache rollups
+- `forge usage backfill` — populates model_calls from historical container.stdout.log files (idempotent)
+- `forge sweep [--dry-run] [--limit]` — close phantom-active runs
+- `forge claude` — launches claude-code with project auto-name + pre-flight; passes through --continue/--resume/etc.
 
 ## Active
 
