@@ -58,10 +58,11 @@ This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creat
 
 - A `commit-msg` git hook that rejects commits with `Co-Authored-By: Claude` trailers or other AI-attribution boilerplate (defense-in-depth for the `no-ai-attribution` constraint).
 - Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd) wired into `.claude/settings.json` that write a heartbeat file at `~/.forge/orchestrators/<session-id>.json`. `forge projects list` reads these to show which orchestrators are currently live (●), and the dashboard surfaces the same signal in its Projects view.
+- Slash commands `/orient` and `/handoff` symlinked into `.claude/commands/`. `/orient` runs the start-of-session protocol (notes / active tickets / git state / live sessions) and ends with "What's the priority?" `/handoff` drafts the next-session notes block and applies it via `forge backlog notes replace`. Both hard-code use of the `forge backlog` CLI instead of reading the file whole. See `docs/concepts.md → Slash commands`.
 
-Re-run `forge init` any time you upgrade forge — the orchestrator block is fence-marked and replaces in place; the commit-msg hook is a symlink; the Claude hooks are merged into `.claude/settings.json` (existing user hooks are preserved, only the forge heartbeat entries get upgraded). All re-runs are idempotent.
+Re-run `forge init` any time you upgrade forge — the orchestrator block is fence-marked and replaces in place; the commit-msg hook is a symlink; the Claude hooks are merged into `.claude/settings.json` (existing user hooks are preserved, only the forge heartbeat entries get upgraded); slash commands are symlinks so template edits in the forge repo flow to every project on next session. All re-runs are idempotent. `forge upgrade` performs the same re-init across the current project as step 4, so already-init'd projects pick up new hooks / commands automatically.
 
-Skip both hook installs with `forge init --no-install-hooks` if you'd rather wire them yourself. Forge will never clobber an existing `commit-msg` hook or unrelated keys in `.claude/settings.json`; if `settings.json` is unparseable JSON it's left alone with a SKIPPED notice.
+Skip all three hook-style installs with `forge init --no-install-hooks` if you'd rather wire them yourself. Forge never clobbers an existing `commit-msg` hook, an unrelated key in `.claude/settings.json`, or a project-local `.claude/commands/<name>.md` override; if `settings.json` is unparseable JSON it's left alone with a SKIPPED notice.
 
 ## 4. Pick a path: orchestrator-led or direct CLI
 

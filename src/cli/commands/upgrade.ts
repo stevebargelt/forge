@@ -4,7 +4,15 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { applyOrchestratorBlock } from "./init.js";
+import {
+  applyOrchestratorBlock,
+  executeClaudeCommandsPlan,
+  executeClaudeHooksPlan,
+  executeHookPlan,
+  planClaudeCommands,
+  planClaudeHooks,
+  planCommitMsgHook,
+} from "./init.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -140,7 +148,10 @@ export function registerUpgrade(program: Command): void {
         }
       }
 
-      // Step 4: re-init current project's CLAUDE.md
+      // Step 4: re-init current project — CLAUDE.md orchestrator block + all
+      // hook installs (commit-msg, claude session hooks, slash commands).
+      // Re-running the install plans is idempotent: already-current entries
+      // no-op; updates apply when the template/source has moved.
       if (!willReinitProject) {
         console.log(`[4/4] project init: skipped`);
       } else {
@@ -151,18 +162,38 @@ export function registerUpgrade(program: Command): void {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
           const next = applyOrchestratorBlock(existing, template);
-          if (next === existing) {
-            console.log(`[4/4] project init: already current (no change)`);
-          } else if (dryRun) {
-            console.log(`[4/4] project init: would update orchestrator block in ${projectClaudeMd}`);
-          } else {
-            writeFileSync(projectClaudeMd, next);
-            console.log(`[4/4] project init: updated orchestrator block`);
-            // Ensure .forge/ exists for project overrides (init does this too).
-            const projForgeDir = join(cwd, ".forge");
-            if (!existsSync(projForgeDir)) {
-              mkdirSync(projForgeDir, { recursive: true });
+          if (next !== existing) {
+            if (dryRun) {
+              console.log(`[4/4] project init: would update orchestrator block in ${projectClaudeMd}`);
+            } else {
+              writeFileSync(projectClaudeMd, next);
+              console.log(`[4/4] project init: updated orchestrator block`);
+              // Ensure .forge/ exists for project overrides (init does this too).
+              const projForgeDir = join(cwd, ".forge");
+              if (!existsSync(projForgeDir)) {
+                mkdirSync(projForgeDir, { recursive: true });
+              }
             }
+          } else {
+            console.log(`[4/4] project init: CLAUDE.md already current`);
+          }
+
+          // Refresh hook installs alongside the orchestrator block so projects
+          // init'd before #153/#118/slash-commands shipped pick up the new
+          // pieces. Each plan is idempotent — already-linked → no-op; new
+          // installs land; updated commands (new template files added to
+          // FORGE_SLASH_COMMANDS) get symlinked.
+          const commitMsg = planCommitMsgHook(cwd);
+          const claudeHooks = planClaudeHooks(cwd);
+          const slashCmds = planClaudeCommands(cwd);
+          if (dryRun) {
+            console.log(`        commit-msg hook: ${commitMsg.action}`);
+            console.log(`        claude hooks:    ${claudeHooks.action}`);
+            console.log(`        slash commands:  ${slashCmds.action}`);
+          } else {
+            console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
+            console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
+            console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
           }
         }
       }

@@ -1,10 +1,18 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyOrchestratorBlock, planClaudeHooks, executeClaudeHooksPlan, planCommitMsgHook } from "./init.js";
+import {
+  applyOrchestratorBlock,
+  executeClaudeCommandsPlan,
+  executeClaudeHooksPlan,
+  forgeSlashCommands,
+  planClaudeCommands,
+  planClaudeHooks,
+  planCommitMsgHook,
+} from "./init.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
 # forge orchestrator
@@ -273,4 +281,77 @@ test("executeClaudeHooksPlan: idempotent — running install twice doesn't accum
   assert.equal(parsed.hooks.SessionStart.length, 1);
   assert.equal(parsed.hooks.Stop.length, 1);
   assert.equal(parsed.hooks.SessionEnd.length, 1);
+});
+
+// ----- planClaudeCommands / executeClaudeCommandsPlan (/orient + /handoff) -----
+
+test("forgeSlashCommands: includes both /orient and /handoff templates", () => {
+  const cmds = forgeSlashCommands();
+  assert.ok(cmds.includes("orient.md"));
+  assert.ok(cmds.includes("handoff.md"));
+});
+
+test("planClaudeCommands: action=install for a fresh project with no .claude/commands dir", () => {
+  const plan = planClaudeCommands(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.equal(plan.entries.length, forgeSlashCommands().length);
+    for (const e of plan.entries) {
+      assert.equal(e.status, "install");
+      assert.match(e.source, /scripts\/claude-commands\//);
+      assert.match(e.target, /\.claude\/commands\//);
+    }
+  }
+});
+
+test("executeClaudeCommandsPlan: creates .claude/commands dir + symlinks each command", () => {
+  const plan = planClaudeCommands(projectDir);
+  const msg = executeClaudeCommandsPlan(plan);
+  assert.match(msg, /installed/);
+  const dir = join(projectDir, ".claude", "commands");
+  for (const name of forgeSlashCommands()) {
+    const target = join(dir, name);
+    assert.ok(existsSync(target), `${name} should exist at ${target}`);
+    assert.ok(lstatSync(target).isSymbolicLink(), `${name} should be a symlink, not a copy`);
+  }
+});
+
+test("planClaudeCommands: action=already-current after a fresh install", () => {
+  executeClaudeCommandsPlan(planClaudeCommands(projectDir));
+  const replan = planClaudeCommands(projectDir);
+  assert.equal(replan.action, "already-current");
+});
+
+test("planClaudeCommands: refuses to clobber a project-local override (regular file at the target path)", () => {
+  const dir = join(projectDir, ".claude", "commands");
+  mkdirSync(dir, { recursive: true });
+  // User wrote their own /orient.md — must not be replaced.
+  writeFileSync(join(dir, "orient.md"), "# my custom orient\n");
+  const plan = planClaudeCommands(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    const orient = plan.entries.find((e) => e.name === "orient.md");
+    assert.equal(orient?.status, "exists-other");
+    assert.match(orient?.details ?? "", /regular file/);
+  }
+  // Execute leaves the custom file alone, installs the other commands.
+  const msg = executeClaudeCommandsPlan(plan);
+  assert.match(msg, /SKIPPED/);
+  assert.equal(readFileSync(join(dir, "orient.md"), "utf8"), "# my custom orient\n");
+});
+
+test("planClaudeCommands: detects a stale-symlink (linked to old path) as exists-other so we don't clobber", () => {
+  const dir = join(projectDir, ".claude", "commands");
+  mkdirSync(dir, { recursive: true });
+  // Decoy: point /orient.md at some unrelated file (simulates a prior tool that managed slash commands)
+  const decoy = join(projectDir, "decoy.md");
+  writeFileSync(decoy, "decoy content");
+  symlinkSync(decoy, join(dir, "orient.md"));
+  const plan = planClaudeCommands(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    const orient = plan.entries.find((e) => e.name === "orient.md");
+    assert.equal(orient?.status, "exists-other");
+    assert.match(orient?.details ?? "", /symlink/);
+  }
 });

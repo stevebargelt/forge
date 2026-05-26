@@ -14,6 +14,12 @@ const CLAUDE_HOOK_EVENTS: ReadonlyArray<readonly [string, string]> = [
   ["SessionEnd", "end"],
 ];
 
+// Slash-command templates that ship with forge and get symlinked into each
+// project's .claude/commands/ so /orient + /handoff are available everywhere.
+// Symlink (not copy) so `forge upgrade` propagates template improvements to
+// all projects without per-project re-install.
+const FORGE_SLASH_COMMANDS: ReadonlyArray<string> = ["orient.md", "handoff.md"];
+
 // Wraps the project's CLAUDE.md with the forge orchestrator block. Idempotent:
 // if the fenced markers already exist, replaces the block in place; if they
 // don't, appends. Creates CLAUDE.md if missing. Adds .forge/ dir for project
@@ -50,10 +56,11 @@ export function registerInit(program: Command): void {
       const willWrite = next !== existing;
       const willCreateForgeDir = !existsSync(forgeProjectDir);
 
-      // Hook install plans (--no-install-hooks bypasses both).
+      // Hook install plans (--no-install-hooks bypasses all of them).
       const installHooks = options.installHooks !== false;
       const hookPlan = installHooks ? planCommitMsgHook(projectDir) : { action: "skipped" as const };
       const claudeHooksPlan = installHooks ? planClaudeHooks(projectDir) : { action: "skipped" as const };
+      const slashCommandsPlan = installHooks ? planClaudeCommands(projectDir) : { action: "skipped" as const };
 
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
@@ -61,6 +68,7 @@ export function registerInit(program: Command): void {
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
+        console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
         return;
       }
 
@@ -72,14 +80,17 @@ export function registerInit(program: Command): void {
       }
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
+      const slashCommandsResult = installHooks ? executeClaudeCommandsPlan(slashCommandsPlan) : "skipped (--no-install-hooks)";
 
       console.log(`forge init complete in ${projectDir}`);
       console.log(`  CLAUDE.md:        ${willWrite ? (existing ? "updated orchestrator block" : "created with orchestrator block") : "already current (no change)"}`);
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
+      console.log(`  slash commands:   ${slashCommandsResult}`);
       console.log(``);
       console.log(`Next: run 'claude' from this directory to talk to the forge orchestrator.`);
+      console.log(`Try /orient to load session state and /handoff before you stop.`);
     });
 }
 
@@ -114,7 +125,7 @@ export function planCommitMsgHook(projectDir: string): HookPlan {
   }
 }
 
-function executeHookPlan(plan: HookPlan): string {
+export function executeHookPlan(plan: HookPlan): string {
   switch (plan.action) {
     case "install":
       symlinkSync(plan.source, plan.target);
@@ -332,4 +343,115 @@ function resolveHeartbeatSource(): string {
   throw new Error(
     `claude-hooks heartbeat source not found. Looked at:\n  ${candidates.join("\n  ")}`
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slash commands (/orient + /handoff). Symlinked into <project>/.claude/commands
+// so `forge upgrade` propagates template edits without per-project re-copy.
+// Each entry is a Claude Code custom command — markdown file at
+// `<project>/.claude/commands/<name>.md`, invoked as `/<name>` in the session.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ClaudeCommandsPlan =
+  | { action: "install"; commandsDir: string; entries: ClaudeCommandEntry[] }
+  | { action: "already-current"; commandsDir: string }
+  | { action: "skipped" };
+
+export type ClaudeCommandEntry = {
+  name: string;             // e.g. "orient.md"
+  target: string;           // <commandsDir>/<name>
+  source: string;           // absolute path in the forge repo
+  status: "install" | "already-linked" | "exists-other";
+  details?: string;         // for exists-other: what's blocking
+};
+
+export function planClaudeCommands(projectDir: string): ClaudeCommandsPlan {
+  const commandsDir = join(projectDir, ".claude", "commands");
+  const entries: ClaudeCommandEntry[] = [];
+  let anyWork = false;
+  for (const name of FORGE_SLASH_COMMANDS) {
+    const source = resolveSlashCommandSource(name);
+    const target = join(commandsDir, name);
+    if (!existsSync(target)) {
+      entries.push({ name, target, source, status: "install" });
+      anyWork = true;
+      continue;
+    }
+    try {
+      const st = lstatSync(target);
+      if (st.isSymbolicLink()) {
+        const linkTarget = readlinkSync(target);
+        const resolved = resolve(dirname(target), linkTarget);
+        if (linkTarget === source || resolved === source) {
+          entries.push({ name, target, source, status: "already-linked" });
+          continue;
+        }
+        entries.push({ name, target, source, status: "exists-other", details: `symlink → ${linkTarget}` });
+        continue;
+      }
+      entries.push({ name, target, source, status: "exists-other", details: "regular file (project-local override)" });
+    } catch {
+      entries.push({ name, target, source, status: "exists-other", details: "unreadable" });
+    }
+  }
+  if (!anyWork && entries.every((e) => e.status === "already-linked")) {
+    return { action: "already-current", commandsDir };
+  }
+  return { action: "install", commandsDir, entries };
+}
+
+export function executeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
+  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
+  if (plan.action === "already-current") return "already current (no change)";
+
+  mkdirSync(plan.commandsDir, { recursive: true });
+  let installed = 0;
+  let alreadyLinked = 0;
+  const skipped: string[] = [];
+  for (const e of plan.entries) {
+    if (e.status === "install") {
+      symlinkSync(e.source, e.target);
+      installed += 1;
+    } else if (e.status === "already-linked") {
+      alreadyLinked += 1;
+    } else {
+      skipped.push(`${e.name} (${e.details ?? "exists"})`);
+    }
+  }
+  const parts: string[] = [];
+  if (installed > 0)     parts.push(`installed ${installed} (${plan.entries.filter((e) => e.status === "install").map((e) => "/" + e.name.replace(/\.md$/, "")).join(", ")})`);
+  if (alreadyLinked > 0) parts.push(`${alreadyLinked} already current`);
+  if (skipped.length)    parts.push(`SKIPPED ${skipped.length}: ${skipped.join(", ")}`);
+  return parts.join("; ") || "no-op";
+}
+
+function describeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
+  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
+  if (plan.action === "already-current") return "already current (no change)";
+  const installs = plan.entries.filter((e) => e.status === "install").map((e) => "/" + e.name.replace(/\.md$/, ""));
+  const others = plan.entries.filter((e) => e.status === "exists-other");
+  const parts: string[] = [];
+  if (installs.length > 0) parts.push(`WOULD install ${installs.join(", ")}`);
+  if (others.length > 0)   parts.push(`WOULD SKIP ${others.map((e) => e.name).join(", ")} (exists)`);
+  return parts.join("; ") || "no-op";
+}
+
+function resolveSlashCommandSource(name: string): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", "..", "..", "scripts", "claude-commands", name),
+    join(here, "..", "..", "..", "..", "scripts", "claude-commands", name),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  throw new Error(
+    `slash-command source not found for ${name}. Looked at:\n  ${candidates.join("\n  ")}`
+  );
+}
+
+// Exposed for tests/upgrade so they can introspect the canonical list without
+// reaching into the module-private constant.
+export function forgeSlashCommands(): readonly string[] {
+  return FORGE_SLASH_COMMANDS;
 }
