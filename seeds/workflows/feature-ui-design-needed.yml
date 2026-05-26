@@ -10,6 +10,12 @@ description: |
   Build a feature that needs UI design. brief → ui-review → architect → plan →
   build → verify. The design and implementation share a designDir.
 
+# Model rationale: brief (prompt-author, dense text authoring) + architect
+# (systems thinking) stay on spec-writer (Opus). plan / build / verify use
+# default (Sonnet) — these are translate-architecture-to-plan, implement-
+# against-acceptance, and judge-tests work, well within Sonnet's capability.
+# Reds stay on fast-orchestrator (Haiku) for triage.
+
 inputs:
   - name: brief
     required: true
@@ -70,7 +76,7 @@ steps:
 
   - id: plan
     agent: tech-lead
-    model: spec-writer
+    model: default
     depends_on: [architect]
     gate: human
     workflow_additions: |
@@ -80,7 +86,7 @@ steps:
 
   - id: build
     agent: engineer
-    model: spec-writer
+    model: default
     depends_on: [plan]
     gate: verdict
     workflow_additions: |
@@ -112,7 +118,7 @@ steps:
 
   - id: verify
     agent: qa-engineer
-    model: spec-writer
+    model: default
     depends_on: [build]
     gate: human
     workflow_additions: |

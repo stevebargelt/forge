@@ -14,6 +14,12 @@
 name: feature
 description: Feature work without UI/UX design. Architect → plan → build → verify.
 
+# Model rationale: only architect uses spec-writer (Opus). plan / build / verify
+# use default (Sonnet) — translating architecture to a plan, implementing
+# against acceptance criteria, and judging tests are well within Sonnet's
+# capability. Build fans out, so Opus burn there was the bulk of cost without
+# a quality justification. Reds stay on fast-orchestrator (Haiku) for triage.
+
 # What inputs `forge new` must collect for this workflow.
 # Maps to today's CLI flags: --brief here, --question for investigation, --prd for
 # feature-ui-design-provided, etc. Runner validates required fields are present.
@@ -48,7 +54,7 @@ steps:
   # ----- plan -----
   - id: plan
     agent: tech-lead
-    model: spec-writer
+    model: default
     depends_on: [architect]
     gate: human
     workflow_additions: |
@@ -61,7 +67,7 @@ steps:
   # settle (per-parent dispatch, not per-child). See #139 for the design call.
   - id: build
     agent: engineer                    # fallback for steps with discipline=general or unmapped
-    model: spec-writer
+    model: default
     depends_on: [plan]
     gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
     workflow_additions: |
@@ -104,7 +110,7 @@ steps:
   # ----- verify -----
   - id: verify
     agent: qa-engineer
-    model: spec-writer
+    model: default
     depends_on: [build]
     gate: human
     workflow_additions: |

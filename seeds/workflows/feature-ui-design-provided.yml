@@ -4,6 +4,11 @@
 name: feature-ui-design-provided
 description: Feature work with UI design already in hand. Architect → plan → build → verify.
 
+# Model rationale: only architect uses spec-writer (Opus). plan / build / verify
+# use default (Sonnet) — translating architecture to a plan, implementing
+# against acceptance criteria, and judging tests are well within Sonnet's
+# capability. Reds stay on fast-orchestrator (Haiku) for triage.
+
 inputs:
   - name: prd
     required: true
@@ -33,7 +38,7 @@ steps:
 
   - id: plan
     agent: tech-lead
-    model: spec-writer
+    model: default
     depends_on: [architect]
     gate: human
     workflow_additions: |
@@ -42,7 +47,7 @@ steps:
 
   - id: build
     agent: engineer
-    model: spec-writer
+    model: default
     depends_on: [plan]
     gate: verdict
     workflow_additions: |
@@ -71,7 +76,7 @@ steps:
 
   - id: verify
     agent: qa-engineer
-    model: spec-writer
+    model: default
     depends_on: [build]
     gate: human
     workflow_additions: |
