@@ -1,5 +1,5 @@
 ---
-id: no-anthropic-attribution
+id: no-ai-attribution
 level: force
 roles: []
 workflows: []

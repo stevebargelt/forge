@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# commit-msg hook — refuse commits that mention Claude/Anthropic or include
+# AI-attribution boilerplate. Defense-in-depth for the
+# no-ai-attribution force-level constraint.
+#
+# Installed by `forge init` into <project>/.git/hooks/commit-msg.
+# Bypass with `git commit --no-verify` only when you genuinely need to
+# reference Claude/Anthropic in a commit (rare).
+#
+# Patterns rejected (case-insensitive):
+#   - "Co-Authored-By:" lines containing "Claude" (any variant)
+#   - "Co-Authored-By:" lines containing "anthropic" (matches noreply@anthropic.com)
+#   - "Generated with Claude Code" attribution boilerplate
+#   - Any bare mention of "Claude", "Anthropic", or "Claude Code"
+#
+# Exit 0 = commit proceeds. Exit nonzero = commit blocked.
+
+set -eu
+
+MSG_FILE="$1"
+
+if grep -qiE '^[[:space:]]*Co-Authored-By:.*(claude|anthropic)' "$MSG_FILE"; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message contains a "Co-Authored-By: Claude/Anthropic" trailer.\n' >&2
+  printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
+  printf '  To bypass: git commit --no-verify  (rare; only when the reference is intentional)\n' >&2
+  exit 1
+fi
+
+if grep -qiE 'generated with claude code|🤖.*claude' "$MSG_FILE"; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message contains AI-attribution boilerplate.\n' >&2
+  printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
+  printf '  To bypass: git commit --no-verify\n' >&2
+  exit 1
+fi
+
+# Bare mentions of Claude / Anthropic / Claude Code in body or title.
+# Strip comment lines (git's own diff annotations) AND strip well-known
+# technical identifiers that legitimately contain the banned words:
+#   - CLAUDE.md (canonical project-setup filename)
+#   - CLAUDE_<UPPER>, ANTHROPIC_<UPPER> (env vars like CLAUDE_CODE_USE_BEDROCK)
+#   - .claude / .claude/ (config dir)
+#   - claude-code / @anthropic-ai/* (package/CLI names)
+# These show up in nearly every forge commit. After stripping, what's left
+# is prose mentions, which are the actual rule target.
+if grep -v '^[[:space:]]*#' "$MSG_FILE" \
+   | sed -E 's|@anthropic-ai/?[a-zA-Z0-9_-]*||g; s/CLAUDE\.md//g; s/CLAUDE_[A-Z_]+//g; s/ANTHROPIC_[A-Z_]+//g; s|\.claude(/[a-zA-Z0-9_/-]*)?||g; s/claude-code//g' \
+   | grep -qiE '\b(claude|anthropic|claude code)\b'; then
+  printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", or "Claude Code" in prose.\n' >&2
+  printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
+  printf '  (Technical identifiers like CLAUDE.md, ANTHROPIC_API_KEY, .claude/, claude-code, @anthropic-ai/* are allowed.)\n' >&2
+  printf '  To bypass: git commit --no-verify  (rare; only when the prose reference is intentional)\n' >&2
+  exit 1
+fi
+
+exit 0

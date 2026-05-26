@@ -10,7 +10,7 @@ When you `git commit`, `gh pr create`, `gh issue create`, or post any other mess
 - **No mentions of "Claude", "Anthropic", or "Claude Code"** in commit messages, PR titles/bodies, issue bodies, issue comments.
 - **No "🤖 Generated with Claude Code" signature.**
 
-Write as a human author would. AI tooling is implementation detail, not public record. This rule is enforced as a force-level constraint at `seeds/constraints/no-anthropic-attribution.md` for forge agents; this section captures it for Claude Code sessions working ON forge.
+Write as a human author would. AI tooling is implementation detail, not public record. This rule is enforced as a force-level constraint at `seeds/constraints/no-ai-attribution.md` for forge agents; this section captures it for Claude Code sessions working ON forge.
 
 ## What forge is
 

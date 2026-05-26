@@ -1,6 +1,10 @@
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { applyOrchestratorBlock } from "./init.js";
+import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyOrchestratorBlock, planCommitMsgHook } from "./init.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
 # forge orchestrator
@@ -80,4 +84,69 @@ test("applyOrchestratorBlock: preserves content before AND after the block on up
   assert.ok(out.includes("## Conventions"));
   assert.ok(out.includes("Use ts not js."));
   assert.ok(out.includes("# forge orchestrator (v2)"));
+});
+
+// ----- planCommitMsgHook (#147 follow-up: ban-AI-attribution hook) -----
+
+let projectDir: string;
+
+beforeEach(() => {
+  projectDir = mkdtempSync(join(tmpdir(), "forge-init-hook-test-"));
+});
+
+afterEach(() => {
+  rmSync(projectDir, { recursive: true, force: true });
+});
+
+test("planCommitMsgHook: returns not-a-git-repo when .git/hooks is missing", () => {
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "not-a-git-repo");
+});
+
+test("planCommitMsgHook: returns install when .git/hooks exists and no commit-msg present", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.match(plan.target, /\.git\/hooks\/commit-msg$/);
+    assert.match(plan.source, /commit-msg-no-ai-attribution$/);
+  }
+});
+
+test("planCommitMsgHook: returns already-linked when a symlink already points at our source", () => {
+  execSync("git init -q", { cwd: projectDir });
+  // Replicate the install: symlink to the bundled source script.
+  // Use the same resolution path the prod helper would.
+  const prodPlan = planCommitMsgHook(projectDir);
+  assert.equal(prodPlan.action, "install");
+  if (prodPlan.action !== "install") throw new Error("setup failed");
+  symlinkSync(prodPlan.source, prodPlan.target);
+
+  const replan = planCommitMsgHook(projectDir);
+  assert.equal(replan.action, "already-linked");
+});
+
+test("planCommitMsgHook: returns exists-other when a non-symlink hook is already in place", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
+  writeFileSync(hookPath, "#!/bin/sh\necho 'some other hook'\n");
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action === "exists-other") {
+    assert.match(plan.details, /regular file/);
+  }
+});
+
+test("planCommitMsgHook: returns exists-other when a symlink points somewhere else", () => {
+  execSync("git init -q", { cwd: projectDir });
+  // Make a decoy target inside the same tmpdir.
+  const decoy = join(projectDir, "decoy-hook");
+  writeFileSync(decoy, "#!/bin/sh\nexit 0\n");
+  const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
+  symlinkSync(decoy, hookPath);
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action === "exists-other") {
+    assert.match(plan.details, /symlink/);
+  }
 });

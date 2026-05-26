@@ -54,9 +54,11 @@ cd ~/code/my-app
 forge init
 ```
 
-This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creating the file if needed) and creates a `~/code/my-app/.forge/` directory for project-level workflow overrides. The orchestrator block tells Claude Code sessions in this project how to route work through forge agents instead of editing files directly.
+This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creating the file if needed), creates a `~/code/my-app/.forge/` directory for project-level workflow overrides, AND installs a `commit-msg` git hook that rejects commits with `Co-Authored-By: Claude` trailers or other AI-attribution boilerplate (defense-in-depth for the `no-ai-attribution` constraint).
 
-Re-run `forge init` any time you upgrade forge — the block is fence-marked and replaces in place.
+Re-run `forge init` any time you upgrade forge — the orchestrator block is fence-marked and replaces in place; the hook is a symlink and re-runs are idempotent.
+
+Skip the hook install with `forge init --no-install-hooks` if a project already has its own `commit-msg` hook you don't want touched (forge won't clobber existing hooks regardless, but the flag silences the SKIPPED notice).
 
 ## 4. Pick a path: orchestrator-led or direct CLI
 
