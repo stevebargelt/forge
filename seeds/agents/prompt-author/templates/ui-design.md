@@ -21,8 +21,16 @@ This prompt requires the Pencil MCP server. The tools you need (`mcp__pencil__op
 This is non-negotiable. Producing HTML-only output here is a failure mode — it pollutes `{{output_dir}}` with the wrong artifact type and the run can't be submitted (forge submit validates both .pen and PNG presence). Refuse and wait, don't improvise.
 
 PRECONDITION 1 — before any MCP tool call, run this Bash:
-mkdir -p {{output_dir_parent}} && touch {{target_pen_file}}
-This guarantees the target file exists on disk so open_document can route to it.
+
+    mkdir -p {{output_dir_parent}}
+    if [ ! -s "{{target_pen_file}}" ]; then
+      touch "{{target_pen_file}}"
+      echo "Created empty {{target_pen_file}}"
+    else
+      echo "Reusing existing {{target_pen_file}} ($(stat -f%z "{{target_pen_file}}") bytes) — DO NOT touch, you'd zero it out"
+    fi
+
+This guarantees the target file exists on disk so open_document can route to it. **Critical:** skip the `touch` when the file already exists with content — `touch` doesn't zero a file, but a misplaced `> {{target_pen_file}}` or stale shell template would. The `-s` check (file exists AND non-empty) is the guard.
 
 PRECONDITION 2 — count existing PNGs and pick a starting screen number (#83). Some runs reuse a shared design corpus (#67) where prior runs already produced PNGs 01-N; if you start numbering at 01 you'll clobber them. Run this Bash next:
 
@@ -50,7 +58,20 @@ If `{{output_dir}}` is empty or doesn't exist yet, START_NUM = 1 and numbering s
    Suggested screen names (in order):
 {{file_naming_list}}
    Example: if START_NUM=21, the first new screen rename is `mv {{output_dir}}/<returned-id>.png {{output_dir}}/21-<screen-name>.png` (or `01-<screen-name>.png` if the corpus is empty and START_NUM=1).
-7. CRITICAL — TARGET .PEN PERSISTENCE: Pencil's MCP tools update an in-memory document keyed by the filePath, but `.pen` files are NOT auto-saved to disk. The PNG exports DO write to disk reliably. The `.pen` source file ONLY persists when the human presses Cmd+S in VS Code. Verify this yourself at the end by running `stat -f%z {{target_pen_file}}` — if it returns 0, the file is empty and the design source is unsaved.
+
+6a. PER-SCREEN HANDLING (#86/#87) — for each screen above, follow the rule below. Do NOT redraw an existing component just to add an annotation to it; do NOT add a new screen if modifying in place is honest.
+
+{{per_screen_handling}}
+
+   Quick reference for the three modes:
+   - **NEW** — full mockup as today. Place the frame in empty canvas space via `find_empty_space_on_canvas`.
+   - **ADDITION** — the named existing component (e.g. `05-task-detail-gate`) is the canonical version; design ONLY the addition (annotation, callout, single new element) as a small focused frame. When picking canvas position, call `find_empty_space_on_canvas` with hints that put the new frame NEAR the existing one (so anyone opening the .pen reads "23-X is the evolved version of 05-X" from spatial proximity, not from filename archeology). Do not redraw the full component.
+   - **MODIFY-IN-PLACE** — open the existing screen's frame on the canvas, edit it directly, re-export with the SAME numeric prefix (overwriting the old PNG). Git history (the corpus is in the project repo) is the audit trail; modify-in-place keeps the corpus to one canonical version per component.
+7. CRITICAL — TARGET .PEN PERSISTENCE: Pencil's MCP tools update an in-memory document keyed by the filePath, but `.pen` files are NOT auto-saved to disk. The PNG exports DO write to disk reliably. The `.pen` source file ONLY persists when the human presses Cmd+S in VS Code.
+
+   **Mid-run saves (#80).** End-of-run save reminders alone are too late — Pencil sessions are known to crash mid-design (verified 2026-05-08, crash between screens 24 and 26 of a 26-screen run). After EVERY TWO screens you complete and export, pause and tell the human, in your output: "💾 SAVE: please switch to VS Code and press Cmd+S on `{{target_pen_basename}}` — I'll wait for confirmation before continuing." Then literally stop and wait for the human to reply "saved" (or equivalent) before doing the next pair. This is friction by design — losing 5 screens to a crash costs vastly more than 5 save pauses.
+
+   Verify the file is non-empty at the end by running `stat -f%z {{target_pen_file}}` — if it returns 0, the file is empty and the design source is unsaved.
 
 8. FINAL SUMMARY — your last message must include this exact block, formatted as bold/highlighted so the user cannot miss it:
 

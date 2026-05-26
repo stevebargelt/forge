@@ -201,21 +201,6 @@ Lean (1) first — surfacing the failure mode honestly is cheap and the right sh
 **Revisit conditions:** the dashboard is doing 80%+ of forge's interaction surface, OR you want notifications/menubar/global shortcuts, OR you want to ship forge to anyone else. Until then, browser tab is fine.
 Stays here so it's not forgotten.
 
-### #80 — Prompt-author seed needs to read existing designDir before authoring (shared-corpus support)
-**Why:** Caught 2026-05-08 mid-phase-flow run. The prompt-author seed assumes a fresh designDir and authors a PROMPT.md based on `<basename(designDir)>.pen` + screen numbering starting at `01-` + a static "N screens" framing pulled from the brief. With #67 (shared per-app corpus), every one of those assumptions breaks:
-- Existing `.pen` file has a meaningful name (`dashboard.pen`), not the basename of the dir.
-- Existing PNGs are numbered 01-20; the agent's `01-phase-pill-row-linear.png` would clobber.
-- "Match the existing 11 screens" framing was stale (already 20 by run time). Cosmetic but misleading.
-- The 0-byte `touch <basename>.pen` precondition created a useless second .pen file.
-**How to apply:** Before authoring PROMPT.md, the prompt-author should:
-1. Read the existing `.pen` file (any `*.pen` in designDir) and use its actual filename in the prompt.
-2. Count existing PNGs in `designs/`; start new numbering at max+1.
-3. Don't hardcode a screen count in the prompt body — say "the existing dashboard screens" or count at author time.
-4. Skip the precondition `touch` step when an existing `.pen` is found.
-5. Add a per-screen-pair Cmd+S reminder, not just an end-of-run warning. Pencil sessions crash mid-run (verified 2026-05-08); the loud end-of-run save is too late if the crash happens between screens 24 and 26 of a 26-screen design (which is exactly what just happened).
-**Validation done so far:** prompt-author DOES tell Pencil to OPEN-the-existing-file and ADD frames (good — this part of the seed worked). Numbering and filename inference are the gaps.
-**Composite with #79 + #82 (validator-glob-pen below):** these three together make shared-designDir reuse robust. Without all three, every reuse run hits a different sharp edge.
-
 ### #88 — Corpus consistency: propagate new components into affected existing screens
 **Why:** Caught 2026-05-08 reviewing phase-flow design output. The pill row (#71) is a new component that, once implemented, will appear above the task list in many existing dashboard screens — 02 (task-list), 03 (task-detail-generic), 05 (task-detail-gate), 08 (task-detail-blocked-by-red), 11, 17, 18, 19, 20, etc. The current design corpus shows those screens *without* pills (drawn pre-pill-row). After implementation: live dashboard shows pills everywhere, corpus shows pills in isolation only. Mismatch.
 
@@ -236,37 +221,6 @@ Stays here so it's not forgotten.
 Lean (1) when actually doing the work. (2) is a stopgap if the propagate session hasn't happened yet but you need to ship.
 
 **Composite with #87:** the modify-in-place convention applies to propagation too — when the propagate pass updates screen 02 to show pills, screen 02 *becomes* the pills-version. The pre-pills version lives in git history, not as a parallel screen.
-
-### #87 — Design corpus convention: modify-in-place + git, not add-new-screens for additions
-**Why:** Caught 2026-05-08 — Steven: "I'm still curious why we didn't just modify 5." The current pattern adds a new screen for every addition (screen 23 added the preview-line treatment to the existing gate panel from screen 05, instead of editing screen 05). That preserves audit trail at the cost of:
-- Duplicate frames in the .pen (the gate panel exists in 05 *and* 23)
-- "Which is canonical?" ambiguity at implementation time
-- Linear screen-count growth as the corpus iterates
-
-**The right convention:** modify in place. Screen 05 *becomes* the gate-panel-with-preview. The .pen file is committed to git after each Pencil session (per `~/code/forge-design/` already being a git repo); commit history is the audit trail. To see "what did this screen look like before phase-flow added the preview?", `git log dashboard.pen` and check out the prior version.
-
-**What this implies for forge / the prompt-author seed (#86 update):**
-- When a brief is "add X to existing component Y," PROMPT.md says "edit screen Y in place" (with the screen name discovered from the corpus, per #80) — not "add a new screen for X."
-- After each Pencil session, the human commits the corpus: `cd ~/code/forge-design && git add -A && git commit -m "<run-title>: <short summary>"`. Eventually automate this — `forge submit` could run the commit on success (or warn if the dir is dirty + uncommitted on next run).
-
-**Counter-argument worth noting:** new screens preserve "before/after" side by side without requiring the reviewer to git-checkout. If the design intent really is showing variation/comparison (state-A vs state-B of the same component), separate frames are honest. But for additions ("here's where the preview line goes"), that's not comparison — that's the new canonical state.
-
-**Pragmatic middle ground (Steven 2026-05-08):** when adding a new screen for an addition, **position it directly next to the original on the .pen canvas**. Spatial proximity inside the .pen is the audit trail — anyone opening the file sees `05-gate-panel` and `23-gate-panel-advance-preview` adjacent and immediately reads "this is the evolved version of that one" without git archeology. Cheaper than git-history awareness, more semantic than just "new screen far away on the canvas." The prompt-author seed (post-#86) should encode this: when designing an addition to existing component X, PROMPT.md tells Pencil to use `find_empty_space_on_canvas` *near* X's position rather than just any free space.
-
-**Sequencing:** ship #80 + #83 + #86 first (the seed-side fixes); revisit this convention when those are real and we have a feel for whether new-screen-for-additions still creeps back in.
-
-### #86 — Prompt-author seed: distinguish "new component" from "addition to existing component"
-**Why:** Caught 2026-05-08 reviewing phase-flow design output. The brief asked for "next-action preview on the gate panel" — a single new element (an italicized line between rationale and buttons) added to the existing gate panel that already lives in the corpus (screen 05 `task-detail-gate.png`). The agent interpreted this as needing three separate gate-panel mockups (23/24/25), each showing a different preview-copy variant. Result: three near-identical full panels with slight variations + invented sections (GATE CONTEXT, AGENT MESSAGE) that weren't in the brief. The actual design content was one piece (preview line shape + placement) with three copy variants — should have been one annotated screen, not three.
-
-**The shape of the bug:** the agent didn't know that the gate panel already exists in the design corpus, so it redrew it (with drift) instead of treating the brief as a tweak to an existing component. The prompt didn't say "the gate panel already exists; design only the addition."
-
-**How to apply:** when authoring PROMPT.md for a shared-corpus run (per #67), the prompt-author should:
-1. Read the existing PNGs/HTMLs in `<designDir>/code/` and `<designDir>/designs/`. Catalog what components already exist.
-2. For each requested screen, decide: is this a *new component* or an *addition to an existing component*?
-3. For additions, the PROMPT.md should explicitly say "the X component already exists in the corpus (see screen Y); design ONLY the addition (callout, annotation, single new element); do not redraw X." Optionally, ask the agent to design one annotated example + a sidecar showing copy/state variants of just the addition.
-4. For new components, normal full-frame design as today.
-
-**Composite with #80, #83:** the seed needs to read existing designDir state before authoring (#80), use existing PNG count for numbering (#83), AND distinguish new-vs-addition framing (#86). All three together make shared-corpus reuse work cleanly. Each one alone leaves drift.
 
 ### #84 — Document the two-channel feedback model for design workflows
 **Why:** Caught 2026-05-08 — Steven's call when reviewing the phase-flow PNGs: "I'd argue that this is exactly what the human loop is for. I can work with claude/pencil to make the corrections." Right take, and worth pinning down so future sessions don't reflexively reach for forge-reject when the cheaper channel exists.
@@ -330,17 +284,6 @@ No prompt-tightening fix makes that ambiguity go away. Even with crisp instructi
 **What to do for the in-flight run:** advance `task-investigate-f6ed49` with rationale ("reds restated investigator findings; advance"). Specialist reds with `gateOnVerdict: false` mean the fail is informational. Do this for every investigate task in this run. Don't change workflows mid-run.
 
 **Side issue, separate fix already shipped:** verdict cards now render `red task: <id>` so the human can copy/reference reds for troubleshooting. Doesn't fix the vocabulary issue but helps debug confusing verdicts in the meantime.
-
-### #67 — Per-app design corpus: encourage / enforce shared designDir within an app
-**Why:** Today every `ui-design` run gets its own `--design-dir`. Each .pen file is a fresh document with no link to prior designs of the same app. If you design the forge dashboard at `~/code/forge-design/dashboard.pen`, then later add a widget to that dashboard, the widget design lives in a new .pen with no automatic access to the variable block or named components from the dashboard's .pen. Pencil 0.2.5 has no cross-file component import — components live inside their .pen file. Result: visual drift, redundant token redefinition, and the human has to keep "the dashboard's house style" in their head when running each new ui-design.
-**Caught 2026-05-08:** running ui-design for a forge dashboard widget against a fresh `--design-dir ~/code/forge-stats-widget/`. Steven flagged that this should have been added to `~/code/forge-design/` so it could reuse the existing component library + variable block. The prompt-author had no way to know.
-**Three shapes to consider (decide before implementing):**
-1. **Convention only.** Document that ui-design runs for the same app share a designDir. Update prompt-author seed to ask "is this an addition to an existing design corpus? if so, point me at it." Cheapest, no code change.
-2. **`forge new --inherit-from <other-design-dir>`.** New flag. The prompt-author template gets a step at the top: "open the inherit-from .pen first, copy variable block + named components into the new .pen, then proceed." Pencil supports this manually; agent automates the copy. Risky — node-copying across .pen files isn't a tested path in Pencil 0.2.5.
-3. **Reuse the same designDir; .pen grows monotonically.** No flag needed. The existing prompt-author already supports an existing .pen (touch + open_document is idempotent; new screens go in empty canvas space via `find_empty_space_on_canvas`). Just teach the human (and the prompt-author seed) that the right move is `--design-dir` pointed at the existing corpus, not a new dir. Accepts the cost of larger .pen files in exchange for actual reuse.
-**Lean toward (3) initially.** It's the cheapest honest answer and exposes whether the monotonic-growth cost is real before we build (1) or (2). (1) becomes the documentation form of (3). (2) only becomes worth building if Pencil ships better cross-file tooling AND we hit a case where one .pen is genuinely too big.
-**Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
-
 
 ### #28 — Per-run constraint scoping (forge new --tag, tags: in constraint frontmatter)
 **Why:** The `atlas-stack-rn` constraint fires on every `feature-ui-design-needed` run regardless of project. Today the workaround is renaming the constraint file to `.disabled`, which is global. Real fix is per-run scoping.
@@ -497,6 +440,71 @@ The flag is opt-in. Gate without \`--feedback\` works exactly as today. Adoption
 
 
 ## Done (recent)
+
+### #87 — Design corpus convention: modify-in-place + git, not add-new-screens for additions
+**Closed:** 2026-05-26. Encoded in the prompt-author seed as one of three per-screen classifications (NEW / ADDITION / MODIFY-IN-PLACE), with adjacent-on-canvas guidance for the ADDITION case (find_empty_space_on_canvas near the existing component). PROMPT.md renders one bullet per screen so Pencil sees the per-screen handling explicitly.
+
+**Why:** Caught 2026-05-08 — Steven: "I'm still curious why we didn't just modify 5." The current pattern adds a new screen for every addition (screen 23 added the preview-line treatment to the existing gate panel from screen 05, instead of editing screen 05). That preserves audit trail at the cost of:
+- Duplicate frames in the .pen (the gate panel exists in 05 *and* 23)
+- "Which is canonical?" ambiguity at implementation time
+- Linear screen-count growth as the corpus iterates
+
+**The right convention:** modify in place. Screen 05 *becomes* the gate-panel-with-preview. The .pen file is committed to git after each Pencil session (per `~/code/forge-design/` already being a git repo); commit history is the audit trail. To see "what did this screen look like before phase-flow added the preview?", `git log dashboard.pen` and check out the prior version.
+
+**What this implies for forge / the prompt-author seed (#86 update):**
+- When a brief is "add X to existing component Y," PROMPT.md says "edit screen Y in place" (with the screen name discovered from the corpus, per #80) — not "add a new screen for X."
+- After each Pencil session, the human commits the corpus: `cd ~/code/forge-design && git add -A && git commit -m "<run-title>: <short summary>"`. Eventually automate this — `forge submit` could run the commit on success (or warn if the dir is dirty + uncommitted on next run).
+
+**Counter-argument worth noting:** new screens preserve "before/after" side by side without requiring the reviewer to git-checkout. If the design intent really is showing variation/comparison (state-A vs state-B of the same component), separate frames are honest. But for additions ("here's where the preview line goes"), that's not comparison — that's the new canonical state.
+
+**Pragmatic middle ground (Steven 2026-05-08):** when adding a new screen for an addition, **position it directly next to the original on the .pen canvas**. Spatial proximity inside the .pen is the audit trail — anyone opening the file sees `05-gate-panel` and `23-gate-panel-advance-preview` adjacent and immediately reads "this is the evolved version of that one" without git archeology. Cheaper than git-history awareness, more semantic than just "new screen far away on the canvas." The prompt-author seed (post-#86) should encode this: when designing an addition to existing component X, PROMPT.md tells Pencil to use `find_empty_space_on_canvas` *near* X's position rather than just any free space.
+
+**Sequencing:** ship #80 + #83 + #86 first (the seed-side fixes); revisit this convention when those are real and we have a feel for whether new-screen-for-additions still creeps back in.
+
+### #86 — Prompt-author seed: distinguish "new component" from "addition to existing component"
+**Closed:** 2026-05-26. The "Reading the existing design corpus" section of the seed walks the agent through cataloging existing screens at `/design`, classifying each requested screen, and stashing the result in `parameters.classifications`. The new `{{per_screen_handling}}` template placeholder renders the classifications into PROMPT.md as explicit per-screen rules ("design ONLY the addition; do not redraw X").
+
+**Why:** Caught 2026-05-08 reviewing phase-flow design output. The brief asked for "next-action preview on the gate panel" — a single new element (an italicized line between rationale and buttons) added to the existing gate panel that already lives in the corpus (screen 05 `task-detail-gate.png`). The agent interpreted this as needing three separate gate-panel mockups (23/24/25), each showing a different preview-copy variant. Result: three near-identical full panels with slight variations + invented sections (GATE CONTEXT, AGENT MESSAGE) that weren't in the brief. The actual design content was one piece (preview line shape + placement) with three copy variants — should have been one annotated screen, not three.
+
+**The shape of the bug:** the agent didn't know that the gate panel already exists in the design corpus, so it redrew it (with drift) instead of treating the brief as a tweak to an existing component. The prompt didn't say "the gate panel already exists; design only the addition."
+
+**How to apply:** when authoring PROMPT.md for a shared-corpus run (per #67), the prompt-author should:
+1. Read the existing PNGs/HTMLs in `<designDir>/code/` and `<designDir>/designs/`. Catalog what components already exist.
+2. For each requested screen, decide: is this a *new component* or an *addition to an existing component*?
+3. For additions, the PROMPT.md should explicitly say "the X component already exists in the corpus (see screen Y); design ONLY the addition (callout, annotation, single new element); do not redraw X." Optionally, ask the agent to design one annotated example + a sidecar showing copy/state variants of just the addition.
+4. For new components, normal full-frame design as today.
+
+**Composite with #80, #83:** the seed needs to read existing designDir state before authoring (#80), use existing PNG count for numbering (#83), AND distinguish new-vs-addition framing (#86). All three together make shared-corpus reuse work cleanly. Each one alone leaves drift.
+
+### #80 — Prompt-author seed needs to read existing designDir before authoring (shared-corpus support)
+**Closed:** 2026-05-26. Seed now requires corpus inspection at `/design` before authoring: discovers `*.pen` filename, counts existing PNGs (template's PRECONDITION 2 already computes START_NUM from this), respects legacy `<designDir>/designs/` layout for override users, and skips the touch precondition when a non-empty .pen already exists. Template adds per-two-screens Cmd+S pause-and-wait reminders so Pencil crashes don't lose multi-screen sessions (the 2026-05-08 incident).
+
+**Why:** Caught 2026-05-08 mid-phase-flow run. The prompt-author seed assumes a fresh designDir and authors a PROMPT.md based on `<basename(designDir)>.pen` + screen numbering starting at `01-` + a static "N screens" framing pulled from the brief. With #67 (shared per-app corpus), every one of those assumptions breaks:
+- Existing `.pen` file has a meaningful name (`dashboard.pen`), not the basename of the dir.
+- Existing PNGs are numbered 01-20; the agent's `01-phase-pill-row-linear.png` would clobber.
+- "Match the existing 11 screens" framing was stale (already 20 by run time). Cosmetic but misleading.
+- The 0-byte `touch <basename>.pen` precondition created a useless second .pen file.
+**How to apply:** Before authoring PROMPT.md, the prompt-author should:
+1. Read the existing `.pen` file (any `*.pen` in designDir) and use its actual filename in the prompt.
+2. Count existing PNGs in `designs/`; start new numbering at max+1.
+3. Don't hardcode a screen count in the prompt body — say "the existing dashboard screens" or count at author time.
+4. Skip the precondition `touch` step when an existing `.pen` is found.
+5. Add a per-screen-pair Cmd+S reminder, not just an end-of-run warning. Pencil sessions crash mid-run (verified 2026-05-08); the loud end-of-run save is too late if the crash happens between screens 24 and 26 of a 26-screen design (which is exactly what just happened).
+**Validation done so far:** prompt-author DOES tell Pencil to OPEN-the-existing-file and ADD frames (good — this part of the seed worked). Numbering and filename inference are the gaps.
+**Composite with #79 + #82 (validator-glob-pen below):** these three together make shared-designDir reuse robust. Without all three, every reuse run hits a different sharp edge.
+
+### #67 — Per-app design corpus: encourage / enforce shared designDir within an app
+**Closed:** 2026-05-26. Convention-with-override: `deriveDefaultDesignDir` in `src/cli/commands/new.ts` now returns `<projectDir>/designs/` for design-touching workflows (was `~/code/<sanitized-title>/` per-run). `--design-dir <path>` still overrides for the legacy peer-dir / shared-design-system-across-repos shape. Pen/PNG layout flattened — designs live at the top of designDir alongside the .pen, with `code/` for optional HTML exports. docs/concepts.md gets a new "Design corpus" entry.
+
+**Why:** Today every `ui-design` run gets its own `--design-dir`. Each .pen file is a fresh document with no link to prior designs of the same app. If you design the forge dashboard at `~/code/forge-design/dashboard.pen`, then later add a widget to that dashboard, the widget design lives in a new .pen with no automatic access to the variable block or named components from the dashboard's .pen. Pencil 0.2.5 has no cross-file component import — components live inside their .pen file. Result: visual drift, redundant token redefinition, and the human has to keep "the dashboard's house style" in their head when running each new ui-design.
+**Caught 2026-05-08:** running ui-design for a forge dashboard widget against a fresh `--design-dir ~/code/forge-stats-widget/`. Steven flagged that this should have been added to `~/code/forge-design/` so it could reuse the existing component library + variable block. The prompt-author had no way to know.
+**Three shapes to consider (decide before implementing):**
+1. **Convention only.** Document that ui-design runs for the same app share a designDir. Update prompt-author seed to ask "is this an addition to an existing design corpus? if so, point me at it." Cheapest, no code change.
+2. **`forge new --inherit-from <other-design-dir>`.** New flag. The prompt-author template gets a step at the top: "open the inherit-from .pen first, copy variable block + named components into the new .pen, then proceed." Pencil supports this manually; agent automates the copy. Risky — node-copying across .pen files isn't a tested path in Pencil 0.2.5.
+3. **Reuse the same designDir; .pen grows monotonically.** No flag needed. The existing prompt-author already supports an existing .pen (touch + open_document is idempotent; new screens go in empty canvas space via `find_empty_space_on_canvas`). Just teach the human (and the prompt-author seed) that the right move is `--design-dir` pointed at the existing corpus, not a new dir. Accepts the cost of larger .pen files in exchange for actual reuse.
+**Lean toward (3) initially.** It's the cheapest honest answer and exposes whether the monotonic-growth cost is real before we build (1) or (2). (1) becomes the documentation form of (3). (2) only becomes worth building if Pencil ships better cross-file tooling AND we hit a case where one .pen is genuinely too big.
+**Open question:** how does forge know when a designDir already has a .pen worth reusing vs an empty/abandoned scratch? Probably: the prompt-author can detect a pre-existing non-zero .pen at the conventional path, surface it in `openQuestions` ("found existing design at <path>; reuse?"), and let the human gate the call.
+
 
 ### #120 — `forge auth status` is shallow + the underlying health probe is local-clock-only
 **Closed:** 2026-05-26. (a) CLI now consumes `getAuthState()` (full profile/account/role/region/SSO portal/expiry/watchdog status); (b) `--deep` flag runs `aws sts get-caller-identity` for the honest answer. STS-cache-stale (#119) surfaced as a warning in the status output.

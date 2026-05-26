@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { mkdirSync } from "node:fs";
-import { ensureForgeDirs, sanitizeTitleForFilename, expandTildePath } from "../../util/paths.js";
+import { basename, join } from "node:path";
+import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { startRun } from "../../v2/startRun.js";
@@ -38,17 +39,20 @@ export function registerNew(program: Command): void {
       if (options.question) inputs["question"] = options.question;
       if (options.prd) inputs["prd"] = options.prd;
 
-      // Resolve --design-dir or derive a default for workflows that name suggests
-      // (kept matching v1 ergonomics — the new RACI model means design is now
-      // a host-led activity, but `feature-ui-design-needed` still uses /design).
+      // Resolve --design-dir for design-touching workflows. Default convention
+      // (#67): `<projectDir>/designs/` — the per-project shared design corpus.
+      // Override with --design-dir <path> for the legacy "peer dir / shared
+      // design system across repos" shape (e.g. `~/code/forge-design/`).
       const designDirRaw =
         (options as { designDir?: string }).designDir
-        ?? deriveDefaultDesignDir(workflowName, title);
+        ?? deriveDefaultDesignDir(workflowName, projectDir);
       const designDir = designDirRaw ? expandTildePath(designDirRaw) : undefined;
       if (designDir) {
         mkdirSync(designDir, { recursive: true });
-        mkdirSync(`${designDir}/designs`, { recursive: true });
-        mkdirSync(`${designDir}/code`, { recursive: true });
+        // Don't pre-create designs/ or code/ subdirs anymore — with the new
+        // flat layout the .pen + PNGs live at designDir root; only the
+        // optional HTML code export uses a code/ subdir, and prompt-author
+        // creates that at need.
         inputs["designDir"] = designDir;
       }
 
@@ -70,10 +74,22 @@ export function registerNew(program: Command): void {
     });
 }
 
-// Default design-dir convention: ~/code/<sanitized-title>/. Matches v1 ergonomics
-// for the feature-ui-design-needed workflow.
-function deriveDefaultDesignDir(workflowName: string, title: string): string | undefined {
+// Default design-dir convention (#67): a per-project shared design corpus at
+// `<projectDir>/designs/`. Every design-touching run for the same project
+// targets the same dir; the corpus grows monotonically. Override with
+// `--design-dir <path>` to point at a peer dir or a shared-across-repos
+// design system.
+//
+// Only fires for design-touching workflows; other workflows get no designDir.
+// Exported for testing.
+export function deriveDefaultDesignDir(workflowName: string, projectDir: string): string | undefined {
   if (!workflowName.includes("ui-design") && !workflowName.includes("design-needed")) return undefined;
-  const home = process.env.HOME ?? "~";
-  return `${home}/code/${sanitizeTitleForFilename(title)}`;
+  return join(projectDir, "designs");
+}
+
+// Project basename helper kept here in case the prompt-author seed or a
+// future caller wants a non-overridden hint for naming the .pen file. Not
+// currently used at the CLI level — exported for completeness.
+export function defaultPenFileName(projectDir: string): string {
+  return `${basename(projectDir)}.pen`;
 }
