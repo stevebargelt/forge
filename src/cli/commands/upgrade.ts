@@ -8,10 +8,12 @@ import {
   applyOrchestratorBlock,
   executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
+  executeGitignoreEntriesPlan,
   executeHookPlan,
   planClaudeCommands,
   planClaudeHooks,
   planCommitMsgHook,
+  planGitignoreEntries,
 } from "./init.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
@@ -181,19 +183,22 @@ export function registerUpgrade(program: Command): void {
           // Refresh hook installs alongside the orchestrator block so projects
           // init'd before #153/#118/slash-commands shipped pick up the new
           // pieces. Each plan is idempotent — already-linked → no-op; new
-          // installs land; updated commands (new template files added to
-          // FORGE_SLASH_COMMANDS) get symlinked.
+          // installs land; updated commands get symlinked; legacy
+          // .claude/settings.json forge hooks get migrated to settings.local.json.
           const commitMsg = planCommitMsgHook(cwd);
           const claudeHooks = planClaudeHooks(cwd);
           const slashCmds = planClaudeCommands(cwd);
+          const gitignore = planGitignoreEntries(cwd);
           if (dryRun) {
             console.log(`        commit-msg hook: ${commitMsg.action}`);
             console.log(`        claude hooks:    ${claudeHooks.action}`);
             console.log(`        slash commands:  ${slashCmds.action}`);
+            console.log(`        .gitignore:      ${gitignore.action}`);
           } else {
             console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
             console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
             console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
+            console.log(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
           }
         }
       }

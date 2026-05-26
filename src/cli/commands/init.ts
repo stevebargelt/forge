@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,6 +12,24 @@ const CLAUDE_HOOK_EVENTS: ReadonlyArray<readonly [string, string]> = [
   ["SessionStart", "start"],
   ["Stop", "tick"],
   ["SessionEnd", "end"],
+];
+
+// Per-developer claude-code config lives in settings.local.json (claude-code's
+// convention for machine-local overrides — not committed). Project-shared
+// settings.json stays untouched by forge so it remains available for project-
+// owned config like permissions. This split was added after a portability bug
+// surfaced: an earlier version of forge wrote hooks into committed
+// settings.json with absolute paths in the hook commands, breaking any
+// developer who cloned the project at a different forge path. Per-developer
+// config + gitignored + bootstrapped via `forge init` resolves that cleanly.
+const LOCAL_SETTINGS_FILENAME = "settings.local.json";
+const LEGACY_SETTINGS_FILENAME = "settings.json";
+
+// Gitignore entries forge ensures are present in each project's .gitignore so
+// the per-developer config doesn't get accidentally committed.
+const FORGE_GITIGNORE_ENTRIES = [
+  ".claude/settings.local.json",
+  ".claude/commands/",
 ];
 
 // Slash-command templates that ship with forge and get symlinked into each
@@ -61,6 +79,7 @@ export function registerInit(program: Command): void {
       const hookPlan = installHooks ? planCommitMsgHook(projectDir) : { action: "skipped" as const };
       const claudeHooksPlan = installHooks ? planClaudeHooks(projectDir) : { action: "skipped" as const };
       const slashCommandsPlan = installHooks ? planClaudeCommands(projectDir) : { action: "skipped" as const };
+      const gitignorePlan = installHooks ? planGitignoreEntries(projectDir) : { action: "skipped" as const };
 
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
@@ -69,6 +88,7 @@ export function registerInit(program: Command): void {
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
+        console.log(`  .gitignore:       ${describeGitignorePlan(gitignorePlan)}`);
         return;
       }
 
@@ -81,6 +101,7 @@ export function registerInit(program: Command): void {
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
       const slashCommandsResult = installHooks ? executeClaudeCommandsPlan(slashCommandsPlan) : "skipped (--no-install-hooks)";
+      const gitignoreResult = installHooks ? executeGitignoreEntriesPlan(gitignorePlan) : "skipped (--no-install-hooks)";
 
       console.log(`forge init complete in ${projectDir}`);
       console.log(`  CLAUDE.md:        ${willWrite ? (existing ? "updated orchestrator block" : "created with orchestrator block") : "already current (no change)"}`);
@@ -88,6 +109,10 @@ export function registerInit(program: Command): void {
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(`  slash commands:   ${slashCommandsResult}`);
+      console.log(`  .gitignore:       ${gitignoreResult}`);
+      console.log(``);
+      console.log(`Note: .claude/settings.local.json and .claude/commands/ are per-developer.`);
+      console.log(`      Other contributors run \`forge init\` after cloning to bootstrap their local copies.`);
       console.log(``);
       console.log(`Next: run 'claude' from this directory to talk to the forge orchestrator.`);
       console.log(`Try /orient to load session state and /handoff before you stop.`);
@@ -228,18 +253,28 @@ function ensureTrailingNewline(s: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type ClaudeHooksPlan =
-  | { action: "install"; settingsPath: string; source: string; details: string }
-  | { action: "already-current"; settingsPath: string }
+  | { action: "install"; settingsPath: string; source: string; details: string; legacyCleanup: boolean }
+  | { action: "already-current"; settingsPath: string; legacyCleanup: boolean }
   | { action: "corrupt-json"; settingsPath: string; details: string }
   | { action: "skipped" };
 
 // Decides what to do for the Claude Code session hooks without writing.
+// Targets settings.local.json (per-developer, gitignored) — NOT settings.json
+// (project-shared, committed). Detects legacy installs that wrote into
+// settings.json and flags them for cleanup so the absolute-path hook commands
+// don't poison committed config.
 // Exported for testing.
 export function planClaudeHooks(projectDir: string): ClaudeHooksPlan {
-  const settingsPath = join(projectDir, ".claude", "settings.json");
+  const claudeDir = join(projectDir, ".claude");
+  const settingsPath = join(claudeDir, LOCAL_SETTINGS_FILENAME);
+  const legacyPath = join(claudeDir, LEGACY_SETTINGS_FILENAME);
+  const legacyCleanup = legacySettingsHasForgeHooks(legacyPath);
   const source = resolveHeartbeatSource();
   if (!existsSync(settingsPath)) {
-    return { action: "install", settingsPath, source, details: "create new .claude/settings.json" };
+    const details = legacyCleanup
+      ? `create new .claude/${LOCAL_SETTINGS_FILENAME} + cleanup legacy ${LEGACY_SETTINGS_FILENAME}`
+      : `create new .claude/${LOCAL_SETTINGS_FILENAME}`;
+    return { action: "install", settingsPath, source, details, legacyCleanup };
   }
   let parsed: unknown;
   try {
@@ -252,21 +287,51 @@ export function planClaudeHooks(projectDir: string): ClaudeHooksPlan {
   for (const [event, action] of CLAUDE_HOOK_EVENTS) {
     if (!hasCurrentForgeHook(hooks[event], source, action)) needs.push(event);
   }
-  if (needs.length === 0) {
-    return { action: "already-current", settingsPath };
+  if (needs.length === 0 && !legacyCleanup) {
+    return { action: "already-current", settingsPath, legacyCleanup: false };
   }
-  return { action: "install", settingsPath, source, details: `merge into existing settings.json (events: ${needs.join(", ")})` };
+  const installDetails = needs.length === 0
+    ? `migrate legacy ${LEGACY_SETTINGS_FILENAME} hooks → ${LOCAL_SETTINGS_FILENAME}`
+    : `merge into existing ${LOCAL_SETTINGS_FILENAME} (events: ${needs.join(", ")})${legacyCleanup ? ` + cleanup legacy ${LEGACY_SETTINGS_FILENAME}` : ""}`;
+  return { action: "install", settingsPath, source, details: installDetails, legacyCleanup };
+}
+
+// True when the legacy committed settings.json contains forge heartbeat hook
+// entries (detected by the orchestrator-heartbeat command substring). Used to
+// trigger one-time migration on init/upgrade for projects installed before
+// the per-developer convention shipped.
+function legacySettingsHasForgeHooks(legacyPath: string): boolean {
+  if (!existsSync(legacyPath)) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(legacyPath, "utf8")); }
+  catch { return false; }
+  if (!isObject(parsed) || !isObject(parsed["hooks"])) return false;
+  const hooks = parsed["hooks"];
+  for (const [event] of CLAUDE_HOOK_EVENTS) {
+    const entries = hooks[event];
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (!isObject(entry) || !Array.isArray(entry["hooks"])) continue;
+      for (const h of entry["hooks"]) {
+        if (isObject(h) && typeof h["command"] === "string" && h["command"].includes(HEARTBEAT_MARKER)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 export function executeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
   if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
+  if (plan.action === "corrupt-json")    return `SKIPPED — ${LOCAL_SETTINGS_FILENAME} not valid JSON (${plan.details})`;
   if (plan.action === "already-current") return "already current (no change)";
-  if (plan.action === "corrupt-json")    return `SKIPPED — settings.json not valid JSON (${plan.details})`;
 
-  const { settingsPath, source } = plan;
+  const { settingsPath, source, legacyCleanup } = plan;
   const settingsDir = dirname(settingsPath);
   if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
 
+  // 1. Install/merge into .claude/settings.local.json (per-developer).
   let parsed: Record<string, unknown> = {};
   const fileExisted = existsSync(settingsPath);
   if (fileExisted) {
@@ -274,10 +339,7 @@ export function executeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
     const decoded = JSON.parse(raw);
     if (isObject(decoded)) parsed = decoded;
   }
-
-  const hooksRoot: Record<string, unknown> =
-    isObject(parsed["hooks"]) ? parsed["hooks"] : {};
-
+  const hooksRoot: Record<string, unknown> = isObject(parsed["hooks"]) ? parsed["hooks"] : {};
   for (const [event, action] of CLAUDE_HOOK_EVENTS) {
     const command = `${source} ${action}`;
     const entries = Array.isArray(hooksRoot[event]) ? hooksRoot[event] as unknown[] : [];
@@ -302,16 +364,72 @@ export function executeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
     hooksRoot[event] = entries;
   }
   parsed["hooks"] = hooksRoot;
-
   writeFileSync(settingsPath, JSON.stringify(parsed, null, 2) + "\n");
-  return fileExisted ? "merged into existing .claude/settings.json" : "created .claude/settings.json";
+
+  // 2. Legacy cleanup: strip forge heartbeat entries from .claude/settings.json
+  // so the committed file doesn't keep the absolute-path commands. Preserve
+  // user's other hooks + non-hook config.
+  let cleanupMsg = "";
+  if (legacyCleanup) {
+    cleanupMsg = stripForgeHooksFromLegacy(join(settingsDir, LEGACY_SETTINGS_FILENAME));
+  }
+
+  const installMsg = fileExisted
+    ? `merged into existing .claude/${LOCAL_SETTINGS_FILENAME}`
+    : `created .claude/${LOCAL_SETTINGS_FILENAME}`;
+  return cleanupMsg ? `${installMsg}; ${cleanupMsg}` : installMsg;
+}
+
+// Remove the forge heartbeat hook entries from .claude/settings.json (legacy
+// install location). Preserves user's other hook entries (matchers with
+// commands that don't contain HEARTBEAT_MARKER) and every other key. Removes
+// now-empty event arrays. Removes the hooks key entirely if it ends up empty.
+// If the resulting file would be `{}`, deletes the file.
+function stripForgeHooksFromLegacy(legacyPath: string): string {
+  if (!existsSync(legacyPath)) return "";
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(legacyPath, "utf8")); }
+  catch { return ""; }
+  if (!isObject(parsed) || !isObject(parsed["hooks"])) return "";
+
+  const hooks = parsed["hooks"];
+  let removed = 0;
+  for (const [event] of CLAUDE_HOOK_EVENTS) {
+    const entries = hooks[event];
+    if (!Array.isArray(entries)) continue;
+    const kept: unknown[] = [];
+    for (const entry of entries) {
+      if (!isObject(entry) || !Array.isArray(entry["hooks"])) { kept.push(entry); continue; }
+      const innerKept = entry["hooks"].filter((h) => {
+        const isForge = isObject(h) && typeof h["command"] === "string" && h["command"].includes(HEARTBEAT_MARKER);
+        if (isForge) removed += 1;
+        return !isForge;
+      });
+      if (innerKept.length > 0) kept.push({ ...entry, hooks: innerKept });
+    }
+    if (kept.length === 0) delete hooks[event];
+    else hooks[event] = kept;
+  }
+  if (Object.keys(hooks).length === 0) delete parsed["hooks"];
+
+  if (Object.keys(parsed).length === 0) {
+    // File reduces to empty object — delete it rather than leave a dangling {}.
+    unlinkSyncSafe(legacyPath);
+    return `removed empty legacy ${LEGACY_SETTINGS_FILENAME}`;
+  }
+  writeFileSync(legacyPath, JSON.stringify(parsed, null, 2) + "\n");
+  return `stripped ${removed} forge hook entry/entries from legacy ${LEGACY_SETTINGS_FILENAME}`;
+}
+
+function unlinkSyncSafe(path: string): void {
+  try { unlinkSync(path); } catch { /* best-effort */ }
 }
 
 function describeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
   switch (plan.action) {
     case "install":         return `WOULD install (${plan.details})`;
-    case "already-current": return "already current (no change)";
-    case "corrupt-json":    return `WOULD SKIP — settings.json not valid JSON (${plan.details})`;
+    case "already-current": return plan.legacyCleanup ? `WOULD migrate legacy ${LEGACY_SETTINGS_FILENAME} hooks` : "already current (no change)";
+    case "corrupt-json":    return `WOULD SKIP — ${LOCAL_SETTINGS_FILENAME} not valid JSON (${plan.details})`;
     case "skipped":         return "skipped (--no-install-hooks)";
   }
 }
@@ -372,27 +490,39 @@ export function planClaudeCommands(projectDir: string): ClaudeCommandsPlan {
   for (const name of FORGE_SLASH_COMMANDS) {
     const source = resolveSlashCommandSource(name);
     const target = join(commandsDir, name);
-    if (!existsSync(target)) {
+    // Use lstatSync to detect symlinks (including broken ones pointing at a
+    // stale forge path). existsSync follows symlinks → a broken link returns
+    // false → install path would EEXIST when it tried to recreate the link.
+    let st;
+    try { st = lstatSync(target); }
+    catch { st = null; }
+    if (!st) {
       entries.push({ name, target, source, status: "install" });
       anyWork = true;
       continue;
     }
-    try {
-      const st = lstatSync(target);
-      if (st.isSymbolicLink()) {
-        const linkTarget = readlinkSync(target);
-        const resolved = resolve(dirname(target), linkTarget);
-        if (linkTarget === source || resolved === source) {
-          entries.push({ name, target, source, status: "already-linked" });
-          continue;
-        }
-        entries.push({ name, target, source, status: "exists-other", details: `symlink → ${linkTarget}` });
+    if (st.isSymbolicLink()) {
+      let linkTarget = "";
+      try { linkTarget = readlinkSync(target); } catch { /* unreadable link */ }
+      const resolved = linkTarget ? resolve(dirname(target), linkTarget) : "";
+      if (linkTarget === source || resolved === source) {
+        entries.push({ name, target, source, status: "already-linked" });
         continue;
       }
-      entries.push({ name, target, source, status: "exists-other", details: "regular file (project-local override)" });
-    } catch {
-      entries.push({ name, target, source, status: "exists-other", details: "unreadable" });
+      // Stale forge symlink (points at a different forge path, possibly
+      // broken). Treat as "upgrade in place" — replace the symlink.
+      // Distinguish from a user's deliberate override: we recognize forge's
+      // own targets by the "claude-commands/<name>.md" tail.
+      const isStaleForge = linkTarget.endsWith(`/scripts/claude-commands/${name}`);
+      if (isStaleForge) {
+        entries.push({ name, target, source, status: "install", details: `replace stale symlink → ${linkTarget}` });
+        anyWork = true;
+      } else {
+        entries.push({ name, target, source, status: "exists-other", details: `symlink → ${linkTarget}` });
+      }
+      continue;
     }
+    entries.push({ name, target, source, status: "exists-other", details: "regular file (project-local override)" });
   }
   if (!anyWork && entries.every((e) => e.status === "already-linked")) {
     return { action: "already-current", commandsDir };
@@ -406,10 +536,18 @@ export function executeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
 
   mkdirSync(plan.commandsDir, { recursive: true });
   let installed = 0;
+  let replaced = 0;
   let alreadyLinked = 0;
   const skipped: string[] = [];
   for (const e of plan.entries) {
     if (e.status === "install") {
+      // If a stale forge symlink is in the way (planClaudeCommands flagged it
+      // by setting `details`), unlink first. lstatSync inside a guarded block
+      // so a missing file path still works.
+      try {
+        const st = lstatSync(e.target);
+        if (st) { unlinkSync(e.target); replaced += 1; }
+      } catch { /* nothing to remove */ }
       symlinkSync(e.source, e.target);
       installed += 1;
     } else if (e.status === "already-linked") {
@@ -454,4 +592,48 @@ function resolveSlashCommandSource(name: string): string {
 // reaching into the module-private constant.
 export function forgeSlashCommands(): readonly string[] {
   return FORGE_SLASH_COMMANDS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gitignore management: ensure per-developer artifacts forge writes into
+// .claude/ are gitignored so they don't accidentally land in the project's
+// committed history. Idempotent; never reorders or removes existing entries.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type GitignorePlan =
+  | { action: "install"; gitignorePath: string; missing: string[] }
+  | { action: "already-current"; gitignorePath: string }
+  | { action: "skipped" };
+
+export function planGitignoreEntries(projectDir: string): GitignorePlan {
+  const gitignorePath = join(projectDir, ".gitignore");
+  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const lines = new Set(
+    existing.split("\n").map((l) => l.trim()).filter(Boolean),
+  );
+  const missing = FORGE_GITIGNORE_ENTRIES.filter((e) => !lines.has(e));
+  if (missing.length === 0) {
+    return { action: "already-current", gitignorePath };
+  }
+  return { action: "install", gitignorePath, missing };
+}
+
+export function executeGitignoreEntriesPlan(plan: GitignorePlan): string {
+  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
+  if (plan.action === "already-current") return "already current (no change)";
+  const { gitignorePath, missing } = plan;
+  const existing = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+  const trailingNewline = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+  const block = (existing.length > 0 ? "\n# forge — per-developer claude-code config (machine-local, not committed)\n" : "# forge — per-developer claude-code config (machine-local, not committed)\n")
+    + missing.join("\n") + "\n";
+  writeFileSync(gitignorePath, existing + trailingNewline + block);
+  return `added ${missing.length} entry/entries (${missing.join(", ")})`;
+}
+
+function describeGitignorePlan(plan: GitignorePlan): string {
+  switch (plan.action) {
+    case "install":         return `WOULD add ${plan.missing.length} entry/entries (${plan.missing.join(", ")})`;
+    case "already-current": return "already current (no change)";
+    case "skipped":         return "skipped (--no-install-hooks)";
+  }
 }

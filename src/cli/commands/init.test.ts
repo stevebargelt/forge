@@ -1,17 +1,19 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyOrchestratorBlock,
   executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
+  executeGitignoreEntriesPlan,
   forgeSlashCommands,
   planClaudeCommands,
   planClaudeHooks,
   planCommitMsgHook,
+  planGitignoreEntries,
 } from "./init.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
@@ -159,23 +161,25 @@ test("planCommitMsgHook: returns exists-other when a symlink points somewhere el
   }
 });
 
-// ----- planClaudeHooks / executeClaudeHooksPlan (#153) -----
+// ----- planClaudeHooks / executeClaudeHooksPlan (#153, retargeted to
+//       settings.local.json per the portability fix) -----
 
-test("planClaudeHooks: action=install when no .claude/settings.json exists", () => {
+test("planClaudeHooks: action=install targeting settings.local.json when no .claude/settings.local.json exists", () => {
   const plan = planClaudeHooks(projectDir);
   assert.equal(plan.action, "install");
   if (plan.action === "install") {
-    assert.match(plan.settingsPath, /\.claude\/settings\.json$/);
+    assert.match(plan.settingsPath, /\.claude\/settings\.local\.json$/);
     assert.match(plan.source, /orchestrator-heartbeat$/);
     assert.match(plan.details, /create new/);
+    assert.equal(plan.legacyCleanup, false);
   }
 });
 
-test("executeClaudeHooksPlan: creates a fresh settings.json with all three event hooks", () => {
+test("executeClaudeHooksPlan: creates a fresh settings.local.json with all three event hooks", () => {
   const plan = planClaudeHooks(projectDir);
   const msg = executeClaudeHooksPlan(plan);
   assert.match(msg, /created/);
-  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.json"), "utf8"));
+  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.local.json"), "utf8"));
   for (const event of ["SessionStart", "Stop", "SessionEnd"]) {
     const entries = parsed.hooks[event];
     assert.ok(Array.isArray(entries), `${event} should be an array`);
@@ -184,15 +188,18 @@ test("executeClaudeHooksPlan: creates a fresh settings.json with all three event
     );
     assert.ok(found, `${event} should contain our orchestrator-heartbeat command`);
   }
+  // settings.json (project-shared) should NOT have been created.
+  assert.ok(!existsSync(join(projectDir, ".claude", "settings.json")), "settings.json should not be created — that's the project-shared file");
 });
 
 test("planClaudeHooks: action=already-current after a fresh install", () => {
   executeClaudeHooksPlan(planClaudeHooks(projectDir));
   const replan = planClaudeHooks(projectDir);
   assert.equal(replan.action, "already-current");
+  if (replan.action === "already-current") assert.equal(replan.legacyCleanup, false);
 });
 
-test("executeClaudeHooksPlan: merges into existing settings.json, preserving unrelated keys", () => {
+test("executeClaudeHooksPlan: merges into existing settings.local.json, preserving unrelated keys", () => {
   const settingsDir = join(projectDir, ".claude");
   mkdirSync(settingsDir, { recursive: true });
   const existing = {
@@ -203,27 +210,23 @@ test("executeClaudeHooksPlan: merges into existing settings.json, preserving unr
       ],
     },
   };
-  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(existing, null, 2));
+  writeFileSync(join(settingsDir, "settings.local.json"), JSON.stringify(existing, null, 2));
 
   const plan = planClaudeHooks(projectDir);
   assert.equal(plan.action, "install");
   if (plan.action === "install") assert.match(plan.details, /merge/);
   executeClaudeHooksPlan(plan);
 
-  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
-  // Unrelated keys preserved.
-  assert.deepEqual(merged.permissions, { allow: ["Read"] });
-  // User's own hook entry still there.
+  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.local.json"), "utf8"));
+  assert.deepEqual(merged.permissions, { allow: ["Read"] }, "unrelated keys preserved");
   const userEntry = merged.hooks.SessionStart.some((e: { hooks?: Array<{ command?: string }> }) =>
     e.hooks?.some((h) => h.command === "/user/their-own-script.sh"),
   );
   assert.ok(userEntry, "user's existing SessionStart hook should be preserved");
-  // Our entry added.
   const ourEntry = merged.hooks.SessionStart.some((e: { hooks?: Array<{ command?: string }> }) =>
     e.hooks?.some((h) => typeof h.command === "string" && h.command.includes("orchestrator-heartbeat")),
   );
   assert.ok(ourEntry, "our SessionStart heartbeat hook should be added");
-  // Stop + SessionEnd added too.
   assert.ok(merged.hooks.Stop?.length > 0);
   assert.ok(merged.hooks.SessionEnd?.length > 0);
 });
@@ -231,7 +234,8 @@ test("executeClaudeHooksPlan: merges into existing settings.json, preserving unr
 test("executeClaudeHooksPlan: upgrades a stale forge heartbeat command in-place rather than appending a duplicate", () => {
   const settingsDir = join(projectDir, ".claude");
   mkdirSync(settingsDir, { recursive: true });
-  // Simulate a stale prior install at a different path.
+  // Simulate a stale prior install at a different path, ALREADY in settings.local.json
+  // (the new target). This is the "forge clone moved on this machine" upgrade path.
   const existing = {
     hooks: {
       SessionStart: [
@@ -245,42 +249,193 @@ test("executeClaudeHooksPlan: upgrades a stale forge heartbeat command in-place 
       ],
     },
   };
-  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(existing, null, 2));
+  writeFileSync(join(settingsDir, "settings.local.json"), JSON.stringify(existing, null, 2));
 
   executeClaudeHooksPlan(planClaudeHooks(projectDir));
-  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
+  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.local.json"), "utf8"));
 
-  // Each event still has exactly ONE entry (we upgraded, didn't duplicate).
-  assert.equal(merged.hooks.SessionStart.length, 1);
+  assert.equal(merged.hooks.SessionStart.length, 1, "should upgrade in place, not duplicate");
   assert.equal(merged.hooks.Stop.length, 1);
   assert.equal(merged.hooks.SessionEnd.length, 1);
-  // And the command no longer points at /old/path.
   const startCmd = merged.hooks.SessionStart[0].hooks[0].command;
   assert.ok(!startCmd.startsWith("/old/path"), `expected upgrade away from /old/path, got: ${startCmd}`);
   assert.ok(startCmd.includes("orchestrator-heartbeat"));
   assert.ok(startCmd.endsWith(" start"));
 });
 
-test("planClaudeHooks: returns corrupt-json when settings.json is unparseable", () => {
+test("planClaudeHooks: returns corrupt-json when settings.local.json is unparseable", () => {
   const settingsDir = join(projectDir, ".claude");
   mkdirSync(settingsDir, { recursive: true });
-  writeFileSync(join(settingsDir, "settings.json"), "{ not valid json");
+  writeFileSync(join(settingsDir, "settings.local.json"), "{ not valid json");
   const plan = planClaudeHooks(projectDir);
   assert.equal(plan.action, "corrupt-json");
-  // Execute should report SKIPPED without throwing.
   const msg = executeClaudeHooksPlan(plan);
   assert.match(msg, /SKIPPED/);
-  // File untouched.
-  assert.equal(readFileSync(join(settingsDir, "settings.json"), "utf8"), "{ not valid json");
+  assert.equal(readFileSync(join(settingsDir, "settings.local.json"), "utf8"), "{ not valid json");
 });
 
 test("executeClaudeHooksPlan: idempotent — running install twice doesn't accumulate entries", () => {
   executeClaudeHooksPlan(planClaudeHooks(projectDir));
   executeClaudeHooksPlan(planClaudeHooks(projectDir));
-  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.json"), "utf8"));
+  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.local.json"), "utf8"));
   assert.equal(parsed.hooks.SessionStart.length, 1);
   assert.equal(parsed.hooks.Stop.length, 1);
   assert.equal(parsed.hooks.SessionEnd.length, 1);
+});
+
+// ----- Legacy migration: forge hooks in committed settings.json get
+//       moved to per-developer settings.local.json -----
+
+test("planClaudeHooks: detects forge hooks in legacy settings.json and flags legacyCleanup", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const legacy = {
+    permissions: { allow: ["Read"] },  // user's project-shared config
+    hooks: {
+      SessionStart: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/forge/scripts/claude-hooks/orchestrator-heartbeat start" }] },
+      ],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(legacy, null, 2));
+  const plan = planClaudeHooks(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.equal(plan.legacyCleanup, true);
+    assert.match(plan.details, /cleanup legacy|migrate legacy/);
+  }
+});
+
+test("executeClaudeHooksPlan: migrates legacy settings.json hooks → settings.local.json, preserves other keys", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const legacy = {
+    permissions: { allow: ["Read"] },
+    hooks: {
+      SessionStart: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/forge/scripts/claude-hooks/orchestrator-heartbeat start" }] },
+        { matcher: "", hooks: [{ type: "command", command: "/user/their-own-hook.sh" }] },
+      ],
+      Stop: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/forge/scripts/claude-hooks/orchestrator-heartbeat tick" }] },
+      ],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(legacy, null, 2));
+
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+
+  // settings.local.json now has the forge hooks (with the CURRENT path).
+  const local = JSON.parse(readFileSync(join(settingsDir, "settings.local.json"), "utf8"));
+  assert.equal(local.hooks.SessionStart.length, 1);
+  assert.match(local.hooks.SessionStart[0].hooks[0].command, /orchestrator-heartbeat start$/);
+  assert.ok(!local.hooks.SessionStart[0].hooks[0].command.startsWith("/old/forge"));
+
+  // settings.json has lost the forge hook entries but kept the user's hook + permissions.
+  const shared = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
+  assert.deepEqual(shared.permissions, { allow: ["Read"] }, "user's permissions preserved in settings.json");
+  // Only the user's own SessionStart hook remains; forge hook gone.
+  assert.equal(shared.hooks.SessionStart.length, 1);
+  assert.equal(shared.hooks.SessionStart[0].hooks[0].command, "/user/their-own-hook.sh");
+  // Stop event had only the forge hook → entire event key removed.
+  assert.ok(shared.hooks.Stop === undefined, "empty Stop event should be removed from settings.json");
+});
+
+test("executeClaudeHooksPlan: deletes legacy settings.json entirely when nothing else remains in it", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  // Settings.json had ONLY forge hooks — no permissions, no user hooks.
+  const legacy = {
+    hooks: {
+      SessionStart: [{ matcher: "", hooks: [{ type: "command", command: "/old/forge/orchestrator-heartbeat start" }] }],
+      Stop:         [{ matcher: "", hooks: [{ type: "command", command: "/old/forge/orchestrator-heartbeat tick" }] }],
+      SessionEnd:   [{ matcher: "", hooks: [{ type: "command", command: "/old/forge/orchestrator-heartbeat end" }] }],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(legacy, null, 2));
+
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+
+  assert.ok(!existsSync(join(settingsDir, "settings.json")), "empty settings.json should be deleted, not left as {}");
+  // settings.local.json still gets the migrated entries.
+  assert.ok(existsSync(join(settingsDir, "settings.local.json")));
+});
+
+test("planClaudeHooks: legacy settings.json without forge hooks is ignored (no migration)", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const userOnly = {
+    permissions: { allow: ["Read", "Edit"] },
+    hooks: {
+      SessionStart: [{ matcher: "", hooks: [{ type: "command", command: "/user/script.sh" }] }],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(userOnly, null, 2));
+  const plan = planClaudeHooks(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") assert.equal(plan.legacyCleanup, false, "user-only legacy file should not trigger cleanup");
+  executeClaudeHooksPlan(plan);
+  // settings.json untouched.
+  const shared = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
+  assert.deepEqual(shared, userOnly);
+});
+
+// ----- planGitignoreEntries / executeGitignoreEntriesPlan -----
+
+test("planGitignoreEntries: action=install when no .gitignore exists", () => {
+  const plan = planGitignoreEntries(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.equal(plan.missing.length, 2);
+    assert.ok(plan.missing.includes(".claude/settings.local.json"));
+    assert.ok(plan.missing.includes(".claude/commands/"));
+  }
+});
+
+test("executeGitignoreEntriesPlan: creates .gitignore with the forge entries", () => {
+  const msg = executeGitignoreEntriesPlan(planGitignoreEntries(projectDir));
+  assert.match(msg, /added 2/);
+  const content = readFileSync(join(projectDir, ".gitignore"), "utf8");
+  assert.match(content, /\.claude\/settings\.local\.json/);
+  assert.match(content, /\.claude\/commands\//);
+});
+
+test("executeGitignoreEntriesPlan: appends to existing .gitignore without disturbing other entries", () => {
+  writeFileSync(join(projectDir, ".gitignore"), "node_modules/\ndist/\n");
+  executeGitignoreEntriesPlan(planGitignoreEntries(projectDir));
+  const content = readFileSync(join(projectDir, ".gitignore"), "utf8");
+  // Original entries preserved.
+  assert.match(content, /node_modules\//);
+  assert.match(content, /dist\//);
+  // New entries appended.
+  assert.match(content, /\.claude\/settings\.local\.json/);
+  assert.match(content, /\.claude\/commands\//);
+});
+
+test("planGitignoreEntries: action=already-current when entries are already present", () => {
+  writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.claude/settings.local.json\n.claude/commands/\n");
+  const plan = planGitignoreEntries(projectDir);
+  assert.equal(plan.action, "already-current");
+});
+
+test("planGitignoreEntries: action=install when ONE entry is missing", () => {
+  writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.claude/settings.local.json\n");
+  const plan = planGitignoreEntries(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.equal(plan.missing.length, 1);
+    assert.equal(plan.missing[0], ".claude/commands/");
+  }
+});
+
+test("executeGitignoreEntriesPlan: idempotent — running twice doesn't duplicate entries", () => {
+  executeGitignoreEntriesPlan(planGitignoreEntries(projectDir));
+  executeGitignoreEntriesPlan(planGitignoreEntries(projectDir));
+  const content = readFileSync(join(projectDir, ".gitignore"), "utf8");
+  const settingsLocalCount = (content.match(/\.claude\/settings\.local\.json/g) ?? []).length;
+  const commandsCount = (content.match(/\.claude\/commands\//g) ?? []).length;
+  assert.equal(settingsLocalCount, 1, "settings.local.json entry should appear exactly once");
+  assert.equal(commandsCount, 1, ".claude/commands/ entry should appear exactly once");
 });
 
 // ----- planClaudeCommands / executeClaudeCommandsPlan (/orient + /handoff) -----
@@ -340,7 +495,7 @@ test("planClaudeCommands: refuses to clobber a project-local override (regular f
   assert.equal(readFileSync(join(dir, "orient.md"), "utf8"), "# my custom orient\n");
 });
 
-test("planClaudeCommands: detects a stale-symlink (linked to old path) as exists-other so we don't clobber", () => {
+test("planClaudeCommands: detects a stale-symlink to an unrelated path as exists-other so we don't clobber", () => {
   const dir = join(projectDir, ".claude", "commands");
   mkdirSync(dir, { recursive: true });
   // Decoy: point /orient.md at some unrelated file (simulates a prior tool that managed slash commands)
@@ -353,5 +508,38 @@ test("planClaudeCommands: detects a stale-symlink (linked to old path) as exists
     const orient = plan.entries.find((e) => e.name === "orient.md");
     assert.equal(orient?.status, "exists-other");
     assert.match(orient?.details ?? "", /symlink/);
+  }
+});
+
+test("planClaudeCommands: detects a stale forge symlink (different forge path) and flags it for replacement", () => {
+  const dir = join(projectDir, ".claude", "commands");
+  mkdirSync(dir, { recursive: true });
+  // Simulate an old forge install at a different path — broken symlink because
+  // /old/forge doesn't exist on this machine.
+  symlinkSync("/old/forge/scripts/claude-commands/orient.md", join(dir, "orient.md"));
+  symlinkSync("/old/forge/scripts/claude-commands/handoff.md", join(dir, "handoff.md"));
+  const plan = planClaudeCommands(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    const orient = plan.entries.find((e) => e.name === "orient.md");
+    assert.equal(orient?.status, "install", "stale forge symlink should be flagged for upgrade-install, not skipped");
+    assert.match(orient?.details ?? "", /replace stale/);
+  }
+});
+
+test("executeClaudeCommandsPlan: replaces stale forge symlinks in place without EEXIST", () => {
+  const dir = join(projectDir, ".claude", "commands");
+  mkdirSync(dir, { recursive: true });
+  symlinkSync("/old/forge/scripts/claude-commands/orient.md", join(dir, "orient.md"));
+  symlinkSync("/old/forge/scripts/claude-commands/handoff.md", join(dir, "handoff.md"));
+  const msg = executeClaudeCommandsPlan(planClaudeCommands(projectDir));
+  // Should succeed (no thrown EEXIST) and report both installed.
+  assert.match(msg, /installed/);
+  // New symlinks now point at the live forge repo, not /old/forge.
+  for (const name of ["orient.md", "handoff.md"]) {
+    const target = join(dir, name);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    const linkTarget = readlinkSync(target);
+    assert.ok(!linkTarget.startsWith("/old/forge"), `${name} should no longer point at /old/forge; got ${linkTarget}`);
   }
 });
