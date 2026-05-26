@@ -2,6 +2,16 @@
 
 This is the forge CLI repo. If you're a Claude Code session working in this directory, read this first.
 
+## Hard rule — no Claude/Anthropic attribution in git or GitHub
+
+When you `git commit`, `gh pr create`, `gh issue create`, or post any other message destined for git or GitHub:
+
+- **No `Co-Authored-By: Claude` trailer** (or any variant: `Claude Opus`, `Claude Sonnet`, `Claude Code`, etc.).
+- **No mentions of "Claude", "Anthropic", or "Claude Code"** in commit messages, PR titles/bodies, issue bodies, issue comments.
+- **No "🤖 Generated with Claude Code" signature.**
+
+Write as a human author would. AI tooling is implementation detail, not public record. This rule is enforced as a force-level constraint at `seeds/constraints/no-anthropic-attribution.md` for forge agents; this section captures it for Claude Code sessions working ON forge.
+
 ## What forge is
 
 A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.

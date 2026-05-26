@@ -215,6 +215,7 @@ If a forge run is already running when your session starts (check `forge status 
 - **Don't speculate about what a step will produce.** Wait for the actual output, read it, then advise.
 - **Don't run agent containers manually via `docker run`.** Always go through `forge invoke` or `forge new`.
 - **Don't reach for the pipeline when a single invoke would do.** Most non-implementation work is one or two invokes, not a feature run.
+- **Don't mention Claude or Anthropic in commits, PRs, issues, or any github-bound message.** No `Co-Authored-By: Claude` trailer. No "🤖 Generated with Claude Code" signature. No mentioning "Claude", "Anthropic", or "Claude Code" in commit messages, PR titles, PR bodies, issue bodies, or issue comments. Write as a human author would. AI tooling is implementation detail, not public record. See the `no-anthropic-attribution` force-level constraint for the full rule.
 
 ## Stack + project context
 
