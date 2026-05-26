@@ -16,7 +16,7 @@
 //     stop the watchdog cleanly.
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -29,6 +29,14 @@ function pidFile(): string {
   return join(forgeHome, "sso-watchdog.pid");
 }
 
+// #118: watchdog log path. Single append-only file so it tail-able with
+// `forge auth watchdog-tail`. The script already timestamps each line so a
+// single log stays grep-friendly across multiple watchdog restarts.
+export function ssoWatchdogLogFile(): string {
+  const forgeHome = process.env.FORGE_HOME ?? join(homedir(), ".forge");
+  return join(forgeHome, "sso-watchdog.log");
+}
+
 export function startSsoWatchdog(runId: string): void {
   const script = process.env.FORGE_SSO_WATCHDOG;
   if (!script) return;
@@ -38,8 +46,12 @@ export function startSsoWatchdog(runId: string): void {
   // don't accidentally create dirs at a stale FORGE_HOME captured by paths.ts.
   mkdirSync(dirname(pidFile()), { recursive: true });
 
+  // #118: redirect watchdog stdout+stderr to a log so failures (wrong profile,
+  // missing aws cli, network blip) leave a trace instead of vanishing into
+  // /dev/null. Open append-only; user rotates manually if it grows.
+  const logFd = openSync(ssoWatchdogLogFile(), "a");
   const child = spawn("bash", [script, runId], {
-    stdio: "ignore",
+    stdio: ["ignore", logFd, logFd],
     detached: true,
   });
   // Unref so the watchdog doesn't keep the forge event loop alive after dispatch.

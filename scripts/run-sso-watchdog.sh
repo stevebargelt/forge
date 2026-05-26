@@ -23,13 +23,17 @@
 #   SSO_WATCHDOG_THRESHOLD_MIN  — refresh when SSO token has less than this many
 #                                 minutes remaining (default: 60)
 #   SSO_WATCHDOG_POLL_SEC       — poll interval in seconds (default: 300 = 5 min)
-#   SSO_WATCHDOG_PROFILE        — SSO profile to refresh (default: adx-dev-sso)
+#   SSO_WATCHDOG_PROFILE        — SSO profile to refresh. Resolution order:
+#                                 SSO_WATCHDOG_PROFILE → AWS_PROFILE → adx-dev-sso.
+#                                 (#117: hardcoding adx-dev-sso was wrong for most
+#                                 users — silently refreshed a profile that didn't
+#                                 exist while the user's real profile aged out.)
 
 set -euo pipefail
 
 THRESHOLD_MIN="${SSO_WATCHDOG_THRESHOLD_MIN:-60}"
 POLL_SEC="${SSO_WATCHDOG_POLL_SEC:-300}"
-PROFILE="${SSO_WATCHDOG_PROFILE:-adx-dev-sso}"
+PROFILE="${SSO_WATCHDOG_PROFILE:-${AWS_PROFILE:-adx-dev-sso}}"
 PID_FILE="${TMPDIR:-/tmp}/sso-watchdog.pid"
 
 echo $$ > "$PID_FILE"

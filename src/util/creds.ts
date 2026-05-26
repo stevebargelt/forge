@@ -17,7 +17,7 @@
 // agent run mounts the same volume read-only at /home/agent/.claude.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { isWatchdogRunning } from "./sso-watchdog.js";
@@ -490,6 +490,14 @@ export function validateCredsForNewRun(): void {
         `${AUTH_ERROR_PREFIX}Bedrock mode active but the AWS SSO token is expired (or no session cache exists yet). Run \`aws sso login --profile ${resolveAwsProfile()}\` and try again.`
       );
     }
+    // #119: even with a clock-valid SSO + STS cache, AWS may have revoked the
+    // STS chain server-side (typically after a manual `aws sso login` minted a
+    // new session while the prior one was still cached). Catch this here
+    // rather than letting the agent burn a spawn to discover 403.
+    const staleness = detectStaleStsCache();
+    if (staleness?.stale) {
+      throw new Error(`${AUTH_ERROR_PREFIX}${staleness.reason}`);
+    }
     return;
   }
   if (mode === "anthropic-apikey") {
@@ -710,4 +718,118 @@ export function readFreshSsoSession(cacheDir: string): SsoSessionSnapshot | null
 // Boolean wrapper kept for back-compat with existing call sites.
 export function hasFreshSsoCache(cacheDir: string): boolean {
   return readFreshSsoSession(cacheDir) !== null;
+}
+
+// #119: Detect when AWS has revoked the cached STS credentials even though
+// they're still clock-valid. Failure mode: a fresh `aws sso login` mints a new
+// SSO session, AWS server-side-invalidates the prior STS chain, but
+// ~/.aws/cli/cache/*.json still holds STS creds derived from the OLD session.
+// First container call returns 403 with no signal to the human that auth-stale
+// (not agent-broken) was the cause.
+//
+// Heuristic: if any SSO session token file is newer than the freshest STS
+// cache file, the STS cache is stale. Doesn't catch every failure mode but
+// catches the common one (manual `aws sso login` after the watchdog let SSO
+// age out) without making an AWS call.
+//
+// Returns null when the check can't be made (cache dirs missing). Returns
+// `{stale: false}` when the chain looks consistent. Returns `{stale: true,
+// reason}` when SSO is newer than STS.
+export function detectStaleStsCache(opts?: { configDir?: string }): { stale: boolean; reason: string } | null {
+  const configDir = opts?.configDir ?? awsConfigDir();
+  const ssoCacheDir = join(configDir, "sso", "cache");
+  const stsCacheDir = join(configDir, "cli", "cache");
+  if (!existsSync(ssoCacheDir) || !existsSync(stsCacheDir)) return null;
+
+  const ssoMtime = freshestSessionMtime(ssoCacheDir);
+  if (ssoMtime === 0) return null;  // no real SSO session; nothing to compare
+
+  const stsMtime = freshestFileMtime(stsCacheDir);
+  if (stsMtime === 0) return { stale: false, reason: "" };  // no STS cache yet → nothing to be stale
+
+  // 1s slack handles filesystem-mtime jitter (refreshing SSO and STS within
+  // the same second shouldn't trip the check).
+  if (ssoMtime > stsMtime + 1000) {
+    const profile = resolveAwsProfile();
+    return {
+      stale: true,
+      reason:
+        `STS credential cache predates the current SSO session — AWS has likely revoked the cached creds even though they're still clock-valid. ` +
+        `Refresh with: aws sts get-caller-identity --profile ${profile}`,
+    };
+  }
+  return { stale: false, reason: "" };
+}
+
+// Newest mtime among files in dir that actually contain an SSO session
+// (top-level accessToken). Client-registration files are skipped — their
+// year-long expiry would always dominate. Returns 0 when nothing qualifies.
+function freshestSessionMtime(dir: string): number {
+  let entries: string[];
+  try { entries = readdirSync(dir); } catch { return 0; }
+  let max = 0;
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    const path = join(dir, name);
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8")) as { accessToken?: string };
+      if (!parsed.accessToken) continue;
+      const mt = statSync(path).mtimeMs;
+      if (mt > max) max = mt;
+    } catch { /* skip unreadable */ }
+  }
+  return max;
+}
+
+// Newest mtime among .json files in dir (no JSON parse). Returns 0 if dir is
+// empty / unreadable.
+function freshestFileMtime(dir: string): number {
+  let entries: string[];
+  try { entries = readdirSync(dir); } catch { return 0; }
+  let max = 0;
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const mt = statSync(join(dir, name)).mtimeMs;
+      if (mt > max) max = mt;
+    } catch { /* skip */ }
+  }
+  return max;
+}
+
+// #120b: actively exercise the AWS credential chain by calling
+// `aws sts get-caller-identity`. The only honest way to know whether bedrock
+// auth will work — clock-based probes miss the #119 failure mode entirely.
+// Cost is ~500ms-1s; gated behind `forge auth status --deep` rather than the
+// dashboard's polled indicator. Returns ok+identity on success, ok=false with
+// the error's first line on failure (timeout, expired token, missing profile).
+export type AwsChainProbe = {
+  ok: boolean;
+  account?: string;     // AWS account id from sts response
+  arn?: string;         // caller arn
+  error?: string;       // first line of the AWS CLI error on failure
+};
+
+export function probeAwsChain(profile: string): AwsChainProbe {
+  try {
+    const raw = execFileSync(
+      "aws",
+      ["sts", "get-caller-identity", "--profile", profile, "--output", "json"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 },
+    );
+    const parsed = JSON.parse(raw) as { Account?: string; Arn?: string };
+    const out: AwsChainProbe = { ok: true };
+    if (parsed.Account) out.account = parsed.Account;
+    if (parsed.Arn)     out.arn = parsed.Arn;
+    return out;
+  } catch (e) {
+    const msg = (e as Error).message ?? String(e);
+    // execFileSync error message bundles stderr at the end; pick the first
+    // useful-looking line.
+    const stderr = (e as Error & { stderr?: Buffer | string }).stderr;
+    const firstLine =
+      (typeof stderr === "string" ? stderr : stderr?.toString() ?? "")
+        .split("\n").find((l) => l.trim().length > 0) ?? msg.split("\n")[0] ?? "unknown error";
+    return { ok: false, error: firstLine.trim() };
+  }
 }

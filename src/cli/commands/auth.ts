@@ -1,9 +1,17 @@
 import type { Command } from "commander";
 import { spawn as cpSpawn, execFileSync } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { oauthVolumeName, legacyOauthVolumeName, writeOauthHint } from "../../util/creds.js";
+import {
+  detectStaleStsCache,
+  getAuthState,
+  legacyOauthVolumeName,
+  oauthVolumeName,
+  probeAwsChain,
+  writeOauthHint,
+} from "../../util/creds.js";
+import { ssoWatchdogLogFile } from "../../util/sso-watchdog.js";
 
 // `forge auth` manages the Anthropic OAuth credential volume used by agent containers.
 // On macOS the host's Claude Code stores OAuth in the keychain — agents can't read that —
@@ -103,16 +111,58 @@ export function registerAuth(program: Command): void {
   auth
     .command("status")
     .description("Report which credentials forge agents will use")
-    .action(() => {
-      const volume = oauthVolumeName();
-      const mode = process.env.CLAUDE_CODE_USE_BEDROCK === "1"
-        ? "bedrock"
-        : process.env.ANTHROPIC_API_KEY ? "anthropic-apikey" : "anthropic-oauth";
-      console.log(`Auth mode: ${mode}`);
-      if (mode === "anthropic-oauth") {
-        console.log(`OAuth volume: ${volume}`);
+    .option("--deep", "actively probe credentials (runs `aws sts get-caller-identity` for bedrock)")
+    .action((opts: { deep?: boolean }) => {
+      // #120a: surface the full getAuthState() snapshot (the dashboard's been
+      // using it via #97 for a while; the CLI was still printing the dumb
+      // two-liner from before getAuthState existed).
+      const state = getAuthState();
+      console.log(`Auth mode:    ${state.mode}`);
+      console.log(`Health:       ${state.health}`);
+      if (state.identity)    console.log(`Identity:     ${state.identity}`);
+      if (state.remediation) console.log(`Remediation:  ${state.remediation}`);
+
+      if (state.mode === "bedrock") {
+        const d = state.detail;
+        if (d.profile)     console.log(`Profile:      ${d.profile}`);
+        if (d.accountId)   console.log(`Account:      ${d.accountId}`);
+        if (d.roleName)    console.log(`Role:         ${d.roleName}`);
+        if (d.region)      console.log(`Region:       ${d.region}`);
+        if (d.ssoPortal)   console.log(`SSO portal:   ${d.ssoPortal}`);
+        if (d.expiresAt)   console.log(`SSO expires:  ${d.expiresAt}`);
+        console.log(`Watchdog:     ${d.watchdogRunning ? "running" : "not running"}`);
+
+        // #119: surface STS-cache staleness even when SSO + STS are both
+        // clock-valid. Catches the "manual `aws sso login` revoked the old
+        // STS chain" case before the user spawns a doomed agent.
+        const staleness = detectStaleStsCache();
+        if (staleness?.stale) {
+          console.log(`\n⚠ ${staleness.reason}`);
+        }
+
+        if (opts.deep && d.profile) {
+          // #120b: actually exercise the chain. ~500ms but the only honest
+          // way to know auth works. CLI-only — too expensive for the
+          // dashboard's poll path.
+          process.stdout.write(`Deep probe:   running aws sts get-caller-identity ...`);
+          const probe = probeAwsChain(d.profile);
+          if (probe.ok) {
+            console.log(` ✓ chain works`);
+            if (probe.account) console.log(`  Account:    ${probe.account}`);
+            if (probe.arn)     console.log(`  Caller:     ${probe.arn}`);
+          } else {
+            console.log(` ✗ ${probe.error}`);
+          }
+        }
+      } else if (state.mode === "anthropic-oauth") {
+        const d = state.detail;
+        if (d.oauthVolume)        console.log(`OAuth volume: ${d.oauthVolume}`);
+        if (d.oauthEmail)         console.log(`Account:      ${d.oauthEmail}`);
+        if (d.oauthOrganization)  console.log(`Org:          ${d.oauthOrganization}`);
+        if (d.oauthPlan)          console.log(`Plan:         ${d.oauthPlan}`);
         // Warn about orphaned v1 volume from before the /home/agent mount
         // migration. Harmless but taking up space; user may want to remove.
+        const volume = oauthVolumeName();
         const legacy = legacyOauthVolumeName();
         if (legacy !== volume) {
           try {
@@ -124,7 +174,30 @@ export function registerAuth(program: Command): void {
           }
         }
       }
-      if (mode === "bedrock") console.log(`AWS_REGION:   ${process.env.AWS_REGION ?? "(unset)"}`);
+    });
+
+  // #118: the SSO watchdog now logs to ~/.forge/sso-watchdog.log instead of
+  // /dev/null. This subcommand prints the path + tails the last N lines so
+  // failures are visible without remembering where the log lives.
+  auth
+    .command("watchdog-tail")
+    .description("Print the SSO watchdog log path and tail recent lines")
+    .option("-n, --lines <n>", "lines to tail (default: 50)", "50")
+    .action((opts: { lines?: string }) => {
+      const logPath = ssoWatchdogLogFile();
+      console.log(`Log: ${logPath}`);
+      if (!existsSync(logPath)) {
+        console.log("(no log yet — the watchdog hasn't run since #118 shipped, or it's disabled)");
+        return;
+      }
+      const n = Math.max(1, Number(opts.lines ?? "50") || 50);
+      const lines = readFileSync(logPath, "utf8").split("\n");
+      // .split leaves an empty trailing element if the file ends with \n;
+      // drop it so the tail count matches user expectation.
+      if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      const tail = lines.slice(Math.max(0, lines.length - n));
+      console.log(`---- last ${tail.length} line(s) ----`);
+      for (const l of tail) console.log(l);
     });
 
   auth

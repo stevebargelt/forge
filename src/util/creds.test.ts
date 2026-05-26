@@ -1,10 +1,11 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   detectCredsMode,
+  detectStaleStsCache,
   hasAwsSsoConfigured,
   hasAnyAwsSsoProfile,
   hasFreshSsoCache,
@@ -571,4 +572,100 @@ test("writeOauthHint honors FORGE_OAUTH_VOLUME override in volumeName field", ()
   writeOauthHint({ credsPresent: true });
   const raw = JSON.parse(readFileSync(join(tmpForgeHome, "oauth-hint.json"), "utf8")) as { volumeName: string };
   assert.equal(raw.volumeName, "test-volume");
+});
+
+// ----- #119: detectStaleStsCache -----
+
+// Helper: write an SSO session cache file (with accessToken so it counts as a
+// real session, not a registration file) and force its mtime.
+function writeSsoSession(name: string, mtimeMs: number): void {
+  const dir = join(tmpAwsDir, "sso", "cache");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  writeFileSync(path, JSON.stringify({
+    accessToken: "fake-token",
+    startUrl: "https://example.awsapps.com/start",
+    expiresAt: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+  }));
+  const t = mtimeMs / 1000;
+  utimesSync(path, t, t);
+}
+
+// Helper: write an STS CLI cache file (content doesn't matter for the mtime check).
+function writeStsCache(name: string, mtimeMs: number): void {
+  const dir = join(tmpAwsDir, "cli", "cache");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  writeFileSync(path, JSON.stringify({ Credentials: { Expiration: "2099-01-01T00:00:00Z" } }));
+  const t = mtimeMs / 1000;
+  utimesSync(path, t, t);
+}
+
+test("detectStaleStsCache returns null when neither cache dir exists", () => {
+  assert.equal(detectStaleStsCache(), null);
+});
+
+test("detectStaleStsCache returns null when SSO cache dir exists but contains only registration files (no real session)", () => {
+  const dir = join(tmpAwsDir, "sso", "cache");
+  mkdirSync(dir, { recursive: true });
+  // Registration file — no accessToken
+  writeFileSync(join(dir, "registration.json"), JSON.stringify({ clientId: "x", clientSecret: "y" }));
+  mkdirSync(join(tmpAwsDir, "cli", "cache"), { recursive: true });
+  assert.equal(detectStaleStsCache(), null);
+});
+
+test("detectStaleStsCache returns {stale:false} when STS cache dir exists but is empty (nothing to be stale)", () => {
+  writeSsoSession("sess-a.json", Date.now() - 5000);
+  mkdirSync(join(tmpAwsDir, "cli", "cache"), { recursive: true });
+  const result = detectStaleStsCache();
+  assert.equal(result?.stale, false);
+});
+
+test("detectStaleStsCache returns {stale:false} when STS cache is newer than SSO session", () => {
+  const now = Date.now();
+  writeSsoSession("sess-a.json", now - 60_000);   // SSO from 1 min ago
+  writeStsCache("sts-a.json",   now - 10_000);    // STS from 10s ago (newer)
+  const result = detectStaleStsCache();
+  assert.equal(result?.stale, false);
+});
+
+test("detectStaleStsCache returns {stale:true} when SSO session is newer than STS cache", () => {
+  const now = Date.now();
+  writeStsCache("sts-a.json",   now - 60_000);    // STS from 1 min ago
+  writeSsoSession("sess-a.json", now - 10_000);   // SSO from 10s ago (newer → STS stale)
+  const result = detectStaleStsCache();
+  assert.equal(result?.stale, true);
+  assert.match(result?.reason ?? "", /STS credential cache predates the current SSO session/);
+  assert.match(result?.reason ?? "", /aws sts get-caller-identity/);
+});
+
+test("detectStaleStsCache tolerates 1-second mtime jitter (same-second refresh isn't flagged)", () => {
+  const now = Date.now();
+  writeStsCache("sts-a.json",   now - 1000);
+  writeSsoSession("sess-a.json", now - 200);  // 800ms newer — within 1s slack
+  const result = detectStaleStsCache();
+  assert.equal(result?.stale, false);
+});
+
+test("detectStaleStsCache picks the freshest SSO session when multiple exist", () => {
+  const now = Date.now();
+  writeSsoSession("old.json",    now - 120_000);  // older
+  writeSsoSession("newest.json", now - 5_000);    // newest — should drive the comparison
+  writeStsCache("sts-a.json",    now - 60_000);
+  const result = detectStaleStsCache();
+  assert.equal(result?.stale, true);
+});
+
+test("validateCredsForNewRun throws when bedrock STS cache is stale", () => {
+  // Arrange bedrock mode via a config + sso session, then make STS stale.
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "adx-dev";
+  writeAwsConfig(`[profile adx-dev]\nsso_session = s1\nsso_account_id = 111\nsso_role_name = R\nregion = us-east-1\n[sso-session s1]\nsso_start_url = https://example.awsapps.com/start\nsso_region = us-east-1\n`);
+  const now = Date.now();
+  writeStsCache("sts-old.json",   now - 60_000);
+  writeSsoSession("sess-new.json", now - 5_000);  // SSO newer → STS stale
+  assert.throws(
+    () => validateCredsForNewRun(),
+    /predates the current SSO session/,
+  );
 });
