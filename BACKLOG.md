@@ -525,6 +525,73 @@ Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-o
 **Caught:** 2026-05-24 during #140 implementation, when the type-extraction work turned out to be cosmetic (dead exports) rather than functional (row-cast types). Documented in docs/SCHEMA-CONTRACT.md as a future ticket.
 
 
+### #147 — Reds: evidence-anchored output schema + post-validation to catch hallucinated citations
+Filed 2026-05-26 based on empirical audit of all 23 red verdicts in ~/.forge/forge.db.
+
+**Why filed (data).** Of 23 red verdicts in the DB:
+- 4 (17%) hallucinated their file:line citations — cited files don't exist, OR cited line is past EOF.
+- Of those 4, **2 were authoritative \`fail\` verdicts at confidence 0.95 that BLOCKED runs against the split-keyboard-teacher project on entirely fabricated evidence**. Both came from red-backend on the same run (\`run-pocket-v1-prompt-practice-and-weakness-engine-*\`).
+- 1 additional verdict was MIXED (some real citations, some hallucinated).
+
+The pattern: reds emit confident, well-structured-looking findings with file:line references that LOOK plausible but point to nothing. Forge's gate aggregator currently trusts them at face value.
+
+**Fix shape (technique #1 from /tmp/red-false-positives-research.md).** Mechanically grep-validate every cited file:line against the actual project source. Drop findings where the quoted text doesn't appear at the cited location. A verdict where all findings get dropped post-validation downgrades to inconclusive.
+
+**Concrete changes:**
+1. **Finding schema extension** — \`Finding\` type (\`src/types/index.ts\`) gains \`{file: string, line: number, quoted_text: string}\` as required fields alongside the existing \`{severity, summary, evidence, hypothesis}\`. \`quoted_text\` is a short verbatim snippet (1-3 lines) from \`file\` at \`line\`.
+2. **Post-validator in \`src/v2/gate.ts\`** — when a verdict is written, iterate findings; for each finding, read \`<projectDir>/<file>\` at \`line ± 3\` lines of context; check whether \`quoted_text\` appears in that window. Drop findings where it doesn't. ~30-50 LoC.
+3. **Verdict downgrade rule** — if a \`fail\` verdict had N findings before validation and 0 after, downgrade to \`inconclusive\` with a synthesized note \"all findings failed post-validation; treat as inconclusive\". Logged via \`logEvent\` for diagnostics.
+4. **Seed updates** — all 5 red seed prompts (\`red-wide\`, \`red-narrow\`, \`red-frontend\`, \`red-backend\`, \`red-security\`) updated to require the new schema. New instruction: \"every finding MUST cite file:line AND quote 1-3 lines verbatim from that location. Findings that fail verbatim-match validation will be silently dropped.\"
+5. **Tests** — new gate.ts tests verifying: drop on mismatched quote, drop on missing file, drop on out-of-bounds line, downgrade fail→inconclusive when all findings dropped, preserve verdicts where validation passes.
+
+**Out of scope:**
+- Per-finding waiver / suppression. Separate feature, separate ticket.
+- K-of-N self-consistency sampling (technique #2). Defer until #1 is in place and we see the cleaner verdict stream.
+- Ground-truth feedback capture (technique #3). Defer.
+- Anything that changes the LLM behavior (prompts) beyond the schema requirement. The validator is the load-bearing change; seed updates are just to make reds emit the data the validator wants.
+- Retroactive validation of historical verdicts. New rule applies only to new verdicts.
+
+**Expected impact (from the audit data):**
+- Prevents 2 of the 23 historical verdicts from BLOCKING runs (the red-backend hallucinations).
+- Drops findings from 4 of 23 verdicts (the hallucination cluster).
+- Plus probable cleanup of red-narrow's noise (its findings rarely cite anything, so most would get dropped → verdicts naturally land at inconclusive instead of being treated as signal).
+
+**Sizing.** Small-medium. One focused session.
+
+**Caught:** 2026-05-26 audit of red verdicts; cross-referenced with FP-mitigation literature survey at /tmp/red-false-positives-research.md.
+
+
+### #148 — red-narrow investigation: 6 of 7 verdicts are process-noise; rework or retire
+Filed 2026-05-26 based on the same audit as #147.
+
+**Why filed (data).** Of 7 red-narrow verdicts in the corpus:
+- 6 are \"inconclusive with zero or one ungrounded findings\" — the red couldn't actually evaluate the artifact against its anti-prompt framing.
+- 1 was a \`pass\` verdict with 8 ungrounded findings (no file:line citations).
+- ZERO produced a confident actionable verdict.
+
+red-narrow's design is to consume force-level constraints as anti-prompts and check whether the artifact violates them. The data suggests either:
+1. The constraints rarely match what artifacts touch (so red-narrow has nothing to say most of the time → process noise).
+2. The seed prompt doesn't translate constraint→finding effectively (so even when relevant, no actionable verdict emerges).
+3. The narrow framing doesn't produce file:line citations the way other reds do.
+
+**What to investigate:**
+- Pull the force-level constraints currently in \`~/.forge/constraints/\`. How many are there? How specific are they?
+- For each red-narrow verdict in the corpus, what constraint did it consume? Was the artifact even in the constraint's scope?
+- Does the seed prompt require file:line citations? If not, that explains the lack of citations.
+- Read red-narrow's seed (\`seeds/agents/red-narrow/CLAUDE.md\`) and compare to the other red seeds' structure.
+
+**Possible outcomes:**
+1. **Rework the seed** to be more permissive (still anti-prompt-driven, but more willing to flag concerns + emit citations). Most likely.
+2. **Demote red-narrow to advisory authority by default** (specialist instead of authoritative). It can't BLOCK what it can't evaluate.
+3. **Retire red-narrow entirely** if investigation shows the anti-prompt framing fundamentally doesn't fit how artifacts arrive at the gate.
+
+**Composite with #147** (evidence-anchored output schema). After #147 ships, red-narrow's ungrounded findings will all be dropped automatically, and its verdicts will naturally land at inconclusive. That may be sufficient — the noise self-mitigates without needing a separate rework. If the data still looks bad post-#147, this ticket revives as a real investigation.
+
+**Suggested sequencing:** do #147 first; revisit this ticket once we have 30+ post-#147 verdicts to see whether red-narrow's signal-to-noise actually improves.
+
+**Caught:** 2026-05-26 audit of red verdicts.
+
+
 ## Done (recent)
 
 ### #90 — Submit captures corpus-level artifacts, not run-level deliverables

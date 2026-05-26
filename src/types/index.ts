@@ -29,6 +29,15 @@ export type Finding = {
   summary: string;
   evidence: string;
   hypothesis: string;
+  // #147 evidence-anchoring. When all three are present, the finding gets
+  // mechanically validated: validate-findings.ts checks that quoted_text
+  // appears at file:line ±3 in the project source. Findings without these
+  // pass through un-anchored (intended for prose-y artifacts like architect
+  // outputs where source-anchoring isn't always applicable). Partial sets
+  // (e.g. file+line but no quoted_text) are treated as un-anchored.
+  file?: string;
+  line?: number;
+  quoted_text?: string;
 };
 
 export type Verdict = {

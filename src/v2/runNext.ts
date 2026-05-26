@@ -24,6 +24,7 @@ import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed } from "../notify/trigger.js";
 import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
 import { insertVerdict } from "../store/verdicts.js";
+import { validateVerdict } from "./validate-findings.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
@@ -377,24 +378,41 @@ async function dispatchReds(args: {
   let authoritativeFail = false;
   const verdicts: Verdict[] = [];
   for (const r of results) {
-    verdicts.push(r.verdict);
+    // #147: post-validate findings against project source. Hallucinated
+    // citations get dropped; a fail with 100% dropped findings downgrades
+    // to inconclusive. Returns a new verdict; original r.verdict untouched.
+    const { validated, dropped } = validateVerdict(r.verdict, args.projectDir);
+    if (dropped.length > 0) {
+      logEvent("verdict.findings_dropped", {
+        runId: args.runId,
+        taskId: args.primaryTaskId,
+        payload: {
+          redRole: r.red.agent,
+          originalVerdict: r.verdict.verdict,
+          finalVerdict: validated.verdict,
+          droppedCount: dropped.length,
+          droppedReasons: dropped.map((d) => d.reason),
+        },
+      });
+    }
+    verdicts.push(validated);
     insertVerdict({
       id: newVerdictId(),
       taskId: args.primaryTaskId,
       redTaskId: r.redTaskId,
       redRole: r.red.agent,
-      verdict: r.verdict.verdict,
-      confidence: r.verdict.confidence,
+      verdict: validated.verdict,
+      confidence: validated.confidence,
       authority: r.red.authority as RedAuthority,
-      findings: r.verdict.findings,
+      findings: validated.findings,
       createdAt: nowIso(),
     });
     logEvent("verdict.received", {
       runId: args.runId,
       taskId: args.primaryTaskId,
-      payload: { redRole: r.red.agent, verdict: r.verdict.verdict, authority: r.red.authority },
+      payload: { redRole: r.red.agent, verdict: validated.verdict, authority: r.red.authority },
     });
-    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && r.verdict.verdict === "fail") {
+    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && validated.verdict === "fail") {
       authoritativeFail = true;
     }
   }

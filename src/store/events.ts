@@ -15,6 +15,7 @@ export type EventType =
   | "task.submitted"
   | "task.retried"
   | "verdict.received"
+  | "verdict.findings_dropped"
   | "gate.decided";
 
 export function logEvent(
