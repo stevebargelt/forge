@@ -3,6 +3,17 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, writeFi
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
+// write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
+// can report which orchestrator sessions are live. Marker substring used to
+// detect/upgrade an existing forge-installed hook entry on re-runs.
+const HEARTBEAT_MARKER = "orchestrator-heartbeat";
+const CLAUDE_HOOK_EVENTS: ReadonlyArray<readonly [string, string]> = [
+  ["SessionStart", "start"],
+  ["Stop", "tick"],
+  ["SessionEnd", "end"],
+];
+
 // Wraps the project's CLAUDE.md with the forge orchestrator block. Idempotent:
 // if the fenced markers already exist, replaces the block in place; if they
 // don't, appends. Creates CLAUDE.md if missing. Adds .forge/ dir for project
@@ -39,15 +50,17 @@ export function registerInit(program: Command): void {
       const willWrite = next !== existing;
       const willCreateForgeDir = !existsSync(forgeProjectDir);
 
-      // Hook install plan (commit-msg).
+      // Hook install plans (--no-install-hooks bypasses both).
       const installHooks = options.installHooks !== false;
       const hookPlan = installHooks ? planCommitMsgHook(projectDir) : { action: "skipped" as const };
+      const claudeHooksPlan = installHooks ? planClaudeHooks(projectDir) : { action: "skipped" as const };
 
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
         console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${willWrite ? "WOULD update" : "no change"}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
+        console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         return;
       }
 
@@ -58,11 +71,13 @@ export function registerInit(program: Command): void {
         mkdirSync(forgeProjectDir, { recursive: true });
       }
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
+      const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
 
       console.log(`forge init complete in ${projectDir}`);
       console.log(`  CLAUDE.md:        ${willWrite ? (existing ? "updated orchestrator block" : "created with orchestrator block") : "already current (no change)"}`);
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
+      console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(``);
       console.log(`Next: run 'claude' from this directory to talk to the forge orchestrator.`);
     });
@@ -195,4 +210,126 @@ export function applyOrchestratorBlock(existing: string, template: string): stri
 
 function ensureTrailingNewline(s: string): string {
   return s.endsWith("\n") ? s : s + "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #153: Claude Code session hooks (heartbeats for orchestrator liveness).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type ClaudeHooksPlan =
+  | { action: "install"; settingsPath: string; source: string; details: string }
+  | { action: "already-current"; settingsPath: string }
+  | { action: "corrupt-json"; settingsPath: string; details: string }
+  | { action: "skipped" };
+
+// Decides what to do for the Claude Code session hooks without writing.
+// Exported for testing.
+export function planClaudeHooks(projectDir: string): ClaudeHooksPlan {
+  const settingsPath = join(projectDir, ".claude", "settings.json");
+  const source = resolveHeartbeatSource();
+  if (!existsSync(settingsPath)) {
+    return { action: "install", settingsPath, source, details: "create new .claude/settings.json" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
+  } catch (e) {
+    return { action: "corrupt-json", settingsPath, details: (e as Error).message };
+  }
+  const hooks = (isObject(parsed) && isObject(parsed["hooks"])) ? parsed["hooks"] : {};
+  const needs: string[] = [];
+  for (const [event, action] of CLAUDE_HOOK_EVENTS) {
+    if (!hasCurrentForgeHook(hooks[event], source, action)) needs.push(event);
+  }
+  if (needs.length === 0) {
+    return { action: "already-current", settingsPath };
+  }
+  return { action: "install", settingsPath, source, details: `merge into existing settings.json (events: ${needs.join(", ")})` };
+}
+
+export function executeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
+  if (plan.action === "skipped")         return "skipped (--no-install-hooks)";
+  if (plan.action === "already-current") return "already current (no change)";
+  if (plan.action === "corrupt-json")    return `SKIPPED — settings.json not valid JSON (${plan.details})`;
+
+  const { settingsPath, source } = plan;
+  const settingsDir = dirname(settingsPath);
+  if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
+
+  let parsed: Record<string, unknown> = {};
+  const fileExisted = existsSync(settingsPath);
+  if (fileExisted) {
+    const raw = readFileSync(settingsPath, "utf8");
+    const decoded = JSON.parse(raw);
+    if (isObject(decoded)) parsed = decoded;
+  }
+
+  const hooksRoot: Record<string, unknown> =
+    isObject(parsed["hooks"]) ? parsed["hooks"] : {};
+
+  for (const [event, action] of CLAUDE_HOOK_EVENTS) {
+    const command = `${source} ${action}`;
+    const entries = Array.isArray(hooksRoot[event]) ? hooksRoot[event] as unknown[] : [];
+    let replaced = false;
+    for (const entry of entries) {
+      if (!isObject(entry)) continue;
+      const innerHooks = entry["hooks"];
+      if (!Array.isArray(innerHooks)) continue;
+      for (const h of innerHooks) {
+        if (!isObject(h)) continue;
+        const cmd = h["command"];
+        if (typeof cmd === "string" && cmd.includes(HEARTBEAT_MARKER)) {
+          h["command"] = command;
+          if (h["type"] === undefined) h["type"] = "command";
+          replaced = true;
+        }
+      }
+    }
+    if (!replaced) {
+      entries.push({ matcher: "", hooks: [{ type: "command", command }] });
+    }
+    hooksRoot[event] = entries;
+  }
+  parsed["hooks"] = hooksRoot;
+
+  writeFileSync(settingsPath, JSON.stringify(parsed, null, 2) + "\n");
+  return fileExisted ? "merged into existing .claude/settings.json" : "created .claude/settings.json";
+}
+
+function describeClaudeHooksPlan(plan: ClaudeHooksPlan): string {
+  switch (plan.action) {
+    case "install":         return `WOULD install (${plan.details})`;
+    case "already-current": return "already current (no change)";
+    case "corrupt-json":    return `WOULD SKIP — settings.json not valid JSON (${plan.details})`;
+    case "skipped":         return "skipped (--no-install-hooks)";
+  }
+}
+
+function hasCurrentForgeHook(entries: unknown, source: string, action: string): boolean {
+  if (!Array.isArray(entries)) return false;
+  const expected = `${source} ${action}`;
+  return entries.some((e) => {
+    if (!isObject(e)) return false;
+    const inner = e["hooks"];
+    if (!Array.isArray(inner)) return false;
+    return inner.some((h) => isObject(h) && typeof h["command"] === "string" && h["command"] === expected);
+  });
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function resolveHeartbeatSource(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", "..", "..", "scripts", "claude-hooks", "orchestrator-heartbeat"),
+    join(here, "..", "..", "..", "..", "scripts", "claude-hooks", "orchestrator-heartbeat"),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  throw new Error(
+    `claude-hooks heartbeat source not found. Looked at:\n  ${candidates.join("\n  ")}`
+  );
 }

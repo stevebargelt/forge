@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { uniqueProjectDirs, type ProjectAggregate } from "../store/runs.js";
 import { findForgeProjects } from "./find-forge-projects.js";
 import { resolveProjectMeta } from "./project-meta.js";
+import { loadHeartbeats } from "./orchestrator-heartbeats.js";
 
 export type ProjectRecord = {
   projectDir: string;
@@ -27,6 +28,7 @@ export type ProjectRecord = {
   inFlightCount: number;
   hasBacklogMd: boolean;  // <project>/BACKLOG.md exists
   readmeFirstLine?: string;
+  liveSessions: number;   // #153: count of live Claude Code orchestrator sessions
 };
 
 export type ListOptions = {
@@ -55,6 +57,20 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
     }
   }
 
+  // #153: per-project live session count from ~/.forge/orchestrators/.
+  const liveByDir = new Map<string, number>();
+  for (const hb of loadHeartbeats()) {
+    if (!hb.isLive) continue;
+    liveByDir.set(hb.projectDir, (liveByDir.get(hb.projectDir) ?? 0) + 1);
+  }
+  // Live sessions for a project that's never had a forge run still count —
+  // bring those projectDirs into the union.
+  for (const dir of liveByDir.keys()) {
+    if (!byDir.has(dir)) {
+      byDir.set(dir, { projectDir: dir, lastRunAt: "", runCount: 0, inFlightCount: 0 });
+    }
+  }
+
   const out: ProjectRecord[] = [];
   for (const agg of byDir.values()) {
     const meta = resolveProjectMeta(agg.projectDir);
@@ -66,6 +82,7 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
       runCount: agg.runCount,
       inFlightCount: agg.inFlightCount,
       hasBacklogMd: existsSync(join(agg.projectDir, "BACKLOG.md")),
+      liveSessions: liveByDir.get(agg.projectDir) ?? 0,
       ...(meta.description ? { description: meta.description } : {}),
       ...(agg.lastRunAt ? { lastRunAt: agg.lastRunAt } : {}),
     };
@@ -97,7 +114,9 @@ export function sortProjects(
     out.sort((a, b) => a.label.localeCompare(b.label));
   } else {
     out.sort((a, b) => {
-      // Live first (lastRunAt populated, descending), then never-run.
+      // Live orchestrator sessions float to the top.
+      if (a.liveSessions !== b.liveSessions) return b.liveSessions - a.liveSessions;
+      // Then by last run (recent first), with never-run projects after run-once projects.
       if (a.lastRunAt && !b.lastRunAt) return -1;
       if (b.lastRunAt && !a.lastRunAt) return 1;
       if (!a.lastRunAt && !b.lastRunAt) return a.label.localeCompare(b.label);

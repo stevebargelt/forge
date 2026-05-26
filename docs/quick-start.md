@@ -54,11 +54,14 @@ cd ~/code/my-app
 forge init
 ```
 
-This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creating the file if needed), creates a `~/code/my-app/.forge/` directory for project-level workflow overrides, AND installs a `commit-msg` git hook that rejects commits with `Co-Authored-By: Claude` trailers or other AI-attribution boilerplate (defense-in-depth for the `no-ai-attribution` constraint).
+This installs the forge orchestrator block into `~/code/my-app/CLAUDE.md` (creating the file if needed), creates a `~/code/my-app/.forge/` directory for project-level workflow overrides, AND installs two kinds of hooks:
 
-Re-run `forge init` any time you upgrade forge — the orchestrator block is fence-marked and replaces in place; the hook is a symlink and re-runs are idempotent.
+- A `commit-msg` git hook that rejects commits with `Co-Authored-By: Claude` trailers or other AI-attribution boilerplate (defense-in-depth for the `no-ai-attribution` constraint).
+- Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd) wired into `.claude/settings.json` that write a heartbeat file at `~/.forge/orchestrators/<session-id>.json`. `forge projects list` reads these to show which orchestrators are currently live (●), and the dashboard surfaces the same signal in its Projects view.
 
-Skip the hook install with `forge init --no-install-hooks` if a project already has its own `commit-msg` hook you don't want touched (forge won't clobber existing hooks regardless, but the flag silences the SKIPPED notice).
+Re-run `forge init` any time you upgrade forge — the orchestrator block is fence-marked and replaces in place; the commit-msg hook is a symlink; the Claude hooks are merged into `.claude/settings.json` (existing user hooks are preserved, only the forge heartbeat entries get upgraded). All re-runs are idempotent.
+
+Skip both hook installs with `forge init --no-install-hooks` if you'd rather wire them yourself. Forge will never clobber an existing `commit-msg` hook or unrelated keys in `.claude/settings.json`; if `settings.json` is unparseable JSON it's left alone with a SKIPPED notice.
 
 ## 4. Pick a path: orchestrator-led or direct CLI
 

@@ -73,20 +73,22 @@ function collect(value: string, prev: string[]): string[] {
 
 function printTable(recs: ProjectRecord[]): void {
   const nameW = Math.min(40, Math.max(4, ...recs.map((r) => r.label.length)));
+  const liveW = 4;          // "LIVE" header
   const activityW = 14;
   const runsW = 6;
   const flightW = 9;
 
   const header =
-    `${"NAME".padEnd(nameW)}  ${"LAST ACTIVITY".padEnd(activityW)}  ${"RUNS".padStart(runsW)}  ${"IN-FLIGHT".padStart(flightW)}  PATH`;
+    `${"LIVE".padEnd(liveW)}  ${"NAME".padEnd(nameW)}  ${"LAST ACTIVITY".padEnd(activityW)}  ${"RUNS".padStart(runsW)}  ${"IN-FLIGHT".padStart(flightW)}  PATH`;
   console.log(header);
   console.log("─".repeat(Math.min(120, header.length)));
   for (const r of recs) {
+    const live = (r.liveSessions > 0 ? (r.liveSessions === 1 ? "●" : `●${r.liveSessions}`) : " ").padEnd(liveW);
     const name = truncate(r.label, nameW).padEnd(nameW);
     const activity = (r.lastRunAt ? relativeTime(r.lastRunAt) : "no runs").padEnd(activityW);
     const runs = String(r.runCount).padStart(runsW);
     const flight = (r.inFlightCount > 0 ? `⚡ ${r.inFlightCount}` : String(r.inFlightCount)).padStart(flightW);
-    console.log(`${name}  ${activity}  ${runs}  ${flight}  ${r.projectDir}`);
+    console.log(`${live}  ${name}  ${activity}  ${runs}  ${flight}  ${r.projectDir}`);
   }
 }
 
@@ -98,6 +100,7 @@ function printShow(r: ProjectRecord): void {
   if (r.readmeFirstLine)    console.log(`README:   ${r.readmeFirstLine}`);
   console.log(``);
   console.log(`Activity:`);
+  console.log(`  Live now:    ${r.liveSessions > 0 ? `${r.liveSessions} orchestrator session(s)` : "—"}`);
   console.log(`  Last run:    ${r.lastRunAt ? relativeTime(r.lastRunAt) + ` (${r.lastRunAt})` : "no runs yet"}`);
   console.log(`  Total runs:  ${r.runCount}`);
   console.log(`  In-flight:   ${r.inFlightCount}`);

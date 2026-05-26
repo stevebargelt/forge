@@ -1,10 +1,10 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyOrchestratorBlock, planCommitMsgHook } from "./init.js";
+import { applyOrchestratorBlock, planClaudeHooks, executeClaudeHooksPlan, planCommitMsgHook } from "./init.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
 # forge orchestrator
@@ -149,4 +149,128 @@ test("planCommitMsgHook: returns exists-other when a symlink points somewhere el
   if (plan.action === "exists-other") {
     assert.match(plan.details, /symlink/);
   }
+});
+
+// ----- planClaudeHooks / executeClaudeHooksPlan (#153) -----
+
+test("planClaudeHooks: action=install when no .claude/settings.json exists", () => {
+  const plan = planClaudeHooks(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.match(plan.settingsPath, /\.claude\/settings\.json$/);
+    assert.match(plan.source, /orchestrator-heartbeat$/);
+    assert.match(plan.details, /create new/);
+  }
+});
+
+test("executeClaudeHooksPlan: creates a fresh settings.json with all three event hooks", () => {
+  const plan = planClaudeHooks(projectDir);
+  const msg = executeClaudeHooksPlan(plan);
+  assert.match(msg, /created/);
+  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.json"), "utf8"));
+  for (const event of ["SessionStart", "Stop", "SessionEnd"]) {
+    const entries = parsed.hooks[event];
+    assert.ok(Array.isArray(entries), `${event} should be an array`);
+    const found = entries.some((e: { hooks?: Array<{ command?: string }> }) =>
+      Array.isArray(e.hooks) && e.hooks.some((h) => typeof h.command === "string" && h.command.includes("orchestrator-heartbeat"))
+    );
+    assert.ok(found, `${event} should contain our orchestrator-heartbeat command`);
+  }
+});
+
+test("planClaudeHooks: action=already-current after a fresh install", () => {
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+  const replan = planClaudeHooks(projectDir);
+  assert.equal(replan.action, "already-current");
+});
+
+test("executeClaudeHooksPlan: merges into existing settings.json, preserving unrelated keys", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  const existing = {
+    permissions: { allow: ["Read"] },
+    hooks: {
+      SessionStart: [
+        { matcher: "", hooks: [{ type: "command", command: "/user/their-own-script.sh" }] },
+      ],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(existing, null, 2));
+
+  const plan = planClaudeHooks(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") assert.match(plan.details, /merge/);
+  executeClaudeHooksPlan(plan);
+
+  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
+  // Unrelated keys preserved.
+  assert.deepEqual(merged.permissions, { allow: ["Read"] });
+  // User's own hook entry still there.
+  const userEntry = merged.hooks.SessionStart.some((e: { hooks?: Array<{ command?: string }> }) =>
+    e.hooks?.some((h) => h.command === "/user/their-own-script.sh"),
+  );
+  assert.ok(userEntry, "user's existing SessionStart hook should be preserved");
+  // Our entry added.
+  const ourEntry = merged.hooks.SessionStart.some((e: { hooks?: Array<{ command?: string }> }) =>
+    e.hooks?.some((h) => typeof h.command === "string" && h.command.includes("orchestrator-heartbeat")),
+  );
+  assert.ok(ourEntry, "our SessionStart heartbeat hook should be added");
+  // Stop + SessionEnd added too.
+  assert.ok(merged.hooks.Stop?.length > 0);
+  assert.ok(merged.hooks.SessionEnd?.length > 0);
+});
+
+test("executeClaudeHooksPlan: upgrades a stale forge heartbeat command in-place rather than appending a duplicate", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  // Simulate a stale prior install at a different path.
+  const existing = {
+    hooks: {
+      SessionStart: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/path/scripts/claude-hooks/orchestrator-heartbeat start" }] },
+      ],
+      Stop: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/path/scripts/claude-hooks/orchestrator-heartbeat tick" }] },
+      ],
+      SessionEnd: [
+        { matcher: "", hooks: [{ type: "command", command: "/old/path/scripts/claude-hooks/orchestrator-heartbeat end" }] },
+      ],
+    },
+  };
+  writeFileSync(join(settingsDir, "settings.json"), JSON.stringify(existing, null, 2));
+
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+  const merged = JSON.parse(readFileSync(join(settingsDir, "settings.json"), "utf8"));
+
+  // Each event still has exactly ONE entry (we upgraded, didn't duplicate).
+  assert.equal(merged.hooks.SessionStart.length, 1);
+  assert.equal(merged.hooks.Stop.length, 1);
+  assert.equal(merged.hooks.SessionEnd.length, 1);
+  // And the command no longer points at /old/path.
+  const startCmd = merged.hooks.SessionStart[0].hooks[0].command;
+  assert.ok(!startCmd.startsWith("/old/path"), `expected upgrade away from /old/path, got: ${startCmd}`);
+  assert.ok(startCmd.includes("orchestrator-heartbeat"));
+  assert.ok(startCmd.endsWith(" start"));
+});
+
+test("planClaudeHooks: returns corrupt-json when settings.json is unparseable", () => {
+  const settingsDir = join(projectDir, ".claude");
+  mkdirSync(settingsDir, { recursive: true });
+  writeFileSync(join(settingsDir, "settings.json"), "{ not valid json");
+  const plan = planClaudeHooks(projectDir);
+  assert.equal(plan.action, "corrupt-json");
+  // Execute should report SKIPPED without throwing.
+  const msg = executeClaudeHooksPlan(plan);
+  assert.match(msg, /SKIPPED/);
+  // File untouched.
+  assert.equal(readFileSync(join(settingsDir, "settings.json"), "utf8"), "{ not valid json");
+});
+
+test("executeClaudeHooksPlan: idempotent — running install twice doesn't accumulate entries", () => {
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+  executeClaudeHooksPlan(planClaudeHooks(projectDir));
+  const parsed = JSON.parse(readFileSync(join(projectDir, ".claude", "settings.json"), "utf8"));
+  assert.equal(parsed.hooks.SessionStart.length, 1);
+  assert.equal(parsed.hooks.Stop.length, 1);
+  assert.equal(parsed.hooks.SessionEnd.length, 1);
 });

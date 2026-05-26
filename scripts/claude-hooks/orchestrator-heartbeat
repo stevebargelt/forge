@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Claude Code hook — writes/updates/deletes a heartbeat file in
+# ~/.forge/orchestrators/<session-id>.json so forge can show which
+# orchestrator sessions are live.
+#
+# Invoked by Claude Code with the event name as $1:
+#   $1 = start    SessionStart event   — create heartbeat file
+#   $1 = tick     Stop event           — update lastSeen
+#   $1 = end      SessionEnd event     — delete heartbeat file
+#
+# Claude Code pipes a JSON context blob on stdin. We extract session_id
+# and cwd from it. Pure POSIX shell + grep/sed; no jq or python required.
+#
+# Installed by `forge init` into <project>/.claude/settings.json.
+# Bypass install with `forge init --no-install-hooks`.
+
+set -eu
+
+ACTION="${1:-tick}"
+DIR="${HOME}/.forge/orchestrators"
+mkdir -p "$DIR"
+
+# Read stdin JSON. Use awk/sed to pull the two fields we care about.
+# Robust enough for Claude Code's well-formed payloads; won't try to be
+# a general JSON parser.
+INPUT=$(cat)
+SESSION_ID=$(printf '%s' "$INPUT" | sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1)
+CWD=$(printf '%s' "$INPUT"        | sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p'        | head -1)
+
+if [ -z "$SESSION_ID" ]; then
+  # No session id — nothing we can write. Exit silently so the hook
+  # doesn't fail the agent's turn.
+  exit 0
+fi
+
+FILE="$DIR/${SESSION_ID}.json"
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+case "$ACTION" in
+  start|tick)
+    # On start, write fresh. On tick, preserve startedAt from the existing
+    # file if present; otherwise treat as a first-tick and synthesize one.
+    STARTED="$NOW"
+    if [ "$ACTION" = "tick" ] && [ -f "$FILE" ]; then
+      STARTED=$(sed -nE 's/.*"startedAt"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$FILE" | head -1)
+      [ -z "$STARTED" ] && STARTED="$NOW"
+    fi
+    cat > "$FILE" <<EOF
+{
+  "sessionId": "$SESSION_ID",
+  "projectDir": "$CWD",
+  "startedAt": "$STARTED",
+  "lastSeen": "$NOW"
+}
+EOF
+    ;;
+  end)
+    rm -f "$FILE"
+    ;;
+  *)
+    # Unknown action — silent no-op rather than failing the hook.
+    exit 0
+    ;;
+esac
