@@ -25,7 +25,7 @@ import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 import { captureUsageForTask } from "../store/model-calls.js";
-import { insertRun, getRun } from "../store/runs.js";
+import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { composeSystemPrompt } from "./compose.js";
@@ -66,6 +66,24 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace);
   const run = getRun(runId);
   if (!run) throw new Error(`invoke: run not found: ${runId}`);
+
+  // #157: forge invoke owns the run when it created it itself (no --run id
+  // supplied). When invoke owns the run, it's responsible for the terminal
+  // run-status flip at task-end — otherwise the run leaks as `active` forever
+  // and `forge projects show` / dashboard live-indicator overcount. When
+  // attached to a caller-supplied --run id, leave run status alone (the caller
+  // is composing multiple invocations into one run; they close it).
+  //
+  // RunStatus is "active" | "complete" | "abandoned" — no "failed". Mirrors
+  // runNext.ts:138 — task-level status carries success/failure; the run flips
+  // to "complete" simply to mark "no longer in flight". Logged event payload
+  // carries the success vs failure signal for downstream consumers.
+  const ownsRun = args.runId === undefined;
+  const closeRun = (succeeded: boolean): void => {
+    if (!ownsRun) return;
+    updateRunStatus(runId, "complete");
+    logEvent("run.completed", { runId, payload: { source: "invoke", succeeded } });
+  };
 
   // Build a synthetic single-step workflow + step. The runner machinery
   // (compose, spawn) takes Workflow + Step types; for invoke we create
@@ -138,6 +156,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     runtime = loadRuntime(step.runtime);
   } catch (e) {
     markTaskFailed(taskId, `loadRuntime failed: ${(e as Error).message}`);
+    closeRun(false);
     return { runId, taskId, status: "failed", error: (e as Error).message };
   }
 
@@ -157,6 +176,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     dockerArgs = buildDockerArgs(runtime, ctx);
   } catch (e) {
     markTaskFailed(taskId, `buildDockerArgs failed: ${(e as Error).message}`);
+    closeRun(false);
     return { runId, taskId, status: "failed", error: (e as Error).message };
   }
 
@@ -175,6 +195,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // tokens before crashing, and we want to account for them.
     captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
     markTaskFailed(taskId, `docker exec threw: ${(e as Error).message}`);
+    closeRun(false);
     return { runId, taskId, status: "failed", error: (e as Error).message };
   }
   // #155: capture token usage from the stream-json log. Best-effort; never
@@ -187,6 +208,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   if (exitCode !== 0 && !resultRaw) {
     const error = `container_crash (exit ${exitCode})`;
     markTaskFailed(taskId, error);
+    closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
 
@@ -196,16 +218,19 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch {
     const error = "result.json malformed";
     markTaskFailed(taskId, error);
+    closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
   if (!result) {
     const error = "no_result_json";
     markTaskFailed(taskId, error);
+    closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
 
   markTaskComplete(taskId, result);
   logEvent("task.completed", { runId, taskId });
+  closeRun(true);
   return { runId, taskId, status: "complete", result };
 }
 

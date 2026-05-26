@@ -65,7 +65,13 @@ test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke'
   const run = getRun(r.runId);
   assert.ok(run);
   assert.equal(run!.workflow, "invoke");
-  assert.equal(run!.status, "active"); // invoke doesn't auto-close the run; one-task runs stay active
+  // #157: invoke now closes the run it owns. Pre-#157 this was 'active' and
+  // leaked into phantom-active counts; the bug was caught after 34 phantoms
+  // accumulated on the dev's machine. RunStatus has no 'failed' state — the
+  // task-level status carries success/failure; the run flips to 'complete'
+  // simply to mark "no longer in flight". Mirrors runNext.ts:138 semantics.
+  assert.equal(run!.status, "complete");
+  assert.ok(run!.completedAt, "completed_at should be set when run closes");
   assert.match(run!.title, /research-specialist/);
 
   const task = getTask(r.taskId);
@@ -255,4 +261,72 @@ test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => 
   // that the docker args were built without throwing — the mode threading happens
   // in spawn.ts which has its own tests.
   assert.ok(capturedArgs.length > 0);
+});
+
+// ----- #157: terminal run-status transitions -----
+
+test("invoke: leaves run.status='active' when attached to an existing --run id (caller owns the run)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // First create a run via invoke (own → closes), then attach a SECOND
+  // invocation to that same run. The second call should NOT re-flip an
+  // already-closed run, AND should not touch the status when invoke is the
+  // attached (not owning) call. To test the "attached" case cleanly, we create
+  // a run separately via insertRun-style helper and then attach.
+  const { insertRun } = await import("../store/runs.js");
+  const externalRunId = "run-external-test-157";
+  insertRun({
+    id: externalRunId,
+    workflow: "external",
+    title: "external owner",
+    status: "active",
+    createdAt: new Date().toISOString(),
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "task inside an externally-owned run",
+    projectDir: "/tmp/x",
+    runId: externalRunId,    // attach — invoke does NOT own this run
+    dockerExec: stub,
+  });
+  assert.equal(r.status, "complete");
+
+  // The external run must still be 'active' — invoke shouldn't have closed it,
+  // because the caller owns it and will manage its lifecycle.
+  const run = getRun(externalRunId);
+  assert.equal(run!.status, "active", "attached invoke must not close the caller-owned run");
+  assert.equal(run!.completedAt, undefined);
+});
+
+test("invoke: closes the owned run as 'complete' even when the task fails (RunStatus has no 'failed')", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Stub that simulates the container_crash path: exit code 1, no result.json.
+  const crashStub: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "boom");
+    return 1;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "task that will fail",
+    projectDir: "/tmp/x",
+    dockerExec: crashStub,
+  });
+  assert.equal(r.status, "failed");
+
+  // Even on failure, the OWNED run flips to 'complete' (not 'failed' — that's
+  // not a valid RunStatus). The failure signal lives at the task level.
+  const run = getRun(r.runId);
+  assert.equal(run!.status, "complete", "owned run closes even on task failure");
+  assert.ok(run!.completedAt, "completed_at should be set on the closed run");
+  const task = getTask(r.taskId);
+  assert.equal(task!.status, "failed", "task-level status still says failed");
 });

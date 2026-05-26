@@ -69,44 +69,63 @@ function applyMigrations(db: DatabaseInstance): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
 }
 
-let _db: DatabaseInstance | null = null;
+// Separate caches for readonly vs writable handles. The earlier single-cache
+// implementation had a latent footgun: the first caller's mode locked in the
+// connection for the rest of the process, so a process that opened readonly
+// for one query and tried to write later silently dropped writes. Caught
+// twice now (#155 backfill, #157 sweep). Fixed by keeping both handles.
+let _dbRW: DatabaseInstance | null = null;
+let _dbRO: DatabaseInstance | null = null;
 
 export function getDb(opts?: { readOnly?: boolean }): DatabaseInstance {
-  if (_db) return _db;
   ensureForgeDirs();
-  // A read-only open on a non-existent file would fail. If no DB exists yet, fall through
-  // to a writable open so the schema gets created — read-only callers running on a fresh
-  // install will simply observe an empty DB.
-  const readOnly = opts?.readOnly === true && existsSync(DB_PATH);
-  const db = new Database(DB_PATH, readOnly ? { readonly: true } : undefined);
-  if (!readOnly) {
-    db.pragma("journal_mode = WAL");
-    db.pragma("foreign_keys = ON");
-    db.exec(SCHEMA_SQL);
-    applyMigrations(db);
+  // A read-only open on a non-existent file would fail. If no DB exists yet,
+  // fall through to a writable open so the schema gets created — read-only
+  // callers on a fresh install simply observe an empty DB.
+  const wantReadOnly = opts?.readOnly === true && existsSync(DB_PATH);
+
+  if (wantReadOnly) {
+    if (_dbRO) return _dbRO;
+    // Schema + migrations must have run at least once before a readonly handle
+    // is useful. If no writable handle has opened yet, open one transiently to
+    // bootstrap schema, then return a fresh readonly handle. (Idempotent —
+    // both `getDb()` and the bootstrap point at the same on-disk file.)
+    if (!_dbRW) getDb();
+    const db = new Database(DB_PATH, { readonly: true });
+    db.pragma("busy_timeout = 5000");
+    _dbRO = db;
+    return db;
   }
-  // Wait up to 5s for a held write lock instead of failing immediately. Cheap insurance
-  // against contention between concurrent forge invocations (e.g. `status` while `next`
-  // is mid-flight). With WAL, readers don't block writers; this matters mostly for the
-  // small write window during commit.
+
+  if (_dbRW) return _dbRW;
+  const db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  applyMigrations(db);
+  // Wait up to 5s for a held write lock instead of failing immediately. Cheap
+  // insurance against contention between concurrent forge invocations (e.g.
+  // `status` while `next` is mid-flight). With WAL, readers don't block
+  // writers; this matters mostly for the small write window during commit.
   db.pragma("busy_timeout = 5000");
-  _db = db;
+  _dbRW = db;
   return db;
 }
 
 export function closeDb(): void {
-  if (_db) {
-    _db.close();
-    _db = null;
-  }
+  if (_dbRW) { _dbRW.close(); _dbRW = null; }
+  if (_dbRO) { _dbRO.close(); _dbRO = null; }
 }
 
-// Test seam: install a fresh in-memory DB as the singleton. Used by tests so they
-// don't touch the real on-disk forge.db. Returns the previous DB so the caller can
-// restore it after the test.
+// Test seam: install a fresh in-memory DB as the singleton. Used by tests so
+// they don't touch the real on-disk forge.db. Returns the previous DB so the
+// caller can restore it after the test. The same handle services both
+// readonly and writable callers in test mode (in-memory DBs don't have the
+// concurrency concern that drives the split in production).
 export function setDbForTest(db: DatabaseInstance): DatabaseInstance | null {
-  const prev = _db;
-  _db = db;
+  const prev = _dbRW;
+  _dbRW = db;
+  _dbRO = db;
   return prev;
 }
 
