@@ -1,8 +1,9 @@
 // forge-dashboard — tiny HTTP server.
 //
 // - GET /                serves the SPA shell (HTML + inline client JS)
-// - GET /api/feed        recent agent outputs across all projects
-// - GET /api/in-flight   currently-running / awaiting-gate tasks
+// - GET /api/feed        recent agent outputs across all projects (?projectDir filter)
+// - GET /api/in-flight   currently-running / awaiting-gate tasks (?projectDir filter)
+// - GET /api/projects    project registry: name, color, last activity, live sessions (#154)
 // - GET /api/task/:id    full task detail (result + stdout/stderr logs + verdicts + gates)
 //
 // All reads. No writes. Mutating actions (gate/next/retry) shell to the
@@ -12,7 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail } from "./queries.js";
+import { recentActivity, inFlight, taskDetail, projectsForDashboard } from "./queries.js";
 import { renderShell } from "./shell.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
@@ -72,13 +73,21 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/api/feed") {
     const since = url.searchParams.get("since") ?? undefined;
     const limit = clamp(Number(url.searchParams.get("limit") ?? 100), 1, 500);
-    const data = recentActivity(limit, since);
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const data = recentActivity(limit, since, projectDir);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }
 
   if (path === "/api/in-flight") {
-    const data = inFlight();
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const data = inFlight(projectDir);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/projects") {
+    const data = projectsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }

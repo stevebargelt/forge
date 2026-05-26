@@ -13,6 +13,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta } from "@forge/project-meta";
+import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
+
+export { type ProjectRecord };
 
 const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 const DB_PATH = join(FORGE_HOME, "forge.db");
@@ -53,7 +56,7 @@ export type ActivityEntry = {
 
 /** Recent completed/failed agent outputs across all projects.
  *  Used for the activity feed. */
-export function recentActivity(limit = 100, sinceIso?: string): ActivityEntry[] {
+export function recentActivity(limit = 100, sinceIso?: string, projectDir?: string): ActivityEntry[] {
   let sql = `
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
            r.title, r.workflow, r.project_dir
@@ -66,6 +69,10 @@ export function recentActivity(limit = 100, sinceIso?: string): ActivityEntry[] 
   if (sinceIso) {
     sql += ` AND t.completed_at > ?`;
     params.push(sinceIso);
+  }
+  if (projectDir) {
+    sql += ` AND r.project_dir = ?`;
+    params.push(projectDir);
   }
   sql += ` ORDER BY t.completed_at DESC LIMIT ?`;
   params.push(limit);
@@ -123,7 +130,9 @@ export type InFlightEntry = {
 
 /** Tasks currently running, awaiting gate, awaiting red, or awaiting human input.
  *  Includes both primary tasks and red children. */
-export function inFlight(): InFlightEntry[] {
+export function inFlight(projectDir?: string): InFlightEntry[] {
+  const where = projectDir ? `AND r.project_dir = ?` : ``;
+  const params = projectDir ? [projectDir] : [];
   const rows = db().prepare(`
     SELECT t.id, t.run_id, t.phase, t.agent_role, t.agent_model, t.status, t.started_at,
            r.title, r.workflow, r.project_dir
@@ -131,8 +140,9 @@ export function inFlight(): InFlightEntry[] {
     JOIN runs r ON r.id = t.run_id
     WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'awaiting_human_input', 'blocked_by_red')
       AND r.status = 'active'
+      ${where}
     ORDER BY t.started_at DESC NULLS LAST, t.created_at DESC
-  `).all() as Array<{
+  `).all(...params) as Array<{
     id: string;
     run_id: string;
     phase: string;
@@ -297,4 +307,17 @@ export function taskDetail(taskId: string): TaskDetail | null {
 function safeJsonParse(s: string): unknown {
   try { return JSON.parse(s); }
   catch { return s; }
+}
+
+// #154: project registry for the dashboard Projects view.
+// Delegates to the shared listProjects() (#152) so the dashboard sees the
+// same union of DB-derived + filesystem-scanned projects as `forge projects
+// list`, plus live-session counts from `~/.forge/orchestrators/` (#153).
+//
+// NB: this opens a second SQLite handle inside the dashboard process (the
+// shared store/db.ts cache is per-module and separate from queries.ts's
+// readonly handle above). On a fresh install with no DB, getDb() will create
+// the schema; on a real install it's a no-op. Acceptable cost.
+export function projectsForDashboard(): ProjectRecord[] {
+  return sortProjects(listProjects(), "activity");
 }

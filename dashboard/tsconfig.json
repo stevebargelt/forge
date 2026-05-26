@@ -15,7 +15,9 @@
     "baseUrl": ".",
     "paths": {
       "@forge/types": ["../src/types/index.ts"],
-      "@forge/project-meta": ["../src/util/project-meta.ts"]
+      "@forge/project-meta": ["../src/util/project-meta.ts"],
+      "@forge/projects": ["../src/util/projects.ts"],
+      "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"]
     }
   },
   "include": ["src/**/*.ts"]

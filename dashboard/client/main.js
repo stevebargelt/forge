@@ -9,26 +9,36 @@ const html = htm.bind(h);
 const POLL_MS = 2000;
 
 function App() {
+  // #154: top-level view toggle. activity = recent runs/in-flight (the original
+  // view); projects = registry cards.
+  const [view, setView] = useState(() => initialView());
+  // When set, both /api/feed and /api/in-flight are filtered to this project.
+  // Clicking a project card sets this AND switches to activity view.
+  const [projectFilter, setProjectFilter] = useState(null);
   const [feed, setFeed] = useState([]);
   const [inFlight, setInFlight] = useState([]);
+  const [projects, setProjects] = useState([]);
   const [error, setError] = useState(null);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
   const [now, setNow] = useState(Date.now());
 
   const poll = useCallback(async () => {
     try {
-      const [feedRes, ifRes] = await Promise.all([
-        fetch("/api/feed?limit=100"),
-        fetch("/api/in-flight"),
-      ]);
+      const q = projectFilter ? `?projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
+      const reqs = [fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`), fetch(`/api/in-flight${q}`)];
+      // Only poll /api/projects on the projects view (or first load) — saves a
+      // filesystem scan every 2s on the activity view.
+      if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
+      const [feedRes, ifRes, projRes] = await Promise.all(reqs);
       if (feedRes.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
+      if (projRes && projRes.ok) setProjects(await projRes.json());
       setError(null);
       setNow(Date.now());
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [view, projectFilter, projects.length]);
 
   useEffect(() => {
     poll();
@@ -36,37 +46,132 @@ function App() {
     return () => clearInterval(id);
   }, [poll]);
 
+  useEffect(() => {
+    const onHash = () => setView(initialView());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const switchView = (next) => {
+    setView(next);
+    window.location.hash = next === "activity" ? "" : `#${next}`;
+  };
+
+  const filterByProject = (project) => {
+    setProjectFilter(project);
+    switchView("activity");
+  };
+
   return html`
     <div class="app">
       <header class="topbar">
         <h1>
           <img src="/client/logo-mark.svg" width="32" height="32" class="brand-mark" alt="forge" />
-          <span class="status-dot"></span>activity
+          <nav class="view-tabs">
+            <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
+            <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
+          </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
       </header>
 
       ${error ? html`<div class="card" style="color: var(--err);">Error: ${error}</div>` : null}
 
-      <section class="in-flight">
-        <h2>In flight</h2>
-        ${inFlight.length === 0
-          ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
-          : inFlight.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => setSelectedTaskId(t.taskId)} />`)
-        }
-      </section>
+      ${view === "projects"
+        ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
+        : html`
+          ${projectFilter ? html`
+            <div class="filter-banner">
+              <span>Filtered to <strong>${projectFilter.label}</strong></span>
+              <button class="clear-filter" onClick=${() => setProjectFilter(null)}>clear ×</button>
+            </div>
+          ` : null}
+          <section class="in-flight">
+            <h2><span class="status-dot"></span>In flight</h2>
+            ${inFlight.length === 0
+              ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
+              : inFlight.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => setSelectedTaskId(t.taskId)} />`)
+            }
+          </section>
 
-      <section class="feed">
-        <h2>Recent agent outputs</h2>
-        ${feed.length === 0
-          ? html`<div class="muted">No completed agent outputs yet.</div>`
-          : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => setSelectedTaskId(e.taskId)} />`)
-        }
-      </section>
+          <section class="feed">
+            <h2>Recent agent outputs</h2>
+            ${feed.length === 0
+              ? html`<div class="muted">No completed agent outputs yet.</div>`
+              : feed.map((e) => html`<${FeedCard} key=${e.taskId} entry=${e} onClick=${() => setSelectedTaskId(e.taskId)} />`)
+            }
+          </section>
+        `
+      }
 
       ${selectedTaskId ? html`<${TaskDetail} taskId=${selectedTaskId} onClose=${() => setSelectedTaskId(null)} />` : null}
     </div>
   `;
+}
+
+function initialView() {
+  const h = (window.location.hash || "").replace(/^#/, "");
+  return h === "projects" ? "projects" : "activity";
+}
+
+function ProjectsView({ projects, onPick }) {
+  if (projects.length === 0) {
+    return html`
+      <section class="projects-grid">
+        <div class="muted" style="grid-column: 1 / -1;">
+          No forge projects detected yet. Run <span class="mono">forge init</span> in a project to register it.
+        </div>
+      </section>
+    `;
+  }
+  return html`
+    <section class="projects-grid">
+      ${projects.map((p) => html`<${ProjectCard} key=${p.projectDir} project=${p} onClick=${() => onPick(p)} />`)}
+    </section>
+  `;
+}
+
+function ProjectCard({ project, onClick }) {
+  const ageState = projectAgeState(project);
+  return html`
+    <div class=${"project-card state-" + ageState} onClick=${onClick} title=${project.projectDir}>
+      <div class="project-card-head">
+        <span class="project-chip" style=${{ background: project.color }}>${project.label}</span>
+        ${project.liveSessions > 0
+          ? html`<span class="live-indicator" title=${`${project.liveSessions} live orchestrator session(s)`}>● LIVE</span>`
+          : null}
+      </div>
+      ${project.description ? html`<div class="project-desc">${project.description}</div>` : null}
+      ${!project.description && project.readmeFirstLine ? html`<div class="project-desc faint">${project.readmeFirstLine}</div>` : null}
+      <div class="project-stats">
+        <div>
+          <div class="project-stat-label">last activity</div>
+          <div class="project-stat-val">${project.lastRunAt ? formatRelativeTime(project.lastRunAt) : "—"}</div>
+        </div>
+        <div>
+          <div class="project-stat-label">runs</div>
+          <div class="project-stat-val">${project.runCount}</div>
+        </div>
+        <div>
+          <div class="project-stat-label">in-flight</div>
+          <div class="project-stat-val ${project.inFlightCount > 0 ? "stat-warn" : ""}">${project.inFlightCount}</div>
+        </div>
+      </div>
+      <div class="project-path mono faint" title=${project.projectDir}>${project.projectDir}</div>
+    </div>
+  `;
+}
+
+// Visual state for the card. Drives a CSS class for dimming/highlighting.
+function projectAgeState(p) {
+  if (p.liveSessions > 0) return "live";
+  if (!p.lastRunAt) return "idle";
+  const ageMs = Date.now() - new Date(p.lastRunAt).getTime();
+  const day = 1000 * 60 * 60 * 24;
+  if (ageMs < 7 * day) return "active";
+  if (ageMs < 30 * day) return "recent";
+  if (ageMs < 180 * day) return "idle";
+  return "stale";
 }
 
 function ProjectChip({ entry }) {

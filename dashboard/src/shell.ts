@@ -213,4 +213,117 @@ section.feed { margin-top: 24px; }
 .md ul, .md ol { margin: 4px 0 8px; padding-left: 20px; }
 .md a { color: var(--accent); }
 .md strong { color: var(--fg); }
+
+/* #154: top-level view tabs (activity / projects). */
+nav.view-tabs { display: flex; gap: 4px; }
+nav.view-tabs .tab {
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: color 0.1s, background 0.1s;
+}
+nav.view-tabs .tab:hover { color: var(--fg); background: var(--bg-elev); }
+nav.view-tabs .tab-active { color: var(--fg); }
+
+/* #154: filter banner shown when activity feed is scoped to one project. */
+.filter-banner {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 16px; padding: 8px 12px;
+  background: rgba(122, 159, 255, 0.08);
+  border: 1px solid rgba(122, 159, 255, 0.25);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.filter-banner strong { color: var(--accent); }
+.clear-filter {
+  background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
+  font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+}
+.clear-filter:hover { color: var(--fg); border-color: var(--fg-dim); }
+
+/* #154: projects grid + cards. */
+section.projects-grid {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.project-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.project-card:hover { background: var(--bg-elev-2); border-color: var(--fg-faint); }
+
+/* State-driven dimming: live > active > recent > idle > stale. */
+.project-card.state-live   { border-color: rgba(74, 222, 128, 0.45); }
+.project-card.state-active { opacity: 1; }
+.project-card.state-recent { opacity: 0.92; }
+.project-card.state-idle   { opacity: 0.72; }
+.project-card.state-stale  { opacity: 0.5; }
+
+.project-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.project-card-head .project-chip { font-size: 12px; padding: 2px 10px; cursor: default; }
+.live-indicator {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ok);
+  letter-spacing: 0.05em;
+  background: rgba(74, 222, 128, 0.12);
+  padding: 2px 8px;
+  border-radius: 10px;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.project-desc {
+  font-size: 13px;
+  color: var(--fg);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.project-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.project-stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+}
+.project-stat-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.project-stat-val.stat-warn { color: var(--warn); }
+
+.project-path {
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* truncate the prefix, keep the tail (basename) visible */
+  text-align: left;
+}
 `;

@@ -637,7 +637,11 @@ The flag is opt-in. Gate without \`--feedback\` works exactly as today. Adoption
 **Caught:** 2026-05-26 cross-track research session.
 
 
+## Done (recent)
+
 ### #154 — Dashboard Projects view: registry + orchestrator status as one page
+**Closed:** 2026-05-26.
+
 Filed 2026-05-26. Fourth piece of the project-registry / orchestrator-tracking arc; consumes #151, #152, #153.
 
 **Problem.** The dashboard today only surfaces individual runs + in-flight tasks. There's no project-level view that answers "what projects do I have?" or "where am I actively working right now?".
@@ -682,8 +686,6 @@ Filed 2026-05-26. Fourth piece of the project-registry / orchestrator-tracking a
 
 **Caught:** 2026-05-26 design conversation.
 
-
-## Done (recent)
 
 ### #153 — Orchestrator heartbeats: track live Claude Code sessions running forge orchestrator
 **Closed:** 2026-05-26.
