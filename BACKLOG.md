@@ -439,7 +439,65 @@ The flag is opt-in. Gate without \`--feedback\` works exactly as today. Adoption
 **Caught:** 2026-05-26 cross-track research session.
 
 
+### #156 — Dashboard usage view: useful AND beautiful (consumes #155)
+Follow-up to #155, which shipped the data layer (capture + backfill + CLI). User flagged that 1-5 are a waste without the dashboard view — 6 is the payoff.
+
+**Why "useful AND beautiful":** the CLI proves the data is sound, but the rollup table isn't acted on at-a-glance. The dashboard needs to surface the actionable signals in a way that drives behavior change (which model to use where; which workflow has cache churn; which project is burning tokens).
+
+**The actionable signals from the data we now have:**
+- Total spend (weighted tokens) per project / workflow / model / role
+- Cache hit rate trends — has it improved since the workflow YAML downgrades shipped?
+- Cache reuse ratio — flags workflows where cache is being created and discarded
+- Per-step model mix (post-#117 audit: confirm Opus burn is dropping)
+- Time series: weighted tokens per day per project (rolling 30d)
+
+**Design considerations (think hard before building):**
+- **Headline metric first.** What's the single number on the page? Probably "weighted tokens last 7 days" with a delta vs prior 7 days. Or cache hit rate.
+- **Comparison is the value.** Project A vs B; workflow X vs Y. Side-by-side bars or sparklines, not just numbers.
+- **Drill-down hierarchy.** Click a project → see workflows. Click a workflow → see roles. Click a role → see tasks.
+- **Time series.** A flat-roll snapshot tells you what's true now; the trend tells you whether the calibration is working.
+- **Cache efficiency callouts.** Workflows with hit rate < 80% or reuse ratio < 5x should be visually flagged.
+- **No dollar amounts.** This is unitless / weighted-tokens. Dollar conversion is brittle and OAuth users have no per-token cost — don't pretend.
+
+**Implementation surface:**
+- Dashboard server: new \`/api/usage\` endpoint with query params for the four rollup dimensions + time filters. Reuse the SQL shape from src/cli/commands/usage.ts.
+- Dashboard client: new \`<UsageView />\` tab alongside activity / projects. Top-of-tab: headline metric + comparison chart. Below: per-dimension breakdowns with sparklines.
+- Maybe a "what changed" tile: workflow YAML edits from #117 + this view side-by-side, watching the spec-writer → default migration's effect in real time.
+
+**Composes with:**
+- #155 — the data layer this consumes
+- #154 — the existing dashboard Projects view; pattern-match the card grid + chip styling
+- 0088737 commit — the workflow downgrades whose effect this measures
+
+**Sequencing:** ship soon. User explicitly flagged this as essential and the CLI alone isn't act-on-able.
+
+**Caught:** 2026-05-26 conversation while shipping #155.
+
+
 ## Done (recent)
+
+### #155 — Token + cache telemetry: capture, backfill, CLI, dashboard view
+**Closed:** 2026-05-26. Data layer shipped (scope items 1-5). model_calls table reshaped with task_id/input/output/cache_read/cache_creation columns; cost dropped. Parser handles stream-json, dedupes by request_id, prefers message_delta totals; 11 tests cover edge cases. Capture wired into both spawn paths (invoke + runNext) as best-effort. forge usage backfill walked 175 historical task logs and inserted 5,139 rows; 146 tagged with alias via tasks-table lookup. forge usage CLI rollups across role/workflow/project/model/alias with cache hit rate + reuse ratio + weighted-tokens columns. Real data: claude-opus-4-7 = 76% of total weighted spend pre-workflow-downgrades; 96.7% cache hit rate corpus-wide; 29.6x reuse ratio. Dashboard view in follow-up #156 ("1-5 are a waste without 6").
+
+Replaces #27's intent (which closed 2026-05-26 as "LiteLLM unreliable").
+
+**Why:** Today's audit showed meatgeekv2 ran 78% of tasks on Opus when most could have been Sonnet (workflow YAMLs hardcoded \`model: spec-writer\` everywhere). Workflows were patched in commit \`0088737\`, but the only way to validate the change — and calibrate the next round — is data. Forge has a half-built \`model_calls\` table (schema present, 0 rows, never instrumented).
+
+**The break:** claude-code already streams structured JSON to container.stdout.log via \`--output-format=stream-json\` (all three runtimes). Every assistant message includes \`usage\` with input/output/cache_read/cache_creation token counts. Every request's \`message_delta\` event has the canonical final usage with an \`iterations\` array. **Backfill is possible** — every existing run on disk has this data.
+
+**Scope (this ticket = 1-5; dashboard view ships as separate ticket):**
+
+1. Schema migration. \`model_calls\` gets \`task_id\` (FK to tasks), \`cache_read_tokens\`, \`cache_creation_tokens\`. Drop \`cost\` (we're not tracking dollars; OAuth has no per-token cost and price drift makes hardcoded tables stale).
+2. Parser. \`extractUsageFromStdoutLog(path) → UsageRow[]\` — walks the stream-json, dedupes by \`request_id\`, takes the final \`message_delta\` usage per request.
+3. Capture. spawn.ts at task-completion: parse the log, insert rows tagged with task_id.
+4. Backfill. \`forge usage backfill\` walks ~/.forge/runs/*/task-*/container.stdout.log and populates historical (~hundreds of tasks become real data points).
+5. CLI: \`forge usage\` with \`--by role|workflow|project|model\` rollups. Headline columns: input tokens, output tokens, cache hit rate (cache_read / (cache_read + cache_creation + input)), cache reuse ratio (cache_read / cache_creation), weighted-tokens (proxy for relative spend without committing to dollars). \`--since 7d\` time filter. \`--json\` for programmatic use.
+
+**Out of scope this ticket (separate next ticket — must follow soon):**
+- **Dashboard usage view.** Useful AND beautiful — cache efficiency as headline, cross-project / cross-workflow / cross-model comparisons, drill-downs, time series. The CLI from #5 proves the data; dashboard makes it act-on-able. The user explicitly flagged that 1-5 are a waste without 6 — file follow-up ticket immediately upon shipping this.
+
+**Caught:** 2026-05-26 conversation about why meatgeekv2 was burning Opus.
+
 
 ### #87 — Design corpus convention: modify-in-place + git, not add-new-screens for additions
 **Closed:** 2026-05-26. Encoded in the prompt-author seed as one of three per-screen classifications (NEW / ADDITION / MODIFY-IN-PLACE), with adjacent-on-canvas guidance for the ADDITION case (find_empty_space_on_canvas near the existing component). PROMPT.md renders one bullet per screen so Pencil sees the per-screen handling explicitly.

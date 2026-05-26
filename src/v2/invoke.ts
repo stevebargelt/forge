@@ -24,6 +24,7 @@ import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
@@ -160,18 +161,25 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   }
 
   const exec = args.dockerExec ?? defaultDockerExec;
+  const stdoutPath = join(dir, "container.stdout.log");
   let exitCode: number;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
-      stdoutPath: join(dir, "container.stdout.log"),
+      stdoutPath,
       stderrPath: join(dir, "container.stderr.log"),
     });
   } catch (e) {
+    // #155: capture usage even on docker failure — the task may have streamed
+    // tokens before crashing, and we want to account for them.
+    captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
     markTaskFailed(taskId, `docker exec threw: ${(e as Error).message}`);
     return { runId, taskId, status: "failed", error: (e as Error).message };
   }
+  // #155: capture token usage from the stream-json log. Best-effort; never
+  // throws or affects task status.
+  captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
 
   // Read result.json.
   const resultPath = join(dir, "result.json");

@@ -16,6 +16,7 @@ import { registerBacklog } from "./commands/backlog.js";
 import { registerDashboard } from "./commands/dashboard.js";
 import { registerNotify } from "./commands/notify.js";
 import { registerProjects } from "./commands/projects.js";
+import { registerUsage } from "./commands/usage.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -45,6 +46,7 @@ registerBacklog(program);
 registerDashboard(program);
 registerNotify(program);
 registerProjects(program);
+registerUsage(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);

@@ -65,14 +65,29 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
 
+-- #155: model_calls — one row per Anthropic API request (deduped by request_id).
+-- Populated by spawn.ts at task-completion (and by "forge usage backfill" for
+-- historical runs). Drives "forge usage" rollups + dashboard usage view.
+--
+-- Note re: the original schema (#27 era): cost was an INTEGER hardcoded-table-
+-- multiply. We dropped it — OAuth has no per-token cost; Anthropic + Bedrock
+-- prices drift; cache tiers complicate the math. Token counts are the stable
+-- signal; users multiply by current prices themselves when they want dollars.
 CREATE TABLE IF NOT EXISTS model_calls (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_id      TEXT NOT NULL,
-  model           TEXT NOT NULL,
-  alias           TEXT,
-  prompt_tokens   INTEGER NOT NULL,
-  completion_tokens INTEGER NOT NULL,
-  cost            REAL NOT NULL,
-  created_at      TEXT NOT NULL
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id                  TEXT REFERENCES tasks(id),   -- nullable: backfill leaves null when log lacks a clean owner
+  request_id               TEXT NOT NULL,                -- Anthropic req_xxx, used for dedupe across stream events
+  model                    TEXT NOT NULL,                -- e.g. claude-opus-4-7 (normalized, no provider prefix)
+  alias                    TEXT,                         -- workflow-declared alias (spec-writer / default / fast-orchestrator)
+  input_tokens             INTEGER NOT NULL DEFAULT 0,   -- fresh (uncached) input tokens
+  output_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens        INTEGER NOT NULL DEFAULT 0,   -- read from prompt cache — ~10% the cost of fresh input
+  cache_creation_tokens    INTEGER NOT NULL DEFAULT 0,   -- written to prompt cache — ~125% the cost of fresh input
+  created_at               TEXT NOT NULL                  -- ISO timestamp from the message event
 );
+-- task_id index is created by applyMigrations (it only exists after the
+-- ALTER TABLE adds the column on existing DBs; including it here would fail
+-- on the IF-NOT-EXISTS path because CREATE INDEX doesn't honor "IF column
+-- exists"). request_id + created_at indexes are also created there for
+-- symmetry — see db.ts.
 `;

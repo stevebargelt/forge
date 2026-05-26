@@ -23,6 +23,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed } from "../notify/trigger.js";
 import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { validateVerdict } from "./validate-findings.js";
 import { logEvent } from "../store/events.js";
@@ -838,19 +839,24 @@ async function runContainer(args: {
   }
 
   const exec = args.dockerExec ?? defaultDockerExec;
+  const stdoutPath = join(dir, "container.stdout.log");
   let exitCode: number;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
-      stdoutPath: join(dir, "container.stdout.log"),
+      stdoutPath,
       stderrPath: join(dir, "container.stderr.log"),
     });
   } catch (e) {
+    // #155: capture usage on docker failure too — tokens may have flown before crash.
+    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
     const msg = `docker exec threw: ${(e as Error).message}`;
     markTaskFailed(args.taskId, msg);
     return { kind: "failed", error: msg };
   }
+  // #155: capture token usage from the stream-json log. Best-effort.
+  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";

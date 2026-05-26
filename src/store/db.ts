@@ -40,6 +40,33 @@ function applyMigrations(db: DatabaseInstance): void {
   // Scope by phase only — both ui-design and ui-design-revise use this phase
   // and there's no other workflow with a phase named "review" today.
   db.exec(`UPDATE tasks SET phase = 'ui-review' WHERE phase = 'review'`);
+
+  // #155: model_calls table reshape. The 0.1.x schema had prompt_tokens/
+  // completion_tokens/cost; we want input_tokens/output_tokens/cache_* and no
+  // cost column. Add the new columns idempotently; leave the legacy columns in
+  // place (they're NOT NULL with no data rows that matter — the table was
+  // empty until #155 anyway).
+  const modelCallsCols = db.prepare(`PRAGMA table_info(model_calls)`).all() as { name: string }[];
+  const haveModelCalls = new Set(modelCallsCols.map((r) => r.name));
+  if (!haveModelCalls.has("task_id")) {
+    db.exec(`ALTER TABLE model_calls ADD COLUMN task_id TEXT REFERENCES tasks(id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_task ON model_calls(task_id)`);
+  }
+  if (!haveModelCalls.has("input_tokens")) {
+    db.exec(`ALTER TABLE model_calls ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!haveModelCalls.has("output_tokens")) {
+    db.exec(`ALTER TABLE model_calls ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!haveModelCalls.has("cache_read_tokens")) {
+    db.exec(`ALTER TABLE model_calls ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!haveModelCalls.has("cache_creation_tokens")) {
+    db.exec(`ALTER TABLE model_calls ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`);
+  }
+  // Created indexes (created_at index too — used by --since time filters).
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
 }
 
 let _db: DatabaseInstance | null = null;
