@@ -83,6 +83,30 @@ export function listRunsForWorkspace(workspace: string): Run[] {
   });
 }
 
+// Per-project aggregate for the registry view (#152). Returns one row per
+// distinct project_dir with lifetime + current-state counts.
+export type ProjectAggregate = {
+  projectDir: string;
+  lastRunAt: string;     // ISO of most recent run's created_at
+  runCount: number;
+  inFlightCount: number; // active or awaiting_gate runs
+};
+
+export function uniqueProjectDirs(): ProjectAggregate[] {
+  const rows = getDb().prepare(`
+    SELECT
+      project_dir AS projectDir,
+      MAX(created_at) AS lastRunAt,
+      COUNT(*) AS runCount,
+      SUM(CASE WHEN status IN ('active') THEN 1 ELSE 0 END) AS inFlightCount
+    FROM runs
+    WHERE project_dir IS NOT NULL AND project_dir != ''
+    GROUP BY project_dir
+    ORDER BY lastRunAt DESC
+  `).all() as Array<{ projectDir: string; lastRunAt: string; runCount: number; inFlightCount: number }>;
+  return rows;
+}
+
 export function updateRunStatus(id: string, status: RunStatus): void {
   // Read the previous status so notifyOnRunTransition can short-circuit on
   // idempotent re-saves (same-status writes). Cheap — same row we're about to

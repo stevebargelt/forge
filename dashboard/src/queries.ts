@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
-import { resolveProjectMeta } from "./project-meta.js";
+import { resolveProjectMeta } from "@forge/project-meta";
 
 const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 const DB_PATH = join(FORGE_HOME, "forge.db");

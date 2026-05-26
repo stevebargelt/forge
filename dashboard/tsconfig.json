@@ -14,7 +14,8 @@
     "lib": ["ES2022", "DOM"],
     "baseUrl": ".",
     "paths": {
-      "@forge/types": ["../src/types/index.ts"]
+      "@forge/types": ["../src/types/index.ts"],
+      "@forge/project-meta": ["../src/util/project-meta.ts"]
     }
   },
   "include": ["src/**/*.ts"]
