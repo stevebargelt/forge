@@ -18,7 +18,8 @@ Classify every incoming prompt into ONE of these types before looking up the RAC
 | `strategy` | "What should I prioritize?", "Is this worth building?", "What's the LOE on this?" |
 | `planning` | "What should I work on next?", "Help me triage the backlog" |
 | `ticketing` | "File a backlog item for X", "Move #N to Done", "Refresh BACKLOG.md notes" |
-| `implementation` | "Build feature X", "Fix bug Y", "Refactor Z" — **the only work type that triggers the pipeline** |
+| `implementation` | "Build feature X", "Fix bug Y", "Refactor Z" — the work type that triggers the **pipeline** (full) or **invoke chain** (quick) |
+| `testing` | "Write tests for X", "Add E2E coverage for the dashboard", "Test this feature", "QA the latest changes", "Catch up on test coverage" |
 | `documentation` | "Document how X works", "Update CLAUDE.md", "Write a how-to for Y" |
 | `research` | "How does X work?", "What does Z's source say about Y?", "Investigate this claim" |
 | `review` | "Review my plan", "Audit this diff", "Red-team this artifact" |
@@ -45,7 +46,10 @@ Plus a forge-specific column:
 | `strategy` | orchestrator | orchestrator | `architecture-advisor` (when scope is non-trivial) | — | in-session | [default] |
 | `planning` | orchestrator | orchestrator | `architecture-advisor` (when sequencing depends on architectural risk) | — | in-session | [default] |
 | `ticketing` | orchestrator | orchestrator | — | — | in-session | [default] |
-| `implementation` | see sub-rule ¹ | orchestrator | `architecture-advisor` (sub-rule ²) | — | **pipeline** (`forge new feature`) | [default] |
+| `implementation` (full) | see sub-rule ¹ | orchestrator | `architecture-advisor` (sub-rule ²) | — | **pipeline** (`forge new feature`) | [default] |
+| `implementation` (quick) | `engineer` (sub-rule ⁵) | orchestrator | — | — | **invoke chain** (sub-rule ⁵) | [default] |
+| `testing` (automation) | `test-engineer` | orchestrator | — | — | invoke | [default] |
+| `testing` (exploratory) | `manual-qa` | orchestrator | — | — | invoke | [default] |
 | `documentation` | orchestrator | orchestrator | subject-matter specialist (sub-rule ³) | — | in-session | [default] |
 | `research` | `research-specialist` | orchestrator | — | — | invoke | [default] |
 | `review` (wide) | `red-wide` | orchestrator | — | — | invoke | [default] |
@@ -90,6 +94,39 @@ Plus a forge-specific column:
 - This second phase is intentionally NOT a RACI row because no agent is involved — it's irreducibly human work. The orchestrator's job is to make sure the user knows the handoff is theirs to drive
 - Accountable = user because design judgment is irreducibly the user's call
 
+**⁵ `implementation` (quick) — invoke chain for small changes:**
+
+Not every implementation task needs the full pipeline. Bug fixes, small features, UI tweaks, and targeted refactors use the quick path: a chain of invokes driven by the orchestrator. The orchestrator picks the path based on scope — see "Full vs quick implementation" below.
+
+The quick chain:
+```
+forge invoke engineer --task "..." --run-title "<title>"
+# read result, verify engineer self-validated, then ALWAYS:
+forge invoke test-engineer --task "verify: <what the engineer changed>" --run <same-run-id>
+# for UI-facing changes on web apps, optionally:
+forge invoke manual-qa --task "exploratory test of <feature>" --run <same-run-id>
+```
+
+Key rules:
+- **test-engineer is NOT optional** in the quick chain. The whole point of quick implementation is to skip ceremony (architect, tech-lead, reds) without skipping verification. The engineer builds; the test-engineer proves it works. Skipping the test-engineer invoke is how "simple UI updates" break the app.
+- The engineer specialist selection follows the same logic as sub-rule ¹ — the orchestrator picks the right specialist (`frontend-specialist`, `backend-specialist`, etc.) based on the task.
+- manual-qa is optional and at the orchestrator's judgment. Invoke it when the change is user-facing, visual, or high-risk.
+- No reds run in the quick path. If the change warrants adversarial review, use the full pipeline.
+
+**Full vs quick implementation — how the orchestrator decides:**
+
+| Signal | Path |
+|--------|------|
+| New feature, multi-file, architectural implications | Full pipeline |
+| Cross-cutting change spanning multiple layers | Full pipeline |
+| Work that needs an architect's risk assessment | Full pipeline |
+| Bug fix in a single module | Quick chain |
+| Small feature addition (one or two files) | Quick chain |
+| UI tweak, styling change, copy update | Quick chain |
+| Targeted refactor within clear boundaries | Quick chain |
+
+When in doubt, ask the user: "This looks small enough for a quick invoke chain — or would you prefer the full pipeline?"
+
 **Review routing**: the five `review (...)` rows are independent. The orchestrator selects which reviews to run based on the artifact:
 - Always run `review (wide)` and `review (narrow)` for any non-trivial diff or artifact
 - Add `review (frontend)` when the artifact touches UI / styles / accessibility
@@ -121,7 +158,10 @@ These are *project hygiene*, not *informing parties*. The orchestrator does them
 If a prompt can't be classified after one read, ask ONE targeted clarifying question. Don't ask for a full spec — just enough to pick the right work type.
 
 **The `implementation` trigger is strict.**
-Only `implementation` work goes through the pipeline. Even complex multi-agent work in other categories (e.g., a research task that needs `research-specialist` + then `synthesizer`-style aggregation) is orchestrator-driven via multiple `forge invoke` calls. **The pipeline earns its weight because of code-change ceremony (architect-first, reds, test-engineer gate). No other work type has those properties.**
+Only `implementation` work modifies source code. It takes one of two paths — full pipeline (architect → tech-lead → engineer → test-engineer with reds) for substantial work, or quick invoke chain (engineer → test-engineer, optionally manual-qa) for small changes. Both paths include test-engineer verification. Even complex multi-agent work in other categories (e.g., a research task that needs `research-specialist` + then `synthesizer`-style aggregation) is orchestrator-driven via multiple `forge invoke` calls without a pipeline.
+
+**The `testing` trigger is standalone.**
+`testing` work does NOT modify source code (other than adding test files). It's always a direct invoke — `test-engineer` for writing automated tests, `manual-qa` for exploratory testing. Use `testing` for catch-up coverage ("write integration tests for the auth flow"), post-hoc verification ("test the dashboard changes"), or test backfill ("we need E2E tests for module X").
 
 **When the orchestrator is "Responsible" itself.**
 Many rows have the orchestrator as Responsible (strategy, planning, ticketing, orientation, meta). This is intentional — those work types are conversation-shaped, not artifact-shaped. The orchestrator does them in the chat with the user, optionally consulting specialists for input. No `forge invoke` needed.

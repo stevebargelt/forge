@@ -113,7 +113,21 @@ Useful flags:
 
 For **Consulted** agents, run them first, read each result, fold into the brief for the Responsible agent. For **parallel review work** (running multiple reds against an artifact), launch them simultaneously in separate Bash calls — they don't depend on each other and you read each result independently.
 
-**For `pipeline` work (implementation only):**
+**For `implementation` (quick) — invoke chain:**
+
+For small changes (bug fixes, UI tweaks, targeted refactors), skip the pipeline and chain invokes:
+
+```bash
+forge invoke engineer --task "<what to build>" --run-title "<title>"
+# read result, verify engineer self-validated, then ALWAYS:
+forge invoke test-engineer --task "verify: <what changed>" --run <same-run-id>
+# for UI-facing changes on web apps, optionally:
+forge invoke manual-qa --task "exploratory test of <feature>" --run <same-run-id>
+```
+
+**test-engineer is NOT optional in the quick chain.** Skipping it is how "simple UI updates" break the app. The engineer builds and self-validates; the test-engineer writes integration/E2E tests that catch what unit tests miss.
+
+**For `implementation` (full) — pipeline:**
 
 ```bash
 forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
@@ -122,6 +136,16 @@ forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
 (Adjust flags for the workflow variant: `feature-ui-design-needed` adds `--design-dir`; `feature-ui-design-provided` uses `--prd`.)
 
 The pipeline runs architect → tech-lead → engineer (specialist per step) → test-engineer with reds. You watch it via `forge watch <run-id>`.
+
+**For `testing` — standalone invoke:**
+
+```bash
+# Test automation (write integration/E2E tests for existing code):
+forge invoke test-engineer --task "write integration tests for <module/feature>"
+
+# Exploratory testing (poke at a feature as a user):
+forge invoke manual-qa --task "exploratory test of <feature/page>"
+```
 
 ### Step 5 — Watch and decide (pipeline runs)
 
@@ -176,6 +200,21 @@ forge invoke red-narrow --task "audit src/v2/spawn.ts" --read-only --run <same-i
 forge invoke red-security --task "audit src/v2/spawn.ts" --read-only --run <same-id> --json &
 wait
 # read each result.json, aggregate verdicts, present to user
+```
+
+**Quick implementation (the common case for small changes):**
+```bash
+# Engineer makes the change
+forge invoke engineer --task "fix the overflow on the dashboard usage table" --run-title "fix usage table overflow"
+# read result, verify self-validation passed, then:
+forge invoke test-engineer --task "verify: engineer fixed overflow on dashboard usage table — write integration tests for the table rendering" --run <same-id>
+# UI change on a web app — add exploratory testing:
+forge invoke manual-qa --task "exploratory test: dashboard usage table — try with 0 rows, 100 rows, long model names, narrow viewport" --run <same-id>
+```
+
+**Test backfill (no implementation, just adding coverage):**
+```bash
+forge invoke test-engineer --task "write integration tests for src/v2/spawn.ts — cover container startup, mount validation, and error paths"
 ```
 
 The pattern: ONE invoke per agent, chained or parallelized by you. Forge doesn't manage the composition — you do, in the conversation.

@@ -198,7 +198,21 @@ Useful flags:
 
 For **Consulted** agents, run them first, read each result, fold into the brief for the Responsible agent. For **parallel review work** (running multiple reds against an artifact), launch them simultaneously in separate Bash calls — they don't depend on each other and you read each result independently.
 
-**For `pipeline` work (implementation only):**
+**For `implementation` (quick) — invoke chain:**
+
+For small changes (bug fixes, UI tweaks, targeted refactors), skip the pipeline and chain invokes:
+
+```bash
+forge invoke engineer --task "<what to build>" --run-title "<title>"
+# read result, verify engineer self-validated, then ALWAYS:
+forge invoke test-engineer --task "verify: <what changed>" --run <same-run-id>
+# for UI-facing changes on web apps, optionally:
+forge invoke manual-qa --task "exploratory test of <feature>" --run <same-run-id>
+```
+
+**test-engineer is NOT optional in the quick chain.** Skipping it is how "simple UI updates" break the app.
+
+**For `implementation` (full) — pipeline:**
 
 ```bash
 forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
@@ -207,6 +221,16 @@ forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
 (Adjust flags for the workflow variant: `feature-ui-design-needed` adds `--design-dir`; `feature-ui-design-provided` uses `--prd`.)
 
 The pipeline runs architect → tech-lead → engineer (specialist per step) → test-engineer with reds. You watch it via `forge watch <run-id>`.
+
+**For `testing` — standalone invoke:**
+
+```bash
+# Test automation (write integration/E2E tests for existing code):
+forge invoke test-engineer --task "write integration tests for <module/feature>"
+
+# Exploratory testing (poke at a feature as a user):
+forge invoke manual-qa --task "exploratory test of <feature/page>"
+```
 
 ### Step 5 — Watch and decide (pipeline runs)
 
