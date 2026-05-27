@@ -5,49 +5,7 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-26.** All 15 commits pushed to origin/main. 406/406 tests green.
 
-**Where we left off:** Finished the day's last user-visible piece — `forge claude` launcher (commit `e556f47`) wraps the claude-code CLI with project auto-name + chdir-to-root + status banner + pre-flight checks. User chose explicit `forge claude` invocation (Option A, no shell alias). Conversation closed with this handoff.
-
-**Picked up next (do these in order):**
-1. **#156 — dashboard usage view.** The payoff piece for #155. Spec lives in the ticket. New `/api/usage` endpoint reusing the SQL shape from `src/cli/commands/usage.ts`; new `<UsageView />` tab alongside activity/projects in `dashboard/`. Headline metric (likely cache hit rate or weighted-tokens last-7d with delta). Comparison views (project vs project, workflow vs workflow, model mix per role). Cache efficiency callouts flag workflows with hit-rate < 80% or reuse-ratio < 5x. Time series for trend tracking (per day per project, rolling 30d). NO dollar amounts — this is unitless weighted-tokens. User explicitly flagged #155 (data) is a waste without #156 (view); ship soon.
-2. **#158 — `forge claude --bedrock`.** Auto-arm bedrock auth without sourcing `scripts/use-bedrock.sh`. Spec in the ticket. Adds `.forge/project.json` `auth: "bedrock"` field (sticky per-project) + `--bedrock` flag (per-invocation override). `forge claude` spawns claude-code with CLAUDE_CODE_USE_BEDROCK=1 + resolved AWS_PROFILE in child env. Real friction removal for the bedrock workflow.
-3. **#88 — corpus-consistency propagate.** Out of scope on today's design-corpus arc (#67/#80/#86/#87 shipped); ticket still open. Cross-cutting components (pill row, toasts) need a retrofit pass after design. Possibly its own workflow primitive `ui-design-propagate`. Pick up if doing UI design work.
-
-**External state to remember:**
-- Twilio SMS campaign still awaiting approval (submitted 2026-05-26). Once approved, verify `forge notify test` still works.
-- 34 phantom-active runs cleaned via `forge sweep` today; dashboard live-indicator + `forge projects` counts now accurate. New invokes self-close per #157 fix.
-
-**Decisions worth not relitigating:**
-- LiteLLM (#27) closed as unreliable; capability-routing rebuilt as token-telemetry (#155) instead. If routing later wanted, build directly against provider SDKs, not through proxy.
-- Dashboard a11y (#123) deferred — no real users; solo-developer-on-localhost doesn't pay for production a11y hygiene yet.
-- Reconcile-era tickets (#74 #107) closed stale — reconcile gone in v2 cutover; re-file if v2 ever grows orphan recovery.
-- `.claude/commands/` and `.claude/settings.local.json` are PER-DEVELOPER (gitignored); project-shared `.claude/settings.json` stays untouched by forge. Documented in concepts.md.
-- Role-level model default (agent settings.json `model:` field) deferred — workflow YAML is the right surface with only 3 workflows; revisit at N>5.
-- Cache numbers stored as raw token counts, NOT dollars. OAuth has no per-token cost; Anthropic/Bedrock price drift makes hardcoded tables stale. Weighted-tokens formula is the unitless proxy (input + 1.25 × cache_create + 0.1 × cache_read + 5 × output).
-
-**Lessons saved as memories this session:**
-- `feedback_shared_db_schema_changes.md` — schema changes to ~/.forge/forge.db have machine-wide blast radius; flag and ask before shipping. Caught after the #155 migration broke other live forge runs on this machine.
-
-**Shipped today (for reference; git log is canonical):**
-- #117 #118 #119 #120 SSO/STS reliability arc (commit `f9360b0`)
-- #67 #80 #86 #87 shared design-corpus arc (commit `2baac2d`)
-- Slash commands /orient + /handoff (commit `350d1ac`)
-- Workflow YAML downgrades — plan/build/verify → Sonnet; architect stays on Opus (commit `0088737`)
-- #155 token + cache telemetry (capture, backfill, CLI) (commit `34d4fbd`)
-- Per-developer .claude/ convention + auto-migration (commit `df7ed78`)
-- #157 invoke run-close + forge sweep + getDb readonly-cache fix (commit `da91ec8`)
-- `forge claude` launcher + commit-msg hook strip-list extension (commit `e556f47`)
-- Grooming closes: #27 #65 #93 #77 #74 #107 #123
-
-**Useful CLI commands surfaced this session:**
-- `forge backlog notes show|replace` — the orient/handoff data path
-- `forge backlog list --status active|done` — bounded interface; do NOT Read BACKLOG.md
-- `forge projects list` — cross-project status with live indicator + chip
-- `forge usage --by role|workflow|project|model|alias [--since 7d] [--json]` — token/cache rollups
-- `forge usage backfill` — populates model_calls from historical container.stdout.log files (idempotent)
-- `forge sweep [--dry-run] [--limit]` — close phantom-active runs
-- `forge claude` — launches claude-code with project auto-name + pre-flight; passes through --continue/--resume/etc.
 
 ## Active
 
@@ -410,9 +368,11 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 
 ### #162 — Dashboard usage: model mix per dimension
 
-### #163 — orchestrator token capture: instrument forge claude to log model_calls
-
 ## Done (recent)
+
+### #163 — orchestrator token capture: instrument forge claude to log model_calls
+**Closed:** 2026-05-27.
+
 
 ### #156 — Dashboard usage view: useful AND beautiful (consumes #155)
 **Closed:** 2026-05-27.
