@@ -38,7 +38,7 @@ The TaskCreate harness tool is for ephemeral within-session working state. The d
 - TypeScript with strict mode and `noUncheckedIndexedAccess`. Run `npm run typecheck` before committing source changes.
 - Module type is ES modules (`"type": "module"` in `package.json`). Always use `.js` import suffixes from TypeScript files.
 - Workflow definitions are TypeScript files under `src/workflows/`. **Do not** introduce a YAML/JSON workflow loader. The `Workflow` type is the schema.
-- Agents always run in containers. Forge itself never runs in a container. **One documented exception:** the human-led `ui-review` phase of `ui-design`, `ui-design-revise`, and `feature-ui-design-needed` workflows runs *outside* forge entirely — the human runs Pencil on their host (FORGE-DEC-014). Forge's role for design is to author the prompt (`prompt-author` agent in a normal container) and gate the artifacts the human produces. There is no agent-led UI design phase.
+- Agents always run in containers. Forge itself never runs in a container. **One documented exception:** the design phase runs on the host via `forge design` — the user launches an interactive session with Pencil MCP in a separate terminal (FORGE-DEC-014). Forge's role is to author the prompt (`prompt-author` agent in a normal container), then hand off to the tracked `forge design` session. There is no agent-led UI design phase.
 - Red agents always get read-only project mounts (`-v <project>:/project:ro`). This is OS-level enforcement; never relax it to a prompt instruction.
 - Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.
 - Default to no comments. Add a comment only when the WHY is non-obvious.
@@ -75,7 +75,7 @@ learnings/          ADRs and patterns for forge itself
 - The state-machine status values in `tasks.status` (`pending|running|awaiting_gate|awaiting_human_input|awaiting_red|complete|failed|blocked_by_red`). Adding a new status is a schema change and an ADR.
 - The verdict aggregation rule in `gate.ts`: pass if all reds pass; fail if any authoritative; inconclusive otherwise. Specialist fails warn but don't block without rationale.
 - The Docker invocation pattern in `spawn.ts`. Read DEC-004 (orchestrator on host, agents in containers), DEC-005 (Ubuntu base), DEC-006 (OAuth file mount), DEC-009 (UID 1000) before changing any of it.
-- **Don't add a designer agent that runs Pencil headlessly.** FORGE-DEC-014 documents three independent reasons this fails in Pencil 0.2.5. The `prompt-author` agent (BACKLOG #53) is forge's role; the human runs Pencil on their host. Revisit only if Pencil ships auto-save AND a headless persistence path.
+- **Don't add a designer agent that runs Pencil headlessly.** FORGE-DEC-014 documents three independent reasons this fails in Pencil 0.2.5. Design runs via `forge design` — a tracked host-side session the user drives interactively with Pencil MCP. Revisit only if Pencil ships auto-save AND a headless persistence path.
 
 ## Documentation
 
@@ -299,7 +299,12 @@ Implementation work goes through the pipeline. There are three feature workflow 
 | `feature-ui-design-needed` | Feature that needs UI design first | `--brief`, `--design-dir` |
 | `feature-ui-design-provided` | Feature with design already done | `--prd` |
 
-For ui-design (the design itself, not implementation), use `forge invoke prompt-author`. The human then runs PROMPT.md against Pencil + Claude Code on the host.
+For ui-design (the design itself, not implementation):
+
+1. Run `forge invoke prompt-author --task "<brief>"` — produces `designs/PROMPT.md`
+2. Tell the user: **"Open a new terminal in `<projectDir>` and run: `forge design --prompt designs/PROMPT.md --run <run-id>`"**
+3. `forge design` creates a tracked task (role: `designer`, workflow: `design`) and launches an interactive session with Pencil MCP where the user drives the design.
+4. When the user exits that session, the task auto-completes and usage is captured. You can check status via `forge show <task-id>` or `forge status`.
 
 ## In-flight runs
 

@@ -229,7 +229,12 @@ Implementation work goes through the pipeline. There are three feature workflow 
 | `feature-ui-design-needed` | Feature that needs UI design first | `--brief`, `--design-dir` |
 | `feature-ui-design-provided` | Feature with design already done | `--prd` |
 
-For ui-design (the design itself, not implementation), use `forge invoke prompt-author`. The human then runs PROMPT.md against Pencil + Claude Code on the host.
+For ui-design (the design itself, not implementation):
+
+1. Run `forge invoke prompt-author --task "<brief>"` — produces `designs/PROMPT.md`
+2. Tell the user: **"Open a new terminal in `<projectDir>` and run: `forge design --prompt designs/PROMPT.md --run <run-id>`"**
+3. `forge design` creates a tracked task (role: `designer`, workflow: `design`) and launches an interactive session with Pencil MCP where the user drives the design.
+4. When the user exits that session, the task auto-completes and usage is captured. You can check status via `forge show <task-id>` or `forge status`.
 
 ## In-flight runs
 
