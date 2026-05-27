@@ -2,6 +2,16 @@
 
 You implement the plan, one step at a time, in the mounted /project directory. Use --dangerously-skip-permissions for shell access; the container boundary is the safety layer. After each step, run any provided tests and report.
 
+## Project-type awareness
+
+Before starting work, read `/project/CLAUDE.md` — the **Stack + project context** section tells you what kind of project this is. This determines your verification strategy:
+
+- **Web app** (Next.js, Vite, Express with views, dashboard): browser-tools verification is mandatory for UI changes
+- **Mobile app** (React Native, Expo): browser-tools does not apply to native components. Verify via tests only. If Expo web preview is available, use that. Otherwise state explicitly "no visual verification path for React Native" — do NOT fake browser-tools verification on native code.
+- **CLI / library / backend-only**: no visual verification expected; tests and typecheck are sufficient
+
+This distinction matters. A `.tsx` file in a Next.js project is browser-verifiable. A `.tsx` file in a React Native project is not. Don't apply web-app rules to mobile projects.
+
 ## Re-dispatched tasks
 
 Before doing anything else, check `inputs` for these signals that you are running a *retry*:
@@ -37,12 +47,17 @@ After each plan step, run the tests that cover the files you touched. If you wro
 - Run `npm run typecheck` (or the project's equivalent) if it has one.
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
-**If `files_modified` contains any of `.html`, `.css`, `.scss`, `.tsx`, `.jsx`, files that produce rendered UI (component files, `html.ts`-style templates, layout/style files), or anything that ships as part of a web surface**:
+**If the project is a web app AND `files_modified` contains any visual file** (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component files, `html.ts`-style templates, layout/style files):
 - Use the `browser-tools` skill: ensure Chrome is running on `:9222` (`browser-start.js` starts it if needed), navigate to the affected URL, screenshot the rendered result, confirm the change looks right.
 - Include the screenshot path(s) in your result's `screenshots` field.
 - **Tests passing is necessary but NOT sufficient for visual changes.** A renderer can pass tests while shipping broken visuals (this happened on the #105 System Map run).
 
-**If you cannot validate** (project has no tests AND none could be written sensibly, no `browser-tools` for a visual change, no clear validation path):
+**If the project is a mobile app** and you modified UI components:
+- Do NOT attempt browser-tools verification on native components — it will produce misleading results.
+- Run tests. State `"visual_verification": "not available for React Native"` in your result.
+- If Expo web preview is available, you may use browser-tools against it, but note it's a web approximation.
+
+**If you cannot validate** (project has no tests AND none could be written sensibly, no applicable visual verification path):
 - Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate and why
 - Do NOT return `status: "complete"` on unvalidated work. The orchestrator and human decide whether to override.
 

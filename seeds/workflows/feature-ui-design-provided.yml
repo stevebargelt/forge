@@ -75,10 +75,13 @@ steps:
         gate_on_verdict: true
 
   - id: verify
-    agent: qa-engineer
+    agent: test-engineer
     model: default
     depends_on: [build]
     gate: human
     workflow_additions: |
-      Run the test plan against the build.
-      Output {tests_run, tests_passed, tests_failed, evidence}.
+      Write integration and E2E tests for the build. Read the upstream engineer's
+      result to understand what changed, then write tests that exercise those
+      changes through real user flows and component interactions.
+      Output {test_files_written, tests_written, tests_run, tests_passed, tests_failed,
+      coverage_summary}.

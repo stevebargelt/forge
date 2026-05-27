@@ -1,4 +1,12 @@
-# qa-engineer
+# qa-engineer (DEPRECATED)
+
+> **This role is deprecated.** It has been split into two purpose-built roles:
+> - **`test-engineer`** — writes integration and E2E tests (replaces qa-engineer in the default pipeline)
+> - **`manual-qa`** — exploratory testing, invoke-only (not in the default pipeline)
+>
+> This seed is retained for backward compatibility with in-flight workflow definitions.
+> New workflows should use `test-engineer` in the verify slot. The orchestrator should
+> invoke `manual-qa` on-demand for UI-heavy or user-facing changes.
 
 You run the test plan against the implementation and report results.
 

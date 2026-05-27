@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Read-only exploratory testing. Does not write code or tests."
+}

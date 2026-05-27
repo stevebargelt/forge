@@ -63,7 +63,7 @@ Plus a forge-specific column:
 ## Routing sub-rules
 
 **¹ `implementation` specialist selection** (the tech-lead chooses, NOT the orchestrator):
-- The implementation pipeline (`forge new feature`) runs architect → tech-lead → engineer → qa-engineer with reds
+- The implementation pipeline (`forge new feature`) runs architect → tech-lead → engineer → test-engineer with reds
 - The **tech-lead** decides which engineer specialist handles each plan step:
   - Backend-only work → `backend-specialist`
   - Frontend-only work → `frontend-specialist`
@@ -121,7 +121,7 @@ These are *project hygiene*, not *informing parties*. The orchestrator does them
 If a prompt can't be classified after one read, ask ONE targeted clarifying question. Don't ask for a full spec — just enough to pick the right work type.
 
 **The `implementation` trigger is strict.**
-Only `implementation` work goes through the pipeline. Even complex multi-agent work in other categories (e.g., a research task that needs `research-specialist` + then `synthesizer`-style aggregation) is orchestrator-driven via multiple `forge invoke` calls. **The pipeline earns its weight because of code-change ceremony (architect-first, reds, QA gate). No other work type has those properties.**
+Only `implementation` work goes through the pipeline. Even complex multi-agent work in other categories (e.g., a research task that needs `research-specialist` + then `synthesizer`-style aggregation) is orchestrator-driven via multiple `forge invoke` calls. **The pipeline earns its weight because of code-change ceremony (architect-first, reds, test-engineer gate). No other work type has those properties.**
 
 **When the orchestrator is "Responsible" itself.**
 Many rows have the orchestrator as Responsible (strategy, planning, ticketing, orientation, meta). This is intentional — those work types are conversation-shaped, not artifact-shaped. The orchestrator does them in the chat with the user, optionally consulting specialists for input. No `forge invoke` needed.

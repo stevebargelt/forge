@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "edit", "write", "bash"],
+  "notes": "Full read/write inside /project. Writes integration and E2E test files."
+}
