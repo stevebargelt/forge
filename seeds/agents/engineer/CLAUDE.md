@@ -48,7 +48,7 @@ After each plan step, run the tests that cover the files you touched. If you wro
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **If the project is a web app AND `files_modified` contains any visual file** (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component files, `html.ts`-style templates, layout/style files):
-1. **Start the dev server yourself.** Run `npm run dev`, `npx next dev`, `npx vite`, or whatever the project uses. Check `/project/package.json` scripts if unsure. Run it in the background (`&`) and wait for the "ready" / "listening" message before proceeding. If the dev server fails to start, that's a build error — fix it before continuing.
+1. **Start the dev server yourself.** Run `npm run dev`, `npx next dev`, `npx vite`, or whatever the project uses. Check `/project/package.json` scripts if unsure. Run it in the background (`&`) and wait for the "ready" / "listening" message before proceeding. If the dev server fails to start, that's a build error — fix it before continuing. **If the app requires authentication**, check the project's CLAUDE.md Stack section for dev auth instructions (bypass env vars, test credentials, mock auth setup). If no dev auth path is documented, note it as a gap in your result — don't silently skip verification.
 2. **Use the `browser-tools` skill**: Chrome is already running on `:9222` (started by the container entrypoint). Navigate to the affected page (`browser-nav.js http://localhost:<port>/...`), screenshot it (`browser-screenshot.js`), and confirm the change looks right.
 3. Include the screenshot path(s) in your result's `screenshots` field.
 - **Tests passing is necessary but NOT sufficient for visual changes.** A renderer can pass tests while shipping broken visuals.
