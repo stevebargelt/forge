@@ -91,8 +91,9 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     const noun = counts.awaiting_human_input === 1 ? "task" : "tasks";
     return {
       kind: "awaiting_human_input",
-      summary: `${counts.awaiting_human_input} ${noun} awaiting your design work. Submit when artifacts are ready.`,
-      command: `forge submit ${t.id}`,
+      summary: `${counts.awaiting_human_input} ${noun} awaiting manual work. Inspect the task, then advance via forge gate.`,
+      command: `forge show ${t.id}`,
+      alternativeCommand: `forge gate ${t.id} advance --rationale "..."`,
       counts,
     };
   }

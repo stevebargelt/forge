@@ -114,10 +114,10 @@ export function setTaskStatus(id: string, status: TaskStatus): void {
   getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, id);
 }
 
-// Used by `forge submit` to transition a manual-phase task (FORGE-DEC-016) from
-// awaiting_human_input → awaiting_gate while writing the captured artifact paths
-// into result. Distinct from markTaskComplete: gate completion still has to happen
-// via the human's gate decision; this is just the data-capture step before the gate.
+// Transition a manual-phase task (FORGE-DEC-016) from awaiting_human_input →
+// awaiting_gate while writing the captured artifact paths into result. Distinct
+// from markTaskComplete: gate completion still has to happen via the human's gate
+// decision; this is just the data-capture step before the gate.
 export function markTaskAwaitingGate(id: string, result: unknown): void {
   getDb()
     .prepare(

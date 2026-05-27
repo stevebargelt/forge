@@ -37,7 +37,7 @@ The TaskCreate harness tool is for ephemeral within-session working state. The d
 
 - TypeScript with strict mode and `noUncheckedIndexedAccess`. Run `npm run typecheck` before committing source changes.
 - Module type is ES modules (`"type": "module"` in `package.json`). Always use `.js` import suffixes from TypeScript files.
-- Workflow definitions are TypeScript files under `src/workflows/`. **Do not** introduce a YAML/JSON workflow loader. The `Workflow` type is the schema.
+- Workflow definitions are YAML files under `seeds/workflows/` (installed to `~/.forge/workflows/`). Loaded by `src/v2/loader.ts` with Zod validation. Per-project overrides go in `<project>/.forge/workflows/<name>.yml`.
 - Agents always run in containers. Forge itself never runs in a container. **One documented exception:** the design phase runs on the host via `forge design` — the user launches an interactive session with Pencil MCP in a separate terminal (FORGE-DEC-014). Forge's role is to author the prompt (`prompt-author` agent in a normal container), then hand off to the tracked `forge design` session. There is no agent-led UI design phase.
 - Red agents always get read-only project mounts (`-v <project>:/project:ro`). This is OS-level enforcement; never relax it to a prompt instruction.
 - Three similar functions are better than a premature base class. Don't introduce abstractions beyond what the spine sketch specifies.

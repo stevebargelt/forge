@@ -1,87 +1,72 @@
 # How-to: add a new workflow
 
-Workflows are TypeScript files under `src/workflows/`. There is no YAML, no JSON, no separate loader. The `Workflow` type in `src/types/index.ts` is the schema; autocomplete on phase names and agent references from day one.
+Workflows are YAML files loaded from `~/.forge/workflows/<name>.yml` (global) or `<project>/.forge/workflows/<name>.yml` (per-project override). Seeds live at `seeds/workflows/` and are installed by `install-seeds.sh`. Schema validation is handled by Zod in `src/v2/schema.ts`.
 
 ## Example: add a `code-review` workflow
 
-Two phases: `review` (a panel of assessors fans out) and `report` (a reporter aggregates).
+Two steps: `review` (a panel of assessors fans out) and `report` (a reporter aggregates).
 
-### Step 1: register the workflow name
+### Step 1: write the YAML file
 
-In `src/types/index.ts`, add the new name to `WorkflowName`:
+Create `seeds/workflows/code-review.yml`:
 
-```ts
-export type WorkflowName =
-  | "feature-design-provided"
-  | "feature-design-needed"
-  | "investigation"
-  | "codebase-assessment"
-  | "code-review";
+```yaml
+name: code-review
+description: Multi-lens code review with adversarial cross-check.
+
+inputs:
+  - name: brief
+    required: true
+    type: text
+    help: "What to review and any specific focus areas."
+
+steps:
+  - id: review
+    agent: assessor
+    model: spec-writer
+    gate: human
+    workflow_additions: |
+      For each lens, output {lens, findings: [{severity, summary, evidence, recommendation}]}.
+    fanout:
+      from_upstream:
+        step: null
+        array_key: lenses
+        input_key: lens
+      max_concurrency: 4
+      failure_mode: continue
+    reds:
+      - agent: red-wide
+        model: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  - id: report
+    agent: reporter
+    model: default
+    depends_on: [review]
+    gate: auto
+    workflow_additions: |
+      Aggregate per-lens findings into a single prioritized report. Output {report: markdown}.
 ```
 
-In `src/spine/workflows.ts`, add it to `VALID_NAMES`. The CLI's `forge new` validation reads from the same source.
+### Step 2: ensure the agent dirs exist
 
-### Step 2: write the workflow file
+`agent: assessor` resolves to `~/.forge/agents/assessor/`. That directory must contain a `CLAUDE.md` (the agent's base prompt). If you reference a new role, see `how-to-new-agent.md`.
 
-Create `src/workflows/code-review.ts`:
-
-```ts
-import type { Workflow } from "../types/index.js";
-import { agent } from "./_agentRefs.js";
-
-export const workflow: Workflow = {
-  name: "code-review",
-  description: "Multi-lens code review with adversarial cross-check.",
-  phases: [
-    {
-      name: "review",
-      agents: [agent("assessor", "spec-writer")],
-      reds: {
-        wide: agent("red-wide", "fast-orchestrator"),
-        parallel: true,
-        authority: "specialist",
-        gateOnVerdict: false,
-      },
-      fanout: { maxConcurrency: 4, failureMode: "continue" },
-      gate: "human",
-      workflowAdditions:
-        "For each lens, output {lens, findings: [{severity, summary, evidence, recommendation}]}.",
-    },
-    {
-      name: "report",
-      agents: [agent("reporter", "spec-writer")],
-      gate: "auto",
-      workflowAdditions:
-        "Aggregate per-lens findings into a single prioritized report. Output {report: markdown}.",
-    },
-  ],
-};
-```
-
-### Step 3: ensure the agent dirs exist
-
-`agent("assessor", ...)` resolves to `~/.forge/agents/assessor/`. That directory must contain a `CLAUDE.md` (the agent's base prompt) and a `settings.json`. The seeds repo already includes `assessor`, `red-wide`, and `reporter`. If you reference a new role, see `how-to-new-agent.md`.
-
-### Step 4: test without a full run
-
-Typecheck the workflow file:
+### Step 3: install and test
 
 ```bash
-npm run typecheck
+# Install seeds (copies to ~/.forge/workflows/)
+./install-seeds.sh
+
+# Validate the YAML parses correctly
+npx tsx -e "import('./src/v2/loader.js').then(m => m.loadWorkflow('code-review', { projectDir: process.cwd() })).then(w => console.log(JSON.stringify(w, null, 2)))"
 ```
 
-Then dry-run the loader:
+### Step 4: invoke
 
 ```bash
-node --import tsx -e "import('./src/spine/workflows.js').then(m => m.loadWorkflow('code-review')).then(console.log)"
-```
-
-You should see your phases printed.
-
-### Step 5: invoke
-
-```bash
-forge new code-review "atlas-clock-skew-review" --meta '{"lenses":["security","performance"]}'
+forge new code-review "atlas-clock-skew-review" --brief "Review the clock-skew handling in src/sync/"
 forge next run-atlas-clock-skew-review-<suffix> --project ~/code/atlas
 ```
 
@@ -118,6 +103,6 @@ The upstream agent (here, `tech-lead`) must emit the discipline field on each el
 
 ## Notes
 
-- Each phase can carry `workflowAdditions` (Tier 2 of `composeSystemPrompt`) — phase-specific framing appended to the agent's base CLAUDE.md.
-- A phase can have `gate: "human" | "verdict" | "auto"` — see `docs/concepts.md`.
-- For mid-pipeline branching, set `phase.onReject = "<other-phase-name>"`. On `forge gate <task> reject`, forge creates tasks for the alternate phase as children of the rejected task.
+- Each step can carry `workflow_additions` — phase-specific framing appended to the agent's base CLAUDE.md.
+- A step can have `gate: "human" | "verdict" | "auto" | "none"` — see `docs/concepts.md`.
+- Steps declare dependencies via `depends_on: [step-id, ...]`. The runner dispatches in topological order.

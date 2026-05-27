@@ -58,7 +58,7 @@ Example: the framer task `task-frame-f68eb8` produced 5 claims and 7 experiments
 
 ## Phase
 
-A fixed step in a workflow. Phases run in order; each phase has one or more agent roles, an optional set of red agents, and a gate. Phases are defined in TypeScript files under `src/workflows/`.
+A fixed step in a workflow. Phases run in order; each phase has one or more agent roles, an optional set of red agents, and a gate. Phases are defined in YAML workflow files under `~/.forge/workflows/` (seeds at `seeds/workflows/`).
 
 Example: the investigation workflow has four phases — `frame`, `investigate`, `synthesize`, `recommend`.
 

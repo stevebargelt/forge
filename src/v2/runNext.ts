@@ -162,7 +162,7 @@ async function dispatchStep(args: {
   const step = args.step;
 
   // For manual steps: create task at pending, never spawn. The runner returns
-  // immediately; forge submit transitions it to awaiting_gate later.
+  // immediately; the orchestrator advances it via forge gate when done.
   if (step.manual) {
     return dispatchManualStep(args.runId, step);
   }
@@ -884,7 +884,7 @@ async function runContainer(args: {
 
 function dispatchManualStep(runId: string, step: Step): string {
   // Look for an existing pending task; if none, create one at pending status.
-  // Manual steps never spawn a container; they're transitioned by `forge submit`.
+  // Manual steps never spawn a container; the orchestrator advances them via forge gate.
   const existing = tasksForRun(runId).find(
     (t) => t.phase === step.id && t.parentId === undefined
   );

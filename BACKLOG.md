@@ -402,21 +402,27 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 7. Update forge CLAUDE.md orchestrator block (role table, gate-decision discipline)
 
 ### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
-## Problem
 
-The current UI design flow tells the user to manually open a separate Claude Code session with Pencil connected and feed it the PROMPT.md. This is out-of-band — forge abdicates its orchestration role for the design step.
+### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
+## Status
 
-## Solution
+The `awaiting_human_input` task status exists in the type union, schema validation (`manual: true`), dashboard CSS badge, advise integration, and ready-queue handling. But the actual state transitions are incomplete:
 
-After `prompt-author` delivers `designs/PROMPT.md`, forge launches a `claude` CLI session on the host (not a container — Pencil is a host MCP) seeded with that prompt. The user drives the design interactively in that session. Forge tracks it as a task in the DB so the dashboard shows it in-flight.
+- `dispatchManualStep` in runNext.ts creates tasks as `pending`, not `awaiting_human_input`
+- No store function transitions `pending` → `awaiting_human_input`
+- No CLI command to advance `awaiting_human_input` → `awaiting_gate` (the deleted `forge submit`)
+- No workflows currently use `manual: true` phases
 
-## Design notes
+## Context
 
-- **Host-side, not container**: Pencil MCP requires host access. This is forge's first (and likely only) host-side agent session. No need to abstract a general "host agent" pattern — extract later if one emerges.
-- **Launch**: spawn `claude` CLI as a child process with `--prompt` or piped input containing the PROMPT.md content. The project's `.claude/settings.json` already configures Pencil MCP.
-- **Tracking**: create a task row (`status: running`, role like `designer` or `pencil-session`). When the `claude` process exits, mark complete.
-- **Handoff back**: the design session produces `.pen` files and PNG exports in the design dir. Forge doesn't parse them — just needs to know the session ended and artifacts exist at the expected path.
-- **Docs**: update all references to "the human runs PROMPT.md against Pencil + Claude Code on the host" in orchestrator template, CLAUDE.md, and prompt-author seed once this ships.
+- `forge submit` was implemented in v1, deleted in v2 cutover (commit b818f27) with note "ui-design is host-led under RACI"
+- The primary use case (Pencil design) is now handled by `forge design` (#166), which is a separate tracked session — not a manual phase in a pipeline
+- FORGE-DEC-016 documents the original design for the manual-phase primitive
+- `advise.ts` was updated to stop recommending the nonexistent `forge submit` — it now points to `forge show` + `forge gate` as the workaround
+
+## Decision needed
+
+Is the general-purpose `manual: true` phase primitive worth completing, or should it be retired? No workflows use it today. If a future workflow needs a human-in-the-loop step, the `forge design` pattern (tracked host-side session) may be the better model.
 
 
 ## Done (recent)

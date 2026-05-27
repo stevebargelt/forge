@@ -25,8 +25,8 @@ export function taskDir(runId: string, taskId: string): string {
 
 // Host path of the PROMPT.md a prompt-author task wrote. The agent writes to
 // `/task/PROMPT.md` (in-container); that bind-mounts to taskDir() on the host.
-// The dashboard renders the prompt body inline; `forge submit` doesn't need this
-// (validation works off the run's designDir, not the prompt path).
+// The dashboard renders the prompt body inline; validation works off the run's
+// designDir, not the prompt path.
 export function briefPromptHostPath(runId: string, briefTaskId: string): string {
   return join(taskDir(runId, briefTaskId), "PROMPT.md");
 }
@@ -45,9 +45,9 @@ export function expandTildePath(p: string): string {
 
 // Sanitize a run title to a filename slug. Source of truth for the
 // `<sanitized-title>.pen` convention used by ui-design / ui-design-revise / feature-ui-design-needed workflows.
-// Both `forge new --design-dir` defaulting and `forge submit` validation share
-// this rule so the .pen file produced by Pencil and the .pen file expected by
-// the validator are guaranteed to match.
+// Both `forge new --design-dir` defaulting and design validation share this rule
+// so the .pen file produced by Pencil and the .pen file expected by the validator
+// are guaranteed to match.
 export function sanitizeTitleForFilename(title: string): string {
   return (
     title
