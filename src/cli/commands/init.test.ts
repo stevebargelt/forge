@@ -26,6 +26,15 @@ const TEMPLATE_V2 = `<!-- forge:orchestrator-start -->
 Different body.
 <!-- forge:orchestrator-end -->`;
 
+const TEMPLATE_WITH_STACK = `<!-- forge:orchestrator-start -->
+# forge orchestrator (v2)
+Different body.
+<!-- forge:orchestrator-end -->
+
+## Stack + project context
+- **Project**: <!-- placeholder -->
+- **Stack**: <!-- placeholder -->`;
+
 test("applyOrchestratorBlock: appends to empty CLAUDE.md", () => {
   const out = applyOrchestratorBlock("", TEMPLATE);
   assert.equal(out, TEMPLATE + "\n");
@@ -94,6 +103,35 @@ test("applyOrchestratorBlock: preserves content before AND after the block on up
   assert.ok(out.includes("## Conventions"));
   assert.ok(out.includes("Use ts not js."));
   assert.ok(out.includes("# forge orchestrator (v2)"));
+});
+
+test("applyOrchestratorBlock: upgrade preserves project-specific Stack section after end marker", () => {
+  const existing = [
+    "# my project",
+    "",
+    "<!-- forge:orchestrator-start -->",
+    "# forge orchestrator",
+    "You are the orchestrator.",
+    "<!-- forge:orchestrator-end -->",
+    "",
+    "## Stack + project context",
+    "- **Project**: Acme — real project data",
+    "- **Stack**: React + Node",
+    "",
+  ].join("\n");
+
+  const out = applyOrchestratorBlock(existing, TEMPLATE_WITH_STACK);
+  assert.ok(out.includes("# forge orchestrator (v2)"), "orchestrator block should be updated");
+  assert.ok(!out.includes("You are the orchestrator."), "old block body should be gone");
+  assert.ok(out.includes("Acme — real project data"), "project-specific Stack content must survive");
+  assert.ok(!out.includes("<!-- placeholder -->"), "template placeholder must NOT be injected");
+});
+
+test("applyOrchestratorBlock: first-time append includes post-marker Stack placeholder", () => {
+  const existing = "# my project\n\nSome notes.\n";
+  const out = applyOrchestratorBlock(existing, TEMPLATE_WITH_STACK);
+  assert.ok(out.includes("## Stack + project context"), "Stack section should be seeded on first init");
+  assert.ok(out.includes("<!-- placeholder -->"), "placeholder should appear on first init");
 });
 
 // ----- planCommitMsgHook (#147 follow-up: ban-AI-attribution hook) -----

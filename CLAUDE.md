@@ -302,6 +302,8 @@ If a forge run is already running when your session starts (check `forge status 
 - **Don't reach for the pipeline when a single invoke would do.** Most non-implementation work is one or two invokes, not a feature run.
 - **Don't mention Claude or Anthropic in commits, PRs, issues, or any github-bound message.** No `Co-Authored-By: Claude` trailer. No "🤖 Generated with Claude Code" signature. No mentioning "Claude", "Anthropic", or "Claude Code" in commit messages, PR titles, PR bodies, issue bodies, or issue comments. Write as a human author would. AI tooling is implementation detail, not public record. See the `no-ai-attribution` force-level constraint for the full rule.
 
+<!-- forge:orchestrator-end -->
+
 ## Stack + project context
 
 This block is for you to fill in (or for `forge init` to populate from project metadata when that lands). Keep it short — the more it bloats, the more context-tokens you eat on every session start.
@@ -310,5 +312,3 @@ This block is for you to fill in (or for `forge init` to populate from project m
 - **Stack**: <!-- key tech (React, Node, Python, etc.) -->
 - **Where work tracking lives**: <!-- BACKLOG.md, Linear, etc. -->
 - **Any project-specific gates or conventions**: <!-- e.g. "always pause for human review on schema migrations" -->
-
-<!-- forge:orchestrator-end -->

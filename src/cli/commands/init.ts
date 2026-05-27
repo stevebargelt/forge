@@ -221,11 +221,27 @@ export function applyOrchestratorBlock(existing: string, template: string): stri
     const endLineEnd = existing.indexOf("\n", endIdx + END_MARKER.length);
     const tail = endLineEnd >= 0 ? existing.slice(endLineEnd + 1) : "";
     const head = existing.slice(0, startIdx);
+
+    // Extract only the orchestrator block (between markers) from the
+    // template. Content after the end marker (e.g. "Stack + project
+    // context") is project-specific and must not be overwritten on upgrade.
+    const tmplStartIdx = template.indexOf(START_MARKER);
+    const tmplEndIdx = template.indexOf(END_MARKER);
+    let block: string;
+    if (tmplStartIdx >= 0 && tmplEndIdx > tmplStartIdx) {
+      const tmplEndLineEnd = template.indexOf("\n", tmplEndIdx + END_MARKER.length);
+      block = tmplEndLineEnd >= 0
+        ? template.slice(tmplStartIdx, tmplEndLineEnd + 1)
+        : template.slice(tmplStartIdx);
+    } else {
+      block = template;
+    }
+
     // Ensure exactly one blank line on each side of the block when there's
     // surrounding content. If head/tail is empty, no blank line needed.
     const headJoin = head && !head.endsWith("\n\n") ? (head.endsWith("\n") ? "\n" : "\n\n") : "";
     const tailJoin = tail ? (tail.startsWith("\n") ? "" : "\n") : "";
-    return head + headJoin + ensureTrailingNewline(template) + tailJoin + tail;
+    return head + headJoin + ensureTrailingNewline(block) + tailJoin + tail;
   }
 
   if (startIdx >= 0 || endIdx >= 0) {
