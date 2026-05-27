@@ -24,9 +24,14 @@
 import type { Command } from "commander";
 import { spawn } from "node:child_process";
 import { execSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync, readlinkSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve as pathResolve } from "node:path";
+import { homedir } from "node:os";
 import { resolveProjectMeta } from "../../util/project-meta.js";
+import { insertRun, updateRunStatus } from "../../store/runs.js";
+import { insertTask, markTaskComplete } from "../../store/tasks.js";
+import { extractUsageFromTranscript, insertUsageRows } from "../../store/model-calls.js";
+import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
 
 const ORCHESTRATOR_MARKER = "<!-- forge:orchestrator-start -->";
 
@@ -59,12 +64,44 @@ export function registerClaude(program: Command): void {
       console.log(statusBanner(projectRoot, resolvedName));
       console.log("");
 
-      // 5. Build the final argv. Strip user-supplied -n / --name (we set ours);
+      // 5. Create an orchestrator run + task so model_calls captured at session
+      //    end show up in the dashboard usage view with proper project grouping.
+      const runId = newRunId("orchestrator");
+      const taskId = newTaskId("session");
+      const startedAt = nowIso();
+      try {
+        insertRun({
+          id: runId,
+          workflow: "orchestrator",
+          title: `${resolvedName} orchestrator`,
+          status: "active",
+          createdAt: startedAt,
+          projectDir: projectRoot,
+        });
+        insertTask({
+          id: taskId,
+          runId,
+          phase: "session",
+          agentRole: "orchestrator",
+          status: "running",
+          taskPackage: {
+            taskId, runId, phase: "session", role: "orchestrator",
+            inputs: { projectDir: projectRoot },
+            composedSystemPrompt: "",
+          },
+          createdAt: startedAt,
+          startedAt,
+        });
+      } catch {
+        // Best-effort — don't block the session if DB writes fail.
+      }
+
+      // 6. Build the final argv. Strip user-supplied -n / --name (we set ours);
       //    insert our --name first so flags-after can still reference it.
       const passthrough = stripNameFromArgs(args);
       const finalArgs: string[] = ["-n", resolvedName, ...passthrough];
 
-      // 6. Exec claude with stdio inherited so the user gets a real interactive
+      // 7. Exec claude with stdio inherited so the user gets a real interactive
       //    session. Child inherits the parent's env (FORGE_REPO_DIR, AWS_*,
       //    CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_API_KEY, etc. — nothing special
       //    happens here; #158 will revisit for the bedrock auto-arm case).
@@ -74,6 +111,7 @@ export function registerClaude(program: Command): void {
         env: process.env,
       });
       child.on("exit", (code, signal) => {
+        captureOrchestratorUsage(projectRoot, taskId, runId);
         if (signal) process.exit(128);
         process.exit(code ?? 0);
       });
@@ -213,4 +251,45 @@ function activeBacklogCount(projectRoot: string): number | undefined {
   } catch {
     return undefined;
   }
+}
+
+// #163: after claude exits, find its transcript and extract token usage into
+// model_calls. Best-effort — never throws, never blocks exit.
+function captureOrchestratorUsage(projectRoot: string, taskId: string, runId: string): void {
+  try {
+    const transcriptPath = findSessionTranscript(projectRoot);
+    if (!transcriptPath) return;
+
+    const rows = extractUsageFromTranscript(transcriptPath, { taskId, alias: "orchestrator" });
+    if (rows.length > 0) insertUsageRows(rows);
+
+    markTaskComplete(taskId, { rowCount: rows.length });
+    updateRunStatus(runId, "complete");
+  } catch {
+    // Telemetry failure must never alter exit behavior.
+    try { updateRunStatus(runId, "complete"); } catch { /* give up */ }
+  }
+}
+
+// Claude Code transcripts live at ~/.claude/projects/<path-hash>/<session-id>.jsonl.
+// The path hash is the absolute project dir with / replaced by -.
+// We find the most recently modified .jsonl in the project's transcript dir.
+function findSessionTranscript(projectRoot: string): string | undefined {
+  const pathHash = projectRoot.replace(/\//g, "-");
+  const transcriptDir = join(homedir(), ".claude", "projects", pathHash);
+  if (!existsSync(transcriptDir)) return undefined;
+
+  let newest: { path: string; mtime: number } | undefined;
+  try {
+    for (const name of readdirSync(transcriptDir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const full = join(transcriptDir, name);
+      try {
+        const mt = statSync(full).mtimeMs;
+        if (!newest || mt > newest.mtime) newest = { path: full, mtime: mt };
+      } catch { continue; }
+    }
+  } catch { return undefined; }
+
+  return newest?.path;
 }

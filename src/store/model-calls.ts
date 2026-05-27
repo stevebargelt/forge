@@ -169,6 +169,60 @@ export function captureUsageForTask(
   }
 }
 
+// Extract usage from a Claude Code .jsonl transcript (the file Claude Code writes
+// to ~/.claude/projects/<hash>/<session-id>.jsonl). Different event shape from
+// --output-format=stream-json logs, but same usage payload inside message.usage.
+// Each assistant turn produces one entry with { message: { id, model, usage } }.
+export function extractUsageFromTranscript(
+  transcriptPath: string,
+  opts?: { taskId?: string; alias?: string },
+): UsageRow[] {
+  let raw: string;
+  try { raw = readFileSync(transcriptPath, "utf8"); }
+  catch { return []; }
+
+  const byRequest = new Map<string, UsageRow>();
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let entry: unknown;
+    try { entry = JSON.parse(line); }
+    catch { continue; }
+    if (!isObject(entry)) continue;
+
+    const msg = isObject(entry["message"]) ? entry["message"] : undefined;
+    if (!msg) continue;
+    if (msg["role"] !== "assistant") continue;
+
+    const reqId = typeof msg["id"] === "string" ? msg["id"] : undefined;
+    const model = typeof msg["model"] === "string" ? msg["model"] : undefined;
+    const usage = isObject(msg["usage"]) ? msg["usage"] : undefined;
+    if (!reqId || !model || !usage) continue;
+
+    const timestamp = typeof entry["timestamp"] === "string" ? entry["timestamp"] : undefined;
+    const row: UsageRow = {
+      taskId: opts?.taskId ?? null,
+      requestId: reqId,
+      model,
+      alias: opts?.alias ?? null,
+      inputTokens: numField(usage, "input_tokens"),
+      outputTokens: numField(usage, "output_tokens"),
+      cacheReadTokens: numField(usage, "cache_read_input_tokens"),
+      cacheCreationTokens: numField(usage, "cache_creation_input_tokens"),
+      createdAt: timestamp ?? new Date().toISOString(),
+    };
+
+    const existing = byRequest.get(reqId);
+    if (!existing) { byRequest.set(reqId, row); continue; }
+    existing.inputTokens         = Math.max(existing.inputTokens,         row.inputTokens);
+    existing.outputTokens        = Math.max(existing.outputTokens,        row.outputTokens);
+    existing.cacheReadTokens     = Math.max(existing.cacheReadTokens,     row.cacheReadTokens);
+    existing.cacheCreationTokens = Math.max(existing.cacheCreationTokens, row.cacheCreationTokens);
+  }
+
+  return Array.from(byRequest.values());
+}
+
 // Insert a batch of usage rows. Idempotent via (task_id, request_id) — re-running
 // against the same log replaces existing rows for that pair so backfill can be
 // re-run safely. (request_id alone isn't unique enough; a session might appear

@@ -410,6 +410,8 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 
 ### #162 — Dashboard usage: model mix per dimension
 
+### #163 — orchestrator token capture: instrument forge claude to log model_calls
+
 ## Done (recent)
 
 ### #156 — Dashboard usage view: useful AND beautiful (consumes #155)
