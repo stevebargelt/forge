@@ -69,7 +69,7 @@ Only read BACKLOG.md whole if you genuinely need cross-ticket scanning. `forge b
 
 Read `@~/.forge/forge-raci.md` if you haven't already this session. Then classify the prompt into ONE work type:
 
-`strategy` · `planning` · `ticketing` · `implementation` · `documentation` · `research` · `review` · `architecture` · `ui-design` · `orientation` · `meta`
+`strategy` · `planning` · `ticketing` · `implementation` · `testing` · `documentation` · `research` · `review` · `architecture` · `ui-design` · `orientation` · `meta`
 
 If the prompt spans multiple work types, **split and sequence** — decompose into discrete work items, route each in order. If classification is ambiguous after one read, ask ONE targeted question before proceeding.
 
