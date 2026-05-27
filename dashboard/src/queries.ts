@@ -309,6 +309,143 @@ function safeJsonParse(s: string): unknown {
   catch { return s; }
 }
 
+export type GroupBy = "role" | "workflow" | "project" | "model" | "alias";
+
+export type UsageRollupRow = {
+  bucket: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  requests: number;
+};
+
+export type UsageTimeSeriesRow = {
+  date: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  requests: number;
+};
+
+export function usageRollup(groupBy: GroupBy, since: string, projectDir?: string, limit = 50): UsageRollupRow[] {
+  const groupExpr: Record<GroupBy, string> = {
+    role:     "COALESCE(t.agent_role, '(unknown role)')",
+    workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
+    project:  "COALESCE(r.project_dir,'(unknown project)')",
+    model:    "COALESCE(mc.model,     '(unknown model)')",
+    alias:    "COALESCE(mc.alias,     '(no alias)')",
+  };
+  const params: unknown[] = [];
+  let sinceClause = "";
+  if (since !== "all") {
+    const m = since.match(/^(\d+)d$/);
+    if (m?.[1]) {
+      const cutoff = new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString();
+      sinceClause = "AND mc.created_at >= ?";
+      params.push(cutoff);
+    }
+  }
+  let projectClause = "";
+  if (projectDir) {
+    projectClause = "AND r.project_dir = ?";
+    params.push(projectDir);
+  }
+  params.push(limit);
+
+  const sql = `
+    SELECT
+      ${groupExpr[groupBy]} AS bucket,
+      SUM(mc.input_tokens)          AS in_tok,
+      SUM(mc.output_tokens)         AS out_tok,
+      SUM(mc.cache_read_tokens)     AS read_tok,
+      SUM(mc.cache_creation_tokens) AS create_tok,
+      COUNT(*) AS req_count
+    FROM model_calls mc
+    LEFT JOIN tasks t ON t.id = mc.task_id
+    LEFT JOIN runs  r ON r.id = t.run_id
+    WHERE 1 = 1
+      ${sinceClause}
+      ${projectClause}
+    GROUP BY bucket
+    ORDER BY (SUM(mc.input_tokens) + SUM(mc.cache_creation_tokens) + SUM(mc.cache_read_tokens) + SUM(mc.output_tokens)) DESC
+    LIMIT ?
+  `;
+
+  const rows = db().prepare(sql).all(...params) as Array<{
+    bucket: string;
+    in_tok: number;
+    out_tok: number;
+    read_tok: number;
+    create_tok: number;
+    req_count: number;
+  }>;
+
+  return rows.map((r) => ({
+    bucket: r.bucket,
+    inputTokens: r.in_tok ?? 0,
+    outputTokens: r.out_tok ?? 0,
+    cacheReadTokens: r.read_tok ?? 0,
+    cacheCreationTokens: r.create_tok ?? 0,
+    requests: r.req_count ?? 0,
+  }));
+}
+
+export function usageTimeSeries(since = "30d", projectDir?: string): UsageTimeSeriesRow[] {
+  const params: unknown[] = [];
+  let sinceClause = "";
+  if (since !== "all") {
+    const m = since.match(/^(\d+)d$/);
+    if (m?.[1]) {
+      const cutoff = new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString();
+      sinceClause = "AND mc.created_at >= ?";
+      params.push(cutoff);
+    }
+  }
+  let projectClause = "";
+  if (projectDir) {
+    projectClause = "AND r.project_dir = ?";
+    params.push(projectDir);
+  }
+
+  const sql = `
+    SELECT
+      date(mc.created_at) AS day,
+      SUM(mc.input_tokens)          AS in_tok,
+      SUM(mc.output_tokens)         AS out_tok,
+      SUM(mc.cache_read_tokens)     AS read_tok,
+      SUM(mc.cache_creation_tokens) AS create_tok,
+      COUNT(*) AS req_count
+    FROM model_calls mc
+    LEFT JOIN tasks t ON t.id = mc.task_id
+    LEFT JOIN runs  r ON r.id = t.run_id
+    WHERE 1 = 1
+      ${sinceClause}
+      ${projectClause}
+    GROUP BY day
+    ORDER BY day ASC
+  `;
+
+  const rows = db().prepare(sql).all(...params) as Array<{
+    day: string;
+    in_tok: number;
+    out_tok: number;
+    read_tok: number;
+    create_tok: number;
+    req_count: number;
+  }>;
+
+  return rows.map((r) => ({
+    date: r.day,
+    inputTokens: r.in_tok ?? 0,
+    outputTokens: r.out_tok ?? 0,
+    cacheReadTokens: r.read_tok ?? 0,
+    cacheCreationTokens: r.create_tok ?? 0,
+    requests: r.req_count ?? 0,
+  }));
+}
+
 // #154: project registry for the dashboard Projects view.
 // Delegates to the shared listProjects() (#152) so the dashboard sees the
 // same union of DB-derived + filesystem-scanned projects as `forge projects

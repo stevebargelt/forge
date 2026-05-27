@@ -4,9 +4,11 @@ import { h, render } from "https://esm.sh/preact@10.24.0";
 import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
 import { renderResultByAgent, md } from "./renderers.js";
+import { UsageView } from "./usage.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
+const USAGE_POLL_MS = 30000;
 
 function App() {
   // #154: top-level view toggle. activity = recent runs/in-flight (the original
@@ -21,6 +23,10 @@ function App() {
   const [error, setError] = useState(null);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const [usageRollup, setUsageRollup] = useState([]);
+  const [usageTimeSeries, setUsageTimeSeries] = useState([]);
+  const [usageGroupBy, setUsageGroupBy] = useState("project");
+  const [usageSince, setUsageSince] = useState("30d");
 
   const poll = useCallback(async () => {
     try {
@@ -40,11 +46,34 @@ function App() {
     }
   }, [view, projectFilter, projects.length]);
 
+  const pollUsage = useCallback(async () => {
+    try {
+      const tsDays = parseInt(usageSince) * 2;
+      const [rollupRes, tsRes] = await Promise.all([
+        fetch(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`),
+        fetch(`/api/usage/timeseries?since=${tsDays}d`),
+      ]);
+      if (rollupRes.ok) setUsageRollup(await rollupRes.json());
+      if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
+      setNow(Date.now());
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [usageGroupBy, usageSince]);
+
   useEffect(() => {
+    if (view === "usage") return;
     poll();
     const id = setInterval(poll, POLL_MS);
     return () => clearInterval(id);
-  }, [poll]);
+  }, [poll, view]);
+
+  useEffect(() => {
+    if (view !== "usage") return;
+    pollUsage();
+    const id = setInterval(pollUsage, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollUsage, view]);
 
   useEffect(() => {
     const onHash = () => setView(initialView());
@@ -70,6 +99,7 @@ function App() {
           <nav class="view-tabs">
             <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
+            <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -79,6 +109,15 @@ function App() {
 
       ${view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
+        : view === "usage"
+        ? html`<${UsageView}
+            rollup=${usageRollup}
+            timeSeries=${usageTimeSeries}
+            groupBy=${usageGroupBy}
+            onGroupByChange=${setUsageGroupBy}
+            since=${usageSince}
+            onSinceChange=${setUsageSince}
+          />`
         : html`
           ${projectFilter ? html`
             <div class="filter-banner">
@@ -111,7 +150,9 @@ function App() {
 
 function initialView() {
   const h = (window.location.hash || "").replace(/^#/, "");
-  return h === "projects" ? "projects" : "activity";
+  if (h === "projects") return "projects";
+  if (h === "usage") return "usage";
+  return "activity";
 }
 
 function ProjectsView({ projects, onPick }) {

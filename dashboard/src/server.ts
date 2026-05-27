@@ -13,7 +13,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail, projectsForDashboard } from "./queries.js";
+import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries } from "./queries.js";
+import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 
 const PORT = Number(process.env.PORT ?? 8024);
@@ -88,6 +89,29 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
 
   if (path === "/api/projects") {
     const data = projectsForDashboard();
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/usage") {
+    const raw = url.searchParams.get("groupBy") ?? "project";
+    const validGroupBy: GroupBy[] = ["role", "workflow", "project", "model", "alias"];
+    if (!validGroupBy.includes(raw as GroupBy)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid groupBy" }));
+      return;
+    }
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
+    const data = usageRollup(raw as GroupBy, since, projectDir, limit);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/usage/timeseries") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const data = usageTimeSeries(since, projectDir);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }

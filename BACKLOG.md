@@ -437,6 +437,10 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 - Multi-profile per-project. One profile per project for now; --aws-profile override is the escape hatch.
 
 
+### #159 — commit-msg hook false-positive: blocks 'forge claude' despite allowlist
+
+### #160 — Architecture-advisor agent: produce Mermaid architecture documents
+
 ## Done (recent)
 
 ### #157 — forge invoke leaks active runs; needs terminal transition + sweep CLI
