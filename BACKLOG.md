@@ -5,40 +5,7 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-## Session 2026-05-26 (overnight)
 
-### Shipped
-
-**CLAUDE.md upgrade protection (committed, pushed)**
-- `forge upgrade` was wiping the "Stack + project context" section because it was inside the orchestrator markers
-- Fixed: moved end marker before Stack section in template; changed `applyOrchestratorBlock` to extract only between-markers content from template on upgrade (first-time init still seeds the placeholder)
-- Two new tests proving the fix
-- Moved end marker in all 6 project CLAUDE.md files (forge, harebrained-apps, Pocket, meatgeekv2, MeatGeek-Monorepo, bargelt-com)
-- Restored wiped Stack content in Pocket from git history
-
-**#164: Agent rework — test-engineer + manual-qa (committed, pushed)**
-- Created `test-engineer` seed: writes integration/E2E tests, project-type-aware (web → browser-tools, mobile → tests only), output is committed test files
-- Created `manual-qa` seed: exploratory testing, invoke-only (not in default pipeline), structured scenario reporting with screenshots
-- Deprecated `qa-engineer` with notice pointing at the two new roles
-- Updated `engineer` + `frontend-specialist` seeds: project-type awareness section — reads Stack to determine verification strategy instead of blanket file-extension rules
-- Updated all 3 workflow YAMLs: verify phase now uses test-engineer
-- Updated orchestrator template + forge CLAUDE.md: role table, gate-decision discipline, pipeline description
-- Updated RACI: pipeline description references test-engineer
-- Seeds installed to ~/.forge/
-
-### Judgment calls made (document for review)
-
-1. **test-engineer gets full read-write to /project** — needs to write test files. Confirmed by user before session end.
-2. **manual-qa gets read-only** — it tests, it doesn't write code. Matches the red agent pattern.
-3. **qa-engineer seed retained with deprecation notice** rather than deleted — avoids breaking any in-flight workflow definitions that still reference it. Can be removed once no runs reference the old name.
-4. **Project-type awareness via Stack section** — agents read `/project/CLAUDE.md` Stack section to determine web vs mobile vs CLI. No structured signal needed; the free-text Stack field is sufficient since the agent can parse "Next.js" vs "React Native" vs "Express backend."
-5. **No changes to backend-specialist, security-advisor, or agentic-platform-builder seeds** — their validation sections already handle the web/non-web distinction adequately (backend-specialist says "if your changes touch UI" which is rare; security-advisor similar). Adding project-type-awareness to them would be scope creep for marginal value. Can revisit if needed.
-
-### Picked up next
-
-- Test the new pipeline end-to-end: run a `forge new feature` on a web app project and verify the test-engineer actually writes integration tests
-- Consider whether manual-qa needs to be wired into `forge invoke` with any special flags or if the generic invoke path works
-- Close #164 once the pipeline has been exercised
 
 ## Active
 
