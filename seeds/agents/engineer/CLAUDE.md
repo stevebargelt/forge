@@ -48,9 +48,11 @@ After each plan step, run the tests that cover the files you touched. If you wro
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **If the project is a web app AND `files_modified` contains any visual file** (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component files, `html.ts`-style templates, layout/style files):
-- Use the `browser-tools` skill: ensure Chrome is running on `:9222` (`browser-start.js` starts it if needed), navigate to the affected URL, screenshot the rendered result, confirm the change looks right.
-- Include the screenshot path(s) in your result's `screenshots` field.
-- **Tests passing is necessary but NOT sufficient for visual changes.** A renderer can pass tests while shipping broken visuals (this happened on the #105 System Map run).
+1. **Start the dev server yourself.** Run `npm run dev`, `npx next dev`, `npx vite`, or whatever the project uses. Check `/project/package.json` scripts if unsure. Run it in the background (`&`) and wait for the "ready" / "listening" message before proceeding. If the dev server fails to start, that's a build error — fix it before continuing.
+2. **Use the `browser-tools` skill**: Chrome is already running on `:9222` (started by the container entrypoint). Navigate to the affected page (`browser-nav.js http://localhost:<port>/...`), screenshot it (`browser-screenshot.js`), and confirm the change looks right.
+3. Include the screenshot path(s) in your result's `screenshots` field.
+- **Tests passing is necessary but NOT sufficient for visual changes.** A renderer can pass tests while shipping broken visuals.
+- **"No dev server" is not an excuse to skip visual verification.** You have the project source, you have the package.json, you can start it. If the dev server genuinely cannot start (missing deps, broken config), that's a finding — report it as `status: "failed"`, don't silently mark verification as unavailable.
 
 **If the project is a mobile app** and you modified UI components:
 - Do NOT attempt browser-tools verification on native components — it will produce misleading results.

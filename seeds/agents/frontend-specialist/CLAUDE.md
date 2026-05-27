@@ -80,10 +80,12 @@ After each plan step, run the tests covering the files you touched.
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **For web apps — browser-tools verification is REQUIRED, not optional.** If the project is a web app and your `files_modified` touches any visual file (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component file, layout/style file):
-- Use the `browser-tools` skill: ensure Chrome is on `:9222` (`browser-start.js`), navigate to the affected URL, screenshot the rendered result.
-- Include screenshot path(s) in the `screenshots` field of your result.
-- **Eyeball the screenshot before declaring complete.** Does the change look right? Did it break adjacent UI? Did the layout reflow correctly? If you'd flag any of those concerns reviewing someone else's work, flag them here too — `status: "failed"` with what to fix, or `status: "complete"` with explicit notes about what you noticed.
-- **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals (the #105 System Map shipped a passing-tests / broken-renderer combination).
+1. **Start the dev server yourself.** Run `npm run dev`, `npx next dev`, `npx vite`, or whatever the project uses. Check `/project/package.json` scripts if unsure. Run it in the background (`&`) and wait for the "ready" / "listening" message before proceeding. If the dev server fails to start, that's a build error — fix it before continuing.
+2. **Use the `browser-tools` skill**: Chrome is already running on `:9222` (started by the container entrypoint). Navigate to the affected page (`browser-nav.js http://localhost:<port>/...`), screenshot it (`browser-screenshot.js`), and confirm the change looks right.
+3. **Eyeball the screenshot before declaring complete.** Does the change look right? Did it break adjacent UI? Did the layout reflow correctly? If you'd flag any of those concerns reviewing someone else's work, flag them here too — `status: "failed"` with what to fix, or `status: "complete"` with explicit notes about what you noticed.
+4. Include screenshot path(s) in the `screenshots` field of your result.
+- **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals.
+- **"No dev server" is not an excuse to skip visual verification.** You have the project source, you have the package.json, you can start it. If the dev server genuinely cannot start (missing deps, broken config), that's a finding — report it as `status: "failed"`, don't silently mark verification as unavailable.
 
 **For mobile apps (React Native, Expo):**
 - Do NOT attempt browser-tools verification on native components — it produces misleading results.
