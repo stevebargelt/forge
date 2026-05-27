@@ -390,9 +390,16 @@ section.usage-section { margin-top: 20px; }
   gap: 12px;
   align-items: center;
   padding: 8px 0;
+  cursor: pointer;
+}
+.usage-row-wrap {
   border-bottom: 1px solid var(--border);
 }
-.usage-row:last-child { border-bottom: none; }
+.usage-row-wrap:last-child { border-bottom: none; }
+.usage-detail {
+  overflow: hidden;
+  transition: max-height 0.25s ease;
+}
 .usage-bucket {
   font-size: 12px;
   color: var(--fg);

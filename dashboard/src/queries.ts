@@ -446,6 +446,70 @@ export function usageTimeSeries(since = "30d", projectDir?: string): UsageTimeSe
   }));
 }
 
+export type ModelMixBucket = {
+  bucket: string;
+  models: Array<{ model: string; weightedTokens: number; requests: number }>;
+};
+
+export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: string): ModelMixBucket[] {
+  const groupExpr: Record<GroupBy, string> = {
+    role:     "COALESCE(t.agent_role, '(unknown role)')",
+    workflow: "COALESCE(r.workflow,   '(unknown workflow)')",
+    project:  "COALESCE(r.project_dir,'(unknown project)')",
+    model:    "COALESCE(mc.model,     '(unknown model)')",
+    alias:    "COALESCE(mc.alias,     '(no alias)')",
+  };
+  const params: unknown[] = [];
+  let sinceClause = "";
+  if (since !== "all") {
+    const m = since.match(/^(\d+)d$/);
+    if (m?.[1]) {
+      const cutoff = new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString();
+      sinceClause = "AND mc.created_at >= ?";
+      params.push(cutoff);
+    }
+  }
+  let projectClause = "";
+  if (projectDir) {
+    projectClause = "AND r.project_dir = ?";
+    params.push(projectDir);
+  }
+
+  const sql = `
+    SELECT
+      ${groupExpr[groupBy]} AS bucket,
+      mc.model,
+      SUM(mc.input_tokens + 1.25*mc.cache_creation_tokens + 0.1*mc.cache_read_tokens + 5*mc.output_tokens) AS weighted,
+      COUNT(*) AS requests
+    FROM model_calls mc
+    LEFT JOIN tasks t ON t.id = mc.task_id
+    LEFT JOIN runs  r ON r.id = t.run_id
+    WHERE 1 = 1
+      ${sinceClause}
+      ${projectClause}
+    GROUP BY bucket, mc.model
+    ORDER BY bucket, weighted DESC
+  `;
+
+  const rows = db().prepare(sql).all(...params) as Array<{
+    bucket: string;
+    model: string;
+    weighted: number;
+    requests: number;
+  }>;
+
+  const map = new Map<string, ModelMixBucket>();
+  for (const row of rows) {
+    if (!map.has(row.bucket)) map.set(row.bucket, { bucket: row.bucket, models: [] });
+    map.get(row.bucket)!.models.push({
+      model: row.model ?? "(unknown model)",
+      weightedTokens: row.weighted ?? 0,
+      requests: row.requests ?? 0,
+    });
+  }
+  return [...map.values()];
+}
+
 // #154: project registry for the dashboard Projects view.
 // Delegates to the shared listProjects() (#152) so the dashboard sees the
 // same union of DB-derived + filesystem-scanned projects as `forge projects

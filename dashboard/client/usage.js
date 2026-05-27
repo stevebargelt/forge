@@ -22,7 +22,7 @@ function fmtK(n) {
   return String(Math.round(n));
 }
 
-export function UsageView({ rollup, timeSeries, groupBy, onGroupByChange, since, onSinceChange }) {
+export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange }) {
   const [showFormula, setShowFormula] = useState(false);
   const now = Date.now();
   const days = parseInt(since);
@@ -61,6 +61,11 @@ export function UsageView({ rollup, timeSeries, groupBy, onGroupByChange, since,
   const cacheLabel   = cacheHitRate >= 80 ? "good" : cacheHitRate >= 50 ? "fair" : "low";
 
   const maxW = rollup.reduce((m, r) => Math.max(m, weighted(r)), 0);
+
+  const mixByBucket = new Map((modelMix ?? []).map(b => [b.bucket, b.models]));
+
+  const [expandedBucket, setExpandedBucket] = useState(null);
+  const toggleBucket = (name) => setExpandedBucket(prev => prev === name ? null : name);
 
   return html`
     <section class="usage-section">
@@ -149,7 +154,7 @@ export function UsageView({ rollup, timeSeries, groupBy, onGroupByChange, since,
       <div class="usage-rollup">
         ${rollup.length === 0
           ? html`<div class="muted" style="padding: 16px 0;">No usage data for this period.</div>`
-          : rollup.map(r => html`<${UsageRow} key=${r.bucket} row=${r} maxW=${maxW} />`)
+          : rollup.map(r => html`<${UsageRow} key=${r.bucket} row=${r} maxW=${maxW} isExpanded=${expandedBucket === r.bucket} onToggle=${toggleBucket} modelModels=${mixByBucket.get(r.bucket) ?? []} />`)
         }
       </div>
 
@@ -158,31 +163,99 @@ export function UsageView({ rollup, timeSeries, groupBy, onGroupByChange, since,
   `;
 }
 
-function UsageRow({ row, maxW }) {
-  const w       = weighted(row);
-  const barPct  = maxW > 0 ? (w / maxW) * 100 : 0;
+function modelColor(model) {
+  if (model.includes("opus"))   return "#9d7aff";
+  if (model.includes("sonnet")) return "#7a9fff";
+  if (model.includes("haiku"))  return "#4ade80";
+  return "var(--fg-dim)";
+}
+
+function shortModel(model) {
+  return model.replace(/^claude-/, "");
+}
+
+function UsageRow({ row, maxW, isExpanded, onToggle, modelModels }) {
+  const w           = weighted(row);
+  const barPct      = maxW > 0 ? (w / maxW) * 100 : 0;
   const cacheRead   = row.cacheReadTokens ?? 0;
   const cacheCreate = row.cacheCreationTokens ?? 0;
   const input       = row.inputTokens ?? 0;
+  const output      = row.outputTokens ?? 0;
   const hitRate     = input + cacheRead + cacheCreate > 0 ? (cacheRead / (cacheRead + input + cacheCreate)) * 100 : 0;
   const reuseRatio  = cacheCreate > 0 ? cacheRead / cacheCreate : Infinity;
 
   const cacheClass = hitRate >= 80 ? "usage-cache-good" : hitRate >= 50 ? "usage-cache-mid" : "usage-cache-bad";
   const label = row.bucket.startsWith("/") ? row.bucket.split("/").pop() : row.bucket;
 
+  const tokenTypes = [
+    { name: "input",          raw: input,       weight: 1,    color: "var(--fg-dim)" },
+    { name: "cache creation", raw: cacheCreate,  weight: 1.25, color: "var(--warn)"   },
+    { name: "cache read",     raw: cacheRead,    weight: 0.1,  color: "var(--ok)"     },
+    { name: "output",         raw: output,       weight: 5,    color: "var(--accent)" },
+  ];
+  const contribs   = tokenTypes.map(t => t.raw * t.weight);
+  const maxContrib = Math.max(...contribs, 1);
+
   return html`
-    <div class="usage-row">
-      <div class="usage-bucket" title=${row.bucket}>${label}</div>
-      <div class="usage-bar-wrap">
-        <div class="usage-bar" style=${{ width: barPct + "%" }} title=${`${fmtK(w)} weighted tokens`}></div>
+    <div class="usage-row-wrap">
+      <div class="usage-row" onClick=${() => onToggle(row.bucket)}>
+        <div class="usage-bucket" title=${row.bucket}>
+          <span style="margin-right: 4px; font-size: 10px;">${isExpanded ? "▾" : "▸"}</span>${label}
+        </div>
+        <div class="usage-bar-wrap">
+          <div class="usage-bar" style=${{ width: barPct + "%" }} title=${`${fmtK(w)} weighted tokens`}></div>
+        </div>
+        <div>
+          <span class=${"usage-cache-badge " + cacheClass} title=${`Cache hit rate: ${hitRate.toFixed(0)}% of input tokens served from cache`}>${hitRate.toFixed(0)}% cache</span>
+          ${reuseRatio < 5 && cacheCreate > 0
+            ? html`<span class="usage-reuse-warn" title=${`Low cache reuse: ${reuseRatio.toFixed(1)}× reads per cache creation (healthy ≥ 5×)`}>⚠ ${reuseRatio.toFixed(1)}x reuse</span>`
+            : null}
+        </div>
+        <div class="usage-req-count">${fmtK(row.requests)} requests</div>
       </div>
-      <div>
-        <span class=${"usage-cache-badge " + cacheClass} title=${`Cache hit rate: ${hitRate.toFixed(0)}% of input tokens served from cache`}>${hitRate.toFixed(0)}% cache</span>
-        ${reuseRatio < 5 && cacheCreate > 0
-          ? html`<span class="usage-reuse-warn" title=${`Low cache reuse: ${reuseRatio.toFixed(1)}× reads per cache creation (healthy ≥ 5×)`}>⚠ ${reuseRatio.toFixed(1)}x reuse</span>`
-          : null}
+      <div class="usage-detail" style=${{ maxHeight: isExpanded ? "400px" : "0" }}>
+        <div style="padding: 8px 0 4px;">
+          ${tokenTypes.map((t, i) => {
+            const contrib = contribs[i];
+            const pct     = (contrib / maxContrib) * 100;
+            return html`
+              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 5px;">
+                <div style="width: 110px; font-size: 11px; color: var(--fg-dim); flex-shrink: 0;">${t.name}</div>
+                <div class="usage-bar-wrap" style="flex: 1;">
+                  <div class="usage-bar" style=${{ width: pct + "%", background: t.color }}></div>
+                </div>
+                <div style="font-size: 11px; color: var(--fg-faint); white-space: nowrap; flex-shrink: 0;">${fmtK(t.raw)} tokens → ${fmtK(contrib)} weighted</div>
+              </div>
+            `;
+          })}
+        </div>
+        ${modelModels.length > 0 && html`
+          <div style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 2px;">
+            <div style="font-size: 11px; color: var(--fg-faint); margin-bottom: 6px;">model mix</div>
+            <div style="display: flex; height: 8px; border-radius: 3px; overflow: hidden; margin-bottom: 6px;">
+              ${(() => {
+                const total = modelModels.reduce((s, m) => s + m.weightedTokens, 0);
+                return modelModels.map(m => html`
+                  <div
+                    style=${{ width: (total > 0 ? (m.weightedTokens / total) * 100 : 0) + "%", background: modelColor(m.model), flexShrink: 0 }}
+                    title=${shortModel(m.model) + ": " + (total > 0 ? ((m.weightedTokens / total) * 100).toFixed(0) : 0) + "%"}
+                  ></div>
+                `);
+              })()}
+            </div>
+            <div style="font-size: 11px; color: var(--fg-faint); flex-wrap: wrap; display: flex; gap: 0;">
+              ${(() => {
+                const total = modelModels.reduce((s, m) => s + m.weightedTokens, 0);
+                return modelModels.map((m, i) => html`
+                  <span>
+                    <span style=${{ color: modelColor(m.model) }}>${shortModel(m.model)}</span>: ${total > 0 ? ((m.weightedTokens / total) * 100).toFixed(0) : 0}% (${fmtK(m.requests)} req)${i < modelModels.length - 1 ? " · " : ""}
+                  </span>
+                `);
+              })()}
+            </div>
+          </div>
+        `}
       </div>
-      <div class="usage-req-count">${fmtK(row.requests)} requests</div>
     </div>
   `;
 }

@@ -25,6 +25,7 @@ function App() {
   const [now, setNow] = useState(Date.now());
   const [usageRollup, setUsageRollup] = useState([]);
   const [usageTimeSeries, setUsageTimeSeries] = useState([]);
+  const [usageModelMix, setUsageModelMix] = useState([]);
   const [usageGroupBy, setUsageGroupBy] = useState("project");
   const [usageSince, setUsageSince] = useState("30d");
 
@@ -49,12 +50,14 @@ function App() {
   const pollUsage = useCallback(async () => {
     try {
       const tsDays = parseInt(usageSince) * 2;
-      const [rollupRes, tsRes] = await Promise.all([
+      const [rollupRes, tsRes, mixRes] = await Promise.all([
         fetch(`/api/usage?groupBy=${usageGroupBy}&since=${usageSince}`),
         fetch(`/api/usage/timeseries?since=${tsDays}d`),
+        fetch(`/api/usage/model-mix?groupBy=${usageGroupBy}&since=${usageSince}`),
       ]);
       if (rollupRes.ok) setUsageRollup(await rollupRes.json());
       if (tsRes.ok) setUsageTimeSeries(await tsRes.json());
+      if (mixRes.ok) setUsageModelMix(await mixRes.json());
       setNow(Date.now());
     } catch (e) {
       setError(String(e));
@@ -113,6 +116,7 @@ function App() {
         ? html`<${UsageView}
             rollup=${usageRollup}
             timeSeries=${usageTimeSeries}
+            modelMix=${usageModelMix}
             groupBy=${usageGroupBy}
             onGroupByChange=${setUsageGroupBy}
             since=${usageSince}

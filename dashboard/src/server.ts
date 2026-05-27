@@ -13,7 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries } from "./queries.js";
+import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix } from "./queries.js";
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 
@@ -112,6 +112,20 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     const since = url.searchParams.get("since") ?? "30d";
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
     const data = usageTimeSeries(since, projectDir);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/usage/model-mix") {
+    const raw = url.searchParams.get("groupBy") ?? "project";
+    const validGroupBy: GroupBy[] = ["role", "workflow", "project", "model", "alias"];
+    if (!validGroupBy.includes(raw as GroupBy)) {
+      res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "invalid groupBy" }));
+      return;
+    }
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const data = usageModelMix(raw as GroupBy, since, projectDir);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
     return;
   }

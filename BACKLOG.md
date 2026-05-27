@@ -373,41 +373,6 @@ The flag is opt-in. Gate without \`--feedback\` works exactly as today. Adoption
 **Caught:** 2026-05-26 cross-track research session.
 
 
-### #156 — Dashboard usage view: useful AND beautiful (consumes #155)
-Follow-up to #155, which shipped the data layer (capture + backfill + CLI). User flagged that 1-5 are a waste without the dashboard view — 6 is the payoff.
-
-**Why "useful AND beautiful":** the CLI proves the data is sound, but the rollup table isn't acted on at-a-glance. The dashboard needs to surface the actionable signals in a way that drives behavior change (which model to use where; which workflow has cache churn; which project is burning tokens).
-
-**The actionable signals from the data we now have:**
-- Total spend (weighted tokens) per project / workflow / model / role
-- Cache hit rate trends — has it improved since the workflow YAML downgrades shipped?
-- Cache reuse ratio — flags workflows where cache is being created and discarded
-- Per-step model mix (post-#117 audit: confirm Opus burn is dropping)
-- Time series: weighted tokens per day per project (rolling 30d)
-
-**Design considerations (think hard before building):**
-- **Headline metric first.** What's the single number on the page? Probably "weighted tokens last 7 days" with a delta vs prior 7 days. Or cache hit rate.
-- **Comparison is the value.** Project A vs B; workflow X vs Y. Side-by-side bars or sparklines, not just numbers.
-- **Drill-down hierarchy.** Click a project → see workflows. Click a workflow → see roles. Click a role → see tasks.
-- **Time series.** A flat-roll snapshot tells you what's true now; the trend tells you whether the calibration is working.
-- **Cache efficiency callouts.** Workflows with hit rate < 80% or reuse ratio < 5x should be visually flagged.
-- **No dollar amounts.** This is unitless / weighted-tokens. Dollar conversion is brittle and OAuth users have no per-token cost — don't pretend.
-
-**Implementation surface:**
-- Dashboard server: new \`/api/usage\` endpoint with query params for the four rollup dimensions + time filters. Reuse the SQL shape from src/cli/commands/usage.ts.
-- Dashboard client: new \`<UsageView />\` tab alongside activity / projects. Top-of-tab: headline metric + comparison chart. Below: per-dimension breakdowns with sparklines.
-- Maybe a "what changed" tile: workflow YAML edits from #117 + this view side-by-side, watching the spec-writer → default migration's effect in real time.
-
-**Composes with:**
-- #155 — the data layer this consumes
-- #154 — the existing dashboard Projects view; pattern-match the card grid + chip styling
-- 0088737 commit — the workflow downgrades whose effect this measures
-
-**Sequencing:** ship soon. User explicitly flagged this as essential and the CLI alone isn't act-on-able.
-
-**Caught:** 2026-05-26 conversation while shipping #155.
-
-
 ### #158 — forge claude --bedrock: spawn claude with bedrock env vars without sourcing scripts/use-bedrock.sh
 **Caught:** 2026-05-26 conversation while shipping \`forge claude\` (#158).
 
@@ -441,7 +406,48 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 
 ### #160 — Architecture-advisor agent: produce Mermaid architecture documents
 
+### #161 — Dashboard usage: expandable token breakdown per row
+
+### #162 — Dashboard usage: model mix per dimension
+
 ## Done (recent)
+
+### #156 — Dashboard usage view: useful AND beautiful (consumes #155)
+**Closed:** 2026-05-27.
+
+Follow-up to #155, which shipped the data layer (capture + backfill + CLI). User flagged that 1-5 are a waste without the dashboard view — 6 is the payoff.
+
+**Why "useful AND beautiful":** the CLI proves the data is sound, but the rollup table isn't acted on at-a-glance. The dashboard needs to surface the actionable signals in a way that drives behavior change (which model to use where; which workflow has cache churn; which project is burning tokens).
+
+**The actionable signals from the data we now have:**
+- Total spend (weighted tokens) per project / workflow / model / role
+- Cache hit rate trends — has it improved since the workflow YAML downgrades shipped?
+- Cache reuse ratio — flags workflows where cache is being created and discarded
+- Per-step model mix (post-#117 audit: confirm Opus burn is dropping)
+- Time series: weighted tokens per day per project (rolling 30d)
+
+**Design considerations (think hard before building):**
+- **Headline metric first.** What's the single number on the page? Probably "weighted tokens last 7 days" with a delta vs prior 7 days. Or cache hit rate.
+- **Comparison is the value.** Project A vs B; workflow X vs Y. Side-by-side bars or sparklines, not just numbers.
+- **Drill-down hierarchy.** Click a project → see workflows. Click a workflow → see roles. Click a role → see tasks.
+- **Time series.** A flat-roll snapshot tells you what's true now; the trend tells you whether the calibration is working.
+- **Cache efficiency callouts.** Workflows with hit rate < 80% or reuse ratio < 5x should be visually flagged.
+- **No dollar amounts.** This is unitless / weighted-tokens. Dollar conversion is brittle and OAuth users have no per-token cost — don't pretend.
+
+**Implementation surface:**
+- Dashboard server: new \`/api/usage\` endpoint with query params for the four rollup dimensions + time filters. Reuse the SQL shape from src/cli/commands/usage.ts.
+- Dashboard client: new \`<UsageView />\` tab alongside activity / projects. Top-of-tab: headline metric + comparison chart. Below: per-dimension breakdowns with sparklines.
+- Maybe a "what changed" tile: workflow YAML edits from #117 + this view side-by-side, watching the spec-writer → default migration's effect in real time.
+
+**Composes with:**
+- #155 — the data layer this consumes
+- #154 — the existing dashboard Projects view; pattern-match the card grid + chip styling
+- 0088737 commit — the workflow downgrades whose effect this measures
+
+**Sequencing:** ship soon. User explicitly flagged this as essential and the CLI alone isn't act-on-able.
+
+**Caught:** 2026-05-26 conversation while shipping #155.
+
 
 ### #157 — forge invoke leaks active runs; needs terminal transition + sweep CLI
 **Closed:** 2026-05-26. Forward fix: invoke.ts closes the run it owns (when args.runId is undefined) at all 7 terminal sites — success and 6 failure paths. RunStatus has no 'failed' (matches runNext convention); both success and failure flip the owned run to 'complete' with the task-level status carrying success/failure. New `forge sweep [--dry-run] [--limit]` CLI: finds runs where status='active' but all tasks are terminal, flips to 'complete' with completed_at = MAX(tasks.completed_at) to preserve historical timestamps. Ran the live sweep — closed 34 phantom invoke runs (in-flight counts across harebrained-apps/split-keyboard-teacher/meatgeekv2 dropped from 18/10/5 → 0/0/1). **Also fixed the latent getDb readonly-cache bug** (flagged after #155 backfill; bit again in this ticket's sweep) — `_db` was a single module-cached connection; first caller's mode locked in for the process so a readonly-then-writable sequence silently dropped writes. Split into `_dbRW` + `_dbRO` caches; both reachable from any call site without footgun.
