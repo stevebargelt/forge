@@ -274,7 +274,7 @@ function captureOrchestratorUsage(projectRoot: string, taskId: string, runId: st
 // Claude Code transcripts live at ~/.claude/projects/<path-hash>/<session-id>.jsonl.
 // The path hash is the absolute project dir with / replaced by -.
 // We find the most recently modified .jsonl in the project's transcript dir.
-function findSessionTranscript(projectRoot: string): string | undefined {
+export function findSessionTranscript(projectRoot: string): string | undefined {
   const pathHash = projectRoot.replace(/\//g, "-");
   const transcriptDir = join(homedir(), ".claude", "projects", pathHash);
   if (!existsSync(transcriptDir)) return undefined;
