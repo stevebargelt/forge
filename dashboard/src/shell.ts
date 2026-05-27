@@ -97,6 +97,32 @@ section.in-flight .item:last-child { border-bottom: none; }
 section.in-flight .item:hover { background: var(--bg-elev-2); }
 section.in-flight .empty { color: var(--fg-faint); font-style: italic; }
 
+.orch-group {
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+}
+.orch-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  cursor: pointer;
+  color: var(--fg-muted);
+  font-size: 12px;
+  user-select: none;
+}
+.orch-header:hover { color: var(--fg); }
+.orch-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+  font-size: 10px;
+}
+.orch-chevron.open { transform: rotate(90deg); }
+.orch-summary { font-weight: 500; }
+section.in-flight .item.item-muted { opacity: 0.6; }
+section.in-flight .item.item-muted:hover { opacity: 1; }
+
 section.feed { margin-top: 24px; }
 .card {
   background: var(--bg-elev);

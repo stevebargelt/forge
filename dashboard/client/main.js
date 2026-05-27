@@ -20,6 +20,7 @@ function App() {
   const [feed, setFeed] = useState([]);
   const [inFlight, setInFlight] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [orchCollapsed, setOrchCollapsed] = useState(true);
   const [error, setError] = useState(null);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
   const [now, setNow] = useState(Date.now());
@@ -129,13 +130,12 @@ function App() {
               <button class="clear-filter" onClick=${() => setProjectFilter(null)}>clear ×</button>
             </div>
           ` : null}
-          <section class="in-flight">
-            <h2><span class="status-dot"></span>In flight</h2>
-            ${inFlight.length === 0
-              ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
-              : inFlight.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => setSelectedTaskId(t.taskId)} />`)
-            }
-          </section>
+          <${InFlightSection}
+            inFlight=${inFlight}
+            orchCollapsed=${orchCollapsed}
+            onToggleOrch=${() => setOrchCollapsed((c) => !c)}
+            onTaskClick=${(id) => setSelectedTaskId(id)}
+          />
 
           <section class="feed">
             <h2>Recent agent outputs</h2>
@@ -228,9 +228,37 @@ function ProjectChip({ entry }) {
   `;
 }
 
-function InFlightItem({ task, onClick }) {
+function InFlightSection({ inFlight, orchCollapsed, onToggleOrch, onTaskClick }) {
+  const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
+  const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
+
   return html`
-    <div class="item" onClick=${onClick}>
+    <section class="in-flight">
+      <h2><span class="status-dot"></span>In flight</h2>
+      ${orchestrators.length > 0 ? html`
+        <div class="orch-group">
+          <div class="orch-header" onClick=${onToggleOrch}>
+            <span class="orch-chevron ${orchCollapsed ? "" : "open"}">▸</span>
+            <span class="orch-summary">${orchestrators.length} orchestrator${orchestrators.length === 1 ? "" : "s"} active</span>
+          </div>
+          ${!orchCollapsed ? orchestrators.map((t) => html`
+            <${InFlightItem} key=${t.taskId} task=${t} muted onClick=${() => onTaskClick(t.taskId)} />
+          `) : null}
+        </div>
+      ` : null}
+      ${work.length === 0 && orchestrators.length === 0
+        ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
+        : work.length === 0
+        ? html`<div class="empty">No agent work in flight.</div>`
+        : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => onTaskClick(t.taskId)} />`)
+      }
+    </section>
+  `;
+}
+
+function InFlightItem({ task, onClick, muted }) {
+  return html`
+    <div class=${"item" + (muted ? " item-muted" : "")} onClick=${onClick}>
       <span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>
       <div>
         <div>
