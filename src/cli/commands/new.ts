@@ -49,10 +49,8 @@ export function registerNew(program: Command): void {
       const designDir = designDirRaw ? expandTildePath(designDirRaw) : undefined;
       if (designDir) {
         mkdirSync(designDir, { recursive: true });
-        // Don't pre-create designs/ or code/ subdirs anymore — with the new
-        // flat layout the .pen + PNGs live at designDir root; only the
-        // optional HTML code export uses a code/ subdir, and prompt-author
-        // creates that at need.
+        // Don't pre-create a designs/ subdir anymore — with the new flat
+        // layout the .pen + PNGs live at designDir root.
         inputs["designDir"] = designDir;
       }
 

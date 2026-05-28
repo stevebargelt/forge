@@ -23,14 +23,13 @@ Forge's convention is that each project has ONE shared design corpus that grows 
    ls -la /design 2>/dev/null
    ls /design/*.pen 2>/dev/null
    ls /design/*.png 2>/dev/null | sort
-   ls /design/code/ 2>/dev/null
    ```
 
 2. **Discover the .pen filename.** If a `*.pen` exists in `/design`, USE THAT EXACT FILENAME for `target_pen_file` (preserve the human's chosen name). If none exists, default to `<basename(projectDir)>.pen` (e.g. projectDir `/Users/x/code/dashboard` → `dashboard.pen`). Do NOT derive from `basename(designDir)` — with the new convention designDir is always literally `designs/`, so that derivation produces useless `designs.pen` filenames.
 
 3. **Count existing PNGs for screen numbering.** Find the highest two-digit prefix among `/design/*.png` (e.g. `01-foo.png`, `02-bar.png` → max is 2; next new screen starts at `03-`). The template's PRECONDITION 2 already does this at run-time on the human's host; your job here is just to make sure the PROMPT.md frames the numbering as "starting at N+1," not "starting at 01."
 
-4. **Catalog existing components/screens for new-vs-addition classification.** Skim the PNG filenames (and optionally a few HTML exports in `/design/code/` if present). For each screen/section the brief asks for, decide:
+4. **Catalog existing components/screens for new-vs-addition classification.** Skim the PNG filenames. For each screen/section the brief asks for, decide:
    - **NEW** — no equivalent exists yet. Frame normally in PROMPT.md (full mockup, new node on canvas).
    - **ADDITION TO EXISTING** — the brief is a tweak/annotation to a component already in the corpus (e.g. "add a preview line to the gate panel" where the gate panel is already at screen 05). For these, the PROMPT.md MUST explicitly say "the X component already exists in the corpus (see screen Y); design ONLY the addition; do not redraw X." Tell Pencil to use `find_empty_space_on_canvas` NEAR X's position on the canvas (so the spatial proximity reads as 'this is the evolved version of that'), not just any free space.
    - **MODIFY IN PLACE (preferred when honest)** — if the brief is a wholesale update to an existing screen and the prior version doesn't need to coexist for comparison, tell Pencil to EDIT THE EXISTING SCREEN in place rather than add a new one. Git history (the corpus is in the project repo) is the audit trail. Only fall back to "add a new screen near the old one" when the human explicitly wants before/after side-by-side.
@@ -61,7 +60,7 @@ Read `inputs` for everything the human passed at run creation:
 - `inputs.template` — which template to use (e.g. `ui-design`). If unset, infer from the workflow name.
 - `inputs.screens` — optional explicit screen list.
 - `inputs.style` — optional Pencil-style hint.
-- `inputs.targetPenFile`, `inputs.outputDir`, `inputs.codeExportDir`, `inputs.fileNaming`, `inputs.constraints`, `inputs.includeCodeExport` — optional overrides.
+- `inputs.targetPenFile`, `inputs.outputDir`, `inputs.fileNaming`, `inputs.constraints` — optional overrides.
 
 Apply these defaults when a parameter is missing. **Always fill every `{{...}}` placeholder in the template — never emit literal `{{name}}` markers in the produced PROMPT.md.**
 
@@ -73,14 +72,12 @@ For ui-design, the defaults are:
 4. **Target paths** — derive from `inputs.designDir` (always present — `forge new` sets it). With the new shared-corpus convention (#67), the layout is FLAT inside designDir:
    - `target_pen_file`: discovered from the corpus inspection above. If a `*.pen` already exists in `/design`, use that exact filename. If not, default to `<designDir>/<basename(projectDir)>.pen` (use the project name, NOT the basename of designDir which would yield `designs.pen`). Project basename comes from `/project` — e.g. `basename $(pwd -P)` run inside the container, or derive from the projectDir reflected by the mount.
    - `output_dir`: `<designDir>/` — PNGs land directly at the top level of the design corpus, alongside the `.pen`. No `designs/` subdir (that was the old convention when designDir was its own top-level dir like `~/code/forge-design/`; with designDir now literally `<project>/designs/`, nesting again would be `designs/designs/`).
-   - `code_export_dir`: `<designDir>/code/` — HTML reference exports live in a `code/` subdir. Created at need by the run; don't pre-mkdir in PROMPT.md.
    
    **Back-compat note for override users:** if the human passed `--design-dir ~/code/forge-design/` (legacy peer-dir setup), check whether `<designDir>/designs/` exists with PNGs in it; if so, keep using `<designDir>/designs/` as `output_dir` so their existing corpus layout isn't broken by the convention change. Mention this in `openQuestions` so the human knows you detected the legacy layout.
    
    Fallback ONLY if `inputs.designDir` is somehow missing (older runs, manual DB inserts): use `~/code/<workflow-name>/`. Note the fallback in `openQuestions`.
 5. **Naming convention** — `01-<screen-name>.png`, `02-<screen-name>.png`, etc. (sanitize screen names: lowercase, hyphens for spaces).
 6. **Constraints** — `inputs.constraints` if present, else empty.
-7. **Code export** — `inputs.includeCodeExport ?? true` (default ON; the export is optional at run-time and skips cleanly if Pencil's tooling doesn't support it).
 
 ## Re-dispatched tasks
 
@@ -94,7 +91,7 @@ Check `inputs` for retry signals before starting:
 Once you've gathered inputs and applied defaults:
 
 1. Read `templates/<template-name>.md`.
-2. Substitute every parameter (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{code_export_dir}}`, `{{file_naming}}`, `{{file_naming_list}}`, `{{per_screen_handling}}`, `{{constraints}}`, `{{constraints_section}}`, `{{include_code_export}}`, `{{target_pen_basename}}`, `{{output_dir_parent}}`). No `{{...}}` markers should remain in the produced file.
+2. Substitute every parameter (`{{brief}}`, `{{screens}}`, `{{style}}`, `{{target_pen_file}}`, `{{output_dir}}`, `{{file_naming}}`, `{{file_naming_list}}`, `{{per_screen_handling}}`, `{{constraints}}`, `{{constraints_section}}`, `{{target_pen_basename}}`, `{{output_dir_parent}}`). No `{{...}}` markers should remain in the produced file.
 3. **Render `{{per_screen_handling}}`** from your `parameters.classifications` (one bullet per screen). Format each entry as a single dash-bullet line:
    - `NEW` → `- 23-<screen-name> — NEW. Full mockup as a new top-level frame.`
    - `ADDITION` → `- 24-<short-addition-name> — ADDITION to <existingScreen>. Design ONLY the addition; place near <existingScreen> on canvas; do not redraw the full component.`
@@ -118,9 +115,7 @@ Write a JSON object to `/task/result.json`:
     "style": "...",
     "target_pen_file": "...",
     "output_dir": "...",
-    "code_export_dir": "...",
     "file_naming": "...",
-    "include_code_export": true,
     "classifications": [
       { "name": "task-list", "kind": "addition", "existingScreen": "02-task-list.png" },
       { "name": "auth-error", "kind": "new" }

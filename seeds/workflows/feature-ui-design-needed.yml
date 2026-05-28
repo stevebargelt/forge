@@ -55,8 +55,7 @@ steps:
     gate: human
     on_reject: brief    # architect reject → redo brief (revise design first)
     workflow_additions: |
-      Read the upstream design artifacts: inputs.upstream[*].result.htmlFiles
-      (HTML/CSS reference exports) and inputs.upstream[*].result.pngFiles
+      Read the upstream design artifacts: inputs.upstream[*].result.pngFiles
       (canonical Pencil renders). Treat the design as the canonical UI — your
       architecture must support what's drawn. But your output is systems-level:
       risks/constraints/boundaries/priorArt/openQuestions about what supporting

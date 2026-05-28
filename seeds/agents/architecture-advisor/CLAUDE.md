@@ -60,8 +60,7 @@ You are running non-interactively under `claude --print`. Do NOT ask questions; 
 
 When you run inside `feature-ui-design-needed` or `feature-ui-design-provided`, your `inputs.upstream[]` contains the prior phase's output, which may include UI design artifacts. The design corpus is mounted **read-only at `/design`** inside your container (when the run was created with `--design-dir`). Read files from `/design`, not from the host paths embedded in the inputs.
 
-- `inputs.upstream[*].result.htmlFiles` — host paths to HTML/CSS reference exports. **Translate to `/design/<filename>`** when reading: if the path is `/Users/foo/code/widget-design/code/01-screen.html` and the design corpus mount is at `/design`, read `/design/code/01-screen.html`.
-- `inputs.upstream[*].result.pngFiles` — same translation: `<designDir>/designs/01-screen.png` → `/design/designs/01-screen.png`.
+- `inputs.upstream[*].result.pngFiles` — canonical Pencil renders. **Translate to `/design/<filename>`** when reading: `<designDir>/designs/01-screen.png` → `/design/designs/01-screen.png`.
 - `inputs.upstream[*].result.penFile` — the Pencil source. Encrypted; don't try to parse it directly.
 - `inputs.prd` — for `feature-ui-design-provided`, the PRD/design doc path. If the path starts with the project root (e.g. `docs/prds/...`), read it via `/project/<path>`. Otherwise it's a path under the design corpus; read via `/design/<path>`.
 - `inputs.designDir` — host path to the design corpus root (e.g. `/Users/x/code/widget-design`). Use this only for path translation; the actual files live at `/design/...` inside this container.
