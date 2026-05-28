@@ -1,8 +1,8 @@
-# Setting up forge notifications (Twilio SMS)
+# Setting up forge notifications
 
-Get pinged when a forge workflow finishes. Opt-in, off by default. One provider today (Twilio); if you add a second later it'll get its own page.
+Get pinged when a forge workflow finishes. Opt-in, off by default. Two providers: **Twilio SMS** and **ntfy push notifications**. Use one or both (`FORGE_NOTIFY=twilio,ntfy`).
 
-This doc covers the **forge** side only — credentials, the opt-in flow, the test command, what triggers a notification. It does NOT cover setting up a Twilio account or buying a phone number; see [twilio.com](https://www.twilio.com/) for that.
+This doc covers the **forge** side only — credentials, the opt-in flow, the test command, what triggers a notification. It does NOT cover setting up a Twilio account or buying a phone number (see [twilio.com](https://www.twilio.com/)), or hosting an ntfy server (see [docs/how-to-ntfy.md](how-to-ntfy.md)).
 
 ## What it does
 
@@ -111,6 +111,53 @@ Generally use the CLI flow.
 
 If you'd rather export `TWILIO_*` in `~/.zshrc` (e.g. you already have them set for another tool that uses Twilio), that works too. Shell-set env vars **take precedence** over `~/.forge/notify.env`. But the subscribe / confirm flow only writes to `notify.env` — if you want the consent log entry, run subscribe; the env var path doesn't create one.
 
+---
+
+## ntfy (push notifications)
+
+ntfy is a simple HTTP-based push notification service. No account, no API keys (unless your server requires auth), no compliance flow. Just a URL.
+
+### Setup
+
+Add to `~/.forge/notify.env`:
+
+```
+FORGE_NOTIFY=ntfy
+NTFY_URL=https://your-ntfy-server.example.com/forge
+```
+
+That's it. `NTFY_URL` is the full topic URL (server + topic name in the path). Optional vars:
+
+- `NTFY_TOKEN` — bearer token for your ntfy server. Required if auth is enabled (recommended — open topics let anyone spam your phone).
+- `NTFY_PRIORITY` — ntfy message priority (`min`, `low`, `default`, `high`, `urgent`). Default: `default`.
+
+To use **both** Twilio and ntfy:
+
+```
+FORGE_NOTIFY=twilio,ntfy
+```
+
+Both fire on the same events. Each provider's failure is independent — if SMS fails, ntfy still sends (and vice versa).
+
+### Verify
+
+```bash
+forge notify test     # sends to all configured providers
+forge notify status   # shows which providers are ready
+```
+
+### Hosting ntfy
+
+See [docs/how-to-ntfy.md](how-to-ntfy.md) for self-hosting options (Azure, Raspberry Pi, etc.) or use the free public instance at `ntfy.sh` for quick testing:
+
+```
+NTFY_URL=https://ntfy.sh/my-forge-notifications
+```
+
+(Public topics are world-readable — use a hard-to-guess topic name or self-host for privacy.)
+
+---
+
 ## Customizing the trigger set
 
 By default forge notifies on `complete`, `failed`, and `blocked_by_red`. Override via:
@@ -194,7 +241,7 @@ Setting `FORGE_NOTIFY=` (empty) for the one command keeps your shell-wide config
 
 ## What's coming next (and what isn't)
 
-- **Other providers** (Pushover, ntfy, Slack webhook) — not on the roadmap. If one becomes useful, it gets its own `docs/notifications/<provider>.md` and a value for `FORGE_NOTIFY`.
+- **Other providers** (Pushover, Slack webhook) — not on the roadmap. If one becomes useful, it gets its own doc and a value for `FORGE_NOTIFY`.
 - **Retry on SMS failure** — explicitly not. Log + continue. SMS isn't transactionally important.
 - **Rate limiting** — Twilio handles this account-side. Forge doesn't add its own.
 - **Custom message templates** — not yet. The current format is fixed. If multiple users start asking for different formats, we'll add a config knob.

@@ -81,4 +81,4 @@ When forge has new commits, run `forge upgrade` from any project. It pulls the f
 
 ## Docs
 
-`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-set-up-notifications.md` (SMS pings when workflows finish), `docs/how-to-iterm-tint.md` (auto-tint iTerm2 background per project), and `docs/how-to-*.md` for adding new agents/workflows.
+`docs/concepts.md` (glossary), `docs/quick-start.md` (end-to-end), `docs/how-to-use-forge-across-projects.md` (multi-project setup), `docs/how-to-upgrade.md` (refresh after forge changes), `docs/how-to-set-up-notifications.md` (SMS + push notifications when workflows finish), `docs/how-to-ntfy.md` (self-hosting ntfy for push notifications), `docs/how-to-iterm-tint.md` (auto-tint iTerm2 background per project), and `docs/how-to-*.md` for adding new agents/workflows.

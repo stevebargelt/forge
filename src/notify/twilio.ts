@@ -19,7 +19,8 @@ export type TwilioResult =
 const REQUIRED_VARS = ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM", "TWILIO_TO"] as const;
 
 export function isTwilioEnabled(): boolean {
-  if (process.env["FORGE_NOTIFY"] !== "twilio") return false;
+  const providers = (process.env["FORGE_NOTIFY"] ?? "").split(",").map(s => s.trim());
+  if (!providers.includes("twilio")) return false;
   for (const k of REQUIRED_VARS) {
     const v = process.env[k];
     if (!v || v.length === 0) return false;

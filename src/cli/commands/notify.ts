@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { hostname } from "node:os";
 import { isTwilioEnabled, notifyTwilio } from "../../notify/twilio.js";
+import { isNtfyEnabled, notifyNtfy } from "../../notify/ntfy.js";
 import {
   loadState,
   saveState,
@@ -17,29 +18,44 @@ const CONFIRMATION_WINDOW_MIN = 10;
 export function registerNotify(program: Command): void {
   const notify = program
     .command("notify")
-    .description("Notification surface (SMS via Twilio; opt-in via FORGE_NOTIFY=twilio)");
+    .description("Notification surface (SMS via Twilio, push via ntfy; opt-in via FORGE_NOTIFY=twilio|ntfy|twilio,ntfy)");
 
   // ----- test -----
   notify
     .command("test")
-    .description("Send a test SMS using the current env config. Verifies the path without waiting for a real workflow.")
+    .description("Send a test notification via all configured providers.")
     .option("--to <number>", "override TWILIO_TO for this one send (E.164 format, e.g. +15551234567)")
     .action(async (opts: { to?: string }) => {
-      if (!isTwilioEnabled()) {
+      const twilioOn = isTwilioEnabled();
+      const ntfyOn = isNtfyEnabled();
+      if (!twilioOn && !ntfyOn) {
         console.error(
-          "forge notify: not configured. Set FORGE_NOTIFY=twilio and all four TWILIO_* env vars (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM, TWILIO_TO). See docs/how-to-set-up-notifications.md."
+          "forge notify: not configured. Set FORGE_NOTIFY=twilio|ntfy|twilio,ntfy in ~/.forge/notify.env. See docs/how-to-set-up-notifications.md."
         );
         process.exitCode = 1;
         return;
       }
       const body = `forge: test message from ${hostname()}`;
-      const result = await notifyTwilio(body, opts.to);
-      if (result.ok) {
-        console.log(`✓ SMS sent (sid: ${result.sid})`);
-      } else {
-        console.error(`✗ SMS failed: ${result.error}`);
-        process.exitCode = 1;
+      let anyFailed = false;
+      if (twilioOn) {
+        const result = await notifyTwilio(body, opts.to);
+        if (result.ok) {
+          console.log(`✓ SMS sent (sid: ${result.sid})`);
+        } else {
+          console.error(`✗ SMS failed: ${result.error}`);
+          anyFailed = true;
+        }
       }
+      if (ntfyOn) {
+        const result = await notifyNtfy(body, "forge: test");
+        if (result.ok) {
+          console.log(`✓ ntfy sent`);
+        } else {
+          console.error(`✗ ntfy failed: ${result.error}`);
+          anyFailed = true;
+        }
+      }
+      if (anyFailed) process.exitCode = 1;
     });
 
   // ----- subscribe -----
@@ -219,10 +235,12 @@ export function registerNotify(program: Command): void {
     .action(() => {
       const state = loadState();
       const master = process.env["FORGE_NOTIFY"] ?? "(unset)";
-      const ready = isTwilioEnabled();
+      const twilioReady = isTwilioEnabled();
+      const ntfyReady = isNtfyEnabled();
 
       console.log(`FORGE_NOTIFY: ${master}`);
-      console.log(`Twilio ready (all required env vars set): ${ready ? "yes" : "no"}`);
+      console.log(`Twilio ready: ${twilioReady ? "yes" : "no"}`);
+      console.log(`ntfy ready:   ${ntfyReady ? "yes" : "no"}${ntfyReady ? ` (${process.env["NTFY_URL"]})` : ""}`);
       console.log("");
 
       if (state.currentSubscription) {

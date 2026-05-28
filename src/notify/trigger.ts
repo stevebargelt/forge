@@ -6,6 +6,7 @@
 import type { Run } from "../types/index.js";
 import { formatRunNotification, type NotifyState } from "./format.js";
 import { isTwilioEnabled, notifyTwilio } from "./twilio.js";
+import { isNtfyEnabled, notifyNtfy } from "./ntfy.js";
 
 const DEFAULT_NOTIFY_ON = new Set<NotifyState>(["complete", "failed", "blocked_by_red"]);
 
@@ -40,13 +41,27 @@ function computeDurationMs(run: Run): number | undefined {
   return Math.max(0, end - start);
 }
 
+function isAnyProviderEnabled(): boolean {
+  return isTwilioEnabled() || isNtfyEnabled();
+}
+
+async function dispatch(body: string, title?: string): Promise<void> {
+  if (isTwilioEnabled()) {
+    const result = await notifyTwilio(body);
+    if (!result.ok) console.error(`forge notify: SMS failed — ${result.error}`);
+  }
+  if (isNtfyEnabled()) {
+    const result = await notifyNtfy(body, title);
+    if (!result.ok) console.error(`forge notify: ntfy failed — ${result.error}`);
+  }
+}
+
 export async function notifyOnRunTransition(
   run: Run,
   newStatus: string,
   previousStatus?: string,
 ): Promise<void> {
-  // Defense in depth: short-circuit before mapping if notify isn't even on.
-  if (!isTwilioEnabled()) return;
+  if (!isAnyProviderEnabled()) return;
 
   // Idempotent re-saves: same-status writes shouldn't double-notify.
   if (previousStatus !== undefined && newStatus === previousStatus) return;
@@ -58,25 +73,15 @@ export async function notifyOnRunTransition(
   if (!filter.has(state)) return;
 
   const body = formatRunNotification(run, state, computeDurationMs(run));
-  const result = await notifyTwilio(body);
-  if (!result.ok) {
-    console.error(`forge notify: SMS failed — ${result.error}`);
-  }
+  await dispatch(body, `forge: ${run.workflow} [${state}]`);
 }
 
 export async function notifyOnTaskBlockedByRed(run: Run): Promise<void> {
-  if (!isTwilioEnabled()) return;
+  if (!isAnyProviderEnabled()) return;
 
-  // Only fire if blocked_by_red is in the user's filter set.
   const filter = parseNotifyOn();
   if (!filter.has("blocked_by_red")) return;
 
-  // The task's block doesn't end the run (run.status stays active), so don't
-  // pass durationMs — it would be misleading. Caller can `forge status <runId>`
-  // for the per-task detail.
   const body = formatRunNotification(run, "blocked_by_red");
-  const result = await notifyTwilio(body);
-  if (!result.ok) {
-    console.error(`forge notify: SMS failed — ${result.error}`);
-  }
+  await dispatch(body, `forge: ${run.workflow} [blocked_by_red]`);
 }
