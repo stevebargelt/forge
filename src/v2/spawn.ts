@@ -96,10 +96,30 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
       ? substituteOptional(mount.host, ctx)
       : substitute(mount.host, ctx);
 
-    if (hostResolved === undefined) continue; // optional + unresolved
+    // A skipped optional *skill* mount (e.g. browser-tools) silently strips a
+    // capability the agent seeds assume — visual verification above all — which
+    // surfaces downstream as a confusing "no browser" report. Warn so it's
+    // diagnosable rather than invisible.
+    const warnIfSkill = (reason: string): void => {
+      if (!mount.container.includes("/.claude/skills/")) return;
+      const skill = mount.container.split("/").pop() ?? "skill";
+      const extra = skill === "browser-tools" ? " — no browser-tools means no visual UI verification" : "";
+      console.error(
+        `forge: WARNING — skill mount '${skill}' skipped (${reason})${extra}. ` +
+          `Set FORGE_BROWSER_TOOLS_DIR or create the host path so agents can verify.`,
+      );
+    };
+
+    if (hostResolved === undefined) {
+      warnIfSkill(`host '${mount.host}' unresolved`);
+      continue; // optional + unresolved
+    }
     const hostPath = expandTilde(hostResolved);
 
-    if (mount.optional && !existsSync(hostPath)) continue;
+    if (mount.optional && !existsSync(hostPath)) {
+      warnIfSkill(`host '${hostPath}' not found`);
+      continue;
+    }
 
     const mode = substitute(mount.mode, ctx);
     args.push("-v", `${hostPath}:${mount.container}:${mode}`);

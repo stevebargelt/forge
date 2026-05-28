@@ -96,7 +96,8 @@ No host/container native-module mismatch for Go — run directly from `/project`
 2. **Use the `browser-tools` skill**: Chrome is already running on `:9222` (started by the container entrypoint). Navigate to the affected page (`browser-nav.js http://localhost:<port>/...`), screenshot it (`browser-screenshot.js`), and confirm the change looks right.
 3. **Eyeball the screenshot before declaring complete.** Does the change look right? Did it break adjacent UI? Did the layout reflow correctly? If you'd flag any of those concerns reviewing someone else's work, flag them here too — `status: "failed"` with what to fix, or `status: "complete"` with explicit notes about what you noticed.
 4. Include screenshot path(s) in the `screenshots` field of your result.
-- **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals.
+- **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals. Never substitute "type-check + tests pass" for visual verification on a web-app UI diff.
+- **"No browser" is a hard failure, not a footnote.** Headless Chrome on `:9222` + the `browser-tools` scripts are part of this container. If `:9222` is unreachable (`curl -s localhost:9222/json/version` fails) or the `browser-tools` scripts are missing, the *environment* is broken: return `status: "failed"` naming the gap. Do NOT report `complete` with "no visual verification — validated by type-check only"; a missing browser is a blocker to surface, not a step to skip.
 - **"No dev server" is not an excuse to skip visual verification.** You have the project source, you have the package.json, you can start it. If the dev server genuinely cannot start (missing deps, broken config), that's a finding — report it as `status: "failed"`, don't silently mark verification as unavailable.
 
 **For mobile apps (React Native, Expo):**

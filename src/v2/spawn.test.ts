@@ -197,3 +197,40 @@ test("buildDockerArgs: apikey auth mode throws when ANTHROPIC_API_KEY is unset",
   const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
   assert.throws(() => buildDockerArgs(rt, BASE_CTX), /ANTHROPIC_API_KEY/);
 });
+
+test("buildDockerArgs: warns (not silent) when an optional browser-tools skill mount is skipped", () => {
+  // apikey auth keeps this off the AWS creds path; the mount loop is auth-agnostic.
+  process.env.ANTHROPIC_API_KEY = "sk-test-mount";
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    auth: { mode: "apikey" },
+    mounts: [
+      ...BASE_RUNTIME.mounts, // includes the optional /design mount (skipped here, non-skill → no warn)
+      {
+        host: "/definitely/not/here/browser-tools",
+        container: "/home/agent/.claude/skills/browser-tools",
+        mode: "ro",
+        optional: true,
+      },
+    ],
+  };
+  const warnings: string[] = [];
+  const orig = console.error;
+  console.error = (msg?: unknown) => { warnings.push(String(msg)); };
+  let args: string[];
+  try {
+    args = buildDockerArgs(rt, BASE_CTX).args;
+  } finally {
+    console.error = orig;
+  }
+
+  // The skill mount must NOT be added (host missing) ...
+  assert.ok(!args.some((a) => a.includes("/home/agent/.claude/skills/browser-tools")));
+  // ... but it must warn loudly, naming the skill and the visual-verification consequence.
+  const warn = warnings.find((w) => w.includes("browser-tools"));
+  assert.ok(warn, `expected a browser-tools skip warning, got: ${JSON.stringify(warnings)}`);
+  assert.match(warn, /skill mount 'browser-tools' skipped/);
+  assert.match(warn, /no visual UI verification/);
+  // A skipped optional *non-skill* mount (/design) stays silent.
+  assert.ok(!warnings.some((w) => w.includes("/design")), "non-skill mount should not warn");
+});
