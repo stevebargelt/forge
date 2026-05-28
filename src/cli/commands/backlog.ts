@@ -186,11 +186,13 @@ export function registerBacklog(program: Command): void {
 
   notes
     .command("replace")
-    .description("Replace the Notes block entirely (reads from stdin)")
+    .argument("[text]", "replacement text; use '-' or omit to read from stdin")
+    .description("Replace the Notes block entirely")
     .option("--project <dir>", "project directory (default: cwd)")
-    .action((opts: { project?: string }) => {
+    .action((textArg: string | undefined, opts: { project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
-      const text = readFileSync(0, "utf8");
+      const text = !textArg || textArg === "-" ? readFileSync(0, "utf8") : textArg;
+      if (text.trim().length === 0) throw new Error("notes replace: empty input");
       const b = readBacklog(dir);
       const next = setNotes(b, text.endsWith("\n") ? text : text + "\n");
       writeBacklog(dir, next);

@@ -12,7 +12,15 @@ Steps:
    - `forge backlog notes show` — the current notes block (about to be replaced)
    - `forge backlog list --status done 2>&1 | head -30` — tickets closed recently (most-recent first)
 
-2. Draft a new notes block in this exact shape and apply it immediately with `forge backlog notes replace "<draft text>"`. Do NOT carry forward the old content unchanged; the value comes from synthesizing what's actually true *now*. Do NOT present the draft for review — the user trusts the synthesis and is not going to read it before applying. If the synthesis is wrong, they'll catch it in the next session's `/orient`.
+2. Draft a new notes block in this exact shape and apply it immediately by piping it to `forge backlog notes replace -` via a **quoted-delimiter heredoc** — this is mandatory, because handoff blocks contain backticks, `$`, and quotes that a plain `"..."` argument would let the shell expand or mangle:
+
+   ```
+   forge backlog notes replace - <<'NOTES'
+   <draft block goes here>
+   NOTES
+   ```
+
+   The quoted `'NOTES'` delimiter disables all shell expansion, so the block lands verbatim. (`replace` also rejects empty input, so a botched pipe errors instead of silently wiping the block.) Do NOT carry forward the old content unchanged; the value comes from synthesizing what's actually true *now*. Do NOT present the draft for review — the user trusts the synthesis and is not going to read it before applying. If the synthesis is wrong, they'll catch it in the next session's `/orient`.
 
    ```
    **Last session ended <YYYY-MM-DD>.**
