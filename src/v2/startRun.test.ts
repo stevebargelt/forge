@@ -28,9 +28,6 @@ const HELLO_WORKFLOW: Workflow = {
 };
 
 test("startRun: creates a run row with provided inputs in metadata", () => {
-  // FORGE_HOME is already mocked by the test runner's mktemp dance (npm test
-  // sets FORGE_HOME=$(mktemp -d ...) per the package.json test script). Each
-  // test run gets a fresh DB.
   const result = startRun({
     workflow: HELLO_WORKFLOW,
     title: "kickoff test",
