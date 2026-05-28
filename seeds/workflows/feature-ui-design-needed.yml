@@ -24,7 +24,7 @@ inputs:
   - name: design-dir
     required: true
     type: path
-    help: "Where the .pen, designs/, and code/ artifacts live."
+    help: "Where the .pen and designs/ artifacts live."
 
 steps:
   - id: brief

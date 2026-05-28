@@ -9,8 +9,8 @@
 // gates beyond "step transitions to awaiting_gate" being a terminal state for
 // this invocation.
 //
-// NOT YET WIRED TO CLI. This is the v2 runner core, callable as a library.
-// Wiring into `forge next` is a separate change at v2 cutover.
+// The v2 runner core: callable as a library and invoked by `forge next`
+// (src/cli/commands/next.ts).
 //
 // See DECISIONS.md for the architectural calls made here.
 

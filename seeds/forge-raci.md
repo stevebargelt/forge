@@ -90,7 +90,7 @@ Plus a forge-specific column:
 
 **⁴ `ui-design` manual handoff:**
 - `prompt-author` runs in a container and produces `PROMPT.md` (this is the `invoke` part)
-- The human (you) then runs `PROMPT.md` against Pencil + Claude Code on the host, exports `.pen` + `designs/*.png` + `code/*.html`, and runs `forge submit <task-id>` to hand the artifacts back to forge
+- The human (you) then runs `PROMPT.md` against Pencil + Claude Code on the host, exports `.pen` + `designs/*.png`, and runs `forge submit <task-id>` to hand the artifacts back to forge
 - This second phase is intentionally NOT a RACI row because no agent is involved — it's irreducibly human work. The orchestrator's job is to make sure the user knows the handoff is theirs to drive
 - Accountable = user because design judgment is irreducibly the user's call
 
