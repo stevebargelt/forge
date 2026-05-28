@@ -50,6 +50,7 @@ resource "azurerm_container_app" "ntfy" {
       args = [
         "serve",
         "--base-url=${var.base_url != "" ? var.base_url : "https://${var.name}.${azurerm_container_app_environment.ntfy.default_domain}"}",
+        "--upstream-base-url=https://ntfy.sh",
       ]
     }
   }

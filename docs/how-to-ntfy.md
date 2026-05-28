@@ -44,6 +44,10 @@ ntfy's built-in user/token auth uses SQLite, which doesn't work on Azure Files (
 
 If you need server-level auth (multi-user, audit trail), run with `min_replicas = 1` so SQLite works on the container's local disk — but that costs ~$19/mo vs free at scale-to-zero.
 
+### iOS push notifications
+
+Self-hosted ntfy must forward poll requests to `ntfy.sh` for iOS instant notifications. Without this, notifications arrive with significant delay (hours). The OpenTofu module includes `--upstream-base-url=https://ntfy.sh` by default. If deploying manually, add it to the `serve` args (see below).
+
 ### Deploy with Azure CLI (manual)
 
 ```bash
@@ -61,7 +65,7 @@ az containerapp create \
   --image binwiederhier/ntfy \
   --target-port 80 \
   --ingress external \
-  --args serve --base-url https://ntfy.<your-env>.azurecontainerapps.io \
+  --args serve --base-url https://ntfy.<your-env>.azurecontainerapps.io --upstream-base-url https://ntfy.sh \
   --min-replicas 0 \
   --max-replicas 1
 ```
@@ -107,7 +111,7 @@ sudo systemctl enable ntfy
 sudo systemctl start ntfy
 ```
 
-Then set up port forwarding (443 → Pi:443) on your router, DuckDNS or similar for dynamic DNS, and Let's Encrypt for TLS (ntfy has built-in ACME support).
+Then set up port forwarding (443 → Pi:443) on your router, DuckDNS or similar for dynamic DNS, and Let's Encrypt for TLS (ntfy has built-in ACME support). Add `upstream-base-url: "https://ntfy.sh"` to `/etc/ntfy/server.yml` for iOS instant notifications.
 
 ```
 FORGE_NOTIFY=ntfy
