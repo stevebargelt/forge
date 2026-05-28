@@ -364,11 +364,57 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 
 ### #160 — Architecture-advisor agent: produce Mermaid architecture documents
 
-### #161 — Dashboard usage: expandable token breakdown per row
+### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
 
-### #162 — Dashboard usage: model mix per dimension
+### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
+
+### #169 — Optional ntfy push notifications for forge events
+## Goal
+
+Let forge optionally POST push notifications to an ntfy server when key events occur. Zero dependencies, zero impact when not configured.
+
+## Integration (forge side)
+
+1. **Config**: `~/.forge/config.json` notifications section. Missing = disabled.
+   ```json
+   {
+     "notifications": {
+       "ntfy": {
+         "url": "https://ntfy.example.com/forge",
+         "events": ["run_complete", "gate_awaiting", "task_failed"]
+       }
+     }
+   }
+   ```
+2. **`src/util/notify.ts`** (~30 LoC): fire-and-forget `fetch(url, { method: "POST", body })`. Swallow errors — notification failure never blocks a run.
+3. **Wire into store event points**: `markRunComplete`, `markTaskFailed`, tasks entering `awaiting_gate` / `awaiting_human_input`.
+4. **`forge notifications setup`**: interactive config wizard (URL, events). `forge notifications test`: sends a test ping.
+
+## Hosting guide (docs, separate from integration)
+
+A `docs/how-to-ntfy.md` that starts with Azure (Container App or App Service, since that's the first tested path) and grows over time:
+- Host on Azure (Container App, free tier)
+- Host on a Raspberry Pi (always-on use case)
+- Host on AWS (ECS/Fargate or Lightsail)
+- Use ntfy.sh public instance (no self-hosting, quick start)
+
+Each section is independent — pick your platform.
+
+## Out of scope
+
+- Other notification transports (email, Slack, SMS). ntfy first; others are separate tickets if needed.
+- Forge managing the ntfy server lifecycle. Forge POSTs to a URL; where that URL lives is the user's concern.
+
+
+## Done (recent)
+
+### #168 — Go toolchain support in agent containers + engineer seed
+**Closed:** 2026-05-28.
+
 
 ### #164 — Agent rework: test-engineer (pipeline) + manual-QA (invoke-only) + engineer self-verification
+**Closed:** 2026-05-28.
+
 
 **Problem:** The current qa-engineer agent is a rubber stamp — re-runs unit tests, maybe takes a screenshot, reports. Burns tokens without catching real bugs. Engineer seed has validation language but agents skip browser-tools in practice.
 
@@ -401,37 +447,13 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 6. Update workflow definitions referencing qa-engineer by name
 7. Update forge CLAUDE.md orchestrator block (role table, gate-decision discipline)
 
-### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
-
-### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
-
-### #168 — Go toolchain support in agent containers + engineer seed
-## Goal
-
-Enable forge agents (engineer, frontend-specialist, backend-specialist) to build, test, and vet Go projects — including CGO projects targeting Raspberry Pi (linux/arm64).
-
-## Approach
-
-NOT language-specific agent roles. Instead:
-
-1. **Container image**: Add Go toolchain + CGO cross-compilation deps to `agent-dev-worker` (or a tagged variant `agent-dev-worker:go`). The container is already linux/arm64, so `go build` produces Pi-compatible binaries natively.
-2. **Engineer seed**: Add a "Go projects" section covering `go test`, `go vet`, `go build` — parallel to the existing Node/`forge-test` section.
-3. **Project CLAUDE.md Stack section**: Go projects declare their stack (`Go 1.22, CGO enabled, target: linux/arm64`) so the engineer knows which toolchain to use.
-
-## Scope
-
-- Dockerfile changes to install Go toolchain
-- Engineer seed update (Go test/build/vet guidance)
-- Verify CGO cross-compilation works for arm64 in the container
-- Document the Stack section convention for Go projects
-
-## Out of scope
-
-- Language-specific agent roles (go-engineer, python-engineer, etc.)
-- Deploy-to-Pi automation (separate concern)
+### #162 — Dashboard usage: model mix per dimension
+**Closed:** 2026-05-28.
 
 
-## Done (recent)
+### #161 — Dashboard usage: expandable token breakdown per row
+**Closed:** 2026-05-28.
+
 
 ### #165 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
 **Closed:** 2026-05-27.
