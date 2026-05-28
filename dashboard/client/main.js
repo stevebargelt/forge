@@ -326,6 +326,36 @@ function renderPreview(entry) {
   return html`<div class="preview">${text.toString().slice(0, 400)}</div>`;
 }
 
+// Copies a value (e.g. a task id) to the clipboard. Falls back to a hidden
+// textarea + execCommand for non-secure contexts; localhost is secure so the
+// clipboard API path is the norm. stopPropagation so clicking it inside a
+// clickable row/overlay doesn't also trigger the row.
+function CopyIdButton({ value }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch { /* best effort */ }
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  }, [value]);
+  return html`<button
+    class="copy-id ${copied ? "copied" : ""}"
+    title="Copy task id"
+    onClick=${onCopy}
+  >${copied ? "copied!" : "copy id"}</button>`;
+}
+
 function TaskDetail({ taskId, onClose }) {
   const [detail, setDetail] = useState(null);
   const [err, setErr] = useState(null);
@@ -366,7 +396,9 @@ function TaskDetail({ taskId, onClose }) {
           <span class="muted"> ·</span> <span class="muted">${detail.task.runTitle}</span>
         </h1>
         <div class="faint mono" style="font-size: 11px; margin: 8px 0 16px;">
-          ${detail.task.taskId} · ${detail.task.phase} · ${detail.task.status}
+          ${detail.task.taskId}
+          <${CopyIdButton} value=${detail.task.taskId} />
+          · ${detail.task.phase} · ${detail.task.status}
         </div>
 
         <h3>Result</h3>

@@ -273,6 +273,15 @@ nav.view-tabs .tab-active { color: var(--fg); }
 }
 .clear-filter:hover { color: var(--fg); border-color: var(--fg-dim); }
 
+/* "copy id" button in the task-detail header. */
+.copy-id {
+  background: transparent; border: 1px solid var(--border); color: var(--fg-dim);
+  font: inherit; font-size: 10px; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+  margin: 0 6px; vertical-align: middle; transition: color 0.1s, border-color 0.1s;
+}
+.copy-id:hover { color: var(--fg); border-color: var(--fg-dim); }
+.copy-id.copied { color: var(--ok); border-color: var(--ok); }
+
 /* #154: projects grid + cards. */
 section.projects-grid {
   margin-top: 20px;
