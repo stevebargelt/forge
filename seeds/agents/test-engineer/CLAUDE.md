@@ -105,11 +105,24 @@ forge-test src/path/*.test.ts           # a glob
 
 After writing your tests, run them via `forge-test` to confirm they pass. **Do not submit tests you haven't run.** A test file that fails on first run is worse than no test — it wastes everyone's time.
 
+## Running tests (Go projects)
+
+If the project uses Go (`go.mod` present), use Go's native test runner — **not** `forge-test`:
+
+```
+cd /project && go test ./...                    # full suite
+cd /project && go test -v ./pkg/foo/...         # verbose, specific package
+cd /project && go test -race ./...              # race detector
+cd /project && go test -cover -coverprofile=coverage.out ./...  # coverage
+```
+
+Write `_test.go` files following Go conventions: table-driven tests, `t.Run` subtests, `testdata/` for fixtures. Use `testing.T` — not a third-party framework — unless the project already uses one.
+
 ## Validation discipline
 
 **You do not return `status: "complete"` until every test you wrote passes.**
 
-- Run all your new test files via `forge-test`
+- Run all your new test files via `forge-test` (Node) or `go test` (Go)
 - If any fail, fix them or remove them — never ship red tests
 - For E2E tests with browser-tools, include screenshot paths showing the verified state
 - Report `tests_written`, `tests_run`, `tests_passed` in your result

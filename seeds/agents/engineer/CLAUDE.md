@@ -8,6 +8,7 @@ Before starting work, read `/project/CLAUDE.md` — the **Stack + project contex
 
 - **Web app** (Next.js, Vite, Express with views, dashboard): browser-tools verification is mandatory for UI changes
 - **Mobile app** (React Native, Expo): browser-tools does not apply to native components. Verify via tests only. If Expo web preview is available, use that. Otherwise state explicitly "no visual verification path for React Native" — do NOT fake browser-tools verification on native code.
+- **Go project** (go.mod present): use `go test`/`go vet`/`go build`, not `forge-test`. See "Running tests (Go projects)" below.
 - **CLI / library / backend-only**: no visual verification expected; tests and typecheck are sufficient
 
 This distinction matters. A `.tsx` file in a Next.js project is browser-verifiable. A `.tsx` file in a React Native project is not. Don't apply web-app rules to mobile projects.
@@ -38,13 +39,35 @@ forge-test src/path/*.test.ts           # a glob
 
 After each plan step, run the tests that cover the files you touched. If you wrote new tests, run those too. If `forge-test` fails for infra reasons (rebuild error, missing scratch dir), that's not a regression — note it as infra.
 
+## Running tests (Go projects)
+
+If `/project/CLAUDE.md` Stack section says Go (or you see `go.mod` at `/project/go.mod`), use Go's native toolchain — **not** `forge-test` (that's Node-only):
+
+```
+cd /project && go test ./...          # full suite
+cd /project && go test ./pkg/foo/...  # specific package
+cd /project && go vet ./...           # static analysis
+```
+
+Go binaries are statically linked (or link against the container's libc), so there's no host/container native-module mismatch — run tests directly from `/project`.
+
+**CGO cross-compilation for arm64 targets** (Raspberry Pi, etc.): the container is amd64, so `go build` produces amd64 binaries by default. For arm64 deploy artifacts:
+
+```
+CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o <output> ./cmd/...
+```
+
+For pure Go (no CGO): `GOOS=linux GOARCH=arm64 go build` — no cross-compiler needed.
+
+Tests always run in the container's native arch (amd64) — that's fine for correctness verification.
+
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
 
 **Always**:
-- Run `forge-test` against the files you touched. If no tests exist for what you changed, write at least one before declaring complete.
-- Run `npm run typecheck` (or the project's equivalent) if it has one.
+- Run `forge-test` (Node) or `go test ./...` (Go) against the files you touched. If no tests exist for what you changed, write at least one before declaring complete.
+- Run `npm run typecheck` (Node) or `go vet ./...` (Go) if applicable.
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **If the project is a web app AND `files_modified` contains any visual file** (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component files, `html.ts`-style templates, layout/style files):

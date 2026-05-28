@@ -58,6 +58,18 @@ RUN npx --yes @puppeteer/browsers install chrome@stable --path "$PUPPETEER_CACHE
     && test -n "$CHROME_PATH" \
     && ln -sf "$CHROME_PATH" /usr/local/bin/chromium
 
+# Go toolchain (#168): supports Go projects including CGO cross-compilation
+# for arm64 targets (e.g. Raspberry Pi). The container is amd64 (pinned for
+# Chrome), so `go test` runs natively; cross-compile via GOARCH=arm64 for
+# deploy artifacts. gcc-aarch64-linux-gnu provides the CGO cross-compiler.
+ENV GOLANG_VERSION=1.26.3
+RUN curl -fsSL "https://go.dev/dl/go${GOLANG_VERSION}.linux-amd64.tar.gz" \
+        | tar -C /usr/local -xz \
+    && apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/go/bin:${PATH}"
+ENV GOPATH="/home/agent/go"
+ENV PATH="${GOPATH}/bin:${PATH}"
+
 # forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
 # platform inside a writable scratch dir, then runs tests there. Works around
 # the host/container native-module mismatch without mutating /project's

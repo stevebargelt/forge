@@ -70,13 +70,25 @@ forge-test src/path/specific.test.ts    # a single file
 
 After each plan step, run the tests covering the files you touched.
 
+## Running tests (Go projects)
+
+If the project uses Go (`go.mod` present), use Go's native toolchain — **not** `forge-test`:
+
+```
+cd /project && go test ./...          # full suite
+cd /project && go test ./pkg/foo/...  # specific package
+cd /project && go vet ./...           # static analysis
+```
+
+No host/container native-module mismatch for Go — run directly from `/project`.
+
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
 
 **Always**:
-- Run `forge-test` against the files you touched. If no tests exist, write at least one before declaring complete.
-- Run `npm run typecheck` if the project has it.
+- Run `forge-test` (Node) or `go test ./...` (Go) against the files you touched. If no tests exist, write at least one before declaring complete.
+- Run `npm run typecheck` (Node) or `go vet ./...` (Go) if applicable.
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **For web apps — browser-tools verification is REQUIRED, not optional.** If the project is a web app and your `files_modified` touches any visual file (`.html`, `.css`, `.scss`, `.tsx`, `.jsx`, component file, layout/style file):

@@ -67,13 +67,27 @@ forge-test src/path/specific.test.ts    # a single file
 
 After each plan step, run the tests covering the files you touched — for backend work especially, run integration tests that exercise transaction boundaries and migration paths.
 
+## Running tests (Go projects)
+
+If the project uses Go (check `/project/CLAUDE.md` Stack section or look for `go.mod`), use Go's native toolchain — **not** `forge-test`:
+
+```
+cd /project && go test ./...          # full suite
+cd /project && go test ./pkg/foo/...  # specific package
+cd /project && go vet ./...           # static analysis
+```
+
+No host/container native-module mismatch for Go — run directly from `/project`.
+
+**CGO cross-compilation for arm64** (Raspberry Pi): `CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o <output> ./cmd/...`. Pure Go: `GOOS=linux GOARCH=arm64 go build`. Tests run in the container's native arch (amd64).
+
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
 
 **Always**:
-- Run `forge-test` against files you touched. For new backend code paths, write at least one integration test that exercises the new path end-to-end before declaring complete.
-- Run `npm run typecheck` if the project has it.
+- Run `forge-test` (Node) or `go test ./...` (Go) against files you touched. For new backend code paths, write at least one integration test that exercises the new path end-to-end before declaring complete.
+- Run `npm run typecheck` (Node) or `go vet ./...` (Go) if applicable.
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **Backend-specific validation requirements**:

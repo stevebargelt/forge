@@ -404,25 +404,31 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 ### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
 
 ### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
-## Status
 
-The `awaiting_human_input` task status exists in the type union, schema validation (`manual: true`), dashboard CSS badge, advise integration, and ready-queue handling. But the actual state transitions are incomplete:
+### #168 — Go toolchain support in agent containers + engineer seed
+## Goal
 
-- `dispatchManualStep` in runNext.ts creates tasks as `pending`, not `awaiting_human_input`
-- No store function transitions `pending` → `awaiting_human_input`
-- No CLI command to advance `awaiting_human_input` → `awaiting_gate` (the deleted `forge submit`)
-- No workflows currently use `manual: true` phases
+Enable forge agents (engineer, frontend-specialist, backend-specialist) to build, test, and vet Go projects — including CGO projects targeting Raspberry Pi (linux/arm64).
 
-## Context
+## Approach
 
-- `forge submit` was implemented in v1, deleted in v2 cutover (commit b818f27) with note "ui-design is host-led under RACI"
-- The primary use case (Pencil design) is now handled by `forge design` (#166), which is a separate tracked session — not a manual phase in a pipeline
-- FORGE-DEC-016 documents the original design for the manual-phase primitive
-- `advise.ts` was updated to stop recommending the nonexistent `forge submit` — it now points to `forge show` + `forge gate` as the workaround
+NOT language-specific agent roles. Instead:
 
-## Decision needed
+1. **Container image**: Add Go toolchain + CGO cross-compilation deps to `agent-dev-worker` (or a tagged variant `agent-dev-worker:go`). The container is already linux/arm64, so `go build` produces Pi-compatible binaries natively.
+2. **Engineer seed**: Add a "Go projects" section covering `go test`, `go vet`, `go build` — parallel to the existing Node/`forge-test` section.
+3. **Project CLAUDE.md Stack section**: Go projects declare their stack (`Go 1.22, CGO enabled, target: linux/arm64`) so the engineer knows which toolchain to use.
 
-Is the general-purpose `manual: true` phase primitive worth completing, or should it be retired? No workflows use it today. If a future workflow needs a human-in-the-loop step, the `forge design` pattern (tracked host-side session) may be the better model.
+## Scope
+
+- Dockerfile changes to install Go toolchain
+- Engineer seed update (Go test/build/vet guidance)
+- Verify CGO cross-compilation works for arm64 in the container
+- Document the Stack section convention for Go projects
+
+## Out of scope
+
+- Language-specific agent roles (go-engineer, python-engineer, etc.)
+- Deploy-to-Pi automation (separate concern)
 
 
 ## Done (recent)
