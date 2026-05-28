@@ -110,6 +110,7 @@ export function registerInit(program: Command): void {
       console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(`  slash commands:   ${slashCommandsResult}`);
       console.log(`  .gitignore:       ${gitignoreResult}`);
+      if (installHooks) warnSkippedClaudeCommands(slashCommandsPlan);
       console.log(``);
       console.log(`Note: .claude/settings.local.json and .claude/commands/ are per-developer.`);
       console.log(`      Other contributors run \`forge init\` after cloning to bootstrap their local copies.`);
@@ -577,6 +578,17 @@ export function executeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {
   if (alreadyLinked > 0) parts.push(`${alreadyLinked} already current`);
   if (skipped.length)    parts.push(`SKIPPED ${skipped.length}: ${skipped.join(", ")}`);
   return parts.join("; ") || "no-op";
+}
+
+export function warnSkippedClaudeCommands(plan: ClaudeCommandsPlan): void {
+  if (plan.action !== "install") return;
+  const skipped = plan.entries.filter((e) => e.status === "exists-other");
+  if (skipped.length === 0) return;
+  for (const e of skipped) {
+    const cmd = "/" + e.name.replace(/\.md$/, "");
+    console.warn(`  ⚠  ${cmd} was NOT installed — ${e.target} already exists (${e.details ?? "unknown reason"}).`);
+    console.warn(`     To use forge's version: remove the file and re-run this command.`);
+  }
 }
 
 function describeClaudeCommandsPlan(plan: ClaudeCommandsPlan): string {

@@ -14,6 +14,7 @@ import {
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
+  warnSkippedClaudeCommands,
 } from "./init.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
@@ -198,6 +199,7 @@ export function registerUpgrade(program: Command): void {
             console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
             console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
             console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
+            warnSkippedClaudeCommands(slashCmds);
             console.log(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
           }
         }
