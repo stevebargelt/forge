@@ -43,6 +43,8 @@ fi
 #   - claude-opus-4-7 / claude-sonnet-4-6 / claude-haiku-* (model identifiers)
 #   - forge claude (forge subcommand wrapping the CLI)
 #   - `claude` in backticks (literal binary name)
+#   - --claude (CLI flag)
+#   - bare lowercase "claude" (CLI tool name; capitalized "Claude" is still caught)
 # These show up in nearly every forge commit. After stripping, what's left
 # is prose mentions, which are the actual rule target.
 if grep -v '^[[:space:]]*#' "$MSG_FILE" \
@@ -55,11 +57,14 @@ if grep -v '^[[:space:]]*#' "$MSG_FILE" \
        s/claude-(code|opus|sonnet|haiku)[a-z0-9._-]*//g
        s/forge[[:space:]]+claude//g
        s/`claude`//g
+       s/--claude//g
+       s/(^|[^a-zA-Z])claude([^a-zA-Z]|$)/\1\2/g
+       s/(^|[^a-zA-Z])claude([^a-zA-Z]|$)/\1\2/g
      ' \
    | grep -qiE '\b(claude|anthropic|claude code)\b'; then
   printf '\033[31m✗ commit blocked:\033[0m commit message mentions "Claude", "Anthropic", or "Claude Code" in prose.\n' >&2
   printf '  See seeds/constraints/no-ai-attribution.md.\n' >&2
-  printf '  (Technical identifiers like CLAUDE.md, ANTHROPIC_API_KEY, .claude/, claude-code, claude-opus-*, `claude`, forge claude, @anthropic-ai/* are allowed.)\n' >&2
+  printf '  (Technical identifiers like CLAUDE.md, ANTHROPIC_API_KEY, .claude/, claude-code, claude-opus-*, `claude`, --claude, forge claude, @anthropic-ai/*, and lowercase "claude" are allowed.)\n' >&2
   printf '  To bypass: git commit --no-verify  (rare; only when the prose reference is intentional)\n' >&2
   exit 1
 fi
