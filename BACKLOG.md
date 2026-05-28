@@ -7,6 +7,8 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 
 
+**Note:** 15 commits ahead of origin/main is intentional — user chose to hold off pushing (2026-05-28). Not a forgotten step.
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -360,53 +362,25 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 - Multi-profile per-project. One profile per project for now; --aws-profile override is the escape hatch.
 
 
-### #159 — commit-msg hook false-positive: blocks 'forge claude' despite allowlist
-
 ### #160 — Architecture-advisor agent: produce Mermaid architecture documents
 
 ### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
 
 ### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
 
-### #169 — Optional ntfy push notifications for forge events
-## Goal
-
-Let forge optionally POST push notifications to an ntfy server when key events occur. Zero dependencies, zero impact when not configured.
-
-## Integration (forge side)
-
-1. **Config**: `~/.forge/config.json` notifications section. Missing = disabled.
-   ```json
-   {
-     "notifications": {
-       "ntfy": {
-         "url": "https://ntfy.example.com/forge",
-         "events": ["run_complete", "gate_awaiting", "task_failed"]
-       }
-     }
-   }
-   ```
-2. **`src/util/notify.ts`** (~30 LoC): fire-and-forget `fetch(url, { method: "POST", body })`. Swallow errors — notification failure never blocks a run.
-3. **Wire into store event points**: `markRunComplete`, `markTaskFailed`, tasks entering `awaiting_gate` / `awaiting_human_input`.
-4. **`forge notifications setup`**: interactive config wizard (URL, events). `forge notifications test`: sends a test ping.
-
-## Hosting guide (docs, separate from integration)
-
-A `docs/how-to-ntfy.md` that starts with Azure (Container App or App Service, since that's the first tested path) and grows over time:
-- Host on Azure (Container App, free tier)
-- Host on a Raspberry Pi (always-on use case)
-- Host on AWS (ECS/Fargate or Lightsail)
-- Use ntfy.sh public instance (no self-hosting, quick start)
-
-Each section is independent — pick your platform.
-
-## Out of scope
-
-- Other notification transports (email, Slack, SMS). ntfy first; others are separate tickets if needed.
-- Forge managing the ntfy server lifecycle. Forge POSTs to a URL; where that URL lives is the user's concern.
-
-
 ## Done (recent)
+
+### #159 — commit-msg hook false-positive: blocks 'forge claude' despite allowlist
+**Closed:** 2026-05-28.
+
+
+### #169 — Optional ntfy push notifications for forge events
+**Closed:** 2026-05-28.
+
+
+### #170 — Tests pollute shared forge.db — use isolated temp DB for test suite runs
+**Closed:** 2026-05-28.
+
 
 ### #168 — Go toolchain support in agent containers + engineer seed
 **Closed:** 2026-05-28.
