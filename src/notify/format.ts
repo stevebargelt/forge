@@ -4,9 +4,23 @@
 
 import type { Run } from "../types/index.js";
 
-export type NotifyState = "complete" | "failed" | "blocked_by_red";
+export type NotifyState =
+  | "complete"
+  | "failed"
+  | "blocked_by_red"
+  | "awaiting_gate"
+  | "awaiting_human_input";
 
 const MAX_SMS_LEN = 160;
+
+// Leading "<project>: " segment so a notification says which project it's
+// about up front. Derived from the run's projectDir basename; omitted when the
+// run has no projectDir. Pure string work — no node:path import.
+function projectSegment(run: Run): string {
+  if (!run.projectDir) return "";
+  const base = run.projectDir.replace(/\/+$/, "").split("/").pop();
+  return base ? `${base}: ` : "";
+}
 
 export function formatRunNotification(
   run: Run,
@@ -15,7 +29,7 @@ export function formatRunNotification(
 ): string {
   const duration = durationMs !== undefined ? ` — ${formatDuration(durationMs)}` : "";
   const titleQuoted = `"${run.title.replaceAll('"', "'")}"`;
-  const prefix = `forge: ${run.id} [${state}] ${run.workflow} `;
+  const prefix = `forge: ${projectSegment(run)}${run.id} [${state}] ${run.workflow} `;
   const suffix = duration;
 
   // If everything fits, emit as-is.
@@ -30,6 +44,25 @@ export function formatRunNotification(
   }
   const truncated = `"${run.title.slice(0, budget)}..."`;
   return `${prefix}${truncated}${suffix}`;
+}
+
+// Gate / human-input notifications carry the actionable bit: which task is
+// blocked on you and the command to clear it. Same 160-char SMS budget; the
+// title is what gets truncated.
+export function formatGateNotification(
+  run: Run,
+  taskId: string,
+  phase: string,
+  state: NotifyState = "awaiting_gate",
+): string {
+  const label = state === "awaiting_human_input" ? "input needed" : "gate";
+  const prefix = `forge: ${projectSegment(run)}${run.workflow} `;
+  const suffix = ` — ${phase} ${label}: forge gate ${taskId}`;
+  const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;
+  if (full.length <= MAX_SMS_LEN) return full;
+  const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
+  if (budget <= 0) return `${prefix.trimEnd()}${suffix}`.slice(0, MAX_SMS_LEN);
+  return `${prefix}"${run.title.slice(0, budget)}..."${suffix}`;
 }
 
 // ----- Subscription flow SMS bodies (#145) -----

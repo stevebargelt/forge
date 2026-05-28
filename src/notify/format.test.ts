@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatRunNotification, formatDuration, subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody } from "./format.js";
+import { formatRunNotification, formatGateNotification, formatDuration, subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody } from "./format.js";
 import type { Run } from "../types/index.js";
 
 const RUN: Run = {
@@ -47,6 +47,38 @@ test("formatRunNotification: handles a title containing double quotes without br
   );
   // Double quotes inside the title get downgraded to singles so the outer quoting stays clean.
   assert.equal(out, `forge: run-add-login-7c2a91 [complete] feature "add 'OAuth' login" — 1s`);
+});
+
+test("formatGateNotification: awaiting_gate carries the actionable forge gate command", () => {
+  const out = formatGateNotification(RUN, "task-plan-ddc707", "plan");
+  assert.match(out, /forge gate task-plan-ddc707/);
+  assert.match(out, /plan gate/);
+  assert.match(out, /"add login"/);
+});
+
+test("formatGateNotification: awaiting_human_input uses the 'input needed' label", () => {
+  const out = formatGateNotification(RUN, "task-x-1", "build", "awaiting_human_input");
+  assert.match(out, /input needed/);
+  assert.match(out, /forge gate task-x-1/);
+});
+
+test("formatGateNotification: truncates a long title but keeps the command intact under 160 chars", () => {
+  const longTitle = "x".repeat(300);
+  const out = formatGateNotification({ ...RUN, title: longTitle }, "task-plan-ddc707", "plan");
+  assert.ok(out.length <= 160, `expected <=160, got ${out.length}`);
+  assert.match(out, /forge gate task-plan-ddc707$/); // the action survives truncation
+  assert.match(out, /\.\.\."/); // title got ellipsized
+});
+
+test("formatRunNotification: leads with the project name when the run has a projectDir", () => {
+  const out = formatRunNotification({ ...RUN, projectDir: "/Users/x/code/wnba-led-scoreboard" }, "complete", 1000);
+  assert.equal(out, 'forge: wnba-led-scoreboard: run-add-login-7c2a91 [complete] feature "add login" — 1s');
+});
+
+test("formatGateNotification: leads with the project name when the run has a projectDir", () => {
+  const out = formatGateNotification({ ...RUN, projectDir: "/Users/x/code/wnba-led-scoreboard" }, "task-build-2ea3ee", "build");
+  assert.match(out, /^forge: wnba-led-scoreboard: feature /);
+  assert.match(out, /forge gate task-build-2ea3ee$/);
 });
 
 test("formatDuration: sub-minute returns just seconds", () => {

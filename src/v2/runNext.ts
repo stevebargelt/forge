@@ -21,8 +21,8 @@ import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
-import { notifyOnTaskBlockedByRed } from "../notify/trigger.js";
-import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { validateVerdict } from "./validate-findings.js";
@@ -337,14 +337,26 @@ function finalizePrimary(taskId: string, gate: Step["gate"], result: unknown): s
       return "complete";
     case "human":
       markTaskAwaitingGate(taskId, result);
+      notifyGateAwaiting(taskId);
       return "awaiting_gate";
     case "verdict":
       // Schema enforces reds.length > 0 for gate=verdict, so this is reached
       // only when all reds passed (or none authoritative-failed). Aggregate
       // outcome is the orchestrator's call; pause for it.
       markTaskAwaitingGate(taskId, result);
+      notifyGateAwaiting(taskId);
       return "awaiting_gate";
   }
+}
+
+// Fire-and-forget "forge is blocked on you" push when a task pauses for a gate.
+// Looks up the run via the task so callers needn't thread runId; the trigger
+// itself swallows provider failures, so this never throws.
+function notifyGateAwaiting(taskId: string): void {
+  const task = getTask(taskId);
+  if (!task) return;
+  const run = getRun(task.runId);
+  if (run) void notifyOnGateAwaiting(run, task);
 }
 
 // Spawn reds for a primary task. Each red runs in parallel, in a read-only
