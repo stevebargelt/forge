@@ -22,6 +22,12 @@ function fmtK(n) {
   return String(Math.round(n));
 }
 
+// "2026-05-27" -> "5/27". String-split, no Date parsing (avoids UTC/local drift).
+function shortDay(iso) {
+  const p = String(iso).split("-");
+  return p.length === 3 ? `${+p[1]}/${+p[2]}` : String(iso);
+}
+
 export function UsageView({ rollup, timeSeries, modelMix, groupBy, onGroupByChange, since, onSinceChange }) {
   const [showFormula, setShowFormula] = useState(false);
   const now = Date.now();
@@ -281,41 +287,63 @@ function SparkLine({ data, since }) {
 
   const xs = values.map((_, i) => n === 1 ? VW / 2 : Math.round((i / (n - 1)) * VW));
   const ys = values.map(v  => PAD_TOP + chartH - Math.round((v / maxV) * chartH));
+  const pt = (i) => `${xs[i]},${ys[i]}`;
 
-  const pts      = xs.map((x, i) => `${x},${ys[i]}`).join(" L ");
-  const linePath = `M ${pts}`;
-  const areaPath = `M ${xs[0]},${VH - PAD_BOTTOM} L ${pts} L ${xs[n - 1]},${VH - PAD_BOTTOM} Z`;
+  // The trailing day is "partial" only when it's actually today — its tally is
+  // still accumulating, so a straight line down to it reads as a fake decline.
+  // Draw that last segment dashed and its point hollow so it's clearly not a
+  // complete day. data dates are UTC (date(created_at)); compare in that basis.
+  const todayStr    = new Date().toISOString().slice(0, 10);
+  const lastPartial = data[n - 1].date === todayStr;
+  const solidEnd    = lastPartial && n >= 2 ? n - 2 : n - 1; // last index of the complete-day line
+
+  const solidPts = xs.slice(0, solidEnd + 1).map((_, i) => pt(i)).join(" L ");
+  const linePath = `M ${solidPts}`;
+  const dashPath = lastPartial && n >= 2 ? `M ${pt(n - 2)} L ${pt(n - 1)}` : null;
+  // Area fills under complete days only — the partial day gets no "volume".
+  const areaPath = `M ${xs[0]},${VH - PAD_BOTTOM} L ${solidPts} L ${xs[solidEnd]},${VH - PAD_BOTTOM} Z`;
 
   const peakIdx = values.indexOf(Math.max(...values));
 
-  // Labels: always show first and last; add peak if it's distinct
-  const labelSet = new Set([0, n - 1]);
-  if (peakIdx !== 0 && peakIdx !== n - 1) labelSet.add(peakIdx);
+  // With only a handful of days, label every point (compact M/D) — the old
+  // first/last/peak thinning made a middle day look "missing". Past ~10 days,
+  // fall back to first/last/peak so the axis doesn't crowd.
+  const LABEL_ALL_MAX = 10;
+  const labelIdxs = n <= LABEL_ALL_MAX
+    ? values.map((_, i) => i)
+    : [...new Set([0, peakIdx, n - 1])].sort((a, b) => a - b);
 
-  const labels = [...labelSet].map(i => ({
-    x:      xs[i],
-    y:      ys[i],
-    date:   data[i].date,
-    value:  values[i],
-    isPeak: i === peakIdx,
-  }));
+  const labels = labelIdxs.map(i => {
+    const isPartial = i === n - 1 && lastPartial;
+    const isPeak    = i === peakIdx;
+    return {
+      x: xs[i], y: ys[i],
+      date: isPartial ? "today" : shortDay(data[i].date),
+      value: values[i], isPeak, isPartial,
+      // Value labels stay sparse to avoid clutter: peak + today always; first/last only in the thinned view.
+      showValue: isPeak || isPartial || (n > LABEL_ALL_MAX && (i === 0 || i === n - 1)),
+    };
+  });
 
   return html`
     <div class="usage-timeseries">
       <div class="usage-timeseries-title">weighted tokens per day (${since})</div>
-      <div style="font-size: 11px; color: var(--fg-faint); margin-top: 2px; margin-bottom: 6px;">Total weighted tokens generated each day across all projects. Trend line shows whether your token usage is increasing or decreasing.</div>
+      <div style="font-size: 11px; color: var(--fg-faint); margin-top: 2px; margin-bottom: 6px;">Total weighted tokens generated each day across all projects. Trend line shows whether your token usage is increasing or decreasing.${lastPartial ? " Today is dashed — partial day, data incomplete." : ""}</div>
       <svg viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="xMidYMid meet">
         <path d=${areaPath} fill="rgba(122,159,255,0.12)" />
         <path d=${linePath} fill="none" stroke="var(--accent)" stroke-width="1.5" />
+        ${dashPath ? html`<path d=${dashPath} fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 4" opacity="0.7" />` : null}
         <text x="4" y=${PAD_TOP - 2} text-anchor="start" font-size="10" fill="var(--fg-faint)">peak: ${fmtK(maxV)}</text>
         ${labels.map(l => {
           const anchor = l.x < VW * 0.15 ? "start" : l.x > VW * 0.85 ? "end" : "middle";
           return html`
-            <circle cx=${l.x} cy=${l.y} r="3" fill="var(--accent)" />
+            <circle cx=${l.x} cy=${l.y} r="3"
+              fill=${l.isPartial ? "var(--bg-elev)" : "var(--accent)"}
+              stroke="var(--accent)" stroke-width=${l.isPartial ? 1.5 : 0} />
             <text x=${l.x} y=${VH - 4} text-anchor=${anchor} font-size="11" fill="var(--fg-faint)">${l.date}</text>
-            ${l.isPeak
-              ? html`<text x=${l.x} y=${l.y - 7} text-anchor=${anchor} font-size="11" fill="var(--accent)">${fmtK(l.value)}</text>`
-              : html`<text x=${l.x} y=${l.y - 7} text-anchor=${anchor} font-size="10" fill="var(--fg-faint)">${fmtK(l.value)}</text>`
+            ${l.showValue
+              ? html`<text x=${l.x} y=${l.y - 7} text-anchor=${anchor} font-size="11" fill=${l.isPeak ? "var(--accent)" : "var(--fg-faint)"}>${fmtK(l.value)}</text>`
+              : null
             }
           `;
         })}
