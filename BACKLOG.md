@@ -116,25 +116,6 @@ Lean (1) when actually doing the work. (2) is a stopgap if the propagate session
 
 **Composite with #87:** the modify-in-place convention applies to propagation too — when the propagate pass updates screen 02 to show pills, screen 02 *becomes* the pills-version. The pre-pills version lives in git history, not as a parallel screen.
 
-### #84 — Document the two-channel feedback model for design workflows
-**Why:** Caught 2026-05-08 — Steven's call when reviewing the phase-flow PNGs: "I'd argue that this is exactly what the human loop is for. I can work with claude/pencil to make the corrections." Right take, and worth pinning down so future sessions don't reflexively reach for forge-reject when the cheaper channel exists.
-
-**Two distinct feedback channels in the design workflow:**
-
-1. **Forge gate (reject + onReject)** — for *prompt-level* problems. The prompt-author made wrong inferences (wrong screens listed, wrong style, missing requirements, stale context like "11 screens" when there are 20). Reject loops back to brief; prompt-author re-runs with rationale. Heavy: full round-trip, new Pencil session needed afterward.
-2. **In-Pencil iteration with Claude** — for *rendering-level* problems. The prompt was right; one specific element rendered wrong (e.g., fanout pill showing single-task-progress instead of N-task-parallelism). Open the frame, tell Pencil-Claude what to fix, save. No forge round-trip. Stays inside the human-led `ui-review` phase where the brief intended.
-
-**Heuristic for which channel:** if the *brief* would change as a result of the fix, that's a reject. If only the *frame* would change, that's a Pencil iteration.
-
-**Where this lives:**
-- prompt-author seed should mention both channels in PROMPT.md output (so the human running PROMPT.md knows iteration during the session is normal/expected, not a sign that the prompt was wrong).
-- ui-design workflow's gate-button copy (#62) might want different verbs to reflect this — "reject" reads heavy when the right move was iteration. Maybe a third option "back to prompt-author" or "this is a Pencil-iteration thing, just keep working."
-- Documentation: a small section in `docs/concepts.md` or a new `docs/how-to-design-workflows.md` walking through the two channels.
-
-Validates by experience: Steven shipped multiple in-Pencil corrections this session that would have been over-rejected through forge.
-**Why:** Caught alongside #80. Validator looks for `<basename(designDir)>.pen`; with shared corpora the filename is meaningful (`dashboard.pen`), not derived. The seed-convention is too tight.
-**How to apply:** `submitValidators.ts` — replace fixed-name lookup with `readdirSync(designDir).filter(f => f.endsWith('.pen'))`. Error if zero (with a clear "did Pencil save?" message); error if multiple (ambiguity, list found files); pass if exactly one. The non-zero check still applies. ~10 lines.
-
 ### #73 — Reds-on-investigators: category mismatch; redirect parallel scrutiny to peer-investigation
 **Why this is the wrong shape today, not a prompt-fix problem.** Caught 2026-05-08 mid-investigation run on `task-investigate-f6ed49`. Both red-wide and red-narrow returned `verdict: "fail"` with high-severity findings that *restated the investigator's own findings about the topaz codebase*, not critiques of the investigator's work. Initial diagnosis was "reds drifted out of scope; tighten their seed prompts." That's wrong — the deeper bug is in the verdict vocabulary itself.
 
@@ -364,11 +345,70 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 
 ### #160 — Architecture-advisor agent: produce Mermaid architecture documents
 
-### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
-
 ### #167 — awaiting_human_input status is ~60% wired — incomplete state transitions, no CLI command
 
+### #172 — Gate request-changes should apply the rationale's fix list in place, not re-run the phase/plan
+**Caught 2026-05-28** on wnba-led-scoreboard (same review as the discipline-fanout gap, #171): when the human used request-changes at a build gate, it drove a re-run rather than a targeted application of the rationale's fix list.
+
+**Current behavior (`gate.ts`).** request-changes marks the task failed and inserts a pending task in the SAME step, carrying the rationale as `inputs.requestedChanges`. So the implementer re-runs the whole step with the rationale as free text, rather than surgically applying the specific fixes the human listed against the existing diff. (Reject + `on_reject` is the other path — that loops to an upstream step, e.g. brief/plan, = a full re-plan.)
+
+**Desired.** request-changes should feed the rationale's fix list to the implementer as a targeted change set: "apply these specific fixes to your existing diff," preserving work already done, not regenerating the step from scratch or re-planning upstream.
+
+**Open question for whoever picks this up.** Pin down which path the wnba run actually hit — request-changes re-running the full build step, or a reject→on_reject upstream re-plan. The fix differs:
+1. make the request-changes re-dispatch incremental (carry the prior diff + fix list, instruct surgical edits), vs
+2. ensure UI-variant build gates expose request-changes (in-place) rather than only reject (upstream).
+
+Same class of forge rough-edge as the browser/:9222 and forge-test/Jest gaps surfaced 2026-05-28.
+
+
 ## Done (recent)
+
+### #84 — Document the two-channel feedback model for design workflows
+**Closed:** 2026-05-28.
+
+**Why:** Caught 2026-05-08 — Steven's call when reviewing the phase-flow PNGs: "I'd argue that this is exactly what the human loop is for. I can work with claude/pencil to make the corrections." Right take, and worth pinning down so future sessions don't reflexively reach for forge-reject when the cheaper channel exists.
+
+**Two distinct feedback channels in the design workflow:**
+
+1. **Forge gate (reject + onReject)** — for *prompt-level* problems. The prompt-author made wrong inferences (wrong screens listed, wrong style, missing requirements, stale context like "11 screens" when there are 20). Reject loops back to brief; prompt-author re-runs with rationale. Heavy: full round-trip, new Pencil session needed afterward.
+2. **In-Pencil iteration with Claude** — for *rendering-level* problems. The prompt was right; one specific element rendered wrong (e.g., fanout pill showing single-task-progress instead of N-task-parallelism). Open the frame, tell Pencil-Claude what to fix, save. No forge round-trip. Stays inside the human-led `ui-review` phase where the brief intended.
+
+**Heuristic for which channel:** if the *brief* would change as a result of the fix, that's a reject. If only the *frame* would change, that's a Pencil iteration.
+
+**Where this lives:**
+- prompt-author seed should mention both channels in PROMPT.md output (so the human running PROMPT.md knows iteration during the session is normal/expected, not a sign that the prompt was wrong).
+- ui-design workflow's gate-button copy (#62) might want different verbs to reflect this — "reject" reads heavy when the right move was iteration. Maybe a third option "back to prompt-author" or "this is a Pencil-iteration thing, just keep working."
+- Documentation: a small section in `docs/concepts.md` or a new `docs/how-to-design-workflows.md` walking through the two channels.
+
+Validates by experience: Steven shipped multiple in-Pencil corrections this session that would have been over-rejected through forge.
+**Why:** Caught alongside #80. Validator looks for `<basename(designDir)>.pen`; with shared corpora the filename is meaningful (`dashboard.pen`), not derived. The seed-convention is too tight.
+**How to apply:** `submitValidators.ts` — replace fixed-name lookup with `readdirSync(designDir).filter(f => f.endsWith('.pen'))`. Error if zero (with a clear "did Pencil save?" message); error if multiple (ambiguity, list found files); pass if exactly one. The non-zero check still applies. ~10 lines.
+
+### #171 — feature-ui-design-{provided,needed} build phase ignores discipline tags — port feature.yml fanout
+**Closed:** 2026-05-28. Commit `645a523`.
+
+**Caught 2026-05-28** on wnba-led-scoreboard: a `feature-ui-design-provided` run dispatched a single generic `engineer` for the whole build wave. The tech-lead plan tagged each step's discipline (steps 1–4 backend, 5–6 frontend), but the build phase ignored the tags — they rode along as metadata and never routed to frontend-specialist / backend-specialist. CLAUDE.md says the pipeline is "engineer (specialist per step)"; that did not happen.
+
+**Root cause (verified).** The fanout mechanism exists and `feature.yml` uses it — its `build` step has:
+
+    fanout:
+      from_upstream: { step: plan, array_key: steps, input_key: step }
+      agent_map: { frontend: frontend-specialist, backend: backend-specialist, infosec: security-advisor }
+
+with `agent: engineer` as the fallback for unmapped/general disciplines. The two UI variants were never migrated:
+- `seeds/workflows/feature-ui-design-provided.yml` build step (~line 48): plain `agent: engineer`, no fanout.
+- `seeds/workflows/feature-ui-design-needed.yml` build step (~line 85): same.
+
+The irony: the UI workflows are exactly where frontend-specialist matters most, and they are the two that don't route to it.
+
+**Fix.** Port feature.yml's build-phase `fanout` block + the per-step `workflow_additions` ("Implement your assigned plan-step (passed via inputs.step)…") into both UI variants. YAML-only, no code change — the FanoutDef schema + runtime are already proven by feature.yml. Reds stay per-parent (review the aggregate diff), same as feature.yml (#139).
+
+**Verify.** Confirm the tech-lead seed emits a `discipline` field per plan step (feature.yml already relies on it). Then a UI feature with mixed steps should fan out: frontend steps → frontend-specialist, backend → backend-specialist, unmapped → engineer.
+
+
+### #166 — forge invoke prompt-author → host-side Claude Code + Pencil session (replace out-of-band handoff)
+**Closed:** 2026-05-28. Commit `e358c38`.
+
 
 ### #159 — commit-msg hook false-positive: blocks 'forge claude' despite allowlist
 **Closed:** 2026-05-28.
