@@ -537,6 +537,89 @@ Provenance: forge red panel + independent external review + in-use refresh-token
 
 ### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
 
+### #192 — Revisit notification suppression: global NO_NOTIFY kill-switch + invoke-path noise
+Revisit how forge suppresses notifications. Two related problems in the notify subsystem, to be solved together.
+
+**Problem 1 — testing suppression is indirect.** Today #175 silences the test suite by clearing FORGE_NOTIFY in src/test-setup.ts so isAnyProviderEnabled() is false. That works but it is implicit (you have to know that clearing the provider list is what disables notifications) and only covers the in-process suite. Proposed: a single explicit global kill-switch, e.g. NO_NOTIFY=true, checked at the top of the dispatch path (src/notify/trigger.ts dispatch() / isAnyProviderEnabled()) that short-circuits ALL providers regardless of FORGE_NOTIFY / NTFY_URL / Twilio config. Then test-setup.ts (and any other "don't notify" context) just sets NO_NOTIFY=true — clearer intent, one lever, provider-agnostic.
+
+**Problem 2 — orchestrator-internal invoke runs notify on every completion.** Every `forge invoke` is its own run; updateRunStatus (src/store/runs.ts:128) fires notifyOnRunTransition on complete/failed, and the default FORGE_NOTIFY_ON includes complete+failed. So an orchestrator-driven invoke chain (engineer -> test-engineer -> ...) buzzes the human once per sub-agent, even though the orchestrator is watching synchronously and the human only needs gate / blocked / awaiting / top-level-pipeline-complete signals. Hit live 2026-05-29 during the #186 work (4+ pushes for one logical task). Candidate fix: suppress complete/failed ntfy for invoke-path runs specifically (keep them for `forge new` pipeline runs and ALL gate/blocked/awaiting states everywhere), or a per-invoke quiet flag. Role/path-based suppression is cleaner since the orchestrator always wants invokes quiet.
+
+**Why together:** both are "this transition is not a human-actionable signal" — the same insight #175 applied to the test path. A clean design might unify them: a notification-policy layer where NO_NOTIFY is the hard global off, FORGE_NOTIFY_ON is the transition filter, and invoke-path runs default to a quiet policy.
+
+Relates to #175 (test suite no longer notifies — the narrow precedent). Deferred — not urgent.
+
+
+### #193 — Crawl 1 — events-read: eventsForTask/eventsForRun + render timelines in forge show
+Crawl milestone, step 1 of 5 (see docs/observability.md, Crawl section). The keystone — do this first; the rest of Crawl is worthless until it lands.
+
+**The problem this fixes:** forge's events table is WRITE-ONLY. logEvent is the only accessor in src/store/events.ts; nothing — not forge show, status, watch, or the dashboard — ever reads it back (verified: zero `FROM events` queries in src/). Forge faithfully records ~12 event types from a dozen call sites into a table no command can display.
+
+**Scope (deliberately minimal — no schema, no new emissions):**
+- Add read accessors to src/store/events.ts: eventsForTask(taskId) and eventsForRun(runId).
+- Render timelines in src/cli/commands/show.ts: for a task, its lifecycle events (+ relevant run-level + verdict events) in timestamp order; for a run, run lifecycle + task events as one ordered timeline.
+- Add --json output (orchestrator-consumable).
+
+**Acceptance:**
+- forge show <task-id> displays an event timeline from existing data.
+- forge show <run-id> displays a run timeline (NOTE: show currently only accepts task ids — this also requires the run-id branch; coordinate with Crawl 4 which grows the run-id detail view. Minimal here = timeline; rich diagnostics come in Crawl 4).
+- No schema change. No new event emissions.
+
+Foundation for Crawl 2 (backfill — the new events need a surface to appear on) and Crawl 4 (detail view). Blocks both.
+
+
+### #194 — Crawl 2 — events-backfill: emit the genuinely-missing lifecycle events
+Crawl milestone, step 2 of 5 (docs/observability.md, Crawl §2). Depends on Crawl 1 (read path) so the new events are actually visible.
+
+**Only backfill what's genuinely missing.** Already emitted today (do NOT re-add): run.created, run.completed, run.cancelled, task.created, task.started, task.completed, task.failed, task.cancelled (#186), task.awaiting_red, task.blocked_by_red, gate.decided, verdict.received.
+
+**The real gap to fill:**
+- run.abandoned — NOT in the EventType union at all; add it. forge abandons runs (cancel/reaper) but emits no abandon event.
+- task.awaiting_gate — emitted nowhere; add on the awaiting-gate transition.
+- container.started / container.exited / container.killed / container.idle_timeout — none exist.
+- auth.profile_applied / auth.profile_failed — the #176 auth epic emits ZERO events; add when forge stages auth state (applied) and when AuthProfileError throws (failed).
+- Remove the DEAD enum values task.idle_timeout and task.crashed from EventType — they're in the union (events.ts:13-14) but no logEvent call ever fires them. Their meaning moves to failure_kind (Crawl 3).
+
+**Naming decision (settled):** container.idle_timeout is the INFRA event (watchdog fired, container killed). The TASK outcome stays task.failed carrying failure_kind: idle_timeout (Crawl 3). Likewise container.exited(nonzero)+no result → task.failed + failure_kind: container_crash. Do not emit a separate task.idle_timeout/task.crashed event — failure_kind carries the distinction.
+
+**Land mine — container.* events emit from the CALLER, not the executor.** src/v2/docker-exec.ts (DockerExecFn) has no taskId/runId and is on the do-not-touch-without-a-learnings-entry list. Emit from src/v2/invoke.ts and src/v2/runNext.ts which hold runId+taskId: container.started before the exec call, container.exited/killed/idle_timeout after, deriving idle from the existing IDLE_TIMEOUT_EXIT_CODE the executor returns.
+
+**Acceptance:** every status transition emits an event; forge cancel, idle timeout, gate decisions, auth failures, red blocks all visible via Crawl 1's forge show timeline.
+
+
+### #195 — Crawl 3 — failure-kind: classify task failures in structured event payloads (no schema column)
+Crawl milestone, step 3 of 5 (docs/observability.md, Crawl §3).
+
+**Do NOT add a tasks.failure_kind column in this stage.** That's a schema change to ~/.forge/forge.db with machine-wide blast radius (every running forge re-migrates on next DB open), and its only advantage — aggregate queries — isn't realized until the Run-stage metrics layer. Store failure_kind in the structured FAILURE EVENT PAYLOAD; keep tasks.error as the prose summary. Promote to a column deliberately later, tied to #141 (SQL single-source-of-truth).
+
+**Central classifier, not 24 hand-edits.** markTaskFailed has 24 call sites (invoke.ts ×8, runNext.ts ×12, gate.ts ×2, cancel.ts ×2), several in the dispatch core. Route them through one tested classifier module that records the failure event with a kind, rather than spreading string constants across the runner.
+
+Initial kinds + mapping: AuthProfileError(missing)→auth_missing; AuthProfileError(expired)→auth_expired; IDLE_TIMEOUT_EXIT_CODE→idle_timeout; nonzero container exit + no result→container_crash; empty result.json→result_missing; malformed result.json→result_malformed; gate reject/request-changes→gate_rejected; forge cancel path→cancelled; auth injection failure→auth_injection_failed; plus model_error, tool_error, red_blocked, unknown.
+
+**Acceptance:** every failure event carries a failure_kind; classification logic centralized + unit-tested for every kind; orchestrators can branch on failure_kind without parsing strings. (Dashboard grouping waits for the column/metrics layer — out of scope here.)
+
+
+### #196 — Crawl 4 — show-detail: grow forge show <run|task> into the diagnostic view
+Crawl milestone, step 4 of 5 (docs/observability.md, Crawl §4). Depends on Crawl 1 (timeline read path) and Crawl 3 (failure_kind in payloads).
+
+**Grow forge show — do NOT add forge inspect.** Forge already has status (overview) + show (detail); a third overlapping read command is user-facing sprawl before the read model is stable. Make forge show <run-id|task-id> the canonical detail/diagnostic command.
+
+Task view adds (on top of Crawl 1's timeline): status + failure_kind, container name, elapsed time, last-output timestamp, idle timeout if known, last few stdout/stderr lines, result-file status (missing/empty/malformed/valid), artifact manifest (Crawl 5), suggested next command (e.g. failed+idle_timeout → forge retry <id>).
+
+Run view: identity/workflow/project/status, current blockers, failed tasks grouped by failure_kind, awaiting-gate + blocked-by-red tasks, running tasks with last-output time, next suggested command. (This is where the run-id branch from Crawl 1 gets its rich rendering.)
+
+**Acceptance:** forge show <task-id> on a failed task shows the full diagnostic block from the doc's example (lines ~227-248); forge show <run-id> summarizes blockers + failures by kind; --json for both.
+
+
+### #197 — Crawl 5 — manifest: write task manifest.json indexing artifacts
+Crawl milestone, step 5 of 5 (docs/observability.md, Crawl §5). Independent of Crawl 1-4 — can be built in parallel; consumed by Crawl 4's artifact-manifest line.
+
+Each task directory gets a small manifest.json indexing known artifacts: taskId, runId, files map (prompt=CLAUDE.md, package=package.md, result=result.json, stdout/stderr logs), container.name, and an auth block describing whether a profile was REQUESTED and whether state was MOUNTED.
+
+**Secrets discipline:** the manifest describes whether sensitive capabilities were mounted — NOT where bearer credentials live. No token paths, no auth-state contents. Consistent with the #176 rule (credential never in prompts/logs/project-mount; this is the same principle for the manifest).
+
+**Acceptance:** every task dir gets a manifest.json on dispatch; no secret paths in it; forge show (Crawl 4) reads it for the artifact list.
+
+
 ## Done (recent)
 
 ### #186 — forge cancel/kill verb for a stuck task or run (manual reaper)
