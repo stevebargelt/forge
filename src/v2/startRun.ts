@@ -27,6 +27,10 @@ export type StartRunArgs = {
    *  workspace's orchestrator runs against an external target repo. Defaults
    *  to projectDir at the CLI layer when not set explicitly. */
   workspace?: string;
+  /** #176: name of a captured auth profile injected into browser-verify steps
+   *  of this run. Stored in metadata; runNext scopes it to browser-capable
+   *  roles. */
+  authProfile?: string;
 };
 
 export type StartRunResult = {
@@ -47,6 +51,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
   const metadata: Record<string, unknown> = { ...args.inputs };
   if (args.designDir) metadata["designDir"] = args.designDir;
   if (args.workspace) metadata["workspace"] = args.workspace;
+  if (args.authProfile) metadata["authProfile"] = args.authProfile;
 
   const run: Run = {
     id: runId,

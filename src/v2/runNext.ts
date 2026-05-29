@@ -33,6 +33,7 @@ import { computeReadyQueue } from "./ready-queue.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
+import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser } from "./auth-state.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
@@ -235,8 +236,10 @@ async function dispatchSingleStep(args: {
   //   3. fanoutInput (per-child key/value for fanout dispatches)
   // designDir is intentionally NOT poured into inputs — it's a mount, not a task field.
   const inputs: Record<string, unknown> = { ...args.runMetadata, upstream };
-  // designDir lives at the docker mount layer; don't expose it as an input value.
+  // designDir + authProfile live at the docker mount layer; don't expose them
+  // as input values (the profile name would otherwise ride into the prompt).
   delete (inputs as Record<string, unknown>)["designDir"];
+  delete (inputs as Record<string, unknown>)["authProfile"];
   if (args.fanoutInput) {
     inputs[args.fanoutInput.key] = args.fanoutInput.value;
   }
@@ -279,6 +282,7 @@ async function dispatchSingleStep(args: {
     taskPackage,
     runtimeName: step.runtime,
     model: step.model,
+    authProfile: authProfileForRole(args.runMetadata, agentRole),
     dockerExec: args.dockerExec,
   });
 
@@ -739,6 +743,7 @@ async function runFanoutChild(args: {
     fanoutIndex: args.index,
   };
   delete childInputs["designDir"];
+  delete childInputs["authProfile"];
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
     runId: args.runId,
@@ -775,6 +780,7 @@ async function runFanoutChild(args: {
     taskPackage,
     runtimeName: step.runtime,
     model: step.model,
+    authProfile: authProfileForRole(args.runMetadata, agentRole),
     dockerExec: args.dockerExec,
   });
 
@@ -810,6 +816,9 @@ async function runContainer(args: {
   taskPackage: TaskPackage;
   runtimeName: string;
   model: string | undefined;
+  // #176: name of a captured auth profile to inject. Callers pass this only for
+  // browser-capable PRIMARY steps; reds never do (read-only, no credential).
+  authProfile?: string;
   dockerExec?: DockerExecFn;
 }): Promise<ContainerOutcome> {
   const dir = taskDir(args.runId, args.taskId);
@@ -831,6 +840,29 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
 
+  // #176: stage the auth profile (resolve + reconcile localhost origins) for
+  // injection. Fail fast on missing/expired — don't run a browser step against
+  // a dead session and emit false "app broken" findings.
+  let authStateHostPath: string | undefined;
+  if (args.authProfile) {
+    try {
+      const staged = resolveAuthStateForContainer(args.authProfile, dir);
+      authStateHostPath = staged.hostPath;
+      if (staged.reconciled) {
+        console.error(
+          `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
+            `Agent should navigate to: ${staged.origins.join(", ")}`,
+        );
+      }
+    } catch (e) {
+      if (e instanceof AuthProfileError) {
+        markTaskFailed(args.taskId, e.message);
+        return { kind: "failed", error: e.message };
+      }
+      throw e;
+    }
+  }
+
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
     TASK_DIR: dir,
@@ -840,6 +872,7 @@ async function runContainer(args: {
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,
+    AUTH_STATE_HOST_PATH: authStateHostPath,
   };
 
   let dockerArgs;
@@ -978,4 +1011,14 @@ function renderTaskPackage(tp: TaskPackage): string {
 function resolveModel(alias: string | undefined, runtime: Runtime): string {
   if (!alias) return runtime.models["default"]!;
   return runtime.models[alias] ?? runtime.models["default"]!;
+}
+
+// #176: the run-level auth profile (from `forge new --auth-profile`) applies
+// only to browser-capable PRIMARY roles — non-browsing roles don't need the
+// credential and would trip the browser-tools guard. Reds never reach here
+// (runOneRed doesn't pass authProfile).
+function authProfileForRole(runMetadata: Record<string, unknown>, role: string): string | undefined {
+  const profile = runMetadata["authProfile"];
+  if (typeof profile !== "string" || !profile) return undefined;
+  return roleUsesBrowser(role) ? profile : undefined;
 }

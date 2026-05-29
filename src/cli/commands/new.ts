@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
+import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { startRun } from "../../v2/startRun.js";
 
@@ -21,6 +22,7 @@ export function registerNew(program: Command): void {
     .option("--project <path>", "project directory mounted at /project (default: cwd; persisted on run)")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--meta <json>", "extra run metadata as JSON")
+    .option("--auth-profile <name>", "inject a captured auth profile (#176) into browser-verify steps so they test the app authenticated")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       validateCredsForNewRun();
@@ -54,6 +56,19 @@ export function registerNew(program: Command): void {
         inputs["designDir"] = designDir;
       }
 
+      // #176: validate the auth profile up front so a missing/expired session
+      // fails the run at creation, not deep into a browser-verify step.
+      const authProfile = (options as { authProfile?: string }).authProfile;
+      if (authProfile) {
+        const st = profileStatus(authProfile);
+        if (!st.exists) {
+          throw new Error(`auth profile '${authProfile}' not found — run: forge auth-profile login ${authProfile} --url <url>`);
+        }
+        if (st.expired) {
+          throw new Error(`auth profile '${authProfile}' is expired — run: forge auth-profile login ${authProfile} --url <url>`);
+        }
+      }
+
       const { runId } = startRun({
         workflow,
         title,
@@ -61,6 +76,7 @@ export function registerNew(program: Command): void {
         projectDir,
         designDir,
         workspace,
+        authProfile,
       });
 
       console.log(`Created run ${runId}`);

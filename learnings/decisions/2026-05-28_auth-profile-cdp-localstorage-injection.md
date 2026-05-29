@@ -112,8 +112,9 @@ The agent must browse `host.docker.internal:3000` (a container can't reach the
 host's `localhost` on macOS), but the profile was captured at `localhost:3000`.
 The injector guards localStorage by `location.origin`, so the captured origin
 must match what the agent browses. The proof initially hand-derived a
-`qa-admin-docker` profile; that's now automatic. `invoke.ts` calls
-`reconcileStateForContainer` — localhost-family origins (`localhost`,
+`qa-admin-docker` profile; that's now automatic. Both `forge invoke` and the
+pipeline use the shared `resolveAuthStateForContainer` helper (src/v2/auth-state.ts),
+which calls `reconcileStateForContainer` — localhost-family origins (`localhost`,
 `127.0.0.1`, `0.0.0.0`, `::1`) and cookie domains are rewritten to the container
 host (`host.docker.internal`, override `FORGE_CONTAINER_HOST`), preserving
 scheme+port. Only when a rewrite is needed is a reconciled copy staged at
@@ -142,19 +143,25 @@ Enforcement: `spawn.ts` fails fast when `--auth-profile` is used but the mounted
 browser-tools dir lacks `auth-inject.js` — an old/upstream checkout can't
 silently no-op auth. The error names the required fork/branch/commit.
 
-## Still pending
+## Pipeline wiring (done)
 
-- Pipeline steps (`--auth-profile` on browser-verify phases) — invoke covers the
-  primary path; pipeline wiring is the same ctx field.
+`forge new --auth-profile <name>` stores the profile on the run; `runNext`
+injects it via the shared helper into browser-capable PRIMARY roles only
+(`engineer`, `frontend-specialist`, `test-engineer`, `manual-qa` —
+`roleUsesBrowser`). Non-browsing roles (architect, tech-lead, advisors) don't
+carry the credential and don't trip the browser-tools guard; **reds never
+receive it** (`runOneRed` passes no profile). The profile name is stripped from
+task inputs so it never rides into a prompt. `forge new` validates the profile
+at creation (fail fast); per-step resolution also catches mid-run expiry. Invoke
+stays unscoped — an explicit `--auth-profile` is honored for any named agent.
+
+## Still pending (optional)
+
 - `browser-content.js` and `--new`-tab cases reuse the same helper; new-tab
   injection re-registers per nav (harmless duplicate init scripts).
 - An upstream PR of `feat/preload-storage-state` to `badlogic/pi-skills` (the
-  change is generic now) would drop the fork entirely — optional follow-up.
+  change is generic now) would drop the fork entirely.
 - Long-term: forking the whole pi-skills repo pins *all* its skills to this
   branch's snapshot; revisit if other skills need upstream updates.
-
-## Note
-
-The spike left a **live** session token at `~/.forge/auth/spike-wnba.storage.json`
-(mode 600, host-global, gitignored territory) plus screenshots with the user's
-email. Bearer credential — delete when done spiking.
+- Scoping is a role allowlist, not a per-step workflow flag; a `needs_auth: true`
+  step field would be more precise if a non-listed role ever needs to browse.
