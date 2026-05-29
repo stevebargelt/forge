@@ -19,6 +19,7 @@ import { registerNotify } from "./commands/notify.js";
 import { registerProjects } from "./commands/projects.js";
 import { registerUsage } from "./commands/usage.js";
 import { registerSweep } from "./commands/sweep.js";
+import { registerCancel } from "./commands/cancel.js";
 import { registerClaude } from "./commands/claude.js";
 import { registerDesign } from "./commands/design.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
@@ -58,6 +59,7 @@ registerNotify(program);
 registerProjects(program);
 registerUsage(program);
 registerSweep(program);
+registerCancel(program);
 registerClaude(program);
 registerDesign(program);
 
