@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { resolveProjectMeta, _clearCacheForTesting } from "./project-meta.js";
 
 let dir: string;
@@ -159,4 +159,20 @@ test("resolveProjectMeta: hash fallback is deterministic across calls", () => {
     rmSync(dirA, { recursive: true, force: true });
     rmSync(dirB, { recursive: true, force: true });
   }
+});
+
+test("resolveProjectMeta: a git subdir takes the repo root's name, not the subdir", () => {
+  // Make `dir` a repo root, resolve a subdir under it.
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  const sub = join(dir, "web-admin");
+  mkdirSync(sub, { recursive: true });
+  assert.equal(resolveProjectMeta(sub)?.label, basename(dir));
+});
+
+test("resolveProjectMeta: name override is read from the repo root, applied to subdirs", () => {
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  writeProjectJson(dir, { name: "wnba-led-scoreboard" }); // override at the ROOT
+  const sub = join(dir, "web-admin");
+  mkdirSync(sub, { recursive: true });
+  assert.equal(resolveProjectMeta(sub)?.label, "wnba-led-scoreboard");
 });

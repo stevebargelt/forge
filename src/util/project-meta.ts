@@ -19,6 +19,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { findGitRoot } from "./git-root.js";
 
 export type ProjectMeta = {
   label: string;
@@ -35,10 +36,13 @@ export function resolveProjectMeta(projectDir: string | null): ProjectMeta | nul
   if (!projectDir) return null;
   const cached = cache.get(projectDir);
   if (cached) return cached;
-  const overrides = readProjectJson(projectDir);
+  // Project identity is the git repo root: a monorepo subdir takes the repo's
+  // name, and the .forge/project.json name override + color live at the root.
+  const root = findGitRoot(projectDir);
+  const overrides = readProjectJson(root);
   const meta: ProjectMeta = {
-    label: overrides?.name ?? basename(projectDir),
-    color: readVscodeColor(projectDir) ?? hashColor(projectDir),
+    label: overrides?.name ?? basename(root),
+    color: readVscodeColor(root) ?? hashColor(root),
     ...(overrides?.description ? { description: overrides.description } : {}),
   };
   cache.set(projectDir, meta);

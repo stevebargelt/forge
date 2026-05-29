@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { uniqueProjectDirs, type ProjectAggregate } from "../store/runs.js";
 import { findForgeProjects } from "./find-forge-projects.js";
 import { resolveProjectMeta } from "./project-meta.js";
+import { findGitRoot } from "./git-root.js";
 import { loadHeartbeats } from "./orchestrator-heartbeats.js";
 
 export type ProjectRecord = {
@@ -43,36 +44,39 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
     maxDepth: opts.scanMaxDepth ?? 3,
   });
 
-  // Union by projectDir.
-  const byDir = new Map<string, ProjectAggregate>();
-  for (const a of dbAggs) byDir.set(a.projectDir, a);
-  for (const fp of fsProjects) {
-    if (!byDir.has(fp.projectDir)) {
-      byDir.set(fp.projectDir, {
-        projectDir: fp.projectDir,
-        lastRunAt: "",
-        runCount: 0,
-        inFlightCount: 0,
-      });
+  // Union + aggregate by GIT REPO ROOT: runs dispatched against a monorepo
+  // subdir (e.g. .../wnba-led-scoreboard/web-admin) roll up under one project
+  // keyed by the repo root, so the list shows one entry per repo, not one per
+  // subdir. Non-git dirs are their own root (findGitRoot returns them as-is).
+  const byRoot = new Map<string, ProjectAggregate>();
+  const fold = (dir: string, runCount: number, inFlightCount: number, lastRunAt: string): void => {
+    const root = findGitRoot(dir);
+    const cur = byRoot.get(root);
+    if (!cur) {
+      byRoot.set(root, { projectDir: root, lastRunAt, runCount, inFlightCount });
+    } else {
+      cur.runCount += runCount;
+      cur.inFlightCount += inFlightCount;
+      if (lastRunAt > cur.lastRunAt) cur.lastRunAt = lastRunAt;
     }
-  }
+  };
+  for (const a of dbAggs) fold(a.projectDir, a.runCount, a.inFlightCount, a.lastRunAt);
+  // forge-init'd projects with no runs yet: ensure their root exists (0 counts).
+  for (const fp of fsProjects) fold(fp.projectDir, 0, 0, "");
 
-  // #153: per-project live session count from ~/.forge/orchestrators/.
-  const liveByDir = new Map<string, number>();
+  // #153: per-project live session count, also folded to the repo root.
+  const liveByRoot = new Map<string, number>();
   for (const hb of loadHeartbeats()) {
     if (!hb.isLive) continue;
-    liveByDir.set(hb.projectDir, (liveByDir.get(hb.projectDir) ?? 0) + 1);
+    const root = findGitRoot(hb.projectDir);
+    liveByRoot.set(root, (liveByRoot.get(root) ?? 0) + 1);
   }
-  // Live sessions for a project that's never had a forge run still count —
-  // bring those projectDirs into the union.
-  for (const dir of liveByDir.keys()) {
-    if (!byDir.has(dir)) {
-      byDir.set(dir, { projectDir: dir, lastRunAt: "", runCount: 0, inFlightCount: 0 });
-    }
+  for (const root of liveByRoot.keys()) {
+    if (!byRoot.has(root)) byRoot.set(root, { projectDir: root, lastRunAt: "", runCount: 0, inFlightCount: 0 });
   }
 
   const out: ProjectRecord[] = [];
-  for (const agg of byDir.values()) {
+  for (const agg of byRoot.values()) {
     const meta = resolveProjectMeta(agg.projectDir);
     if (!meta) continue;  // null projectDir shouldn't happen here
     const record: ProjectRecord = {
@@ -82,7 +86,7 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
       runCount: agg.runCount,
       inFlightCount: agg.inFlightCount,
       hasBacklogMd: existsSync(join(agg.projectDir, "BACKLOG.md")),
-      liveSessions: liveByDir.get(agg.projectDir) ?? 0,
+      liveSessions: liveByRoot.get(agg.projectDir) ?? 0,
       ...(meta.description ? { description: meta.description } : {}),
       ...(agg.lastRunAt ? { lastRunAt: agg.lastRunAt } : {}),
     };
