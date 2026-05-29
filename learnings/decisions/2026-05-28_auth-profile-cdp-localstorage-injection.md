@@ -4,6 +4,23 @@
 **Status:** Slices 1–3 built & verified END-TO-END in a real agent container
 **Ticket:** #176 (auth profiles)
 
+## Outcome — read this first (2026-05-29)
+
+**For routine authenticated E2E, do NOT use this capture-and-inject feature.**
+Use **programmatic login** instead: a dedicated test user + the project's own
+harness logging in fresh each run (e.g. Playwright `globalSetup` →
+`signInWithPassword` → `storageState`). No human, no session expiry, no captured
+token to manage, and the localhost↔host.docker.internal origin reconcile becomes
+moot. The wnba-led-scoreboard web-admin E2E is the reference implementation.
+
+This capture/inject feature (everything below) is the **narrow fallback** for
+apps with **no scriptable login** — third-party SSO/MFA where you genuinely
+can't mint a session programmatically. Principle either way: **forge never logs
+in interactively** — a non-interactive auth script produces the storageState.
+We built capture/inject first (it needed no app changes) before concluding the
+programmatic path is the right default; this is recorded so the next reader
+doesn't repeat that detour.
+
 ## Context
 
 #176 lets forge browser agents test *authenticated* apps without ever holding

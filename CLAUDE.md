@@ -129,6 +129,8 @@ When you read an implementer's result, verify the seed was honored:
 
 The **test-engineer** runs in the pipeline's verify phase. It writes integration and E2E tests — durable test files committed to the repo, not a one-shot report. Its output should include `test_files_written` and `tests_written`. If it returns zero tests written, that's a finding — reject.
 
+**Testing an authenticated app:** default to **programmatic login** — a dedicated test user + the project's own harness logging in fresh each run (e.g. Playwright `globalSetup` → `signInWithPassword` → `storageState`). No human, no expiry, nothing committed. Do NOT reach for `forge auth-profile` capture/inject by default — that's the narrow fallback for apps with no scriptable login (third-party SSO/MFA). forge never logs in interactively. See `learnings/decisions/2026-05-28_auth-profile-cdp-localstorage-injection.md`.
+
 For **exploratory manual QA** (clicking through the app as a user, testing edge cases), invoke `manual-qa` on-demand — it is NOT in the default pipeline. Use it when:
 - The diff is UI-heavy or user-facing
 - You want someone to poke at edge cases (empty states, overflow, weird inputs)
