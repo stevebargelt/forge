@@ -11,6 +11,8 @@ import {
   profileExpiry,
   profileDomains,
   profileStatus,
+  reconcileOriginForContainer,
+  reconcileStateForContainer,
   AUTH_DIR,
   type StorageState,
 } from "./auth-profiles.js";
@@ -136,4 +138,44 @@ test("profileStatus with unknown expiry is not flagged expired", () => {
   const s = profileStatus("dateless", 10_000_000);
   assert.equal(s.expiresAt, null);
   assert.equal(s.expired, false);
+});
+
+// #183 — container origin reconciliation
+test("reconcileOriginForContainer rewrites localhost-family hosts, preserves scheme+port", () => {
+  delete process.env.FORGE_CONTAINER_HOST;
+  assert.equal(reconcileOriginForContainer("http://localhost:3000"), "http://host.docker.internal:3000");
+  assert.equal(reconcileOriginForContainer("http://127.0.0.1:8080"), "http://host.docker.internal:8080");
+  assert.equal(reconcileOriginForContainer("http://localhost"), "http://host.docker.internal");
+  // real DNS passes through untouched
+  assert.equal(reconcileOriginForContainer("https://staging.example.com"), "https://staging.example.com");
+});
+
+test("reconcileOriginForContainer honors FORGE_CONTAINER_HOST override", () => {
+  process.env.FORGE_CONTAINER_HOST = "10.0.0.5";
+  try {
+    assert.equal(reconcileOriginForContainer("http://localhost:3000"), "http://10.0.0.5:3000");
+  } finally {
+    delete process.env.FORGE_CONTAINER_HOST;
+  }
+});
+
+test("reconcileStateForContainer rewrites localhost origins + cookie domains, flags changed", () => {
+  delete process.env.FORGE_CONTAINER_HOST;
+  const s = state({
+    origins: [{ origin: "http://localhost:3000", localStorage: [{ name: "t", value: "v" }] }],
+    cookies: [{ name: "c", value: "v", domain: "localhost", path: "/", expires: -1, httpOnly: false, secure: false }],
+  });
+  const { state: out, changed } = reconcileStateForContainer(s);
+  assert.equal(changed, true);
+  assert.equal(out.origins[0]!.origin, "http://host.docker.internal:3000");
+  assert.equal(out.origins[0]!.localStorage[0]!.value, "v"); // contents untouched
+  assert.equal(out.cookies[0]!.domain, "host.docker.internal");
+});
+
+test("reconcileStateForContainer leaves real-DNS state unchanged", () => {
+  delete process.env.FORGE_CONTAINER_HOST;
+  const s = state({ origins: [{ origin: "https://staging.example.com", localStorage: [{ name: "t", value: "v" }] }] });
+  const { state: out, changed } = reconcileStateForContainer(s);
+  assert.equal(changed, false);
+  assert.equal(out.origins[0]!.origin, "https://staging.example.com");
 });

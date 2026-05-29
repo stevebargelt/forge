@@ -144,6 +144,55 @@ export function profileDomains(state: StorageState): string[] {
   return [...set].sort();
 }
 
+// #183: a captured profile records the origin the human logged in at (often
+// http://localhost:3000). An agent CONTAINER can't reach the host's localhost —
+// it reaches the host via host.docker.internal (Docker Desktop) — so the state's
+// origin must be rewritten to what the agent will actually browse, or the
+// injector's location.origin guard never fires and auth silently no-ops.
+// Override the target host with FORGE_CONTAINER_HOST (e.g. for non-Docker-Desktop
+// setups); host-served apps on real DNS need no rewrite.
+const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+
+function containerHost(): string {
+  return process.env.FORGE_CONTAINER_HOST || "host.docker.internal";
+}
+
+// Rewrite a localhost-family origin to the container-reachable host, preserving
+// scheme and port. Non-localhost origins (real DNS) pass through unchanged.
+export function reconcileOriginForContainer(origin: string): string {
+  try {
+    const u = new URL(origin);
+    if (LOCALHOST_HOSTS.has(u.hostname)) {
+      u.hostname = containerHost();
+      return u.origin;
+    }
+    return origin;
+  } catch {
+    return origin;
+  }
+}
+
+// Produce a container-reachable copy of a storage state: localhost-family origins
+// and cookie domains rewritten to the container host. `changed` is false when
+// nothing localhost was present (the original can be used as-is).
+export function reconcileStateForContainer(state: StorageState): { state: StorageState; changed: boolean } {
+  let changed = false;
+  const host = containerHost();
+  const origins = state.origins.map((o) => {
+    const newOrigin = reconcileOriginForContainer(o.origin);
+    if (newOrigin !== o.origin) changed = true;
+    return { ...o, origin: newOrigin };
+  });
+  const cookies = state.cookies.map((c) => {
+    if (LOCALHOST_HOSTS.has(c.domain)) {
+      changed = true;
+      return { ...c, domain: host };
+    }
+    return c;
+  });
+  return { state: { cookies, origins }, changed };
+}
+
 export interface ProfileStatus {
   name: string;
   exists: boolean;

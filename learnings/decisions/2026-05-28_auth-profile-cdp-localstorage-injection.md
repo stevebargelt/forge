@@ -106,15 +106,22 @@ injector firing in-container then navigating:
 Reachability: `host.docker.internal:3000` resolves and returns 200 from the agent
 image with NO `--add-host` (Docker Desktop macOS auto-provides it).
 
-## Finding from the run: origin reconciliation for host-served apps (→ ticket)
+## Origin reconciliation for host-served apps (#183 — resolved)
 
 The agent must browse `host.docker.internal:3000` (a container can't reach the
 host's `localhost` on macOS), but the profile was captured at `localhost:3000`.
 The injector guards localStorage by `location.origin`, so the captured origin
-must match what the agent browses. For the proof we hand-derived a
-`qa-admin-docker` profile with the origin rewritten to `host.docker.internal`
-(the Supabase JWT is origin-agnostic, so the same token authenticates). forge
-should reconcile this rather than require a hand-derived profile — see backlog.
+must match what the agent browses. The proof initially hand-derived a
+`qa-admin-docker` profile; that's now automatic. `invoke.ts` calls
+`reconcileStateForContainer` — localhost-family origins (`localhost`,
+`127.0.0.1`, `0.0.0.0`, `::1`) and cookie domains are rewritten to the container
+host (`host.docker.internal`, override `FORGE_CONTAINER_HOST`), preserving
+scheme+port. Only when a rewrite is needed is a reconciled copy staged at
+`<taskDir>/auth-state.json` (mode 600, so the bearer token isn't exposed by the
+task dir's 0777 perms) and mounted instead of the original; real-DNS profiles
+mount unchanged. The rewritten origin is logged so the caller knows the URL to
+navigate the agent to. The Supabase JWT is origin-agnostic, so the same token
+authenticates under the rewritten origin.
 
 ## Dependency pin (#181 + #182)
 

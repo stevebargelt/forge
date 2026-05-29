@@ -33,7 +33,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
-import { profileStatus } from "../util/auth-profiles.js";
+import { profileStatus, readProfile, reconcileStateForContainer } from "../util/auth-profiles.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -184,6 +184,28 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       return { runId, taskId, status: "failed", error };
     }
     authStateHostPath = status.path;
+
+    // #183: a container can't reach the host's localhost; rewrite localhost-family
+    // origins to the container host (host.docker.internal) so the injector's
+    // origin guard matches what the agent browses. Only when a rewrite is needed
+    // do we stage a copy — written mode 600 so the bearer token isn't exposed by
+    // the task dir's 0777 perms. The agent must then navigate to the rewritten
+    // origin (surfaced below).
+    const original = readProfile(args.authProfile);
+    if (original) {
+      const { state: reconciled, changed } = reconcileStateForContainer(original);
+      if (changed) {
+        const staged = join(dir, "auth-state.json");
+        writeFileSync(staged, JSON.stringify(reconciled));
+        chmodSync(staged, 0o600);
+        authStateHostPath = staged;
+        const origins = reconciled.origins.map((o) => o.origin).join(", ");
+        console.error(
+          `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
+            `Point the agent at: ${origins}`,
+        );
+      }
+    }
   }
 
   const ctx: SpawnContext = {

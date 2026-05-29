@@ -2,13 +2,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { writeProfile } from "../util/auth-profiles.js";
+import { taskDir } from "../util/paths.js";
 
 // Stub exec that writes a fixed result.json and returns 0.
 function makeStubExec(resultJson: unknown, exitCode = 0): DockerExecFn {
@@ -411,4 +412,57 @@ test("invoke: --auth-profile fails fast (no container) when the profile is expir
   assert.equal(r.status, "failed");
   assert.match(r.error!, /expired/);
   assert.equal(execCalled, false, "no container should spawn for an expired profile");
+});
+
+test("invoke: --auth-profile with a localhost origin stages a reconciled mode-600 copy (#183)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  delete process.env.FORGE_CONTAINER_HOST;
+  const fhome = process.env.FORGE_HOME!;
+  // A browser-tools dir carrying the injector, so the #181 auth guard passes.
+  const btDir = join(fhome, "bt-skill");
+  mkdirSync(btDir, { recursive: true });
+  writeFileSync(join(btDir, "auth-inject.js"), "// stub injector\n");
+  // A runtime that mounts browser-tools (the stub claude.yml doesn't).
+  const rtPath = join(fhome, "runtimes", "claude-bt.yml");
+  writeFileSync(rtPath, `
+name: claude-bt
+description: bt stub
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+  - { host: "${btDir}", container: /home/agent/.claude/skills/browser-tools }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  writeProfile("local-admin", {
+    cookies: [],
+    origins: [{ origin: "http://localhost:3000", localStorage: [{ name: "sb-x-auth-token", value: supabaseValue(future) }] }],
+  });
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test",
+    projectDir: "/tmp/x",
+    authProfile: "local-admin",
+    runtimeName: "claude-bt",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(r.status, "complete");
+
+  const staged = join(taskDir(r.runId, r.taskId), "auth-state.json");
+  assert.ok(existsSync(staged), "reconciled auth-state.json should be staged in the task dir");
+  const reconciled = JSON.parse(readFileSync(staged, "utf8"));
+  assert.equal(reconciled.origins[0].origin, "http://host.docker.internal:3000");
+  // owner-only perms on the bearer token despite the 0777 task dir
+  assert.equal(statSync(staged).mode & 0o777, 0o600);
 });
