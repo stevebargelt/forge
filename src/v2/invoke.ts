@@ -113,7 +113,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     steps: [step],
   };
 
-  const taskId = newTaskId("task");
+  // Use the agent role for the id (e.g. task-test-engineer-ab12cd), not the
+  // literal phase "task" — newTaskId already prefixes "task-", so passing "task"
+  // produced the doubled "task-task-..." id. The row's phase stays "task".
+  const taskId = newTaskId(args.agentRole);
   const taskPackage: TaskPackage = {
     taskId,
     runId,
