@@ -20,6 +20,49 @@ export type EventType =
   | "verdict.findings_dropped"
   | "gate.decided";
 
+export type Event = {
+  id: number;
+  runId: string | null;
+  taskId: string | null;
+  eventType: EventType;
+  payload: unknown;
+  createdAt: string;
+};
+
+type EventRow = {
+  id: number;
+  run_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  payload: string | null;
+  created_at: string;
+};
+
+function rowToEvent(row: EventRow): Event {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    eventType: row.event_type as EventType,
+    payload: row.payload !== null ? (JSON.parse(row.payload) as unknown) : null,
+    createdAt: row.created_at,
+  };
+}
+
+export function eventsForTask(taskId: string): Event[] {
+  const rows = getDb({ readOnly: true })
+    .prepare(`SELECT * FROM events WHERE task_id = ? ORDER BY created_at ASC, id ASC`)
+    .all(taskId) as EventRow[];
+  return rows.map(rowToEvent);
+}
+
+export function eventsForRun(runId: string): Event[] {
+  const rows = getDb({ readOnly: true })
+    .prepare(`SELECT * FROM events WHERE run_id = ? ORDER BY created_at ASC, id ASC`)
+    .all(runId) as EventRow[];
+  return rows.map(rowToEvent);
+}
+
 export function logEvent(
   eventType: EventType,
   opts: { runId?: string; taskId?: string; payload?: unknown } = {}
