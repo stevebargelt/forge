@@ -19,7 +19,6 @@
 // - No gate concept; agent completes or fails
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
-import { spawn as cpSpawn } from "node:child_process";
 import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
@@ -28,6 +27,8 @@ import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
+import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
@@ -182,6 +183,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
+  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
   let exitCode: number;
   try {
     exitCode = await exec({
@@ -189,6 +191,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       stdin: dockerArgs.stdin,
       stdoutPath,
       stderrPath: join(dir, "container.stderr.log"),
+      idleTimeoutMs,
     });
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed
@@ -201,6 +204,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // #155: capture token usage from the stream-json log. Best-effort; never
   // throws or affects task status.
   captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
+
+  // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
+  // timeout). Fail with a clear reason rather than a generic container_crash.
+  if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
+    const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
+    markTaskFailed(taskId, error);
+    closeRun(false);
+    return { runId, taskId, status: "failed", error };
+  }
 
   // Read result.json.
   const resultPath = join(dir, "result.json");
@@ -286,32 +298,4 @@ function resolveModel(alias: string | undefined, runtime: Runtime): string {
   return runtime.models[alias] ?? runtime.models.default!;
 }
 
-type DockerExecArgs = {
-  args: string[];
-  stdin: string | undefined;
-  stdoutPath: string;
-  stderrPath: string;
-};
-export type DockerExecFn = (args: DockerExecArgs) => Promise<number>;
-
-const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath }) => {
-  return new Promise<number>((resolve) => {
-    const proc = cpSpawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-    const outChunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    proc.stdout.on("data", (c: Buffer) => outChunks.push(c));
-    proc.stderr.on("data", (c: Buffer) => errChunks.push(c));
-    proc.on("close", (code) => {
-      writeFileSync(stdoutPath, Buffer.concat(outChunks));
-      writeFileSync(stderrPath, Buffer.concat(errChunks));
-      resolve(code ?? 1);
-    });
-    proc.on("error", () => resolve(1));
-    if (stdin !== undefined) {
-      proc.stdin.write(stdin);
-      proc.stdin.end();
-    } else {
-      proc.stdin.end();
-    }
-  });
-};
+export type { DockerExecArgs, DockerExecFn };

@@ -66,7 +66,7 @@ invocation:
 container:
   name: "forge-${TASK_ID}"
   remove_on_exit: true
-  idle_timeout_seconds: 300
+  idle_timeout_seconds: 600
 
 result:
   file: /task/result.json

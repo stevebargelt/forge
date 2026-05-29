@@ -15,6 +15,7 @@ import { startRun } from "./startRun.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { verdictsForTask } from "../store/verdicts.js";
+import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
 
 // Stub docker exec that writes a fixed result.json and returns 0. The runner's
@@ -267,6 +268,34 @@ test("runNext: failed step (container exit nonzero + empty result.json) marks ta
   const first = tasks.find((t) => t.phase === "first");
   assert.ok(first);
   assert.equal(first!.status, "failed");
+});
+
+test("runNext: idle-timeout exit code marks the pipeline task failed with idle_timeout", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "idle test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Mimic the watchdog SIGKILLing a hung agent: empty result.json, exit 124.
+  const idleKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: idleKilled });
+  assert.deepEqual(wave.failedSteps, ["first"]);
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first");
+  assert.ok(first);
+  assert.equal(first!.status, "failed");
+  assert.match(first!.error ?? "", /idle_timeout/);
 });
 
 // ---------------------------------------------------------------------------

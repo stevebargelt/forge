@@ -15,7 +15,8 @@
 // See DECISIONS.md for the architectural calls made here.
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
-import { spawn as cpSpawn } from "node:child_process";
+import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
@@ -852,6 +853,7 @@ async function runContainer(args: {
 
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
+  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
   let exitCode: number;
   try {
     exitCode = await exec({
@@ -859,6 +861,7 @@ async function runContainer(args: {
       stdin: dockerArgs.stdin,
       stdoutPath,
       stderrPath: join(dir, "container.stderr.log"),
+      idleTimeoutMs,
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
@@ -869,6 +872,14 @@ async function runContainer(args: {
   }
   // #155: capture token usage from the stream-json log. Best-effort.
   captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
+
+  // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
+  // Fail with a clear reason rather than a generic container_crash.
+  if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
+    const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
+    markTaskFailed(args.taskId, msg);
+    return { kind: "failed", error: msg };
+  }
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
@@ -926,35 +937,7 @@ function dispatchManualStep(runId: string, step: Step): string {
 
 // --- Helpers ---
 
-type DockerExecArgs = {
-  args: string[];
-  stdin: string | undefined;
-  stdoutPath: string;
-  stderrPath: string;
-};
-export type DockerExecFn = (args: DockerExecArgs) => Promise<number>;
-
-const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath }) => {
-  return new Promise<number>((resolve) => {
-    const proc = cpSpawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-    const outChunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    proc.stdout.on("data", (c: Buffer) => outChunks.push(c));
-    proc.stderr.on("data", (c: Buffer) => errChunks.push(c));
-    proc.on("close", (code) => {
-      writeFileSync(stdoutPath, Buffer.concat(outChunks));
-      writeFileSync(stderrPath, Buffer.concat(errChunks));
-      resolve(code ?? 1);
-    });
-    proc.on("error", () => resolve(1));
-    if (stdin !== undefined) {
-      proc.stdin.write(stdin);
-      proc.stdin.end();
-    } else {
-      proc.stdin.end();
-    }
-  });
-};
+export type { DockerExecArgs, DockerExecFn };
 
 function homeForge(): string {
   return process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge");

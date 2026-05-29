@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
+import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 
@@ -176,6 +177,34 @@ test("invoke: failed exit + empty result.json marks task failed and returns fail
 
   assert.equal(r.status, "failed");
   assert.match(r.error ?? "", /container_crash/);
+
+  const task = getTask(r.taskId);
+  assert.equal(task!.status, "failed");
+});
+
+test("invoke: idle-timeout exit code marks task failed with idle_timeout", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Mimic the watchdog SIGKILLing a hung agent: empty result.json, exit 124.
+  const idleKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "hang forever",
+    projectDir: "/tmp/x",
+    dockerExec: idleKilled,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /idle_timeout/);
 
   const task = getTask(r.taskId);
   assert.equal(task!.status, "failed");

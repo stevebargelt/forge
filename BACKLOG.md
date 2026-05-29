@@ -5,9 +5,26 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
+**Last session ended 2026-05-28.**
 
+**Where we left off:** Did a post-hoc code-review pass over the session's 11-commit batch (clean verdict, swept 3 stale-doc stragglers). Prior thread was a step-back on whether this session's reactive forge fixes cohere — they do, and they share one shape (see below).
 
-**Note:** 15 commits ahead of origin/main is intentional — user chose to hold off pushing (2026-05-28). Not a forgotten step.
+**Picked up next:**
+1. **#172** (gate `request-changes` should apply the rationale's fix list in place, not re-run). Fully diagnosed this session: `gate.ts` request-changes re-dispatches the same step with the rationale but NOT the prior diff → implementer redoes from scratch. Fix = pass prior result into the re-dispatch inputs + seed instruction to apply incrementally. BUT the wnba evidence showed the human reached for `reject` (upstream re-plan), not request-changes — so the real gap may be gate-verb UX/guidance (which verb when), overlapping the closed-#84 two-channel thinking. Decide that before coding.
+2. **Consider a deliberate "contract vs behavior drift" audit.** Every forge fix this session was the same shape: CLAUDE.md/seed *declares* a behavior the workflow/dispatch/container layer doesn't *enact* (#171 specialist-per-step, browser verification, awaiting_gate notify, request-changes). Worth auditing systematically vs. patching reactively.
+3. **Write the #148 analysis into the ticket.** Done this session but never recorded: red-narrow's noise is STRUCTURAL (only 3 force-level constraints, spawned every run → inconclusive when none apply), not a quality defect — when fed it produced real grounded findings (caught a hardcoded Azure subscription ID). Re-scope #148 from "rework/retire red-narrow" to "make red-narrow conditional on constraint-applicability" (keep specialist authority).
+
+**External state to remember:**
+- 26 commits unpushed — INTENTIONAL. User holds off pushing on their own schedule; do NOT suggest pushing.
+- This session's seed/runtime/workflow edits are installed live in ~/.forge (browser-verification seeds, #171 fanout workflows, Opus 4.8 runtime, notify changes). ~/.forge reflects HEAD.
+- gastown/gascity (`gt`/`gc`) tooling was fully uninstalled this session (unrelated to forge) — the ~/code/.events.jsonl feed and crumbs are gone; don't re-investigate.
+
+**Decisions worth not relitigating:**
+- **#150** (gate --feedback labels) and **#112** (transactional dispatch/gate writes) considered and DEFERRED — neither fixes a problem actually hit in the last 2 days (verified via DB: zero partial-write failures; red noise present but not felt). #150 is NOT a prerequisite for #148 — the verdicts table already captures the signal, and #150's labels don't fit red-narrow's empty-findings failure mode.
+- **#88** (corpus consistency) and **#60** (pass secrets) kept OPEN as legit future work — not closed.
+- 11 forge-on-forge commits bypassed forge's own pipeline (native-module constraint); a code-reviewer agent reviewed them after the fact → ship-as-is.
+
+**Shipped (for reference):** a9a21b8 /handoff notes-wipe fix · 1bd2e1d dashboard copy-id button · 4c638b3 partial-day chart honesty · da01264 design-flow code-export removal · 1fd40e3 Opus 4.8 (spec-writer) · 68e6118 notify on awaiting_gate + project-name prefix · ceda17d browser-verification hardening (fail not rationalize; warn on skipped skill mounts) · 645a523 #171 UI-workflow build fanout · 2679d34 review-cleanup doc sweep. Closed #166/#171/#84; filed #172.
 
 ## Active
 
@@ -361,7 +378,47 @@ Lean (2) with (1) as override. Matches the .forge/project.json pattern from #151
 Same class of forge rough-edge as the browser/:9222 and forge-test/Jest gaps surfaced 2026-05-28.
 
 
+### #173 — v2 has no idle-watchdog — hung agents run forever (re-files #74)
+**v2-shaped re-file of #74**, which closed 2026-05-26 with "Re-file a fresh v2-shaped ticket if/when it bites." It bit on 2026-05-29.
+
+**What happened:** `task-task-718ad0` (frontend-specialist, web-admin redesign screens, wnba-led-scoreboard workspace) hung for ~1 hour. The agent stalled during its initial file-reading research — last logged action was a `Glob` at `00:10:26`, 16s after start — then emitted *zero stdout for the next hour*. The agent process (`claude --model claude-sonnet-4-6`, PID 1) was alive the whole time at ~0.1% CPU: blocked waiting on a model stream response that never arrived. The container stayed `Up`, the DB task stayed `running`, and `result.json` was 0 bytes. Nothing killed it — the human noticed and stopped it manually.
+
+**Root cause:** the #26 idle-stdout watchdog (kill container after N min of no stdout, `FORGE_AGENT_IDLE_TIMEOUT_MS`) was lost in the v1→v2 cutover and never re-added. `src/v2/DECISIONS.md` Decision 9 documented the gap verbatim: *"no idle-watchdog yet … The runner's exec stub doesn't implement it."* So v2 had *no liveness protection at all* for a hung-but-alive agent.
+
+**Distinct from #74's original shape (matters for the fix):**
+- #74 original: container *dead*, status stuck `running` → a reconcile gap (sniff dead containers, persist `container_id`).
+- This incident: container *alive*, agent *hung*, stdout frozen → the idle-stdout watchdog case (#26), which v2 dropped. Detection rides the live stdout `data` events the host already receives — disk-write timing never gated it.
+
+**Tier 0 + Tier 1 — SHIPPED (this session):** `src/v2/idle-watchdog.ts` (`startIdleWatchdog` measures the *gap between* stdout chunks, not total runtime, so a busy long task that streams steadily never trips; disabled when `idleMs <= 0`). Wired into a *single shared* `src/v2/docker-exec.ts` used by BOTH the invoke path (invoke.ts) and the pipeline path (runNext.ts) — they had diverged into two buffered executors, leaving `forge new`/`forge next` tasks unwatched; consolidating closed that gap. Each chunk both streams to disk live (observability + bounded memory; replaces buffer-until-close) and bumps the watchdog. On silence it runs `docker kill <name>` on the container itself (SIGKILLing only the docker CLI client leaves the container orphaned under the daemon; the client kill is just a backstop), then the task fails with `idle_timeout` via a `124` sentinel exit code. Timeout precedence: `FORGE_AGENT_IDLE_TIMEOUT_MS` env override > runtime YAML `container.idle_timeout_seconds` (seeds set 600s — this field existed in the schema but was orphaned/unread until now; bumped 300→600 this session for margin) > 15-min hardcoded fallback. So effective production timeout is **10 min** (from the seeds); revisit if a legit quiet tool call (big test suite / build) ever exceeds it. Host-side `forge design` is exempt by construction (no container, never enters this path). Tests: watchdog units + env/runtime precedence matrix, `containerNameFromArgs`/`killContainer` units, plus idle_timeout integration tests through both `invoke()` and `runNext()`.
+
+**Tier 2 — REMAINING (separate, schema-gated):** dead-container detection for the parent-died orphan (the in-process timer dies with its parent). Persist `tasks.container_id` at spawn; a sweep marks `running` tasks `failed` when `docker inspect` shows the container gone. No `container_id` column exists today. Schema change → machine-wide blast radius, flag per shared-DB-migration rule.
+
+**Possible refinement (only if 15 min feels slow):** tail the stream shape — a pending `tool_use` means the agent is inside a long tool (lenient); a `tool_result`/turn-end with nothing after is the awaiting-model hung signature (strict), letting the timeout drop to ~3–5 min safely.
+
+**Diagnostic playbook:** `forge show` "running" and `docker ps` "Up" both mean *spawned*, not *progressing*. True liveness = `docker logs <c>` last-timestamp vs wall clock. Agent PID alive at ~0% CPU + frozen logs = blocked on I/O (usually a hung model stream). 0-byte `result.json` + age ≫ expected confirms.
+
+
+### #174 — forge backlog has no edit-body verb; ## in a ticket body silently breaks the parser roundtrip
+Two related rough edges, both hit 2026-05-29 while filing #173.
+
+**No edit-body verb.** `forge backlog` exposes file/close/move/notes — there is no way to edit an existing ticket's body. A typo or malformed body can only be fixed by close+refile (burns the sticky number AND leaves the broken body relocated, not removed) or by hand-editing BACKLOG.md (which CLAUDE.md forbids). #173's body had to be fixed via a direct Edit because no CLI path existed. Add `forge backlog edit <id> --body <text|-\>` (replace body, keep heading + sticky).
+
+**`##` in a ticket body silently breaks the byte-for-byte roundtrip.** The parser's SECTION_HEADING_RE = /^## (.+)$/ (src/backlog/parse.ts:24) treats any `## X` line as a top-level section boundary, even inside a ticket body. A ticket whose body uses `##` subheadings gets truncated at the first one and the remainder lands in unrecognized-section limbo, so parse(BACKLOG.md)→serialize() no longer roundtrips and parse.test.ts goes red. Convention is bold lead-ins (`**X:**`); `###`-without-`#NNN` is also body-safe (TICKET_HEADING_RE requires the `#<id> — ` shape). Harden: either have `forge backlog file` reject/escape `^## ` lines in a body, or make the parser only treat `## ` as a section when the name is in SECTION_ORDER. Related to #141 (parser as single-source-of-truth).
+
+
 ## Done (recent)
+
+### #175 — Test suite fires real ntfy/twilio notifications — test-setup.ts didn't neutralize providers
+**Closed:** 2026-05-29.
+
+**Symptom:** running `npm test` in a shell with `FORGE_NOTIFY=ntfy` + `NTFY_URL` set sprays real push notifications — one per test run that transitions to complete/failed. Hit 2026-05-29: ~20 `[complete]` pushes for synthetic fixtures (`run-invoke-engineer-… some-project/x … — 0s`) during repeated suite runs.
+
+**Cause:** `updateRunStatus` (src/store/runs.ts) fires `notifyOnRunTransition` on every terminal transition; both providers gate only on `FORGE_NOTIFY` (notify/ntfy.ts, notify/twilio.ts). `src/test-setup.ts` isolated the test DB (#170) but left notification env untouched, so fixtures fired real pushes to whoever's env was set in the shell.
+
+**Fix (shipped):** `src/test-setup.ts` now sets `process.env.FORGE_NOTIFY = ""` for the whole suite → `isAnyProviderEnabled()` false → no pushes. Verified: full suite green, zero notifications.
+
+**Lesson:** test isolation must cover *side-effects*, not just the DB — anything keyed off process env (notify, future webhooks) needs neutralizing in test-setup. Same class as #170.
+
 
 ### #84 — Document the two-channel feedback model for design workflows
 **Closed:** 2026-05-28.

@@ -95,7 +95,7 @@ invocation:
 container:
   name: "forge-${TASK_ID}"
   remove_on_exit: true
-  idle_timeout_seconds: 300   # FORGE_AGENT_IDLE_TIMEOUT_MS env still overrides
+  idle_timeout_seconds: 600   # FORGE_AGENT_IDLE_TIMEOUT_MS env still overrides
 
 # Where the agent writes results. Used by the runner + reconcile.
 result:
