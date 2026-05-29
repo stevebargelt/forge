@@ -70,6 +70,21 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOPATH="/home/agent/go"
 ENV PATH="${GOPATH}/bin:${PATH}"
 
+# Playwright + chromium for project E2E suites (#180). Distinct from the
+# browser-tools Chrome above (#128): that one (headless on :9222) is the
+# AGENT's interactive verification; this is the *project's* committed E2E
+# suite, which Playwright drives with its OWN browser for real per-test
+# isolation + storageState-per-context (the seam #176 auth plugs into). Pinned
+# so the baked browser build matches the package. PLAYWRIGHT_BROWSERS_PATH is a
+# shared, world-readable location (set as a real ENV so it persists at runtime)
+# so a project's `npm install` finds the pre-baked browser instead of
+# re-downloading. --with-deps adds any OS libs chromium needs beyond the #128 set.
+ENV PLAYWRIGHT_VERSION=1.60.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"
+
 # forge-test wrapper (#111): rebuilds better-sqlite3 for this container's
 # platform inside a writable scratch dir, then runs tests there. Works around
 # the host/container native-module mismatch without mutating /project's
