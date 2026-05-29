@@ -116,14 +116,30 @@ must match what the agent browses. For the proof we hand-derived a
 (the Supabase JWT is origin-agnostic, so the same token authenticates). forge
 should reconcile this rather than require a hand-derived profile — see backlog.
 
+## Dependency pin (#181 + #182)
+
+The injector is **not** in forge — it lives in the browser-tools skill forge
+mounts into containers. Pinned dependency:
+**`github.com/stevebargelt/pi-skills` branch `feat/preload-storage-state`, commit
+`cac695b`** (a fork of `badlogic/pi-skills`). That commit carries the generic
+`auth-inject.js` (keyed on `BROWSER_TOOLS_STORAGE_STATE`, #182) + the
+`browser-nav.js` wiring. Point `FORGE_BROWSER_TOOLS_DIR` at a checkout on that
+branch.
+
+Enforcement: `spawn.ts` fails fast when `--auth-profile` is used but the mounted
+browser-tools dir lacks `auth-inject.js` — an old/upstream checkout can't
+silently no-op auth. The error names the required fork/branch/commit.
+
 ## Still pending
 
 - Pipeline steps (`--auth-profile` on browser-verify phases) — invoke covers the
   primary path; pipeline wiring is the same ctx field.
 - `browser-content.js` and `--new`-tab cases reuse the same helper; new-tab
   injection re-registers per nav (harmless duplicate init scripts).
-- Reproducibility of the browser-tools dep (fork+pin) — backlog #181; env-var
-  genericization — backlog #182.
+- An upstream PR of `feat/preload-storage-state` to `badlogic/pi-skills` (the
+  change is generic now) would drop the fork entirely — optional follow-up.
+- Long-term: forking the whole pi-skills repo pins *all* its skills to this
+  branch's snapshot; revisit if other skills need upstream updates.
 
 ## Note
 

@@ -3,8 +3,17 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Runtime } from "./schema.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
+
+// A browser-tools dir that actually contains the auth injector (#181 pin check).
+const BT_DIR_WITH_INJECTOR = mkdtempSync(join(tmpdir(), "forge-bt-"));
+writeFileSync(join(BT_DIR_WITH_INJECTOR, "auth-inject.js"), "// stub injector\n");
+// A browser-tools dir mounted but WITHOUT the injector (old/upstream checkout).
+const BT_DIR_NO_INJECTOR = mkdtempSync(join(tmpdir(), "forge-bt-old-"));
 
 const BASE_RUNTIME: Runtime = {
   name: "claude-bedrock",
@@ -242,7 +251,7 @@ const RUNTIME_WITH_BROWSER_TOOLS: Runtime = {
   auth: { mode: "apikey" },
   mounts: [
     ...BASE_RUNTIME.mounts,
-    { host: "/opt/browser-tools", container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: false },
+    { host: BT_DIR_WITH_INJECTOR, container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: false },
   ],
 };
 
@@ -269,4 +278,19 @@ test("buildDockerArgs: AUTH_STATE_HOST_PATH throws when browser-tools is not mou
   const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
   const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
   assert.throws(() => buildDockerArgs(rt, ctx), /browser-tools/);
+});
+
+test("buildDockerArgs: AUTH_STATE_HOST_PATH throws when browser-tools lacks the injector (#181 pin)", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-auth";
+  // browser-tools IS mounted, but it's an old/upstream checkout with no auth-inject.js.
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    auth: { mode: "apikey" },
+    mounts: [
+      ...BASE_RUNTIME.mounts,
+      { host: BT_DIR_NO_INJECTOR, container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: false },
+    ],
+  };
+  const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
+  assert.throws(() => buildDockerArgs(rt, ctx), /auth-inject\.js/);
 });

@@ -17,6 +17,7 @@
 // produces the full `docker run ... claude ...` argv.
 
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { Runtime } from "./schema.js";
 import {
   exportAwsCreds,
@@ -100,7 +101,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   }
 
   // Mounts.
-  let browserToolsMounted = false;
+  let browserToolsHostPath: string | undefined;
   for (const mount of runtime.mounts) {
     const hostResolved = mount.optional
       ? substituteOptional(mount.host, ctx)
@@ -133,7 +134,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
 
     const mode = substitute(mount.mode, ctx);
     args.push("-v", `${hostPath}:${mount.container}:${mode}`);
-    if (mount.container.includes("/skills/browser-tools")) browserToolsMounted = true;
+    if (mount.container.includes("/skills/browser-tools")) browserToolsHostPath = hostPath;
   }
 
   // #176 auth profile: mount the captured session read-only and point the
@@ -143,10 +144,21 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // mount. The injector lives in the browser-tools skill, so a skipped skill
   // mount would silently no-op auth; fail fast instead.
   if (ctx.AUTH_STATE_HOST_PATH) {
-    if (!browserToolsMounted) {
+    if (!browserToolsHostPath) {
       throw new Error(
         "--auth-profile needs the browser-tools skill (it carries the auth injector), " +
           "but that mount was skipped. Set FORGE_BROWSER_TOOLS_DIR or create the host path.",
+      );
+    }
+    // #181 pin: the mount existing isn't enough — an old/upstream browser-tools
+    // checkout has no injector, so auth would silently no-op. Require the
+    // injector file. Pinned dependency: pi-skills fork branch
+    // feat/preload-storage-state (github.com/stevebargelt/pi-skills, >= cac695b).
+    if (!existsSync(join(browserToolsHostPath, "auth-inject.js"))) {
+      throw new Error(
+        `--auth-profile requires the browser-tools auth injector, but ${browserToolsHostPath}/auth-inject.js ` +
+          "is missing. Point FORGE_BROWSER_TOOLS_DIR at a pi-skills checkout on the " +
+          "feat/preload-storage-state branch (github.com/stevebargelt/pi-skills, >= cac695b).",
       );
     }
     args.push("-v", `${ctx.AUTH_STATE_HOST_PATH}:${AUTH_STATE_CONTAINER_PATH}:ro`);
