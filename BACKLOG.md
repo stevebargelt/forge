@@ -535,6 +535,8 @@ Combined, code-verified findings from forge's red panel (red-security 0.78 / red
 Provenance: forge red panel + independent external review + in-use refresh-token finding, merged and code-verified by the orchestrator.
 
 
+### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
+
 ## Done (recent)
 
 ### #186 — forge cancel/kill verb for a stuck task or run (manual reaper)
