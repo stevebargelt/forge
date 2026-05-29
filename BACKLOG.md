@@ -5,26 +5,51 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-28.**
+**Last session ended 2026-05-29.**
 
-**Where we left off:** Did a post-hoc code-review pass over the session's 11-commit batch (clean verdict, swept 3 stale-doc stragglers). Prior thread was a step-back on whether this session's reactive forge fixes cohere — they do, and they share one shape (see below).
+**Where we left off:** Started from "I got ~20 ntfy messages" → found two real gaps and shipped fixes, then spun a full design thread on testing authenticated apps. Two arcs this session: (1) the idle-watchdog (hung agents ran forever), (2) the E2E/auth epic (forge silently couldn't test authed apps and pretended it could). Ended at a clean stopping point with #180 done.
 
 **Picked up next:**
-1. **#172** (gate `request-changes` should apply the rationale's fix list in place, not re-run). Fully diagnosed this session: `gate.ts` request-changes re-dispatches the same step with the rationale but NOT the prior diff → implementer redoes from scratch. Fix = pass prior result into the re-dispatch inputs + seed instruction to apply incrementally. BUT the wnba evidence showed the human reached for `reject` (upstream re-plan), not request-changes — so the real gap may be gate-verb UX/guidance (which verb when), overlapping the closed-#84 two-channel thinking. Decide that before coding.
-2. **Consider a deliberate "contract vs behavior drift" audit.** Every forge fix this session was the same shape: CLAUDE.md/seed *declares* a behavior the workflow/dispatch/container layer doesn't *enact* (#171 specialist-per-step, browser verification, awaiting_gate notify, request-changes). Worth auditing systematically vs. patching reactively.
-3. **Write the #148 analysis into the ticket.** Done this session but never recorded: red-narrow's noise is STRUCTURAL (only 3 force-level constraints, spawned every run → inconclusive when none apply), not a quality defect — when fed it produced real grounded findings (caught a hardcoded Azure subscription ID). Re-scope #148 from "rework/retire red-narrow" to "make red-narrow conditional on constraint-applicability" (keep specialist authority).
+1. **#176 (auth profiles) — the keystone, flagged "soon."** It's the last thing between us and real E2E on our apps (web-admin etc. are all behind Supabase login; without auth, E2E only reaches login/public pages). Design + spike: capture browser session out-of-band (`forge auth-profile login`), store host-global at `~/.forge/auth/<profile>.storage.json` (NOT in the project tree — any agent can read the project mount), inject via CDP (`Network.setCookies` + per-origin script), fail-fast on expiry. v1 = manual login. Start with the CDP-injection spike (does an injected storageState survive into the :9222 browser-tools session?).
+2. **Optional now, before #176 lands: the E2E-mechanics spike.** The Playwright image (#180) is live — point a `forge invoke test-engineer` at an UNauthenticated surface with an explicit "write Playwright E2E" brief to exercise the new image end-to-end. Auth-independent; de-risks #177.
+3. **#177 (test-engineer → Playwright E2E + anti-downgrade gate).** Value gated on #176; mechanics now provably runnable. The gate is the real fix — web-app verify must commit an E2E spec OR return `e2e_skipped_reason`, else hard-reject. Evidence: 0 E2E across 6 test-engineer runs — it silently substitutes integration tests and the gate passes.
 
 **External state to remember:**
-- 26 commits unpushed — INTENTIONAL. User holds off pushing on their own schedule; do NOT suggest pushing.
-- This session's seed/runtime/workflow edits are installed live in ~/.forge (browser-verification seeds, #171 fanout workflows, Opus 4.8 runtime, notify changes). ~/.forge reflects HEAD.
-- gastown/gascity (`gt`/`gc`) tooling was fully uninstalled this session (unrelated to forge) — the ~/code/.events.jsonl feed and crumbs are gone; don't re-investigate.
+- **2 commits unpushed, INTENTIONAL** (`7071b0c` #180 Dockerfile, `e2185d4` backlog) — user pushes this evening on their own schedule. Do NOT push.
+- **#180 image is live LOCALLY ONLY.** `agent-dev-worker:latest` rebuilt + verified (npx playwright test → 1 passed, baked chromium, no download). Other machines need `docker/build.sh` to get it.
+- **Idle-watchdog is live machine-wide.** Code runs from this repo via npm-link+tsx (no build step — saving = deploying). Seeds bumped 300→600s and installed to `~/.forge/runtimes/` via `install-seeds.sh FORCE=1`. Effective idle timeout = 10 min, all projects, new dispatches only (in-flight containers not retroactively watched).
+- Decided NO CI / NO PRs / direct-to-main (saved to memory). Don't re-pitch.
 
 **Decisions worth not relitigating:**
-- **#150** (gate --feedback labels) and **#112** (transactional dispatch/gate writes) considered and DEFERRED — neither fixes a problem actually hit in the last 2 days (verified via DB: zero partial-write failures; red noise present but not felt). #150 is NOT a prerequisite for #148 — the verdicts table already captures the signal, and #150's labels don't fit red-narrow's empty-findings failure mode.
-- **#88** (corpus consistency) and **#60** (pass secrets) kept OPEN as legit future work — not closed.
-- 11 forge-on-forge commits bypassed forge's own pipeline (native-module constraint); a code-reviewer agent reviewed them after the fact → ship-as-is.
+- **E2E = project-owned Playwright; agent verification = browser-tools (CDP). Two layers, never conflated.** Playwright drives its OWN chromium (#180), separate from the #128 browser-tools Chrome on :9222. "#128 retired Playwright" applies ONLY to the agent layer, not the project's E2E deps.
+- **Auth artifact serves both layers from one file:** project Playwright consumes storageState natively; browser-tools via CDP injection. Same file, two consumers, no shared code path.
+- **Idle-watchdog Tier 2 (dead-container/parent-died orphan) deliberately deferred** — schema-gated (`tasks.container_id`), not needed for the observed failure mode. Tier 0+1 (in-process timer + live disk streaming + docker-kill-by-name) shipped.
 
-**Shipped (for reference):** a9a21b8 /handoff notes-wipe fix · 1bd2e1d dashboard copy-id button · 4c638b3 partial-day chart honesty · da01264 design-flow code-export removal · 1fd40e3 Opus 4.8 (spec-writer) · 68e6118 notify on awaiting_gate + project-name prefix · ceda17d browser-verification hardening (fail not rationalize; warn on skipped skill mounts) · 645a523 #171 UI-workflow build fanout · 2679d34 review-cleanup doc sweep. Closed #166/#171/#84; filed #172.
+**Shipped (for reference):** `7071b0c` #180 Playwright in agent image · `e2185d4` backlog (filed #176/#177/#178/#179, gate, cross-links) · `f892b91` #173 idle-watchdog across both exec paths · `d5fb3b3` #175 stop tests firing real ntfy. Filed open: #176 auth profiles, #177 test-engineer Playwright+gate, #178 forge-test breaks on Jest, #179 qa-engineer #164 leftover. Closed: #173/#175/#180.
+
+#176 spike DONE (2026-05-28): CDP localStorage injection PROVEN against the real Supabase admin app. evaluateOnNewDocument (=Page.addScriptToEvaluateOnNewDocument) injecting a captured sb-<ref>-auth-token before nav flips a clean incognito context unauth->authed; treatment rendered steve@bargelt.com + real device/teams, control rendered empty shell. Spike: spikes/176-auth-cdp/inject-spike.mjs. ADR: learnings/decisions/2026-05-28_auth-profile-cdp-localstorage-injection.md. THREE build-shaping findings: (1) app uses localStorage ONLY, zero auth cookies -> Network.setCookies irrelevant for Supabase-default, localStorage path is mandatory/first; (2) unauth does NOT redirect to /login, renders empty shell -> expiry detection MUST parse token expires_at, not watch URL; (3) createBrowserContext() incognito = isolation primitive. Build split: forge=auth_profiles resolution + forge auth-profile {login,status,list,rm} + --auth-profile on invoke/pipeline + spawn.ts copies state to task tmp (never project mount) + redaction + expiry parse; pi-skills/browser-tools=the CDP injector. CLEANUP PENDING: ~/.forge/auth/spike-wnba.storage.json holds a LIVE token (mode 600, host-global) + spike-{treatment,control}.png have user email.
+
+#176 Slices 1-3 SHIPPED (2026-05-28): (1) forge auth-profile {login,status,list,rm} [84deada] — verified with REAL Supabase login (qa-admin profile, steve@bargelt.com, valid token). (2) auth-inject.js in pi-skills/browser-tools — maybeApplyAuth(page), no-op unless FORGE_AUTH_STATE set, wired into browser-nav.js; verified against :9222 with real profile (control empty / treatment authed). LIVE ON DISK but pi-skills is badlogic/pi-skills THIRD-PARTY repo — local edits uncommitted, user decision how to version. (3) forge invoke --auth-profile [1404107] — spawn.ts mounts state ro at /forge-auth/state.json + sets FORGE_AUTH_STATE, throws if browser-tools unmounted; invoke.ts fails fast on missing/expired before container; token never in argv/prompts/result/project-mount. 454 tests green. STILL PENDING: real agent-container run end-to-end (exercises in-container entrypoint Chrome + container->host networking to reach localhost:3000 — host.docker.internal/--network host; may surface networking work orthogonal to auth). Pipeline-step --auth-profile not yet wired (same ctx field).
+
+#176 PROVEN END-TO-END IN A REAL CONTAINER (2026-05-28): forge invoke manual-qa --auth-profile qa-admin-docker --project wnba-led-scoreboard -> agent reported logged_in:true, steve@bargelt.com, steve-1, teams visible; container stdout shows '✓ auth profile applied' then nav (Slice 2 injector fired in-container via Slice 3's FORGE_AUTH_STATE mount). ADR commit 21d23ce. Reachability is fine (host.docker.internal:3000 -> 200 from agent image, no --add-host). Filed follow-ups: #181 (browser-tools is unpinned dep — fork+pin+preflight), #182 (genericize FORGE_AUTH_STATE env var for upstreaming), #183 (origin reconciliation: captured localhost origin vs container-reachable host.docker.internal — proof used a hand-derived qa-admin-docker profile; forge should reconcile). NOT yet: pipeline-step --auth-profile (same ctx field). CLEANUP PENDING: live-token files in ~/.forge/auth/ (qa-admin, qa-admin-docker, spike-wnba) + spike PNGs with user email.
+
+#182 + #181 DONE (2026-05-29). #182 [8769dc2]: env var renamed FORGE_AUTH_STATE -> BROWSER_TOOLS_STORAGE_STATE in auth-inject.js + spawn.ts + tests + ADR; injector is now generic/upstreamable (no forge branding). #181 [8828955]: forked badlogic/pi-skills -> github.com/stevebargelt/pi-skills branch feat/preload-storage-state (commit cac695b) carrying the generic auth-inject.js + browser-nav.js wiring — reproducible source of truth replacing unversioned local edits. spawn.ts preflight now HARD-FAILS when --auth-profile is used but the mounted browser-tools lacks auth-inject.js (catches old/upstream checkout; error names the required fork/branch/commit). Pinned dep documented in ADR. 455 tests green. Local ~/pi-skills is on the feat branch (tracks fork) — keeps this machine's injector live. Optional follow-up: upstream PR to badlogic (change is generic). Dead token files cleaned from ~/.forge/auth. Remaining #176 open: #183 (origin reconciliation), pipeline-step --auth-profile wiring.
+
+#183 DONE (2026-05-29) [1353f9c]: forge auto-reconciles localhost-family origins (localhost/127.0.0.1/0.0.0.0/::1) + cookie domains -> host.docker.internal (override FORGE_CONTAINER_HOST) when staging auth state for a container. invoke.ts writes a reconciled copy to <taskDir>/auth-state.json mode 600 ONLY when a rewrite is needed (real-DNS profiles mount the original unchanged); logs the rewritten origin so the caller knows the agent URL. Removes the hand-derived qa-admin-docker workaround. 460 tests green. NOT yet live-re-proven end-to-end (tokens expired overnight; same container machinery as the passing #176 proof minus manual derivation — unit tests cover the reconcile + staging + 600 perms). Remaining #176: pipeline-step --auth-profile wiring (same ctx field); optional upstream PR of the pi-skills injector.
+
+#183 LIVE-PROVEN end-to-end (2026-05-29): forge invoke manual-qa --auth-profile qa-admin (PLAIN localhost capture, no hand-derivation) -> forge logged 'rewrote localhost origins ... Point the agent at: http://host.docker.internal:3000', agent reported logged_in:true, steve@bargelt.com, steve-1, teams visible, no login redirect. run-183-auto-reconcile-capstone-582003. ADR updated. Live token deleted post-proof. #176 EPIC COMPLETE + proven: Slices 1-3 + #181/#182/#183 all shipped & closed, 460 tests green. Remaining (minor/optional, not blocking): pipeline-step --auth-profile wiring (same ctx field as invoke), optional upstream PR of the generic injector to badlogic/pi-skills.
+
+#176 EPIC CLOSED (2026-05-29) [ece71af]: pipeline wiring done — forge new --auth-profile <name> stores on run, runNext injects into browser-capable PRIMARY roles only (engineer/frontend-specialist/test-engineer/manual-qa via roleUsesBrowser); reds NEVER get it; non-browser roles (architect/tech-lead) excluded (no over-mount, no browser-tools-guard trip). Shared helper src/v2/auth-state.ts (resolveAuthStateForContainer + AuthProfileError + roleUsesBrowser) now used by BOTH invoke and pipeline; invoke refactored onto it. forge new validates profile at creation (fail-fast) + per-step resolution catches mid-run expiry. authProfile stripped from task inputs (never in prompt). 467 tests green. #176 + #181/#182/#183 all CLOSED. Optional follow-ups filed as #184 (upstream PR, browser-content.js wiring, per-step needs_auth flag, whole-repo pin). Full epic: capture (Slice 1) -> injector (Slice 2, forked+pinned) -> invoke plumbing (Slice 3) -> origin auto-reconcile (#183) -> pipeline wiring. Live-proven end-to-end twice.
+
+SESSION CLOSE (2026-05-29): Code-reviewed the #176 auth code with a parallel red panel (red-security + red-backend completed FAIL with real findings; red-wide orphaned by my external timeout mistake — see below). Review verdict: reviewer did WELL — grounded/anchored findings, verified the load-bearing invariants (reds never get cred, no path traversal) instead of rubber-stamping, two reds converged on the same top issues. Findings filed as #188 (TOCTOU write-then-chmod perms, --meta authProfile bypass, CdpSession.send no timeout, cookie leading-dot, staged-copy cleanup, getCookies over-broad) — REAL but unfixed; NOT critical for single-user macOS. INCIDENT: wrapped the panel in  → exit 124 killed the parent forge processes → red-wide task stuck status=running (phantom 'running for an hour', but NO container was actually alive). Root cause = my external timeout (idle-watchdog is in-process, dies with parent). Cleaned the orphan via store accessors (markTaskFailed + updateRunStatus abandoned). Saved memory: no external timeout on forge invoke. New tickets: #184 (auth-profile polish), #185 (parent-died orphan reaper, #173 Tier-2 hit live), #186 (forge cancel verb), #187 (native arm64 multi-arch agent image — drop Rosetta tax; achievable now because #180 already baked arm64-capable Playwright chromium — repoint browser-tools at it, BANKED not started), #188 (auth review findings). OPEN DECISIONS for next session: fix #188 findings? pursue #187 arm64 spike? #176 epic itself is DONE/closed.
+
+FINDINGS CONSOLIDATED (2026-05-29): An independent external agent re-reviewed the #176 auth code; user had it merge with our red panel's findings. I code-VERIFIED the 3 NEW claims — all real: (a) IPv6 [::1] not reconciled (new URL hostname has brackets, LOCALHOST_HOSTS has '::1'), (b) over-broad EXPIRY (profileExpiry Math.min over ALL cookies -> a short-lived non-auth cookie prematurely expires a valid profile), (c) wrong-tab capture (cdp-capture picks first page target). Independent report was accurate, no hallucinations. Recalibrated 2 things: the 'HIGH auth-state readable by primary agent' is a DOC-honesty fix not an exploit (within trust model; reds correctly excluded — both reviewers confirmed) and shouldn't trigger process-isolation work; 'role-scoping broad' is by-design not a defect. Merged everything into #189 (consolidated, supersedes/closed #188), prioritized as CORRECTNESS/CLEANUP. Product owner: zero users, security deprioritized pre-launch (saved memory). #189 includes a doc-language fix item (stop saying 'agent never holds the credential'; say 'never in prompts/logs/project mount').
+
+AUTH FINDINGS now consolidated in #190 (supersedes #189/#188, both closed — churn is the #174 no-edit-body-verb tax). #190 headline: expiry logic is wrong — profileExpiry/profileStatus gate on the 1h access-token expires_at and IGNORE the refresh_token that's in the captured bundle. The injected bundle's refresh_token + the app's autoRefreshToken means the agent's real session lives for the REFRESH-token lifetime (days), not 1h; forge artificially kills it at 60m. Fix: access valid->OK; access expired+refresh_token present->proceed (browser refreshes on load); neither->fail. Also folds the over-broad-expiry (min over all cookies) finding into the same fix. Caveat documented: Supabase rotates refresh tokens (capture fresh, don't keep using the same login). All correctness/cleanup priority (zero users).
+
+TESTING DIRECTION DECIDED (2026-05-29): For routine authed E2E, use PROGRAMMATIC login (Playwright globalSetup -> supabase signInWithPassword with a dedicated QA test user -> storageState), NOT the #176 capture-and-inject flow. Rationale: capture/inject needs a human to re-login periodically (session expires) -> fragile for pipeline E2E. #176 interactive capture is now VESTIGIAL — keep only for apps with no scriptable login (SSO/MFA third-party). Senior-dev principle adopted: forge never logs in interactively; a non-interactive auth script produces storageState (globalSetup IS that script for Playwright; for non-Playwright agents the same script can write ~/.forge/auth/<name>.storage.json and forge injects via existing --auth-profile, no forge changes). wnba-led-scoreboard E2E is the first instance — brief handed to its orchestrator: QA user qa@bargelt.com (creds in gitignored env), globalSetup login, per-test device seed via RLS-permitted insert + cascade-delete teardown, commit config+spec only. NO forge-side work needed for this. Open forge tickets unaffected: #190 (refresh-token expiry fix still good-to-have), #184/#185/#186/#187 stand.
+
+FORGE BUGS FIXED (2026-05-29): (1) [8288341] forge invoke task ids were doubled 'task-task-<id>' — invoke passed literal phase 'task' to newTaskId which already prefixes 'task-'; now passes agentRole -> 'task-test-engineer-<id>'. Phase unchanged. (2) [8e3d967] projects fragmented by monorepo subdir — a run against .../wnba-led-scoreboard/web-admin showed as its own project 'web-admin'. Now project identity = git repo root: new util findGitRoot; resolveProjectMeta labels from root + reads .forge/project.json name override AT THE ROOT; listProjects folds/aggregates by root. Verified: forge projects list now shows one 'wnba-led-scoreboard' entry (36 runs) instead of a split. run.projectDir (mount) untouched — read-side identity only. 473 tests green. NOTE: a running dashboard caches project-meta for its process lifetime — restart 'forge dashboard' to pick up the regrouping.
 
 ## Active
 
@@ -406,54 +431,6 @@ Two related rough edges, both hit 2026-05-29 while filing #173.
 **`##` in a ticket body silently breaks the byte-for-byte roundtrip.** The parser's SECTION_HEADING_RE = /^## (.+)$/ (src/backlog/parse.ts:24) treats any `## X` line as a top-level section boundary, even inside a ticket body. A ticket whose body uses `##` subheadings gets truncated at the first one and the remainder lands in unrecognized-section limbo, so parse(BACKLOG.md)→serialize() no longer roundtrips and parse.test.ts goes red. Convention is bold lead-ins (`**X:**`); `###`-without-`#NNN` is also body-safe (TICKET_HEADING_RE requires the `#<id> — ` shape). Harden: either have `forge backlog file` reject/escape `^## ` lines in a body, or make the parser only treat `## ` as a section when the name is in SECTION_ORDER. Related to #141 (parser as single-source-of-truth).
 
 
-### #176 — Auth profiles: agents test authenticated apps via a captured browser session (CDP), never credentials
-**Priority: high / soon — blocks QA of any authenticated app.** Today forge's browser agents (manual-qa, engineer/frontend visual verification) can only exercise *unauthenticated* surfaces. The implementer seeds already name this gap ("if the app requires authentication, check CLAUDE.md for a dev-auth path; if none, note it as a gap"). Without a systematic mechanism we either hand agents credentials (violates forge's no-secrets-to-agents posture) or skip authed flows entirely — and most real apps are behind a login.
-
-**Principle:** agents operate *authenticated* but never *know credentials*. This is forge's existing trust model (read-only project mounts, container boundary as the trust line) generalized from the project to the app-under-test. The agent gets an authenticated browser context, not the secret.
-
-**Concept — auth profiles.** A named profile binds a captured browser session to a set of domains:
-
-```
-auth_profiles:
-  qa-admin:
-    kind: browser-storage-state        # storageState-shaped JSON, loaded via CDP (NOT Playwright)
-    path: ~/.forge/auth/qa-admin.storage.json
-    domains: [ "https://staging.example.com" ]
-    readonly: true
-```
-
-Task requests it: `forge invoke manual-qa --auth-profile qa-admin ...`. Forge copies the state into the authed task's container tmp, the CDP browser-tools start with cookies/localStorage already injected, and the path + contents are redacted from prompts and logs.
-
-**Flow:**
-1. Out-of-band trusted login: `forge auth-profile login qa-admin --url https://staging...` opens a real/controlled browser; the human logs in (incl. MFA).
-2. Forge captures the session to a storageState-shaped JSON at the host-global path.
-3. Later, `forge invoke ... --auth-profile qa-admin` injects it; the app sees the agent as logged in.
-4. The prompt says "use auth profile qa-admin," never the password or cookie contents.
-
-**Three load-bearing constraints (where the naive version breaks or leaks):**
-- **CDP, not Playwright.** Forge retired Playwright for CDP browser-tools (#126, #128). Keep the storageState *format* but implement a CDP loader: cookies via `Network.setCookies`, localStorage/sessionStorage via `Page.addScriptToEvaluateOnNewDocument` per origin. Do not reintroduce Playwright. **Scope note:** "no Playwright" applies ONLY to the *agent's* injection path (browser-tools / manual-qa). The *project's* committed E2E suite IS Playwright (#177) and consumes this same storageState file *natively* via `storageState:` — same artifact, different consumer. Don't read this as "projects shouldn't use Playwright."
-- **The state file is a bearer credential — store it host-global, never in the project tree.** Session cookies are live tokens. A path under `<project>/.forge/auth/` is readable by ANY agent via the project mount (read-only still means readable), defeating the principle. Store at `~/.forge/auth/<profile>.storage.json` (like runtimes), mode 600, gitignored, copied only into the specific authed task's container tmp — never via the general project mount. Encryption-at-rest is the trigger to activate #60 (`pass`).
-- **Fail fast on expiry.** An expired session silently lands the agent on a login page, producing false bug reports ("app broken — shows login"). The profile must carry/derive expiry; `forge auth-profile status` checks it; the authed task fails fast ("profile qa-admin expired — re-run forge auth-profile login qa-admin") rather than proceeding logged-out.
-
-**Smaller notes:**
-- Name it distinct from `forge auth` (Claude API auth modes: bedrock/oauth/apikey). This is app-under-test auth, an orthogonal axis. `--auth-profile` is fine.
-- `domains:` allowlist — inject state only for matching origins so staging cookies don't ride along to other hosts the agent navigates to.
-- Redact profile path + contents from prompts, result.json, and container logs.
-
-**Variant scoping:**
-- v1 (build first): manual login + CDP capture/inject. No app changes, fits today.
-- v2: scripted login using a vault secret -> activates #60.
-- Preferred when available: app test-login endpoint (`/__test__/login?role=admin`) — deterministic, no UI login; recommend to app teams that can add it.
-- Defer: magic-link / short-lived-token broker.
-- Out of scope (for now): mobile — RN verification is tests-only, no browser/sim in container today.
-
-**CLI surface:** `forge auth-profile login <name> --url <url>`, `forge auth-profile status [<name>]`, `forge auth-profile list`, `forge auth-profile rm <name>`; `--auth-profile <name>` on `forge invoke` and on pipeline steps that browser-verify.
-
-**Schema:** new `auth_profiles` map (host-global and/or project `.forge/`), profile = {kind, path, domains[], readonly}. Resolve like runtimes (project override -> host-global fallback).
-
-**Ties:** activates #60 (secret-at-rest); turns the implementer-seed dev-auth-gap note into a real mechanism; must respect the red read-only-mount rule (don't expose the cred via mounts); builds on this session's browser-verification hardening (ceda17d).
-
-
 ### #177 — test-engineer E2E should be Playwright (project-owned), kept strictly separate from agent verification (browser-tools)
 **Decision (2026-05-29):** Playwright is the E2E stack for the *project's committed suite*. It must NOT be conflated with *agent testing* (forge's CDP browser-tools). Different layers, different owners, different lifecycles — the seed currently blurs them and that's the defect.
 
@@ -502,7 +479,233 @@ Task requests it: `forge invoke manual-qa --auth-profile qa-admin ...`. Forge co
 **Fix:** remove the `qa-engineer` seed dir (or, if any value remains, fold it into `manual-qa` per #164's intent), update `quick-start.md:147` and `SCHEMA-CONTRACT.md:109` to `test-engineer`. Small, isolated, docs + seed only.
 
 
+### #184 — Auth-profile polish (optional follow-ups from #176)
+Optional refinements after the #176 auth-profile epic shipped (none blocking):
+
+- **Upstream PR**: open a PR of `feat/preload-storage-state` from the fork (github.com/stevebargelt/pi-skills) to `badlogic/pi-skills`. The injector is generic now (keyed on BROWSER_TOOLS_STORAGE_STATE); if merged, forge could drop the fork and pin upstream instead (#181).
+- **browser-content.js + --new-tab**: only `browser-nav.js` calls `maybeApplyAuth`. `browser-content.js` (and any other navigating script) doesn't, so auth doesn't apply there. New-tab navigation re-registers the init script per nav (harmless duplicate). Wire the helper into the other nav paths if those surfaces need auth.
+- **Per-step auth flag**: pipeline scoping is a hardcoded role allowlist (`roleUsesBrowser`: engineer, frontend-specialist, test-engineer, manual-qa). A `needs_auth: true` step field in the workflow schema would be more precise if a non-listed role ever needs to browse authenticated, or to exclude an in-list role for a given workflow.
+- **pi-skills whole-repo pin**: forking all of pi-skills pins every skill to the branch snapshot; if other skills need upstream updates, split browser-tools out or rebase periodically.
+
+
+### #185 — Reaper for tasks orphaned when the parent forge process is killed (#173 Tier-2, hit live)
+**Hit live 2026-05-29** running a parallel red panel wrapped in `timeout 600 bash -c "forge invoke ... & ... & wait"`. The wall-clock timeout killed the parent forge processes mid-review. The `docker run --rm` containers were torn down (verified: no forge-* container running or exited afterward), but the killed task stayed `status=running` forever — the dashboard/`forge status` showed it "running for an hour" when nothing was actually running.
+
+**Root cause:** the idle-watchdog is in-process (#173 Tier 0+1). When the parent forge process dies (SIGKILL/SIGTERM from an external `timeout`, a crash, a closed terminal), the watchdog dies with it, so nothing transitions the in-flight task to a terminal state. `forge sweep` doesn't catch it (it only closes runs whose tasks are ALL terminal; a stuck `running` task isn't terminal). `forge retry` only resets `failed` tasks. There's no CLI to fail/reap a stuck-`running` task — had to mark it via the store accessors directly (markTaskFailed + updateRunStatus("abandoned")).
+
+This is the #173 Tier-2 "dead-container / parent-died orphan" case that was explicitly deferred (schema-gated on tasks.container_id). The deferral reasoning holds, but this is a concrete recurrence worth a lightweight fix.
+
+**Options:**
+- A reaper pass (extend `forge sweep`): for runs that are `active` with a task `running` whose container (by name `forge-<taskId>`) is absent from `docker ps`, mark the task failed + run abandoned. Needs the container-name → docker-ps check (no schema change required — derive the name).
+- Persist a heartbeat/PID per running task; sweep reaps tasks whose owning PID is dead.
+- A `forge cancel <task-or-run>` / `forge sweep --running-orphans` CLI verb so this doesn't require poking the DB by hand.
+
+**Operational note:** don't wrap `forge invoke` in an external `timeout` — rely on the per-agent idle-watchdog (10m) instead; an external timeout that kills the parent orphans the task. For parallel panels, launch and let the idle-watchdog bound each agent.
+
+Relates to #173 (idle-watchdog, closed).
+
+
+### #186 — forge cancel/kill verb for a stuck task or run (manual reaper)
+**From the #185 discussion.** There's no CLI to terminate a task stuck in a non-terminal state or to kill its container. When a task orphaned (parent died, see #185), the only way to clear it was poking the DB directly via store accessors (markTaskFailed + updateRunStatus). `gate` only handles awaiting_gate; `retry` only resets failed; `sweep` only closes runs whose tasks are ALL terminal.
+
+Add a `forge cancel <task-id|run-id>` (or `forge sweep --running-orphans`) that: docker-kills `forge-<taskId>` if present, marks the task failed, and abandons the run. This is the manual counterpart to #185's automatic reaper — file alongside it. No schema change.
+
+Relates to #185 (parent-died orphan reaper), #173 (idle-watchdog).
+
+
+### #187 — Native arm64 (multi-arch) agent image — drop the amd64 Rosetta tax on Apple Silicon
+**Broad perf win.** docker/build.sh pins `--platform linux/amd64`, so on Apple Silicon EVERY agent container runs under Rosetta/qemu emulation (2-4x slower CPU). This taxes every run — builds, tests, browser work, the review panel that triggered this investigation (red-wide blew past a 10-min ceiling largely due to emulation + contention).
+
+**Sole root cause:** the headless Chrome baked for the browser-tools skill (`:9222`) comes from `@puppeteer/browsers install chrome` (Chrome for Testing), which Google publishes for linux64 only — no official Linux/arm64 binary. build.sh pins amd64 for that one dependency; everything else pays the tax as collateral.
+
+**Why it's achievable now (and the codebase contradicts itself):** build.sh claims Chromium-for-Testing has no arm64; the Dockerfile comment (lines 43-44) claims it "ships both arm64 and amd64" and that we "need multi-arch long-term." Chrome FOR TESTING is genuinely amd64-only on Linux, BUT:
+- #180 already bakes Playwright's chromium into the image (project E2E). Playwright's chromium DOES ship linux-arm64.
+- browser-tools uses puppeteer-core, which can drive any chromium via `executablePath`.
+So: point browser-tools at Playwright's (already-present, arm64-capable) chromium, drop the @puppeteer/browsers Chrome-for-Testing dependency, and the amd64 pin's only justification is gone. The thing build.sh was avoiding ("dragging Playwright's arm64 chromium back in") is already done by #180.
+
+**Proposed:**
+- Repoint browser-tools' `:9222` Chrome to Playwright's chromium (executablePath), removing the @puppeteer/browsers chrome install. Verify browser-start/nav/screenshot + auth-inject all work against it.
+- Build the image native arm64 on Apple Silicon; multi-arch (buildx) so amd64 hosts (CI/Linux servers) still get amd64.
+- Reconcile/remove the contradictory amd64-vs-arm64 comments in build.sh + Dockerfile; update the #128 decision record.
+
+**Verify:** agent-entrypoint.sh launches the right chromium binary on :9222; better-sqlite3/sharp/Go toolchain build native arm64 (all arch-agnostic or arm64-available); the browser-tools skill is host-mounted (pi-skills) so it's arch-neutral — only the in-container chromium binary path matters.
+
+**Caveat:** quantify the actual win per step before committing effort — pure-reasoning agents are network-bound (Claude API) and gain less; CPU/browser/build/test-heavy steps gain most. But the review panel evidence suggests it's material.
+
+Relates to #128 (container Chrome + retire Playwright MCP), #180 (Playwright chromium baked in).
+
+
+### #190 — Auth-profile review findings + expiry/refresh-token fix (consolidated)
+Combined, code-verified findings from forge's red panel (red-security 0.78 / red-backend 0.88, both FAIL) + an independent external agent review of the #176 auth-profile code, PLUS the refresh-token expiry gap found in use. Verified against source 2026-05-29. Supersedes #189 (and #188).
+
+**Priority is CORRECTNESS / CLEANUP, not security-urgent.** Per product owner (2026-05-29): zero users, security hardening deprioritized pre-launch; track these, fix genuine correctness bugs, revisit hardening before real users. Reviewers CONFIRMED the load-bearing invariants are sound: reds never receive the credential (runOneRed passes no profile), sanitizeProfileName blocks path traversal.
+
+**HIGHEST VALUE — expiry logic is wrong, and it artificially kills usable sessions:**
+1. Expiry is computed wrong in TWO ways, both in profileExpiry / profileStatus (src/util/auth-profiles.ts:118-136):
+   (a) **Ignores the refresh_token.** A captured Supabase bundle contains access_token (~1h), expires_at, AND refresh_token. forge gates on the access token's 1h expires_at and hard-fails after that — but the injected bundle includes the refresh_token, and the app's Supabase client (autoRefreshToken on) silently mints new access tokens on load. So the agent's real session lives as long as the REFRESH token (days/weeks), not 1h. forge declaring the profile dead at 1h is the actual flaw — it makes "capture once" far less useful than it is. Fix the gate: access valid → OK; access expired BUT refresh_token present → proceed (browser refreshes on load), warn at most; access expired AND no refresh_token → fail.
+   (b) **Over-broad min.** profileExpiry does Math.min over ALL cookie `expires` (line 133); an unrelated short-lived cookie (CSRF/analytics) marks a still-valid auth profile expired. Fix: derive expiry from the auth-token/JWT (and refresh_token presence), not arbitrary cookies.
+   Caveat to document: Supabase rotates refresh tokens — if the human keeps actively using the same login after capture, rotation can invalidate the captured refresh_token. Cleanest capture = log in fresh in the forge window; long-term an app test-login endpoint sidesteps it (v2, #176). Don't build server-side refresh (needs the anon key, not captured) — rely on in-browser auto-refresh.
+
+**Other correctness bugs (worth fixing):**
+2. TOCTOU write-then-chmod — credential file briefly at umask default before chmod. writeProfile (auth-profiles.ts) + staged copy (auth-state.ts). Fix: writeFileSync(path, data, { mode: 0o600 }), ideally temp-file + rename.
+3. [verified] IPv6 [::1] not reconciled. new URL("http://[::1]:3000").hostname === "[::1]" (brackets) but LOCALHOST_HOSTS has "::1" → ::1 origins skip the localhost→host.docker.internal rewrite. Fix: normalize brackets or include both. (Low impact.)
+4. CdpSession.send has no timeout — `forge auth-profile login` hangs forever if Chrome/CDP stalls after Enter. Fix: per-call timeout that rejects + close the socket.
+5. [verified] Wrong-tab capture. cdp-capture.ts:168 picks the FIRST page target. Mitigated by the dedicated-browser launch; fix: prefer the page whose origin matches --url.
+6. Cookie leading-dot domain (.localhost) not reconciled (auth-profiles.ts). Zero impact for the localStorage-only app; real for cookie-based apps. Normalize domains before reconciliation.
+
+**Cleanup:**
+7. Staged auth-state.json persists in the run dir after the run. Stage outside taskDir and/or unlink after the container exits.
+8. Network.getCookies captures cookies from ALL origins, not just the target (over-broad capture). Scope to the target origin (pairs with 1b).
+
+**Documentation honesty (cheap, do it — NOT a code vuln):**
+9. Correct overclaiming language. The injected token IS readable by the (trusted) primary agent inside its container (`cat /forge-auth/state.json`). Accurate guarantee: "never in prompts, logs, result.json, or the project mount" — NOT "the agent never holds/sees the credential." Fix the ADR + commit-summary phrasing. NOT a vuln within forge's trust model (container boundary = trust line; reds correctly excluded). A separate injector-process boundary is possible but NOT warranted now — out of scope.
+
+**By-design (NOT defects — recorded so they aren't re-raised):**
+- Pipeline auth scoping is a role allowlist incl engineer + frontend-specialist (UI visual verification). A workflow needs_auth: true flag is an optional refinement (#184), not a bug.
+
+Provenance: forge red panel + independent external review + in-use refresh-token finding, merged and code-verified by the orchestrator.
+
+
 ## Done (recent)
+
+### #189 — Auth-profile review findings (consolidated: red panel + independent review)
+**Closed:** 2026-05-29.
+
+Combined, code-verified findings from forge's own red panel (red-security 0.78 / red-backend 0.88, both verdict FAIL) AND an independent external agent review of the #176 auth-profile code. Verified against source 2026-05-29. Supersedes #188.
+
+**Priority is CORRECTNESS / CLEANUP, not security-urgent.** Per product owner (2026-05-29): zero users, security hardening deprioritized pre-launch — track these, fix genuine correctness bugs, revisit hardening before onboarding real users. Reviewers CONFIRMED the load-bearing invariants are sound: reds never receive the credential (runOneRed passes no profile), and sanitizeProfileName blocks path traversal.
+
+**Correctness bugs (worth fixing):**
+1. TOCTOU write-then-chmod — credential file briefly at umask default before chmod. Two sites: writeProfile (src/util/auth-profiles.ts) + staged copy (src/v2/auth-state.ts). Fix: writeFileSync(path, data, { mode: 0o600 }), ideally temp-file + rename.
+2. [NEW, verified] Over-broad EXPIRY → premature expiry. profileExpiry (auth-profiles.ts:133/136) does Math.min over ALL cookie expires; an unrelated short-lived cookie (CSRF/analytics) marks a still-valid auth profile expired. Fix: prefer localStorage/JWT auth expiry when present; only consider likely auth/session cookies.
+3. [NEW, verified] IPv6 [::1] not reconciled. new URL("http://[::1]:3000").hostname === "[::1]" (brackets) but LOCALHOST_HOSTS has "::1" → ::1 origins skip the localhost→host.docker.internal rewrite. Fix: normalize brackets or include both forms. (Low impact; rare.)
+4. CdpSession.send has no timeout — `forge auth-profile login` hangs forever if Chrome/CDP stalls after Enter. Fix: per-call timeout that rejects + close the socket.
+5. [NEW, verified] Wrong-tab capture. cdp-capture.ts:168 picks the FIRST page target. Mitigated by the dedicated-browser launch (one tab), but if the user opens tabs it can snapshot the wrong one. Fix: prefer the page whose origin matches the requested --url.
+6. Cookie leading-dot domain (.localhost) not reconciled (auth-profiles.ts). Zero impact for the current localStorage-only app; real for cookie-based apps. Normalize cookie domains before reconciliation.
+
+**Cleanup:**
+7. Staged auth-state.json persists in the run dir after the run. Stage outside taskDir and/or unlink after the container exits.
+8. Network.getCookies captures cookies from ALL origins, not just the target (over-broad capture). Scope to the target origin (pairs with #2).
+
+**Documentation honesty (cheap, do it — NOT a code vuln):**
+9. Correct overclaiming language. The injected token IS readable by the (trusted) primary agent inside its container — it can `cat /forge-auth/state.json`. Accurate guarantee: "never in prompts, logs, result.json, or the project mount" — NOT "the agent never holds/sees the credential." Fix the ADR (2026-05-28_auth-profile-cdp-localstorage-injection.md) + any commit-summary phrasing. This is NOT a vulnerability within forge's trust model (container boundary = trust line; trusted primaries; reds correctly excluded). A separate injector-process boundary for true isolation is possible but NOT warranted at this stage — explicitly out of scope.
+
+**By-design (NOT defects — recorded so they aren't re-raised):**
+- Pipeline auth scoping is a role allowlist incl engineer + frontend-specialist (they do UI visual verification). A workflow-level needs_auth: true flag is an optional refinement (tracked in #184), not a bug. The independent review rated this medium; it's by-design.
+
+Provenance: forge red panel + independent external agent review, merged and code-verified by the orchestrator.
+
+
+### #188 — Fix auth-profile review findings (TOCTOU perms, --meta bypass, CDP hang, cookie-dot)
+**Closed:** 2026-05-29.
+
+**From the red panel review of the #176 auth-profile code (2026-05-29).** Two reds (red-security 0.78, red-backend 0.88) converged on these REAL, unfixed defects. None critical for single-user macOS, but all legit and cheap:
+
+1. **TOCTOU write-then-chmod (medium, both reds)** — `writeFileSync(path, data)` then `chmodSync(path, 0o600)` leaves the credential file briefly at umask default (world-readable on a shared host). Two sites: `writeProfile` (src/util/auth-profiles.ts) and the staged reconciled copy (src/v2/auth-state.ts). Fix: pass `{ mode: 0o600 }` to writeFileSync so perms are set at creation.
+2. **--meta authProfile bypass (low, red-security)** — `forge new --meta '{"authProfile":"x"}'` injects the key into run metadata via the inputs spread (startRun), bypassing the up-front existence/expiry validation in new.ts (which only checks --auth-profile). Not a security hole (per-step resolution still fail-fasts), but defeats fail-fast-at-creation. Fix: validate metadata.authProfile too, or strip it from --meta.
+3. **CdpSession.send has no timeout (medium, both)** — registers a pending promise then ws.send with no error/timeout handling; captureViaBrowser hangs forever if Chrome stops responding after the user presses Enter. Fix: bound send() with a timeout that rejects.
+4. **Cookie leading-dot domain miss (red-be high / red-sec low)** — reconcileStateForContainer only matches exact `localhost`/`127.0.0.1`; a `.localhost` cookie domain isn't rewritten. Zero impact for the current localStorage-only app (no cookies), real for cookie-based apps. Calibration note: red-be over-rated this high.
+5. **Staged auth-state.json never cleaned up (low, both)** — the reconciled copy persists in the run dir after the run. Lower priority (run dirs aren't auto-cleaned anyway).
+6. **Network.getCookies over-broad (low, red-security)** — capture grabs cookies from all origins, not just the captured app's. Scope to the target origin.
+
+Reds CONFIRMED the load-bearing invariants are sound: reds never receive the credential (runOneRed passes no profile), and sanitizeProfileName blocks path traversal. No hallucinated findings.
+
+Recommended order if picked up: #1 (TOCTOU) + #2 (--meta) + #3 (CDP timeout) are quick and worthwhile; #4/#5/#6 lower priority.
+
+
+### #176 — Auth profiles: agents test authenticated apps via a captured browser session (CDP), never credentials
+**Closed:** 2026-05-29.
+
+**Priority: high / soon — blocks QA of any authenticated app.** Today forge's browser agents (manual-qa, engineer/frontend visual verification) can only exercise *unauthenticated* surfaces. The implementer seeds already name this gap ("if the app requires authentication, check CLAUDE.md for a dev-auth path; if none, note it as a gap"). Without a systematic mechanism we either hand agents credentials (violates forge's no-secrets-to-agents posture) or skip authed flows entirely — and most real apps are behind a login.
+
+**Principle:** agents operate *authenticated* but never *know credentials*. This is forge's existing trust model (read-only project mounts, container boundary as the trust line) generalized from the project to the app-under-test. The agent gets an authenticated browser context, not the secret.
+
+**Concept — auth profiles.** A named profile binds a captured browser session to a set of domains:
+
+```
+auth_profiles:
+  qa-admin:
+    kind: browser-storage-state        # storageState-shaped JSON, loaded via CDP (NOT Playwright)
+    path: ~/.forge/auth/qa-admin.storage.json
+    domains: [ "https://staging.example.com" ]
+    readonly: true
+```
+
+Task requests it: `forge invoke manual-qa --auth-profile qa-admin ...`. Forge copies the state into the authed task's container tmp, the CDP browser-tools start with cookies/localStorage already injected, and the path + contents are redacted from prompts and logs.
+
+**Flow:**
+1. Out-of-band trusted login: `forge auth-profile login qa-admin --url https://staging...` opens a real/controlled browser; the human logs in (incl. MFA).
+2. Forge captures the session to a storageState-shaped JSON at the host-global path.
+3. Later, `forge invoke ... --auth-profile qa-admin` injects it; the app sees the agent as logged in.
+4. The prompt says "use auth profile qa-admin," never the password or cookie contents.
+
+**Three load-bearing constraints (where the naive version breaks or leaks):**
+- **CDP, not Playwright.** Forge retired Playwright for CDP browser-tools (#126, #128). Keep the storageState *format* but implement a CDP loader: cookies via `Network.setCookies`, localStorage/sessionStorage via `Page.addScriptToEvaluateOnNewDocument` per origin. Do not reintroduce Playwright. **Scope note:** "no Playwright" applies ONLY to the *agent's* injection path (browser-tools / manual-qa). The *project's* committed E2E suite IS Playwright (#177) and consumes this same storageState file *natively* via `storageState:` — same artifact, different consumer. Don't read this as "projects shouldn't use Playwright."
+- **The state file is a bearer credential — store it host-global, never in the project tree.** Session cookies are live tokens. A path under `<project>/.forge/auth/` is readable by ANY agent via the project mount (read-only still means readable), defeating the principle. Store at `~/.forge/auth/<profile>.storage.json` (like runtimes), mode 600, gitignored, copied only into the specific authed task's container tmp — never via the general project mount. Encryption-at-rest is the trigger to activate #60 (`pass`).
+- **Fail fast on expiry.** An expired session silently lands the agent on a login page, producing false bug reports ("app broken — shows login"). The profile must carry/derive expiry; `forge auth-profile status` checks it; the authed task fails fast ("profile qa-admin expired — re-run forge auth-profile login qa-admin") rather than proceeding logged-out.
+
+**Smaller notes:**
+- Name it distinct from `forge auth` (Claude API auth modes: bedrock/oauth/apikey). This is app-under-test auth, an orthogonal axis. `--auth-profile` is fine.
+- `domains:` allowlist — inject state only for matching origins so staging cookies don't ride along to other hosts the agent navigates to.
+- Redact profile path + contents from prompts, result.json, and container logs.
+
+**Variant scoping:**
+- v1 (build first): manual login + CDP capture/inject. No app changes, fits today.
+- v2: scripted login using a vault secret -> activates #60.
+- Preferred when available: app test-login endpoint (`/__test__/login?role=admin`) — deterministic, no UI login; recommend to app teams that can add it.
+- Defer: magic-link / short-lived-token broker.
+- Out of scope (for now): mobile — RN verification is tests-only, no browser/sim in container today.
+
+**CLI surface:** `forge auth-profile login <name> --url <url>`, `forge auth-profile status [<name>]`, `forge auth-profile list`, `forge auth-profile rm <name>`; `--auth-profile <name>` on `forge invoke` and on pipeline steps that browser-verify.
+
+**Schema:** new `auth_profiles` map (host-global and/or project `.forge/`), profile = {kind, path, domains[], readonly}. Resolve like runtimes (project override -> host-global fallback).
+
+**Ties:** activates #60 (secret-at-rest); turns the implementer-seed dev-auth-gap note into a real mechanism; must respect the red read-only-mount rule (don't expose the cred via mounts); builds on this session's browser-verification hardening (ceda17d).
+
+
+### #183 — Auth profiles: reconcile capture origin with container-reachable origin for host-served apps
+**Closed:** 2026-05-29.
+
+**Found proving #176 end-to-end in a real container.** A captured profile records the origin the human logged in at (e.g. `http://localhost:3000`). But an agent container on macOS cannot reach the host's `localhost` — it must browse `http://host.docker.internal:3000`. The browser-tools injector guards localStorage by `location.origin` (the domains allowlist), so when the agent browses host.docker.internal but the profile origin is localhost, injection silently no-ops and the agent lands logged-out (which, per #176 finding #2, renders an empty shell, not a login redirect — a false "app broken").
+
+**Proof workaround used (do not ship as the UX):** hand-derived a `qa-admin-docker` profile by rewriting `http://localhost:3000` → `http://host.docker.internal:3000` (and cookie domain localhost → host.docker.internal). The Supabase session JWT is origin-agnostic, so the same token authenticated fine. Run passed: agent reported logged_in, steve@bargelt.com, steve-1, teams visible.
+
+**What forge should do (options to weigh):**
+- On copy into the authed container, if the profile origin host is `localhost`/`127.0.0.1` and the app is host-served, rewrite the origin (and cookie domains) to `host.docker.internal` in the in-container copy — transparent, no second profile. Needs a signal that the target is host-served (heuristic, or a flag on the profile / invoke).
+- OR capture/store the profile under the container-reachable origin from the start (capture via host.docker.internal — but the human logs in on localhost).
+- OR pass `--network host` so container localhost maps to host localhost (Docker Desktop 4.34+, macOS-gated; forge spawn has no network flag today — separate change).
+- For PUBLIC staging/prod apps (real DNS, reachable identically from host and container) this is a non-issue; the gap is specific to localhost-served dev apps.
+
+**Reachability is NOT the gap:** host.docker.internal:3000 returns 200 from the agent image with no --add-host (Docker Desktop auto-provides it). Only the origin mismatch needs solving.
+
+Relates to #176 (auth profiles), #181 (pin browser-tools), #182 (generic env var).
+
+
+### #181 — pi-skills/browser-tools is an unpinned dependency — fork + pin the auth injector
+**Closed:** 2026-05-29.
+
+**Found during #176 Slice 2.** forge mounts `${FORGE_BROWSER_TOOLS_DIR:-~/pi-skills/browser-tools}` into agent containers (read-only) — currently `~/.claude/skills/browser-tools` is a symlink to `~/pi-skills/browser-tools`, a checkout of the THIRD-PARTY repo `badlogic/pi-skills` sitting on upstream `main` (SHA 75d32a3 at time of writing). The #176 auth injector (`auth-inject.js` + a `browser-nav.js` edit) lives there as UNCOMMITTED local edits on top of upstream. forge therefore mounts "whatever SHA that checkout happens to be at" with zero pinning — works on this machine, no reproducible dependency state. A fresh clone / another machine / a container rebuild silently lacks the injector, which is exactly the silent-skip failure #176 exists to kill.
+
+**Senior-engineer recommendation (relayed, agreed):**
+- Fork or branch `badlogic/pi-skills`; commit the auth changes there.
+- Pin forge to a specific git SHA / tag of the fork.
+- Add a forge compat note: "auth profiles require pi-skills browser-tools >= commit Y."
+- Patch files are an acceptable temporary escape hatch only, not the main strategy. Fork + pinned SHA is more boring and reproducible.
+
+**Open sub-decisions (deferred from the build session):**
+- Pin mechanism: (a) fork + documented required-SHA + a forge PREFLIGHT that hard-fails at dispatch when the mounted browser-tools lacks the injector — extends the spawn.ts browser-tools-mounted guard already added in #176 Slice 3 to also assert `auth-inject.js` presence; (b) git submodule in forge pinned to a SHA; (c) bake the fork into the agent image at a pinned SHA (revisits #128 mount-don't-bake). Leaning (a): boring, reproducible, no submodule friction, fits no-build-step workflow.
+- Fork target is an outward action on the user's GitHub (gh repo fork) — needs the user.
+
+**Until done:** #176 auth profiles only work on this machine. Blocks shipping auth-profile to any other environment.
+
+
+### #182 — Genericize the auth injector env var (decouple browser-tools from forge)
+**Closed:** 2026-05-29.
+
+**Found during #176 Slice 2.** The browser-tools auth injector keys off `FORGE_AUTH_STATE`. The senior engineer noted (agreed) that loading a preloaded storage-state file is a GENERIC browser-tools capability, not forge-specific — "if a storage-state env var is set, load it." Renaming `FORGE_AUTH_STATE` to a neutral name (e.g. `BROWSER_TOOLS_STORAGE_STATE`) in both `auth-inject.js` and forge `spawn.ts` decouples the feature, makes it cleanly upstreamable to `badlogic/pi-skills`, and keeps the upstream change non-forge-branded.
+
+**Scope:** rename in `auth-inject.js` (read the neutral var), forge `spawn.ts` (set the neutral var instead of FORGE_AUTH_STATE), update the #176 ADR. Pairs with the fork/pin ticket — do the rename before pushing to the fork so upstream history is clean. Small, isolated change.
+
 
 ### #180 — Bake Playwright (chromium) into the agent-dev-worker image for E2E — resolves #177 infra question
 **Closed:** 2026-05-29.
