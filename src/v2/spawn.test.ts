@@ -246,21 +246,21 @@ const RUNTIME_WITH_BROWSER_TOOLS: Runtime = {
   ],
 };
 
-test("buildDockerArgs: AUTH_STATE_HOST_PATH mounts the session ro and sets FORGE_AUTH_STATE", () => {
+test("buildDockerArgs: AUTH_STATE_HOST_PATH mounts the session ro and sets BROWSER_TOOLS_STORAGE_STATE", () => {
   process.env.ANTHROPIC_API_KEY = "sk-auth";
   const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
 
   const { args } = buildDockerArgs(RUNTIME_WITH_BROWSER_TOOLS, ctx);
   const mount = pickMount(args, "/forge-auth/state.json");
   assert.equal(mount, "/home/u/.forge/auth/qa-admin.storage.json:/forge-auth/state.json:ro");
-  assert.equal(pickEnv(args).FORGE_AUTH_STATE, "/forge-auth/state.json");
+  assert.equal(pickEnv(args).BROWSER_TOOLS_STORAGE_STATE, "/forge-auth/state.json");
 });
 
 test("buildDockerArgs: no auth mount/env when AUTH_STATE_HOST_PATH is unset", () => {
   process.env.ANTHROPIC_API_KEY = "sk-auth";
   const { args } = buildDockerArgs(RUNTIME_WITH_BROWSER_TOOLS, BASE_CTX);
   assert.equal(pickMount(args, "/forge-auth/state.json"), undefined);
-  assert.equal(pickEnv(args).FORGE_AUTH_STATE, undefined);
+  assert.equal(pickEnv(args).BROWSER_TOOLS_STORAGE_STATE, undefined);
 });
 
 test("buildDockerArgs: AUTH_STATE_HOST_PATH throws when browser-tools is not mounted", () => {

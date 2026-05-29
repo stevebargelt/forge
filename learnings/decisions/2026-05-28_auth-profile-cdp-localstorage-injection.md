@@ -82,14 +82,16 @@ code path.
   Verified end-to-end with a real Supabase login (qa-admin).
 - **Slice 2 — pi-skills/browser-tools (done, live on disk; third-party repo, not
   committed there):** `auth-inject.js` `maybeApplyAuth(page)` — no-op unless
-  `FORGE_AUTH_STATE` is set; registers the document-start localStorage script per
+  `BROWSER_TOOLS_STORAGE_STATE` is set (generic, non-forge-branded — #182);
+  registers the document-start localStorage script per
   origin + `setCookie`, logs SHAPE only. Wired into `browser-nav.js` before each
   nav. Verified against :9222 with the real qa-admin profile (control empty,
   treatment rendered steve@bargelt.com).
 - **Slice 3 — forge (done):** `--auth-profile <name>` on `forge invoke`; `invoke.ts`
   resolves the profile and fails fast (no container) on missing/expired; `spawn.ts`
-  mounts the file read-only at `/forge-auth/state.json` and sets `FORGE_AUTH_STATE`,
-  and throws if browser-tools (the injector) isn't mounted. The token rides only a
+  mounts the file read-only at `/forge-auth/state.json` and sets
+  `BROWSER_TOOLS_STORAGE_STATE`, and throws if browser-tools (the injector) isn't
+  mounted. The token rides only a
   single read-only mount — never argv, prompts, result.json, or the project mount.
   Unit-tested (docker args + fail-fast).
 

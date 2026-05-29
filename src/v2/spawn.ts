@@ -39,7 +39,7 @@ export type SpawnContext = SubstContext & {
   // DESIGN_DIR is optional — empty string when --design-dir wasn't passed.
   DESIGN_DIR?: string;
   // Host path to a captured auth-profile storageState file (#176). When set,
-  // the file is mounted read-only and FORGE_AUTH_STATE points the in-container
+  // the file is mounted read-only and BROWSER_TOOLS_STORAGE_STATE points the in-container
   // browser-tools injector at it so the agent operates authenticated without
   // ever seeing the credential. Undefined = no auth profile for this task.
   AUTH_STATE_HOST_PATH?: string;
@@ -137,7 +137,8 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   }
 
   // #176 auth profile: mount the captured session read-only and point the
-  // browser-tools injector at it via FORGE_AUTH_STATE. The token never enters
+  // browser-tools injector at it via BROWSER_TOOLS_STORAGE_STATE (a generic
+  // browser-tools env var, not forge-branded — #182). The token never enters
   // argv / prompts / logs — only this single read-only file, never the project
   // mount. The injector lives in the browser-tools skill, so a skipped skill
   // mount would silently no-op auth; fail fast instead.
@@ -149,7 +150,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
       );
     }
     args.push("-v", `${ctx.AUTH_STATE_HOST_PATH}:${AUTH_STATE_CONTAINER_PATH}:ro`);
-    args.push("-e", `FORGE_AUTH_STATE=${AUTH_STATE_CONTAINER_PATH}`);
+    args.push("-e", `BROWSER_TOOLS_STORAGE_STATE=${AUTH_STATE_CONTAINER_PATH}`);
   }
 
   // Image.
