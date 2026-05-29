@@ -4,10 +4,12 @@ import { nowIso } from "../util/ids.js";
 export type EventType =
   | "run.created"
   | "run.completed"
+  | "run.cancelled"
   | "task.created"
   | "task.started"
   | "task.completed"
   | "task.failed"
+  | "task.cancelled"
   | "task.crashed"
   | "task.idle_timeout"
   | "task.blocked_by_red"

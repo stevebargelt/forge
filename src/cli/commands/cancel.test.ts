@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
+import { makeInMemoryDb, setDbForTest, getDb } from "../../store/db.js";
 import { insertRun, getRun } from "../../store/runs.js";
 import { insertTask, getTask } from "../../store/tasks.js";
 import { performCancel } from "./cancel.js";
@@ -146,4 +146,89 @@ test("cancel run: --dry-run issues no kills and writes nothing", () => {
   assert.equal(killed.length, 0);
   assert.equal(getTask("task-dr1")!.status, "running");
   assert.equal(getRun(RUN.id)!.status, "active");
+});
+
+// Finding 2: cancelling already-terminal run is a no-op
+test("cancel run: complete run returns run-terminal and is NOT flipped to abandoned", () => {
+  const completeRun: Run = { ...RUN, id: "run-complete", status: "complete" };
+  insertRun(completeRun);
+  const outcome = performCancel("run-complete", {});
+  assert.equal(outcome.kind, "run-terminal");
+  if (outcome.kind === "run-terminal") {
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.runId, "run-complete");
+  }
+  assert.equal(getRun("run-complete")!.status, "complete");
+});
+
+test("cancel run: abandoned run returns run-terminal", () => {
+  const abandonedRun: Run = { ...RUN, id: "run-abandoned", status: "abandoned" };
+  insertRun(abandonedRun);
+  const outcome = performCancel("run-abandoned", {});
+  assert.equal(outcome.kind, "run-terminal");
+  if (outcome.kind === "run-terminal") {
+    assert.equal(outcome.status, "abandoned");
+  }
+  assert.equal(getRun("run-abandoned")!.status, "abandoned");
+});
+
+// Finding 3: --json emits structured error for unknown id
+test("cancel: unknown id outcome has correct structure for JSON output", () => {
+  const outcome = performCancel("no-such-id-json", { json: true });
+  assert.equal(outcome.kind, "unknown");
+  if (outcome.kind === "unknown") {
+    const jsonPayload = { dryRun: false, error: "unknown id", id: outcome.id, kind: "unknown" };
+    assert.equal(jsonPayload.error, "unknown id");
+    assert.equal(jsonPayload.kind, "unknown");
+    assert.equal(jsonPayload.id, "no-such-id-json");
+    assert.equal(jsonPayload.dryRun, false);
+  }
+});
+
+function getEvents(runId: string): Array<{ event_type: string; task_id: string | null; payload: string | null }> {
+  return getDb()
+    .prepare(`SELECT event_type, task_id, payload FROM events WHERE run_id = ? ORDER BY created_at`)
+    .all(runId) as Array<{ event_type: string; task_id: string | null; payload: string | null }>;
+}
+
+// Finding 4: event emission on real cancel
+test("cancel task: emits task.cancelled and run.cancelled on real cancel", () => {
+  insertTask(makeTask({ id: "task-ev1", status: "running" }));
+  performCancel("task-ev1", {});
+  const events = getEvents(RUN.id);
+  const types = events.map((e) => e.event_type);
+  assert.ok(types.includes("task.cancelled"), "should emit task.cancelled");
+  assert.ok(types.includes("run.cancelled"), "should emit run.cancelled");
+  const taskEvent = events.find((e) => e.event_type === "task.cancelled");
+  assert.equal(taskEvent!.task_id, "task-ev1");
+  assert.equal(JSON.parse(taskEvent!.payload!).via, "forge cancel");
+});
+
+test("cancel task: does NOT emit events on dry-run", () => {
+  insertTask(makeTask({ id: "task-ev2", status: "running" }));
+  performCancel("task-ev2", { dryRun: true });
+  const events = getEvents(RUN.id);
+  const types = events.map((e) => e.event_type);
+  assert.ok(!types.includes("task.cancelled"), "dry-run must not emit task.cancelled");
+  assert.ok(!types.includes("run.cancelled"), "dry-run must not emit run.cancelled");
+});
+
+test("cancel run: emits task.cancelled per task and run.cancelled on real cancel", () => {
+  insertTask(makeTask({ id: "task-rev1", status: "running" }));
+  insertTask(makeTask({ id: "task-rev2", status: "pending" }));
+  performCancel(RUN.id, {});
+  const events = getEvents(RUN.id);
+  const taskCancelledEvents = events.filter((e) => e.event_type === "task.cancelled");
+  const runCancelledEvents = events.filter((e) => e.event_type === "run.cancelled");
+  assert.equal(taskCancelledEvents.length, 2);
+  assert.equal(runCancelledEvents.length, 1);
+});
+
+test("cancel run: does NOT emit events on dry-run", () => {
+  insertTask(makeTask({ id: "task-rev3", status: "running" }));
+  performCancel(RUN.id, { dryRun: true });
+  const events = getEvents(RUN.id);
+  const types = events.map((e) => e.event_type);
+  assert.ok(!types.includes("task.cancelled"), "dry-run must not emit task.cancelled");
+  assert.ok(!types.includes("run.cancelled"), "dry-run must not emit run.cancelled");
 });

@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
-import { getRun } from "../store/runs.js";
+import { getRun, updateRunStatus } from "../store/runs.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
@@ -296,6 +296,49 @@ test("runNext: idle-timeout exit code marks the pipeline task failed with idle_t
   assert.ok(first);
   assert.equal(first!.status, "failed");
   assert.match(first!.error ?? "", /idle_timeout/);
+});
+
+// Finding 1: runNext guard — non-active run returns empty dispatch
+test("runNext: abandoned run returns empty dispatch without starting any work", async () => {
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "abandoned guard test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Manually mark the run abandoned (as forge cancel would do).
+  updateRunStatus(runId, "abandoned");
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("runNext dispatched a step on a non-active run");
+  };
+
+  const result = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: throwingExec });
+  assert.deepEqual(result.dispatchedSteps, []);
+  assert.deepEqual(result.completedSteps, []);
+  assert.deepEqual(result.awaitingGate, []);
+  assert.deepEqual(result.failedSteps, []);
+  assert.equal(result.runStatus, "abandoned");
+});
+
+test("runNext: complete run returns empty dispatch without starting any work", async () => {
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "complete guard test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  updateRunStatus(runId, "complete");
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("runNext dispatched a step on a non-active run");
+  };
+
+  const result = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: throwingExec });
+  assert.deepEqual(result.dispatchedSteps, []);
+  assert.equal(result.runStatus, "complete");
 });
 
 // ---------------------------------------------------------------------------

@@ -17,6 +17,12 @@ export function registerNext(program: Command): void {
 
       const run = getRun(runId);
       if (!run) throw new Error(`Run not found: ${runId}`);
+
+      if (run.status === "abandoned" || run.status === "complete") {
+        console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);
+        return;
+      }
+
       const projectDir = resolveProjectDir(runId, options.project as string | undefined);
 
       const workflow = loadWorkflow(run.workflow, { projectDir });

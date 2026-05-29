@@ -68,6 +68,16 @@ export async function runNext(args: {
   const run = getRun(args.runId);
   if (!run) throw new Error(`runNext: run not found: ${args.runId}`);
 
+  if (run.status !== "active") {
+    return {
+      dispatchedSteps: [],
+      completedSteps: [],
+      awaitingGate: [],
+      failedSteps: [],
+      runStatus: run.status,
+    };
+  }
+
   const tasks = tasksForRun(args.runId);
   const ready = computeReadyQueue(args.workflow, tasks);
 

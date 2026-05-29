@@ -5,6 +5,8 @@ import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun, getRun } from "../../store/runs.js";
 import { insertTask, getTask } from "../../store/tasks.js";
 import { performCancel } from "./cancel.js";
+import { runNext, type DockerExecFn } from "../../v2/runNext.js";
+import type { Workflow } from "../../v2/schema.js";
 import type { Run, Task, TaskStatus } from "../../types/index.js";
 
 let db: DatabaseInstance;
@@ -16,6 +18,17 @@ const BASE_RUN: Run = {
   title: "cancel integration tests",
   status: "active",
   createdAt: "2026-05-29T00:00:00Z",
+};
+
+// Used by the resurrection-prevention test (Finding 1).
+const TWO_STEP_WORKFLOW: Workflow = {
+  name: "cancel-test",
+  description: "two-step workflow for resurrection-prevention test",
+  inputs: [],
+  steps: [
+    { id: "step-one", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "step-two", agent: "engineer", gate: "auto", manual: false, depends_on: ["step-one"], runtime: "claude", reds: [] },
+  ],
 };
 
 function makeTask(id: string, overrides: Partial<Omit<Task, "id" | "taskPackage">> = {}): Task {
@@ -224,9 +237,12 @@ test("integ cancel: cancelling already-abandoned run yields empty kill list, tas
   const killed: string[] = [];
   const outcome = performCancel("run-abandoned-integ", {}, (n) => killed.push(n));
 
-  assert.equal(outcome.kind, "run-cancelled");
-  if (outcome.kind === "run-cancelled") {
-    assert.equal(outcome.tasksKilled.length, 0, "no non-terminal tasks to kill");
+  // Finding 2: history-rewrite guard — already-abandoned run returns run-terminal
+  // immediately; status stays 'abandoned' (NOT re-written by a second cancel).
+  assert.equal(outcome.kind, "run-terminal");
+  if (outcome.kind === "run-terminal") {
+    assert.equal(outcome.status, "abandoned");
+    assert.equal(outcome.runId, "run-abandoned-integ");
   }
   assert.equal(killed.length, 0);
   assert.equal(getTask("t-done-a")!.status, "failed");
@@ -283,4 +299,122 @@ test("integ cancel: --dry-run by run-id issues no kills and makes zero DB writes
   assert.equal(getTask("t-drun-2")!.status, "pending", "pending task status unchanged");
   assert.equal(getTask("t-drun-3")!.status, "complete", "complete task status unchanged");
   assert.equal(getRun(BASE_RUN.id)!.status, "active", "run status unchanged after dry-run");
+});
+
+// ─── 7. Resurrection prevention (Finding 1) ─────────────────────────────────
+// The High finding: forge next was able to resurrect a cancelled run by seeing
+// unstarted steps and dispatching them even though the run was abandoned.
+// This end-to-end test locks in the fix: runNext must exit early and dispatch
+// nothing when the run is not 'active'.
+
+test("integ cancel: cancelled run cannot be resurrected — runNext dispatches nothing and run stays abandoned", async () => {
+  // Seed: one task stuck 'running' on step-one; step-two has no task row yet.
+  insertTask(makeTask("t-resurrect-running", { status: "running", phase: "step-one" }));
+
+  // Cancel the run. Running task becomes failed, run becomes abandoned.
+  const killed: string[] = [];
+  performCancel(BASE_RUN.id, {}, (n) => killed.push(n));
+
+  assert.equal(getRun(BASE_RUN.id)!.status, "abandoned");
+  assert.equal(getTask("t-resurrect-running")!.status, "failed");
+
+  // A dockerExec that proves no container was spawned. If runNext ever reaches
+  // dispatchStep, this throw propagates and the test fails.
+  const forbiddenExec: DockerExecFn = async () => {
+    throw new Error("runNext must not spawn any container on an abandoned run");
+  };
+
+  const result = await runNext({
+    runId: BASE_RUN.id,
+    workflow: TWO_STEP_WORKFLOW,
+    dockerExec: forbiddenExec,
+  });
+
+  assert.deepEqual(result.dispatchedSteps, [], "no steps dispatched on an abandoned run");
+  assert.deepEqual(result.completedSteps, []);
+  assert.deepEqual(result.awaitingGate, []);
+  assert.deepEqual(result.failedSteps, []);
+  assert.equal(result.runStatus, "abandoned", "run status must stay abandoned after runNext");
+  assert.equal(getRun(BASE_RUN.id)!.status, "abandoned", "DB confirms run is still abandoned");
+});
+
+// ─── 8. History-rewrite guard (Finding 2) — complete run ─────────────────────
+// Cancelling an already-complete run must be a no-op: status must NOT be
+// flipped to 'abandoned', no tasks touched, no containers killed.
+
+test("integ cancel: cancelling already-complete run is a no-op (run-terminal, status stays complete)", () => {
+  const completeRun: Run = {
+    id: "run-complete-integ",
+    workflow: "feature",
+    title: "already complete",
+    status: "complete",
+    createdAt: "2026-05-29T02:00:00Z",
+    completedAt: "2026-05-29T02:30:00Z",
+  };
+  insertRun(completeRun);
+  insertTask(makeTask("t-comp-task", { runId: "run-complete-integ", status: "complete" }));
+
+  const killed: string[] = [];
+  const outcome = performCancel("run-complete-integ", {}, (n) => killed.push(n));
+
+  assert.equal(outcome.kind, "run-terminal");
+  if (outcome.kind === "run-terminal") {
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.runId, "run-complete-integ");
+  }
+  assert.equal(killed.length, 0, "no containers killed for an already-complete run");
+  // Status must NOT be flipped to 'abandoned'.
+  assert.equal(getRun("run-complete-integ")!.status, "complete", "status must not change from complete");
+  assert.equal(getTask("t-comp-task")!.status, "complete");
+});
+
+// ─── 9. Event emission (Finding 4) — non-dry-run emits events ────────────────
+// A real cancel must write task.cancelled for every failed task and exactly
+// one run.cancelled when the run is abandoned.
+
+test("integ cancel: non-dry-run cancel emits task.cancelled per failed task and one run.cancelled", () => {
+  insertTask(makeTask("t-evt-running", { status: "running" }));
+  insertTask(makeTask("t-evt-pending", { status: "pending" }));
+  insertTask(makeTask("t-evt-done", { status: "complete" }));   // terminal — no event expected
+
+  const outcome = performCancel(BASE_RUN.id, {}, () => { /* stub kill — no docker */ });
+
+  assert.equal(outcome.kind, "run-cancelled");
+
+  type EventRow = { event_type: string; task_id: string | null };
+  const events = db
+    .prepare("SELECT event_type, task_id FROM events WHERE run_id = ? ORDER BY id ASC")
+    .all(BASE_RUN.id) as EventRow[];
+
+  const taskCancelledEvents = events.filter((e) => e.event_type === "task.cancelled");
+  const runCancelledEvents = events.filter((e) => e.event_type === "run.cancelled");
+
+  assert.equal(taskCancelledEvents.length, 2, "one task.cancelled per non-terminal task");
+  assert.deepEqual(
+    taskCancelledEvents.map((e) => e.task_id).sort(),
+    ["t-evt-pending", "t-evt-running"],
+    "task.cancelled events carry correct task IDs",
+  );
+  assert.equal(runCancelledEvents.length, 1, "exactly one run.cancelled event");
+  assert.equal(runCancelledEvents[0]!.task_id, null, "run.cancelled has no task_id");
+});
+
+// ─── 10. Event emission (Finding 4) — dry-run emits NO events ────────────────
+// A --dry-run cancel must not write any rows to the events table.
+
+test("integ cancel: --dry-run cancel emits no events", () => {
+  insertTask(makeTask("t-dryevt-running", { status: "running" }));
+  insertTask(makeTask("t-dryevt-pending", { status: "pending" }));
+
+  const outcome = performCancel(BASE_RUN.id, { dryRun: true }, () => { /* stub — not called in dry-run */ });
+
+  assert.equal(outcome.kind, "run-cancelled");
+
+  type EventRow = { event_type: string };
+  const events = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ?")
+    .all(BASE_RUN.id) as EventRow[];
+
+  assert.equal(events.length, 0, "dry-run must write no rows to the events table");
+  assert.equal(getRun(BASE_RUN.id)!.status, "active", "dry-run must not change run status");
 });
