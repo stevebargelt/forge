@@ -406,7 +406,121 @@ Two related rough edges, both hit 2026-05-29 while filing #173.
 **`##` in a ticket body silently breaks the byte-for-byte roundtrip.** The parser's SECTION_HEADING_RE = /^## (.+)$/ (src/backlog/parse.ts:24) treats any `## X` line as a top-level section boundary, even inside a ticket body. A ticket whose body uses `##` subheadings gets truncated at the first one and the remainder lands in unrecognized-section limbo, so parse(BACKLOG.md)→serialize() no longer roundtrips and parse.test.ts goes red. Convention is bold lead-ins (`**X:**`); `###`-without-`#NNN` is also body-safe (TICKET_HEADING_RE requires the `#<id> — ` shape). Harden: either have `forge backlog file` reject/escape `^## ` lines in a body, or make the parser only treat `## ` as a section when the name is in SECTION_ORDER. Related to #141 (parser as single-source-of-truth).
 
 
+### #176 — Auth profiles: agents test authenticated apps via a captured browser session (CDP), never credentials
+**Priority: high / soon — blocks QA of any authenticated app.** Today forge's browser agents (manual-qa, engineer/frontend visual verification) can only exercise *unauthenticated* surfaces. The implementer seeds already name this gap ("if the app requires authentication, check CLAUDE.md for a dev-auth path; if none, note it as a gap"). Without a systematic mechanism we either hand agents credentials (violates forge's no-secrets-to-agents posture) or skip authed flows entirely — and most real apps are behind a login.
+
+**Principle:** agents operate *authenticated* but never *know credentials*. This is forge's existing trust model (read-only project mounts, container boundary as the trust line) generalized from the project to the app-under-test. The agent gets an authenticated browser context, not the secret.
+
+**Concept — auth profiles.** A named profile binds a captured browser session to a set of domains:
+
+```
+auth_profiles:
+  qa-admin:
+    kind: browser-storage-state        # storageState-shaped JSON, loaded via CDP (NOT Playwright)
+    path: ~/.forge/auth/qa-admin.storage.json
+    domains: [ "https://staging.example.com" ]
+    readonly: true
+```
+
+Task requests it: `forge invoke manual-qa --auth-profile qa-admin ...`. Forge copies the state into the authed task's container tmp, the CDP browser-tools start with cookies/localStorage already injected, and the path + contents are redacted from prompts and logs.
+
+**Flow:**
+1. Out-of-band trusted login: `forge auth-profile login qa-admin --url https://staging...` opens a real/controlled browser; the human logs in (incl. MFA).
+2. Forge captures the session to a storageState-shaped JSON at the host-global path.
+3. Later, `forge invoke ... --auth-profile qa-admin` injects it; the app sees the agent as logged in.
+4. The prompt says "use auth profile qa-admin," never the password or cookie contents.
+
+**Three load-bearing constraints (where the naive version breaks or leaks):**
+- **CDP, not Playwright.** Forge retired Playwright for CDP browser-tools (#126, #128). Keep the storageState *format* but implement a CDP loader: cookies via `Network.setCookies`, localStorage/sessionStorage via `Page.addScriptToEvaluateOnNewDocument` per origin. Do not reintroduce Playwright. **Scope note:** "no Playwright" applies ONLY to the *agent's* injection path (browser-tools / manual-qa). The *project's* committed E2E suite IS Playwright (#177) and consumes this same storageState file *natively* via `storageState:` — same artifact, different consumer. Don't read this as "projects shouldn't use Playwright."
+- **The state file is a bearer credential — store it host-global, never in the project tree.** Session cookies are live tokens. A path under `<project>/.forge/auth/` is readable by ANY agent via the project mount (read-only still means readable), defeating the principle. Store at `~/.forge/auth/<profile>.storage.json` (like runtimes), mode 600, gitignored, copied only into the specific authed task's container tmp — never via the general project mount. Encryption-at-rest is the trigger to activate #60 (`pass`).
+- **Fail fast on expiry.** An expired session silently lands the agent on a login page, producing false bug reports ("app broken — shows login"). The profile must carry/derive expiry; `forge auth-profile status` checks it; the authed task fails fast ("profile qa-admin expired — re-run forge auth-profile login qa-admin") rather than proceeding logged-out.
+
+**Smaller notes:**
+- Name it distinct from `forge auth` (Claude API auth modes: bedrock/oauth/apikey). This is app-under-test auth, an orthogonal axis. `--auth-profile` is fine.
+- `domains:` allowlist — inject state only for matching origins so staging cookies don't ride along to other hosts the agent navigates to.
+- Redact profile path + contents from prompts, result.json, and container logs.
+
+**Variant scoping:**
+- v1 (build first): manual login + CDP capture/inject. No app changes, fits today.
+- v2: scripted login using a vault secret -> activates #60.
+- Preferred when available: app test-login endpoint (`/__test__/login?role=admin`) — deterministic, no UI login; recommend to app teams that can add it.
+- Defer: magic-link / short-lived-token broker.
+- Out of scope (for now): mobile — RN verification is tests-only, no browser/sim in container today.
+
+**CLI surface:** `forge auth-profile login <name> --url <url>`, `forge auth-profile status [<name>]`, `forge auth-profile list`, `forge auth-profile rm <name>`; `--auth-profile <name>` on `forge invoke` and on pipeline steps that browser-verify.
+
+**Schema:** new `auth_profiles` map (host-global and/or project `.forge/`), profile = {kind, path, domains[], readonly}. Resolve like runtimes (project override -> host-global fallback).
+
+**Ties:** activates #60 (secret-at-rest); turns the implementer-seed dev-auth-gap note into a real mechanism; must respect the red read-only-mount rule (don't expose the cred via mounts); builds on this session's browser-verification hardening (ceda17d).
+
+
+### #177 — test-engineer E2E should be Playwright (project-owned), kept strictly separate from agent verification (browser-tools)
+**Decision (2026-05-29):** Playwright is the E2E stack for the *project's committed suite*. It must NOT be conflated with *agent testing* (forge's CDP browser-tools). Different layers, different owners, different lifecycles — the seed currently blurs them and that's the defect.
+
+**The two layers — do not confuse:**
+- **Project E2E suite — Playwright.** Durable, committed `*.spec.ts` with real assertions (locators, auto-wait, `expect`). Lives in the repo, runs via the project's own `npx playwright test` / CI, portable, independent of forge. The test-engineer *authors* these; the project *owns and re-runs* them. This is the durable regression coverage the test-engineer seed promises.
+- **Agent verification — browser-tools (CDP, :9222).** Interactive and ephemeral: drive the browser, screenshot, eyeball. Runs ONLY inside the forge container. Output is *evidence* (screenshots in result.json), never a committed repo artifact. Belongs to engineer/frontend (build-phase visual check) and manual-qa — not to durable E2E.
+
+**Why this is a defect today:** the test-engineer seed (seeds/agents/test-engineer/CLAUDE.md) tells the agent to write E2E "tests" using browser-tools scripts (browser-nav.js/click.js + screenshot + prose). That produces a one-shot scripted verification with no machine assertion, not runnable in the project's own CI (browser-tools + :9222 exist only in the forge container), and orphaned the moment it leaves forge — directly contradicting the seed's headline ("committed test files — durable regression coverage that lives in the repo"). It's really manual-qa work mislabeled as E2E.
+
+**test-engineer seed change:**
+- E2E section: detect the project's E2E framework (playwright.config / cypress.config / package.json). If the project is a web app and has none, scaffold Playwright (config + tests dir + npm script). Write committed, assertion-bearing specs.
+- Stop describing browser-tools scenario scripts as "E2E tests." browser-tools is not in the test-engineer's E2E path; Playwright has its own headed/trace debugging.
+- Reconcile the seed headline with the method: Playwright specs satisfy "durable committed regression"; browser-tools scripts do not.
+
+**Anti-downgrade gate (REQUIRED — the audit's core finding).** Evidence (2026-05-29): across 6 test-engineer runs, E2E files written = 0 — including web-admin runs where E2E applies. The agent silently substitutes integration tests for E2E and the verify gate passes because `test_files_written` is non-empty (integration tests satisfy it). Fixing Playwright/auth alone won't *force* E2E. So: on a web app the test-engineer must EITHER commit an E2E spec OR return a structured `e2e_skipped_reason` (e.g. "needs auth profile #176", "no dev-auth path documented"). The orchestrator gate-check (CLAUDE.md) must reject a web-app `verify` result that has zero E2E specs AND no `e2e_skipped_reason` — i.e. silence on E2E is a hard reject, not a pass. This closes the "looks complete, isn't" failure mode that hid the missing E2E for this long.
+
+**Infra question — RESOLVED (see #180):** running the Playwright suite in-container needs a browser. Decided to **bake Playwright's own chromium into the agent-dev-worker image** (not `connectOverCDP` to #128's Chrome — that loses Playwright's per-test isolation, `storageState`-per-context, and parallelism). Own browser keeps project-E2E (layer b) independent of agent-verification (layer a). Full spec + size/version-locking details in #180. #180 is auth-independent and can ship in parallel with #176.
+
+**Auth (ties #176):** the captured storageState artifact serves BOTH layers from one file via different mechanisms — Playwright consumes `storageState:` natively (project E2E); browser-tools consumes via CDP injection (agent verification / manual-qa). Same file, two consumers, no shared code path — the layers stay separate even where they share the credential.
+
+**Ties:** #176 (auth profiles — storageState feeds both layers), #128 (baked Chrome / retired Playwright MCP — applies to the AGENT layer only, NOT the project's E2E deps), #164 (test-engineer role definition).
+
+
+### #178 — forge-test runs node:test and fails on Jest projects — agents must bypass with npx jest
+**Bug:** the `forge-test` wrapper (mandated by every implementer + test-engineer seed) invokes Node's native test runner (`node:test`). On a project that uses Jest (e.g. web-admin, jest ^30) it fails outright — the agent can't validate via the sanctioned path.
+
+**Evidence (2026-05-29):** test-engineer run `403d26` (run-add-sport-toggle-to-preview), notes verbatim: *"forge-test runs Node's native test runner which fails because the project uses Jest (jest ^30). Tests were verified by running 'npx jest --testPathPatterns=DisplayPreview.test --no-coverage' directly in web-admin/."* The agent bypassed forge-test to validate at all.
+
+**Why it matters:** the seeds make forge-test the required validation gate ("use the forge-test wrapper, not npm test directly"). When forge-test breaks on Jest, a diligent agent bypasses it (as 403d26 did) but a less careful one reports a false `status: failed` or — worse — skips validation and returns `complete` unvalidated. Either way the gate is unreliable for the large class of Jest projects.
+
+**Fix direction:** forge-test should detect the project's test runner (package.json `scripts.test` / devDeps: jest / vitest / node:test) and dispatch accordingly inside the container scratch copy, rather than hardcoding `node:test`. It already does the native-module rebuild + scratch-copy dance; it just needs runner detection. Keep the single `forge-test` entrypoint the seeds reference.
+
+**Relation:** distinct from #125 (which is "implementer seeds don't *mention* forge-test"). Here forge-test IS used and picks the wrong runner. #125 is documentation; this is forge-test's runner assumption.
+
+
+### #179 — Cleanup: qa-engineer is an orphaned #164 leftover — remove seed + fix stale docs (pipeline verify is test-engineer now)
+**Leftover from #164** (closed), which moved the pipeline verify phase from `qa-engineer` to `test-engineer` and intended to "rework qa-engineer -> manual-qa (rename or deprecate)" + "update workflow definitions referencing qa-engineer." The workflows were updated (all three `feature*.yml` now use `agent: test-engineer` for verify), but the deprecation tail was left:
+
+- `seeds/agents/qa-engineer/` seed dir still exists (no current workflow references it; confirmed via grep).
+- `docs/quick-start.md:147` still says the pipeline verify phase is `qa-engineer` — stale, should read `test-engineer`.
+- `docs/SCHEMA-CONTRACT.md:109` still documents a `qa-engineer` role.
+- (Historical PRD drafts under `docs/prds/yaml-orchestrator-116/` also mention it — those are frozen design docs, leave as-is.)
+
+**Why it matters:** orphaned seeds + stale docs are exactly the contract-vs-behavior drift this session keeps surfacing — a future session reading quick-start would think verify is qa-engineer, contradicting the workflows + the orchestrator template. Old pipeline runs in the DB show `qa-engineer` verify tasks writing 0 test files; that role is dead in the current pipeline.
+
+**Fix:** remove the `qa-engineer` seed dir (or, if any value remains, fold it into `manual-qa` per #164's intent), update `quick-start.md:147` and `SCHEMA-CONTRACT.md:109` to `test-engineer`. Small, isolated, docs + seed only.
+
+
 ## Done (recent)
+
+### #180 — Bake Playwright (chromium) into the agent-dev-worker image for E2E — resolves #177 infra question
+**Closed:** 2026-05-29.
+
+**Decision (2026-05-29):** E2E testing (#177) requires Playwright + a browser available *inside* the agent container. Bake it into the `agent-dev-worker` image (docker/). This resolves #177's infra question in favor of "bake," not `connectOverCDP`.
+
+**Bring Playwright's OWN chromium — do not reuse #128's CDP Chrome.** Rationale: keeps the project-E2E layer (b) independent of the agent-verification layer (a) — the same separation #177 draws — and preserves real Playwright isolation: per-test browser contexts, `storageState`-per-context (this is the seam #176 auth plugs into), and parallel workers. A shared `connectOverCDP` session to the browser-tools Chrome can't give that. #128's Chrome stays dedicated to browser-tools; Playwright drives its own. Two browsers, two layers — intentional.
+
+**Specifics:**
+- `npx playwright install --with-deps chromium` — chromium-only (~300MB) to limit image bloat; skip firefox/webkit unless a project needs them.
+- Pin the baked `@playwright/test` version and its matching browser build (Playwright browser binaries are version-locked to the package).
+- Set `PLAYWRIGHT_BROWSERS_PATH` to a shared baked location so a project's `npm install` finds the pre-downloaded browser instead of re-fetching it per run.
+- **Version-mismatch wrinkle:** if a project pins a `@playwright/test` whose browser build differs from the baked one, Playwright re-downloads at run time (slower but works). Mitigation: bake a recent version + document a supported range; revisit only if it bites.
+
+**Verification:** the container can run `npx playwright test` against a trivial spec headlessly and produce a result + trace with no network browser download.
+
+**Ties:** resolves the infra question in #177 (E2E authoring + anti-downgrade gate); independent of #176 (auth) — this unblocks the auth-independent E2E-mechanics spike, so it can proceed in parallel; follows the image-baking pattern from #128 (which baked Chrome for browser-tools). Sequencing: this + #176 are the two prerequisites that make #177's E2E backfill real.
+
 
 ### #175 — Test suite fires real ntfy/twilio notifications — test-setup.ts didn't neutralize providers
 **Closed:** 2026-05-29.
