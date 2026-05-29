@@ -234,3 +234,39 @@ test("buildDockerArgs: warns (not silent) when an optional browser-tools skill m
   // A skipped optional *non-skill* mount (/design) stays silent.
   assert.ok(!warnings.some((w) => w.includes("/design")), "non-skill mount should not warn");
 });
+
+// #176 auth profiles — a runtime that actually mounts browser-tools (the
+// injector). Non-optional so it's added regardless of host existence on disk.
+const RUNTIME_WITH_BROWSER_TOOLS: Runtime = {
+  ...BASE_RUNTIME,
+  auth: { mode: "apikey" },
+  mounts: [
+    ...BASE_RUNTIME.mounts,
+    { host: "/opt/browser-tools", container: "/home/agent/.claude/skills/browser-tools", mode: "ro", optional: false },
+  ],
+};
+
+test("buildDockerArgs: AUTH_STATE_HOST_PATH mounts the session ro and sets FORGE_AUTH_STATE", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-auth";
+  const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
+
+  const { args } = buildDockerArgs(RUNTIME_WITH_BROWSER_TOOLS, ctx);
+  const mount = pickMount(args, "/forge-auth/state.json");
+  assert.equal(mount, "/home/u/.forge/auth/qa-admin.storage.json:/forge-auth/state.json:ro");
+  assert.equal(pickEnv(args).FORGE_AUTH_STATE, "/forge-auth/state.json");
+});
+
+test("buildDockerArgs: no auth mount/env when AUTH_STATE_HOST_PATH is unset", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-auth";
+  const { args } = buildDockerArgs(RUNTIME_WITH_BROWSER_TOOLS, BASE_CTX);
+  assert.equal(pickMount(args, "/forge-auth/state.json"), undefined);
+  assert.equal(pickEnv(args).FORGE_AUTH_STATE, undefined);
+});
+
+test("buildDockerArgs: AUTH_STATE_HOST_PATH throws when browser-tools is not mounted", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-auth";
+  // BASE_RUNTIME has no browser-tools mount → the injector would be absent.
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
+  const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
+  assert.throws(() => buildDockerArgs(rt, ctx), /browser-tools/);
+});

@@ -38,7 +38,16 @@ export type SpawnContext = SubstContext & {
   TASK_PACKAGE_MARKDOWN: string;
   // DESIGN_DIR is optional — empty string when --design-dir wasn't passed.
   DESIGN_DIR?: string;
+  // Host path to a captured auth-profile storageState file (#176). When set,
+  // the file is mounted read-only and FORGE_AUTH_STATE points the in-container
+  // browser-tools injector at it so the agent operates authenticated without
+  // ever seeing the credential. Undefined = no auth profile for this task.
+  AUTH_STATE_HOST_PATH?: string;
 };
+
+// Fixed in-container path for the mounted auth-profile state. A top-level path
+// (not under /home/agent) avoids nesting under the oauth-volume mount.
+const AUTH_STATE_CONTAINER_PATH = "/forge-auth/state.json";
 
 export type BuildArgsResult = {
   args: string[];
@@ -91,6 +100,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   }
 
   // Mounts.
+  let browserToolsMounted = false;
   for (const mount of runtime.mounts) {
     const hostResolved = mount.optional
       ? substituteOptional(mount.host, ctx)
@@ -123,6 +133,23 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
 
     const mode = substitute(mount.mode, ctx);
     args.push("-v", `${hostPath}:${mount.container}:${mode}`);
+    if (mount.container.includes("/skills/browser-tools")) browserToolsMounted = true;
+  }
+
+  // #176 auth profile: mount the captured session read-only and point the
+  // browser-tools injector at it via FORGE_AUTH_STATE. The token never enters
+  // argv / prompts / logs — only this single read-only file, never the project
+  // mount. The injector lives in the browser-tools skill, so a skipped skill
+  // mount would silently no-op auth; fail fast instead.
+  if (ctx.AUTH_STATE_HOST_PATH) {
+    if (!browserToolsMounted) {
+      throw new Error(
+        "--auth-profile needs the browser-tools skill (it carries the auth injector), " +
+          "but that mount was skipped. Set FORGE_BROWSER_TOOLS_DIR or create the host path.",
+      );
+    }
+    args.push("-v", `${ctx.AUTH_STATE_HOST_PATH}:${AUTH_STATE_CONTAINER_PATH}:ro`);
+    args.push("-e", `FORGE_AUTH_STATE=${AUTH_STATE_CONTAINER_PATH}`);
   }
 
   // Image.

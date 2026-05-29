@@ -33,6 +33,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
+import { profileStatus } from "../util/auth-profiles.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -42,6 +43,7 @@ export type InvokeArgs = {
   modelAlias?: string;       // override the step's model alias
   runtimeName?: string;      // override the runtime to load (default: "claude")
   readOnlyProject?: boolean; // mount /project ro (default: false)
+  authProfile?: string;      // #176: name of a captured auth profile to inject (authenticated browser testing)
   runId?: string;            // attach to existing run; if absent, create a new one
   runTitle?: string;         // used only when creating a new run
   /** The orchestrator's home directory. When set, `forge status` filters
@@ -161,6 +163,29 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     return { runId, taskId, status: "failed", error: (e as Error).message };
   }
 
+  // #176: resolve the requested auth profile and fail fast BEFORE spawning a
+  // container. An expired session would silently land the agent on an
+  // unauthenticated app (which doesn't even redirect to login — it just renders
+  // empty), producing false "app broken" reports. Better to refuse up front.
+  let authStateHostPath: string | undefined;
+  if (args.authProfile) {
+    const status = profileStatus(args.authProfile);
+    const remediation = `run: forge auth-profile login ${args.authProfile} --url <url>`;
+    if (!status.exists) {
+      const error = `auth profile '${args.authProfile}' not found — ${remediation}`;
+      markTaskFailed(taskId, error);
+      closeRun(false);
+      return { runId, taskId, status: "failed", error };
+    }
+    if (status.expired) {
+      const error = `auth profile '${args.authProfile}' is expired — ${remediation}`;
+      markTaskFailed(taskId, error);
+      closeRun(false);
+      return { runId, taskId, status: "failed", error };
+    }
+    authStateHostPath = status.path;
+  }
+
   const ctx: SpawnContext = {
     TASK_ID: taskId,
     TASK_DIR: dir,
@@ -170,6 +195,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task),
     DESIGN_DIR: args.designDir,
+    AUTH_STATE_HOST_PATH: authStateHostPath,
   };
 
   let dockerArgs;

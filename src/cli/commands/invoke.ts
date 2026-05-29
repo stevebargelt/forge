@@ -16,6 +16,7 @@ export function registerInvoke(program: Command): void {
     .option("--model <alias>", "override model alias (spec-writer | fast-orchestrator | etc.)")
     .option("--runtime <name>", "override runtime YAML name (default: claude)")
     .option("--read-only", "mount /project read-only (default for adversarial / review work)")
+    .option("--auth-profile <name>", "inject a captured auth profile (#176) so the agent tests the app authenticated; never sees the credential")
     .option("--run <run-id>", "attach this invocation as a task in an existing run; otherwise a new one is created")
     .option("--run-title <text>", "title for the new run when --run is not provided")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
@@ -28,6 +29,7 @@ export function registerInvoke(program: Command): void {
       model?: string;
       runtime?: string;
       readOnly?: boolean;
+      authProfile?: string;
       run?: string;
       runTitle?: string;
       workspace?: string;
@@ -55,6 +57,7 @@ export function registerInvoke(program: Command): void {
         modelAlias: opts.model,
         runtimeName: opts.runtime,
         readOnlyProject: opts.readOnly,
+        authProfile: opts.authProfile,
         runId: opts.run,
         runTitle: opts.runTitle,
         workspace,

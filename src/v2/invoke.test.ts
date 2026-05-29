@@ -8,6 +8,7 @@ import { invoke, type DockerExecFn } from "./invoke.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
+import { writeProfile } from "../util/auth-profiles.js";
 
 // Stub exec that writes a fixed result.json and returns 0.
 function makeStubExec(resultJson: unknown, exitCode = 0): DockerExecFn {
@@ -358,4 +359,56 @@ test("invoke: closes the owned run as 'complete' even when the task fails (RunSt
   assert.ok(run!.completedAt, "completed_at should be set on the closed run");
   const task = getTask(r.taskId);
   assert.equal(task!.status, "failed", "task-level status still says failed");
+});
+
+// #176: --auth-profile must fail fast BEFORE a container spawns when the profile
+// is missing or expired — an unauthenticated agent silently produces false
+// "app broken" reports.
+function supabaseValue(expiresAt: number): string {
+  return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt, refresh_token: "r" });
+}
+
+test("invoke: --auth-profile fails fast (no container) when the profile is missing", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  let execCalled = false;
+  const guardExec: DockerExecFn = async () => { execCalled = true; return 0; };
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test the admin",
+    projectDir: "/tmp/x",
+    authProfile: "ghost-profile",
+    dockerExec: guardExec,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error!, /not found/);
+  assert.match(r.error!, /forge auth-profile login ghost-profile/);
+  assert.equal(execCalled, false, "no container should spawn for a missing profile");
+});
+
+test("invoke: --auth-profile fails fast (no container) when the profile is expired", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // expires_at one second in the past.
+  const past = Math.floor(Date.now() / 1000) - 1;
+  writeProfile("stale-admin", {
+    cookies: [],
+    origins: [{ origin: "https://staging.test", localStorage: [{ name: "sb-x-auth-token", value: supabaseValue(past) }] }],
+  });
+  let execCalled = false;
+  const guardExec: DockerExecFn = async () => { execCalled = true; return 0; };
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test the admin",
+    projectDir: "/tmp/x",
+    authProfile: "stale-admin",
+    dockerExec: guardExec,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error!, /expired/);
+  assert.equal(execCalled, false, "no container should spawn for an expired profile");
 });

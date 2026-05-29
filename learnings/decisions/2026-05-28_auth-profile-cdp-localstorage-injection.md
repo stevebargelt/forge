@@ -1,7 +1,7 @@
 # Auth profiles: CDP localStorage injection is the load-bearing mechanism (#176 spike)
 
 **Date:** 2026-05-28
-**Status:** spike complete — mechanism proven, build pending
+**Status:** Slices 1–3 built & verified; real container run pending
 **Ticket:** #176 (auth profiles)
 
 ## Context
@@ -73,14 +73,37 @@ Playwright-storageState-compatible on purpose: the project's committed E2E suite
 consumes the same file via CDP injection. One artifact, two consumers, no shared
 code path.
 
-## Build split (next)
+## Build status
 
-- **forge (this repo):** `auth_profiles` resolution (host-global `~/.forge/auth/`
-  + project override), `forge auth-profile {login,status,list,rm}`, `--auth-profile`
-  on invoke/pipeline, spawn.ts copies state into the authed task container tmp (never
-  via project mount), redact path+contents from prompts/logs, expiry parse for status.
-- **pi-skills/browser-tools (external):** the CDP injector above, run before the
-  agent's first navigation.
+- **Slice 1 — forge (done, commit 84deada):** `forge auth-profile {login,status,
+  list,rm}`. login launches a dedicated Chrome, human logs in, raw-CDP snapshot →
+  host-global `~/.forge/auth/<name>.storage.json` (mode 600). status/list parse
+  `expires_at` (Supabase top-level, JWT exp fallback) to fail-fast on expiry.
+  Verified end-to-end with a real Supabase login (qa-admin).
+- **Slice 2 — pi-skills/browser-tools (done, live on disk; third-party repo, not
+  committed there):** `auth-inject.js` `maybeApplyAuth(page)` — no-op unless
+  `FORGE_AUTH_STATE` is set; registers the document-start localStorage script per
+  origin + `setCookie`, logs SHAPE only. Wired into `browser-nav.js` before each
+  nav. Verified against :9222 with the real qa-admin profile (control empty,
+  treatment rendered steve@bargelt.com).
+- **Slice 3 — forge (done):** `--auth-profile <name>` on `forge invoke`; `invoke.ts`
+  resolves the profile and fails fast (no container) on missing/expired; `spawn.ts`
+  mounts the file read-only at `/forge-auth/state.json` and sets `FORGE_AUTH_STATE`,
+  and throws if browser-tools (the injector) isn't mounted. The token rides only a
+  single read-only mount — never argv, prompts, result.json, or the project mount.
+  Unit-tested (docker args + fail-fast).
+
+## Still pending
+
+- A **real agent-container run** with `--auth-profile` end to end. Distinct from
+  the host `:9222` validation: it exercises the entrypoint-launched in-container
+  Chrome AND container→host networking to reach a local app under test (e.g.
+  localhost:3000 needs host networking / host.docker.internal). May surface
+  networking work orthogonal to auth.
+- Pipeline steps (`--auth-profile` on browser-verify phases) — invoke covers the
+  primary path; pipeline wiring is the same ctx field.
+- `browser-content.js` and `--new`-tab cases reuse the same helper; new-tab
+  injection re-registers per nav (harmless duplicate init scripts).
 
 ## Note
 
