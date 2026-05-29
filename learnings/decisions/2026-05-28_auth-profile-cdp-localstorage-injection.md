@@ -123,6 +123,11 @@ mount unchanged. The rewritten origin is logged so the caller knows the URL to
 navigate the agent to. The Supabase JWT is origin-agnostic, so the same token
 authenticates under the rewritten origin.
 
+**Live-proven end-to-end 2026-05-29** (zero manual steps): a plain `localhost`
+capture + `forge invoke manual-qa --auth-profile qa-admin` → forge logged the
+rewrite, the agent authenticated (`logged_in: true`, steve@bargelt.com, steve-1,
+teams), no hand-derived profile. run-183-auto-reconcile-capstone-582003.
+
 ## Dependency pin (#181 + #182)
 
 The injector is **not** in forge — it lives in the browser-tools skill forge
