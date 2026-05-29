@@ -1,7 +1,7 @@
 # Auth profiles: CDP localStorage injection is the load-bearing mechanism (#176 spike)
 
 **Date:** 2026-05-28
-**Status:** Slices 1–3 built & verified; real container run pending
+**Status:** Slices 1–3 built & verified END-TO-END in a real agent container
 **Ticket:** #176 (auth profiles)
 
 ## Context
@@ -93,17 +93,35 @@ code path.
   single read-only mount — never argv, prompts, result.json, or the project mount.
   Unit-tested (docker args + fail-fast).
 
+## Real container run — PASSED (2026-05-28)
+
+`forge invoke manual-qa --auth-profile qa-admin-docker --project .../wnba-led-scoreboard`
+spawned a real agent container; the agent (which never saw the credential)
+reported `logged_in: true`, `signed_in_email: steve@bargelt.com`,
+`device_name_visible: steve-1`, `teams_visible: true`. Container stdout shows the
+injector firing in-container then navigating:
+`✓ auth profile applied: 1 origin(s), 1 localStorage entr(ies), 0 cookie(s)`.
+Reachability: `host.docker.internal:3000` resolves and returns 200 from the agent
+image with NO `--add-host` (Docker Desktop macOS auto-provides it).
+
+## Finding from the run: origin reconciliation for host-served apps (→ ticket)
+
+The agent must browse `host.docker.internal:3000` (a container can't reach the
+host's `localhost` on macOS), but the profile was captured at `localhost:3000`.
+The injector guards localStorage by `location.origin`, so the captured origin
+must match what the agent browses. For the proof we hand-derived a
+`qa-admin-docker` profile with the origin rewritten to `host.docker.internal`
+(the Supabase JWT is origin-agnostic, so the same token authenticates). forge
+should reconcile this rather than require a hand-derived profile — see backlog.
+
 ## Still pending
 
-- A **real agent-container run** with `--auth-profile` end to end. Distinct from
-  the host `:9222` validation: it exercises the entrypoint-launched in-container
-  Chrome AND container→host networking to reach a local app under test (e.g.
-  localhost:3000 needs host networking / host.docker.internal). May surface
-  networking work orthogonal to auth.
 - Pipeline steps (`--auth-profile` on browser-verify phases) — invoke covers the
   primary path; pipeline wiring is the same ctx field.
 - `browser-content.js` and `--new`-tab cases reuse the same helper; new-tab
   injection re-registers per nav (harmless duplicate init scripts).
+- Reproducibility of the browser-tools dep (fork+pin) — backlog #181; env-var
+  genericization — backlog #182.
 
 ## Note
 
