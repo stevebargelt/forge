@@ -555,25 +555,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #209 — RUN-1 runs-query: forge runs query — search historical runs by status, failure_kind, project, age
-Observability RUN stage §1 (docs/observability.md). CLI query over ~/.forge/forge.db to answer operational questions:
-- Which tasks hit idle_timeout this week?
-- Which projects have the most auth failures?
-- Which runs were cancelled manually?
-
-Command (per doc):
-  forge runs query --failure-kind idle_timeout --since 7d
-  forge runs query --project ~/code/app --status abandoned
-  forge runs query --json
-
-Filters: --status, --failure-kind, --project, --since <Nd|all>, --workflow. --json for orchestrator consumption.
-
-Notes:
-- No schema change. failure_kind lives in task.failed event payloads (Crawl decision), so filtering by failure_kind means scanning events per task — reuse failureKindForTask (failure-kind.ts). For hundreds of runs that's fine in-process.
-- Reuse the --since window parser pattern from usage.ts. Cross-project by default (like the dashboard), with --project to scope.
-- Pure query helpers in a testable module; thin CLI wrapper. Stable JSON schema.
-
-
 ### #210 — RUN-2 metrics: forge metrics — aggregate durations, failures, cancels, retries, red blocks
 Observability RUN stage §3 (docs/observability.md). Reliability/management metrics, distinct from forge usage (which is token/cost). Aggregate over runs/tasks/events:
 - run success rate
@@ -628,6 +609,27 @@ Lowest priority; capstone. JSONL slice is high-value-low-cost; OTel can be defer
 
 
 ## Done (recent)
+
+### #209 — RUN-1 runs-query: forge runs query — search historical runs by status, failure_kind, project, age
+**Closed:** 2026-05-30. Commit `2b3fc82`.
+
+Observability RUN stage §1 (docs/observability.md). CLI query over ~/.forge/forge.db to answer operational questions:
+- Which tasks hit idle_timeout this week?
+- Which projects have the most auth failures?
+- Which runs were cancelled manually?
+
+Command (per doc):
+  forge runs query --failure-kind idle_timeout --since 7d
+  forge runs query --project ~/code/app --status abandoned
+  forge runs query --json
+
+Filters: --status, --failure-kind, --project, --since <Nd|all>, --workflow. --json for orchestrator consumption.
+
+Notes:
+- No schema change. failure_kind lives in task.failed event payloads (Crawl decision), so filtering by failure_kind means scanning events per task — reuse failureKindForTask (failure-kind.ts). For hundreds of runs that's fine in-process.
+- Reuse the --since window parser pattern from usage.ts. Cross-project by default (like the dashboard), with --project to scope.
+- Pure query helpers in a testable module; thin CLI wrapper. Stable JSON schema.
+
 
 ### #208 — WALK-5 dashboard-activity: add task timeline + live activity panel to the dashboard
 **Closed:** 2026-05-30. Commit `b93a6cb`.

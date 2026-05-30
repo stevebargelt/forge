@@ -35,7 +35,7 @@ export function parseSince(raw: string, nowMs = Date.now()): number | undefined 
   return nowMs - parseInt(m[1], 10) * 86_400_000;
 }
 
-function projectMatches(run: Run, project: string): boolean {
+export function projectMatches(run: Run, project: string): boolean {
   if (!run.projectDir) return false;
   if (run.projectDir === project) return true;
   const rb = basename(run.projectDir.replace(/\/+$/, ""));
@@ -43,13 +43,20 @@ function projectMatches(run: Run, project: string): boolean {
   return rb === pb || rb === project;
 }
 
+/** Shared run-level filter predicate (status/workflow/since/project). Reused by
+ *  queryRuns and the metrics aggregator. */
+export function runMatchesFilters(run: Run, f: Pick<RunFilters, "status" | "workflow" | "sinceMs" | "project">): boolean {
+  if (f.status && run.status !== f.status) return false;
+  if (f.workflow && run.workflow !== f.workflow) return false;
+  if (f.sinceMs !== undefined && new Date(run.createdAt).getTime() < f.sinceMs) return false;
+  if (f.project && !projectMatches(run, f.project)) return false;
+  return true;
+}
+
 export function queryRuns(filters: RunFilters): RunQueryRow[] {
   const rows: RunQueryRow[] = [];
   for (const run of listRuns()) {
-    if (filters.status && run.status !== filters.status) continue;
-    if (filters.workflow && run.workflow !== filters.workflow) continue;
-    if (filters.sinceMs !== undefined && new Date(run.createdAt).getTime() < filters.sinceMs) continue;
-    if (filters.project && !projectMatches(run, filters.project)) continue;
+    if (!runMatchesFilters(run, filters)) continue;
 
     // Top-level tasks only — fanout children and reds roll up under their parent.
     const tasks = tasksForRun(run.id).filter((t) => t.parentId === undefined);
