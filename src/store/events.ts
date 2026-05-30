@@ -15,7 +15,6 @@ export type EventType =
   | "task.blocked_by_red"
   | "task.awaiting_red"
   | "task.awaiting_gate"
-  | "task.submitted"
   | "task.retried"
   | "verdict.received"
   | "verdict.findings_dropped"
