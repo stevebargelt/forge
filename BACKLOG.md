@@ -537,25 +537,6 @@ Provenance: forge red panel + independent external review + in-use refresh-token
 
 ### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
 
-### #194 — Crawl 2 — events-backfill: emit the genuinely-missing lifecycle events
-Crawl milestone, step 2 of 5 (docs/observability.md, Crawl §2). Depends on Crawl 1 (read path) so the new events are actually visible.
-
-**Only backfill what's genuinely missing.** Already emitted today (do NOT re-add): run.created, run.completed, run.cancelled, task.created, task.started, task.completed, task.failed, task.cancelled (#186), task.awaiting_red, task.blocked_by_red, gate.decided, verdict.received.
-
-**The real gap to fill:**
-- run.abandoned — NOT in the EventType union at all; add it. forge abandons runs (cancel/reaper) but emits no abandon event.
-- task.awaiting_gate — emitted nowhere; add on the awaiting-gate transition.
-- container.started / container.exited / container.killed / container.idle_timeout — none exist.
-- auth.profile_applied / auth.profile_failed — the #176 auth epic emits ZERO events; add when forge stages auth state (applied) and when AuthProfileError throws (failed).
-- Remove the DEAD enum values task.idle_timeout and task.crashed from EventType — they're in the union (events.ts:13-14) but no logEvent call ever fires them. Their meaning moves to failure_kind (Crawl 3).
-
-**Naming decision (settled):** container.idle_timeout is the INFRA event (watchdog fired, container killed). The TASK outcome stays task.failed carrying failure_kind: idle_timeout (Crawl 3). Likewise container.exited(nonzero)+no result → task.failed + failure_kind: container_crash. Do not emit a separate task.idle_timeout/task.crashed event — failure_kind carries the distinction.
-
-**Land mine — container.* events emit from the CALLER, not the executor.** src/v2/docker-exec.ts (DockerExecFn) has no taskId/runId and is on the do-not-touch-without-a-learnings-entry list. Emit from src/v2/invoke.ts and src/v2/runNext.ts which hold runId+taskId: container.started before the exec call, container.exited/killed/idle_timeout after, deriving idle from the existing IDLE_TIMEOUT_EXIT_CODE the executor returns.
-
-**Acceptance:** every status transition emits an event; forge cancel, idle timeout, gate decisions, auth failures, red blocks all visible via Crawl 1's forge show timeline.
-
-
 ### #195 — Crawl 3 — failure-kind: classify task failures in structured event payloads (no schema column)
 Crawl milestone, step 3 of 5 (docs/observability.md, Crawl §3).
 
@@ -600,7 +581,38 @@ A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the to
 Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred — not urgent.
 
 
+### #199 — forge-test drops --import ./src/test-setup.ts for file-specific args → false SQLITE_ERROR + bypasses test DB/notify isolation
+The forge-test wrapper (what agents use to self-validate) omits `--import ./src/test-setup.ts` when invoked with specific file arguments, whereas `npm test` always includes it. test-setup.ts is load-bearing: it sets up the in-memory test DB schema (#170 isolation) AND clears FORGE_NOTIFY so the suite doesn't fire real notifications (#175).
+
+Consequences when an agent/human runs `forge-test <specific-file>`:
+- runNext / DB-touching tests fail with SQLITE_ERROR ('no such table/column') because the schema setup never ran — a FALSE failure that makes self-validation untrustworthy (agents have flagged this twice: #194 backfill, and the earlier runNext isolation confusion).
+- Potentially worse: without the import, a specific-file run could touch the real ~/.forge/forge.db and/or fire real notifications (the two things test-setup.ts exists to prevent). Needs confirming whether the file-specific path actually reaches a live DB/provider in practice.
+
+Fix: make forge-test ALWAYS pass `--import ./src/test-setup.ts` regardless of whether file args are present. Relates to #178 (forge-test node:test vs Jest) — same wrapper.
+
+
 ## Done (recent)
+
+### #194 — Crawl 2 — events-backfill: emit the genuinely-missing lifecycle events
+**Closed:** 2026-05-30.
+
+Crawl milestone, step 2 of 5 (docs/observability.md, Crawl §2). Depends on Crawl 1 (read path) so the new events are actually visible.
+
+**Only backfill what's genuinely missing.** Already emitted today (do NOT re-add): run.created, run.completed, run.cancelled, task.created, task.started, task.completed, task.failed, task.cancelled (#186), task.awaiting_red, task.blocked_by_red, gate.decided, verdict.received.
+
+**The real gap to fill:**
+- run.abandoned — NOT in the EventType union at all; add it. forge abandons runs (cancel/reaper) but emits no abandon event.
+- task.awaiting_gate — emitted nowhere; add on the awaiting-gate transition.
+- container.started / container.exited / container.killed / container.idle_timeout — none exist.
+- auth.profile_applied / auth.profile_failed — the #176 auth epic emits ZERO events; add when forge stages auth state (applied) and when AuthProfileError throws (failed).
+- Remove the DEAD enum values task.idle_timeout and task.crashed from EventType — they're in the union (events.ts:13-14) but no logEvent call ever fires them. Their meaning moves to failure_kind (Crawl 3).
+
+**Naming decision (settled):** container.idle_timeout is the INFRA event (watchdog fired, container killed). The TASK outcome stays task.failed carrying failure_kind: idle_timeout (Crawl 3). Likewise container.exited(nonzero)+no result → task.failed + failure_kind: container_crash. Do not emit a separate task.idle_timeout/task.crashed event — failure_kind carries the distinction.
+
+**Land mine — container.* events emit from the CALLER, not the executor.** src/v2/docker-exec.ts (DockerExecFn) has no taskId/runId and is on the do-not-touch-without-a-learnings-entry list. Emit from src/v2/invoke.ts and src/v2/runNext.ts which hold runId+taskId: container.started before the exec call, container.exited/killed/idle_timeout after, deriving idle from the existing IDLE_TIMEOUT_EXIT_CODE the executor returns.
+
+**Acceptance:** every status transition emits an event; forge cancel, idle timeout, gate decisions, auth failures, red blocks all visible via Crawl 1's forge show timeline.
+
 
 ### #193 — Crawl 1 — events-read: eventsForTask/eventsForRun + render timelines in forge show
 **Closed:** 2026-05-29.
