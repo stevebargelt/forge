@@ -22,15 +22,23 @@ function projectSegment(run: Run): string {
   return base ? `${base}: ` : "";
 }
 
+// WALK-4: optional failure detail folded into a run-completion notification so
+// the push answers "what failed and what do I do next" without opening a
+// terminal. Kept compact (one SMS segment); the title absorbs truncation.
+export type FailureDetail = { taskId: string; failureKind?: string };
+
 export function formatRunNotification(
   run: Run,
   state: NotifyState,
   durationMs?: number,
+  failure?: FailureDetail,
 ): string {
-  const duration = durationMs !== undefined ? ` — ${formatDuration(durationMs)}` : "";
+  const bits: string[] = [];
+  if (durationMs !== undefined) bits.push(formatDuration(durationMs));
+  if (failure) bits.push(`${failure.failureKind ?? "failed"} → forge show ${failure.taskId}`);
   const titleQuoted = `"${run.title.replaceAll('"', "'")}"`;
   const prefix = `forge: ${projectSegment(run)}${run.id} [${state}] ${run.workflow} `;
-  const suffix = duration;
+  const suffix = bits.length > 0 ? ` — ${bits.join(" · ")}` : "";
 
   // If everything fits, emit as-is.
   const full = `${prefix}${titleQuoted}${suffix}`;

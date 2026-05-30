@@ -21,6 +21,16 @@ test("formatRunNotification: failed state produces the expected one-liner", () =
   assert.equal(out, 'forge: run-add-login-7c2a91 [failed] feature "add login" — 5s');
 });
 
+test("formatRunNotification: folds failure_kind + forge show into the completion notification (WALK-4)", () => {
+  const out = formatRunNotification(RUN, "complete", 5 * 60 * 1000, { taskId: "task-engineer-abc123", failureKind: "result_malformed" });
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — 5m0s · result_malformed → forge show task-engineer-abc123');
+});
+
+test("formatRunNotification: failure without a known kind still carries the forge show command", () => {
+  const out = formatRunNotification(RUN, "complete", undefined, { taskId: "task-x-1" });
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — failed → forge show task-x-1');
+});
+
 test("formatRunNotification: blocked_by_red state produces the expected one-liner", () => {
   const out = formatRunNotification(RUN, "blocked_by_red", 60 * 1000);
   assert.equal(out, 'forge: run-add-login-7c2a91 [blocked_by_red] feature "add login" — 1m0s');

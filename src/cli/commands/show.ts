@@ -10,6 +10,7 @@ import { eventsForTask, eventsForRun } from "../../store/events.js";
 import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
+import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
@@ -30,23 +31,11 @@ export function performShow(id: string): ShowResult {
 
 // ─── Pure helpers, exported for testing ─────────────────────────────────────
 
-export function getFailureKindFromEvents(events: Event[]): string | undefined {
-  // Walk newest-first and stop at the first terminal lifecycle event. Picking
-  // the FIRST task.failed (the old behavior) returned a stale failure_kind from
-  // before a retry; the task's CURRENT failure is the latest one. A later
-  // task.completed means the task recovered — no failure_kind to report.
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (!e) continue;
-    if (e.eventType === "task.completed") return undefined;
-    if (e.eventType === "task.failed") {
-      const payload = e.payload as Record<string, unknown> | null;
-      if (payload && typeof payload["failure_kind"] === "string") return payload["failure_kind"];
-      return undefined;
-    }
-  }
-  return undefined;
-}
+// The failure-kind scan lives in the neutral failure-kind module (single source
+// of truth, also consumed by the notification layer). Imported + re-exported
+// here under its long-standing name so forge show / watch importers and tests
+// stay stable.
+export { getFailureKindFromEvents };
 
 export function classifyResultFile(filePath: string): "missing" | "empty" | "malformed" | "valid" {
   let content: string;

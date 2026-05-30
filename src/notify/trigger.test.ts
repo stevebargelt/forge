@@ -1,7 +1,20 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { notifyOnRunTransition, notifyOnTaskBlockedByRed } from "./trigger.js";
-import type { Run } from "../types/index.js";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import { notifyOnRunTransition, notifyOnTaskBlockedByRed, failureDetailForRun } from "./trigger.js";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
+import { logEvent } from "../store/events.js";
+import type { Run, Task } from "../types/index.js";
+
+function mkTask(id: string, runId: string, overrides: Partial<Task> = {}): Task {
+  return {
+    id, runId, phase: "engineer", agentRole: "engineer", status: "complete",
+    taskPackage: { taskId: id, runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-25T12:00:00Z", ...overrides,
+  };
+}
 
 const RUN: Run = {
   id: "run-x",
@@ -71,6 +84,44 @@ test("notifyOnTaskBlockedByRed: short-circuits when isTwilioEnabled is false", a
   await notifyOnTaskBlockedByRed(RUN);
   assert.ok(true);
 });
+
+// ── failureDetailForRun (WALK-4) ──
+// These need a DB; install an in-memory one for just this block.
+{
+  let db: DatabaseInstance;
+  let prev: DatabaseInstance | null;
+  const DBRUN: Run = { id: "run-fd", workflow: "feature", title: "fd", status: "complete", createdAt: "2026-05-25T12:00:00Z" };
+
+  test("failureDetailForRun: returns the first failed top-level task + its failure_kind", () => {
+    db = makeInMemoryDb();
+    prev = setDbForTest(db);
+    try {
+      insertRun(DBRUN);
+      insertTask(mkTask("task-ok", DBRUN.id, { status: "complete" }));
+      insertTask(mkTask("task-bad", DBRUN.id, { status: "failed" }));
+      logEvent("task.failed", { runId: DBRUN.id, taskId: "task-bad", payload: { failure_kind: "result_malformed", error: "bad json" } });
+      const fd = failureDetailForRun(DBRUN);
+      assert.deepEqual(fd, { taskId: "task-bad", failureKind: "result_malformed" });
+    } finally {
+      setDbForTest(prev as DatabaseInstance);
+      db.close();
+    }
+  });
+
+  test("failureDetailForRun: undefined for a clean run; ignores failed CHILD tasks", () => {
+    db = makeInMemoryDb();
+    prev = setDbForTest(db);
+    try {
+      insertRun(DBRUN);
+      insertTask(mkTask("task-ok", DBRUN.id, { status: "complete" }));
+      insertTask(mkTask("task-child", DBRUN.id, { status: "failed", parentId: "task-ok" }));
+      assert.equal(failureDetailForRun(DBRUN), undefined);
+    } finally {
+      setDbForTest(prev as DatabaseInstance);
+      db.close();
+    }
+  });
+}
 
 test("notifyOnTaskBlockedByRed: respects FORGE_NOTIFY_ON exclusion", async () => {
   process.env["FORGE_NOTIFY"] = "twilio";

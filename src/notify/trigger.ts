@@ -4,9 +4,11 @@
 // human sees them without forge crashing.
 
 import type { Run, Task } from "../types/index.js";
-import { formatRunNotification, formatGateNotification, type NotifyState } from "./format.js";
+import { formatRunNotification, formatGateNotification, type NotifyState, type FailureDetail } from "./format.js";
 import { isTwilioEnabled, notifyTwilio } from "./twilio.js";
 import { isNtfyEnabled, notifyNtfy } from "./ntfy.js";
+import { tasksForRun } from "../store/tasks.js";
+import { failureKindForTask } from "../v2/failure-kind.js";
 
 const DEFAULT_NOTIFY_ON = new Set<NotifyState>([
   "complete",
@@ -86,8 +88,21 @@ export async function notifyOnRunTransition(
   const filter = parseNotifyOn();
   if (!filter.has(state)) return;
 
-  const body = formatRunNotification(run, state, computeDurationMs(run));
+  const body = formatRunNotification(run, state, computeDurationMs(run), failureDetailForRun(run));
   await dispatch(body, `forge: ${run.workflow} [${state}]`);
+}
+
+// WALK-4: a run flips to "complete" even when a task inside it failed (RunStatus
+// has no "failed"). Surface the failure so the notification names the kind and a
+// forge show. Picks the first failed top-level task; returns undefined for a
+// clean run.
+export function failureDetailForRun(run: Run): FailureDetail | undefined {
+  const failed = tasksForRun(run.id).find(
+    (t) => t.parentId === undefined && t.status === "failed",
+  );
+  if (!failed) return undefined;
+  const failureKind = failureKindForTask(failed.id);
+  return failureKind ? { taskId: failed.id, failureKind } : { taskId: failed.id };
 }
 
 export async function notifyOnTaskBlockedByRed(run: Run): Promise<void> {
