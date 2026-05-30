@@ -559,7 +559,11 @@ Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred 
 Polish: when the log looks like Claude stream-json (JSONL with type fields), extract the human-readable text — the assistant text deltas / the final result.result string — and show that as the tail, capped to a sane width/line count. Fall back to raw tail for non-JSON logs (plain CLI/test output). Keep it in show.ts's tailLines/last-output rendering. Pure-function-friendly so it stays unit-testable like the other #196 helpers. Low priority — cosmetic, not blocking.
 
 
+## Done (recent)
+
 ### #201 — forge invoke --run <terminal-run> attaches a running task but leaves run status complete → live task hidden in dashboard
+**Closed:** 2026-05-30. Commit `ad82297`.
+
 Hit live (and confused the user) multiple times: when the orchestrator chains engineer -> test-engineer by attaching the second invoke to the first's run via `forge invoke --run <runId>`, the engineer phase has already marked that run `complete`. The test-engineer task IS created and its container IS running, but `forge invoke --run` attaches the task WITHOUT flipping run.status back to `active`. The dashboard and `forge status` list by run status, so the run shows `complete` and the live test-engineer task is invisible — looks like "nothing is running" when a container is actively churning.
 
 Confirmed: run-197-task-manifest-f45aaa status=complete while forge-task-test-engineer-2e8523 was Up 7 minutes with task.started + container.started events under that run.
@@ -568,8 +572,6 @@ Fix: when `forge invoke --run <runId>` (or any path) creates a non-terminal task
 
 Workaround until fixed: orchestrator should NOT attach a new invoke to an already-complete run; give each invoke its own run so it shows active.
 
-
-## Done (recent)
 
 ### #199 — forge-test drops --import ./src/test-setup.ts for file-specific args → false SQLITE_ERROR + bypasses test DB/notify isolation
 **Closed:** 2026-05-30. Commit `419825c`.

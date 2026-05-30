@@ -283,6 +283,11 @@ async function dispatchSingleStep(args: {
       createdAt: new Date().toISOString(),
     };
     insertTask(task);
+    // Primary-step tasks were the one creation path that never logged
+    // task.created (reds/fanout/manual all do) — leaving a gap in the forge
+    // show timeline. Emit it here so every task's lifecycle starts with a
+    // creation event.
+    logEvent("task.created", { runId: args.runId, taskId });
   }
 
   const dispatchResult = await runContainer({
@@ -351,6 +356,7 @@ function finalizePrimary(taskId: string, runId: string, gate: Step["gate"], resu
     case "auto":
     case "none":
       markTaskComplete(taskId, result);
+      logEvent("task.completed", { runId, taskId });
       return "complete";
     case "human":
       markTaskAwaitingGate(taskId, result);
@@ -514,6 +520,7 @@ async function runOneRed(args: {
   }
 
   markTaskComplete(redTaskId, result.result);
+  logEvent("task.completed", { runId: args.runId, taskId: redTaskId });
   return { red: args.red, redTaskId, verdict: parseVerdict(result.result) };
 }
 
@@ -807,6 +814,7 @@ async function runFanoutChild(args: {
   }
 
   markTaskComplete(childTaskId, dispatchResult.result);
+  logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
   return {
     index: args.index,
     value: args.value,

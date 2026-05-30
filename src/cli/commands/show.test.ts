@@ -194,6 +194,26 @@ test("getFailureKindFromEvents: returns container_crash from payload", () => {
   assert.equal(getFailureKindFromEvents(events), "container_crash");
 });
 
+test("getFailureKindFromEvents: picks the LATEST task.failed after a retry, not the stale first", () => {
+  const events: Event[] = [
+    makeEvent("task.started"),
+    makeEvent("task.failed", { failure_kind: "idle_timeout" }),
+    makeEvent("task.retried"),
+    makeEvent("task.started"),
+    makeEvent("task.failed", { failure_kind: "container_crash" }),
+  ];
+  assert.equal(getFailureKindFromEvents(events), "container_crash");
+});
+
+test("getFailureKindFromEvents: returns undefined when a later task.completed supersedes an earlier failure", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "model_error" }),
+    makeEvent("task.retried"),
+    makeEvent("task.completed"),
+  ];
+  assert.equal(getFailureKindFromEvents(events), undefined);
+});
+
 test("getFailureKindFromEvents: failure_kind round-trip via DB events", () => {
   insertTask(makeTask("task-fk-roundtrip", { status: "failed" }));
   logEvent("task.failed", {
@@ -377,6 +397,22 @@ test("tailLines: returns all lines if fewer than N", () => {
 
 test("tailLines: returns [] when file does not exist", () => {
   assert.deepEqual(tailLines(join(tmpDir, "nope.txt"), 5), []);
+});
+
+test("tailLines: returns the correct last N lines from a file larger than the read bound", () => {
+  // Build a log well past the 64KB tail window so the bounded read is exercised.
+  const p = join(tmpDir, "big.log");
+  const filler = "x".repeat(2000); // ~2KB per line → ~200KB total
+  const lines = Array.from({ length: 100 }, (_, i) => `line${i}-${filler}`);
+  writeFileSync(p, lines.join("\n") + "\n");
+  const tail = tailLines(p, 3);
+  assert.deepEqual(
+    tail.map((l) => l.split("-")[0]),
+    ["line97", "line98", "line99"],
+    "tails the true last lines even though the file exceeds the read window",
+  );
+  // Every returned line is whole — no truncated leading fragment leaks through.
+  assert.ok(tail.every((l) => l.endsWith(filler)), "no partial line in the tail");
 });
 
 // ─── deriveNextCommandForTask ────────────────────────────────────────────────

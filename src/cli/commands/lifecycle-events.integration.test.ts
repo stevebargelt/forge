@@ -381,6 +381,50 @@ test("integ lifecycle container.started + container.exited: emitted in order on 
   assert.equal((showExited.payload as Record<string, unknown>).containerName, expectedName);
 });
 
+// ─── 3b. task.created + task.completed (primary step) ───────────────────────
+// The primary-step dispatch path historically logged neither task.created nor
+// task.completed (only reds/fanout/manual did), leaving a gap in the forge show
+// timeline. Both must now bracket the primary task's lifecycle.
+
+test("integ lifecycle task.created + task.completed: primary step brackets its lifecycle, readable end-to-end", async () => {
+  ensureClaudeRuntime();
+  const { runId } = startRun({
+    workflow: SINGLE_STEP_WORKFLOW,
+    title: "primary lifecycle events test",
+    inputs: {},
+    projectDir: "/tmp/test-project",
+  });
+
+  await runNext({
+    runId,
+    workflow: SINGLE_STEP_WORKFLOW,
+    dockerExec: makeStubExec({ status: "complete" }, 0),
+  });
+
+  const primary = tasksForRun(runId).find((t) => t.phase === "work" && t.parentId === undefined)!;
+  assert.ok(primary, "primary task must exist");
+  assert.equal(primary.status, "complete");
+
+  const types = eventsForTask(primary.id).map((e) => e.eventType);
+  assert.ok(types.includes("task.created"), "primary step must emit task.created");
+  assert.ok(types.includes("task.completed"), "primary step must emit task.completed");
+
+  // Order: created → started → completed.
+  const createdIdx = types.indexOf("task.created");
+  const startedIdx = types.indexOf("task.started");
+  const completedIdx = types.indexOf("task.completed");
+  assert.ok(createdIdx < startedIdx, "task.created must precede task.started");
+  assert.ok(startedIdx < completedIdx, "task.started must precede task.completed");
+
+  // performShow round-trips them.
+  const showResult = performShow(primary.id);
+  assert.equal(showResult.kind, "task");
+  if (showResult.kind !== "task") return;
+  const showTypes = showResult.events.map((e) => e.eventType);
+  assert.ok(showTypes.includes("task.created"), "performShow must include task.created");
+  assert.ok(showTypes.includes("task.completed"), "performShow must include task.completed");
+});
+
 // ─── 4. container.idle_timeout ──────────────────────────────────────────────
 // When the watchdog kills a hung agent (IDLE_TIMEOUT_EXIT_CODE = 124),
 // container.idle_timeout is emitted — NOT container.exited. The task ends

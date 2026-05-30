@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { statSync, readFileSync } from "node:fs";
+import { statSync, readFileSync, openSync, readSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { getTask, tasksForRun } from "../../store/tasks.js";
 import { getRun } from "../../store/runs.js";
@@ -31,10 +31,20 @@ export function performShow(id: string): ShowResult {
 // ─── Pure helpers, exported for testing ─────────────────────────────────────
 
 export function getFailureKindFromEvents(events: Event[]): string | undefined {
-  const failedEv = events.find((e) => e.eventType === "task.failed");
-  if (!failedEv) return undefined;
-  const payload = failedEv.payload as Record<string, unknown> | null;
-  if (payload && typeof payload["failure_kind"] === "string") return payload["failure_kind"];
+  // Walk newest-first and stop at the first terminal lifecycle event. Picking
+  // the FIRST task.failed (the old behavior) returned a stale failure_kind from
+  // before a retry; the task's CURRENT failure is the latest one. A later
+  // task.completed means the task recovered — no failure_kind to report.
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.eventType === "task.completed") return undefined;
+    if (e.eventType === "task.failed") {
+      const payload = e.payload as Record<string, unknown> | null;
+      if (payload && typeof payload["failure_kind"] === "string") return payload["failure_kind"];
+      return undefined;
+    }
+  }
   return undefined;
 }
 
@@ -90,13 +100,33 @@ export function getLastOutputMtime(logPath: string): number | undefined {
   }
 }
 
+// Bound the tail read so `forge show` never slurps a whole multi-MB stream-json
+// container log into memory just to display the last few lines.
+const TAIL_MAX_BYTES = 64 * 1024;
+
 export function tailLines(filePath: string, n: number): string[] {
+  let fd: number | undefined;
   try {
-    const content = readFileSync(filePath, "utf8");
-    const lines = content.split("\n").filter((l) => l.length > 0);
+    const { size } = statSync(filePath);
+    const readBytes = Math.min(size, TAIL_MAX_BYTES);
+    const buf = Buffer.alloc(readBytes);
+    fd = openSync(filePath, "r");
+    readSync(fd, buf, 0, readBytes, size - readBytes);
+    let lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
+    // If we didn't start at byte 0 we likely sliced mid-line; drop that leading
+    // fragment so we never surface a truncated record.
+    if (size > readBytes && lines.length > 0) lines = lines.slice(1);
     return lines.slice(-n);
   } catch {
     return [];
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // best-effort close
+      }
+    }
   }
 }
 
