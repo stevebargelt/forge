@@ -14,6 +14,7 @@ import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
+import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
@@ -805,4 +806,121 @@ test("resolveChildAgent: respects custom discipline_key (not default 'discipline
 test("resolveChildAgent: returns step.agent when agent_map is undefined (backwards compat)", () => {
   const fanout = fanoutWith({});
   assert.equal(resolveChildAgent(_step, fanout, { discipline: "frontend" }), "engineer");
+});
+
+// ---------------------------------------------------------------------------
+// #194: lifecycle event backfill — task.awaiting_gate, container.*
+// ---------------------------------------------------------------------------
+
+function ensureClaudeRuntime(): void {
+  const fhome = process.env.FORGE_HOME!;
+  const runtimePath = join(fhome, "runtimes", "claude.yml");
+  if (!existsSync(runtimePath)) {
+    mkdirSync(dirname(runtimePath), { recursive: true });
+    writeFileSync(runtimePath, `
+name: claude
+description: test stub runtime
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  }
+}
+
+test("runNext: gate: human emits task.awaiting_gate with runId and taskId", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: HUMAN_GATE_WORKFLOW,
+    title: "awaiting_gate event test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stub });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "needs-review" && t.parentId === undefined)!;
+  assert.equal(primary.status, "awaiting_gate");
+
+  const events = eventsForTask(primary.id);
+  const gateEv = events.find((e) => e.eventType === "task.awaiting_gate");
+  assert.ok(gateEv, "must emit task.awaiting_gate when task enters awaiting_gate");
+  assert.equal(gateEv!.runId, runId);
+  assert.equal(gateEv!.taskId, primary.id);
+});
+
+test("runNext: container.started and container.exited emitted on successful step", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-container-events",
+    description: "one step for container event test",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "container event test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  await runNext({ runId, workflow: WF, dockerExec: makeStubExec({ status: "complete" }) });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  const events = eventsForTask(primary.id);
+  const types = events.map((e) => e.eventType);
+
+  assert.ok(types.includes("container.started"), "must emit container.started");
+  assert.ok(types.includes("container.exited"), "must emit container.exited on success");
+
+  const started = events.find((e) => e.eventType === "container.started")!;
+  assert.equal((started.payload as Record<string, unknown>).containerName, `forge-${primary.id}`);
+
+  const exited = events.find((e) => e.eventType === "container.exited")!;
+  assert.equal((exited.payload as Record<string, unknown>).exitCode, 0);
+});
+
+test("runNext: container.idle_timeout emitted (not container.exited) on idle timeout", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-idle-timeout-events",
+    description: "one step that idle-timeouts",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "idle timeout event test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const idleKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  await runNext({ runId, workflow: WF, dockerExec: idleKilled });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  const events = eventsForTask(primary.id);
+  const types = events.map((e) => e.eventType);
+
+  assert.ok(types.includes("container.started"), "must emit container.started");
+  assert.ok(types.includes("container.idle_timeout"), "must emit container.idle_timeout");
+  assert.ok(!types.includes("container.exited"), "must NOT emit container.exited for idle_timeout");
+
+  const idleEv = events.find((e) => e.eventType === "container.idle_timeout")!;
+  assert.equal((idleEv.payload as Record<string, unknown>).exitCode, IDLE_TIMEOUT_EXIT_CODE);
 });

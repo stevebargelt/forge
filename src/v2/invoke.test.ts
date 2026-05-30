@@ -8,6 +8,7 @@ import { invoke, type DockerExecFn } from "./invoke.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
+import { eventsForTask, eventsForRun } from "../store/events.js";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
 
@@ -465,4 +466,170 @@ result:
   assert.equal(reconciled.origins[0].origin, "http://host.docker.internal:3000");
   // owner-only perms on the bearer token despite the 0777 task dir
   assert.equal(statSync(staged).mode & 0o777, 0o600);
+});
+
+// ----- #194: lifecycle event backfill — container.* and auth.* -----
+
+test("invoke: emits container.started then container.exited (exit 0) on success", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do work",
+    projectDir: "/tmp/x",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(r.status, "complete");
+  const events = eventsForTask(r.taskId);
+  const types = events.map((e) => e.eventType);
+  assert.ok(types.includes("container.started"), "must emit container.started");
+  assert.ok(types.includes("container.exited"), "must emit container.exited on exit 0");
+
+  const started = events.find((e) => e.eventType === "container.started")!;
+  assert.deepEqual((started.payload as Record<string, unknown>).containerName, `forge-${r.taskId}`);
+
+  const exited = events.find((e) => e.eventType === "container.exited")!;
+  assert.equal((exited.payload as Record<string, unknown>).containerName, `forge-${r.taskId}`);
+  assert.equal((exited.payload as Record<string, unknown>).exitCode, 0);
+});
+
+test("invoke: emits container.idle_timeout (not container.exited) on IDLE_TIMEOUT_EXIT_CODE", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const idleKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "hang forever",
+    projectDir: "/tmp/x",
+    dockerExec: idleKilled,
+  });
+
+  assert.equal(r.status, "failed");
+  const events = eventsForTask(r.taskId);
+  const types = events.map((e) => e.eventType);
+  assert.ok(types.includes("container.started"), "must emit container.started");
+  assert.ok(types.includes("container.idle_timeout"), "must emit container.idle_timeout");
+  assert.ok(!types.includes("container.exited"), "must NOT emit container.exited for idle_timeout");
+
+  const idleEv = events.find((e) => e.eventType === "container.idle_timeout")!;
+  assert.equal((idleEv.payload as Record<string, unknown>).containerName, `forge-${r.taskId}`);
+  assert.equal((idleEv.payload as Record<string, unknown>).exitCode, IDLE_TIMEOUT_EXIT_CODE);
+});
+
+test("invoke: emits container.exited with exitCode on nonzero exit", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const crashing: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "crash");
+    return 1;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "crash",
+    projectDir: "/tmp/x",
+    dockerExec: crashing,
+  });
+
+  assert.equal(r.status, "failed");
+  const events = eventsForTask(r.taskId);
+  const exited = events.find((e) => e.eventType === "container.exited")!;
+  assert.ok(exited, "must emit container.exited for nonzero exit");
+  assert.equal((exited.payload as Record<string, unknown>).exitCode, 1);
+});
+
+function supabaseValueInvoke(expiresAt: number): string {
+  return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt, refresh_token: "r" });
+}
+
+test("invoke: emits auth.profile_applied with profile name (no secret material) on success", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  delete process.env.FORGE_CONTAINER_HOST;
+  const fhome = process.env.FORGE_HOME!;
+  const btDir = join(fhome, "bt-skill");
+  mkdirSync(btDir, { recursive: true });
+  writeFileSync(join(btDir, "auth-inject.js"), "// stub injector\n");
+  const rtPath = join(fhome, "runtimes", "claude-bt-auth.yml");
+  writeFileSync(rtPath, `
+name: claude-bt-auth
+description: bt auth stub
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+  - { host: "${btDir}", container: /home/agent/.claude/skills/browser-tools }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  writeProfile("auth-applied-profile", {
+    cookies: [],
+    origins: [{ origin: "https://staging.test", localStorage: [{ name: "sb-x-auth-token", value: supabaseValueInvoke(future) }] }],
+  });
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test",
+    projectDir: "/tmp/x",
+    authProfile: "auth-applied-profile",
+    runtimeName: "claude-bt-auth",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(r.status, "complete");
+  const events = eventsForTask(r.taskId);
+  const applied = events.find((e) => e.eventType === "auth.profile_applied")!;
+  assert.ok(applied, "must emit auth.profile_applied");
+  const payload = applied.payload as Record<string, unknown>;
+  assert.equal(payload.profile, "auth-applied-profile");
+  assert.ok(!("token" in payload), "payload must not contain token");
+  assert.ok(!("state" in payload), "payload must not contain state");
+  assert.ok(!("hostPath" in payload), "payload must not contain hostPath");
+});
+
+test("invoke: emits auth.profile_failed (no secret material) when profile is missing", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test",
+    projectDir: "/tmp/x",
+    authProfile: "totally-missing-profile-xyz",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(r.status, "failed");
+  const events = eventsForTask(r.taskId);
+  const failed = events.find((e) => e.eventType === "auth.profile_failed")!;
+  assert.ok(failed, "must emit auth.profile_failed");
+  const payload = failed.payload as Record<string, unknown>;
+  assert.equal(payload.profile, "totally-missing-profile-xyz");
+  assert.ok(typeof payload.reason === "string" && payload.reason.length > 0, "must include a reason");
+  assert.ok(!("token" in payload), "payload must not contain token");
+  assert.ok(!("state" in payload), "payload must not contain state");
 });

@@ -337,14 +337,14 @@ async function dispatchSingleStep(args: {
       return "blocked_by_red";
     }
     // No authoritative fail — proceed to normal gate semantics.
-    return finalizePrimary(taskId, step.gate, result);
+    return finalizePrimary(taskId, args.runId, step.gate, result);
   }
 
-  return finalizePrimary(taskId, step.gate, result);
+  return finalizePrimary(taskId, args.runId, step.gate, result);
 }
 
 // Final status write for a primary task (no reds path, or reds passed).
-function finalizePrimary(taskId: string, gate: Step["gate"], result: unknown): string {
+function finalizePrimary(taskId: string, runId: string, gate: Step["gate"], result: unknown): string {
   switch (gate) {
     case "auto":
     case "none":
@@ -352,6 +352,7 @@ function finalizePrimary(taskId: string, gate: Step["gate"], result: unknown): s
       return "complete";
     case "human":
       markTaskAwaitingGate(taskId, result);
+      logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
       return "awaiting_gate";
     case "verdict":
@@ -359,6 +360,7 @@ function finalizePrimary(taskId: string, gate: Step["gate"], result: unknown): s
       // only when all reds passed (or none authoritative-failed). Aggregate
       // outcome is the orchestrator's call; pause for it.
       markTaskAwaitingGate(taskId, result);
+      logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
       return "awaiting_gate";
   }
@@ -709,7 +711,7 @@ async function dispatchFanoutStep(args: {
     return "failed";
   }
 
-  return finalizePrimary(parentId, step.gate, parentResult);
+  return finalizePrimary(parentId, args.runId, step.gate, parentResult);
 }
 
 type ChildOutcome = {
@@ -858,6 +860,7 @@ async function runContainer(args: {
     try {
       const staged = resolveAuthStateForContainer(args.authProfile, dir);
       authStateHostPath = staged.hostPath;
+      logEvent("auth.profile_applied", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile } });
       if (staged.reconciled) {
         console.error(
           `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
@@ -866,6 +869,7 @@ async function runContainer(args: {
       }
     } catch (e) {
       if (e instanceof AuthProfileError) {
+        logEvent("auth.profile_failed", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
         markTaskFailed(args.taskId, e.message);
         return { kind: "failed", error: e.message };
       }
@@ -897,6 +901,8 @@ async function runContainer(args: {
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
   const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
+  const containerName = `forge-${args.taskId}`;
+  logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
   let exitCode: number;
   try {
     exitCode = await exec({
@@ -919,10 +925,13 @@ async function runContainer(args: {
   // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
   // Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
+    logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
     const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     markTaskFailed(args.taskId, msg);
     return { kind: "failed", error: msg };
   }
+
+  logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";

@@ -204,6 +204,16 @@ test("cancel task: emits task.cancelled and run.cancelled on real cancel", () =>
   assert.equal(JSON.parse(taskEvent!.payload!).via, "forge cancel");
 });
 
+test("cancel task: emits run.abandoned when the run enters abandoned state", () => {
+  insertTask(makeTask({ id: "task-ev-abn", status: "running" }));
+  performCancel("task-ev-abn", {});
+  const events = getEvents(RUN.id);
+  const types = events.map((e) => e.event_type);
+  assert.ok(types.includes("run.abandoned"), "should emit run.abandoned when run enters abandoned state");
+  const abandonedEvent = events.find((e) => e.event_type === "run.abandoned");
+  assert.equal(JSON.parse(abandonedEvent!.payload!).via, "forge cancel");
+});
+
 test("cancel task: does NOT emit events on dry-run", () => {
   insertTask(makeTask({ id: "task-ev2", status: "running" }));
   performCancel("task-ev2", { dryRun: true });
@@ -222,6 +232,15 @@ test("cancel run: emits task.cancelled per task and run.cancelled on real cancel
   const runCancelledEvents = events.filter((e) => e.event_type === "run.cancelled");
   assert.equal(taskCancelledEvents.length, 2);
   assert.equal(runCancelledEvents.length, 1);
+});
+
+test("cancel run: emits run.abandoned when cancelling a run directly", () => {
+  insertTask(makeTask({ id: "task-rev-abn", status: "running" }));
+  performCancel(RUN.id, {});
+  const events = getEvents(RUN.id);
+  const abandonedEvents = events.filter((e) => e.event_type === "run.abandoned");
+  assert.equal(abandonedEvents.length, 1);
+  assert.equal(JSON.parse(abandonedEvents[0]!.payload!).via, "forge cancel");
 });
 
 test("cancel run: does NOT emit events on dry-run", () => {

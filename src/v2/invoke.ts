@@ -177,6 +177,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     try {
       const staged = resolveAuthStateForContainer(args.authProfile, dir);
       authStateHostPath = staged.hostPath;
+      logEvent("auth.profile_applied", { runId, taskId, payload: { profile: args.authProfile } });
       if (staged.reconciled) {
         console.error(
           `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
@@ -185,6 +186,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       }
     } catch (e) {
       if (e instanceof AuthProfileError) {
+        logEvent("auth.profile_failed", { runId, taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
         markTaskFailed(taskId, e.message);
         closeRun(false);
         return { runId, taskId, status: "failed", error: e.message };
@@ -217,6 +219,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
   const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
+  const containerName = `forge-${taskId}`;
+  logEvent("container.started", { runId, taskId, payload: { containerName } });
   let exitCode: number;
   try {
     exitCode = await exec({
@@ -241,11 +245,14 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
+    logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     markTaskFailed(taskId, error);
     closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
+
+  logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode } });
 
   // Read result.json.
   const resultPath = join(dir, "result.json");

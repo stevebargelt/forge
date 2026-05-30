@@ -43,6 +43,7 @@ export function performCancel(
       if (remaining.length === 0) {
         updateRunStatus(task.runId, "abandoned");
         logEvent("run.cancelled", { runId: task.runId, payload: { via: "forge cancel" } });
+        logEvent("run.abandoned", { runId: task.runId, payload: { via: "forge cancel" } });
         runAbandoned = true;
       }
     } else {
@@ -68,6 +69,7 @@ export function performCancel(
       }
       updateRunStatus(run.id, "abandoned");
       logEvent("run.cancelled", { runId: run.id, payload: { via: "forge cancel" } });
+      logEvent("run.abandoned", { runId: run.id, payload: { via: "forge cancel" } });
     }
     return { kind: "run-cancelled", runId: run.id, tasksKilled: nonTerminal.map((t) => t.id) };
   }

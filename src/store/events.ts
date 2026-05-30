@@ -5,20 +5,26 @@ export type EventType =
   | "run.created"
   | "run.completed"
   | "run.cancelled"
+  | "run.abandoned"
   | "task.created"
   | "task.started"
   | "task.completed"
   | "task.failed"
   | "task.cancelled"
-  | "task.crashed"
-  | "task.idle_timeout"
   | "task.blocked_by_red"
   | "task.awaiting_red"
+  | "task.awaiting_gate"
   | "task.submitted"
   | "task.retried"
   | "verdict.received"
   | "verdict.findings_dropped"
-  | "gate.decided";
+  | "gate.decided"
+  | "container.started"
+  | "container.exited"
+  | "container.killed"
+  | "container.idle_timeout"
+  | "auth.profile_applied"
+  | "auth.profile_failed";
 
 export type Event = {
   id: number;

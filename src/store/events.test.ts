@@ -134,3 +134,26 @@ test("eventsForRun exposes runId on each event row", () => {
   const events = eventsForRun(RUN.id);
   assert.equal(events[0]!.runId, RUN.id);
 });
+
+// #194: new event types are accepted by logEvent (runtime guard for union additions)
+test("logEvent accepts new #194 event types without throwing", () => {
+  logEvent("run.abandoned", { runId: RUN.id, taskId: "task-ev-1", payload: { via: "forge cancel" } });
+  logEvent("task.awaiting_gate", { runId: RUN.id, taskId: "task-ev-1" });
+  logEvent("container.started", { runId: RUN.id, taskId: "task-ev-1", payload: { containerName: "forge-task-ev-1" } });
+  logEvent("container.exited", { runId: RUN.id, taskId: "task-ev-1", payload: { containerName: "forge-task-ev-1", exitCode: 0 } });
+  logEvent("container.idle_timeout", { runId: RUN.id, taskId: "task-ev-1", payload: { containerName: "forge-task-ev-1", exitCode: 124 } });
+  logEvent("container.killed", { runId: RUN.id, taskId: "task-ev-1", payload: { containerName: "forge-task-ev-1" } });
+  logEvent("auth.profile_applied", { runId: RUN.id, taskId: "task-ev-1", payload: { profile: "my-profile" } });
+  logEvent("auth.profile_failed", { runId: RUN.id, taskId: "task-ev-1", payload: { profile: "my-profile", reason: "not found" } });
+
+  const events = eventsForTask("task-ev-1");
+  const types = events.map((e) => e.eventType);
+  assert.ok(types.includes("run.abandoned"));
+  assert.ok(types.includes("task.awaiting_gate"));
+  assert.ok(types.includes("container.started"));
+  assert.ok(types.includes("container.exited"));
+  assert.ok(types.includes("container.idle_timeout"));
+  assert.ok(types.includes("container.killed"));
+  assert.ok(types.includes("auth.profile_applied"));
+  assert.ok(types.includes("auth.profile_failed"));
+});
