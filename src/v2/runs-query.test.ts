@@ -51,11 +51,21 @@ test("queryRuns: filters by since cutoff", () => {
   assert.deepEqual(queryRuns({ sinceMs: cutoff }).map((r) => r.run.id), ["run-new"]);
 });
 
-test("queryRuns: filters by project (exact path and basename)", () => {
+test("queryRuns: filters by project (exact path and bare-name basename)", () => {
   insertRun(mkRun("run-app", { projectDir: "/Users/me/code/app" }));
   insertRun(mkRun("run-other", { projectDir: "/Users/me/code/other" }));
   assert.deepEqual(queryRuns({ project: "/Users/me/code/app" }).map((r) => r.run.id), ["run-app"]);
-  assert.deepEqual(queryRuns({ project: "app" }).map((r) => r.run.id), ["run-app"], "basename match");
+  assert.deepEqual(queryRuns({ project: "app" }).map((r) => r.run.id), ["run-app"], "bare name → basename match");
+});
+
+test("queryRuns: a full-path project filter does NOT degrade to basename (cross-repo name collision)", () => {
+  insertRun(mkRun("run-a", { projectDir: "/Users/me/work/app" }));
+  insertRun(mkRun("run-b", { projectDir: "/Users/me/personal/app" })); // same basename, different repo
+  // A FULL path must match only the exact repo, not the other "app".
+  assert.deepEqual(queryRuns({ project: "/Users/me/work/app" }).map((r) => r.run.id), ["run-a"]);
+  assert.deepEqual(queryRuns({ project: "/Users/me/personal/app" }).map((r) => r.run.id), ["run-b"]);
+  // A bare name still matches both (intentional convenience).
+  assert.equal(queryRuns({ project: "app" }).length, 2, "bare name is the deliberate basename shortcut");
 });
 
 test("queryRuns: filters by workflow", () => {

@@ -37,10 +37,13 @@ export function parseSince(raw: string, nowMs = Date.now()): number | undefined 
 
 export function projectMatches(run: Run, project: string): boolean {
   if (!run.projectDir) return false;
-  if (run.projectDir === project) return true;
-  const rb = basename(run.projectDir.replace(/\/+$/, ""));
-  const pb = basename(project.replace(/\/+$/, ""));
-  return rb === pb || rb === project;
+  const rd = run.projectDir.replace(/\/+$/, "");
+  if (rd === project.replace(/\/+$/, "")) return true;
+  // Basename matching ONLY when the filter is a bare name (no path separator).
+  // A full path like /a/app must NOT match a different repo /b/app that happens
+  // to share the basename "app".
+  if (!project.includes("/")) return basename(rd) === project;
+  return false;
 }
 
 /** Shared run-level filter predicate (status/workflow/since/project). Reused by
