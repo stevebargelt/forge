@@ -5,28 +5,34 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-29.**
+**Last session ended 2026-05-29 (late).**
 
-**Where we left off:** Shipped and CLOSED the entire #176 auth-profile epic (capture CLI → forked+pinned injector → `--auth-profile` on invoke+pipeline → origin auto-reconcile), then fixed two forge bugs and landed auth-testing docs. All pushed to origin/main (b1d83ba). A long design thread concluded that routine authed E2E should use **programmatic login**, not capture/inject — that's now documented. Note: much of the late session was the user accidentally pasting **wnba-led-scoreboard** app work (E2E tests, delete-device, admin-tab bug) into this forge session — windows rearranged. That is NOT forge work; the wnba orchestrator owns it. Don't pick those up here.
+**Where we left off:** Shipped #186 (forge cancel verb + authoritative-cancel review fixes) then the ENTIRE Crawl observability milestone (#193-197) — the events table went from write-only to a full diagnostic surface, all live-proven. Also discovered + cleaned a DB-pollution incident (mine) and corrected a notification misread.
 
-**Picked up next:** (forge epic is done; these are the open follow-ups, by priority)
-1. **#190** — consolidated auth-profile review findings (correctness/cleanup, NOT security-urgent per zero-users). Cheap real ones: TOCTOU write-then-chmod (`writeFileSync(p,d,{mode:0o600})` in writeProfile + auth-state staged copy), `--meta authProfile` bypass of `forge new` validation, `CdpSession.send` no timeout (capture can hang), IPv6 `[::1]` not reconciled (URL hostname has brackets, LOCALHOST_HOSTS has `::1`), and over-broad expiry → fold in the **refresh-token gate** (a captured Supabase session is good for the refresh-token lifetime, not the 1h access token; in-browser client auto-refreshes from the injected refresh_token — forge's expiry currently fails at 1h).
-2. **#185** parent-died orphan reaper (#173 Tier-2, hit live this session) + **#186** `forge cancel` verb (manual counterpart). No CLI today reaps a stuck-`running` task; had to poke the DB via store accessors.
-3. **#187** native arm64 multi-arch agent image — drops the Rosetta tax on Apple Silicon. Achievable now: #180 already baked arm64-capable Playwright chromium; repoint browser-tools at it and drop the amd64-only Chrome-for-Testing dep. Banked (not started); confirm the win on one CPU-heavy step before committing effort.
-4. **#184** auth-profile polish (optional): upstream PR of the now-generic injector to badlogic/pi-skills (would drop the fork), browser-content.js + new-tab injector wiring, per-step `needs_auth` workflow flag.
+**Crawl observability milestone — COMPLETE (#193-197, all closed):**
+- #193 events-read: eventsForTask/eventsForRun + forge show timeline (the keystone — events were write-only before this).
+- #194 events-backfill: run.abandoned, task.awaiting_gate, container.*, auth.profile_* emitted; dead task.idle_timeout/task.crashed enums removed. Container events emit from callers (invoke.ts/runNext.ts), never docker-exec.ts.
+- #195 failure_kind: central classifier (src/v2/failure-kind.ts) + failTask wrapper; routed all 23 markTaskFailed sites (+2 fanout paths); fixed that only 1/24 failures emitted task.failed before. Event-payload, NOT a tasks column (deferred to metrics layer).
+- #196 show-detail: forge show <run|task> grew into the diagnostic view (failure_kind, container, elapsed, last-output, result-file classification, blockers, failed-by-kind, next-command). 11 pure helpers.
+- #197 manifest: manifest.json written per task dir on dispatch; auth block is booleans-only (profileRequested/stateMounted, NO secrets); forge show reads it with fallback.
+675 tests green. Crawl ADR-worthy decisions held: read-first sequencing, failure_kind as event payload, grow show (no forge inspect), container events from callers.
 
-**External state to remember:**
-- origin/main is at b1d83ba — IN SYNC (pushed this session).
-- The browser-tools auth injector lives in the FORK `github.com/stevebargelt/pi-skills` @ branch `feat/preload-storage-state` (commit cac695b); local `~/pi-skills` is checked out on that branch (keeps this machine's injector live). forge's spawn preflight HARD-FAILS `--auth-profile` if the mounted browser-tools lacks `auth-inject.js`. An upstream PR (#184) would let forge pin upstream instead of the fork.
-- wnba-led-scoreboard E2E now uses programmatic login (qa@bargelt.com test user, gitignored creds, Playwright globalSetup) — committed in their repo. The wnba admin-tab fail-open (auth.ts bypasses admin check when NODE_ENV=development OR ADMIN_EMAILS empty) was diagnosed but is THEIR backlog, not forge's.
+**Picked up next (priority):**
+1. **Observability WALK stage** — the documented next phase in docs/observability.md (live task activity in status/watch, structured agent progress events, trace shape, better notifications w/ failure_kind). Walk tickets are listed in the doc but NOT yet filed as #-tickets.
+2. **#199** forge-test drops --import ./src/test-setup.ts for file-specific args → SQLITE_ERROR + (worse) can write to the real DB. ROOT CAUSE of the pollution incident below. Higher value than it looks.
+3. **#201** forge invoke --run <terminal-run> attaches a running task but leaves run status complete → live task HIDDEN in dashboard (confused the user 2-3x this session). Sibling to #185/#186 run-status correctness. Workaround in use: give each invoke its own run.
+4. **#200** forge show stdout/stderr tail dumps raw stream-json blobs — extract text deltas (cosmetic).
+5. **OPEN DECISION (user undecided):** the getDb() test-isolation guard — make getDb() REFUSE the real ~/.forge/forge.db in a test context so a bare tsx --test can never pollute. User said "not sure yet." Not filed.
 
-**Decisions worth not relitigating:**
-- **Authed-app testing = programmatic login** (test user + project globalSetup → signInWithPassword → storageState), NOT forge auth-profile capture/inject. Capture/inject is the documented FALLBACK for apps with no scriptable login (SSO/MFA third-party). Documented in CLAUDE.md (test-engineer section) + the #176 ADR "Outcome — read this first" block. forge never logs in interactively.
-- **#190 findings are correctness/cleanup, not security-urgent** (zero users, pre-launch — saved to memory). The "auth-state readable by the trusted primary agent" finding is a doc-honesty fix (language corrected), NOT an exploit — don't build process-isolation; reds correctly never receive the credential (both reviewers verified).
-- **Never wrap `forge invoke` in an external `timeout`** — it kills the parent and orphans the task (idle-watchdog is in-process; dies with the parent). Caused the red-wide orphan this session. Saved to memory.
-- Project identity = git repo root (monorepo subdirs roll up; name override at the repo's `.forge/project.json`). Shipped 8e3d967.
+**DB pollution incident (resolved):** I ran `npx tsx --test src/v2/runNext.test.ts` bare (no --import test-setup.ts) ~4x while debugging → wrote 58 /tmp/test-project fixture runs (112 tasks, 262 events, 20 verdicts) into the REAL ~/.forge/forge.db. Backed up to ~/.forge/forge.db.bak-20260529-pretestcleanup, then scoped-DELETE'd (project_dir='/tmp/test-project'). 189→131 runs. Saved memory: never bare tsx --test; use npm test. After ANY host test run, check `sqlite3 ~/.forge/forge.db "SELECT COUNT(*) FROM runs WHERE project_dir='/tmp/test-project'"` is 0.
 
-**Shipped (for reference):** #176 epic across 84deada→ece71af (auth-profile capture/status CLI, --auth-profile invoke + pipeline wiring, fork-pin preflight #181, generic env var #182, origin auto-reconcile #183) · 8288341 fix task-task id doubling · 8e3d967 project git-root grouping · 5efbb64 auth-testing docs. Closed: #176/#181/#182/#183/#188/#189. Open: #184/#185/#186/#187/#190. All pushed.
+**Notification correction:** I misread a neutral "I got pings" as a noise complaint and wrongly suppressed real run notifications. Real forge invoke/new completions SHOULD notify (human is away, ping is the signal). Closed mis-scoped #192, refiled #198 = NO_NOTIFY kill-switch scoped ONLY to forge's own test suite (test-setup.ts generalization of #175). Saved memory. Do NOT quiet real runs.
+
+**Tickets filed this session:** #191 (broken runNext.test.ts test-1 fixture, path.join undefined), #198 (NO_NOTIFY test kill-switch), #199 (forge-test test-setup import), #200 (show stdout-tail polish), #201 (invoke --run reactivate). Closed: #186, #193, #194, #195, #196, #197. Superseded: #192.
+
+**Shipped commits (all local, unpushed):** #186 (cancel verb eddd553 + fixes 4786963), observability doc 00de273, #193 fd50001, #194 de6758f, #195 b6301b5, #196 042dc60, #197 1ef77fa, plus backlog/notify-correction commits. ~18 commits this session, all on main.
+
+**Decisions worth not relitigating:** failure_kind = event payload not column (zero users, defer schema). Grow forge show, never add forge inspect. Container events from callers not docker-exec. Real runs notify; only test suite silenced. Never bare tsx --test on host. Auth-event/manifest payloads = booleans + safe error text only, never credentials/paths.
 
 ## Active
 
