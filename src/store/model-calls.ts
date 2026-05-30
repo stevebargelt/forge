@@ -227,6 +227,23 @@ export function extractUsageFromTranscript(
 // against the same log replaces existing rows for that pair so backfill can be
 // re-run safely. (request_id alone isn't unique enough; a session might appear
 // in multiple task logs during fanout edge cases.)
+/** All model-call rows for a task (token counts only — no secrets). Used by the
+ *  debug bundle (RUN-4). */
+export function usageForTask(taskId: string): UsageRow[] {
+  const rows = getDb({ readOnly: true })
+    .prepare(`SELECT task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at
+              FROM model_calls WHERE task_id = ? ORDER BY created_at ASC`)
+    .all(taskId) as Array<{
+      task_id: string | null; request_id: string; model: string; alias: string | null;
+      input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; created_at: string;
+    }>;
+  return rows.map((r) => ({
+    taskId: r.task_id, requestId: r.request_id, model: r.model, alias: r.alias,
+    inputTokens: r.input_tokens, outputTokens: r.output_tokens,
+    cacheReadTokens: r.cache_read_tokens, cacheCreationTokens: r.cache_creation_tokens, createdAt: r.created_at,
+  }));
+}
+
 export function insertUsageRows(rows: UsageRow[]): number {
   if (rows.length === 0) return 0;
   const db = getDb();
