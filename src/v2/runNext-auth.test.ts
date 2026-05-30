@@ -73,7 +73,7 @@ function stagedAuthPathFor(runId: string): string | undefined {
   return existsSync(p) ? p : undefined;
 }
 
-test("runNext: browser-capable step gets a reconciled, mode-600 auth-state staged", async () => {
+test("runNext: a browser-capable step's staged auth-state is cleaned up after it terminates (AWN-8)", async () => {
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   delete process.env.FORGE_CONTAINER_HOST;
   const runtime = setupBrowserRuntime();
@@ -86,11 +86,9 @@ test("runNext: browser-capable step gets a reconciled, mode-600 auth-state stage
   const { runId } = startRun({ workflow: wf, title: "auth pipe", inputs: {}, projectDir: "/tmp/x", authProfile: "pipe-admin" });
   await runNext({ runId, workflow: wf, dockerExec: makeStubExec({ status: "complete" }) });
 
-  const staged = stagedAuthPathFor(runId);
-  assert.ok(staged, "engineer step should have a staged auth-state.json");
-  assert.equal(statSync(staged!).mode & 0o777, 0o600);
-  const written = JSON.parse(readFileSync(staged!, "utf8"));
-  assert.equal(written.origins[0].origin, "http://host.docker.internal:3000");
+  // The staging mechanics (reconcile + mode 600) are covered in auth-state.test.ts;
+  // here we assert AWN-8 cleanup: the bearer token doesn't linger after the step.
+  assert.equal(stagedAuthPathFor(runId), undefined, "staged auth-state.json must be removed once the step is terminal");
 });
 
 test("runNext: a non-browser step (architecture-advisor) gets NO auth-state even when the run has a profile", async () => {

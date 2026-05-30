@@ -563,25 +563,6 @@ Acceptance:
 Note: runtime YAMLs already exist (seeds/runtimes/claude-*.yml) + loader; this formalizes the execution interface, not just config. Largest/most architectural item — sequence last per the doc. Second of the broadening trio.
 
 
-### #221 — AWN-8 hygiene-hardening: complete secret exclusion across bundles/logs/manifests/exports + staged-auth cleanup
-docs/agentic-workflow-next-steps.md §8. Useful debug artifacts that never preserve secrets/prompts/auth state.
-
-PARTLY DONE this week: forge bundle uses an allowlist (never denylist); bundle.json strips composedSystemPrompt + inputs unless --include-prompts; manifest auth block is booleans-only; logs bounded. AWN-8 = the remainder.
-
-Remaining scope:
-- Explicit denylist for .env, auth state, browser profiles, prompt inputs, token-looking values, generated credential copies — across task packages, bundles, manifests, logs, dashboard payloads, AND exports (forge export jsonl/otel payloads).
-- Stage-auth cleanup: remove auth-state.json after terminal task state where practical (ties to AWN-3's "no reuse of staged credentials").
-- Document redaction behavior; surface it in forge show / bundle metadata.
-
-Acceptance:
-- forge bundle tests prove auth state, .env, and prompt inputs excluded by default. (composedSystemPrompt/inputs test already landed.)
-- Staged auth files removed/marked for cleanup after terminal task.
-- Manifest fields useful but never credential material.
-- Redaction documented + visible in forge show or bundle metadata.
-
-Smallest remaining item (allowlist + bundle work already done). Relates to #190 (auth-profile findings). Last of the broadening trio.
-
-
 ### #222 — Session/orchestrator tasks stuck 'running' need a heartbeat-based reaper (not container-based)
 Surfaced during AWN-1 (#214): the real DB has several task-session-* (phase=session, role=orchestrator) tasks stuck status='running' from orchestrator/design sessions that ended without finalizing. AWN-1's reconcile deliberately SKIPS them (no container.started — they're host-side), so they stay 'running' forever and inflate forge status / dashboard "in flight".
 
@@ -604,6 +585,27 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 
 ## Done (recent)
+
+### #221 — AWN-8 hygiene-hardening: complete secret exclusion across bundles/logs/manifests/exports + staged-auth cleanup
+**Closed:** 2026-05-30. Commit `48eedf6`.
+
+docs/agentic-workflow-next-steps.md §8. Useful debug artifacts that never preserve secrets/prompts/auth state.
+
+PARTLY DONE this week: forge bundle uses an allowlist (never denylist); bundle.json strips composedSystemPrompt + inputs unless --include-prompts; manifest auth block is booleans-only; logs bounded. AWN-8 = the remainder.
+
+Remaining scope:
+- Explicit denylist for .env, auth state, browser profiles, prompt inputs, token-looking values, generated credential copies — across task packages, bundles, manifests, logs, dashboard payloads, AND exports (forge export jsonl/otel payloads).
+- Stage-auth cleanup: remove auth-state.json after terminal task state where practical (ties to AWN-3's "no reuse of staged credentials").
+- Document redaction behavior; surface it in forge show / bundle metadata.
+
+Acceptance:
+- forge bundle tests prove auth state, .env, and prompt inputs excluded by default. (composedSystemPrompt/inputs test already landed.)
+- Staged auth files removed/marked for cleanup after terminal task.
+- Manifest fields useful but never credential material.
+- Redaction documented + visible in forge show or bundle metadata.
+
+Smallest remaining item (allowlist + bundle work already done). Relates to #190 (auth-profile findings). Last of the broadening trio.
+
 
 ### #219 — AWN-6 project-command-auth: project-owned auth profile (runs project login command to produce storageState)
 **Closed:** 2026-05-30. Commit `853b418`.
