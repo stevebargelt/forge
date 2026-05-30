@@ -5,6 +5,7 @@ import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
+import { liveIdleCountdownForTask, formatIdleCountdown } from "./show.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -67,6 +68,7 @@ export function registerStatus(program: Command): void {
           startedAt: t.startedAt ?? null,
           completedAt: t.completedAt ?? null,
           error: t.error ?? null,
+          idleCountdown: liveIdleCountdownForTask(t) ?? null,
           verdicts: verdictsForTask(t.id).map((v) => ({
             redRole: v.redRole,
             verdict: v.verdict,
@@ -107,6 +109,8 @@ export function registerStatus(program: Command): void {
         for (const t of list) {
           const icon = statusIcon(t.status);
           let line = `  ${icon} ${t.id}  ${t.agentRole}  [${t.status}]`;
+          const countdown = liveIdleCountdownForTask(t);
+          if (countdown) line += `  — ${formatIdleCountdown(countdown)}`;
           const verdicts = verdictsForTask(t.id);
           if (verdicts.length > 0) {
             const summary = verdicts

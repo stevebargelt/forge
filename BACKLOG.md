@@ -559,7 +559,165 @@ Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred 
 Polish: when the log looks like Claude stream-json (JSONL with type fields), extract the human-readable text — the assistant text deltas / the final result.result string — and show that as the tail, capped to a sane width/line count. Fall back to raw tail for non-JSON logs (plain CLI/test output). Keep it in show.ts's tailLines/last-output rendering. Pure-function-friendly so it stays unit-testable like the other #196 helpers. Low priority — cosmetic, not blocking.
 
 
+### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
+
+### #204 — WALK-1 live-task-activity: show running task last-output time + idle countdown in status/show/watch
+Observability WALK stage, §1 (docs/observability.md:309). Make ACTIVE tasks
+inspectable while still running — the Crawl work made completed/failed work
+explainable; this makes in-flight work observable.
+
+For a running task, surface:
+- startedAt
+- last stdout/stderr output time (we have getLastOutputMtime in show.ts already)
+- idle duration (now - last output)
+- idle timeout threshold (now recorded per-task in manifest.json — see Crawl
+  idle-timeout fix; use the recorded value, fall back to default)
+- container name
+- current status
+- last lifecycle event
+
+Surfaces (this ticket = the CLI read surfaces; dashboard split to WALK-5):
+- `forge show <task-id>` — already shows last-output + idle timeout for any task;
+  extend to show a live idle COUNTDOWN (time remaining before idle kill) when
+  status=running.
+- `forge status` — add per-running-task last-output age + idle countdown column.
+
+Builds on: idle watchdog, live log streaming, the Crawl show.ts diagnostic
+helpers (getLastOutputMtime, formatTimeAgo, getManifestIdleTimeoutMs).
+
+Acceptance:
+- A running task's `forge show` shows "idle Xs / timeout Ym (Zs left)".
+- `forge status` shows last-output age for running tasks so a stalled task is
+  obvious without opening show.
+- Pure-function-friendly so the countdown math is unit-testable.
+
+
+### #205 — WALK-2 watch-activity: forge watch --json emits structured task-activity + failure-kind events
+Observability WALK stage, §1 surface + trace-shape (docs/observability.md:326, 349).
+
+Today `forge watch` emits one JSON event per state CHANGE (run/task status
+transitions). WALK adds live ACTIVITY signal between transitions so a consumer
+(orchestrator, dashboard, script) can see a running task is alive and progressing,
+not just "still running".
+
+Scope:
+- `forge watch --json` should emit task-activity records for running tasks:
+  last-output time, idle duration, idle countdown (reuse WALK-1 computation).
+- Failure transitions in the stream should carry failure_kind (already in the
+  task.failed event payload from Crawl) so a watcher branches on kind without
+  parsing prose.
+- Adopt the trace-shape fields opportunistically: include runId, taskId, and
+  spanKind (run|task|docker|model|tool|auth|gate|red-review) on emitted records
+  where applicable, per §3 Trace Shape (observability.md:349). This keeps an OTel
+  export path open later (WALK/RUN-otel) without a rewrite now.
+
+Depends on WALK-1 (#204) for the activity computation. Does NOT require agent
+cooperation — derives everything from container lifecycle + log mtimes.
+
+Acceptance:
+- `forge watch --json` surfaces failure_kind on failure events.
+- Running tasks emit periodic activity records (last-output age + idle countdown).
+- Records carry runId/taskId and a spanKind where meaningful.
+
+
+### #206 — WALK-3 agent-progress: parse delimited JSON progress lines from agent stdout into task.progress/artifact/decision events
+Observability WALK stage, §2 (docs/observability.md:331).
+
+Agents MAY (not must) emit structured progress records as clearly-delimited JSON
+lines on stdout. Forge parses them into events. If an agent never emits them,
+forge still works from container lifecycle + logs — this is purely additive.
+
+Example agent lines (JSONL on stdout):
+  {"type":"progress","message":"installed dependencies","percent":25}
+  {"type":"progress","message":"running unit tests","percent":60}
+  {"type":"artifact","kind":"screenshot","path":"/task/homepage.png"}
+  {"type":"decision","summary":"using existing auth profile qa-admin"}
+
+These become NEW event types: task.progress, task.artifact, task.decision.
+(Adding event types → update EventType union in src/store/events.ts AND ensure a
+real emission path, per the no-dead-enum invariant established in Crawl.)
+
+Implementation notes:
+- Parse from container.stdout.log. Claude agent logs are stream-json already
+  (#200), so the progress lines must be distinguishable from the assistant
+  stream — define a clear delimiter/shape and only parse lines that match it.
+- Reuse / coordinate with the captureUsageForTask stdout-scan pass rather than
+  adding a second full-file read (bounded — don't slurp multi-MB logs; see the
+  Crawl bounded-tail fix).
+- Redact: progress payloads are agent-authored — never persist secrets; cap sizes.
+
+Acceptance:
+- Well-formed progress/artifact/decision lines become task.progress/artifact/
+  decision events, readable via eventsForTask and rendered in forge show timeline.
+- Malformed or absent progress lines are ignored without failing the task.
+- New event types have real emission paths + unit tests.
+
+
+### #207 — WALK-4 rich-notifications: run-transition notifications carry failure_kind + a forge show next-command
+Observability WALK stage, §4 (docs/observability.md:379).
+
+Enrich the CONTENT of forge's existing run/task notifications so the ping itself
+answers "what failed and what do I do next" without opening a terminal.
+
+Target format:
+  Forge: task engineer failed: result_malformed.
+  Run: feature login redesign
+  Next: forge show task-engineer-abc123
+
+  Forge: task manual-qa idle for 8m; timeout at 10m.
+  Run: app redesign
+  Next: forge show task-manual-qa-def456
+
+Scope:
+- notify/format.ts formatRunNotification / formatGateNotification should include
+  failure_kind (from the task.failed event payload — Crawl) and a derived next
+  command (reuse deriveNextCommandForTask/deriveNextCommandForRun from show.ts).
+- Idle-warning notifications (idle for Xm; timeout at Ym) — optional stretch, ties
+  to WALK-1 idle computation.
+- Respect NO_NOTIFY (#198) and the real-runs-notify rule (test suite stays silent,
+  real runs ping).
+
+RELATIONSHIP: distinct from #203 (orchestrator-done ping for forge-on-forge work,
+which has NO run transition at all). This ticket improves the content of pings
+that already fire on run transitions; #203 is about a ping existing for direct
+orchestrator work. Implement independently; share the formatting helper.
+
+Acceptance:
+- A failure notification names the failure_kind and a copy-pasteable forge show.
+- Formatting is unit-tested per failure_kind.
+
+
+### #208 — WALK-5 dashboard-activity: add task timeline + live activity panel to the dashboard
+Observability WALK stage, §1 dashboard surface (docs/observability.md:325, 403).
+
+Bring the Crawl/WALK observability data into the web dashboard (the CLI surfaces
+are WALK-1/#204; this is the browser surface).
+
+Scope:
+- Task detail view: render the lifecycle event TIMELINE (eventsForTask) — the same
+  data forge show <task-id> now shows, in the dashboard.
+- Live activity panel for running tasks: last-output age, idle countdown, container
+  name, current status, last lifecycle event (reuse WALK-1 computation).
+- Failure surfacing: show failure_kind on failed tasks; group a run's failures by
+  kind (groupFailedByKind already exists in show.ts).
+
+Verify with browser-tools (screenshot + inspect) per the standing UI-verification
+rule — don't ask the user to eyeball it manually.
+
+Depends on WALK-1 (#204) for activity computation. Lower priority than the CLI
+surfaces — file last, do after the read model is proven on the CLI side.
+
+Acceptance:
+- Dashboard task detail shows the event timeline.
+- Running tasks show a live idle countdown that updates.
+- Verified via browser-tools screenshots.
+
+
 ## Done (recent)
+
+### #202 — Orchestrator-done notifications: ping when forge-on-forge work finishes (no run transition fires)
+**Closed:** 2026-05-30. Commit `superseded`.
+
 
 ### #201 — forge invoke --run <terminal-run> attaches a running task but leaves run status complete → live task hidden in dashboard
 **Closed:** 2026-05-30. Commit `ad82297`.

@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { taskDir } from "../../util/paths.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -17,6 +18,9 @@ import {
   formatTimeAgo,
   tailLines,
   getManifestIdleTimeoutMs,
+  computeIdleCountdown,
+  formatIdleCountdown,
+  liveIdleCountdownForTask,
   listPresentArtifacts,
   deriveNextCommandForTask,
   deriveNextCommandForRun,
@@ -398,6 +402,62 @@ test("tailLines: returns all lines if fewer than N", () => {
 
 test("tailLines: returns [] when file does not exist", () => {
   assert.deepEqual(tailLines(join(tmpDir, "nope.txt"), 5), []);
+});
+
+// ─── computeIdleCountdown / formatIdleCountdown (WALK-1) ─────────────────────
+
+const T0 = 1_700_000_000_000; // fixed "now" base for deterministic math
+
+test("computeIdleCountdown: fresh output — most of the budget remains", () => {
+  const c = computeIdleCountdown(T0 - 10_000, 900_000, T0); // 10s idle, 15m timeout
+  assert.equal(c.hasOutput, true);
+  assert.equal(c.idleMs, 10_000);
+  assert.equal(c.remainingMs, 890_000);
+  assert.equal(c.expired, false);
+});
+
+test("computeIdleCountdown: idle past the timeout — expired, remaining clamped to 0", () => {
+  const c = computeIdleCountdown(T0 - 1_000_000, 900_000, T0); // 16m40s idle > 15m
+  assert.equal(c.expired, true);
+  assert.equal(c.remainingMs, 0);
+});
+
+test("computeIdleCountdown: exactly at the timeout boundary counts as expired", () => {
+  const c = computeIdleCountdown(T0 - 900_000, 900_000, T0);
+  assert.equal(c.expired, true);
+  assert.equal(c.remainingMs, 0);
+});
+
+test("computeIdleCountdown: no output yet — full budget, not expired, hasOutput false", () => {
+  const c = computeIdleCountdown(undefined, 900_000, T0);
+  assert.equal(c.hasOutput, false);
+  assert.equal(c.idleMs, 0);
+  assert.equal(c.remainingMs, 900_000);
+  assert.equal(c.expired, false);
+});
+
+test("formatIdleCountdown: renders left/expired/no-output variants distinctly", () => {
+  assert.match(formatIdleCountdown(computeIdleCountdown(T0 - 10_000, 900_000, T0)), /left/);
+  assert.match(formatIdleCountdown(computeIdleCountdown(T0 - 1_000_000, 900_000, T0)), /exhausted/);
+  assert.match(formatIdleCountdown(computeIdleCountdown(undefined, 900_000, T0)), /no output yet/);
+});
+
+test("liveIdleCountdownForTask: running task → countdown from its stdout mtime + manifest timeout", () => {
+  const t = makeTask("task-live-run", { status: "running" });
+  const dir = taskDir(t.runId, t.id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({ container: { name: "forge-x", idleTimeoutMs: 600_000 } }));
+  writeFileSync(join(dir, "container.stdout.log"), "some output\n");
+  const c = liveIdleCountdownForTask(t);
+  assert.ok(c, "running task must yield a countdown");
+  assert.equal(c!.hasOutput, true);
+  // Budget reflects the manifest's recorded timeout, not the global default.
+  assert.equal(c!.remainingMs + c!.idleMs, 600_000);
+});
+
+test("liveIdleCountdownForTask: terminal task → undefined (countdown is meaningless once done)", () => {
+  const t = makeTask("task-live-done", { status: "complete" });
+  assert.equal(liveIdleCountdownForTask(t), undefined);
 });
 
 // ─── getManifestIdleTimeoutMs ────────────────────────────────────────────────
