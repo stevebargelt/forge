@@ -746,6 +746,19 @@ test("runNext: fanout — missing array_key on upstream marks parent failed", as
   const researchParent = tasks.find((t) => t.phase === "research" && t.parentId === undefined)!;
   assert.equal(researchParent.status, "failed");
   assert.match(researchParent.error ?? "", /no array/);
+  // Defensive fanout failure must still go through normal lifecycle bookkeeping:
+  // completedAt is set (markTaskFailed), and the timeline brackets created→failed.
+  assert.ok(researchParent.completedAt, "defensively-failed fanout parent must have completedAt set");
+  const types = eventsForTask(researchParent.id).map((e) => e.eventType);
+  assert.ok(types.includes("task.created"), "fanout parent must emit task.created even on defensive failure");
+  assert.ok(types.includes("task.failed"), "fanout parent must emit task.failed");
+  assert.ok(
+    types.indexOf("task.created") < types.indexOf("task.failed"),
+    "task.created must precede task.failed",
+  );
+  // failure_kind comes from the classifier (via failTask), not a hardcoded string.
+  const failedEv = eventsForTask(researchParent.id).find((e) => e.eventType === "task.failed")!;
+  assert.equal(typeof (failedEv.payload as Record<string, unknown>).failure_kind, "string");
 });
 
 // ------------------------------------------------------------------

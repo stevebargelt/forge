@@ -543,6 +543,34 @@ function parseVerdict(output: unknown): Verdict {
   };
 }
 
+// Defensive-failure path for a fanout parent (upstream missing / no array).
+// When the step is seen for the first time we must create the parent row so its
+// lifecycle starts with task.created, then route the failure through failTask
+// for the normal bookkeeping the hand-rolled insert used to skip: completed_at
+// and a classified failure_kind on the task.failed event. The existing-parent
+// case just fails the already-created row.
+function failFanoutParent(
+  parentId: string,
+  runId: string,
+  step: Step,
+  isNew: boolean,
+  error: string,
+): void {
+  if (isNew) {
+    insertTask({
+      id: parentId,
+      runId,
+      phase: step.id,
+      agentRole: step.agent ?? "fanout",
+      status: "pending",
+      taskPackage: emptyTaskPackage(parentId, runId, step.id, step.agent ?? "fanout"),
+      createdAt: nowIso(),
+    });
+    logEvent("task.created", { runId, taskId: parentId, payload: { fanoutParent: true } });
+  }
+  failTask(parentId, { runId, kind: classify({}), error });
+}
+
 // Fanout dispatch: read the upstream array, spawn N child tasks (max_concurrency
 // at a time), apply failure_mode policy, mark a synthetic parent task that
 // aggregates child results.
@@ -577,21 +605,7 @@ async function dispatchFanoutStep(args: {
   if (!upstreamTask) {
     // Upstream hasn't completed; ready-queue logic should have prevented this.
     const upstreamMsg = "fanout: upstream not complete";
-    if (!existingParent) {
-      insertTask({
-        id: parentId,
-        runId: args.runId,
-        phase: step.id,
-        agentRole: step.agent ?? "fanout",
-        status: "failed",
-        taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
-        createdAt: nowIso(),
-        error: upstreamMsg,
-      });
-      logEvent("task.failed", { runId: args.runId, taskId: parentId, payload: { failure_kind: "unknown", error: upstreamMsg } });
-    } else {
-      failTask(parentId, { runId: args.runId, kind: classify({}), error: upstreamMsg });
-    }
+    failFanoutParent(parentId, args.runId, step, !existingParent, upstreamMsg);
     return "failed";
   }
 
@@ -599,21 +613,7 @@ async function dispatchFanoutStep(args: {
   const rawArray = upstreamResult[fanout.from_upstream.array_key];
   if (!Array.isArray(rawArray) || rawArray.length === 0) {
     const noArrayMsg = `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`;
-    if (!existingParent) {
-      insertTask({
-        id: parentId,
-        runId: args.runId,
-        phase: step.id,
-        agentRole: step.agent ?? "fanout",
-        status: "failed",
-        taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
-        createdAt: nowIso(),
-        error: noArrayMsg,
-      });
-      logEvent("task.failed", { runId: args.runId, taskId: parentId, payload: { failure_kind: "unknown", error: noArrayMsg } });
-    } else {
-      failTask(parentId, { runId: args.runId, kind: classify({}), error: noArrayMsg });
-    }
+    failFanoutParent(parentId, args.runId, step, !existingParent, noArrayMsg);
     return "failed";
   }
 
