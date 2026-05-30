@@ -563,7 +563,22 @@ Observability RUN stage §3 dashboard surface (docs/observability.md). Bring RUN
 Depends on RUN-2 (#metrics) for the aggregation shape. Lower priority than the CLI surfaces.
 
 
+### #213 — RUN-5 otel: optional OpenTelemetry/JSONL trace export from forge events
+Observability RUN stage §5 (docs/observability.md). After the internal trace shape is stable, add export options. The WALK-2 spanKind groundwork (run|task|docker|model|tool|auth|gate|red-review on events) is the hook.
+
+  forge export --run <id> --format jsonl       # one event per line
+  forge export --run <id> --format otel        # OTLP spans (run→task→… hierarchy)
+
+Scope (do JSONL first — trivial, no deps): dump eventsForRun as JSONL with runId/taskId/spanKind/timestamp/payload. OTel is the stretch: map run→root span, task→child spans, lifecycle events→span events/status; emit OTLP JSON (no collector required — file output). Keep it an EXPORT path, not the source of truth. Redact payloads (no secrets — payloads are already booleans/safe text by Crawl discipline, but double-check).
+
+Lowest priority; capstone. JSONL slice is high-value-low-cost; OTel can be deferred.
+
+
+## Done (recent)
+
 ### #212 — RUN-4 bundle: forge bundle <run-id> — sanitized debug archive of a run
+**Closed:** 2026-05-30. Commit `c01bd8d`.
+
 Observability RUN stage §4 (docs/observability.md). Produce a sanitized archive for debugging forge itself or handing a failed run to a reviewer without the whole project.
 
   forge bundle <run-id>            # writes <run-id>-bundle.tar.gz (or a dir)
@@ -577,19 +592,6 @@ SANITIZATION (hard requirement):
 
 Notes: bounded log inclusion (cap or note truncation — reuse the bounded-tail discipline). --json manifest of what was included. Pure assembly helper (testable: given a temp FORGE_HOME, assert archive contents + that no secret files are included).
 
-
-### #213 — RUN-5 otel: optional OpenTelemetry/JSONL trace export from forge events
-Observability RUN stage §5 (docs/observability.md). After the internal trace shape is stable, add export options. The WALK-2 spanKind groundwork (run|task|docker|model|tool|auth|gate|red-review on events) is the hook.
-
-  forge export --run <id> --format jsonl       # one event per line
-  forge export --run <id> --format otel        # OTLP spans (run→task→… hierarchy)
-
-Scope (do JSONL first — trivial, no deps): dump eventsForRun as JSONL with runId/taskId/spanKind/timestamp/payload. OTel is the stretch: map run→root span, task→child spans, lifecycle events→span events/status; emit OTLP JSON (no collector required — file output). Keep it an EXPORT path, not the source of truth. Redact payloads (no secrets — payloads are already booleans/safe text by Crawl discipline, but double-check).
-
-Lowest priority; capstone. JSONL slice is high-value-low-cost; OTel can be deferred.
-
-
-## Done (recent)
 
 ### #210 — RUN-2 metrics: forge metrics — aggregate durations, failures, cancels, retries, red blocks
 **Closed:** 2026-05-30. Commit `b15d57a`.
