@@ -543,33 +543,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #217 — AWN-4 task-contract: explicit task contract object in task packages + manifests
-docs/agentic-workflow-next-steps.md §4. Sharper agent assignments + concrete review criteria.
-
-Scope:
-- Explicit task contract object in task packages: objective, allowed_paths, expected_artifacts, validation.commands, auth_profile, risk, review.{required,invariants}.
-- Markdown-readable AND machine-readable (manifest/package metadata).
-- Orchestrator template prefers contracts when invoking agents.
-
-Example (from the doc):
-  contract:
-    objective: "Add cancel race tests"
-    allowed_paths: [src/cli/commands/cancel.ts, src/v2/cancel.test.ts]
-    expected_artifacts: [result.json, tests]
-    validation: { commands: ["npm test -- src/v2/cancel.test.ts"] }
-    auth_profile: null
-    risk: medium
-    review: { required: true, invariants: ["cancel remains idempotent", "reds never receive auth state"] }
-
-Acceptance:
-- New tasks expose their contract in forge show.
-- Result manifests record which contract checks were satisfied.
-- Agents instructed to report contract deviations explicitly.
-- >=1 workflow and >=1 forge invoke path use the contract.
-
-First of the agent-quality pair (AWN-4/5).
-
-
 ### #218 — AWN-5 review-protocol: standardize red/review result schema, evidence, and severity calibration
 docs/agentic-workflow-next-steps.md §5. Grounded, comparable, useful reviews.
 
@@ -667,7 +640,47 @@ Scope: a heartbeat-staleness reconcile pass for session/manual (non-containerize
 Note: 5 such tasks were briefly mis-orphaned by an early AWN-1 build and restored from backup (forge.db.bak-20260530-084522-reconcile-restore); they remain legitimately stale and this ticket cleans them up properly.
 
 
+### #223 — AWN-4 phase 2: contract enforcement — record satisfied checks, workflow-YAML contracts, orchestrator prefers contracts
+Follow-up to AWN-4 phase 1 (#217, which landed the TaskContract schema + manifest carry + forge show + forge invoke --contract). Phase 2 closes the doc's remaining §4 acceptance:
+
+- Result manifest records which contract checks were satisfied: after a task with a contract completes, capture pass/fail per validation command + per expected_artifact (the agent runs validation and reports; or forge verifies artifact presence). Surface in forge show ("contract: 3/3 checks satisfied").
+- Declare contracts in workflow YAML (per-step `contract:` block, loaded by loader.ts/schema.ts), so pipeline steps carry contracts, not just forge invoke.
+- Orchestrator template prefers contracts when invoking agents (CLAUDE.md / forge-raci guidance: build a contract for implementation tasks).
+- Agents instructed to report deviations explicitly — the renderContract note already tells them; phase 2 makes the result schema include a `contract_deviations` field and forge show flags it.
+
+Builds directly on #217's TaskContract type + contract.ts.
+
+
 ## Done (recent)
+
+### #217 — AWN-4 task-contract: explicit task contract object in task packages + manifests
+**Closed:** 2026-05-30. Commit `751cae7`.
+
+docs/agentic-workflow-next-steps.md §4. Sharper agent assignments + concrete review criteria.
+
+Scope:
+- Explicit task contract object in task packages: objective, allowed_paths, expected_artifacts, validation.commands, auth_profile, risk, review.{required,invariants}.
+- Markdown-readable AND machine-readable (manifest/package metadata).
+- Orchestrator template prefers contracts when invoking agents.
+
+Example (from the doc):
+  contract:
+    objective: "Add cancel race tests"
+    allowed_paths: [src/cli/commands/cancel.ts, src/v2/cancel.test.ts]
+    expected_artifacts: [result.json, tests]
+    validation: { commands: ["npm test -- src/v2/cancel.test.ts"] }
+    auth_profile: null
+    risk: medium
+    review: { required: true, invariants: ["cancel remains idempotent", "reds never receive auth state"] }
+
+Acceptance:
+- New tasks expose their contract in forge show.
+- Result manifests record which contract checks were satisfied.
+- Agents instructed to report contract deviations explicitly.
+- >=1 workflow and >=1 forge invoke path use the contract.
+
+First of the agent-quality pair (AWN-4/5).
+
 
 ### #216 — AWN-3 retry-policy: define retry semantics per failure_kind + preserve lineage without leaking secrets
 **Closed:** 2026-05-30. Commit `c0d6233`.
