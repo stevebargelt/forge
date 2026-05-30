@@ -143,7 +143,11 @@ export async function runNext(args: {
   );
 
   let runStatus: string = run.status;
-  if (readyAfter.length === 0 && allStepsHaveTasks && noPendingWork) {
+  // Re-read the status: a concurrent `forge cancel` may have abandoned the run
+  // while this wave ran. An abandoned run is authoritatively terminal — don't
+  // flip it back to complete (AWN-2 cancel-vs-completion coherence).
+  const currentStatus = getRun(args.runId)?.status ?? run.status;
+  if (currentStatus !== "abandoned" && readyAfter.length === 0 && allStepsHaveTasks && noPendingWork) {
     // RunStatus union is "active" | "complete" | "abandoned" — there's no
     // "failed" state for runs. Mark complete regardless; the human / orchestrator
     // reads task statuses to know whether the run failed. Aligns with how the
@@ -152,6 +156,8 @@ export async function runNext(args: {
     runStatus = "complete";
     updateRunStatus(args.runId, "complete");
     logEvent("run.completed", { runId: args.runId, payload: { anyFailed } });
+  } else if (currentStatus === "abandoned") {
+    runStatus = "abandoned";
   }
 
   return {
@@ -248,7 +254,13 @@ async function dispatchSingleStep(args: {
   //   2. upstream (always present, may be empty array)
   //   3. fanoutInput (per-child key/value for fanout dispatches)
   // designDir is intentionally NOT poured into inputs — it's a mount, not a task field.
-  const inputs: Record<string, unknown> = { ...args.runMetadata, upstream };
+  // When REUSING a pending row (forge retry, gate request-changes), start from
+  // the context it was created with so carried fields survive — previous_failure
+  // (retry, AWN-3) and requestedChanges (request-changes). run metadata +
+  // freshly-derived upstream layer on top and win on shared keys. A fresh
+  // dispatch has no carried inputs, so this is a no-op there.
+  const carried = (existing?.taskPackage?.inputs as Record<string, unknown> | undefined) ?? {};
+  const inputs: Record<string, unknown> = { ...carried, ...args.runMetadata, upstream };
   // designDir + authProfile live at the docker mount layer; don't expose them
   // as input values (the profile name would otherwise ride into the prompt).
   delete (inputs as Record<string, unknown>)["designDir"];

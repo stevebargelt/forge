@@ -39,6 +39,30 @@ function makeStubExec(resultJson: unknown, exitCode = 0): DockerExecFn {
   };
 }
 
+// Synthesize a minimal claude runtime YAML so loadRuntime() succeeds in tests.
+function ensureRuntime(): void {
+  const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "claude.yml");
+  if (existsSync(runtimePath)) return;
+  mkdirSync(dirname(runtimePath), { recursive: true });
+  writeFileSync(runtimePath, `name: claude
+description: test stub runtime
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
 const LINEAR_WORKFLOW: Workflow = {
   name: "test-linear",
   description: "two-step linear test",
@@ -978,4 +1002,42 @@ test("runNext: writes manifest.json into the task dir on pipeline dispatch", asy
   for (const v of Object.values(manifest.auth as Record<string, unknown>)) {
     assert.ok(typeof v !== "string" || !v.includes("/"), `auth value must not be a path: ${String(v)}`);
   }
+});
+
+// ─── AWN-3 finding: retry must be the task that actually dispatches ──────────
+
+test("runNext after retry: the RETRIED task is dispatched (not a fresh one) and carries previous_failure", async () => {
+  const { retry } = await import("./retry.js");
+  const { insertTask } = await import("../store/tasks.js");
+  const { logEvent } = await import("../store/events.js");
+
+  ensureRuntime();
+  const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title: "retry e2e", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+
+  // A failed primary task for the "first" step (as if its first attempt failed).
+  insertTask({
+    id: "task-first-failed", runId, phase: "first", agentRole: "test-agent", status: "failed",
+    error: "no output for 10m",
+    taskPackage: { taskId: "task-first-failed", runId, phase: "first", role: "test-agent", inputs: { brief: "x" }, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+  logEvent("task.failed", { runId, taskId: "task-first-failed", payload: { failure_kind: "idle_timeout", error: "no output for 10m" } });
+
+  const out = await retry("task-first-failed");
+  const retriedId = out.newTask.id;
+
+  await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: makeStubExec({ status: "complete" }) });
+
+  // The retried task itself must have been dispatched (reached a terminal state),
+  // NOT a separate fresh primary created alongside it.
+  const firstTasks = tasksForRun(runId).filter((t) => t.phase === "first" && t.parentId === undefined);
+  const dispatchedRetry = getTask(retriedId)!;
+  assert.notEqual(dispatchedRetry.status, "pending", "the retried task must actually be dispatched");
+  assert.ok(["running", "complete"].includes(dispatchedRetry.status), `retried task should have run, got ${dispatchedRetry.status}`);
+  assert.equal(firstTasks.length, 2, "exactly the failed task + the retried task — no third fresh primary");
+
+  // And the dispatched retry carried the previous-failure context to the agent.
+  const pkg = readFileSync(join(taskDir(runId, retriedId), "package.md"), "utf8");
+  assert.match(pkg, /previous_failure/, "the retry's package must carry previous_failure context");
+  assert.match(pkg, /idle_timeout/, "previous failure kind reaches the agent");
 });

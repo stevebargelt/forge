@@ -212,7 +212,10 @@ export async function gate(
     const newTask: Task = {
       id: newId,
       runId: task.runId,
-      parentId: task.id,
+      // PRIMARY task (parentId undefined) so runNext.dispatchStep reuses this
+      // pending row — a parentId-child is ignored, dropping the requestedChanges
+      // guidance. Matches this block's stated intent ("runner reuses the pending
+      // row in the same step"). Same fix as forge retry (AWN-3 finding).
       phase: task.phase,
       agentRole: task.agentRole,
       agentAlias: task.agentAlias,

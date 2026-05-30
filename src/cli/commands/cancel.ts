@@ -5,6 +5,7 @@ import { getRun, updateRunStatus } from "../../store/runs.js";
 import { killContainer } from "../../v2/docker-exec.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { logEvent } from "../../store/events.js";
+import { acquireRunLock, releaseRunLock } from "../../util/run-lock.js";
 import type { Task } from "../../types/index.js";
 
 const TERMINAL = new Set(["complete", "failed"]);
@@ -89,7 +90,17 @@ export function registerCancel(program: Command): void {
     .option("--json", "emit JSON result")
     .action((id: string, opts: { dryRun?: boolean; json?: boolean }) => {
       ensureForgeDirs();
-      const outcome = performCancel(id, opts);
+      // AWN-2: cancel is authoritative — it STEALS the run lock so it interrupts
+      // a running next/gate/retry rather than waiting. Resolve the run to lock
+      // (id may be a task or a run). dry-run takes no lock (it writes nothing).
+      const lockRunId = getTask(id)?.runId ?? id;
+      if (!opts.dryRun) acquireRunLock(lockRunId, "cancel", { steal: true });
+      let outcome;
+      try {
+        outcome = performCancel(id, opts);
+      } finally {
+        if (!opts.dryRun) releaseRunLock(lockRunId);
+      }
 
       if (outcome.kind === "unknown") {
         if (opts.json) {

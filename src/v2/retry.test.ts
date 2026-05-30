@@ -69,7 +69,9 @@ test("retry after idle_timeout: new pending task with lineage + previous_failure
   assert.equal(out.disposition.retryable, true);
   const nt = getTask(out.newTask.id)!;
   assert.equal(nt.status, "pending");
-  assert.equal(nt.parentId, "t-idle", "lineage preserved");
+  // PRIMARY task (parentId undefined) so runNext.dispatchStep reuses it; lineage
+  // is carried in previous_failure, not parentId.
+  assert.equal(nt.parentId, undefined, "retry task is a primary so it actually dispatches");
   // previous failure handed forward as context (no secrets — prose + tag only).
   const pf = (nt.taskPackage.inputs as Record<string, unknown>)["previous_failure"] as Record<string, unknown>;
   assert.equal(pf.kind, "idle_timeout");

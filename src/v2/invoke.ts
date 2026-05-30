@@ -105,7 +105,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
     );
     if (inFlight) return;
-    if (getRun(runId)?.status === "complete") return; // already closed — idempotent
+    // Don't override a terminal run. complete = already closed (idempotent);
+    // abandoned = a concurrent `forge cancel` won the race — its cancellation is
+    // authoritative, so completion must not flip it back to complete (AWN-2).
+    const st = getRun(runId)?.status;
+    if (st === "complete" || st === "abandoned") return;
     updateRunStatus(runId, "complete");
     logEvent("run.completed", { runId, payload: { source: "invoke", succeeded, owned: ownsRun } });
   };

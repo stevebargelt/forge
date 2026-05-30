@@ -51,7 +51,10 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   const newTask: Task = {
     id: newId,
     runId: task.runId,
-    parentId: task.id,
+    // PRIMARY task (parentId undefined) — runNext.dispatchStep only reuses pending
+    // PRIMARY rows, so a parentId-child would be ignored and a fresh task created
+    // instead, dropping this retry's context. Lineage is preserved via
+    // inputs.previous_failure.failedTaskId + the task.retried event, not parentId.
     phase: task.phase,
     agentRole: task.agentRole,
     agentAlias: task.agentAlias,
