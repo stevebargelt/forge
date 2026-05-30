@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
-import { insertTask, markTaskRunning, markTaskComplete, tasksForRun } from "../store/tasks.js";
+import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
@@ -333,7 +333,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     return { runId, taskId, status: "failed", error };
   }
 
-  markTaskComplete(taskId, result);
+  // AWN-2 task-level race: a concurrent `forge cancel` may have already marked
+  // this task failed (failure_kind=cancelled) while the container ran. The CAS in
+  // markTaskComplete refuses to overwrite a terminal task — only emit
+  // task.completed and report success if we actually completed it.
+  if (!markTaskComplete(taskId, result)) {
+    const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
+    closeRunIfIdle(finalStatus === "complete");
+    return { runId, taskId, status: finalStatus, result, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
+  }
   logEvent("task.completed", { runId, taskId });
   closeRunIfIdle(true);
   return { runId, taskId, status: "complete", result };

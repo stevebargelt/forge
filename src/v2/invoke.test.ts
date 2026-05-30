@@ -302,28 +302,45 @@ test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => 
 // top-level task. An attached invoke closes the run when no sibling is in
 // flight, and reactivates a terminally-closed run it attaches to.
 
-test("invoke: a run abandoned mid-flight (concurrent forge cancel) is NOT flipped back to complete (AWN-2)", async () => {
+test("invoke: a task cancelled mid-spawn stays failed/cancelled even when the container returns success (AWN-2 task-level)", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
 
   const { insertRun, updateRunStatus, getRun } = await import("../store/runs.js");
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
   const externalRunId = "run-cancel-race";
   insertRun({ id: externalRunId, workflow: "external", title: "race", status: "active", createdAt: new Date().toISOString() });
 
-  // Stub that simulates `forge cancel` abandoning the run while the container runs.
+  // Stub that simulates a real `forge cancel` landing while the container runs:
+  // it marks the task failed (failure_kind=cancelled) AND abandons the run, THEN
+  // the container returns a successful result.
   const cancelMidSpawn: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
     const dir = dirname(stdoutPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    updateRunStatus(externalRunId, "abandoned"); // cancel wins the race
+    const taskId = basename(dir); // task dir basename === taskId
+    failTask(taskId, { runId: externalRunId, kind: "cancelled", error: "cancelled via forge cancel" });
+    updateRunStatus(externalRunId, "abandoned");
     writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
     writeFileSync(stdoutPath, ""); writeFileSync(stderrPath, "");
     return 0;
   };
 
-  await invoke({ agentRole: "engineer", task: "work", projectDir: "/tmp/x", runId: externalRunId, dockerExec: cancelMidSpawn });
+  const r = await invoke({ agentRole: "engineer", task: "work", projectDir: "/tmp/x", runId: externalRunId, dockerExec: cancelMidSpawn });
 
-  // Completion must respect the cancellation — the run stays abandoned.
-  assert.equal(getRun(externalRunId)!.status, "abandoned", "cancel is authoritative; completion must not override it");
+  // The TASK must stay failed/cancelled — not overwritten to complete.
+  const task = getTask(r.taskId)!;
+  assert.equal(task.status, "failed", "cancelled task must not be overwritten to complete");
+  assert.equal(r.status, "failed", "invoke reports the cancelled task as failed, not complete");
+
+  // No task.completed emitted after the cancellation.
+  const types = eventsForTask(r.taskId).map((e) => e.eventType);
+  const failedIdx = types.lastIndexOf("task.failed");
+  assert.ok(failedIdx >= 0, "task.failed (cancelled) was emitted");
+  assert.ok(!types.includes("task.completed"), "no task.completed after task cancellation");
+
+  // The run stays abandoned (cancel is authoritative).
+  assert.equal(getRun(externalRunId)!.status, "abandoned");
 });
 
 test("invoke: closes an attached run once no sibling top-level task is in flight (#201)", async () => {

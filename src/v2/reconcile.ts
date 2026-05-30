@@ -75,12 +75,11 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     // Container is gone. If it left a usable result, finalize as complete (the
     // work finished but the DB write was lost); otherwise it was orphaned.
     const result = readResult(t.runId, t.id);
-    if (result !== undefined) {
-      markTaskComplete(t.id, result);
+    if (result !== undefined && markTaskComplete(t.id, result)) {
       logEvent("task.completed", { runId, taskId: t.id });
       logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present" } });
       taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
-    } else {
+    } else if (result === undefined) {
       const error = "orphaned: container gone with no result (reconciled after crash)";
       markTaskFailed(t.id, error);
       logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });

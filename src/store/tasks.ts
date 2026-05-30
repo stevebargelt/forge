@@ -96,10 +96,18 @@ export function markTaskRunning(id: string): void {
     .run(nowIso(), id);
 }
 
-export function markTaskComplete(id: string, result: unknown): void {
-  getDb()
-    .prepare(`UPDATE tasks SET status = 'complete', result = ?, completed_at = ?, error = NULL WHERE id = ?`)
+// Compare-and-set: complete a task ONLY if it isn't already terminal. Returns
+// true iff this call completed it. A task that a concurrent `forge cancel`
+// already marked failed (failure_kind=cancelled) — or that's already complete —
+// must NOT be overwritten when its container then returns successfully (AWN-2
+// task-level race). awaiting_gate/awaiting_red/running → complete is allowed
+// (gate advance, reconcile, normal finish); failed/complete → blocked.
+export function markTaskComplete(id: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'complete', result = ?, completed_at = ?, error = NULL
+              WHERE id = ? AND status NOT IN ('complete', 'failed')`)
     .run(JSON.stringify(result), nowIso(), id);
+  return info.changes === 1;
 }
 
 export function markTaskFailed(id: string, error: string, result?: unknown): void {

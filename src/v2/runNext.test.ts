@@ -1041,3 +1041,30 @@ test("runNext after retry: the RETRIED task is dispatched (not a fresh one) and 
   assert.match(pkg, /previous_failure/, "the retry's package must carry previous_failure context");
   assert.match(pkg, /idle_timeout/, "previous failure kind reaches the agent");
 });
+
+test("runNext: a pipeline task cancelled mid-spawn stays failed; no task.completed when the container returns success (AWN-2 task-level)", async () => {
+  const { failTask } = await import("./failure-kind.js");
+  const { basename } = await import("node:path");
+  ensureRuntime();
+  const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title: "cancel race e2e", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+
+  // Stub: mark the dispatched task failed (cancelled) mid-spawn, then return a
+  // successful result — the post-container completion must not overwrite it.
+  const cancelMidSpawn: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const taskId = basename(dir);
+    failTask(taskId, { runId, kind: "cancelled", error: "cancelled via forge cancel" });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(stdoutPath, ""); writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: cancelMidSpawn });
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first" && t.parentId === undefined)!;
+  assert.equal(first.status, "failed", "cancelled pipeline task must not be overwritten to complete");
+  const types = eventsForTask(first.id).map((e) => e.eventType);
+  assert.ok(types.includes("task.failed"), "task.failed (cancelled) emitted");
+  assert.ok(!types.includes("task.completed"), "no task.completed after cancellation");
+});

@@ -368,7 +368,12 @@ function finalizePrimary(taskId: string, runId: string, gate: Step["gate"], resu
   switch (gate) {
     case "auto":
     case "none":
-      markTaskComplete(taskId, result);
+      // AWN-2 task-level race: don't overwrite a task a concurrent cancel already
+      // marked failed. The CAS only completes a non-terminal task; if it didn't,
+      // report the task's actual (cancelled/failed) terminal status.
+      if (!markTaskComplete(taskId, result)) {
+        return getTask(taskId)?.status ?? "failed";
+      }
       logEvent("task.completed", { runId, taskId });
       return "complete";
     case "human":
@@ -532,8 +537,11 @@ async function runOneRed(args: {
     };
   }
 
-  markTaskComplete(redTaskId, result.result);
-  logEvent("task.completed", { runId: args.runId, taskId: redTaskId });
+  // AWN-2 task-level race: only emit task.completed if the CAS actually completed
+  // it (not if a concurrent cancel already terminated it).
+  if (markTaskComplete(redTaskId, result.result)) {
+    logEvent("task.completed", { runId: args.runId, taskId: redTaskId });
+  }
   return { red: args.red, redTaskId, verdict: parseVerdict(result.result) };
 }
 
@@ -826,8 +834,10 @@ async function runFanoutChild(args: {
     return { index: args.index, value: args.value, childTaskId, status: "failed" };
   }
 
-  markTaskComplete(childTaskId, dispatchResult.result);
-  logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
+  // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
+  if (markTaskComplete(childTaskId, dispatchResult.result)) {
+    logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
+  }
   return {
     index: args.index,
     value: args.value,
