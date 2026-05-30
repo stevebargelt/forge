@@ -543,25 +543,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #214 — AWN-1 lifecycle-recovery: reconcile active/running state after host crash, Docker races, interrupted commands
-docs/agentic-workflow-next-steps.md §1. Make active/running state trustworthy after crashes.
-
-UMBRELLA over #185 (reaper for orphaned-running tasks — hit live 2026-05-29) and related to #173 (idle-watchdog), #112/#109 (transactional dispatch). The reaper becomes one case of a general reconciliation pass.
-
-Scope:
-- Reconciliation path on first lifecycle-touching command (status/show/next/cancel).
-- Detect: runs active with no live runnable work; tasks running whose container is gone; tasks with result files but unfinalized DB state; active-run-with-no-work.
-- Emit reconciliation EVENTS (new event type, e.g. task.reconciled / run.reconciled) — never silently rewrite state. Idempotent.
-
-Acceptance:
-- Simulated host crash with a running task reconciles into a truthful terminal/resumable state.
-- forge show <run> explains what reconciliation changed and why.
-- Re-running reconciliation emits no duplicate terminal transitions.
-- Tests: container-gone, container-still-running, result-present-unfinalized, active-run-no-work.
-
-Subsumes #185 when it lands. First of the lifecycle-foundation trio (AWN-1/2/3).
-
-
 ### #215 — AWN-2 concurrent-command-safety: run/task locking + idempotency under racing commands
 docs/agentic-workflow-next-steps.md §2. Prevent two forge commands advancing/mutating the same run conflictingly.
 
@@ -714,7 +695,38 @@ Acceptance:
 Smallest remaining item (allowlist + bundle work already done). Relates to #190 (auth-profile findings). Last of the broadening trio.
 
 
+### #222 — Session/orchestrator tasks stuck 'running' need a heartbeat-based reaper (not container-based)
+Surfaced during AWN-1 (#214): the real DB has several task-session-* (phase=session, role=orchestrator) tasks stuck status='running' from orchestrator/design sessions that ended without finalizing. AWN-1's reconcile deliberately SKIPS them (no container.started — they're host-side), so they stay 'running' forever and inflate forge status / dashboard "in flight".
+
+These need a DIFFERENT reaper keyed on the orchestrator-heartbeat files (~/.forge/orchestrators/<session>.json, written by scripts/claude-hooks/orchestrator-heartbeat): if a session task is 'running' but its heartbeat file is absent or its lastSeen is stale (> threshold), finalize it (complete with "session ended" note, mirroring design.ts:138, or a session.reconciled event).
+
+Scope: a heartbeat-staleness reconcile pass for session/manual (non-containerized) tasks, complementing AWN-1's container-liveness pass. Wire into the same lifecycle commands. Idempotent + audited like AWN-1.
+
+Note: 5 such tasks were briefly mis-orphaned by an early AWN-1 build and restored from backup (forge.db.bak-20260530-084522-reconcile-restore); they remain legitimately stale and this ticket cleans them up properly.
+
+
 ## Done (recent)
+
+### #214 — AWN-1 lifecycle-recovery: reconcile active/running state after host crash, Docker races, interrupted commands
+**Closed:** 2026-05-30. Commit `2d29b4e`.
+
+docs/agentic-workflow-next-steps.md §1. Make active/running state trustworthy after crashes.
+
+UMBRELLA over #185 (reaper for orphaned-running tasks — hit live 2026-05-29) and related to #173 (idle-watchdog), #112/#109 (transactional dispatch). The reaper becomes one case of a general reconciliation pass.
+
+Scope:
+- Reconciliation path on first lifecycle-touching command (status/show/next/cancel).
+- Detect: runs active with no live runnable work; tasks running whose container is gone; tasks with result files but unfinalized DB state; active-run-with-no-work.
+- Emit reconciliation EVENTS (new event type, e.g. task.reconciled / run.reconciled) — never silently rewrite state. Idempotent.
+
+Acceptance:
+- Simulated host crash with a running task reconciles into a truthful terminal/resumable state.
+- forge show <run> explains what reconciliation changed and why.
+- Re-running reconciliation emits no duplicate terminal transitions.
+- Tests: container-gone, container-still-running, result-present-unfinalized, active-run-no-work.
+
+Subsumes #185 when it lands. First of the lifecycle-foundation trio (AWN-1/2/3).
+
 
 ### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
 **Closed:** 2026-05-30. Commit `superseded-by-219... AWN-7`.

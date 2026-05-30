@@ -9,7 +9,7 @@ import { insertRun, getRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
-import { reconcileRun } from "./reconcile.js";
+import { reconcileRun, reconcileRuns } from "./reconcile.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -100,6 +100,20 @@ test("reconcile: does NOT complete a multi-step pipeline run (only invoke runs)"
   const r = reconcileRun("run-pipe", ALIVE);
   assert.equal(r.runChange, undefined, "pipeline run-completion is left to forge next (has the workflow)");
   assert.equal(getRun("run-pipe")!.status, "active");
+});
+
+test("reconcileRuns: only reconciles the given run ids — other workspaces' runs are untouched (scoping)", () => {
+  // run-rec (this workspace) has an orphaned containerized task.
+  insertContainerized(mkTask("t-mine", { status: "running" }));
+  // A run in ANOTHER workspace, also with an orphaned task — must NOT be touched.
+  insertRun({ id: "run-other-ws", workflow: "invoke", title: "other", status: "active", createdAt: "2026-05-30T00:00:00Z", projectDir: "/other/ws" });
+  insertContainerized(mkTask("t-theirs", { runId: "run-other-ws", status: "running" }));
+
+  const changed = reconcileRuns([RUN.id], GONE); // scoped to this workspace's run only
+  assert.deepEqual(changed.map((c) => c.runId), [RUN.id]);
+  assert.equal(getTask("t-mine")!.status, "failed", "in-scope orphan reconciled");
+  assert.equal(getTask("t-theirs")!.status, "running", "out-of-scope run left untouched");
+  assert.equal(getRun("run-other-ws")!.status, "active", "out-of-scope run not completed");
 });
 
 test("reconcile: idempotent — a second pass changes nothing and emits no new events", () => {

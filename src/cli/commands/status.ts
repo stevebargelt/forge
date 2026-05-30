@@ -6,7 +6,7 @@ import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { liveIdleCountdownForTask, formatIdleCountdown } from "./show.js";
-import { reconcileRun, reconcileActiveRuns } from "../../v2/reconcile.js";
+import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -19,20 +19,25 @@ export function registerStatus(program: Command): void {
     .description("Show run status. Filters to the current workspace by default; use --all for the cross-project view.")
     .action(async (runId: string | undefined, opts: { readOnly?: boolean; all?: boolean; workspace?: string; json?: boolean }) => {
       ensureForgeDirs();
-      if (opts.readOnly) {
-        getDb({ readOnly: true });
-      } else {
-        // AWN-1: reconcile crash/Docker state before reporting. Skipped under
-        // --read-only (reconciliation writes). One target run, or all active runs.
-        if (runId) reconcileRun(runId);
-        else reconcileActiveRuns();
-      }
+      const reconcileEnabled = !opts.readOnly;
+      if (opts.readOnly) getDb({ readOnly: true });
+
+      // AWN-1: reconcile crash/Docker state before reporting (writable path only).
+      // Scope it to EXACTLY the runs this command will display — a workspace-
+      // scoped `forge status` must not reconcile (and mutate) other workspaces'
+      // runs. The single-run path is already scoped.
+      if (reconcileEnabled && runId) reconcileRun(runId);
 
       if (!runId) {
         // Default: filter to the current workspace. --all bypasses the filter
         // for the cross-project survey case (matches the dashboard behavior).
         const workspace = resolve(opts.workspace ?? process.cwd());
-        const runs = opts.all ? listRuns() : listRunsForWorkspace(workspace);
+        const selectRuns = () => (opts.all ? listRuns() : listRunsForWorkspace(workspace));
+        if (reconcileEnabled) {
+          reconcileRuns(selectRuns().filter((r) => r.status === "active").map((r) => r.id));
+        }
+        // Re-read post-reconcile so the display reflects any state changes.
+        const runs = selectRuns();
         if (opts.json) {
           console.log(JSON.stringify({ runs: runs.map((r) => ({
             id: r.id,

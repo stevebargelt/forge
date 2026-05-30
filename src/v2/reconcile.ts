@@ -15,7 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { listRuns, getRun, updateRunStatus } from "../store/runs.js";
+import { getRun, updateRunStatus } from "../store/runs.js";
 import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
@@ -108,11 +108,13 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
   return { runId, taskChanges, ...(runChange ? { runChange } : {}) };
 }
 
-/** Reconcile every active run. Used by `forge status` (the list view). Returns
- *  only the runs that actually changed. */
-export function reconcileActiveRuns(containerAlive: ContainerAlive = defaultContainerAlive): ReconcileResult[] {
-  return listRuns()
-    .filter((r) => r.status === "active")
-    .map((r) => reconcileRun(r.id, containerAlive))
+/** Reconcile a specific set of runs. Callers pass exactly the run ids they will
+ *  act on / display, so reconciliation stays scoped — e.g. `forge status` must
+ *  reconcile only the workspace-filtered runs it shows, not every active run on
+ *  the host (that would mutate other workspaces' runs). Returns only the runs
+ *  that actually changed. */
+export function reconcileRuns(runIds: string[], containerAlive: ContainerAlive = defaultContainerAlive): ReconcileResult[] {
+  return runIds
+    .map((id) => reconcileRun(id, containerAlive))
     .filter((r) => r.taskChanges.length > 0 || r.runChange);
 }
