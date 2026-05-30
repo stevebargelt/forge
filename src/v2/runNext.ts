@@ -941,12 +941,19 @@ async function runContainer(args: {
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
     captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
+    // WALK-3: ingest progress on the crash path too — last decision/progress
+    // records are most valuable in failure cases.
+    emitAgentProgressEvents(dir, args.runId, args.taskId);
     const msg = `docker exec threw: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
   // #155: capture token usage from the stream-json log. Best-effort.
   captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
+  // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /
+  // crash / normal branches — so a hung or crashed agent's records still land on
+  // the timeline. The events precede the terminal event, matching when written.
+  emitAgentProgressEvents(dir, args.runId, args.taskId);
 
   // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
   // Fail with a clear reason rather than a generic container_crash.
@@ -958,10 +965,6 @@ async function runContainer(args: {
   }
 
   logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
-
-  // WALK-3: ingest any agent-written progress.jsonl into events before the
-  // terminal event so they slot into the timeline.
-  emitAgentProgressEvents(dir, args.runId, args.taskId);
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";

@@ -626,6 +626,30 @@ test("invoke: emits container.idle_timeout (not container.exited) on IDLE_TIMEOU
   assert.equal((idleEv.payload as Record<string, unknown>).exitCode, IDLE_TIMEOUT_EXIT_CODE);
 });
 
+test("invoke: ingests progress.jsonl even when the agent hits idle_timeout (WALK finding)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Agent wrote a decision then hung — its last record must still reach the timeline.
+  const hungWithProgress: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "progress.jsonl"), '{"type":"decision","summary":"chose approach A"}\n');
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  const r = await invoke({ agentRole: "engineer", task: "hang", projectDir: "/tmp/x", dockerExec: hungWithProgress });
+  assert.equal(r.status, "failed");
+  const types = eventsForTask(r.taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.decision"), "progress must be ingested on the idle_timeout path");
+  assert.ok(types.includes("container.idle_timeout"), "still emits idle_timeout");
+  // Ordering: the decision (written during the run) precedes the terminal failure.
+  assert.ok(types.indexOf("task.decision") < types.indexOf("task.failed"), "progress precedes task.failed");
+});
+
 test("invoke: emits container.exited with exitCode on nonzero exit", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";

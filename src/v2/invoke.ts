@@ -270,6 +270,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // #155: capture usage even on docker failure — the task may have streamed
     // tokens before crashing, and we want to account for them.
     captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
+    // WALK-3: ingest progress on the crash path too — the agent's last
+    // decision/progress records are most valuable in failure cases.
+    emitAgentProgressEvents(dir, runId, taskId);
     const error = `docker exec threw: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);
@@ -278,6 +281,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // #155: capture token usage from the stream-json log. Best-effort; never
   // throws or affects task status.
   captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
+  // WALK-3: ingest any agent-written progress.jsonl as soon as exec returns —
+  // BEFORE the idle-timeout / crash / normal branches below — so a hung or
+  // crashed agent's progress records still land on the timeline (these are the
+  // failure cases where they matter most). The events precede the terminal
+  // event, matching when the agent actually wrote them.
+  emitAgentProgressEvents(dir, runId, taskId);
 
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.
@@ -290,10 +299,6 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   }
 
   logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode } });
-
-  // WALK-3: ingest any agent-written progress.jsonl into task.progress/artifact/
-  // decision events before the terminal event, so they slot into the timeline.
-  emitAgentProgressEvents(dir, runId, taskId);
 
   // Read result.json.
   const resultPath = join(dir, "result.json");
