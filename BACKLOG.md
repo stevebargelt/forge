@@ -543,27 +543,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #218 — AWN-5 review-protocol: standardize red/review result schema, evidence, and severity calibration
-docs/agentic-workflow-next-steps.md §5. Grounded, comparable, useful reviews.
-
-UMBRELLA over #148 (red-narrow rework), #149 (K=3 self-consistency sampling), #150 (forge gate --feedback ground-truth labels), #113 (promote specialist reds authoritative). Those become sub-parts.
-
-Scope:
-- Review prompts standardized around invariants, evidence, severity, tests.
-- Require file/line refs for code findings.
-- Distinguish confirmed issues from residual risks.
-- Merge duplicate findings across review agents.
-- Calibrate severity against exploitability, blast radius, likelihood.
-
-Acceptance:
-- Red result schema includes finding_type, severity, confidence, evidence, affected_files, recommended_fix.
-- Orchestrator can summarize convergent vs unique findings.
-- Reviewers state which invariants they verified.
-- Tests/fixtures reject or downgrade malformed/low-evidence review output.
-
-References #148/#149/#150/#113. Second of the agent-quality pair.
-
-
 ### #219 — AWN-6 project-command-auth: project-owned auth profile (runs project login command to produce storageState)
 docs/agentic-workflow-next-steps.md §6. Authenticated browser work where the PROJECT owns credentials/login, forge owns scoping/mounting/redaction/freshness/lifecycle.
 
@@ -652,6 +631,29 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 
 ## Done (recent)
+
+### #218 — AWN-5 review-protocol: standardize red/review result schema, evidence, and severity calibration
+**Closed:** 2026-05-30. Commit `a6e4e3e`.
+
+docs/agentic-workflow-next-steps.md §5. Grounded, comparable, useful reviews.
+
+UMBRELLA over #148 (red-narrow rework), #149 (K=3 self-consistency sampling), #150 (forge gate --feedback ground-truth labels), #113 (promote specialist reds authoritative). Those become sub-parts.
+
+Scope:
+- Review prompts standardized around invariants, evidence, severity, tests.
+- Require file/line refs for code findings.
+- Distinguish confirmed issues from residual risks.
+- Merge duplicate findings across review agents.
+- Calibrate severity against exploitability, blast radius, likelihood.
+
+Acceptance:
+- Red result schema includes finding_type, severity, confidence, evidence, affected_files, recommended_fix.
+- Orchestrator can summarize convergent vs unique findings.
+- Reviewers state which invariants they verified.
+- Tests/fixtures reject or downgrade malformed/low-evidence review output.
+
+References #148/#149/#150/#113. Second of the agent-quality pair.
+
 
 ### #217 — AWN-4 task-contract (PHASE 1: schema + surfacing)
 **Closed:** 2026-05-30. Commit `751cae7`. Phase-1 scope only ("schema + surfacing first"); the phase-2 acceptance below was moved to #223 — this item is NOT the full §4.

@@ -558,7 +558,9 @@ test("integ lifecycle auth.profile_applied: emitted with payload {profile} only 
   const payload = appliedEv!.payload as Record<string, unknown>;
   assert.equal(payload.profile, profileName, "payload.profile must be the profile name");
   const keys = Object.keys(payload);
-  assert.equal(keys.length, 1, `payload must have exactly one key ('profile'), got: ${keys.join(", ")}`);
+  // payload carries only safe metadata: profile name + kind (captured | project-command).
+  assert.ok(keys.every((k) => k === "profile" || k === "kind"), `payload must only have profile/kind, got: ${keys.join(", ")}`);
+  assert.equal(payload.kind, "captured", "this is a captured #176 profile");
   assert.ok(!("token" in payload), "payload must NOT contain 'token'");
   assert.ok(!("state" in payload), "payload must NOT contain 'state'");
   assert.ok(!("path" in payload), "payload must NOT contain 'path'");
@@ -582,10 +584,9 @@ test("integ lifecycle auth.profile_applied: emitted with payload {profile} only 
   assert.ok(showAppliedEv, "performShow must include auth.profile_applied");
   const showPayload = showAppliedEv!.payload as Record<string, unknown>;
   assert.equal(showPayload.profile, profileName);
-  assert.equal(
-    Object.keys(showPayload).length,
-    1,
-    "performShow payload must have exactly one key ('profile')",
+  assert.ok(
+    Object.keys(showPayload).every((k) => k === "profile" || k === "kind"),
+    "performShow payload must only carry profile/kind (no credential material)",
   );
 });
 

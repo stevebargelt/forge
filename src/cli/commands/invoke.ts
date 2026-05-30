@@ -17,7 +17,7 @@ export function registerInvoke(program: Command): void {
     .option("--model <alias>", "override model alias (spec-writer | fast-orchestrator | etc.)")
     .option("--runtime <name>", "override runtime YAML name (default: claude)")
     .option("--read-only", "mount /project read-only (default for adversarial / review work)")
-    .option("--auth-profile <name>", "inject a captured auth profile (#176) so the agent tests the app authenticated; never sees the credential")
+    .option("--auth-profile <name>", "inject an auth profile so the agent tests the app authenticated (never sees the credential): a project-command profile from <project>/.forge/auth-profiles.yml (AWN-6, runs the project's own login) or a captured #176 profile")
     .option("--contract <path>", "AWN-4: attach an explicit task contract (YAML/JSON) — objective, allowed_paths, validation, invariants")
     .option("--run <run-id>", "attach this invocation as a task in an existing run; otherwise a new one is created")
     .option("--run-title <text>", "title for the new run when --run is not provided")

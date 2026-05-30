@@ -35,6 +35,7 @@ import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError } from "./auth-state.js";
+import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { renderContract, type TaskContract } from "./contract.js";
@@ -205,9 +206,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   let authStateHostPath: string | undefined;
   if (args.authProfile) {
     try {
-      const staged = resolveAuthStateForContainer(args.authProfile, dir);
+      // AWN-6: a project-command profile (<project>/.forge/auth-profiles.yml) runs
+      // the project's own login to produce storage_state; otherwise fall back to a
+      // captured #176 profile. Either way forge stages a mode-600 copy.
+      const projectProfile = loadProjectAuthProfile(args.projectDir, args.authProfile);
+      const staged = projectProfile
+        ? resolveProjectAuthForContainer(projectProfile, args.projectDir, dir, args.agentRole)
+        : resolveAuthStateForContainer(args.authProfile, dir);
       authStateHostPath = staged.hostPath;
-      logEvent("auth.profile_applied", { runId, taskId, payload: { profile: args.authProfile } });
+      logEvent("auth.profile_applied", { runId, taskId, payload: { profile: args.authProfile, kind: projectProfile ? "project-command" : "captured" } });
       if (staged.reconciled) {
         console.error(
           `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
@@ -215,11 +222,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
         );
       }
     } catch (e) {
-      if (e instanceof AuthProfileError) {
+      if (e instanceof AuthProfileError || e instanceof ProjectAuthError) {
         logEvent("auth.profile_failed", { runId, taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
-        failTask(taskId, { runId, kind: classify({ error: e }), error: (e as AuthProfileError).message });
+        failTask(taskId, { runId, kind: classify({ error: e }), error: (e as Error).message });
         closeRunIfIdle(false);
-        return { runId, taskId, status: "failed", error: (e as AuthProfileError).message };
+        return { runId, taskId, status: "failed", error: (e as Error).message };
       }
       throw e;
     }

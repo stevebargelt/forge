@@ -35,6 +35,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser } from "./auth-state.js";
+import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
@@ -313,6 +314,7 @@ async function dispatchSingleStep(args: {
     runtimeName: step.runtime,
     model: step.model,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
+    role: agentRole,
     dockerExec: args.dockerExec,
   });
 
@@ -832,6 +834,7 @@ async function runFanoutChild(args: {
     runtimeName: step.runtime,
     model: step.model,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
+    role: agentRole,
     dockerExec: args.dockerExec,
   });
 
@@ -873,6 +876,7 @@ async function runContainer(args: {
   // #176: name of a captured auth profile to inject. Callers pass this only for
   // browser-capable PRIMARY steps; reds never do (read-only, no credential).
   authProfile?: string;
+  role?: string; // AWN-6: agent role, for project-command auth role-gating
   dockerExec?: DockerExecFn;
 }): Promise<ContainerOutcome> {
   const dir = taskDir(args.runId, args.taskId);
@@ -900,9 +904,13 @@ async function runContainer(args: {
   let authStateHostPath: string | undefined;
   if (args.authProfile) {
     try {
-      const staged = resolveAuthStateForContainer(args.authProfile, dir);
+      // AWN-6: project-command profile (project's own login) vs captured #176 profile.
+      const projectProfile = loadProjectAuthProfile(args.projectDir, args.authProfile);
+      const staged = projectProfile
+        ? resolveProjectAuthForContainer(projectProfile, args.projectDir, dir, args.role ?? "engineer")
+        : resolveAuthStateForContainer(args.authProfile, dir);
       authStateHostPath = staged.hostPath;
-      logEvent("auth.profile_applied", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile } });
+      logEvent("auth.profile_applied", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile, kind: projectProfile ? "project-command" : "captured" } });
       if (staged.reconciled) {
         console.error(
           `forge: auth-profile '${args.authProfile}' — rewrote localhost origins for container access. ` +
@@ -910,10 +918,10 @@ async function runContainer(args: {
         );
       }
     } catch (e) {
-      if (e instanceof AuthProfileError) {
+      if (e instanceof AuthProfileError || e instanceof ProjectAuthError) {
         logEvent("auth.profile_failed", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
-        failTask(args.taskId, { runId: args.runId, kind: classify({ error: e }), error: (e as AuthProfileError).message });
-        return { kind: "failed", error: (e as AuthProfileError).message };
+        failTask(args.taskId, { runId: args.runId, kind: classify({ error: e }), error: (e as Error).message });
+        return { kind: "failed", error: (e as Error).message };
       }
       throw e;
     }
