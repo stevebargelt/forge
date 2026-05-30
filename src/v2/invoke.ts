@@ -35,6 +35,7 @@ import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError } from "./auth-state.js";
+import { writeTaskManifest } from "./task-manifest.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -196,6 +197,14 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       throw e;
     }
   }
+
+  writeTaskManifest(dir, {
+    taskId,
+    runId,
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: `forge-${taskId}` },
+    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+  });
 
   const ctx: SpawnContext = {
     TASK_ID: taskId,

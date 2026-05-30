@@ -11,6 +11,7 @@ import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
+import type { TaskManifest } from "./task-manifest.js";
 
 // Stub exec that writes a fixed result.json and returns 0.
 function makeStubExec(resultJson: unknown, exitCode = 0): DockerExecFn {
@@ -632,4 +633,65 @@ test("invoke: emits auth.profile_failed (no secret material) when profile is mis
   assert.ok(typeof payload.reason === "string" && payload.reason.length > 0, "must include a reason");
   assert.ok(!("token" in payload), "payload must not contain token");
   assert.ok(!("state" in payload), "payload must not contain state");
+});
+
+// ----- #197: manifest.json written on invoke dispatch -----
+
+test("invoke: writes manifest.json into the task dir with correct shape", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do work",
+    projectDir: "/tmp/x",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(r.status, "complete");
+  const dir = taskDir(r.runId, r.taskId);
+  const manifestPath = join(dir, "manifest.json");
+  assert.ok(existsSync(manifestPath), "manifest.json must exist in task dir");
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as TaskManifest;
+  assert.equal(manifest.taskId, r.taskId);
+  assert.equal(manifest.runId, r.runId);
+  assert.equal(manifest.files.prompt, "CLAUDE.md");
+  assert.equal(manifest.files.package, "package.md");
+  assert.equal(manifest.files.result, "result.json");
+  assert.equal(manifest.files.stdout, "container.stdout.log");
+  assert.equal(manifest.files.stderr, "container.stderr.log");
+  assert.equal(manifest.container.name, `forge-${r.taskId}`);
+  assert.equal(manifest.auth.profileRequested, false);
+  assert.equal(manifest.auth.stateMounted, false);
+});
+
+test("invoke: manifest auth block is booleans-only — no token, no hostPath, no path values", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do work",
+    projectDir: "/tmp/x",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  const dir = taskDir(r.runId, r.taskId);
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as TaskManifest;
+
+  const authKeys = Object.keys(manifest.auth).sort();
+  assert.deepEqual(authKeys, ["profileRequested", "stateMounted"]);
+  assert.equal(typeof manifest.auth.profileRequested, "boolean");
+  assert.equal(typeof manifest.auth.stateMounted, "boolean");
+
+  // No credential or path keys present
+  const forbidden = ["token", "profile", "path", "hostPath", "state", "secret"];
+  for (const k of forbidden) {
+    assert.ok(!(k in manifest.auth), `auth must not contain '${k}'`);
+  }
+  // No values that look like filesystem paths
+  for (const v of Object.values(manifest.auth as Record<string, unknown>)) {
+    assert.ok(typeof v !== "string" || !v.includes("/"), `auth value must not be a path: ${String(v)}`);
+  }
 });

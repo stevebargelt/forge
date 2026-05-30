@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -17,7 +17,9 @@ import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { taskDir } from "../util/paths.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
+import type { TaskManifest } from "./task-manifest.js";
 
 // Stub docker exec that writes a fixed result.json and returns 0. The runner's
 // container.stdout/stderr.log paths must be writable from this exec, so create
@@ -923,4 +925,44 @@ test("runNext: container.idle_timeout emitted (not container.exited) on idle tim
 
   const idleEv = events.find((e) => e.eventType === "container.idle_timeout")!;
   assert.equal((idleEv.payload as Record<string, unknown>).exitCode, IDLE_TIMEOUT_EXIT_CODE);
+});
+
+// ----- #197: manifest.json written on pipeline dispatch -----
+
+test("runNext: writes manifest.json into the task dir on pipeline dispatch", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-manifest-dispatch",
+    description: "one step for manifest test",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "manifest test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  await runNext({ runId, workflow: WF, dockerExec: makeStubExec({ status: "complete" }) });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  assert.ok(primary, "primary task must exist");
+
+  const dir = taskDir(runId, primary.id);
+  const manifestPath = join(dir, "manifest.json");
+  assert.ok(existsSync(manifestPath), "manifest.json must be written in the task dir");
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as TaskManifest;
+  assert.equal(manifest.taskId, primary.id);
+  assert.equal(manifest.runId, runId);
+  assert.equal(manifest.files.prompt, "CLAUDE.md");
+  assert.equal(manifest.files.result, "result.json");
+  assert.equal(manifest.container.name, `forge-${primary.id}`);
+  assert.equal(manifest.auth.profileRequested, false);
+  assert.equal(manifest.auth.stateMounted, false);
+
+  // Auth block: booleans only, no credential/path values
+  const authKeys = Object.keys(manifest.auth).sort();
+  assert.deepEqual(authKeys, ["profileRequested", "stateMounted"]);
+  for (const v of Object.values(manifest.auth as Record<string, unknown>)) {
+    assert.ok(typeof v !== "string" || !v.includes("/"), `auth value must not be a path: ${String(v)}`);
+  }
 });

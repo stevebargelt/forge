@@ -101,7 +101,17 @@ export function tailLines(filePath: string, n: number): string[] {
 }
 
 export function listPresentArtifacts(taskDirPath: string): string[] {
-  // #197 seam: manifest.json will plug in here when that ticket lands.
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const manifest = JSON.parse(raw) as { files?: Record<string, string> };
+    if (manifest.files && typeof manifest.files === "object") {
+      return Object.values(manifest.files).filter((f) => {
+        try { statSync(join(taskDirPath, f)); return true; } catch { return false; }
+      });
+    }
+  } catch {
+    // no manifest — fall through to direct read
+  }
   const known = [
     "CLAUDE.md",
     "package.md",

@@ -325,6 +325,42 @@ test("listPresentArtifacts: returns all five known files when all present", () =
   assert.equal(listPresentArtifacts(tmpDir).length, 5);
 });
 
+test("listPresentArtifacts: reads from manifest.json when present (authoritative)", () => {
+  const manifest = {
+    taskId: "t-manifest",
+    runId: "r-manifest",
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: "forge-t-manifest" },
+    auth: { profileRequested: false, stateMounted: false },
+  };
+  writeFileSync(join(tmpDir, "manifest.json"), JSON.stringify(manifest));
+  // Only create two of the five files
+  writeFileSync(join(tmpDir, "result.json"), "{}");
+  writeFileSync(join(tmpDir, "CLAUDE.md"), "prompt");
+
+  const artifacts = listPresentArtifacts(tmpDir);
+  assert.ok(artifacts.includes("result.json"), "result.json must be listed when present");
+  assert.ok(artifacts.includes("CLAUDE.md"), "CLAUDE.md must be listed when present");
+  assert.ok(!artifacts.includes("container.stdout.log"), "missing file must not appear");
+});
+
+test("listPresentArtifacts: falls back to direct read when manifest.json absent", () => {
+  writeFileSync(join(tmpDir, "result.json"), "{}");
+  writeFileSync(join(tmpDir, "package.md"), "");
+  // No manifest.json
+  const artifacts = listPresentArtifacts(tmpDir);
+  assert.ok(artifacts.includes("result.json"));
+  assert.ok(artifacts.includes("package.md"));
+  assert.ok(!artifacts.includes("CLAUDE.md"));
+});
+
+test("listPresentArtifacts: falls back gracefully when manifest.json is malformed", () => {
+  writeFileSync(join(tmpDir, "manifest.json"), "not json {{{");
+  writeFileSync(join(tmpDir, "result.json"), "{}");
+  const artifacts = listPresentArtifacts(tmpDir);
+  assert.ok(artifacts.includes("result.json"), "fallback must still return present files");
+});
+
 // ─── tailLines ───────────────────────────────────────────────────────────────
 
 test("tailLines: returns last N lines", () => {

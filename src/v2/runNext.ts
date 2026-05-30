@@ -35,6 +35,7 @@ import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser } from "./auth-state.js";
+import { writeTaskManifest } from "./task-manifest.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
@@ -881,6 +882,14 @@ async function runContainer(args: {
       throw e;
     }
   }
+
+  writeTaskManifest(dir, {
+    taskId: args.taskId,
+    runId: args.runId,
+    files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
+    container: { name: `forge-${args.taskId}` },
+    auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+  });
 
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
