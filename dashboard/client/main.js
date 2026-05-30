@@ -362,15 +362,21 @@ function TaskDetail({ taskId, onClose }) {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    let timer = null;
+    const load = async () => {
       try {
         const res = await fetch(`/api/task/${encodeURIComponent(taskId)}`);
-        if (!res.ok) { setErr("not found"); return; }
+        if (!res.ok) { if (!cancelled) setErr("not found"); return; }
         const d = await res.json();
-        if (!cancelled) setDetail(d);
+        if (cancelled) return;
+        setDetail(d);
+        // WALK-5: poll while the task is running so the timeline + idle
+        // countdown stay live; stop once it reaches a terminal state.
+        if (d.task && d.task.status === "running") timer = setTimeout(load, 3000);
       } catch (e) { if (!cancelled) setErr(String(e)); }
-    })();
-    return () => { cancelled = true; };
+    };
+    load();
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [taskId]);
 
   if (!detail) {
@@ -399,7 +405,20 @@ function TaskDetail({ taskId, onClose }) {
           ${detail.task.taskId}
           <${CopyIdButton} value=${detail.task.taskId} />
           · ${detail.task.phase} · ${detail.task.status}
+          ${detail.failureKind ? html`<span class="badge status-failed" style="margin-left: 6px;">${detail.failureKind}</span>` : null}
         </div>
+
+        ${detail.idle ? html`
+          <div class="subcard" style="margin-bottom: 16px;">
+            <div class="row" style="gap: 14px; align-items: center;">
+              <span><span class="status-dot"></span><strong>live</strong></span>
+              <span class="muted mono" style="font-size: 11px;">forge-${detail.task.taskId}</span>
+            </div>
+            <div class="muted ${detail.idle.expired ? "" : ""}" style="font-size: 12px; margin-top: 6px;">
+              ${idleLine(detail.idle)}
+            </div>
+          </div>
+        ` : null}
 
         <h3>Result</h3>
         ${rendered ?? html`<pre>${JSON.stringify(detail.task.result, null, 2)}</pre>`}
@@ -427,6 +446,19 @@ function TaskDetail({ taskId, onClose }) {
               ${g.rationale ? html`<div class="md" style="margin-top: 6px;" dangerouslySetInnerHTML=${{ __html: md(g.rationale) }}></div>` : null}
             </div>
           `)}
+        ` : null}
+
+        ${detail.events && detail.events.length > 0 ? html`
+          <h3>Timeline (${detail.events.length})</h3>
+          <div class="timeline">
+            ${detail.events.map((e, i) => html`
+              <div class="row" key=${i} style="gap: 8px; padding: 2px 0; align-items: baseline;">
+                <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt)}</span>
+                <span class="badge ${eventBadgeClass(e.eventType)}">${e.eventType}</span>
+                ${eventDetail(e) ? html`<span class="muted" style="font-size: 12px;">${eventDetail(e)}</span>` : null}
+              </div>
+            `)}
+          </div>
         ` : null}
 
         ${detail.stdoutLog ? html`
@@ -460,6 +492,40 @@ function formatRelativeTime(iso) {
 function truncate(s, max) {
   if (s.length <= max) return s;
   return s.slice(0, max) + `\n... (${s.length - max} more chars)`;
+}
+
+// WALK-5 helpers for the task timeline + live activity panel.
+function formatDurMs(ms) {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`;
+}
+function formatClock(iso) {
+  try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
+}
+function eventBadgeClass(type) {
+  if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
+  if (/completed|complete/.test(type)) return "status-complete";
+  if (/awaiting/.test(type)) return "status-awaiting_gate";
+  return "status-pending";
+}
+function eventDetail(e) {
+  const p = e.payload;
+  if (!p || typeof p !== "object") return "";
+  if (typeof p.failure_kind === "string") return p.failure_kind;
+  if (typeof p.message === "string") return p.message;
+  if (typeof p.exitCode === "number") return `exit ${p.exitCode}`;
+  if (typeof p.from === "string" && typeof p.to === "string") return `${p.from} → ${p.to}`;
+  if (typeof p.containerName === "string") return p.containerName;
+  return "";
+}
+function idleLine(idle) {
+  if (!idle.hasOutput) return `no output yet · timeout ${formatDurMs(idle.idleTimeoutMs)}`;
+  const tail = idle.expired ? "(idle budget exhausted)" : `(${formatDurMs(idle.remainingMs)} left)`;
+  return `idle ${formatDurMs(idle.idleMs)} · timeout ${formatDurMs(idle.idleTimeoutMs)} ${tail}`;
 }
 
 render(h(App), document.getElementById("app"));

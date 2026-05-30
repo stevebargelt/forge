@@ -8,7 +8,7 @@
 // error). Documented in docs/SCHEMA-CONTRACT.md.
 
 import Database from "better-sqlite3";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
@@ -181,7 +181,61 @@ export type TaskDetail = {
   stderrLog: string | null;
   verdicts: VerdictRow[];
   gates: GateRow[];
+  events: TaskEventEntry[];   // WALK-5: lifecycle timeline
+  failureKind: string | null; // WALK-5: machine-readable failure kind, if failed
+  idle: IdleInfo | null;      // WALK-5: live activity, running tasks only
 };
+
+export type TaskEventEntry = {
+  eventType: string;
+  payload: unknown;
+  createdAt: string;
+};
+
+// Live idle state for a running task. Mirrors the CLI's computeIdleCountdown
+// (WALK-1); inlined here to keep the dashboard's read path self-contained.
+export type IdleInfo = {
+  hasOutput: boolean;
+  idleMs: number;
+  remainingMs: number;
+  expired: boolean;
+  idleTimeoutMs: number;
+};
+
+// Matches src/v2/idle-watchdog.ts DEFAULT_IDLE_TIMEOUT_MS (15m) for the fallback
+// when a task's manifest predates the recorded-timeout field.
+const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+
+function deriveFailureKind(events: TaskEventEntry[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.eventType === "task.completed") return null;
+    if (e.eventType === "task.failed") {
+      const p = e.payload as Record<string, unknown> | null;
+      return p && typeof p["failure_kind"] === "string" ? (p["failure_kind"] as string) : null;
+    }
+  }
+  return null;
+}
+
+function computeIdle(runId: string, taskId: string, status: string): IdleInfo | null {
+  if (status !== "running") return null;
+  const dir = join(RUNS_DIR, runId, taskId);
+  let mtime: number | undefined;
+  try { mtime = statSync(join(dir, "container.stdout.log")).mtimeMs; } catch { /* no output yet */ }
+  let idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS;
+  try {
+    const m = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as { container?: { idleTimeoutMs?: unknown } };
+    if (typeof m?.container?.idleTimeoutMs === "number") idleTimeoutMs = m.container.idleTimeoutMs;
+  } catch { /* no/old manifest → default */ }
+  if (mtime === undefined) {
+    return { hasOutput: false, idleMs: 0, remainingMs: idleTimeoutMs, expired: false, idleTimeoutMs };
+  }
+  const idleMs = Math.max(0, Date.now() - mtime);
+  const remainingMs = Math.max(0, idleTimeoutMs - idleMs);
+  return { hasOutput: true, idleMs, remainingMs, expired: idleMs >= idleTimeoutMs, idleTimeoutMs };
+}
 
 export type VerdictRow = {
   id: string;
@@ -279,6 +333,19 @@ export function taskDetail(taskId: string): TaskDetail | null {
     decided_by: string;
   }>;
 
+  // WALK-5: lifecycle timeline from the events table (write-only until Crawl).
+  const eventRows = db().prepare(`
+    SELECT event_type, payload, created_at
+    FROM events WHERE task_id = ? ORDER BY created_at ASC, id ASC
+  `).all(taskId) as Array<{ event_type: string; payload: string | null; created_at: string }>;
+  const events: TaskEventEntry[] = eventRows.map((e) => ({
+    eventType: e.event_type,
+    payload: e.payload ? safeJsonParse(e.payload) : null,
+    createdAt: e.created_at,
+  }));
+  const failureKind = deriveFailureKind(events);
+  const idle = computeIdle(taskRow.run_id, taskId, taskRow.status);
+
   return {
     task,
     stdoutLog,
@@ -301,6 +368,9 @@ export function taskDetail(taskId: string): TaskDetail | null {
       decidedAt: g.decided_at,
       decidedBy: g.decided_by,
     })),
+    events,
+    failureKind,
+    idle,
   };
 }
 
