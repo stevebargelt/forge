@@ -409,6 +409,12 @@ export function registerShow(program: Command): void {
         console.log(`  idle timeout: ${formatDurationMs(idleTimeoutMs)}${idleTimeoutExact ? "" : " (current default — not recorded at dispatch)"}`);
         if (idleCountdown) console.log(`  idle:      ${formatIdleCountdown(idleCountdown)}`);
         console.log(`  parent:    ${task.parentId ?? "(none)"}`);
+        // AWN-3: retry lineage. previous_failure (set by forge retry) marks this
+        // task as a retry; a task.retried event marks it as having been retried.
+        const prevFail = (task.taskPackage?.inputs as Record<string, unknown> | undefined)?.["previous_failure"] as { failedTaskId?: string; kind?: string } | undefined;
+        if (prevFail?.failedTaskId) console.log(`  retry of:  ${prevFail.failedTaskId} (was ${prevFail.kind ?? "?"})`);
+        const retriedEv = events.find((e) => e.eventType === "task.retried");
+        if (retriedEv) console.log(`  retried →  ${(retriedEv.payload as Record<string, unknown> | null)?.["newTaskId"] ?? "?"}`);
         if (task.error) console.log(`  error:     ${task.error}`);
 
         if (stdoutTail.length > 0) {

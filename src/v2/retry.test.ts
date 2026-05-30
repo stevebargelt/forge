@@ -1,0 +1,113 @@
+import { test, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import type { Database as DatabaseInstance } from "better-sqlite3";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask, getTask } from "../store/tasks.js";
+import { logEvent, eventsForTask } from "../store/events.js";
+import { retry, RetryNotAllowedError } from "./retry.js";
+import { retryPolicy } from "./retry-policy.js";
+import type { Run, Task } from "../types/index.js";
+
+let db: DatabaseInstance;
+let prev: DatabaseInstance | null;
+const RUN: Run = { id: "run-retry", workflow: "feature", title: "retry", status: "active", createdAt: "2026-05-30T00:00:00Z" };
+
+function failedTask(id: string, failureKind: string | undefined, error = "boom"): Task {
+  const t: Task = {
+    id, runId: RUN.id, phase: "engineer", agentRole: "engineer", status: "failed", error,
+    taskPackage: { taskId: id, runId: RUN.id, phase: "engineer", role: "engineer", inputs: { brief: "do the thing" }, composedSystemPrompt: "PROMPT" },
+    createdAt: "2026-05-30T00:00:00Z",
+  };
+  insertTask(t);
+  if (failureKind) logEvent("task.failed", { runId: RUN.id, taskId: id, payload: { failure_kind: failureKind, error } });
+  return t;
+}
+
+beforeEach(() => { db = makeInMemoryDb(); prev = setDbForTest(db); insertRun(RUN); });
+afterEach(() => { setDbForTest(prev as DatabaseInstance); db.close(); });
+
+// ── retryPolicy ──
+
+test("retryPolicy: transient kinds are retryable; outcome kinds are not", () => {
+  for (const k of ["idle_timeout", "container_crash", "orphaned", "result_missing", "result_malformed", "model_error", "tool_error", "cancelled", "unknown"]) {
+    assert.equal(retryPolicy(k).retryable, true, `${k} should be retryable`);
+  }
+  for (const k of ["gate_rejected", "red_blocked"]) {
+    assert.equal(retryPolicy(k).retryable, false, `${k} should NOT be retryable`);
+    assert.ok(retryPolicy(k).advice, `${k} should carry advice`);
+  }
+});
+
+test("retryPolicy: auth kinds are retryable but carry resolve-auth advice", () => {
+  for (const k of ["auth_missing", "auth_expired", "auth_injection_failed"]) {
+    const d = retryPolicy(k);
+    assert.equal(d.retryable, true);
+    assert.match(d.advice ?? "", /auth|session|profile/i);
+  }
+});
+
+test("retryPolicy: undefined / unknown label → retryable", () => {
+  assert.equal(retryPolicy(undefined).retryable, true);
+  assert.equal(retryPolicy("some_new_kind").retryable, true);
+});
+
+// ── retry() ──
+
+test("retry: refuses a missing task and a non-failed task", async () => {
+  await assert.rejects(retry("does-not-exist"), /not found/);
+  insertTask({ id: "t-running", runId: RUN.id, phase: "engineer", agentRole: "engineer", status: "running",
+    taskPackage: { taskId: "t-running", runId: RUN.id, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-30T00:00:00Z" });
+  await assert.rejects(retry("t-running"), /not failed/);
+});
+
+test("retry after idle_timeout: new pending task with lineage + previous_failure context", async () => {
+  failedTask("t-idle", "idle_timeout", "no output for 10m");
+  const out = await retry("t-idle");
+  assert.equal(out.failureKind, "idle_timeout");
+  assert.equal(out.disposition.retryable, true);
+  const nt = getTask(out.newTask.id)!;
+  assert.equal(nt.status, "pending");
+  assert.equal(nt.parentId, "t-idle", "lineage preserved");
+  // previous failure handed forward as context (no secrets — prose + tag only).
+  const pf = (nt.taskPackage.inputs as Record<string, unknown>)["previous_failure"] as Record<string, unknown>;
+  assert.equal(pf.kind, "idle_timeout");
+  assert.equal(pf.error, "no output for 10m");
+  assert.equal(pf.failedTaskId, "t-idle");
+  // original kept as failed for audit; task.retried records the kind.
+  assert.equal(getTask("t-idle")!.status, "failed");
+  const retried = eventsForTask("t-idle").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).failure_kind, "idle_timeout");
+});
+
+test("retry after auth failure: allowed (user may have fixed auth), disposition carries advice", async () => {
+  failedTask("t-auth", "auth_expired");
+  const out = await retry("t-auth");
+  assert.equal(out.disposition.retryable, true);
+  assert.match(out.disposition.advice ?? "", /refresh|session|profile/i);
+});
+
+test("retry after cancelled / malformed: allowed", async () => {
+  failedTask("t-cancel", "cancelled");
+  assert.equal((await retry("t-cancel")).newTask.status, "pending");
+  failedTask("t-mal", "result_malformed");
+  assert.equal((await retry("t-mal")).newTask.status, "pending");
+});
+
+test("retry after gate_rejected: refused without --force, allowed with --force", async () => {
+  failedTask("t-gate", "gate_rejected");
+  await assert.rejects(retry("t-gate"), RetryNotAllowedError);
+  // not retryable kinds must not have created a new task on the refused attempt
+  assert.equal(eventsForTask("t-gate").some((e) => e.eventType === "task.retried"), false);
+  // --force overrides
+  const out = await retry("t-gate", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  const retried = eventsForTask("t-gate").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).forced, true);
+});
+
+test("retry after red_blocked: refused without --force", async () => {
+  failedTask("t-red", "red_blocked");
+  await assert.rejects(retry("t-red"), RetryNotAllowedError);
+});
