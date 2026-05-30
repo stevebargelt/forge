@@ -65,3 +65,20 @@ test("resolveAuthStateForContainer mounts the original (no copy) for real-DNS or
   assert.equal(staged.hostPath, profilePath("prod"));
   assert.deepEqual(staged.origins, ["https://staging.example.com"]);
 });
+
+test("cleanupStagedAuth: removes a staged auth-state.json (AWN-8), no-op when absent", async () => {
+  const { cleanupStagedAuth } = await import("./auth-state.js");
+  const { mkdtempSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "forge-cleanup-"));
+  try {
+    assert.equal(cleanupStagedAuth(dir), false, "no-op when no staged file");
+    writeFileSync(join(dir, "auth-state.json"), JSON.stringify({ cookies: [] }));
+    assert.equal(cleanupStagedAuth(dir), true, "removes the staged file");
+    assert.equal(existsSync(join(dir, "auth-state.json")), false);
+    assert.equal(cleanupStagedAuth(dir), false, "idempotent — already gone");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

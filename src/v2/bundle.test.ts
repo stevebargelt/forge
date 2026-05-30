@@ -149,3 +149,23 @@ test("assembleBundle: bounds large logs to a tail and flags truncation", () => {
 test("assembleBundle: throws on unknown run", () => {
   assert.throws(() => assembleBundle("run-nope", outRoot), /run not found/);
 });
+
+test("assembleBundle: SECURITY — a .env file in the task dir is never bundled (denylist + allowlist)", () => {
+  insertTask(mkTask("task-env"));
+  const dir = taskDir(RUN.id, "task-env");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), "{}");
+  writeFileSync(join(dir, ".env"), "SECRET=leak-me");
+  writeFileSync(join(dir, ".env.local"), "TOKEN=also-leak");
+  const r = assembleBundle(RUN.id, outRoot);
+  for (const f of r.filesIncluded) assert.ok(!f.includes(".env"), `.env must never be bundled: ${f}`);
+  // and the secret content appears nowhere in the bundle
+  const walk = (p: string): string[] =>
+    readdirSync(p).flatMap((name) => {
+      const full = join(p, name);
+      return statSync(full).isDirectory() ? walk(full) : [full];
+    });
+  for (const file of walk(r.bundleDir)) {
+    assert.ok(!readFileSync(file, "utf8").includes("leak-me"), `.env secret leaked into ${file}`);
+  }
+});

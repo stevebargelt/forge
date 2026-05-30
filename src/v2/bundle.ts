@@ -22,9 +22,16 @@ const SAFE_TASK_FILES = ["result.json", "manifest.json", "progress.jsonl"] as co
 const LOG_FILES = ["container.stdout.log", "container.stderr.log"] as const;
 // Prompts/packages — task context, opt-in (they restate the brief, not secrets).
 const PROMPT_FILES = ["CLAUDE.md", "package.md"] as const;
-// Belt-and-suspenders: filenames that must NEVER appear in a bundle. Not used to
-// filter (the allowlist already excludes them) — asserted in tests + reported.
-export const NEVER_BUNDLE = ["auth-state.json"] as const;
+// Belt-and-suspenders denylist: file basenames / patterns that must NEVER appear
+// in a bundle. The allowlist above already excludes everything not on it; this is
+// a second, explicit guard checked after assembly (AWN-8) so a future allowlist
+// slip can't leak a credential. Matched by exact basename or suffix.
+export const NEVER_BUNDLE = ["auth-state.json", ".env", "storageState.json", "qa.json"] as const;
+
+function isDenied(relPath: string): boolean {
+  const base = relPath.split("/").pop() ?? relPath;
+  return NEVER_BUNDLE.some((d) => base === d || base.endsWith(d) || base.startsWith(".env"));
+}
 
 const LOG_CAP_BYTES = 256 * 1024;
 
@@ -123,6 +130,14 @@ export function assembleBundle(runId: string, destRoot: string, opts: BundleOpti
     truncated,
   };
   writeFileSync(join(bundleDir, "bundle.json"), JSON.stringify(manifest, null, 2));
+
+  // AWN-8 defense-in-depth: assert the allowlist never let a denied (credential)
+  // file through. This should be impossible by construction; if it ever trips,
+  // fail loudly rather than ship a bundle with secrets.
+  const leaked = filesIncluded.filter(isDenied);
+  if (leaked.length > 0) {
+    throw new Error(`bundle: refusing to ship — denylisted files were included: ${leaked.join(", ")}`);
+  }
 
   return { bundleDir, runId, taskCount: tasks.length, filesIncluded, truncated, note };
 }

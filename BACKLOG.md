@@ -543,33 +543,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #219 — AWN-6 project-command-auth: project-owned auth profile (runs project login command to produce storageState)
-docs/agentic-workflow-next-steps.md §6. Authenticated browser work where the PROJECT owns credentials/login, forge owns scoping/mounting/redaction/freshness/lifecycle.
-
-DIRECTLY SOLVES the gap surfaced 2026-05-30: a project with programmatic QA logins (e.g. Pixtron) has no way to declare its login to forge. Today programmatic login is the documented DEFAULT but is entirely project-side (Playwright globalSetup) with no forge-side declaration; the captured-session auth-profile (#176) is the only forge-owned path. AWN-6 adds the missing middle: a declared project-command profile.
-
-Scope (new auth_profile kind):
-  auth_profiles:
-    qa:
-      kind: project-command
-      command: npm run e2e:auth
-      storage_state: .playwright/.auth/qa.json
-      required_env: [E2E_SUPABASE_EMAIL, E2E_SUPABASE_PASSWORD]
-      roles: [test-engineer, manual-qa, frontend-specialist]
-- Project owns credentials, login flow, token refresh, cleanup.
-- Forge owns role scoping, read-only mount, redaction, freshness checks, lifecycle events.
-- Keep the captured-session profile (#176) as the manual fallback.
-
-Acceptance:
-- Forge checks required_env var NAMES without printing values.
-- Forge runs the auth command before browser-capable tasks that request the profile.
-- Forge mounts the produced storage_state read-only into the container.
-- Reds do NOT receive auth state by default.
-- forge show reports auth setup success/failure without exposing secrets.
-
-Relates to #184 (auth-profile polish). First of the broadening trio (AWN-6/7/8).
-
-
 ### #220 — AWN-7 provider-runtime: extract Claude execution behind a provider interface (supersedes #106)
 docs/agentic-workflow-next-steps.md §7. Make Claude/Codex/future agents interchangeable behind one forge lifecycle.
 
@@ -631,6 +604,35 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 
 ## Done (recent)
+
+### #219 — AWN-6 project-command-auth: project-owned auth profile (runs project login command to produce storageState)
+**Closed:** 2026-05-30. Commit `853b418`.
+
+docs/agentic-workflow-next-steps.md §6. Authenticated browser work where the PROJECT owns credentials/login, forge owns scoping/mounting/redaction/freshness/lifecycle.
+
+DIRECTLY SOLVES the gap surfaced 2026-05-30: a project with programmatic QA logins (e.g. Pixtron) has no way to declare its login to forge. Today programmatic login is the documented DEFAULT but is entirely project-side (Playwright globalSetup) with no forge-side declaration; the captured-session auth-profile (#176) is the only forge-owned path. AWN-6 adds the missing middle: a declared project-command profile.
+
+Scope (new auth_profile kind):
+  auth_profiles:
+    qa:
+      kind: project-command
+      command: npm run e2e:auth
+      storage_state: .playwright/.auth/qa.json
+      required_env: [E2E_SUPABASE_EMAIL, E2E_SUPABASE_PASSWORD]
+      roles: [test-engineer, manual-qa, frontend-specialist]
+- Project owns credentials, login flow, token refresh, cleanup.
+- Forge owns role scoping, read-only mount, redaction, freshness checks, lifecycle events.
+- Keep the captured-session profile (#176) as the manual fallback.
+
+Acceptance:
+- Forge checks required_env var NAMES without printing values.
+- Forge runs the auth command before browser-capable tasks that request the profile.
+- Forge mounts the produced storage_state read-only into the container.
+- Reds do NOT receive auth state by default.
+- forge show reports auth setup success/failure without exposing secrets.
+
+Relates to #184 (auth-profile polish). First of the broadening trio (AWN-6/7/8).
+
 
 ### #218 — AWN-5 review-protocol: standardize red/review result schema, evidence, and severity calibration
 **Closed:** 2026-05-30. Commit `a6e4e3e`.

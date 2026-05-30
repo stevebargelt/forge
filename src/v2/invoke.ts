@@ -34,7 +34,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
-import { resolveAuthStateForContainer, AuthProfileError } from "./auth-state.js";
+import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
@@ -262,6 +262,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     dockerArgs = buildDockerArgs(runtime, ctx);
   } catch (e) {
     const error = `buildDockerArgs failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
@@ -287,6 +288,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // WALK-3: ingest progress on the crash path too — the agent's last
     // decision/progress records are most valuable in failure cases.
     emitAgentProgressEvents(dir, runId, taskId);
+    cleanupStagedAuth(dir); // AWN-8: remove staged auth-state once terminal
     const error = `docker exec threw: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);
@@ -301,6 +303,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // failure cases where they matter most). The events precede the terminal
   // event, matching when the agent actually wrote them.
   emitAgentProgressEvents(dir, runId, taskId);
+  cleanupStagedAuth(dir); // AWN-8: remove staged auth-state once the container is done
 
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.

@@ -535,7 +535,7 @@ test("invoke: --auth-profile fails fast (no container) when the profile is expir
   assert.equal(execCalled, false, "no container should spawn for an expired profile");
 });
 
-test("invoke: --auth-profile with a localhost origin stages a reconciled mode-600 copy (#183)", async () => {
+test("invoke: staged auth-state is CLEANED UP after the task terminates (AWN-8; staging details covered in auth-state.test.ts)", async () => {
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   delete process.env.FORGE_CONTAINER_HOST;
   const fhome = process.env.FORGE_HOME!;
@@ -580,12 +580,9 @@ result:
   });
   assert.equal(r.status, "complete");
 
+  // AWN-8: the staged mode-600 bearer token must NOT linger after the task ends.
   const staged = join(taskDir(r.runId, r.taskId), "auth-state.json");
-  assert.ok(existsSync(staged), "reconciled auth-state.json should be staged in the task dir");
-  const reconciled = JSON.parse(readFileSync(staged, "utf8"));
-  assert.equal(reconciled.origins[0].origin, "http://host.docker.internal:3000");
-  // owner-only perms on the bearer token despite the 0777 task dir
-  assert.equal(statSync(staged).mode & 0o777, 0o600);
+  assert.ok(!existsSync(staged), "staged auth-state.json must be cleaned up after the task terminates");
 });
 
 // ----- #194: lifecycle event backfill — container.* and auth.* -----

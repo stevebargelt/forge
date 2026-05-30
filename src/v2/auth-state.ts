@@ -8,8 +8,18 @@
 // rewritten) origins for caller logging.
 
 import { join } from "node:path";
-import { writeFileSync, chmodSync } from "node:fs";
+import { writeFileSync, chmodSync, existsSync, unlinkSync } from "node:fs";
 import { profileStatus, readProfile, reconcileStateForContainer } from "../util/auth-profiles.js";
+
+// AWN-8: remove the staged mode-600 auth-state.json once a task is terminal — the
+// session token shouldn't linger on disk after the container is gone, and a
+// retry mints a fresh one (no reuse of staged credentials). Best-effort; never
+// throws. Returns true if a file was removed.
+export function cleanupStagedAuth(taskDirPath: string): boolean {
+  const staged = join(taskDirPath, "auth-state.json");
+  if (!existsSync(staged)) return false;
+  try { unlinkSync(staged); return true; } catch { return false; }
+}
 
 export class AuthProfileError extends Error {}
 

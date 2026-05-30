@@ -34,7 +34,7 @@ import { computeReadyQueue } from "./ready-queue.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser } from "./auth-state.js";
+import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
@@ -956,6 +956,7 @@ async function runContainer(args: {
     dockerArgs = buildDockerArgs(runtime, spawnCtx);
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
@@ -979,6 +980,7 @@ async function runContainer(args: {
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
+    cleanupStagedAuth(dir); // AWN-8
     const msg = `docker exec threw: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
@@ -989,6 +991,7 @@ async function runContainer(args: {
   // crash / normal branches — so a hung or crashed agent's records still land on
   // the timeline. The events precede the terminal event, matching when written.
   emitAgentProgressEvents(dir, args.runId, args.taskId);
+  cleanupStagedAuth(dir); // AWN-8: remove staged auth-state once the container is done
 
   // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
   // Fail with a clear reason rather than a generic container_crash.
