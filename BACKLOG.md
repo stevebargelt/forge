@@ -555,6 +555,78 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
+### #209 — RUN-1 runs-query: forge runs query — search historical runs by status, failure_kind, project, age
+Observability RUN stage §1 (docs/observability.md). CLI query over ~/.forge/forge.db to answer operational questions:
+- Which tasks hit idle_timeout this week?
+- Which projects have the most auth failures?
+- Which runs were cancelled manually?
+
+Command (per doc):
+  forge runs query --failure-kind idle_timeout --since 7d
+  forge runs query --project ~/code/app --status abandoned
+  forge runs query --json
+
+Filters: --status, --failure-kind, --project, --since <Nd|all>, --workflow. --json for orchestrator consumption.
+
+Notes:
+- No schema change. failure_kind lives in task.failed event payloads (Crawl decision), so filtering by failure_kind means scanning events per task — reuse failureKindForTask (failure-kind.ts). For hundreds of runs that's fine in-process.
+- Reuse the --since window parser pattern from usage.ts. Cross-project by default (like the dashboard), with --project to scope.
+- Pure query helpers in a testable module; thin CLI wrapper. Stable JSON schema.
+
+
+### #210 — RUN-2 metrics: forge metrics — aggregate durations, failures, cancels, retries, red blocks
+Observability RUN stage §3 (docs/observability.md). Reliability/management metrics, distinct from forge usage (which is token/cost). Aggregate over runs/tasks/events:
+- run success rate
+- task failure kinds (counts by kind)
+- median task duration by workflow/phase/role
+- idle kills, cancel count, retry count, red block rate
+- gate wait time
+
+Command:
+  forge metrics --since 30d
+  forge metrics --by workflow|phase|role
+  forge metrics --json
+
+Notes:
+- Median durations from task started_at/completed_at. failure_kind counts from task.failed event payloads. cancels from run.cancelled events / abandoned runs. retries from task.retried events. red blocks from task.blocked_by_red.
+- No schema change. Pure aggregation helpers (testable) + thin CLI. Don't duplicate forge usage's token rollups — link to it.
+- Depends conceptually on RUN-1's window/scan helpers; share them.
+
+
+### #211 — RUN-3 ops-dashboard: dashboard operations summary views (success rate, failure-kind mix, durations)
+Observability RUN stage §3 dashboard surface (docs/observability.md). Bring RUN-2 metrics into the web dashboard as an operations summary view (sibling to the existing usage view).
+- Run success rate, failure-kind mix, median durations by workflow/phase, cancel/retry/red-block counts.
+- Reuse the dashboard's read-only query layer (dashboard/src/queries.ts); inline aggregation to keep it self-contained.
+- New nav tab or section alongside activity/projects/usage. Verify with browser-tools (screenshot + inspect).
+Depends on RUN-2 (#metrics) for the aggregation shape. Lower priority than the CLI surfaces.
+
+
+### #212 — RUN-4 bundle: forge bundle <run-id> — sanitized debug archive of a run
+Observability RUN stage §4 (docs/observability.md). Produce a sanitized archive for debugging forge itself or handing a failed run to a reviewer without the whole project.
+
+  forge bundle <run-id>            # writes <run-id>-bundle.tar.gz (or a dir)
+
+Contents: run metadata, tasks, events, verdicts, task manifests, result.json files, stdout/stderr logs, prompts/packages (optional), usage records.
+
+SANITIZATION (hard requirement):
+- NEVER include raw auth state (auth-state files, NTFY_TOKEN, AWS creds, bearer tokens). The manifest auth block is already booleans-only (Crawl) — safe.
+- Redact known secret-bearing paths; do not bundle ~/.forge/runtimes or notify.env or any auth-profile material.
+- Bundle is per-run: copy from ~/.forge/runs/<runId>/ + the run/task/event/verdict rows for that run, not the whole DB.
+
+Notes: bounded log inclusion (cap or note truncation — reuse the bounded-tail discipline). --json manifest of what was included. Pure assembly helper (testable: given a temp FORGE_HOME, assert archive contents + that no secret files are included).
+
+
+### #213 — RUN-5 otel: optional OpenTelemetry/JSONL trace export from forge events
+Observability RUN stage §5 (docs/observability.md). After the internal trace shape is stable, add export options. The WALK-2 spanKind groundwork (run|task|docker|model|tool|auth|gate|red-review on events) is the hook.
+
+  forge export --run <id> --format jsonl       # one event per line
+  forge export --run <id> --format otel        # OTLP spans (run→task→… hierarchy)
+
+Scope (do JSONL first — trivial, no deps): dump eventsForRun as JSONL with runId/taskId/spanKind/timestamp/payload. OTel is the stretch: map run→root span, task→child spans, lifecycle events→span events/status; emit OTLP JSON (no collector required — file output). Keep it an EXPORT path, not the source of truth. Redact payloads (no secrets — payloads are already booleans/safe text by Crawl discipline, but double-check).
+
+Lowest priority; capstone. JSONL slice is high-value-low-cost; OTel can be deferred.
+
+
 ## Done (recent)
 
 ### #208 — WALK-5 dashboard-activity: add task timeline + live activity panel to the dashboard
