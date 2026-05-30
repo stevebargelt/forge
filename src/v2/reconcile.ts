@@ -19,6 +19,7 @@ import { getRun, updateRunStatus } from "../store/runs.js";
 import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
+import { cleanupStagedAuth } from "./auth-state.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -86,6 +87,9 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
       logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result" } });
       taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
     }
+    // AWN-8: reconciliation is a terminal transition too — don't leave the staged
+    // bearer token behind (no-op when there's no auth file).
+    cleanupStagedAuth(taskDir(t.runId, t.id));
   }
 
   // Run-level: an active run with no remaining non-terminal work is no longer in

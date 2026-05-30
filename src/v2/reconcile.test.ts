@@ -125,3 +125,15 @@ test("reconcile: idempotent — a second pass changes nothing and emits no new e
   assert.equal(r2.runChange, undefined);
   assert.equal(eventsForRun(RUN.id).length, eventsAfterFirst, "no duplicate events");
 });
+
+test("reconcile: terminalizing an orphaned task ALSO removes its staged auth-state (AWN-8 finding)", async () => {
+  const { writeFileSync, existsSync, mkdirSync } = await import("node:fs");
+  insertContainerized(mkTask("task-auth", { status: "running" }));
+  const dir = taskDir(RUN.id, "task-auth");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "auth-state.json"), JSON.stringify({ bearer: "leak" }));
+
+  reconcileRun(RUN.id, GONE); // container gone, no result → orphaned/failed
+  assert.equal(getTask("task-auth")!.status, "failed");
+  assert.equal(existsSync(join(dir, "auth-state.json")), false, "staged auth must be cleaned up on reconcile-terminalize");
+});

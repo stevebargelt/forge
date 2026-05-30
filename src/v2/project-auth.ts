@@ -17,13 +17,19 @@
 // read-only (mode 600) into the task dir like a captured profile. Reds never get
 // auth state. Errors never include the command's stderr (it can echo secrets).
 
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { reconcileStateForContainer } from "../util/auth-profiles.js";
+import { writeSecretFile } from "../util/secret-file.js";
 import type { StagedAuthState } from "./auth-state.js";
+
+// The project login command runs on the HOST before the container starts, so the
+// container idle-watchdog can't bound it. Cap it so a hung login can't wedge a
+// task indefinitely. (Configurable later if needed.)
+const AUTH_COMMAND_TIMEOUT_MS = 120_000;
 
 export class ProjectAuthError extends Error {}
 
@@ -75,13 +81,18 @@ export function profileAllowsRole(profile: ProjectAuthProfile, role: string): bo
   return profile.roles.includes(role);
 }
 
-export type AuthCommandRunner = (command: string, cwd: string) => { ok: boolean; code: number };
+export type AuthCommandRunner = (command: string, cwd: string) => { ok: boolean; code: number; timedOut?: boolean };
 
 const defaultRunner: AuthCommandRunner = (command, cwd) => {
   // Inherit the env (the project's login needs its creds) but DON'T capture
-  // stdout/stderr into anything we surface — it can echo secrets.
-  const r = spawnSync(command, { cwd, shell: true, stdio: ["ignore", "ignore", "ignore"], env: process.env });
-  return { ok: r.status === 0, code: r.status ?? -1 };
+  // stdout/stderr into anything we surface — it can echo secrets. Time-bounded so
+  // a hung login can't block the task forever (no container watchdog yet).
+  const r = spawnSync(command, {
+    cwd, shell: true, stdio: ["ignore", "ignore", "ignore"], env: process.env,
+    timeout: AUTH_COMMAND_TIMEOUT_MS, killSignal: "SIGKILL",
+  });
+  const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT" || r.signal === "SIGKILL";
+  return { ok: r.status === 0 && !timedOut, code: r.status ?? -1, timedOut };
 };
 
 /** Run the project's login command to produce its storage_state file. Returns the
@@ -94,8 +105,14 @@ export function produceStorageState(profile: ProjectAuthProfile, projectDir: str
   }
   const runner = opts?.runner ?? defaultRunner;
   const res = runner(profile.command, projectDir);
+  if (res.timedOut) {
+    // Don't echo the configured command (it could contain inline creds).
+    throw new ProjectAuthError(`auth command timed out after ${Math.round(AUTH_COMMAND_TIMEOUT_MS / 1000)}s — check the project's login setup`);
+  }
   if (!res.ok) {
-    throw new ProjectAuthError(`auth command failed (exit ${res.code}): \`${profile.command}\` — check the project's login setup`);
+    // Report exit code only — NOT the raw command string (Finding 5: a command
+    // with inline credentials would otherwise be persisted in the failure event).
+    throw new ProjectAuthError(`auth command failed (exit ${res.code}) — check the project's login setup`);
   }
   const statePath = resolve(projectDir, profile.storage_state);
   if (!existsSync(statePath)) {
@@ -126,10 +143,9 @@ export function resolveProjectAuthForContainer(
   }
   const { state } = reconcileStateForContainer(original as Parameters<typeof reconcileStateForContainer>[0]);
   const origins = state.origins.map((o) => o.origin);
-  // Always stage a forge-owned mode-600 copy; never bind-mount the project's
-  // file directly (the task dir is 0777, and we want a single redaction point).
+  // Always stage a forge-owned mode-600 copy (atomically; the task dir is 0777)
+  // — never bind-mount the project's file directly (single redaction point).
   const staged = join(taskDirPath, "auth-state.json");
-  writeFileSync(staged, JSON.stringify(state));
-  chmodSync(staged, 0o600);
+  writeSecretFile(staged, JSON.stringify(state));
   return { hostPath: staged, origins, reconciled: true };
 }

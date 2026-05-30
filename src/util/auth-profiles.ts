@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, readdirSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { FORGE_HOME } from "./paths.js";
+import { writeSecretFile } from "./secret-file.js";
 
 // #176 auth profiles. A profile is a captured, Playwright-storageState-shaped
 // browser session bound to a name. It lets browser agents test *authenticated*
@@ -62,8 +63,8 @@ export function ensureAuthDir(): void {
 export function writeProfile(name: string, state: StorageState): string {
   ensureAuthDir();
   const path = profilePath(name);
-  writeFileSync(path, JSON.stringify(state, null, 2));
-  chmodSync(path, 0o600); // bearer credential — owner-only
+  // bearer credential — write 0600 atomically (no world-readable TOCTOU window).
+  writeSecretFile(path, JSON.stringify(state, null, 2));
   return path;
 }
 

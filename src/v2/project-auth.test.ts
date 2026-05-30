@@ -140,3 +140,20 @@ test("resolveProjectAuthForContainer: stages a mode-600 copy in the task dir", (
   // the staged copy is valid JSON (the reconciled state)
   JSON.parse(readFileSync(staged.hostPath, "utf8"));
 });
+
+test("produceStorageState: a timed-out login command → ProjectAuthError, NO command echoed (Findings 3+5)", () => {
+  const p: ProjectAuthProfile = { kind: "project-command", command: "secret-login --password=hunter2", storage_state: "s.json" };
+  const timingOut: AuthCommandRunner = () => ({ ok: false, code: -1, timedOut: true });
+  assert.throws(
+    () => produceStorageState(p, proj, { runner: timingOut }),
+    (e: Error) => /timed out/.test(e.message) && !e.message.includes("hunter2") && !e.message.includes("secret-login"),
+  );
+});
+
+test("produceStorageState: a failed command error never echoes the configured command (Finding 5)", () => {
+  const p: ProjectAuthProfile = { kind: "project-command", command: "login --token=SECRET123", storage_state: "s.json" };
+  assert.throws(
+    () => produceStorageState(p, proj, { runner: () => ({ ok: false, code: 3 }) }),
+    (e: Error) => /exit 3/.test(e.message) && !e.message.includes("SECRET123") && !e.message.includes("--token"),
+  );
+});

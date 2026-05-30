@@ -8,8 +8,9 @@
 // rewritten) origins for caller logging.
 
 import { join } from "node:path";
-import { writeFileSync, chmodSync, existsSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { profileStatus, readProfile, reconcileStateForContainer } from "../util/auth-profiles.js";
+import { writeSecretFile } from "../util/secret-file.js";
 
 // AWN-8: remove the staged mode-600 auth-state.json once a task is terminal — the
 // session token shouldn't linger on disk after the container is gone, and a
@@ -45,11 +46,10 @@ export function resolveAuthStateForContainer(profileName: string, taskDirPath: s
   if (!changed) {
     return { hostPath: status.path, origins, reconciled: false };
   }
-  // Stage the rewritten copy mode 600 so the bearer token isn't exposed by the
-  // task dir's 0777 perms.
+  // Stage the rewritten copy mode 600 (atomically — the task dir is 0777, so a
+  // non-atomic write would briefly expose the bearer token).
   const staged = join(taskDirPath, "auth-state.json");
-  writeFileSync(staged, JSON.stringify(state));
-  chmodSync(staged, 0o600);
+  writeSecretFile(staged, JSON.stringify(state));
   return { hostPath: staged, origins, reconciled: true };
 }
 
