@@ -19,7 +19,9 @@ import type { Workflow, Step } from "./schema.js";
 
 const FRAMING = `## Output contract
 
-Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}. For red agents, the role-specific output must match the Verdict schema (verdict, confidence, findings).`;
+Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}. For red agents, the role-specific output must match the Verdict schema (verdict, confidence, findings).
+
+Optionally, for long-running work, you MAY append progress records to /task/progress.jsonl — one JSON object per line — and forge will surface them on the run timeline. Shapes: {"type":"progress","message":"...","percent":0-100}, {"type":"artifact","kind":"screenshot","path":"/task/..."}, {"type":"decision","summary":"..."}. This is purely optional; never put secrets in it, and result.json is still the required deliverable.`;
 
 export type ComposeArgs = {
   role: string;

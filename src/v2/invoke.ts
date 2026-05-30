@@ -36,6 +36,7 @@ import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError } from "./auth-state.js";
 import { writeTaskManifest } from "./task-manifest.js";
+import { emitAgentProgressEvents } from "./agent-progress.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -289,6 +290,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   }
 
   logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode } });
+
+  // WALK-3: ingest any agent-written progress.jsonl into task.progress/artifact/
+  // decision events before the terminal event, so they slot into the timeline.
+  emitAgentProgressEvents(dir, runId, taskId);
 
   // Read result.json.
   const resultPath = join(dir, "result.json");

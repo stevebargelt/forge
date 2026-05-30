@@ -209,6 +209,7 @@ export function listPresentArtifacts(taskDirPath: string): string[] {
     "result.json",
     "container.stdout.log",
     "container.stderr.log",
+    "progress.jsonl",
   ];
   return known.filter((f) => {
     try {

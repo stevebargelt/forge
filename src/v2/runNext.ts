@@ -36,6 +36,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser } from "./auth-state.js";
 import { writeTaskManifest } from "./task-manifest.js";
+import { emitAgentProgressEvents } from "./agent-progress.js";
 import { loadRuntime, resolveModelForTask } from "./loader.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
@@ -957,6 +958,10 @@ async function runContainer(args: {
   }
 
   logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+
+  // WALK-3: ingest any agent-written progress.jsonl into events before the
+  // terminal event so they slot into the timeline.
+  emitAgentProgressEvents(dir, args.runId, args.taskId);
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
