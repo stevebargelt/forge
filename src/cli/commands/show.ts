@@ -130,6 +130,21 @@ export function tailLines(filePath: string, n: number): string[] {
   }
 }
 
+// The idle timeout the task actually ran under, recorded in its manifest at
+// dispatch. Falls back to undefined for pre-#202 manifests (or none), so the
+// caller can substitute the current default — but a recorded value is exact
+// even if the runtime YAML / env changed since the task ran.
+export function getManifestIdleTimeoutMs(taskDirPath: string): number | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const manifest = JSON.parse(raw) as { container?: { idleTimeoutMs?: unknown } };
+    const v = manifest.container?.idleTimeoutMs;
+    return typeof v === "number" ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function listPresentArtifacts(taskDirPath: string): string[] {
   try {
     const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
@@ -283,7 +298,9 @@ export function registerShow(program: Command): void {
         const elapsed = computeElapsed(task.startedAt, task.completedAt);
         const stdoutMtime = getLastOutputMtime(stdoutLog);
         const lastOutputAgo = stdoutMtime !== undefined ? formatTimeAgo(stdoutMtime) : "—";
-        const idleTimeoutMs = resolveIdleTimeoutMs();
+        const recordedIdleTimeoutMs = getManifestIdleTimeoutMs(tDir);
+        const idleTimeoutMs = recordedIdleTimeoutMs ?? resolveIdleTimeoutMs();
+        const idleTimeoutExact = recordedIdleTimeoutMs !== undefined;
         const resultStatus = classifyResultFile(resultJson);
         const artifacts = listPresentArtifacts(tDir);
         const nextCommand = deriveNextCommandForTask(task.status, failureKind, task.id);
@@ -302,6 +319,7 @@ export function registerShow(program: Command): void {
                   elapsed,
                   lastOutputAgo,
                   idleTimeoutMs,
+                  idleTimeoutExact,
                   resultStatus,
                   artifacts,
                   nextCommand,
@@ -328,7 +346,7 @@ export function registerShow(program: Command): void {
         console.log(`  container: forge-${task.id}`);
         console.log(`  elapsed:   ${elapsed}`);
         console.log(`  last output: ${lastOutputAgo}`);
-        console.log(`  idle timeout: ${formatDurationMs(idleTimeoutMs)}`);
+        console.log(`  idle timeout: ${formatDurationMs(idleTimeoutMs)}${idleTimeoutExact ? "" : " (current default — not recorded at dispatch)"}`);
         console.log(`  parent:    ${task.parentId ?? "(none)"}`);
         if (task.error) console.log(`  error:     ${task.error}`);
 

@@ -163,6 +163,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     createdAt: new Date().toISOString(),
   };
   insertTask(task);
+  // invoke is forge's main orchestrator primitive; its timelines must start at
+  // task.created, not task.started — matching the pipeline path (runNext).
+  logEvent("task.created", { runId, taskId });
 
   // Materialize the task dir.
   const dir = taskDir(runId, taskId);
@@ -215,11 +218,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     }
   }
 
+  // Resolve the effective idle timeout once, at dispatch, and record it in the
+  // manifest so forge show reports the value this task actually ran under.
+  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
+
   writeTaskManifest(dir, {
     taskId,
     runId,
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
-    container: { name: `forge-${taskId}` },
+    container: { name: `forge-${taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
   });
 
@@ -247,7 +254,6 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
-  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
   const containerName = `forge-${taskId}`;
   logEvent("container.started", { runId, taskId, payload: { containerName } });
   let exitCode: number;

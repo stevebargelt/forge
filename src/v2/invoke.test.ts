@@ -549,6 +549,26 @@ result:
 
 // ----- #194: lifecycle event backfill — container.* and auth.* -----
 
+test("invoke: emits task.created before task.started (timeline starts at creation)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do work",
+    projectDir: "/tmp/x",
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(r.status, "complete");
+
+  const types = eventsForTask(r.taskId).map((e) => e.eventType);
+  const createdIdx = types.indexOf("task.created");
+  const startedIdx = types.indexOf("task.started");
+  assert.ok(createdIdx >= 0, "invoke must emit task.created");
+  assert.ok(startedIdx >= 0, "invoke must emit task.started");
+  assert.ok(createdIdx < startedIdx, "task.created must precede task.started");
+});
+
 test("invoke: emits container.started then container.exited (exit 0) on success", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";

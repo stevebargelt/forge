@@ -38,6 +38,7 @@ export function performCancel(
     let runAbandoned = false;
     if (!opts.dryRun) {
       killFn(`forge-${task.id}`);
+      logEvent("container.killed", { runId: task.runId, taskId: task.id, payload: { containerName: `forge-${task.id}`, via: "forge cancel" } });
       failTask(task.id, { runId: task.runId, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
       logEvent("task.cancelled", { runId: task.runId, taskId: task.id, payload: { via: "forge cancel" } });
       const remaining = tasksForRun(task.runId).filter((t) => !isTerminal(t));
@@ -65,6 +66,7 @@ export function performCancel(
     if (!opts.dryRun) {
       for (const t of nonTerminal) {
         killFn(`forge-${t.id}`);
+        logEvent("container.killed", { runId: run.id, taskId: t.id, payload: { containerName: `forge-${t.id}`, via: "forge cancel" } });
         failTask(t.id, { runId: run.id, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
         logEvent("task.cancelled", { runId: run.id, taskId: t.id, payload: { via: "forge cancel" } });
       }

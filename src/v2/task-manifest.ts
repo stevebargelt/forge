@@ -11,7 +11,11 @@ export type TaskManifest = {
     stdout: "container.stdout.log";
     stderr: "container.stderr.log";
   };
-  container: { name: string };
+  // idleTimeoutMs is the EFFECTIVE timeout resolved at dispatch (from the
+  // task's runtime YAML / env at that moment), so forge show reports the value
+  // the task actually ran under — not whatever the current environment resolves
+  // to now. Optional: pre-#202 manifests omit it, and show falls back.
+  container: { name: string; idleTimeoutMs?: number };
   auth: { profileRequested: boolean; stateMounted: boolean };
 };
 

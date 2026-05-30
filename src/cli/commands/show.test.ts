@@ -16,6 +16,7 @@ import {
   computeElapsed,
   formatTimeAgo,
   tailLines,
+  getManifestIdleTimeoutMs,
   listPresentArtifacts,
   deriveNextCommandForTask,
   deriveNextCommandForRun,
@@ -397,6 +398,22 @@ test("tailLines: returns all lines if fewer than N", () => {
 
 test("tailLines: returns [] when file does not exist", () => {
   assert.deepEqual(tailLines(join(tmpDir, "nope.txt"), 5), []);
+});
+
+// ─── getManifestIdleTimeoutMs ────────────────────────────────────────────────
+
+test("getManifestIdleTimeoutMs: reads container.idleTimeoutMs from manifest.json", () => {
+  writeFileSync(join(tmpDir, "manifest.json"), JSON.stringify({ container: { name: "forge-x", idleTimeoutMs: 420000 } }));
+  assert.equal(getManifestIdleTimeoutMs(tmpDir), 420000);
+});
+
+test("getManifestIdleTimeoutMs: returns undefined for a pre-#202 manifest without the field", () => {
+  writeFileSync(join(tmpDir, "manifest.json"), JSON.stringify({ container: { name: "forge-x" } }));
+  assert.equal(getManifestIdleTimeoutMs(tmpDir), undefined);
+});
+
+test("getManifestIdleTimeoutMs: returns undefined when no manifest exists", () => {
+  assert.equal(getManifestIdleTimeoutMs(join(tmpDir, "no-such-dir")), undefined);
 });
 
 test("tailLines: returns the correct last N lines from a file larger than the read bound", () => {

@@ -5,6 +5,7 @@ import { makeInMemoryDb, setDbForTest, getDb } from "../../store/db.js";
 import { insertRun, getRun } from "../../store/runs.js";
 import { insertTask, getTask } from "../../store/tasks.js";
 import { performCancel } from "./cancel.js";
+import { eventsForTask } from "../../store/events.js";
 import type { Run, Task } from "../../types/index.js";
 
 let db: DatabaseInstance;
@@ -56,6 +57,27 @@ test("cancel task: killContainer called with forge-<taskId>", () => {
   const killed: string[] = [];
   performCancel("task-abc", {}, (name) => killed.push(name));
   assert.deepEqual(killed, ["forge-task-abc"]);
+});
+
+// (1b) container.killed lifecycle event emitted on a real kill, before task.cancelled
+test("cancel task: emits container.killed (with containerName) before task.cancelled", () => {
+  insertTask(makeTask({ id: "task-killed", status: "running" }));
+  performCancel("task-killed", {}, () => {});
+  const types = eventsForTask("task-killed").map((e) => e.eventType);
+  const killedIdx = types.indexOf("container.killed");
+  const cancelledIdx = types.indexOf("task.cancelled");
+  assert.ok(killedIdx >= 0, "must emit container.killed");
+  assert.ok(cancelledIdx >= 0, "must emit task.cancelled");
+  assert.ok(killedIdx < cancelledIdx, "container.killed must precede task.cancelled");
+  const killedEv = eventsForTask("task-killed").find((e) => e.eventType === "container.killed")!;
+  assert.equal((killedEv.payload as Record<string, unknown>).containerName, "forge-task-killed");
+});
+
+test("cancel task: --dry-run emits no container.killed", () => {
+  insertTask(makeTask({ id: "task-killdry", status: "running" }));
+  performCancel("task-killdry", { dryRun: true }, () => {});
+  const types = eventsForTask("task-killdry").map((e) => e.eventType);
+  assert.ok(!types.includes("container.killed"), "dry-run must not emit container.killed");
 });
 
 // (2) non-terminal task -> failed

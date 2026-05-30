@@ -891,11 +891,15 @@ async function runContainer(args: {
     }
   }
 
+  // Resolve the effective idle timeout once, at dispatch, and record it in the
+  // manifest so forge show reports the value this task actually ran under.
+  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
+
   writeTaskManifest(dir, {
     taskId: args.taskId,
     runId: args.runId,
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
-    container: { name: `forge-${args.taskId}` },
+    container: { name: `forge-${args.taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
   });
 
@@ -922,7 +926,6 @@ async function runContainer(args: {
 
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
-  const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
   const containerName = `forge-${args.taskId}`;
   logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
   let exitCode: number;

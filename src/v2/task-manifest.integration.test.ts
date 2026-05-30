@@ -172,6 +172,9 @@ test("integ manifest dispatch: invoke writes manifest.json with full correct sha
   }, "files map must enumerate all five known artifacts with correct filenames");
   assert.equal(manifest.container.name, `forge-${r.taskId}`,
     "container.name must be forge-<taskId>");
+  assert.equal(typeof manifest.container.idleTimeoutMs, "number",
+    "container.idleTimeoutMs must record the effective timeout this task ran under");
+  assert.ok(manifest.container.idleTimeoutMs! > 0, "idleTimeoutMs must be positive");
   assert.equal(typeof manifest.auth.profileRequested, "boolean");
   assert.equal(typeof manifest.auth.stateMounted, "boolean");
 
