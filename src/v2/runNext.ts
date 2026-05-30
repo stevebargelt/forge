@@ -28,6 +28,7 @@ import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { validateVerdict } from "./validate-findings.js";
+import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
@@ -440,29 +441,39 @@ async function dispatchReds(args: {
     // citations get dropped; a fail with 100% dropped findings downgrades
     // to inconclusive. Returns a new verdict; original r.verdict untouched.
     const { validated, dropped } = validateVerdict(r.verdict, args.projectDir);
-    if (dropped.length > 0) {
+    // AWN-5: after citation validation, GRADE the surviving findings — reject the
+    // malformed (no summary) and downgrade severity on unsupported-but-confident
+    // ones (no evidence, no anchor, weak confidence). This enforces the review-
+    // quality protocol, not just surfaces it.
+    const { graded, rejected } = gradeFindings(validated.findings);
+    const gradedFindings = graded.map((g) => g.finding);
+    const downgradedCount = graded.filter((g) => g.downgraded).length;
+    const finalVerdict: Verdict = { ...validated, findings: gradedFindings };
+    if (dropped.length > 0 || rejected.length > 0 || downgradedCount > 0) {
       logEvent("verdict.findings_dropped", {
         runId: args.runId,
         taskId: args.primaryTaskId,
         payload: {
           redRole: r.red.agent,
           originalVerdict: r.verdict.verdict,
-          finalVerdict: validated.verdict,
+          finalVerdict: finalVerdict.verdict,
           droppedCount: dropped.length,
           droppedReasons: dropped.map((d) => d.reason),
+          rejectedCount: rejected.length,        // AWN-5 malformed
+          downgradedCount,                       // AWN-5 weak-evidence severity downgrades
         },
       });
     }
-    verdicts.push(validated);
+    verdicts.push(finalVerdict);
     insertVerdict({
       id: newVerdictId(),
       taskId: args.primaryTaskId,
       redTaskId: r.redTaskId,
       redRole: r.red.agent,
-      verdict: validated.verdict,
-      confidence: validated.confidence,
+      verdict: finalVerdict.verdict,
+      confidence: finalVerdict.confidence,
       authority: r.red.authority as RedAuthority,
-      findings: validated.findings,
+      findings: finalVerdict.findings,
       createdAt: nowIso(),
     });
     logEvent("verdict.received", {
