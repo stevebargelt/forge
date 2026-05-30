@@ -3,6 +3,7 @@ import { gate, batchGate } from "../../v2/gate.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getTask } from "../../store/tasks.js";
 import { getRun } from "../../store/runs.js";
+import { withRunLock, RunBusyError } from "../../util/run-lock.js";
 
 export function registerGate(program: Command): void {
   program
@@ -18,10 +19,28 @@ export function registerGate(program: Command): void {
       if (decision !== "advance" && decision !== "reject" && decision !== "request-changes") {
         throw new Error(`Decision must be advance | reject | request-changes (got '${decision}')`);
       }
+      const dec = decision; // narrowed to GateDecision; preserved into the closure
       ensureForgeDirs();
 
+      // AWN-2: serialize the gate mutation per run so it can't race a concurrent
+      // gate/next on the same run. --all → the id is the run; single → the
+      // task's run.
+      const lockRunId = options.all ? id : getTask(id)?.runId;
+      try {
+        await withRunLock(lockRunId ?? id, "gate", () => runGate());
+      } catch (e) {
+        if (e instanceof RunBusyError) {
+          console.error(`forge gate: ${e.message}`);
+          console.error(`Another forge command is mutating this run. Wait for it to finish.`);
+          process.exitCode = 1;
+          return;
+        }
+        throw e;
+      }
+
+      async function runGate() {
       if (options.all) {
-        const r = await batchGate(id, decision, options.rationale, {
+        const r = await batchGate(id, dec, options.rationale, {
           decidedBy: options.decidedBy,
         });
         if (r.skippedBlocked.length > 0) {
@@ -59,7 +78,7 @@ export function registerGate(program: Command): void {
         );
       }
 
-      const result = await gate(id, decision, options.rationale, {
+      const result = await gate(id, dec, options.rationale, {
         force: options.force,
         decidedBy: options.decidedBy,
       });
@@ -76,5 +95,6 @@ export function registerGate(program: Command): void {
       } else {
         console.log(`\nNext:\n  forge next ${result.task.runId}`);
       }
+      } // end runGate
     });
 }

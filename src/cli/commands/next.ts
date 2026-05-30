@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { getRun, setRunProjectDir } from "../../store/runs.js";
 import { reconcileRun } from "../../v2/reconcile.js";
+import { withRunLock, RunBusyError } from "../../util/run-lock.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { runNext } from "../../v2/runNext.js";
@@ -16,49 +17,64 @@ export function registerNext(program: Command): void {
       ensureForgeDirs();
       validateCredsForNewRun();
 
-      // AWN-1: reconcile crash/Docker state before dispatching, so a stuck
-      // "running" task (container gone) is finalized rather than blocking next.
-      reconcileRun(runId);
+      // AWN-2: serialize dispatch per run — a second concurrent `forge next` on
+      // the same run must not double-dispatch it. The lock is held across the
+      // whole wave (reconcile + spawn); a dead/stuck holder is stolen.
+      try {
+        await withRunLock(runId, "next", async () => {
+          // AWN-1: reconcile crash/Docker state before dispatching, so a stuck
+          // "running" task (container gone) is finalized rather than blocking next.
+          reconcileRun(runId);
 
-      const run = getRun(runId);
-      if (!run) throw new Error(`Run not found: ${runId}`);
+          const run = getRun(runId);
+          if (!run) throw new Error(`Run not found: ${runId}`);
 
-      if (run.status === "abandoned" || run.status === "complete") {
-        console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);
-        return;
-      }
+          if (run.status === "abandoned" || run.status === "complete") {
+            console.log(`Run ${runId} is ${run.status} — cannot dispatch.`);
+            return;
+          }
 
-      const projectDir = resolveProjectDir(runId, options.project as string | undefined);
+          const projectDir = resolveProjectDir(runId, options.project as string | undefined);
 
-      const workflow = loadWorkflow(run.workflow, { projectDir });
-      const result = await runNext({ runId, workflow });
+          const workflow = loadWorkflow(run.workflow, { projectDir });
+          const result = await runNext({ runId, workflow });
 
-      if (result.dispatchedSteps.length === 0) {
-        console.log(`Run ${runId}: nothing ready to dispatch.`);
-        if (result.runStatus === "complete") {
-          console.log(`Run is complete.`);
-        } else {
-          console.log(`Status: ${result.runStatus}.`);
-          console.log(`Use 'forge status ${runId}' to see what's blocked.`);
+          if (result.dispatchedSteps.length === 0) {
+            console.log(`Run ${runId}: nothing ready to dispatch.`);
+            if (result.runStatus === "complete") {
+              console.log(`Run is complete.`);
+            } else {
+              console.log(`Status: ${result.runStatus}.`);
+              console.log(`Use 'forge status ${runId}' to see what's blocked.`);
+            }
+            return;
+          }
+
+          console.log(`Run ${runId}: wave dispatched.`);
+          if (result.completedSteps.length > 0) {
+            console.log(`  ✓ completed: ${result.completedSteps.join(", ")}`);
+          }
+          if (result.awaitingGate.length > 0) {
+            console.log(`  ⚠ awaiting gate: ${result.awaitingGate.join(", ")}`);
+          }
+          if (result.failedSteps.length > 0) {
+            console.log(`  ✗ failed: ${result.failedSteps.join(", ")}`);
+          }
+          if (result.runStatus === "complete") {
+            console.log(`\nRun complete.`);
+          } else {
+            console.log(`\nStatus: ${result.runStatus}.`);
+            console.log(`Next:\n  forge next ${runId}`);
+          }
+        });
+      } catch (e) {
+        if (e instanceof RunBusyError) {
+          console.error(`forge next: ${e.message}`);
+          console.error(`Another forge command is advancing this run. Wait for it, or 'forge cancel ${runId}' to stop it.`);
+          process.exitCode = 1;
+          return;
         }
-        return;
-      }
-
-      console.log(`Run ${runId}: wave dispatched.`);
-      if (result.completedSteps.length > 0) {
-        console.log(`  ✓ completed: ${result.completedSteps.join(", ")}`);
-      }
-      if (result.awaitingGate.length > 0) {
-        console.log(`  ⚠ awaiting gate: ${result.awaitingGate.join(", ")}`);
-      }
-      if (result.failedSteps.length > 0) {
-        console.log(`  ✗ failed: ${result.failedSteps.join(", ")}`);
-      }
-      if (result.runStatus === "complete") {
-        console.log(`\nRun complete.`);
-      } else {
-        console.log(`\nStatus: ${result.runStatus}.`);
-        console.log(`Next:\n  forge next ${runId}`);
+        throw e;
       }
     });
 }
