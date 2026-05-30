@@ -5,34 +5,28 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-29 (late).**
+**Last session ended 2026-05-29 (night). Observability WALK milestone COMPLETE.**
 
-**Where we left off:** Shipped #186 (forge cancel verb + authoritative-cancel review fixes) then the ENTIRE Crawl observability milestone (#193-197) — the events table went from write-only to a full diagnostic surface, all live-proven. Also discovered + cleaned a DB-pollution incident (mine) and corrected a notification misread.
+**Where we left off:** Shipped #199 + #201, closed the Crawl follow-up gaps, then the ENTIRE Observability WALK milestone (#204–208, all closed). 719 forge tests + 7 dashboard tests green; zero DB pollution throughout. 28 commits this session, all local/unpushed on main.
 
-**Crawl observability milestone — COMPLETE (#193-197, all closed):**
-- #193 events-read: eventsForTask/eventsForRun + forge show timeline (the keystone — events were write-only before this).
-- #194 events-backfill: run.abandoned, task.awaiting_gate, container.*, auth.profile_* emitted; dead task.idle_timeout/task.crashed enums removed. Container events emit from callers (invoke.ts/runNext.ts), never docker-exec.ts.
-- #195 failure_kind: central classifier (src/v2/failure-kind.ts) + failTask wrapper; routed all 23 markTaskFailed sites (+2 fanout paths); fixed that only 1/24 failures emitted task.failed before. Event-payload, NOT a tasks column (deferred to metrics layer).
-- #196 show-detail: forge show <run|task> grew into the diagnostic view (failure_kind, container, elapsed, last-output, result-file classification, blockers, failed-by-kind, next-command). 11 pure helpers.
-- #197 manifest: manifest.json written per task dir on dispatch; auth block is booleans-only (profileRequested/stateMounted, NO secrets); forge show reads it with fallback.
-675 tests green. Crawl ADR-worthy decisions held: read-first sequencing, failure_kind as event payload, grow show (no forge inspect), container events from callers.
+**Observability WALK — COMPLETE (#204–208, all closed):**
+- #204 WALK-1 live-task-activity: computeIdleCountdown/formatIdleCountdown + liveIdleCountdownForTask (show.ts, pure+tested). forge show <task> and forge status show "idle Xs / timeout Ym (Zs left)" for RUNNING tasks. Built on Crawl's getManifestIdleTimeoutMs.
+- #205 WALK-2 watch-activity: forge watch --json now emits task_activity (on stdout mtime advance), task_idle_warning (idle budget crossed), failureKind on failure transitions, and runId+spanKind (run|task|red-review) trace-shape on every event. Refactored emitDiff→pure diffEvents (exported + tested). New watch.test.ts.
+- #206 WALK-3 agent-progress: agents MAY write /task/progress.jsonl → forge ingests into NEW task.progress/artifact/decision events after container.exited (both invoke + runNext). DESIGN: doc said "stdout" but container stdout is pure claude stream-json (exec claude --output-format stream-json), so a task-dir file is the runtime-agnostic channel. Defensive parser (src/v2/agent-progress.ts). Optional contract added to compose.ts framing.
+- #207 WALK-4 rich-notifications: run-completion notifications now carry failure_kind + "→ forge show <taskId>" (a run flips complete even when a task failed). Consolidated the failure_kind scan into the neutral failure-kind module (failureKindFromEvents/failureKindForTask) as single source of truth; show.ts re-exports it (stable for watch+tests). notify no longer reaches into a CLI command file.
+- #208 WALK-5 dashboard-activity: dashboard taskDetail returns events timeline + failureKind + idle; client renders the timeline (timestamp · type badge · payload), a failure_kind badge, and a 'live' idle panel that polls 3s while running. Verified via browser-tools (Timeline renders on a real completed task; no live panel on terminal — idle null). Logic inlined in dashboard/src/queries.ts to keep its read-only path self-contained.
+
+**Also shipped this session (pre-WALK):** #199 (forge-test always loads test-setup.ts — confirmed it WAS polluting the real DB), #201 (derived run status: attached invoke reactivates terminal run + closes only when no top-level task in flight; supersedes #157), 3 Crawl event-stream gaps (primary task.created/completed, stale failure_kind→newest-first, bounded 64KB tail), 3 review findings (invoke task.created, cancel container.killed, recorded idle timeout in manifest), dead-enum removal (task.submitted — full EventType audit, every member now has a real emission path), fanout defensive failures routed through failTask (completedAt + classified kind + task.created).
+
+**Event vocabulary changes:** ADDED run.reactivated, container.killed (now emitted), task.progress/artifact/decision. REMOVED task.submitted (dead). Invariant held: no EventType exists only in the union — each has a real emission path. task.failed failure_kind stays event-payload (NOT a column).
 
 **Picked up next (priority):**
-1. **Observability WALK stage** — the documented next phase in docs/observability.md (live task activity in status/watch, structured agent progress events, trace shape, better notifications w/ failure_kind). Walk tickets are listed in the doc but NOT yet filed as #-tickets.
-2. **#199** forge-test drops --import ./src/test-setup.ts for file-specific args → SQLITE_ERROR + (worse) can write to the real DB. ROOT CAUSE of the pollution incident below. Higher value than it looks.
-3. **#201** forge invoke --run <terminal-run> attaches a running task but leaves run status complete → live task HIDDEN in dashboard (confused the user 2-3x this session). Sibling to #185/#186 run-status correctness. Workaround in use: give each invoke its own run.
-4. **#200** forge show stdout/stderr tail dumps raw stream-json blobs — extract text deltas (cosmetic).
-5. **OPEN DECISION (user undecided):** the getDb() test-isolation guard — make getDb() REFUSE the real ~/.forge/forge.db in a test context so a bare tsx --test can never pollute. User said "not sure yet." Not filed.
+1. **OPEN DECISION — #203 orchestrator-done notifications.** User wants a ntfy when the orchestrator finishes forge-on-forge work (no run transition fires), but NOT during back-and-forth chat. The GATE is undecided: turn-duration vs commit-landed vs orchestrator-decides. Channel = ntfy (live; NTFY_URL set, FORGE_NOTIFY=ntfy). Twilio NOT configured. Full design in #203 body. INTERIM: orchestrator now ntfys on blocker/decision/batch-landed via `curl $NTFY_URL` (memory feedback_ntfy_when_needed). Decide the gate before building.
+2. **Observability RUN stage** — docs/observability.md §Run lists 5 tickets (runs query, metrics, dashboard ops, bundle, otel), NOT yet filed as #-tickets. The trace-shape groundwork (spanKind) landed in WALK-2; otel export is the natural capstone.
+3. **#200** forge show stdout/stderr tail still dumps raw stream-json blobs (cosmetic; bounded-read landed, text-extraction did not). Saw it live during WALK-5 verification.
+4. Older active: #106 provider abstraction (needs arch), #112 transactional dispatch, #167 awaiting_human_input ~60% wired, #173/#185 reaper/idle-watchdog.
 
-**DB pollution incident (resolved):** I ran `npx tsx --test src/v2/runNext.test.ts` bare (no --import test-setup.ts) ~4x while debugging → wrote 58 /tmp/test-project fixture runs (112 tasks, 262 events, 20 verdicts) into the REAL ~/.forge/forge.db. Backed up to ~/.forge/forge.db.bak-20260529-pretestcleanup, then scoped-DELETE'd (project_dir='/tmp/test-project'). 189→131 runs. Saved memory: never bare tsx --test; use npm test. After ANY host test run, check `sqlite3 ~/.forge/forge.db "SELECT COUNT(*) FROM runs WHERE project_dir='/tmp/test-project'"` is 0.
-
-**Notification correction:** I misread a neutral "I got pings" as a noise complaint and wrongly suppressed real run notifications. Real forge invoke/new completions SHOULD notify (human is away, ping is the signal). Closed mis-scoped #192, refiled #198 = NO_NOTIFY kill-switch scoped ONLY to forge's own test suite (test-setup.ts generalization of #175). Saved memory. Do NOT quiet real runs.
-
-**Tickets filed this session:** #191 (broken runNext.test.ts test-1 fixture, path.join undefined), #198 (NO_NOTIFY test kill-switch), #199 (forge-test test-setup import), #200 (show stdout-tail polish), #201 (invoke --run reactivate). Closed: #186, #193, #194, #195, #196, #197. Superseded: #192.
-
-**Shipped commits (all local, unpushed):** #186 (cancel verb eddd553 + fixes 4786963), observability doc 00de273, #193 fd50001, #194 de6758f, #195 b6301b5, #196 042dc60, #197 1ef77fa, plus backlog/notify-correction commits. ~18 commits this session, all on main.
-
-**Decisions worth not relitigating:** failure_kind = event payload not column (zero users, defer schema). Grow forge show, never add forge inspect. Container events from callers not docker-exec. Real runs notify; only test suite silenced. Never bare tsx --test on host. Auth-event/manifest payloads = booleans + safe error text only, never credentials/paths.
+**Decisions worth not relitigating:** progress channel = task-dir file not stdout (stream-json blocks raw lines). failure_kind scan single-sourced in failure-kind.ts. Dashboard stays read-only + self-contained (inline logic, no cross-workspace write imports). Derived run status supersedes #157. ntfy only when needed, never per-turn. Never bare tsx --test on host. No AI attribution in git/GitHub.
 
 ## Active
 
@@ -561,7 +555,11 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
+## Done (recent)
+
 ### #208 — WALK-5 dashboard-activity: add task timeline + live activity panel to the dashboard
+**Closed:** 2026-05-30. Commit `b93a6cb`.
+
 Observability WALK stage, §1 dashboard surface (docs/observability.md:325, 403).
 
 Bring the Crawl/WALK observability data into the web dashboard (the CLI surfaces
@@ -586,8 +584,6 @@ Acceptance:
 - Running tasks show a live idle countdown that updates.
 - Verified via browser-tools screenshots.
 
-
-## Done (recent)
 
 ### #207 — WALK-4 rich-notifications: run-transition notifications carry failure_kind + a forge show next-command
 **Closed:** 2026-05-30. Commit `26c75db`.
