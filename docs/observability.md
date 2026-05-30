@@ -16,12 +16,14 @@ This roadmap turns observability into crawl, walk, and run stages. The emphasis
 is practical: build on Forge's existing SQLite store, event log, task directory,
 and Docker executor before introducing heavier tracing infrastructure.
 
-> **Status:** Crawl and Walk have shipped. The events table is readable
+> **Status:** Crawl, Walk, and Run have all shipped. The events table is readable
 > (`eventsForTask`/`eventsForRun`), `forge show` is the diagnostic detail view,
 > failure kinds are classified, `forge status`/`watch` and the dashboard surface
-> live task activity, and agents can emit optional progress records. The
+> live task activity, agents can emit optional progress records, and the Run stage
+> adds `forge runs query`, `forge metrics`, the dashboard ops view, `forge bundle`
+> (sanitized debug archive), and `forge export` (JSONL / OTLP trace export). The
 > "Current State" section below is the original pre-Crawl motivation, kept for
-> context; the Run stage is the remaining work.
+> historical context.
 
 ## Goals
 

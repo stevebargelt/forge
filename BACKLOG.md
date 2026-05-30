@@ -5,28 +5,30 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-29 (night). Observability WALK milestone COMPLETE.**
+**Last session ended 2026-05-30 (overnight, autonomous). Observability RUN milestone COMPLETE — the entire Crawl→Walk→Run roadmap is shipped.**
 
-**Where we left off:** Shipped #199 + #201, closed the Crawl follow-up gaps, then the ENTIRE Observability WALK milestone (#204–208, all closed). 719 forge tests + 7 dashboard tests green; zero DB pollution throughout. 28 commits this session, all local/unpushed on main.
+**Where we left off:** Worked autonomously through the night per the user's request ("get as far as you can"). Closed all 5 WALK review findings, then filed + shipped the ENTIRE Observability RUN milestone (#209–213, all closed). 745 forge tests + 12 dashboard tests green; zero DB pollution throughout. ~16 commits this stretch; ~39 commits ahead of origin total, all local/unpushed on main.
 
-**Observability WALK — COMPLETE (#204–208, all closed):**
-- #204 WALK-1 live-task-activity: computeIdleCountdown/formatIdleCountdown + liveIdleCountdownForTask (show.ts, pure+tested). forge show <task> and forge status show "idle Xs / timeout Ym (Zs left)" for RUNNING tasks. Built on Crawl's getManifestIdleTimeoutMs.
-- #205 WALK-2 watch-activity: forge watch --json now emits task_activity (on stdout mtime advance), task_idle_warning (idle budget crossed), failureKind on failure transitions, and runId+spanKind (run|task|red-review) trace-shape on every event. Refactored emitDiff→pure diffEvents (exported + tested). New watch.test.ts.
-- #206 WALK-3 agent-progress: agents MAY write /task/progress.jsonl → forge ingests into NEW task.progress/artifact/decision events after container.exited (both invoke + runNext). DESIGN: doc said "stdout" but container stdout is pure claude stream-json (exec claude --output-format stream-json), so a task-dir file is the runtime-agnostic channel. Defensive parser (src/v2/agent-progress.ts). Optional contract added to compose.ts framing.
-- #207 WALK-4 rich-notifications: run-completion notifications now carry failure_kind + "→ forge show <taskId>" (a run flips complete even when a task failed). Consolidated the failure_kind scan into the neutral failure-kind module (failureKindFromEvents/failureKindForTask) as single source of truth; show.ts re-exports it (stable for watch+tests). notify no longer reaches into a CLI command file.
-- #208 WALK-5 dashboard-activity: dashboard taskDetail returns events timeline + failureKind + idle; client renders the timeline (timestamp · type badge · payload), a failure_kind badge, and a 'live' idle panel that polls 3s while running. Verified via browser-tools (Timeline renders on a real completed task; no live panel on terminal — idle null). Logic inlined in dashboard/src/queries.ts to keep its read-only path self-contained.
+**Observability RUN — COMPLETE (#209–213, all closed):**
+- #209 RUN-1 runs-query: `forge runs query` — filter historical runs by --status/--failure-kind/--project/--workflow/--since, --json. src/v2/runs-query.ts (in-process; failure_kind scans events via failureKindForTask). Shares runMatchesFilters.
+- #210 RUN-2 metrics: `forge metrics` — success rate, failure-kind histogram, median task duration by --by workflow|phase|role, operational counts (idle kills/cancels/retries/red blocks). src/v2/metrics.ts. Distinct from forge usage (token/cost).
+- #211 RUN-3 ops-dashboard: dashboard 'ops' tab (stat cards + failure-kind bar chart + median durations). opsMetrics inlined in dashboard/src/queries.ts — verified /api/ops returns IDENTICAL numbers to `forge metrics --json` (no drift). Browser-tools verified.
+- #212 RUN-4 bundle: `forge bundle <run-id>` — sanitized debug archive (--out/--include-prompts/--tar/--json). SECURITY: ALLOWLIST not denylist — auth-state.json (mode-0600 bearer token) is never copied; security test seeds a secret token and asserts it leaks into NO bundled file. Logs bounded to 256KB tails. src/v2/bundle.ts + usageForTask accessor.
+- #213 RUN-5 otel: `forge export --run <id> --format jsonl|otel`. JSONL = one event/line. OTLP/JSON = run root span + task child spans sharing one trace, lifecycle events as span events; deterministic 16-byte trace/8-byte span ids, BigInt unix-nanos, failed→ERROR status. src/v2/export.ts. No OTel SDK dep.
 
-**Also shipped this session (pre-WALK):** #199 (forge-test always loads test-setup.ts — confirmed it WAS polluting the real DB), #201 (derived run status: attached invoke reactivates terminal run + closes only when no top-level task in flight; supersedes #157), 3 Crawl event-stream gaps (primary task.created/completed, stale failure_kind→newest-first, bounded 64KB tail), 3 review findings (invoke task.created, cancel container.killed, recorded idle timeout in manifest), dead-enum removal (task.submitted — full EventType audit, every member now has a real emission path), fanout defensive failures routed through failTask (completedAt + classified kind + task.created).
+**Pre-RUN this session (WALK review findings, all fixed):** idle countdown measures from spawn when no stdout (hung agents now expire, not full-budget-forever) across show/status/watch/dashboard; dashboard reads bounded 64KB log tails on poll (not full files); progress.jsonl ingested on idle-timeout + crash paths (not just normal exit); docs refreshed (observability.md + concepts.md — task.crashed removed).
 
-**Event vocabulary changes:** ADDED run.reactivated, container.killed (now emitted), task.progress/artifact/decision. REMOVED task.submitted (dead). Invariant held: no EventType exists only in the union — each has a real emission path. task.failed failure_kind stays event-payload (NOT a column).
+**Roadmap status:** docs/observability.md Status banner updated — Crawl + Walk + Run ALL shipped. New CLI surface: forge runs query, forge metrics, forge bundle, forge export. New dashboard 'ops' tab. Run-stage §"Optional External Export" OTLP path landed via forge export.
+
+**Event vocabulary (cumulative this multi-session arc):** ADDED run.reactivated, container.killed (emitted), task.progress/artifact/decision. REMOVED task.submitted. Invariant holds: every EventType has a real emission path. failure_kind stays event-payload, not a column.
 
 **Picked up next (priority):**
-1. **OPEN DECISION — #203 orchestrator-done notifications.** User wants a ntfy when the orchestrator finishes forge-on-forge work (no run transition fires), but NOT during back-and-forth chat. The GATE is undecided: turn-duration vs commit-landed vs orchestrator-decides. Channel = ntfy (live; NTFY_URL set, FORGE_NOTIFY=ntfy). Twilio NOT configured. Full design in #203 body. INTERIM: orchestrator now ntfys on blocker/decision/batch-landed via `curl $NTFY_URL` (memory feedback_ntfy_when_needed). Decide the gate before building.
-2. **Observability RUN stage** — docs/observability.md §Run lists 5 tickets (runs query, metrics, dashboard ops, bundle, otel), NOT yet filed as #-tickets. The trace-shape groundwork (spanKind) landed in WALK-2; otel export is the natural capstone.
-3. **#200** forge show stdout/stderr tail still dumps raw stream-json blobs (cosmetic; bounded-read landed, text-extraction did not). Saw it live during WALK-5 verification.
-4. Older active: #106 provider abstraction (needs arch), #112 transactional dispatch, #167 awaiting_human_input ~60% wired, #173/#185 reaper/idle-watchdog.
+1. **OPEN DECISION — #203 orchestrator-done notifications.** Still undecided: the GATE (turn-duration vs commit-landed vs orchestrator-decides). Channel = ntfy (live). Twilio NOT configured. INTERIM: orchestrator ntfys on blocker/decision/batch-landed via curl $NTFY_URL (memory feedback_ntfy_when_needed). This is the main open thread — needs the user's call before building.
+2. **#200** forge show stdout/stderr tail still dumps raw stream-json blobs (cosmetic; the bounded-read landed, text-extraction did not). Now that #200 is the only observability-adjacent loose end, consider it.
+3. **#141** SQL schema single-source-of-truth — relevant if failure_kind ever gets promoted to a column (deferred; metrics/runs-query work all stayed event-payload).
+4. Older active: #106 provider abstraction (needs arch), #112 transactional dispatch, #167 awaiting_human_input ~60% wired, #173/#185 reaper.
 
-**Decisions worth not relitigating:** progress channel = task-dir file not stdout (stream-json blocks raw lines). failure_kind scan single-sourced in failure-kind.ts. Dashboard stays read-only + self-contained (inline logic, no cross-workspace write imports). Derived run status supersedes #157. ntfy only when needed, never per-turn. Never bare tsx --test on host. No AI attribution in git/GitHub.
+**Decisions worth not relitigating:** bundle = allowlist (never denylist) for sanitization. opsMetrics inlined in dashboard but kept numerically identical to metrics.ts (verified, no drift). export is a path not a source of truth (no OTel SDK dep). runs-query/metrics are in-process scans (failure_kind isn't a column). progress channel = task-dir file not stdout. Derived run status supersedes #157. ntfy only when needed, never per-turn. Never bare tsx --test on host. No AI attribution in git/GitHub.
 
 ## Active
 
@@ -555,15 +557,17 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
+## Done (recent)
+
 ### #211 — RUN-3 ops-dashboard: dashboard operations summary views (success rate, failure-kind mix, durations)
+**Closed:** 2026-05-30. Commit `9554c86`.
+
 Observability RUN stage §3 dashboard surface (docs/observability.md). Bring RUN-2 metrics into the web dashboard as an operations summary view (sibling to the existing usage view).
 - Run success rate, failure-kind mix, median durations by workflow/phase, cancel/retry/red-block counts.
 - Reuse the dashboard's read-only query layer (dashboard/src/queries.ts); inline aggregation to keep it self-contained.
 - New nav tab or section alongside activity/projects/usage. Verify with browser-tools (screenshot + inspect).
 Depends on RUN-2 (#metrics) for the aggregation shape. Lower priority than the CLI surfaces.
 
-
-## Done (recent)
 
 ### #213 — RUN-5 otel: optional OpenTelemetry/JSONL trace export from forge events
 **Closed:** 2026-05-30. Commit `92fa722`.
