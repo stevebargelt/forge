@@ -45,9 +45,14 @@ else
 fi
 
 # Forward all arguments to the test runner. Default to `npm test` when
-# called with no args; otherwise pass straight through to tsx --test.
+# called with no args; otherwise run the given files directly. EITHER path
+# MUST load src/test-setup.ts via --import: it points FORGE_HOME at a temp
+# dir (isolating the real ~/.forge/forge.db) and clears FORGE_NOTIFY (so the
+# suite never fires real notifications). Omitting it on the file-args path
+# both produced false SQLITE_ERRORs (schema never set up) AND let test runs
+# write to the live DB / fire real pings (#199).
 if [[ $# -eq 0 ]]; then
   exec npm test
 else
-  exec npx tsx --test "$@"
+  exec node --import tsx --import ./src/test-setup.ts --test "$@"
 fi
