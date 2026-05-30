@@ -537,16 +537,6 @@ Provenance: forge red panel + independent external review + in-use refresh-token
 
 ### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
 
-### #197 — Crawl 5 — manifest: write task manifest.json indexing artifacts
-Crawl milestone, step 5 of 5 (docs/observability.md, Crawl §5). Independent of Crawl 1-4 — can be built in parallel; consumed by Crawl 4's artifact-manifest line.
-
-Each task directory gets a small manifest.json indexing known artifacts: taskId, runId, files map (prompt=CLAUDE.md, package=package.md, result=result.json, stdout/stderr logs), container.name, and an auth block describing whether a profile was REQUESTED and whether state was MOUNTED.
-
-**Secrets discipline:** the manifest describes whether sensitive capabilities were mounted — NOT where bearer credentials live. No token paths, no auth-state contents. Consistent with the #176 rule (credential never in prompts/logs/project-mount; this is the same principle for the manifest).
-
-**Acceptance:** every task dir gets a manifest.json on dispatch; no secret paths in it; forge show (Crawl 4) reads it for the artifact list.
-
-
 ### #198 — NO_NOTIFY kill-switch so forge's own test suite doesn't fire real notifications
 A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the top of the notify dispatch path (src/notify/trigger.ts isAnyProviderEnabled / dispatch) that short-circuits ALL providers (ntfy + Twilio) regardless of FORGE_NOTIFY / NTFY_URL config.
 
@@ -567,7 +557,35 @@ Consequences when an agent/human runs `forge-test <specific-file>`:
 Fix: make forge-test ALWAYS pass `--import ./src/test-setup.ts` regardless of whether file args are present. Relates to #178 (forge-test node:test vs Jest) — same wrapper.
 
 
+### #200 — forge show: stdout/stderr tail dumps raw stream-json blobs — extract text deltas instead
+#196's forge show task view tails the last ~5 lines of container.stdout.log. For Claude agent containers the log is stream-json — each 'line' is a huge JSON object, so the 'Last stdout' block renders 5 giant unreadable blobs instead of useful recent activity.
+
+Polish: when the log looks like Claude stream-json (JSONL with type fields), extract the human-readable text — the assistant text deltas / the final result.result string — and show that as the tail, capped to a sane width/line count. Fall back to raw tail for non-JSON logs (plain CLI/test output). Keep it in show.ts's tailLines/last-output rendering. Pure-function-friendly so it stays unit-testable like the other #196 helpers. Low priority — cosmetic, not blocking.
+
+
+### #201 — forge invoke --run <terminal-run> attaches a running task but leaves run status complete → live task hidden in dashboard
+Hit live (and confused the user) multiple times: when the orchestrator chains engineer -> test-engineer by attaching the second invoke to the first's run via `forge invoke --run <runId>`, the engineer phase has already marked that run `complete`. The test-engineer task IS created and its container IS running, but `forge invoke --run` attaches the task WITHOUT flipping run.status back to `active`. The dashboard and `forge status` list by run status, so the run shows `complete` and the live test-engineer task is invisible — looks like "nothing is running" when a container is actively churning.
+
+Confirmed: run-197-task-manifest-f45aaa status=complete while forge-task-test-engineer-2e8523 was Up 7 minutes with task.started + container.started events under that run.
+
+Fix: when `forge invoke --run <runId>` (or any path) creates a non-terminal task under a run whose status is terminal (complete/abandoned), reactivate the run — set status back to `active`. The run isn't complete if it has a running task. Sibling to #185/#186 (run-status lifecycle correctness: cancel made abandon authoritative; this makes attach reactivate).
+
+Workaround until fixed: orchestrator should NOT attach a new invoke to an already-complete run; give each invoke its own run so it shows active.
+
+
 ## Done (recent)
+
+### #197 — Crawl 5 — manifest: write task manifest.json indexing artifacts
+**Closed:** 2026-05-30.
+
+Crawl milestone, step 5 of 5 (docs/observability.md, Crawl §5). Independent of Crawl 1-4 — can be built in parallel; consumed by Crawl 4's artifact-manifest line.
+
+Each task directory gets a small manifest.json indexing known artifacts: taskId, runId, files map (prompt=CLAUDE.md, package=package.md, result=result.json, stdout/stderr logs), container.name, and an auth block describing whether a profile was REQUESTED and whether state was MOUNTED.
+
+**Secrets discipline:** the manifest describes whether sensitive capabilities were mounted — NOT where bearer credentials live. No token paths, no auth-state contents. Consistent with the #176 rule (credential never in prompts/logs/project-mount; this is the same principle for the manifest).
+
+**Acceptance:** every task dir gets a manifest.json on dispatch; no secret paths in it; forge show (Crawl 4) reads it for the artifact list.
+
 
 ### #196 — Crawl 4 — show-detail: grow forge show <run|task> into the diagnostic view
 **Closed:** 2026-05-30.
