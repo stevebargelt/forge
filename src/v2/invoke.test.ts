@@ -296,19 +296,18 @@ test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => 
   assert.ok(capturedArgs.length > 0);
 });
 
-// ----- #157: terminal run-status transitions -----
+// ----- #201 (supersedes #157): derived run-status transitions -----
+//
+// Run status reflects task states: a run is "active" iff it has a non-terminal
+// top-level task. An attached invoke closes the run when no sibling is in
+// flight, and reactivates a terminally-closed run it attaches to.
 
-test("invoke: leaves run.status='active' when attached to an existing --run id (caller owns the run)", async () => {
+test("invoke: closes an attached run once no sibling top-level task is in flight (#201)", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
 
-  // First create a run via invoke (own → closes), then attach a SECOND
-  // invocation to that same run. The second call should NOT re-flip an
-  // already-closed run, AND should not touch the status when invoke is the
-  // attached (not owning) call. To test the "attached" case cleanly, we create
-  // a run separately via insertRun-style helper and then attach.
   const { insertRun } = await import("../store/runs.js");
-  const externalRunId = "run-external-test-157";
+  const externalRunId = "run-external-derived-idle";
   insertRun({
     id: externalRunId,
     workflow: "external",
@@ -317,21 +316,100 @@ test("invoke: leaves run.status='active' when attached to an existing --run id (
     createdAt: new Date().toISOString(),
   });
 
-  const stub = makeStubExec({ status: "complete" });
   const r = await invoke({
     agentRole: "engineer",
     task: "task inside an externally-owned run",
     projectDir: "/tmp/x",
     runId: externalRunId,    // attach — invoke does NOT own this run
-    dockerExec: stub,
+    dockerExec: makeStubExec({ status: "complete" }),
   });
   assert.equal(r.status, "complete");
 
-  // The external run must still be 'active' — invoke shouldn't have closed it,
-  // because the caller owns it and will manage its lifecycle.
+  // No other top-level task remains running, so the run is no longer in
+  // flight — derived status closes it. (Supersedes #157, which left attached
+  // runs leaked-active with nothing to close them.)
   const run = getRun(externalRunId);
-  assert.equal(run!.status, "active", "attached invoke must not close the caller-owned run");
+  assert.equal(run!.status, "complete", "attached invoke closes the run when nothing else is in flight");
+  assert.ok(run!.completedAt, "completed_at set on close");
+});
+
+test("invoke: keeps an attached run active while a sibling top-level task is still running (#201)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const { insertRun } = await import("../store/runs.js");
+  const { insertTask, markTaskRunning } = await import("../store/tasks.js");
+  const externalRunId = "run-external-derived-sibling";
+  insertRun({
+    id: externalRunId,
+    workflow: "external",
+    title: "parallel reds",
+    status: "active",
+    createdAt: new Date().toISOString(),
+  });
+  // A sibling top-level task still churning (e.g. a parallel red launched under
+  // the same run). It must keep the run active after our invoke finishes.
+  insertTask({
+    id: "task-sibling-still-running",
+    runId: externalRunId,
+    phase: "task",
+    agentRole: "red-wide",
+    status: "pending",
+    taskPackage: { taskId: "task-sibling-still-running", runId: externalRunId, phase: "task", role: "red-wide", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+  markTaskRunning("task-sibling-still-running");
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "finishes first",
+    projectDir: "/tmp/x",
+    runId: externalRunId,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(r.status, "complete");
+
+  const run = getRun(externalRunId);
+  assert.equal(run!.status, "active", "run stays active while a sibling task is still running");
   assert.equal(run!.completedAt, undefined);
+});
+
+test("invoke: reactivates a terminally-closed run on attach, then closes it again (#201)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const { insertRun } = await import("../store/runs.js");
+  // A run that was already closed (a prior invoke completed it). Attaching a
+  // new live task must bring it back to active mid-flight — otherwise the
+  // churning container is invisible in the dashboard / forge status.
+  const externalRunId = "run-external-reactivate";
+  insertRun({
+    id: externalRunId,
+    workflow: "external",
+    title: "previously closed",
+    status: "complete",
+    createdAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  });
+
+  const r = await invoke({
+    agentRole: "test-engineer",
+    task: "attached after the run was closed",
+    projectDir: "/tmp/x",
+    runId: externalRunId,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(r.status, "complete");
+
+  // A run.reactivated event proves the run was flipped back to active while the
+  // task ran; the final close brings it to complete again now that it's idle.
+  const events = eventsForRun(externalRunId);
+  assert.ok(
+    events.some((e) => e.eventType === "run.reactivated"),
+    "attach to a terminal run must emit run.reactivated",
+  );
+  const run = getRun(externalRunId);
+  assert.equal(run!.status, "complete", "run closes again once the attached task is terminal");
 });
 
 test("invoke: closes the owned run as 'complete' even when the task fails (RunStatus has no 'failed')", async () => {

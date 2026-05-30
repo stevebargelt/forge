@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
-import { insertTask, markTaskRunning, markTaskComplete } from "../store/tasks.js";
+import { insertTask, markTaskRunning, markTaskComplete, tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
@@ -72,22 +72,39 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const run = getRun(runId);
   if (!run) throw new Error(`invoke: run not found: ${runId}`);
 
-  // #157: forge invoke owns the run when it created it itself (no --run id
-  // supplied). When invoke owns the run, it's responsible for the terminal
-  // run-status flip at task-end — otherwise the run leaks as `active` forever
-  // and `forge projects show` / dashboard live-indicator overcount. When
-  // attached to a caller-supplied --run id, leave run status alone (the caller
-  // is composing multiple invocations into one run; they close it).
+  const ownsRun = args.runId === undefined;
+
+  // #201: attaching a task to a run whose status already went terminal (a
+  // prior invoke closed it, or it was abandoned) must bring the run back to
+  // active — a run with a live task is not complete. Only the attach path can
+  // hit this; the owns-run path created a fresh active run above. Before the
+  // fix the live task was invisible (dashboard / forge status list by run
+  // status), so a churning container looked like "nothing running".
+  if (!ownsRun && (run.status === "complete" || run.status === "abandoned")) {
+    updateRunStatus(runId, "active");
+    logEvent("run.reactivated", { runId, payload: { source: "invoke", from: run.status } });
+  }
+
+  // Run status is a derived property: a run is "active" iff it has a
+  // non-terminal top-level task. Close to "complete" only when no top-level
+  // task is still in flight — so a parallel sibling invoke under the same run
+  // (e.g. reds launched together) keeps the run active until the last one
+  // finishes. This supersedes #157's "attached invoke never closes the run":
+  // that left attached runs leaked-active with nothing to close them. Applies
+  // to owned AND attached runs; the owns-run case still closes its lone task.
   //
   // RunStatus is "active" | "complete" | "abandoned" — no "failed". Mirrors
-  // runNext.ts:138 — task-level status carries success/failure; the run flips
-  // to "complete" simply to mark "no longer in flight". Logged event payload
-  // carries the success vs failure signal for downstream consumers.
-  const ownsRun = args.runId === undefined;
-  const closeRun = (succeeded: boolean): void => {
-    if (!ownsRun) return;
+  // runNext.ts — task-level status carries success/failure; the run flips to
+  // "complete" simply to mark "no longer in flight". The logged event payload
+  // carries the success-vs-failure signal for downstream consumers.
+  const closeRunIfIdle = (succeeded: boolean): void => {
+    const inFlight = tasksForRun(runId).some(
+      (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
+    );
+    if (inFlight) return;
+    if (getRun(runId)?.status === "complete") return; // already closed — idempotent
     updateRunStatus(runId, "complete");
-    logEvent("run.completed", { runId, payload: { source: "invoke", succeeded } });
+    logEvent("run.completed", { runId, payload: { source: "invoke", succeeded, owned: ownsRun } });
   };
 
   // Build a synthetic single-step workflow + step. The runner machinery
@@ -165,7 +182,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch (e) {
     const error = `loadRuntime failed: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
@@ -191,7 +208,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       if (e instanceof AuthProfileError) {
         logEvent("auth.profile_failed", { runId, taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
         failTask(taskId, { runId, kind: classify({ error: e }), error: (e as AuthProfileError).message });
-        closeRun(false);
+        closeRunIfIdle(false);
         return { runId, taskId, status: "failed", error: (e as AuthProfileError).message };
       }
       throw e;
@@ -224,7 +241,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch (e) {
     const error = `buildDockerArgs failed: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
@@ -248,7 +265,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
     const error = `docker exec threw: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
   // #155: capture token usage from the stream-json log. Best-effort; never
@@ -261,7 +278,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     failTask(taskId, { runId, kind: classify({ exitCode }), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
@@ -273,7 +290,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   if (exitCode !== 0 && !resultRaw) {
     const error = `container_crash (exit ${exitCode})`;
     failTask(taskId, { runId, kind: classify({ exitCode, resultState: "missing" }), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
@@ -283,19 +300,19 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch {
     const error = "result.json malformed";
     failTask(taskId, { runId, kind: classify({ resultState: "malformed" }), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
   if (!result) {
     const error = "no_result_json";
     failTask(taskId, { runId, kind: classify({ resultState: "missing" }), error });
-    closeRun(false);
+    closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
   markTaskComplete(taskId, result);
   logEvent("task.completed", { runId, taskId });
-  closeRun(true);
+  closeRunIfIdle(true);
   return { runId, taskId, status: "complete", result };
 }
 

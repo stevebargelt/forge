@@ -553,16 +553,6 @@ A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the to
 Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred — not urgent.
 
 
-### #199 — forge-test drops --import ./src/test-setup.ts for file-specific args → false SQLITE_ERROR + bypasses test DB/notify isolation
-The forge-test wrapper (what agents use to self-validate) omits `--import ./src/test-setup.ts` when invoked with specific file arguments, whereas `npm test` always includes it. test-setup.ts is load-bearing: it sets up the in-memory test DB schema (#170 isolation) AND clears FORGE_NOTIFY so the suite doesn't fire real notifications (#175).
-
-Consequences when an agent/human runs `forge-test <specific-file>`:
-- runNext / DB-touching tests fail with SQLITE_ERROR ('no such table/column') because the schema setup never ran — a FALSE failure that makes self-validation untrustworthy (agents have flagged this twice: #194 backfill, and the earlier runNext isolation confusion).
-- Potentially worse: without the import, a specific-file run could touch the real ~/.forge/forge.db and/or fire real notifications (the two things test-setup.ts exists to prevent). Needs confirming whether the file-specific path actually reaches a live DB/provider in practice.
-
-Fix: make forge-test ALWAYS pass `--import ./src/test-setup.ts` regardless of whether file args are present. Relates to #178 (forge-test node:test vs Jest) — same wrapper.
-
-
 ### #200 — forge show: stdout/stderr tail dumps raw stream-json blobs — extract text deltas instead
 #196's forge show task view tails the last ~5 lines of container.stdout.log. For Claude agent containers the log is stream-json — each 'line' is a huge JSON object, so the 'Last stdout' block renders 5 giant unreadable blobs instead of useful recent activity.
 
@@ -580,6 +570,18 @@ Workaround until fixed: orchestrator should NOT attach a new invoke to an alread
 
 
 ## Done (recent)
+
+### #199 — forge-test drops --import ./src/test-setup.ts for file-specific args → false SQLITE_ERROR + bypasses test DB/notify isolation
+**Closed:** 2026-05-30. Commit `419825c`.
+
+The forge-test wrapper (what agents use to self-validate) omits `--import ./src/test-setup.ts` when invoked with specific file arguments, whereas `npm test` always includes it. test-setup.ts is load-bearing: it sets up the in-memory test DB schema (#170 isolation) AND clears FORGE_NOTIFY so the suite doesn't fire real notifications (#175).
+
+Consequences when an agent/human runs `forge-test <specific-file>`:
+- runNext / DB-touching tests fail with SQLITE_ERROR ('no such table/column') because the schema setup never ran — a FALSE failure that makes self-validation untrustworthy (agents have flagged this twice: #194 backfill, and the earlier runNext isolation confusion).
+- Potentially worse: without the import, a specific-file run could touch the real ~/.forge/forge.db and/or fire real notifications (the two things test-setup.ts exists to prevent). Needs confirming whether the file-specific path actually reaches a live DB/provider in practice.
+
+Fix: make forge-test ALWAYS pass `--import ./src/test-setup.ts` regardless of whether file args are present. Relates to #178 (forge-test node:test vs Jest) — same wrapper.
+
 
 ### #197 — Crawl 5 — manifest: write task manifest.json indexing artifacts
 **Closed:** 2026-05-30.
