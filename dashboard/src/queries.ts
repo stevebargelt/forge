@@ -431,7 +431,7 @@ export type UsageTimeSeriesRow = {
 // read-only db() to keep the dashboard self-contained. Distinct from usage
 // (token/cost).
 export type OpsMetrics = {
-  runs: { total: number; clean: number; withFailures: number; successRate: number };
+  runs: { total: number; active: number; terminal: number; clean: number; withFailures: number; successRate: number };
   taskCount: number;
   failureKinds: Array<{ kind: string; count: number }>;
   durations: Array<{ dimension: string; count: number; medianMs: number }>;
@@ -462,16 +462,21 @@ export function opsMetrics(since: string, projectDir?: string): OpsMetrics {
     return { clause, params };
   };
 
-  // Run success: a run is "with failures" if it has >=1 failed top-level task.
+  // Success rate is terminal-only: an active (in-flight) run has no outcome yet,
+  // so counting it as clean would inflate the KPI while long work is running.
+  // clean = completed with no failed top-level task.
   const rw = win();
   const runRows = db().prepare(`
-    SELECT r.id,
+    SELECT r.id, r.status AS status,
       (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id AND t.parent_id IS NULL AND t.status = 'failed') AS failed
     FROM runs r WHERE 1 = 1 ${rw.clause}
-  `).all(...rw.params) as Array<{ id: string; failed: number }>;
+  `).all(...rw.params) as Array<{ id: string; status: string; failed: number }>;
   const total = runRows.length;
-  const withFailures = runRows.filter((r) => r.failed > 0).length;
-  const clean = total - withFailures;
+  const terminalRows = runRows.filter((r) => r.status === "complete" || r.status === "abandoned");
+  const terminal = terminalRows.length;
+  const active = total - terminal;
+  const clean = terminalRows.filter((r) => r.status === "complete" && r.failed === 0).length;
+  const withFailures = terminal - clean;
 
   const tw = win();
   const taskCount = (db().prepare(`
@@ -530,7 +535,7 @@ export function opsMetrics(since: string, projectDir?: string): OpsMetrics {
   };
 
   return {
-    runs: { total, clean, withFailures, successRate: total > 0 ? clean / total : 0 },
+    runs: { total, active, terminal, clean, withFailures, successRate: terminal > 0 ? clean / terminal : 0 },
     taskCount,
     failureKinds,
     durations,

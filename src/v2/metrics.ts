@@ -22,7 +22,12 @@ export type MetricsFilters = {
 export type DurationStat = { dimension: string; count: number; medianMs: number };
 
 export type Metrics = {
-  runs: { total: number; clean: number; withFailures: number; successRate: number };
+  // successRate is terminal-only: an in-flight (active) run has no outcome yet,
+  // so counting it as "clean" would inflate the KPI whenever long work is running.
+  // clean = completed with no failed top-level task; withFailures = terminal but
+  // not clean (a completed-with-failure or an abandoned run); successRate =
+  // clean / terminal.
+  runs: { total: number; active: number; terminal: number; clean: number; withFailures: number; successRate: number };
   taskCount: number;
   failureKinds: Array<{ kind: string; count: number }>;
   durationsBy: MetricDimension;
@@ -46,7 +51,7 @@ function dimensionValue(by: MetricDimension, run: Run, task: Task): string {
 export function computeMetrics(filters: MetricsFilters): Metrics {
   const by: MetricDimension = filters.by ?? "phase";
 
-  let total = 0, clean = 0, withFailures = 0, taskCount = 0;
+  let total = 0, active = 0, terminal = 0, clean = 0, taskCount = 0;
   const failureKindCounts = new Map<string, number>();
   const durationsByDim = new Map<string, number[]>();
   let idleKills = 0, cancels = 0, retries = 0, redBlocks = 0;
@@ -54,6 +59,7 @@ export function computeMetrics(filters: MetricsFilters): Metrics {
   for (const run of listRuns()) {
     if (!runMatchesFilters(run, filters)) continue;
     total++;
+    const isTerminal = run.status === "complete" || run.status === "abandoned";
 
     const tasks = tasksForRun(run.id).filter((t) => t.parentId === undefined);
     taskCount += tasks.length;
@@ -77,7 +83,14 @@ export function computeMetrics(filters: MetricsFilters): Metrics {
         if (kind === "idle_timeout") idleKills++;
       }
     }
-    if (runHadFailure) withFailures++; else clean++;
+    // Success rate is terminal-only. An active run has no outcome yet — counting
+    // it as clean would inflate the KPI while long work is in flight.
+    if (isTerminal) {
+      terminal++;
+      if (run.status === "complete" && !runHadFailure) clean++;
+    } else {
+      active++;
+    }
 
     // Operational counts from the event stream.
     for (const e of eventsForRun(run.id)) {
@@ -96,7 +109,7 @@ export function computeMetrics(filters: MetricsFilters): Metrics {
     .sort((a, b) => b.count - a.count);
 
   return {
-    runs: { total, clean, withFailures, successRate: total > 0 ? clean / total : 0 },
+    runs: { total, active, terminal, clean, withFailures: terminal - clean, successRate: terminal > 0 ? clean / terminal : 0 },
     taskCount,
     failureKinds,
     durationsBy: by,

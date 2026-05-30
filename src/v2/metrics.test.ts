@@ -44,6 +44,30 @@ test("computeMetrics: success rate counts a run with any failed task as with-fai
   assert.deepEqual(m.failureKinds, [{ kind: "container_crash", count: 1 }]);
 });
 
+test("computeMetrics: an active in-flight run is NOT counted as a clean success", () => {
+  insertRun(mkRun("run-done", { status: "complete" }));
+  insertTask(mkTask("td", "run-done", { status: "complete" }));
+  insertRun(mkRun("run-live", { status: "active" }));      // in-flight, no failures yet
+  insertTask(mkTask("tl", "run-live", { status: "running" }));
+
+  const m = computeMetrics({});
+  assert.equal(m.runs.total, 2);
+  assert.equal(m.runs.active, 1, "the active run is tracked separately");
+  assert.equal(m.runs.terminal, 1, "only the completed run is terminal");
+  assert.equal(m.runs.clean, 1);
+  assert.equal(m.runs.successRate, 1, "100% of TERMINAL runs are clean — active doesn't dilute or inflate");
+});
+
+test("computeMetrics: abandoned run counts as terminal-not-clean (lowers success rate)", () => {
+  insertRun(mkRun("run-ok", { status: "complete" }));
+  insertTask(mkTask("tok", "run-ok", { status: "complete" }));
+  insertRun(mkRun("run-cancelled", { status: "abandoned" })); // cancelled, no failed task
+  const m = computeMetrics({});
+  assert.equal(m.runs.terminal, 2);
+  assert.equal(m.runs.clean, 1, "abandoned is never clean even without a failed task");
+  assert.equal(m.runs.successRate, 0.5);
+});
+
 test("computeMetrics: idle_timeout failures counted as idle kills", () => {
   insertRun(mkRun("run-idle"));
   insertTask(mkTask("ti", "run-idle", { status: "failed" }));

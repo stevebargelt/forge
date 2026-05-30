@@ -50,7 +50,8 @@ export function registerMetrics(program: Command): void {
       }
 
       const pct = (m.runs.successRate * 100).toFixed(0);
-      console.log(`Runs: ${m.runs.total}  (clean ${m.runs.clean} · with-failures ${m.runs.withFailures} · success rate ${pct}%)`);
+      const activeNote = m.runs.active > 0 ? ` · ${m.runs.active} active` : "";
+      console.log(`Runs: ${m.runs.total}  (${m.runs.terminal} terminal: clean ${m.runs.clean} · with-failures ${m.runs.withFailures}${activeNote} · success rate ${pct}% of terminal)`);
       console.log(`Tasks: ${m.taskCount}`);
       console.log(`Operational: idle-kills ${m.counts.idleKills} · cancels ${m.counts.cancels} · retries ${m.counts.retries} · red-blocks ${m.counts.redBlocks}`);
 

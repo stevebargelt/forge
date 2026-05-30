@@ -196,8 +196,8 @@ function OpsView({ data, since, onSinceChange }) {
       </div>
 
       <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
-        <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate</div></div>
-        <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures)</div></div>
+        <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate (of ${data.runs.terminal} terminal)</div></div>
+        <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures${data.runs.active ? ` · ${data.runs.active} active` : ""})</div></div>
         <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks</div></div>
       </div>
 

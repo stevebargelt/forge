@@ -34,16 +34,22 @@ const { opsMetrics } = await import("./queries.js");
 
     -- a failed CHILD task must NOT count toward run failures or failure kinds
     INSERT INTO tasks VALUES ('b2','rB','red','red-wide','failed','b1',NULL,NULL);
+
+    -- run C: ACTIVE (in-flight). Must NOT count as a clean success.
+    INSERT INTO runs VALUES ('rC','C','feature','/proj/c','active', datetime('now','-1 hour'));
+    INSERT INTO tasks VALUES ('c1','rC','engineer','engineer','running',NULL,NULL,NULL);
   `);
   db.close();
 }
 
-test("opsMetrics: success rate counts a run with any failed top-level task as with-failures", () => {
+test("opsMetrics: success rate is terminal-only; active run excluded from clean/denominator", () => {
   const m = opsMetrics("30d");
-  assert.equal(m.runs.total, 2);
-  assert.equal(m.runs.clean, 1);          // run A
+  assert.equal(m.runs.total, 3);          // A + B + active C
+  assert.equal(m.runs.active, 1);         // C is in-flight
+  assert.equal(m.runs.terminal, 2);       // A + B
+  assert.equal(m.runs.clean, 1);          // run A only
   assert.equal(m.runs.withFailures, 1);   // run B
-  assert.equal(m.runs.successRate, 0.5);
+  assert.equal(m.runs.successRate, 0.5);  // 1 clean / 2 terminal — active doesn't inflate
 });
 
 test("opsMetrics: failure_kind from events; child failures excluded", () => {
