@@ -1,5 +1,6 @@
 import type { Command } from "commander";
-import { getTask, tasksForRun, markTaskFailed } from "../../store/tasks.js";
+import { getTask, tasksForRun } from "../../store/tasks.js";
+import { failTask, classify } from "../../v2/failure-kind.js";
 import { getRun, updateRunStatus } from "../../store/runs.js";
 import { killContainer } from "../../v2/docker-exec.js";
 import { ensureForgeDirs } from "../../util/paths.js";
@@ -37,7 +38,7 @@ export function performCancel(
     let runAbandoned = false;
     if (!opts.dryRun) {
       killFn(`forge-${task.id}`);
-      markTaskFailed(task.id, "cancelled via forge cancel");
+      failTask(task.id, { runId: task.runId, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
       logEvent("task.cancelled", { runId: task.runId, taskId: task.id, payload: { via: "forge cancel" } });
       const remaining = tasksForRun(task.runId).filter((t) => !isTerminal(t));
       if (remaining.length === 0) {
@@ -64,7 +65,7 @@ export function performCancel(
     if (!opts.dryRun) {
       for (const t of nonTerminal) {
         killFn(`forge-${t.id}`);
-        markTaskFailed(t.id, "cancelled via forge cancel");
+        failTask(t.id, { runId: run.id, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
         logEvent("task.cancelled", { runId: run.id, taskId: t.id, payload: { via: "forge cancel" } });
       }
       updateRunStatus(run.id, "abandoned");

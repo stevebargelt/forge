@@ -22,7 +22,8 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
-import { insertTask, markTaskRunning, markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import { insertTask, markTaskRunning, markTaskComplete } from "../store/tasks.js";
+import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
@@ -161,9 +162,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   try {
     runtime = loadRuntime(step.runtime);
   } catch (e) {
-    markTaskFailed(taskId, `loadRuntime failed: ${(e as Error).message}`);
+    const error = `loadRuntime failed: ${(e as Error).message}`;
+    failTask(taskId, { runId, kind: classify({}), error });
     closeRun(false);
-    return { runId, taskId, status: "failed", error: (e as Error).message };
+    return { runId, taskId, status: "failed", error };
   }
 
   // #176: resolve the requested auth profile and fail fast BEFORE spawning a
@@ -187,9 +189,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     } catch (e) {
       if (e instanceof AuthProfileError) {
         logEvent("auth.profile_failed", { runId, taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
-        markTaskFailed(taskId, e.message);
+        failTask(taskId, { runId, kind: classify({ error: e }), error: (e as AuthProfileError).message });
         closeRun(false);
-        return { runId, taskId, status: "failed", error: e.message };
+        return { runId, taskId, status: "failed", error: (e as AuthProfileError).message };
       }
       throw e;
     }
@@ -211,9 +213,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   try {
     dockerArgs = buildDockerArgs(runtime, ctx);
   } catch (e) {
-    markTaskFailed(taskId, `buildDockerArgs failed: ${(e as Error).message}`);
+    const error = `buildDockerArgs failed: ${(e as Error).message}`;
+    failTask(taskId, { runId, kind: classify({}), error });
     closeRun(false);
-    return { runId, taskId, status: "failed", error: (e as Error).message };
+    return { runId, taskId, status: "failed", error };
   }
 
   const exec = args.dockerExec ?? defaultDockerExec;
@@ -234,9 +237,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // #155: capture usage even on docker failure — the task may have streamed
     // tokens before crashing, and we want to account for them.
     captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
-    markTaskFailed(taskId, `docker exec threw: ${(e as Error).message}`);
+    const error = `docker exec threw: ${(e as Error).message}`;
+    failTask(taskId, { runId, kind: classify({}), error });
     closeRun(false);
-    return { runId, taskId, status: "failed", error: (e as Error).message };
+    return { runId, taskId, status: "failed", error };
   }
   // #155: capture token usage from the stream-json log. Best-effort; never
   // throws or affects task status.
@@ -247,7 +251,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
     logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
-    markTaskFailed(taskId, error);
+    failTask(taskId, { runId, kind: classify({ exitCode }), error });
     closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -259,7 +263,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
   if (exitCode !== 0 && !resultRaw) {
     const error = `container_crash (exit ${exitCode})`;
-    markTaskFailed(taskId, error);
+    failTask(taskId, { runId, kind: classify({ exitCode, resultState: "missing" }), error });
     closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -269,13 +273,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     if (resultRaw.length > 0) result = JSON.parse(resultRaw);
   } catch {
     const error = "result.json malformed";
-    markTaskFailed(taskId, error);
+    failTask(taskId, { runId, kind: classify({ resultState: "malformed" }), error });
     closeRun(false);
     return { runId, taskId, status: "failed", error };
   }
   if (!result) {
     const error = "no_result_json";
-    markTaskFailed(taskId, error);
+    failTask(taskId, { runId, kind: classify({ resultState: "missing" }), error });
     closeRun(false);
     return { runId, taskId, status: "failed", error };
   }

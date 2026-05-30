@@ -20,7 +20,7 @@
 // blocked_by_red also requires --force to advance.
 
 import type { GateDecision, Task, TaskPackage, VerdictRow } from "../types/index.js";
-import { getTask, setTaskStatus, insertTask, markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import { getTask, setTaskStatus, insertTask, markTaskComplete } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
@@ -29,6 +29,7 @@ import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { loadWorkflow } from "./loader.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
+import { failTask, classify } from "./failure-kind.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -138,11 +139,10 @@ export async function gate(
     // run row.
     finalizeRunIfDone(run.id, workflow);
   } else if (decision === "reject") {
-    markTaskFailed(taskId, rationale ?? "rejected by gate");
-    logEvent("task.failed", {
+    failTask(taskId, {
       runId: run.id,
-      taskId,
-      payload: { gate: "reject", rationale },
+      kind: classify({ source: "gate_rejected" }),
+      error: rationale ?? "rejected by gate",
     });
 
     if (step.on_reject) {
@@ -194,7 +194,11 @@ export async function gate(
     }
     // Close the current task, seed a fresh pending in the SAME step. The
     // runner's "reuse pending row in same step" logic picks it up.
-    markTaskFailed(taskId, "request-changes; superseded");
+    failTask(taskId, {
+      runId: run.id,
+      kind: classify({ source: "gate_rejected" }),
+      error: "request-changes; superseded",
+    });
     const newId = newTaskId(task.phase);
     const tp: TaskPackage = {
       ...task.taskPackage,

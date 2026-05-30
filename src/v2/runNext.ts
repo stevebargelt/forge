@@ -23,7 +23,8 @@ import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskFailed, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict } from "../store/verdicts.js";
 import { validateVerdict } from "./validate-findings.js";
@@ -567,6 +568,7 @@ async function dispatchFanoutStep(args: {
     .pop();
   if (!upstreamTask) {
     // Upstream hasn't completed; ready-queue logic should have prevented this.
+    const upstreamMsg = "fanout: upstream not complete";
     if (!existingParent) {
       insertTask({
         id: parentId,
@@ -576,10 +578,11 @@ async function dispatchFanoutStep(args: {
         status: "failed",
         taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
         createdAt: nowIso(),
-        error: "fanout: upstream not complete",
+        error: upstreamMsg,
       });
+      logEvent("task.failed", { runId: args.runId, taskId: parentId, payload: { failure_kind: "unknown", error: upstreamMsg } });
     } else {
-      markTaskFailed(parentId, "fanout: upstream not complete");
+      failTask(parentId, { runId: args.runId, kind: classify({}), error: upstreamMsg });
     }
     return "failed";
   }
@@ -587,6 +590,7 @@ async function dispatchFanoutStep(args: {
   const upstreamResult = (upstreamTask.result ?? {}) as Record<string, unknown>;
   const rawArray = upstreamResult[fanout.from_upstream.array_key];
   if (!Array.isArray(rawArray) || rawArray.length === 0) {
+    const noArrayMsg = `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`;
     if (!existingParent) {
       insertTask({
         id: parentId,
@@ -596,10 +600,11 @@ async function dispatchFanoutStep(args: {
         status: "failed",
         taskPackage: emptyTaskPackage(parentId, args.runId, step.id, step.agent ?? "fanout"),
         createdAt: nowIso(),
-        error: `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`,
+        error: noArrayMsg,
       });
+      logEvent("task.failed", { runId: args.runId, taskId: parentId, payload: { failure_kind: "unknown", error: noArrayMsg } });
     } else {
-      markTaskFailed(parentId, `fanout: upstream '${fanout.from_upstream.step}' has no array at '${fanout.from_upstream.array_key}'`);
+      failTask(parentId, { runId: args.runId, kind: classify({}), error: noArrayMsg });
     }
     return "failed";
   }
@@ -707,7 +712,7 @@ async function dispatchFanoutStep(args: {
   // failure_mode determines whether a partial result fails the parent.
   const anyFailed = childOutcomes.some((c) => c.status === "failed");
   if (anyFailed && fanout.failure_mode === "fail-phase") {
-    markTaskFailed(parentId, "fanout: at least one child failed (failure_mode=fail-phase)", parentResult);
+    failTask(parentId, { runId: args.runId, kind: classify({}), error: "fanout: at least one child failed (failure_mode=fail-phase)", result: parentResult });
     return "failed";
   }
 
@@ -848,7 +853,7 @@ async function runContainer(args: {
     runtime = loadRuntime(args.runtimeName);
   } catch (e) {
     const msg = `loadRuntime failed: ${(e as Error).message}`;
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
 
@@ -870,8 +875,8 @@ async function runContainer(args: {
     } catch (e) {
       if (e instanceof AuthProfileError) {
         logEvent("auth.profile_failed", { runId: args.runId, taskId: args.taskId, payload: { profile: args.authProfile, reason: (e as Error).message } });
-        markTaskFailed(args.taskId, e.message);
-        return { kind: "failed", error: e.message };
+        failTask(args.taskId, { runId: args.runId, kind: classify({ error: e }), error: (e as AuthProfileError).message });
+        return { kind: "failed", error: (e as AuthProfileError).message };
       }
       throw e;
     }
@@ -894,7 +899,7 @@ async function runContainer(args: {
     dockerArgs = buildDockerArgs(runtime, spawnCtx);
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
 
@@ -916,7 +921,7 @@ async function runContainer(args: {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
     captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
     const msg = `docker exec threw: ${(e as Error).message}`;
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
   // #155: capture token usage from the stream-json log. Best-effort.
@@ -927,7 +932,7 @@ async function runContainer(args: {
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
     logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
     const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({ exitCode }), error: msg });
     return { kind: "failed", error: msg };
   }
 
@@ -937,7 +942,7 @@ async function runContainer(args: {
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
   if (exitCode !== 0 && !resultRaw) {
     const msg = `container_crash (exit ${exitCode})`;
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({ exitCode, resultState: "missing" }), error: msg });
     return { kind: "failed", error: msg };
   }
   let result: unknown;
@@ -945,12 +950,12 @@ async function runContainer(args: {
     if (resultRaw.length > 0) result = JSON.parse(resultRaw);
   } catch {
     const msg = "result.json malformed";
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({ resultState: "malformed" }), error: msg });
     return { kind: "failed", error: msg };
   }
   if (!result) {
     const msg = "no_result_json";
-    markTaskFailed(args.taskId, msg);
+    failTask(args.taskId, { runId: args.runId, kind: classify({ resultState: "missing" }), error: msg });
     return { kind: "failed", error: msg };
   }
 
