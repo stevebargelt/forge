@@ -101,6 +101,38 @@ test("assembleBundle: bundle.json carries run, tasks, events", () => {
   assert.ok(manifest.events.some((e: { eventType: string }) => e.eventType === "task.completed"));
 });
 
+test("assembleBundle: SECURITY — bundle.json strips composedSystemPrompt + inputs unless --include-prompts", () => {
+  const t: Task = {
+    id: "task-pp", runId: RUN.id, phase: "engineer", agentRole: "engineer", status: "complete",
+    taskPackage: { taskId: "task-pp", runId: RUN.id, phase: "engineer", role: "engineer",
+      inputs: { brief: "SECRET-BRIEF-CONTENT" }, composedSystemPrompt: "SECRET-SYSTEM-PROMPT" },
+    createdAt: "2026-05-20T00:00:00Z", result: { status: "complete" },
+  };
+  insertTask(t);
+  const dir = taskDir(RUN.id, "task-pp");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), "{}");
+
+  // Default: prompt context must NOT be in bundle.json.
+  const def = assembleBundle(RUN.id, outRoot);
+  let raw = readFileSync(join(def.bundleDir, "bundle.json"), "utf8");
+  assert.ok(!raw.includes("SECRET-SYSTEM-PROMPT"), "composedSystemPrompt must be stripped by default");
+  assert.ok(!raw.includes("SECRET-BRIEF-CONTENT"), "inputs must be stripped by default");
+  const manifest = JSON.parse(raw);
+  const taskNode = manifest.tasks.find((x: any) => x.task.id === "task-pp").task;
+  assert.equal(taskNode.taskPackage.composedSystemPrompt, undefined);
+  assert.equal(taskNode.taskPackage.inputs, undefined);
+  assert.equal(taskNode.taskPackage.role, "engineer", "identity fields retained");
+  assert.deepEqual(taskNode.result, { status: "complete" }, "result (debug signal) retained");
+
+  // Opt-in: now present.
+  rmSync(def.bundleDir, { recursive: true, force: true });
+  const withP = assembleBundle(RUN.id, outRoot, { includePrompts: true });
+  raw = readFileSync(join(withP.bundleDir, "bundle.json"), "utf8");
+  assert.ok(raw.includes("SECRET-SYSTEM-PROMPT"), "composedSystemPrompt included on opt-in");
+  assert.ok(raw.includes("SECRET-BRIEF-CONTENT"), "inputs included on opt-in");
+});
+
 test("assembleBundle: bounds large logs to a tail and flags truncation", () => {
   insertTask(mkTask("task-big"));
   const dir = taskDir(RUN.id, "task-big");

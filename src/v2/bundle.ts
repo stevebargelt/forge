@@ -59,6 +59,20 @@ function copyVerbatim(src: string, dest: string): boolean {
   return true;
 }
 
+// bundle.json embeds the task rows. The Task carries taskPackage, whose
+// composedSystemPrompt (the full system prompt) and inputs (the brief / PRD /
+// upstream data) are exactly the prompt/task context that --include-prompts gates
+// for the prompt FILES. Strip them by default so the prompt-context opt-in is
+// honored in the JSON too; keep task identity + result (the debug signal).
+function sanitizeTask(t: Task, includePrompts: boolean) {
+  if (includePrompts) return t;
+  const { taskPackage, ...rest } = t;
+  return {
+    ...rest,
+    taskPackage: { taskId: taskPackage.taskId, runId: taskPackage.runId, phase: taskPackage.phase, role: taskPackage.role },
+  };
+}
+
 /** Assemble a sanitized bundle for a run under destRoot. Returns a manifest of
  *  what was included. Throws if the run does not exist. */
 export function assembleBundle(runId: string, destRoot: string, opts: BundleOptions = {}): BundleResult {
@@ -72,7 +86,7 @@ export function assembleBundle(runId: string, destRoot: string, opts: BundleOpti
   const filesIncluded: string[] = [];
   const truncated: string[] = [];
 
-  const tasksData: Array<{ task: Task; verdicts: unknown[]; usage: unknown[] }> = [];
+  const tasksData: Array<{ task: unknown; verdicts: unknown[]; usage: unknown[] }> = [];
   for (const t of tasks) {
     const srcDir = taskDir(t.runId, t.id);
     const outDir = join(bundleDir, "tasks", t.id);
@@ -91,7 +105,7 @@ export function assembleBundle(runId: string, destRoot: string, opts: BundleOpti
       }
     }
 
-    tasksData.push({ task: t, verdicts: verdictsForTask(t.id), usage: usageForTask(t.id) });
+    tasksData.push({ task: sanitizeTask(t, !!opts.includePrompts), verdicts: verdictsForTask(t.id), usage: usageForTask(t.id) });
   }
 
   const note =
