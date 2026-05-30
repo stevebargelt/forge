@@ -8,7 +8,7 @@
 // error). Documented in docs/SCHEMA-CONTRACT.md.
 
 import Database from "better-sqlite3";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
@@ -174,17 +174,35 @@ export function inFlight(projectDir?: string): InFlightEntry[] {
   });
 }
 
-/** Full task detail including container.stdout.log + verdicts + gates. */
+/** Full task detail including container log tails + verdicts + gates. */
 export type TaskDetail = {
   task: ActivityEntry;
-  stdoutLog: string | null;
+  stdoutLog: string | null;  // bounded TAIL (last LOG_TAIL_BYTES), not the whole file
   stderrLog: string | null;
+  stdoutBytes: number;       // true on-disk size, so the UI can label honestly
+  stderrBytes: number;
   verdicts: VerdictRow[];
   gates: GateRow[];
   events: TaskEventEntry[];   // WALK-5: lifecycle timeline
   failureKind: string | null; // WALK-5: machine-readable failure kind, if failed
   idle: IdleInfo | null;      // WALK-5: live activity, running tasks only
 };
+
+// The dashboard polls running-task detail every 3s; reading whole multi-MB
+// stream-json logs each tick would undo the bounded-tail discipline elsewhere.
+// Read only the trailing window (most-recent activity); report the true size.
+const LOG_TAIL_BYTES = 64 * 1024;
+
+function readLogTail(path: string): { text: string | null; bytes: number } {
+  let bytes: number;
+  try { bytes = statSync(path).size; } catch { return { text: null, bytes: 0 }; }
+  if (bytes === 0) return { text: "", bytes: 0 };
+  const readBytes = Math.min(bytes, LOG_TAIL_BYTES);
+  const buf = Buffer.alloc(readBytes);
+  const fd = openSync(path, "r");
+  try { readSync(fd, buf, 0, readBytes, bytes - readBytes); } finally { closeSync(fd); }
+  return { text: buf.toString("utf8"), bytes };
+}
 
 export type TaskEventEntry = {
   eventType: string;
@@ -311,8 +329,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
 
   const stdoutPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stdout.log");
   const stderrPath = join(RUNS_DIR, taskRow.run_id, taskId, "container.stderr.log");
-  const stdoutLog = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : null;
-  const stderrLog = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8") : null;
+  const stdout = readLogTail(stdoutPath);
+  const stderr = readLogTail(stderrPath);
 
   const verdicts = db().prepare(`
     SELECT id, task_id, red_task_id, red_role, verdict, confidence, authority, findings
@@ -355,8 +373,10 @@ export function taskDetail(taskId: string): TaskDetail | null {
 
   return {
     task,
-    stdoutLog,
-    stderrLog,
+    stdoutLog: stdout.text,
+    stderrLog: stderr.text,
+    stdoutBytes: stdout.bytes,
+    stderrBytes: stderr.bytes,
     verdicts: verdicts.map((v) => ({
       id: v.id,
       taskId: v.task_id,

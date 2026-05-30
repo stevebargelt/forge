@@ -462,13 +462,13 @@ function TaskDetail({ taskId, onClose }) {
         ` : null}
 
         ${detail.stdoutLog ? html`
-          <h3>Container stdout (${(detail.stdoutLog.length / 1024).toFixed(1)} KB)</h3>
-          <pre class="log">${truncate(detail.stdoutLog, 8000)}</pre>
+          <h3>Container stdout (${logSizeLabel(detail.stdoutBytes, detail.stdoutLog)})</h3>
+          <pre class="log">${tailChars(detail.stdoutLog, 8000)}</pre>
         ` : null}
 
         ${detail.stderrLog && detail.stderrLog.trim().length > 0 ? html`
-          <h3>Container stderr</h3>
-          <pre class="log">${detail.stderrLog}</pre>
+          <h3>Container stderr (${logSizeLabel(detail.stderrBytes, detail.stderrLog)})</h3>
+          <pre class="log">${tailChars(detail.stderrLog, 8000)}</pre>
         ` : null}
       </div>
     </div>
@@ -492,6 +492,19 @@ function formatRelativeTime(iso) {
 function truncate(s, max) {
   if (s.length <= max) return s;
   return s.slice(0, max) + `\n... (${s.length - max} more chars)`;
+}
+
+// Server now sends a bounded tail (last 64KB), not the whole log. Show the most
+// recent slice and label with the true on-disk size.
+function tailChars(s, max) {
+  if (s.length <= max) return s;
+  return `... (earlier output omitted)\n` + s.slice(s.length - max);
+}
+function logSizeLabel(bytes, received) {
+  const kb = (bytes / 1024).toFixed(1);
+  // received is a tail; if the file is bigger than what we got, say so.
+  if (typeof bytes === "number" && bytes > received.length) return `last ${(received.length / 1024).toFixed(0)} KB of ${kb} KB`;
+  return `${kb} KB`;
 }
 
 // WALK-5 helpers for the task timeline + live activity panel.
