@@ -130,8 +130,9 @@ export function snapshot(runId: string): Snapshot {
       const tDir = taskDir(t.runId, t.id);
       const mtime = getLastOutputMtime(join(tDir, "container.stdout.log"));
       const timeout = getManifestIdleTimeoutMs(tDir) ?? resolveIdleTimeoutMs();
+      const startedAtMs = t.startedAt ? new Date(t.startedAt).getTime() : undefined;
       snap.lastOutputMtime = mtime;
-      snap.idle = computeIdleCountdown(mtime, timeout);
+      snap.idle = computeIdleCountdown(mtime, timeout, Date.now(), startedAtMs);
     }
     taskMap.set(t.id, snap);
     for (const v of verdictsForTask(t.id)) {

@@ -428,18 +428,37 @@ test("computeIdleCountdown: exactly at the timeout boundary counts as expired", 
   assert.equal(c.remainingMs, 0);
 });
 
-test("computeIdleCountdown: no output yet — full budget, not expired, hasOutput false", () => {
+test("computeIdleCountdown: no output and no spawn baseline → unmeasured, full budget", () => {
   const c = computeIdleCountdown(undefined, 900_000, T0);
   assert.equal(c.hasOutput, false);
+  assert.equal(c.measured, false);
   assert.equal(c.idleMs, 0);
   assert.equal(c.remainingMs, 900_000);
   assert.equal(c.expired, false);
 });
 
-test("formatIdleCountdown: renders left/expired/no-output variants distinctly", () => {
+// The core no-output-hung-agent fix: a running task that NEVER emits stdout must
+// still count idle from spawn and expire — not sit at a full budget forever.
+test("computeIdleCountdown: no output but spawn baseline → idle measured from spawn, can expire", () => {
+  const c = computeIdleCountdown(undefined, 900_000, T0, T0 - 1_000_000); // spawned 16m40s ago
+  assert.equal(c.hasOutput, false, "still no stdout");
+  assert.equal(c.measured, true, "measured from spawn baseline");
+  assert.equal(c.idleMs, 1_000_000);
+  assert.equal(c.remainingMs, 0);
+  assert.equal(c.expired, true, "hung-from-spawn agent past its budget is expired");
+});
+
+test("computeIdleCountdown: stdout mtime takes precedence over spawn baseline", () => {
+  const c = computeIdleCountdown(T0 - 10_000, 900_000, T0, T0 - 1_000_000);
+  assert.equal(c.idleMs, 10_000, "measures from last output, not the older spawn time");
+  assert.equal(c.hasOutput, true);
+});
+
+test("formatIdleCountdown: renders left/expired/no-output/awaiting variants distinctly", () => {
   assert.match(formatIdleCountdown(computeIdleCountdown(T0 - 10_000, 900_000, T0)), /left/);
   assert.match(formatIdleCountdown(computeIdleCountdown(T0 - 1_000_000, 900_000, T0)), /exhausted/);
-  assert.match(formatIdleCountdown(computeIdleCountdown(undefined, 900_000, T0)), /no output yet/);
+  assert.match(formatIdleCountdown(computeIdleCountdown(undefined, 900_000, T0, T0 - 5_000)), /no output yet/);
+  assert.match(formatIdleCountdown(computeIdleCountdown(undefined, 900_000, T0)), /awaiting start/);
 });
 
 test("liveIdleCountdownForTask: running task → countdown from its stdout mtime + manifest timeout", () => {

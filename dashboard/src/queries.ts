@@ -193,13 +193,16 @@ export type TaskEventEntry = {
 };
 
 // Live idle state for a running task. Mirrors the CLI's computeIdleCountdown
-// (WALK-1); inlined here to keep the dashboard's read path self-contained.
+// (WALK-1); inlined here to keep the dashboard's read path self-contained. The
+// watchdog measures idle from the last stdout write, falling back to spawn time
+// when no stdout has arrived — so a hung agent still counts down and expires.
 export type IdleInfo = {
   hasOutput: boolean;
   idleMs: number;
   remainingMs: number;
   expired: boolean;
   idleTimeoutMs: number;
+  measured: boolean;
 };
 
 // Matches src/v2/idle-watchdog.ts DEFAULT_IDLE_TIMEOUT_MS (15m) for the fallback
@@ -219,7 +222,7 @@ function deriveFailureKind(events: TaskEventEntry[]): string | null {
   return null;
 }
 
-function computeIdle(runId: string, taskId: string, status: string): IdleInfo | null {
+function computeIdle(runId: string, taskId: string, status: string, startedAt: string | null): IdleInfo | null {
   if (status !== "running") return null;
   const dir = join(RUNS_DIR, runId, taskId);
   let mtime: number | undefined;
@@ -229,12 +232,15 @@ function computeIdle(runId: string, taskId: string, status: string): IdleInfo | 
     const m = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as { container?: { idleTimeoutMs?: unknown } };
     if (typeof m?.container?.idleTimeoutMs === "number") idleTimeoutMs = m.container.idleTimeoutMs;
   } catch { /* no/old manifest → default */ }
-  if (mtime === undefined) {
-    return { hasOutput: false, idleMs: 0, remainingMs: idleTimeoutMs, expired: false, idleTimeoutMs };
+  const startedAtMs = startedAt ? new Date(startedAt).getTime() : undefined;
+  const baseline = mtime ?? startedAtMs;
+  const hasOutput = mtime !== undefined;
+  if (baseline === undefined || Number.isNaN(baseline)) {
+    return { hasOutput, idleMs: 0, remainingMs: idleTimeoutMs, expired: false, idleTimeoutMs, measured: false };
   }
-  const idleMs = Math.max(0, Date.now() - mtime);
+  const idleMs = Math.max(0, Date.now() - baseline);
   const remainingMs = Math.max(0, idleTimeoutMs - idleMs);
-  return { hasOutput: true, idleMs, remainingMs, expired: idleMs >= idleTimeoutMs, idleTimeoutMs };
+  return { hasOutput, idleMs, remainingMs, expired: idleMs >= idleTimeoutMs, idleTimeoutMs, measured: true };
 }
 
 export type VerdictRow = {
@@ -260,7 +266,7 @@ export type GateRow = {
 export function taskDetail(taskId: string): TaskDetail | null {
   const taskRow = db().prepare(`
     SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
-           t.error,
+           t.error, t.started_at,
            r.title, r.workflow, r.project_dir
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
@@ -277,6 +283,7 @@ export function taskDetail(taskId: string): TaskDetail | null {
         result: string | null;
         completed_at: string | null;
         error: string | null;
+        started_at: string | null;
         title: string;
         workflow: string;
         project_dir: string | null;
@@ -344,7 +351,7 @@ export function taskDetail(taskId: string): TaskDetail | null {
     createdAt: e.created_at,
   }));
   const failureKind = deriveFailureKind(events);
-  const idle = computeIdle(taskRow.run_id, taskId, taskRow.status);
+  const idle = computeIdle(taskRow.run_id, taskId, taskRow.status, taskRow.started_at);
 
   return {
     task,

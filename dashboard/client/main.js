@@ -523,9 +523,10 @@ function eventDetail(e) {
   return "";
 }
 function idleLine(idle) {
-  if (!idle.hasOutput) return `no output yet · timeout ${formatDurMs(idle.idleTimeoutMs)}`;
+  if (idle.measured === false) return `awaiting start · timeout ${formatDurMs(idle.idleTimeoutMs)}`;
+  const note = idle.hasOutput ? "" : ", no output yet";
   const tail = idle.expired ? "(idle budget exhausted)" : `(${formatDurMs(idle.remainingMs)} left)`;
-  return `idle ${formatDurMs(idle.idleMs)} · timeout ${formatDurMs(idle.idleTimeoutMs)} ${tail}`;
+  return `idle ${formatDurMs(idle.idleMs)}${note} · timeout ${formatDurMs(idle.idleTimeoutMs)} ${tail}`;
 }
 
 render(h(App), document.getElementById("app"));

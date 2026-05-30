@@ -106,8 +106,8 @@ test("diffEvents: non-failure status change has no failureKind", () => {
 
 test("diffEvents: task_activity emitted when a running task's stdout mtime advances", () => {
   const base: Omit<TaskSnap, "lastOutputMtime" | "idle"> = { id: "task-run", phase: "engineer", agentRole: "engineer", status: "running" };
-  const prevS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 5000, remainingMs: 895000, expired: false } }]);
-  const nextS = snap([{ ...base, lastOutputMtime: 2000, idle: { hasOutput: true, idleMs: 100, remainingMs: 899900, expired: false } }]);
+  const prevS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 5000, remainingMs: 895000, expired: false, measured: true } }]);
+  const nextS = snap([{ ...base, lastOutputMtime: 2000, idle: { hasOutput: true, idleMs: 100, remainingMs: 899900, expired: false, measured: true } }]);
   const activity = diffEvents(prevS, nextS, RUN.id).find((e) => e.type === "task_activity");
   assert.ok(activity, "advancing mtime must emit task_activity");
   assert.equal(activity!.spanKind, "task");
@@ -115,7 +115,7 @@ test("diffEvents: task_activity emitted when a running task's stdout mtime advan
 
 test("diffEvents: no task_activity when mtime is unchanged (agent silent)", () => {
   const base: Omit<TaskSnap, "lastOutputMtime" | "idle"> = { id: "task-run", phase: "engineer", agentRole: "engineer", status: "running" };
-  const idle = { hasOutput: true, idleMs: 5000, remainingMs: 895000, expired: false };
+  const idle = { hasOutput: true, idleMs: 5000, remainingMs: 895000, expired: false, measured: true };
   const prevS = snap([{ ...base, lastOutputMtime: 1000, idle }]);
   const nextS = snap([{ ...base, lastOutputMtime: 1000, idle }]);
   assert.equal(diffEvents(prevS, nextS, RUN.id).find((e) => e.type === "task_activity"), undefined);
@@ -123,12 +123,12 @@ test("diffEvents: no task_activity when mtime is unchanged (agent silent)", () =
 
 test("diffEvents: task_idle_warning emitted once when idle budget crosses into exhausted", () => {
   const base: Omit<TaskSnap, "lastOutputMtime" | "idle"> = { id: "task-idle", phase: "engineer", agentRole: "engineer", status: "running" };
-  const prevS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 800000, remainingMs: 100000, expired: false } }]);
-  const nextS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 900000, remainingMs: 0, expired: true } }]);
+  const prevS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 800000, remainingMs: 100000, expired: false, measured: true } }]);
+  const nextS = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 900000, remainingMs: 0, expired: true, measured: true } }]);
   const warning = diffEvents(prevS, nextS, RUN.id).find((e) => e.type === "task_idle_warning");
   assert.ok(warning, "crossing into expired must emit task_idle_warning");
   // Already-expired in both snapshots → no repeat warning.
-  const stillExpired = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 950000, remainingMs: 0, expired: true } }]);
+  const stillExpired = snap([{ ...base, lastOutputMtime: 1000, idle: { hasOutput: true, idleMs: 950000, remainingMs: 0, expired: true, measured: true } }]);
   assert.equal(diffEvents(nextS, stillExpired, RUN.id).find((e) => e.type === "task_idle_warning"), undefined);
 });
 

@@ -70,35 +70,47 @@ export function computeElapsed(startedAt?: string, completedAt?: string, now = D
   return formatDurationMs(end - start);
 }
 
-// Live idle state for a RUNNING task: how long since its last stdout write, and
-// how much of its idle-timeout budget remains before the watchdog kills it.
-// Pure — the caller supplies the last-output mtime (from getLastOutputMtime),
-// the effective timeout (from the manifest), and now. WALK-1.
+// Live idle state for a RUNNING task: how long since its last activity, and how
+// much of its idle-timeout budget remains before the watchdog kills it. The
+// watchdog (idle-watchdog.ts) starts its timer at SPAWN and bumps on stdout —
+// so idle time runs from the last stdout write, or from spawn when no stdout has
+// arrived yet. A hung agent that never emits stdout must still count down (and
+// expire), not sit at a full budget forever. Pure — the caller supplies the
+// last-output mtime, a spawn baseline (task.startedAt), the effective timeout,
+// and now. WALK-1.
 export type IdleCountdown = {
-  hasOutput: boolean;     // false until the container has written any stdout
-  idleMs: number;         // ms since last output (0 if no output yet)
+  hasOutput: boolean;     // whether the container has written any stdout yet
+  idleMs: number;         // ms since last activity (output, else spawn)
   remainingMs: number;    // ms left before idle kill (clamped at 0)
   expired: boolean;       // idle budget exhausted — a kill is imminent/overdue
+  measured: boolean;      // false only when neither output nor a spawn baseline exists
 };
 
 export function computeIdleCountdown(
   lastOutputMtime: number | undefined,
   idleTimeoutMs: number,
   now = Date.now(),
+  startedAtMs?: number,
 ): IdleCountdown {
-  if (lastOutputMtime === undefined) {
-    return { hasOutput: false, idleMs: 0, remainingMs: idleTimeoutMs, expired: false };
+  // Mirror the watchdog: measure idle from the last stdout write, falling back
+  // to spawn time when nothing has been written. Only when we have neither is
+  // the countdown unmeasurable.
+  const baseline = lastOutputMtime ?? startedAtMs;
+  const hasOutput = lastOutputMtime !== undefined;
+  if (baseline === undefined) {
+    return { hasOutput, idleMs: 0, remainingMs: idleTimeoutMs, expired: false, measured: false };
   }
-  const idleMs = Math.max(0, now - lastOutputMtime);
+  const idleMs = Math.max(0, now - baseline);
   const remainingMs = Math.max(0, idleTimeoutMs - idleMs);
-  return { hasOutput: true, idleMs, remainingMs, expired: idleMs >= idleTimeoutMs };
+  return { hasOutput, idleMs, remainingMs, expired: idleMs >= idleTimeoutMs, measured: true };
 }
 
 export function formatIdleCountdown(c: IdleCountdown): string {
   const budget = formatDurationMs(c.remainingMs + c.idleMs);
-  if (!c.hasOutput) return `idle —  /  timeout ${budget}  (no output yet)`;
-  if (c.expired) return `idle ${formatDurationMs(c.idleMs)}  /  timeout ${budget}  (idle budget exhausted)`;
-  return `idle ${formatDurationMs(c.idleMs)}  /  timeout ${budget}  (${formatDurationMs(c.remainingMs)} left)`;
+  if (!c.measured) return `idle —  /  timeout ${budget}  (awaiting start)`;
+  const note = c.hasOutput ? "" : ", no output yet";
+  const tail = c.expired ? "(idle budget exhausted)" : `(${formatDurationMs(c.remainingMs)} left)`;
+  return `idle ${formatDurationMs(c.idleMs)}${note}  /  timeout ${budget}  ${tail}`;
 }
 
 // Disk-glue convenience: the live idle countdown for a task, reading its stdout
@@ -106,14 +118,15 @@ export function formatIdleCountdown(c: IdleCountdown): string {
 // (countdown is meaningless once terminal). Shared by forge status / watch so
 // they don't each re-derive the manifest + mtime reads. WALK-1.
 export function liveIdleCountdownForTask(
-  task: Pick<Task, "runId" | "id" | "status">,
+  task: Pick<Task, "runId" | "id" | "status" | "startedAt">,
   now = Date.now(),
 ): IdleCountdown | undefined {
   if (task.status !== "running") return undefined;
   const tDir = taskDir(task.runId, task.id);
   const stdoutMtime = getLastOutputMtime(join(tDir, "container.stdout.log"));
   const idleTimeoutMs = getManifestIdleTimeoutMs(tDir) ?? resolveIdleTimeoutMs();
-  return computeIdleCountdown(stdoutMtime, idleTimeoutMs, now);
+  const startedAtMs = task.startedAt ? new Date(task.startedAt).getTime() : undefined;
+  return computeIdleCountdown(stdoutMtime, idleTimeoutMs, now, startedAtMs);
 }
 
 export function formatTimeAgo(mtimeMs: number, now = Date.now()): string {
@@ -344,7 +357,7 @@ export function registerShow(program: Command): void {
         const stderrTail = tailLines(stderrLog, 5);
         // WALK-1: live idle countdown only makes sense while the task is running.
         const idleCountdown = task.status === "running"
-          ? computeIdleCountdown(stdoutMtime, idleTimeoutMs)
+          ? computeIdleCountdown(stdoutMtime, idleTimeoutMs, Date.now(), task.startedAt ? new Date(task.startedAt).getTime() : undefined)
           : undefined;
 
         if (opts.json) {
