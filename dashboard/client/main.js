@@ -29,6 +29,8 @@ function App() {
   const [usageModelMix, setUsageModelMix] = useState([]);
   const [usageGroupBy, setUsageGroupBy] = useState("project");
   const [usageSince, setUsageSince] = useState("30d");
+  const [ops, setOps] = useState(null);
+  const [opsSince, setOpsSince] = useState("30d");
 
   const poll = useCallback(async () => {
     try {
@@ -79,6 +81,21 @@ function App() {
     return () => clearInterval(id);
   }, [pollUsage, view]);
 
+  const pollOps = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/ops?since=${opsSince}`);
+      if (res.ok) setOps(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [opsSince]);
+
+  useEffect(() => {
+    if (view !== "ops") return;
+    pollOps();
+    const id = setInterval(pollOps, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollOps, view]);
+
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -104,6 +121,7 @@ function App() {
             <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
+            <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -113,6 +131,8 @@ function App() {
 
       ${view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
+        : view === "ops"
+        ? html`<${OpsView} data=${ops} since=${opsSince} onSinceChange=${setOpsSince} />`
         : view === "usage"
         ? html`<${UsageView}
             rollup=${usageRollup}
@@ -156,7 +176,75 @@ function initialView() {
   const h = (window.location.hash || "").replace(/^#/, "");
   if (h === "projects") return "projects";
   if (h === "usage") return "usage";
+  if (h === "ops") return "ops";
   return "activity";
+}
+
+// RUN-3: operations summary — success rate, failure-kind mix, median durations,
+// operational counts. Reads /api/ops.
+function OpsView({ data, since, onSinceChange }) {
+  if (!data) return html`<div class="muted">loading metrics…</div>`;
+  const pct = (data.runs.successRate * 100).toFixed(0);
+  const maxKind = Math.max(1, ...data.failureKinds.map((k) => k.count));
+  return html`
+    <section class="ops-view">
+      <div class="row" style="gap: 8px; margin-bottom: 16px;">
+        <span class="muted">window:</span>
+        ${["7d", "30d", "all"].map((w) => html`
+          <button class=${"tab " + (since === w ? "tab-active" : "")} onClick=${() => onSinceChange(w)}>${w}</button>
+        `)}
+      </div>
+
+      <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
+        <div class="card stat"><div class="stat-num">${pct}%</div><div class="muted">success rate</div></div>
+        <div class="card stat"><div class="stat-num">${data.runs.total}</div><div class="muted">runs (${data.runs.clean} clean · ${data.runs.withFailures} w/ failures)</div></div>
+        <div class="card stat"><div class="stat-num">${data.taskCount}</div><div class="muted">tasks</div></div>
+      </div>
+
+      <div class="row" style="gap: 16px; flex-wrap: wrap; margin-bottom: 20px;">
+        <div class="card stat"><div class="stat-num">${data.counts.idleKills}</div><div class="muted">idle kills</div></div>
+        <div class="card stat"><div class="stat-num">${data.counts.cancels}</div><div class="muted">cancels</div></div>
+        <div class="card stat"><div class="stat-num">${data.counts.retries}</div><div class="muted">retries</div></div>
+        <div class="card stat"><div class="stat-num">${data.counts.redBlocks}</div><div class="muted">red blocks</div></div>
+      </div>
+
+      ${data.failureKinds.length > 0 ? html`
+        <h2>Failure kinds</h2>
+        <div class="card">
+          ${data.failureKinds.map((k) => html`
+            <div class="row" style="gap: 10px; align-items: center; padding: 3px 0;">
+              <span class="mono" style="min-width: 140px;">${k.kind}</span>
+              <div style="flex: 1; background: var(--bg2, #1a1a1a); height: 14px; border-radius: 3px; overflow: hidden;">
+                <div style="width: ${(k.count / maxKind * 100).toFixed(0)}%; height: 100%; background: var(--err, #c0392b);"></div>
+              </div>
+              <span class="muted" style="min-width: 36px; text-align: right;">${k.count}</span>
+            </div>
+          `)}
+        </div>
+      ` : null}
+
+      ${data.durations.length > 0 ? html`
+        <h2 style="margin-top: 20px;">Median task duration by phase</h2>
+        <div class="card">
+          ${data.durations.map((d) => html`
+            <div class="row" style="gap: 10px; padding: 3px 0;">
+              <span class="mono" style="min-width: 140px;">${d.dimension}</span>
+              <span style="min-width: 80px;">${opsFmtMs(d.medianMs)}</span>
+              <span class="muted">n=${d.count}</span>
+            </div>
+          `)}
+        </div>
+      ` : null}
+    </section>
+  `;
+}
+function opsFmtMs(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${s % 60}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h${m % 60}m`;
 }
 
 function ProjectsView({ projects, onPick }) {

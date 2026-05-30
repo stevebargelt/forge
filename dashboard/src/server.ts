@@ -13,7 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix } from "./queries.js";
+import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics } from "./queries.js";
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 
@@ -90,6 +90,13 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
   if (path === "/api/projects") {
     const data = projectsForDashboard();
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/ops") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(opsMetrics(since, projectDir)));
     return;
   }
 

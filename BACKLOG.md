@@ -563,7 +563,11 @@ Observability RUN stage §3 dashboard surface (docs/observability.md). Bring RUN
 Depends on RUN-2 (#metrics) for the aggregation shape. Lower priority than the CLI surfaces.
 
 
+## Done (recent)
+
 ### #213 — RUN-5 otel: optional OpenTelemetry/JSONL trace export from forge events
+**Closed:** 2026-05-30. Commit `92fa722`.
+
 Observability RUN stage §5 (docs/observability.md). After the internal trace shape is stable, add export options. The WALK-2 spanKind groundwork (run|task|docker|model|tool|auth|gate|red-review on events) is the hook.
 
   forge export --run <id> --format jsonl       # one event per line
@@ -573,8 +577,6 @@ Scope (do JSONL first — trivial, no deps): dump eventsForRun as JSONL with run
 
 Lowest priority; capstone. JSONL slice is high-value-low-cost; OTel can be deferred.
 
-
-## Done (recent)
 
 ### #212 — RUN-4 bundle: forge bundle <run-id> — sanitized debug archive of a run
 **Closed:** 2026-05-30. Commit `c01bd8d`.

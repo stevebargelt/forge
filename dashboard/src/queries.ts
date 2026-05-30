@@ -426,6 +426,118 @@ export type UsageTimeSeriesRow = {
   requests: number;
 };
 
+// RUN-3: operations metrics for the dashboard ops view. Mirrors the CLI's
+// `forge metrics` (src/v2/metrics.ts) shape, computed via the dashboard's
+// read-only db() to keep the dashboard self-contained. Distinct from usage
+// (token/cost).
+export type OpsMetrics = {
+  runs: { total: number; clean: number; withFailures: number; successRate: number };
+  taskCount: number;
+  failureKinds: Array<{ kind: string; count: number }>;
+  durations: Array<{ dimension: string; count: number; medianMs: number }>;
+  counts: { idleKills: number; cancels: number; retries: number; redBlocks: number };
+};
+
+function opsCutoff(since: string): string | null {
+  if (since === "all") return null;
+  const m = since.match(/^(\d+)d$/);
+  return m?.[1] ? new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString() : null;
+}
+
+function opsMedian(values: number[]): number {
+  if (values.length === 0) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? Math.round((s[mid - 1]! + s[mid]!) / 2) : s[mid]!;
+}
+
+export function opsMetrics(since: string, projectDir?: string): OpsMetrics {
+  const cutoff = opsCutoff(since);
+  // Window clause + params, applied to a `runs r` alias in each query.
+  const win = (): { clause: string; params: unknown[] } => {
+    const params: unknown[] = [];
+    let clause = "";
+    if (cutoff) { clause += " AND r.created_at >= ?"; params.push(cutoff); }
+    if (projectDir) { clause += " AND r.project_dir = ?"; params.push(projectDir); }
+    return { clause, params };
+  };
+
+  // Run success: a run is "with failures" if it has >=1 failed top-level task.
+  const rw = win();
+  const runRows = db().prepare(`
+    SELECT r.id,
+      (SELECT COUNT(*) FROM tasks t WHERE t.run_id = r.id AND t.parent_id IS NULL AND t.status = 'failed') AS failed
+    FROM runs r WHERE 1 = 1 ${rw.clause}
+  `).all(...rw.params) as Array<{ id: string; failed: number }>;
+  const total = runRows.length;
+  const withFailures = runRows.filter((r) => r.failed > 0).length;
+  const clean = total - withFailures;
+
+  const tw = win();
+  const taskCount = (db().prepare(`
+    SELECT COUNT(*) AS c FROM tasks t JOIN runs r ON r.id = t.run_id
+    WHERE t.parent_id IS NULL ${tw.clause}
+  `).get(...tw.params) as { c: number }).c;
+
+  // Latest failure_kind per failed top-level task in the window.
+  const fw = win();
+  const failedKindRows = db().prepare(`
+    SELECT e.payload AS payload
+    FROM events e
+    JOIN tasks t ON t.id = e.task_id
+    JOIN runs  r ON r.id = t.run_id
+    WHERE e.event_type = 'task.failed'
+      AND t.parent_id IS NULL AND t.status = 'failed'
+      AND e.created_at = (SELECT MAX(e2.created_at) FROM events e2 WHERE e2.task_id = e.task_id AND e2.event_type = 'task.failed')
+      ${fw.clause}
+  `).all(...fw.params) as Array<{ payload: string | null }>;
+  const kindCounts = new Map<string, number>();
+  for (const row of failedKindRows) {
+    let kind = "unknown";
+    try { const p = row.payload ? JSON.parse(row.payload) : null; if (p && typeof p.failure_kind === "string") kind = p.failure_kind; } catch { /* keep unknown */ }
+    kindCounts.set(kind, (kindCounts.get(kind) ?? 0) + 1);
+  }
+  const failureKinds = [...kindCounts.entries()].map(([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count);
+
+  // Median task duration by phase.
+  const dw = win();
+  const durRows = db().prepare(`
+    SELECT t.phase AS phase, t.started_at AS started, t.completed_at AS completed
+    FROM tasks t JOIN runs r ON r.id = t.run_id
+    WHERE t.parent_id IS NULL AND t.started_at IS NOT NULL AND t.completed_at IS NOT NULL ${dw.clause}
+  `).all(...dw.params) as Array<{ phase: string; started: string; completed: string }>;
+  const byPhase = new Map<string, number[]>();
+  for (const r of durRows) {
+    const ms = new Date(r.completed).getTime() - new Date(r.started).getTime();
+    if (ms >= 0) { const arr = byPhase.get(r.phase) ?? []; arr.push(ms); byPhase.set(r.phase, arr); }
+  }
+  const durations = [...byPhase.entries()].map(([dimension, arr]) => ({ dimension, count: arr.length, medianMs: opsMedian(arr) })).sort((a, b) => b.count - a.count);
+
+  // Operational counts from the event stream.
+  const cw = win();
+  const countRows = db().prepare(`
+    SELECT e.event_type AS et, COUNT(*) AS c
+    FROM events e JOIN runs r ON r.id = e.run_id
+    WHERE e.event_type IN ('task.cancelled','run.cancelled','task.retried','task.blocked_by_red') ${cw.clause}
+    GROUP BY e.event_type
+  `).all(...cw.params) as Array<{ et: string; c: number }>;
+  const countOf = (t: string) => countRows.find((r) => r.et === t)?.c ?? 0;
+  const counts = {
+    idleKills: failureKinds.find((f) => f.kind === "idle_timeout")?.count ?? 0,
+    cancels: countOf("task.cancelled") + countOf("run.cancelled"),
+    retries: countOf("task.retried"),
+    redBlocks: countOf("task.blocked_by_red"),
+  };
+
+  return {
+    runs: { total, clean, withFailures, successRate: total > 0 ? clean / total : 0 },
+    taskCount,
+    failureKinds,
+    durations,
+    counts,
+  };
+}
+
 export function usageRollup(groupBy: GroupBy, since: string, projectDir?: string, limit = 50): UsageRollupRow[] {
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
