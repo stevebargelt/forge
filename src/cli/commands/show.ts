@@ -11,6 +11,7 @@ import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
+import { reconcileRun } from "../../v2/reconcile.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
@@ -329,6 +330,11 @@ export function registerShow(program: Command): void {
     .option("--json", "emit JSON instead of human-readable output")
     .action((id: string, opts: { json?: boolean }) => {
       ensureForgeDirs();
+      // AWN-1: reconcile the target run against reality (writable) BEFORE the
+      // read-only show, so the timeline reflects any crash/Docker recovery.
+      const targetTask = getTask(id);
+      reconcileRun(targetTask ? targetTask.runId : id);
+
       getDb({ readOnly: true });
       const result = performShow(id);
 

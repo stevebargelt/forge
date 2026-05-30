@@ -6,6 +6,7 @@ import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { liveIdleCountdownForTask, formatIdleCountdown } from "./show.js";
+import { reconcileRun, reconcileActiveRuns } from "../../v2/reconcile.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -18,7 +19,14 @@ export function registerStatus(program: Command): void {
     .description("Show run status. Filters to the current workspace by default; use --all for the cross-project view.")
     .action(async (runId: string | undefined, opts: { readOnly?: boolean; all?: boolean; workspace?: string; json?: boolean }) => {
       ensureForgeDirs();
-      if (opts.readOnly) getDb({ readOnly: true });
+      if (opts.readOnly) {
+        getDb({ readOnly: true });
+      } else {
+        // AWN-1: reconcile crash/Docker state before reporting. Skipped under
+        // --read-only (reconciliation writes). One target run, or all active runs.
+        if (runId) reconcileRun(runId);
+        else reconcileActiveRuns();
+      }
 
       if (!runId) {
         // Default: filter to the current workspace. --all bypasses the filter

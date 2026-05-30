@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { getRun, setRunProjectDir } from "../../store/runs.js";
+import { reconcileRun } from "../../v2/reconcile.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { runNext } from "../../v2/runNext.js";
@@ -14,6 +15,10 @@ export function registerNext(program: Command): void {
     .action(async (runId: string, options) => {
       ensureForgeDirs();
       validateCredsForNewRun();
+
+      // AWN-1: reconcile crash/Docker state before dispatching, so a stuck
+      // "running" task (container gone) is finalized rather than blocking next.
+      reconcileRun(runId);
 
       const run = getRun(runId);
       if (!run) throw new Error(`Run not found: ${runId}`);

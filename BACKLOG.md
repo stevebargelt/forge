@@ -88,20 +88,6 @@ Lean (1) first — surfacing the failure mode honestly is cheap and the right sh
 
 **Caught:** 2026-05-12 — scope-split from #109 at land-time.
 
-### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
-**Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
-
-**Scope (high-level — needs design):**
-- A `Provider` interface in `src/types` or `src/spine`: identity, model vocabulary, credential detection, container env shape, CLI invocation pattern.
-- Refactor `spawn.ts` to ask the provider how to invoke the agent (not hardcode `claude --model`).
-- Refactor `creds.ts` to be provider-aware (today's three-mode detector becomes one provider's three credential flavors).
-- Container image (#75 territory): may need to host multiple provider CLIs side-by-side, or build per-provider images.
-- Workflow/agent declarations: `AgentRef.model` becomes provider-scoped (e.g., `provider: 'openai', model: 'gpt-5'`).
-
-**Not designed yet — this is a placeholder.** When forge actually needs OpenAI/Codex, this gets a real architecture-work session: read the spawn/creds/image code paths, sketch the Provider interface, decide whether providers share containers or get separate ones, plan migration of existing Claude-only code.
-
-**Caught:** 2026-05-11 — surfaced while talking through #97. Steven's call: leave room for OpenAI/Codex without designing it now.
-
 ### #60 — Use `pass` for host-side secret storage (was previously #47, kept here as it now applies to PROMPT.md design output)
 **Why:** Same as the original #47 — secrets like `PENCIL_CLI_KEY` shouldn't sit in a `.env` file forever. With FORGE-DEC-014 the consumer of `PENCIL_CLI_KEY` moves *out* of forge entirely (it's used by the human's host-side Claude Code, not by a forge container). But forge still touches host-side env in `forge auth` and possibly in future host-side tools. Keeping the entry but renumbered to reflect the architectural pivot.
 **How to apply:** When forge needs another host-side secret (e.g., for a future GitHub or Slack integration), build the `pass` wrapper then. Until then, this is dormant.
@@ -557,7 +543,194 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
+### #214 — AWN-1 lifecycle-recovery: reconcile active/running state after host crash, Docker races, interrupted commands
+docs/agentic-workflow-next-steps.md §1. Make active/running state trustworthy after crashes.
+
+UMBRELLA over #185 (reaper for orphaned-running tasks — hit live 2026-05-29) and related to #173 (idle-watchdog), #112/#109 (transactional dispatch). The reaper becomes one case of a general reconciliation pass.
+
+Scope:
+- Reconciliation path on first lifecycle-touching command (status/show/next/cancel).
+- Detect: runs active with no live runnable work; tasks running whose container is gone; tasks with result files but unfinalized DB state; active-run-with-no-work.
+- Emit reconciliation EVENTS (new event type, e.g. task.reconciled / run.reconciled) — never silently rewrite state. Idempotent.
+
+Acceptance:
+- Simulated host crash with a running task reconciles into a truthful terminal/resumable state.
+- forge show <run> explains what reconciliation changed and why.
+- Re-running reconciliation emits no duplicate terminal transitions.
+- Tests: container-gone, container-still-running, result-present-unfinalized, active-run-no-work.
+
+Subsumes #185 when it lands. First of the lifecycle-foundation trio (AWN-1/2/3).
+
+
+### #215 — AWN-2 concurrent-command-safety: run/task locking + idempotency under racing commands
+docs/agentic-workflow-next-steps.md §2. Prevent two forge commands advancing/mutating the same run conflictingly.
+
+Strong overlap with #112 (transactional dispatch + gate writes — the write-transaction half). AWN-2 adds the race-guard half.
+
+Scope:
+- Audit transitions for continue/next, cancel, retry, invoke --run, gate commands.
+- Lightweight run/task locking or transactional guards where needed.
+- Make cancel/retry/continue idempotent under races.
+- Read-only commands (status/show/dashboard) tolerate in-progress transitions.
+
+Acceptance:
+- Two simultaneous advancement commands cannot dispatch the same task twice.
+- cancel racing with normal completion → one coherent terminal state.
+- retry cannot attach to stale/half-finalized task state.
+- Tests exercise >=1 command-race path with controlled interleaving.
+
+Builds on #112. Second of the lifecycle-foundation trio.
+
+
+### #216 — AWN-3 retry-policy: define retry semantics per failure_kind + preserve lineage without leaking secrets
+docs/agentic-workflow-next-steps.md §3. Predictable retry after every major failure kind. Builds on the Crawl failure taxonomy (failure_kind) and the existing forge retry command.
+
+Scope:
+- Retry policy per failure_kind: idle_timeout, container_crash, auth_*, result_missing, result_malformed, gate_rejected, red_blocked, cancelled, unknown.
+- Define inherited context: upstream results, task package, auth profile, artifacts, previous-failure summary, logs.
+- Retry creates a NEW task identity preserving lineage to the failed task.
+- Prevent reuse of staged credential files / partial result files (ties to AWN-8).
+
+Acceptance:
+- forge retry shows why a task is retryable or not.
+- Retried tasks carry previous-failure context, no secret leakage.
+- forge show renders retry lineage clearly.
+- Tests: retry after idle_timeout, auth failure, cancelled, malformed result, gate rejection.
+
+Third of the lifecycle-foundation trio.
+
+
+### #217 — AWN-4 task-contract: explicit task contract object in task packages + manifests
+docs/agentic-workflow-next-steps.md §4. Sharper agent assignments + concrete review criteria.
+
+Scope:
+- Explicit task contract object in task packages: objective, allowed_paths, expected_artifacts, validation.commands, auth_profile, risk, review.{required,invariants}.
+- Markdown-readable AND machine-readable (manifest/package metadata).
+- Orchestrator template prefers contracts when invoking agents.
+
+Example (from the doc):
+  contract:
+    objective: "Add cancel race tests"
+    allowed_paths: [src/cli/commands/cancel.ts, src/v2/cancel.test.ts]
+    expected_artifacts: [result.json, tests]
+    validation: { commands: ["npm test -- src/v2/cancel.test.ts"] }
+    auth_profile: null
+    risk: medium
+    review: { required: true, invariants: ["cancel remains idempotent", "reds never receive auth state"] }
+
+Acceptance:
+- New tasks expose their contract in forge show.
+- Result manifests record which contract checks were satisfied.
+- Agents instructed to report contract deviations explicitly.
+- >=1 workflow and >=1 forge invoke path use the contract.
+
+First of the agent-quality pair (AWN-4/5).
+
+
+### #218 — AWN-5 review-protocol: standardize red/review result schema, evidence, and severity calibration
+docs/agentic-workflow-next-steps.md §5. Grounded, comparable, useful reviews.
+
+UMBRELLA over #148 (red-narrow rework), #149 (K=3 self-consistency sampling), #150 (forge gate --feedback ground-truth labels), #113 (promote specialist reds authoritative). Those become sub-parts.
+
+Scope:
+- Review prompts standardized around invariants, evidence, severity, tests.
+- Require file/line refs for code findings.
+- Distinguish confirmed issues from residual risks.
+- Merge duplicate findings across review agents.
+- Calibrate severity against exploitability, blast radius, likelihood.
+
+Acceptance:
+- Red result schema includes finding_type, severity, confidence, evidence, affected_files, recommended_fix.
+- Orchestrator can summarize convergent vs unique findings.
+- Reviewers state which invariants they verified.
+- Tests/fixtures reject or downgrade malformed/low-evidence review output.
+
+References #148/#149/#150/#113. Second of the agent-quality pair.
+
+
+### #219 — AWN-6 project-command-auth: project-owned auth profile (runs project login command to produce storageState)
+docs/agentic-workflow-next-steps.md §6. Authenticated browser work where the PROJECT owns credentials/login, forge owns scoping/mounting/redaction/freshness/lifecycle.
+
+DIRECTLY SOLVES the gap surfaced 2026-05-30: a project with programmatic QA logins (e.g. Pixtron) has no way to declare its login to forge. Today programmatic login is the documented DEFAULT but is entirely project-side (Playwright globalSetup) with no forge-side declaration; the captured-session auth-profile (#176) is the only forge-owned path. AWN-6 adds the missing middle: a declared project-command profile.
+
+Scope (new auth_profile kind):
+  auth_profiles:
+    qa:
+      kind: project-command
+      command: npm run e2e:auth
+      storage_state: .playwright/.auth/qa.json
+      required_env: [E2E_SUPABASE_EMAIL, E2E_SUPABASE_PASSWORD]
+      roles: [test-engineer, manual-qa, frontend-specialist]
+- Project owns credentials, login flow, token refresh, cleanup.
+- Forge owns role scoping, read-only mount, redaction, freshness checks, lifecycle events.
+- Keep the captured-session profile (#176) as the manual fallback.
+
+Acceptance:
+- Forge checks required_env var NAMES without printing values.
+- Forge runs the auth command before browser-capable tasks that request the profile.
+- Forge mounts the produced storage_state read-only into the container.
+- Reds do NOT receive auth state by default.
+- forge show reports auth setup success/failure without exposing secrets.
+
+Relates to #184 (auth-profile polish). First of the broadening trio (AWN-6/7/8).
+
+
+### #220 — AWN-7 provider-runtime: extract Claude execution behind a provider interface (supersedes #106)
+docs/agentic-workflow-next-steps.md §7. Make Claude/Codex/future agents interchangeable behind one forge lifecycle.
+
+SUPERSEDES #106 (provider abstraction — "NEEDS ARCHITECTURE WORK"). AWN-7 is the same work with a concrete interface spec.
+
+Scope — runtime/provider interface covering:
+- prompt composition, process launch, streaming output, result parsing, usage/cost capture, cancellation, error classification.
+- Move Claude-specific assumptions behind a Claude provider.
+- Add a Codex provider only AFTER the interface is explicit enough to preserve lifecycle semantics.
+- Workflow YAML + task contracts stay provider-neutral.
+
+Acceptance:
+- Existing Claude behavior passes through the interface with no regression.
+- Provider output streams into the same container logs + lifecycle events.
+- Provider failures map into the same failure_kind taxonomy.
+- A smoke task runs through a second provider without changing workflow definitions.
+
+Note: runtime YAMLs already exist (seeds/runtimes/claude-*.yml) + loader; this formalizes the execution interface, not just config. Largest/most architectural item — sequence last per the doc. Second of the broadening trio.
+
+
+### #221 — AWN-8 hygiene-hardening: complete secret exclusion across bundles/logs/manifests/exports + staged-auth cleanup
+docs/agentic-workflow-next-steps.md §8. Useful debug artifacts that never preserve secrets/prompts/auth state.
+
+PARTLY DONE this week: forge bundle uses an allowlist (never denylist); bundle.json strips composedSystemPrompt + inputs unless --include-prompts; manifest auth block is booleans-only; logs bounded. AWN-8 = the remainder.
+
+Remaining scope:
+- Explicit denylist for .env, auth state, browser profiles, prompt inputs, token-looking values, generated credential copies — across task packages, bundles, manifests, logs, dashboard payloads, AND exports (forge export jsonl/otel payloads).
+- Stage-auth cleanup: remove auth-state.json after terminal task state where practical (ties to AWN-3's "no reuse of staged credentials").
+- Document redaction behavior; surface it in forge show / bundle metadata.
+
+Acceptance:
+- forge bundle tests prove auth state, .env, and prompt inputs excluded by default. (composedSystemPrompt/inputs test already landed.)
+- Staged auth files removed/marked for cleanup after terminal task.
+- Manifest fields useful but never credential material.
+- Redaction documented + visible in forge show or bundle metadata.
+
+Smallest remaining item (allowlist + bundle work already done). Relates to #190 (auth-profile findings). Last of the broadening trio.
+
+
 ## Done (recent)
+
+### #106 — Provider abstraction (OpenAI/Codex + future) — NEEDS ARCHITECTURE WORK
+**Closed:** 2026-05-30. Commit `superseded-by-219... AWN-7`.
+
+**Why:** Today forge's three auth modes (bedrock, anthropic-oauth, anthropic-apikey) all happen to call `claude` against Anthropic models — provider is implicit, not a concept. To support OpenAI/Codex (and future providers like Anthropic-via-Vertex), forge needs **provider** as a first-class abstraction across the spine, the agent container, and the credential layer. This is the architectural prep work that *makes* #97's hierarchical-ready UI meaningful and unblocks future provider additions.
+
+**Scope (high-level — needs design):**
+- A `Provider` interface in `src/types` or `src/spine`: identity, model vocabulary, credential detection, container env shape, CLI invocation pattern.
+- Refactor `spawn.ts` to ask the provider how to invoke the agent (not hardcode `claude --model`).
+- Refactor `creds.ts` to be provider-aware (today's three-mode detector becomes one provider's three credential flavors).
+- Container image (#75 territory): may need to host multiple provider CLIs side-by-side, or build per-provider images.
+- Workflow/agent declarations: `AgentRef.model` becomes provider-scoped (e.g., `provider: 'openai', model: 'gpt-5'`).
+
+**Not designed yet — this is a placeholder.** When forge actually needs OpenAI/Codex, this gets a real architecture-work session: read the spawn/creds/image code paths, sketch the Provider interface, decide whether providers share containers or get separate ones, plan migration of existing Claude-only code.
+
+**Caught:** 2026-05-11 — surfaced while talking through #97. Steven's call: leave room for OpenAI/Codex without designing it now.
 
 ### #211 — RUN-3 ops-dashboard: dashboard operations summary views (success rate, failure-kind mix, durations)
 **Closed:** 2026-05-30. Commit `9554c86`.

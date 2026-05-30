@@ -6,6 +6,7 @@ import type { Event } from "../store/events.js";
 
 export type FailureKind =
   | "cancelled"
+  | "orphaned"        // container gone with no result — reconciled after a host/parent crash (AWN-1)
   | "container_crash"
   | "idle_timeout"
   | "result_missing"
