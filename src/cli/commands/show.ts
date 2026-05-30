@@ -13,6 +13,7 @@ import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 import { reconcileRun } from "../../v2/reconcile.js";
 import type { TaskContract } from "../../v2/contract.js";
+import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
@@ -485,6 +486,8 @@ export function registerShow(program: Command): void {
       const blockers = getBlockerTasks(tasks);
       const runningTasks = tasks.filter((t) => t.status === "running");
       const nextCommand = deriveNextCommandForRun(run.id, tasks);
+      // AWN-5: convergent (≥2 reds agree) vs unique review findings across the run.
+      const reviewSummary = summarizeFindings(gatherRunReviews(tasks.map((t) => t.id), verdictsForTask));
 
       if (opts.json) {
         const now = Date.now();
@@ -513,6 +516,7 @@ export function registerShow(program: Command): void {
                 failedByKind,
                 runningWithLastOutput,
                 nextCommand,
+                reviewSummary,
               },
             },
             null,
@@ -542,6 +546,23 @@ export function registerShow(program: Command): void {
         console.log("Failed tasks:");
         for (const [kind, taskIds] of Object.entries(failedByKind)) {
           console.log(`  ${kind}: ${taskIds.join(", ")}`);
+        }
+      }
+
+      if (reviewSummary.convergent.length > 0 || reviewSummary.unique.length > 0) {
+        console.log("");
+        console.log("Review findings:");
+        if (reviewSummary.convergent.length > 0) {
+          console.log(`  Convergent (multiple reds agree):`);
+          for (const c of reviewSummary.convergent) {
+            console.log(`    [${c.maxSeverity}] ${c.exemplar.summary}  — ${c.reviewers.join(", ")} (${c.count})`);
+          }
+        }
+        if (reviewSummary.unique.length > 0) {
+          console.log(`  Unique (single red):`);
+          for (const c of reviewSummary.unique) {
+            console.log(`    [${c.maxSeverity}] ${c.exemplar.summary}  — ${c.reviewers[0]}`);
+          }
         }
       }
 

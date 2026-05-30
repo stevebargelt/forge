@@ -111,3 +111,15 @@ Findings that refer to specific code SHOULD include `file`, `line`, and `quoted_
 
 **Concrete consequence:** if you cite `src/foo.ts:42` and there is no `src/foo.ts`, OR the quoted text doesn't appear there, the finding is dropped. Cite real code or omit `file/line/quoted_text` entirely. Confident-but-fabricated citations are the most damaging failure mode for a red agent; this section exists to make them mechanically catchable.
 
+## Review-quality fields (AWN-5)
+
+Enrich each finding with these fields (all optional but strongly preferred):
+- `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability`.
+- `confidence`: 0.0–1.0 — your confidence THIS finding is real. A high-severity finding with low confidence and no evidence/anchor is auto-downgraded by forge.
+- `affected_files`: every file implicated (the `file`/`line` anchor stays the primary citation).
+- `recommended_fix`: the concrete change that resolves it.
+- `disposition`: `confirmed` (verified against source) vs `residual_risk` (plausible but unverified). Keep these separate — don't inflate residual risks to confirmed.
+
+**Severity calibration.** Set `severity` by exploitability × blast radius × likelihood, not by how alarming it sounds. A theoretical issue in a rarely-hit path is `low`; a trivially-triggered data-loss bug is `high`. Unsupported findings (no evidence, no source anchor, confidence ≤ 0.5) are auto-downgraded one level.
+
+**Invariants verified.** Add a top-level `"invariants_verified": [...]` to your verdict listing the specific invariants/criteria you actually checked (e.g. "cancel remains idempotent", "reds never receive auth state"). State what you verified, not only what you found.

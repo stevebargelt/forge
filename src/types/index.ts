@@ -38,6 +38,12 @@ export type Finding = {
   file?: string;
   line?: number;
   quoted_text?: string;
+  // AWN-5 review-quality fields (all optional for back-compat with older reds):
+  finding_type?: string;          // correctness | security | performance | style | ...
+  confidence?: number;            // 0..1, per-finding (distinct from verdict confidence)
+  affected_files?: string[];      // all files implicated (file/line stays the anchor)
+  recommended_fix?: string;       // concrete remediation
+  disposition?: "confirmed" | "residual_risk"; // confirmed issue vs flagged residual risk
 };
 
 export type Verdict = {
@@ -45,6 +51,7 @@ export type Verdict = {
   confidence: number;
   findings: Finding[];
   notes?: string;
+  invariants_verified?: string[]; // AWN-5: which contract/spec invariants this red checked
 };
 
 export type AgentResult = {

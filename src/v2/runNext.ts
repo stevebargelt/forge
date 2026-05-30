@@ -556,11 +556,16 @@ function parseVerdict(output: unknown): Verdict {
       ? obj["confidence"]
       : 0.5;
   const findings: Finding[] = Array.isArray(obj["findings"]) ? (obj["findings"] as Finding[]) : [];
+  // AWN-5: carry invariants_verified through (which invariants the red checked).
+  const invariants = Array.isArray(obj["invariants_verified"])
+    ? (obj["invariants_verified"] as unknown[]).filter((x): x is string => typeof x === "string")
+    : undefined;
   return {
     verdict,
     confidence,
     findings,
     notes: typeof obj["notes"] === "string" ? obj["notes"] : undefined,
+    ...(invariants && invariants.length > 0 ? { invariants_verified: invariants } : {}),
   };
 }
 
