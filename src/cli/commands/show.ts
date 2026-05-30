@@ -12,6 +12,7 @@ import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 import { reconcileRun } from "../../v2/reconcile.js";
+import type { TaskContract } from "../../v2/contract.js";
 
 export type ShowResult =
   | { kind: "task"; task: Task; verdicts: VerdictRow[]; events: Event[] }
@@ -194,6 +195,17 @@ export function getManifestIdleTimeoutMs(taskDirPath: string): number | undefine
   }
 }
 
+// AWN-4: the task contract this task was dispatched under, from its manifest.
+export function getManifestContract(taskDirPath: string): TaskContract | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const manifest = JSON.parse(raw) as { contract?: TaskContract };
+    return manifest.contract;
+  } catch {
+    return undefined;
+  }
+}
+
 export function listPresentArtifacts(taskDirPath: string): string[] {
   try {
     const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
@@ -345,6 +357,7 @@ export function registerShow(program: Command): void {
       if (result.kind === "task") {
         const { task, verdicts, events } = result;
         const tDir = taskDir(task.runId, task.id);
+        const contract = getManifestContract(tDir);
         const stdoutLog = join(tDir, "container.stdout.log");
         const stderrLog = join(tDir, "container.stderr.log");
         const resultJson = join(tDir, "result.json");
@@ -403,6 +416,12 @@ export function registerShow(program: Command): void {
         }
         console.log(`  status:    ${task.status}`);
         if (failureKind) console.log(`  failure:   ${failureKind}`);
+        if (contract) {
+          console.log(`  contract:  ${contract.objective}${contract.risk ? `  [risk: ${contract.risk}]` : ""}`);
+          if (contract.allowed_paths?.length) console.log(`    allowed:   ${contract.allowed_paths.join(", ")}`);
+          if (contract.validation?.commands?.length) console.log(`    validate:  ${contract.validation.commands.join(" ; ")}`);
+          if (contract.review?.invariants?.length) console.log(`    invariants: ${contract.review.invariants.join(" | ")}`);
+        }
         console.log(`  container: forge-${task.id}`);
         console.log(`  elapsed:   ${elapsed}`);
         console.log(`  last output: ${lastOutputAgo}`);

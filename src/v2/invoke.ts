@@ -37,6 +37,7 @@ import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError } from "./auth-state.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
+import { renderContract, type TaskContract } from "./contract.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -47,6 +48,7 @@ export type InvokeArgs = {
   runtimeName?: string;      // override the runtime to load (default: "claude")
   readOnlyProject?: boolean; // mount /project ro (default: false)
   authProfile?: string;      // #176: name of a captured auth profile to inject (authenticated browser testing)
+  contract?: TaskContract;   // AWN-4: explicit task contract carried into the package + manifest
   runId?: string;            // attach to existing run; if absent, create a new one
   runTitle?: string;         // used only when creating a new run
   /** The orchestrator's home directory. When set, `forge status` filters
@@ -172,7 +174,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const dir = taskDir(runId, taskId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
-  writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.task));
+  writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.task, args.contract));
   writeFileSync(join(dir, "result.json"), "");
   chmodSync(dir, 0o777);
 
@@ -229,6 +231,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
     container: { name: `forge-${taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    ...(args.contract ? { contract: args.contract } : {}),
   });
 
   const ctx: SpawnContext = {
@@ -238,7 +241,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolveModel(step.model, runtime),
     SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
-    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task),
+    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task, args.contract),
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
   };
@@ -361,7 +364,7 @@ function createInvokeRun(
   return runId;
 }
 
-function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
+function renderInvokeTaskPackage(tp: TaskPackage, task: string, contract?: TaskContract): string {
   return [
     `# Task ${tp.taskId}`,
     ``,
@@ -372,6 +375,7 @@ function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
     ``,
     task,
     ``,
+    ...(contract ? [renderContract(contract), ``] : []),
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,

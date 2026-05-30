@@ -444,3 +444,41 @@ test("integ manifest pipeline: runNext dispatch writes manifest.json → correct
   assert.ok(artifacts.includes("container.stdout.log"),
     "container.stdout.log must appear via manifest index");
 });
+
+// ─── AWN-4: contract carried into the manifest + readable via forge show ─────
+
+test("integ contract: invoke --contract writes manifest.contract; getManifestContract reads it; package.md renders it", async () => {
+  ensureClaudeRuntime();
+  const { TaskContractSchema } = await import("./contract.js");
+  const { getManifestContract } = await import("../cli/commands/show.js");
+  const contract = TaskContractSchema.parse({
+    objective: "Add cancel race tests",
+    allowed_paths: ["src/cli/commands/cancel.ts"],
+    validation: { commands: ["npm test"] },
+    review: { required: true, invariants: ["cancel remains idempotent"] },
+  });
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do the thing",
+    projectDir: "/tmp/integ-manifest-project",
+    contract,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+  assert.equal(r.status, "complete");
+
+  const dir = taskDir(r.runId, r.taskId);
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as TaskManifest;
+  assert.deepEqual(manifest.contract?.allowed_paths, ["src/cli/commands/cancel.ts"]);
+  assert.equal(manifest.contract?.objective, "Add cancel race tests");
+
+  // forge show's reader returns the same contract.
+  const viaShow = getManifestContract(dir);
+  assert.equal(viaShow?.objective, "Add cancel race tests");
+
+  // The agent's package.md carries the rendered contract (objective + deviation note).
+  const pkg = readFileSync(join(dir, "package.md"), "utf8");
+  assert.match(pkg, /Task contract/);
+  assert.match(pkg, /Add cancel race tests/);
+  assert.match(pkg, /cancel remains idempotent/);
+});

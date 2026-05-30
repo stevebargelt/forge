@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { TaskContract } from "./contract.js";
 
 export type TaskManifest = {
   taskId: string;
@@ -17,6 +18,9 @@ export type TaskManifest = {
   // to now. Optional: pre-#202 manifests omit it, and show falls back.
   container: { name: string; idleTimeoutMs?: number };
   auth: { profileRequested: boolean; stateMounted: boolean };
+  // AWN-4: the task contract this task was dispatched under, if any. Surfaced in
+  // forge show; consumed by the agent via its rendered package.
+  contract?: TaskContract;
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {

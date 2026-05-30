@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { invoke } from "../../v2/invoke.js";
+import { parseContractFile } from "../../v2/contract.js";
 
 export function registerInvoke(program: Command): void {
   program
@@ -17,6 +18,7 @@ export function registerInvoke(program: Command): void {
     .option("--runtime <name>", "override runtime YAML name (default: claude)")
     .option("--read-only", "mount /project read-only (default for adversarial / review work)")
     .option("--auth-profile <name>", "inject a captured auth profile (#176) so the agent tests the app authenticated; never sees the credential")
+    .option("--contract <path>", "AWN-4: attach an explicit task contract (YAML/JSON) — objective, allowed_paths, validation, invariants")
     .option("--run <run-id>", "attach this invocation as a task in an existing run; otherwise a new one is created")
     .option("--run-title <text>", "title for the new run when --run is not provided")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
@@ -30,6 +32,7 @@ export function registerInvoke(program: Command): void {
       runtime?: string;
       readOnly?: boolean;
       authProfile?: string;
+      contract?: string;
       run?: string;
       runTitle?: string;
       workspace?: string;
@@ -48,6 +51,8 @@ export function registerInvoke(program: Command): void {
         throw new Error(`project dir does not exist: ${projectDir}`);
       }
       const workspace = resolve(opts.workspace ?? process.cwd());
+      // AWN-4: optional explicit task contract (YAML/JSON file).
+      const contract = opts.contract ? parseContractFile(resolve(opts.contract)) : undefined;
 
       const result = await invoke({
         agentRole,
@@ -58,6 +63,7 @@ export function registerInvoke(program: Command): void {
         runtimeName: opts.runtime,
         readOnlyProject: opts.readOnly,
         authProfile: opts.authProfile,
+        ...(contract ? { contract } : {}),
         runId: opts.run,
         runTitle: opts.runTitle,
         workspace,
