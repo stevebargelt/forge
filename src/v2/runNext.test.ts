@@ -548,6 +548,23 @@ test("runNext: an authoritative fail whose findings are ALL malformed does NOT b
   assert.ok(verdicts.every((v) => v.verdict === "inconclusive"), "fail with all-malformed findings is downgraded to inconclusive");
 });
 
+test("runNext: an authoritative fail with NO findings at all does NOT block — unsubstantiated → inconclusive (finding)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "empty-fail", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+    { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "fail", confidence: 0.9, findings: [] } }, // fail, zero findings
+  ]);
+  await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+
+  const primary = tasksForRun(runId).find((t) => t.parentId === undefined)!;
+  assert.notEqual(primary.status, "blocked_by_red", "an unsubstantiated fail (no findings) must NOT block");
+  assert.equal(primary.status, "awaiting_gate");
+  const verdicts = verdictsForTask(primary.id);
+  assert.ok(verdicts.every((v) => v.verdict === "inconclusive"), "fail with no findings downgraded to inconclusive");
+});
+
 test("runNext: reds — authoritative fail blocks the primary (blocked_by_red)", async () => {
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   const { runId } = startRun({
@@ -626,7 +643,9 @@ test("runNext: reds — specialist fail does NOT block (advisory), primary proce
     },
     {
       matches: (id) => id.startsWith("task-red-review-"),
-      result: { status: "complete", verdict: "fail", confidence: 0.8, findings: [] },
+      // A SUBSTANTIATED fail (real finding) so it stays 'fail' through grading —
+      // the point is that a specialist fail is advisory and doesn't block.
+      result: { status: "complete", verdict: "fail", confidence: 0.8, findings: [{ severity: "high", summary: "real issue", evidence: "observed in logs", hypothesis: "bug" }] },
     },
   ]);
 
@@ -642,7 +661,7 @@ test("runNext: reds — specialist fail does NOT block (advisory), primary proce
 
   const verdicts = verdictsForTask(primary.id);
   assert.equal(verdicts.length, 1);
-  assert.equal(verdicts[0]!.verdict, "fail");
+  assert.equal(verdicts[0]!.verdict, "fail", "a substantiated specialist fail stays fail (advisory, not blocking)");
   assert.equal(verdicts[0]!.authority, "specialist");
 });
 

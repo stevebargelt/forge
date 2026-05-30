@@ -449,16 +449,18 @@ async function dispatchReds(args: {
     const gradedFindings = graded.map((g) => g.finding);
     const downgradedCount = graded.filter((g) => g.downgraded).length;
     let finalVerdict: Verdict = { ...validated, findings: gradedFindings };
-    // AWN-5: a `fail` whose findings grading entirely REJECTED (all malformed) has
-    // no substantiated case — downgrade it to inconclusive so it doesn't BLOCK the
-    // gate on rejected findings. Mirrors validateVerdict's all-citations-dropped
-    // behavior. (Downgrade keeps findings; only rejection can empty them, so an
-    // empty set here means every finding was malformed.)
-    if (finalVerdict.verdict === "fail" && validated.findings.length > 0 && gradedFindings.length === 0) {
+    // AWN-5: a `fail` with NO substantiating findings has no case to act on —
+    // downgrade it to inconclusive so it doesn't BLOCK the gate. This covers both
+    // "all findings rejected by grading (malformed)" and "fail with no findings at
+    // all (unsubstantiated)"; an authoritative block must rest on a real finding.
+    if (finalVerdict.verdict === "fail" && gradedFindings.length === 0) {
+      const why = validated.findings.length > 0
+        ? "all findings rejected by grading (malformed)"
+        : "fail with no findings (unsubstantiated)";
       finalVerdict = {
         ...finalVerdict,
         verdict: "inconclusive",
-        notes: [finalVerdict.notes, "all findings rejected by grading (malformed); fail → inconclusive"].filter(Boolean).join("; "),
+        notes: [finalVerdict.notes, `${why}; fail → inconclusive`].filter(Boolean).join("; "),
       };
     }
     if (dropped.length > 0 || rejected.length > 0 || downgradedCount > 0) {
