@@ -527,6 +527,27 @@ test("runNext: AWN-5 grading is ENFORCED on verdict ingestion — malformed reje
   assert.equal(findings[0]!.severity, "medium", "the weak unsupported high-severity finding is downgraded to medium");
 });
 
+test("runNext: an authoritative fail whose findings are ALL malformed does NOT block — grading downgrades it to inconclusive (finding)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "grade-gate", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+    {
+      matches: (id) => id.startsWith("task-red-review-"),
+      // an authoritative FAIL, but its only finding is malformed (no summary)
+      result: { status: "complete", verdict: "fail", confidence: 0.9, findings: [{ summary: "", severity: "high", evidence: "", hypothesis: "" }] },
+    },
+  ]);
+  await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+
+  const primary = tasksForRun(runId).find((t) => t.parentId === undefined)!;
+  assert.notEqual(primary.status, "blocked_by_red", "an all-malformed fail must NOT block the gate");
+  assert.equal(primary.status, "awaiting_gate", "downgraded → no authoritative block → normal verdict gate");
+  const verdicts = verdictsForTask(primary.id);
+  assert.ok(verdicts.every((v) => v.verdict === "inconclusive"), "fail with all-malformed findings is downgraded to inconclusive");
+});
+
 test("runNext: reds — authoritative fail blocks the primary (blocked_by_red)", async () => {
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   const { runId } = startRun({

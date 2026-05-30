@@ -448,7 +448,19 @@ async function dispatchReds(args: {
     const { graded, rejected } = gradeFindings(validated.findings);
     const gradedFindings = graded.map((g) => g.finding);
     const downgradedCount = graded.filter((g) => g.downgraded).length;
-    const finalVerdict: Verdict = { ...validated, findings: gradedFindings };
+    let finalVerdict: Verdict = { ...validated, findings: gradedFindings };
+    // AWN-5: a `fail` whose findings grading entirely REJECTED (all malformed) has
+    // no substantiated case — downgrade it to inconclusive so it doesn't BLOCK the
+    // gate on rejected findings. Mirrors validateVerdict's all-citations-dropped
+    // behavior. (Downgrade keeps findings; only rejection can empty them, so an
+    // empty set here means every finding was malformed.)
+    if (finalVerdict.verdict === "fail" && validated.findings.length > 0 && gradedFindings.length === 0) {
+      finalVerdict = {
+        ...finalVerdict,
+        verdict: "inconclusive",
+        notes: [finalVerdict.notes, "all findings rejected by grading (malformed); fail → inconclusive"].filter(Boolean).join("; "),
+      };
+    }
     if (dropped.length > 0 || rejected.length > 0 || downgradedCount > 0) {
       logEvent("verdict.findings_dropped", {
         runId: args.runId,
@@ -479,9 +491,10 @@ async function dispatchReds(args: {
     logEvent("verdict.received", {
       runId: args.runId,
       taskId: args.primaryTaskId,
-      payload: { redRole: r.red.agent, verdict: validated.verdict, authority: r.red.authority },
+      payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
     });
-    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && validated.verdict === "fail") {
+    // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
+    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && finalVerdict.verdict === "fail") {
       authoritativeFail = true;
     }
   }
