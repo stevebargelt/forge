@@ -16,6 +16,13 @@ This roadmap turns observability into crawl, walk, and run stages. The emphasis
 is practical: build on Forge's existing SQLite store, event log, task directory,
 and Docker executor before introducing heavier tracing infrastructure.
 
+> **Status:** Crawl and Walk have shipped. The events table is readable
+> (`eventsForTask`/`eventsForRun`), `forge show` is the diagnostic detail view,
+> failure kinds are classified, `forge status`/`watch` and the dashboard surface
+> live task activity, and agents can emit optional progress records. The
+> "Current State" section below is the original pre-Crawl motivation, kept for
+> context; the Run stage is the remaining work.
+
 ## Goals
 
 - Make every run explainable after the fact.
@@ -33,10 +40,10 @@ Forge has these useful primitives today:
 
 - `runs` table: run identity, workflow, status, project, metadata.
 - `tasks` table: task identity, phase, role, status, package, result, error.
-- `events` table: lifecycle events are written here, but the table is currently
-  write-only — `logEvent` is the only accessor, and no command, dashboard view,
-  or read path queries it back. The events forge records are effectively
-  invisible today.
+- `events` table: lifecycle events are written here. (Pre-Crawl this table was
+  write-only; the Crawl milestone added `eventsForTask`/`eventsForRun` and the
+  `forge show` timeline, so the events are now read back across the CLI and
+  dashboard.)
 - `verdicts` table: red-agent findings and authority.
 - Per-task files: `CLAUDE.md`, `package.md`, `result.json`,
   `container.stdout.log`, `container.stderr.log`.
@@ -330,8 +337,15 @@ Docker executor.
 
 ### 2. Structured Agent Progress Events
 
-Agents should be allowed, but not required, to emit progress records. Forge can
-parse them from stdout when they are clearly delimited JSON lines.
+Agents should be allowed, but not required, to emit progress records.
+
+> **As implemented (WALK-3):** agents append delimited JSON lines to
+> `/task/progress.jsonl` rather than to stdout. The container runs
+> `claude --output-format stream-json`, so the container's stdout is pure
+> stream-json and an agent cannot inject a raw top-level line there; a file in
+> the task dir (the same interface as `result.json`/`manifest.json`) is the
+> runtime-agnostic channel. Forge ingests it after the container exits — on the
+> idle-timeout and crash paths too, not just normal exit.
 
 Example progress events:
 

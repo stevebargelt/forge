@@ -102,4 +102,4 @@ Example: a build phase whose red detected a stack violation would set the build 
 
 ## Container crash vs. agent failure
 
-Two failure modes, surfaced differently. **Container crash**: container exited non-zero with no result JSON (Docker issue, OOM, credential failure). Event type `task.crashed`. **Agent failure**: container exited 0 and wrote a result JSON with `status: "failed"` and an error reason. Event type `task.failed`. Different follow-up actions.
+Two failure modes, surfaced differently — but both emit `task.failed`; the machine-readable `failure_kind` in the event payload distinguishes them. **Container crash**: container exited non-zero with no result JSON (Docker issue, OOM, credential failure) → `failure_kind: "container_crash"`. **Agent failure**: container exited 0 and wrote a result JSON with `status: "failed"` and an error reason → classified per context. Different follow-up actions. (There is no `task.crashed` event type — the failure taxonomy lives in the `task.failed` payload, not in separate event types.)
