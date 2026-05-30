@@ -1,15 +1,32 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
 import { logEvent } from "../../store/events.js";
-import { performShow } from "./show.js";
+import type { Event } from "../../store/events.js";
+import {
+  performShow,
+  getFailureKindFromEvents,
+  classifyResultFile,
+  computeElapsed,
+  formatTimeAgo,
+  tailLines,
+  listPresentArtifacts,
+  deriveNextCommandForTask,
+  deriveNextCommandForRun,
+  groupFailedByKind,
+  getBlockerTasks,
+} from "./show.js";
 import type { Run, Task } from "../../types/index.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
+let tmpDir: string;
 
 const RUN: Run = {
   id: "run-show-test",
@@ -19,21 +36,35 @@ const RUN: Run = {
   createdAt: "2026-05-29T10:00:00Z",
 };
 
-function makeTask(id: string): Task {
+function makeTask(id: string, overrides: Partial<Task> = {}): Task {
   return {
     id,
     runId: RUN.id,
-    phase: "engineer",
-    agentRole: "engineer",
-    status: "pending",
+    phase: overrides.phase ?? "engineer",
+    agentRole: overrides.agentRole ?? "engineer",
+    status: overrides.status ?? "pending",
     taskPackage: {
       taskId: id,
       runId: RUN.id,
-      phase: "engineer",
-      role: "engineer",
+      phase: overrides.phase ?? "engineer",
+      role: overrides.agentRole ?? "engineer",
       inputs: { brief: "do the thing" },
       composedSystemPrompt: "",
     },
+    createdAt: overrides.createdAt ?? "2026-05-29T10:00:00Z",
+    startedAt: overrides.startedAt,
+    completedAt: overrides.completedAt,
+    error: overrides.error,
+  };
+}
+
+function makeEvent(type: string, payload?: unknown): Event {
+  return {
+    id: 1,
+    runId: RUN.id,
+    taskId: "task-x",
+    eventType: type as Event["eventType"],
+    payload: payload ?? null,
     createdAt: "2026-05-29T10:00:00Z",
   };
 }
@@ -41,6 +72,7 @@ function makeTask(id: string): Task {
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
+  tmpDir = mkdtempSync(join(tmpdir(), "forge-show-test-"));
   insertRun(RUN);
   insertTask(makeTask("task-show-1"));
 });
@@ -48,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   setDbForTest(prev as DatabaseInstance);
   db.close();
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test("performShow with task id returns kind=task with task and events", () => {
@@ -118,4 +151,338 @@ test("performShow: task id takes priority over run id when both could match", ()
   // Task is looked up first; if a task exists for the id, kind=task is returned
   const result = performShow("task-show-1");
   assert.equal(result.kind, "task");
+});
+
+test("performShow: run result includes tasks array", () => {
+  insertTask(makeTask("task-show-2"));
+  const result = performShow(RUN.id);
+  assert.equal(result.kind, "run");
+  if (result.kind === "run") {
+    assert.equal(result.tasks.length, 2);
+  }
+});
+
+// ─── getFailureKindFromEvents ────────────────────────────────────────────────
+
+test("getFailureKindFromEvents: returns failure_kind from task.failed payload", () => {
+  const events: Event[] = [
+    makeEvent("task.started"),
+    makeEvent("task.failed", { failure_kind: "idle_timeout", error: "no output" }),
+  ];
+  assert.equal(getFailureKindFromEvents(events), "idle_timeout");
+});
+
+test("getFailureKindFromEvents: returns undefined when no task.failed event", () => {
+  const events: Event[] = [makeEvent("task.started"), makeEvent("task.completed")];
+  assert.equal(getFailureKindFromEvents(events), undefined);
+});
+
+test("getFailureKindFromEvents: returns undefined when payload has no failure_kind", () => {
+  const events: Event[] = [makeEvent("task.failed", { error: "something" })];
+  assert.equal(getFailureKindFromEvents(events), undefined);
+});
+
+test("getFailureKindFromEvents: returns undefined when payload is null", () => {
+  const events: Event[] = [makeEvent("task.failed", null)];
+  assert.equal(getFailureKindFromEvents(events), undefined);
+});
+
+test("getFailureKindFromEvents: returns container_crash from payload", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "container_crash", error: "exit 137" }),
+  ];
+  assert.equal(getFailureKindFromEvents(events), "container_crash");
+});
+
+test("getFailureKindFromEvents: failure_kind round-trip via DB events", () => {
+  insertTask(makeTask("task-fk-roundtrip", { status: "failed" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId: "task-fk-roundtrip",
+    payload: { failure_kind: "gate_rejected", error: "rejected" },
+  });
+  const result = performShow("task-fk-roundtrip");
+  assert.equal(result.kind, "task");
+  if (result.kind === "task") {
+    assert.equal(getFailureKindFromEvents(result.events), "gate_rejected");
+  }
+});
+
+// ─── classifyResultFile ──────────────────────────────────────────────────────
+
+test("classifyResultFile: missing when file does not exist", () => {
+  assert.equal(classifyResultFile(join(tmpDir, "no-such-file.json")), "missing");
+});
+
+test("classifyResultFile: empty when file exists but is blank", () => {
+  const p = join(tmpDir, "empty.json");
+  writeFileSync(p, "");
+  assert.equal(classifyResultFile(p), "empty");
+});
+
+test("classifyResultFile: empty when file contains only whitespace", () => {
+  const p = join(tmpDir, "whitespace.json");
+  writeFileSync(p, "   \n  ");
+  assert.equal(classifyResultFile(p), "empty");
+});
+
+test("classifyResultFile: malformed when file contains invalid JSON", () => {
+  const p = join(tmpDir, "bad.json");
+  writeFileSync(p, "not valid json {{{");
+  assert.equal(classifyResultFile(p), "malformed");
+});
+
+test("classifyResultFile: valid when file contains valid JSON object", () => {
+  const p = join(tmpDir, "good.json");
+  writeFileSync(p, JSON.stringify({ status: "complete" }));
+  assert.equal(classifyResultFile(p), "valid");
+});
+
+test("classifyResultFile: valid when file contains valid JSON array", () => {
+  const p = join(tmpDir, "arr.json");
+  writeFileSync(p, "[]");
+  assert.equal(classifyResultFile(p), "valid");
+});
+
+// ─── computeElapsed ─────────────────────────────────────────────────────────
+
+test("computeElapsed: returns — when no startedAt", () => {
+  assert.equal(computeElapsed(undefined, undefined, 1000), "—");
+});
+
+test("computeElapsed: uses completedAt when provided", () => {
+  const start = "2026-05-29T10:00:00Z";
+  const end = "2026-05-29T10:05:00Z";
+  assert.equal(computeElapsed(start, end), "5m");
+});
+
+test("computeElapsed: injectable now for determinism", () => {
+  const startMs = 1000;
+  const nowMs = startMs + 10 * 60 * 1000;
+  assert.equal(computeElapsed(new Date(startMs).toISOString(), undefined, nowMs), "10m");
+});
+
+test("computeElapsed: formats seconds for short elapsed", () => {
+  const startMs = 1000;
+  const nowMs = startMs + 45 * 1000;
+  assert.equal(computeElapsed(new Date(startMs).toISOString(), undefined, nowMs), "45s");
+});
+
+test("computeElapsed: formats hours correctly", () => {
+  const startMs = 1000;
+  const nowMs = startMs + 90 * 60 * 1000;
+  assert.equal(computeElapsed(new Date(startMs).toISOString(), undefined, nowMs), "1h 30m");
+});
+
+test("computeElapsed: exact hour with no trailing minutes", () => {
+  const startMs = 1000;
+  const nowMs = startMs + 60 * 60 * 1000;
+  assert.equal(computeElapsed(new Date(startMs).toISOString(), undefined, nowMs), "1h");
+});
+
+// ─── formatTimeAgo ───────────────────────────────────────────────────────────
+
+test("formatTimeAgo: seconds ago for < 60s", () => {
+  const now = 60000;
+  assert.equal(formatTimeAgo(now - 30000, now), "30s ago");
+});
+
+test("formatTimeAgo: minutes ago for < 60m", () => {
+  const now = 120 * 60 * 1000;
+  assert.equal(formatTimeAgo(now - 11 * 60 * 1000, now), "11m ago");
+});
+
+test("formatTimeAgo: hours ago for >= 60m", () => {
+  const now = 200 * 60 * 1000;
+  assert.equal(formatTimeAgo(now - 75 * 60 * 1000, now), "1h 15m ago");
+});
+
+test("formatTimeAgo: exact hour with no trailing minutes", () => {
+  const now = 200 * 60 * 1000;
+  assert.equal(formatTimeAgo(now - 60 * 60 * 1000, now), "1h ago");
+});
+
+// ─── listPresentArtifacts ────────────────────────────────────────────────────
+
+test("listPresentArtifacts: returns only files that exist", () => {
+  writeFileSync(join(tmpDir, "result.json"), "{}");
+  writeFileSync(join(tmpDir, "container.stdout.log"), "hello\n");
+  const artifacts = listPresentArtifacts(tmpDir);
+  assert.ok(artifacts.includes("result.json"));
+  assert.ok(artifacts.includes("container.stdout.log"));
+  assert.ok(!artifacts.includes("CLAUDE.md"));
+  assert.ok(!artifacts.includes("container.stderr.log"));
+});
+
+test("listPresentArtifacts: empty when no known files present", () => {
+  assert.deepEqual(listPresentArtifacts(tmpDir), []);
+});
+
+test("listPresentArtifacts: returns all five known files when all present", () => {
+  for (const f of ["CLAUDE.md", "package.md", "result.json", "container.stdout.log", "container.stderr.log"]) {
+    writeFileSync(join(tmpDir, f), "");
+  }
+  assert.equal(listPresentArtifacts(tmpDir).length, 5);
+});
+
+// ─── tailLines ───────────────────────────────────────────────────────────────
+
+test("tailLines: returns last N lines", () => {
+  const p = join(tmpDir, "log.txt");
+  writeFileSync(p, "a\nb\nc\nd\ne\nf\n");
+  assert.deepEqual(tailLines(p, 3), ["d", "e", "f"]);
+});
+
+test("tailLines: returns all lines if fewer than N", () => {
+  const p = join(tmpDir, "short.txt");
+  writeFileSync(p, "x\ny\n");
+  assert.deepEqual(tailLines(p, 5), ["x", "y"]);
+});
+
+test("tailLines: returns [] when file does not exist", () => {
+  assert.deepEqual(tailLines(join(tmpDir, "nope.txt"), 5), []);
+});
+
+// ─── deriveNextCommandForTask ────────────────────────────────────────────────
+
+test("deriveNextCommandForTask: failed+idle_timeout → forge retry", () => {
+  assert.match(deriveNextCommandForTask("failed", "idle_timeout", "task-abc"), /forge retry task-abc/);
+});
+
+test("deriveNextCommandForTask: failed+container_crash → forge retry", () => {
+  assert.match(deriveNextCommandForTask("failed", "container_crash", "task-abc"), /forge retry task-abc/);
+});
+
+test("deriveNextCommandForTask: failed+result_missing → forge retry", () => {
+  assert.match(deriveNextCommandForTask("failed", "result_missing", "task-abc"), /forge retry task-abc/);
+});
+
+test("deriveNextCommandForTask: failed+result_malformed → forge retry", () => {
+  assert.match(deriveNextCommandForTask("failed", "result_malformed", "task-abc"), /forge retry task-abc/);
+});
+
+test("deriveNextCommandForTask: failed+red_blocked → show red task + gate", () => {
+  const cmd = deriveNextCommandForTask("failed", "red_blocked", "task-abc");
+  assert.match(cmd, /forge show/);
+  assert.match(cmd, /forge gate task-abc/);
+});
+
+test("deriveNextCommandForTask: failed+undefined failure_kind → forge retry", () => {
+  assert.match(deriveNextCommandForTask("failed", undefined, "task-abc"), /forge retry task-abc/);
+});
+
+test("deriveNextCommandForTask: awaiting_gate → forge gate --advance | --reject", () => {
+  const cmd = deriveNextCommandForTask("awaiting_gate", undefined, "task-abc");
+  assert.match(cmd, /forge gate task-abc/);
+  assert.match(cmd, /--advance/);
+});
+
+test("deriveNextCommandForTask: blocked_by_red → forge show red task + gate", () => {
+  const cmd = deriveNextCommandForTask("blocked_by_red", undefined, "task-abc");
+  assert.match(cmd, /forge show/);
+  assert.match(cmd, /forge gate task-abc/);
+});
+
+test("deriveNextCommandForTask: awaiting_human_input → forge gate --advance", () => {
+  assert.match(deriveNextCommandForTask("awaiting_human_input", undefined, "task-abc"), /forge gate task-abc --advance/);
+});
+
+test("deriveNextCommandForTask: complete → —", () => {
+  assert.equal(deriveNextCommandForTask("complete", undefined, "task-abc"), "—");
+});
+
+// ─── deriveNextCommandForRun ─────────────────────────────────────────────────
+
+test("deriveNextCommandForRun: awaiting_gate first priority", () => {
+  const tasks: Task[] = [
+    makeTask("t-gate", { status: "awaiting_gate" }),
+    makeTask("t-fail", { status: "failed" }),
+  ];
+  assert.match(deriveNextCommandForRun(RUN.id, tasks), /forge gate t-gate/);
+});
+
+test("deriveNextCommandForRun: blocked_by_red is second priority", () => {
+  const tasks: Task[] = [
+    makeTask("t-red", { status: "blocked_by_red" }),
+    makeTask("t-fail", { status: "failed" }),
+  ];
+  assert.match(deriveNextCommandForRun(RUN.id, tasks), /forge show t-red/);
+});
+
+test("deriveNextCommandForRun: failed task → forge retry", () => {
+  const tasks: Task[] = [
+    makeTask("t-fail", { status: "failed" }),
+    makeTask("t-ok", { status: "complete" }),
+  ];
+  assert.match(deriveNextCommandForRun(RUN.id, tasks), /forge retry t-fail/);
+});
+
+test("deriveNextCommandForRun: only running → show run with count", () => {
+  const tasks: Task[] = [makeTask("t-run", { status: "running" })];
+  const cmd = deriveNextCommandForRun(RUN.id, tasks);
+  assert.match(cmd, /forge show.*1 task/);
+});
+
+test("deriveNextCommandForRun: all complete → —", () => {
+  assert.equal(deriveNextCommandForRun(RUN.id, [makeTask("t", { status: "complete" })]), "—");
+});
+
+test("deriveNextCommandForRun: empty tasks → —", () => {
+  assert.equal(deriveNextCommandForRun(RUN.id, []), "—");
+});
+
+// ─── groupFailedByKind ───────────────────────────────────────────────────────
+
+test("groupFailedByKind: groups failed tasks by failure_kind", () => {
+  const eventsMap: Record<string, Event[]> = {
+    "t-a": [makeEvent("task.failed", { failure_kind: "idle_timeout" })],
+    "t-b": [makeEvent("task.failed", { failure_kind: "container_crash" })],
+    "t-c": [makeEvent("task.failed", { failure_kind: "idle_timeout" })],
+  };
+  const tasks: Task[] = [
+    makeTask("t-a", { status: "failed" }),
+    makeTask("t-b", { status: "failed" }),
+    makeTask("t-c", { status: "failed" }),
+  ];
+  const result = groupFailedByKind(tasks, (id) => eventsMap[id] ?? []);
+  assert.deepEqual((result["idle_timeout"] ?? []).sort(), ["t-a", "t-c"]);
+  assert.deepEqual(result["container_crash"], ["t-b"]);
+});
+
+test("groupFailedByKind: uses unknown when no failure_kind in events", () => {
+  const tasks: Task[] = [makeTask("t-a", { status: "failed" })];
+  assert.deepEqual(groupFailedByKind(tasks, () => []), { unknown: ["t-a"] });
+});
+
+test("groupFailedByKind: ignores non-failed tasks", () => {
+  const tasks: Task[] = [
+    makeTask("t-ok", { status: "complete" }),
+    makeTask("t-run", { status: "running" }),
+    makeTask("t-fail", { status: "failed" }),
+  ];
+  const result = groupFailedByKind(tasks, () => [makeEvent("task.failed", { failure_kind: "model_error" })]);
+  assert.deepEqual(Object.values(result).flat(), ["t-fail"]);
+});
+
+test("groupFailedByKind: empty tasks → empty object", () => {
+  assert.deepEqual(groupFailedByKind([], () => []), {});
+});
+
+// ─── getBlockerTasks ─────────────────────────────────────────────────────────
+
+test("getBlockerTasks: returns awaiting_gate, awaiting_human_input, blocked_by_red", () => {
+  const tasks: Task[] = [
+    makeTask("t1", { status: "awaiting_gate" }),
+    makeTask("t2", { status: "awaiting_human_input" }),
+    makeTask("t3", { status: "blocked_by_red" }),
+    makeTask("t4", { status: "running" }),
+    makeTask("t5", { status: "failed" }),
+    makeTask("t6", { status: "complete" }),
+  ];
+  const ids = getBlockerTasks(tasks).map((t) => t.id).sort();
+  assert.deepEqual(ids, ["t1", "t2", "t3"]);
+});
+
+test("getBlockerTasks: empty when no blockers", () => {
+  assert.deepEqual(getBlockerTasks([makeTask("t1", { status: "running" })]), []);
 });
