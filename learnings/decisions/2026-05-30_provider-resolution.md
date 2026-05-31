@@ -115,6 +115,29 @@ User/project policy strictly beats forge default. **Orchestrator choice is allow
 only *inside* the bounds set by user/project policy** (§5) — it is not a
 precedence level that can exceed policy.
 
+**Policy *loading* is file-level replacement, not key-by-key merge (Crawl).** The
+Pass-2 "project > user" precedence is realized at *file* granularity, not by
+merging the two documents:
+
+```
+project  <project>/.forge/model-policy.yml  — if present, IS the entire policy
+else     ~/.forge/model-policy.yml           — the workspace policy
+else     legacy resolution                   — runtime.models[alias] (forge's built-in default; behavior unchanged)
+```
+
+This matches forge's existing "project file wins" override pattern for workflows
+and runtimes, keeps the resolver deterministic and easy to explain, and avoids
+inventing merge semantics for profile catalogs / defaults / fallback / allowed
+lists before a real use case demands them. It also avoids a project policy
+silently inheriting a user/global `allowed_profiles`. Key-by-key merge can be
+added later behind `loadModelPolicy` if ergonomics demand it (a project wanting
+to retarget *one* agent while inheriting the rest).
+
+*Future note (Run, not Crawl):* when bounded orchestrator choice lands, a
+global/admin `allowed_profiles` may become a **ceiling** over project policy, so
+a project can't silently expand orchestrator autonomy. Off by default today, so
+not solved in Crawl.
+
 ### 5. Orchestrator choice: request intent, forge enforces
 
 The orchestrator never names an arbitrary provider/model. It requests
