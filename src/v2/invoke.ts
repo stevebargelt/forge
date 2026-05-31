@@ -276,6 +276,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
   });
 
+  // Usage attribution: prefer the resolved capability alias (policy mode); fall
+  // back to the workflow-declared alias (legacy, where resolution.alias is unset).
+  const usageAlias = resolution.alias ?? args.modelAlias;
+
   const ctx: SpawnContext = {
     TASK_ID: taskId,
     TASK_DIR: dir,
@@ -315,7 +319,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed
     // tokens before crashing, and we want to account for them.
-    captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
+    captureUsageForTask(stdoutPath, { taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
     // WALK-3: ingest progress on the crash path too — the agent's last
     // decision/progress records are most valuable in failure cases.
     emitAgentProgressEvents(dir, runId, taskId);
@@ -327,7 +331,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   }
   // #155: capture token usage from the stream-json log. Best-effort; never
   // throws or affects task status.
-  captureUsageForTask(stdoutPath, { taskId, ...(args.modelAlias ? { alias: args.modelAlias } : {}) });
+  captureUsageForTask(stdoutPath, { taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
   // WALK-3: ingest any agent-written progress.jsonl as soon as exec returns —
   // BEFORE the idle-timeout / crash / normal branches below — so a hung or
   // crashed agent's progress records still land on the timeline (these are the

@@ -4,7 +4,23 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { probeAuth, doctorReport } from "./provider-doctor.js";
+import { probeAuth, doctorReport, checkResolvedAvailability } from "./provider-doctor.js";
+import type { ModelResolution } from "./model-resolution.js";
+
+// A policy-mode resolution pinned to api (probe is unavailable when no key set).
+function apiResolution(onUnavailable: "fail" | "fallback"): ModelResolution {
+  return {
+    alias: "review",
+    model: "m",
+    profile: "claude-api",
+    provider: "anthropic",
+    auth: "api",
+    costTier: "standard",
+    resolvedBy: "defaults.profile",
+    runtime: "claude-apikey",
+    onUnavailable,
+  };
+}
 
 let snap: Record<string, string | undefined>;
 
@@ -30,17 +46,19 @@ test("probeAuth(api): available iff ANTHROPIC_API_KEY set", () => {
   assert.equal(probeAuth("api").status, "available");
 });
 
-test("probeAuth(bedrock): available when CLAUDE_CODE_USE_BEDROCK=1 + AWS present", () => {
+test("probeAuth(bedrock): available when AWS present + CLAUDE_CODE_USE_BEDROCK=1", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "test-profile";
   const p = probeAuth("bedrock");
   assert.equal(p.status, "available");
 });
 
-test("probeAuth(bedrock): unknown when AWS present but bedrock not switched on", () => {
-  process.env.AWS_PROFILE = "test-profile"; // aws signal true, but no CLAUDE_CODE_USE_BEDROCK=1
+test("probeAuth(bedrock): available on AWS creds alone — a pinned profile doesn't need CLAUDE_CODE_USE_BEDROCK", () => {
+  // The claude-bedrock runtime injects CLAUDE_CODE_USE_BEDROCK=1 itself; the host
+  // env var is the auto-SELECTION signal, not an availability requirement.
+  process.env.AWS_PROFILE = "test-profile"; // AWS creds present, no env var
   const p = probeAuth("bedrock");
-  assert.equal(p.status, "unknown");
+  assert.equal(p.status, "available");
 });
 
 test("probeAuth(subscription): unknown with no cached OAuth hint", () => {
@@ -53,4 +71,31 @@ test("probeAuth(subscription): unknown with no cached OAuth hint", () => {
 test("doctorReport: returns all three anthropic auth modes in order", () => {
   const report = doctorReport();
   assert.deepEqual(report.map((r) => r.mode), ["subscription", "api", "bedrock"]);
+});
+
+test("checkResolvedAvailability: legacy resolution always ok (no policy gate)", () => {
+  const legacy: ModelResolution = {
+    alias: undefined, model: "x", profile: undefined, provider: undefined,
+    auth: undefined, costTier: undefined, resolvedBy: "legacy", runtime: "claude",
+    onUnavailable: "fail",
+  };
+  assert.deepEqual(checkResolvedAvailability(legacy), { ok: true });
+});
+
+test("checkResolvedAvailability: unavailable + on_unavailable=fail → fail loud", () => {
+  // No ANTHROPIC_API_KEY (cleared in beforeEach) → api probe is unavailable.
+  const r = checkResolvedAvailability(apiResolution("fail"));
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /unavailable/);
+});
+
+test("checkResolvedAvailability: unavailable + on_unavailable=fallback → fail loud (not implemented in Crawl)", () => {
+  const r = checkResolvedAvailability(apiResolution("fallback"));
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /fallback is not implemented/);
+});
+
+test("checkResolvedAvailability: available auth proceeds", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-x"; // api now available
+  assert.deepEqual(checkResolvedAvailability(apiResolution("fail")), { ok: true });
 });

@@ -579,6 +579,10 @@ Follow-up to AWN-4 phase 1 (#217, which landed the TaskContract schema + manifes
 Builds directly on #217's TaskContract type + contract.ts.
 
 
+### #224 — AWN-7 Walk: Codex/OpenAI as a real second provider (usage-parser hook)
+
+### #225 — AWN-7 Run: bounded orchestrator choice + adaptive routing (allowed_profiles ceiling, cost-tier guardrail)
+
 ## Done (recent)
 
 ### #221 — AWN-8 hygiene-hardening: complete secret exclusion across bundles/logs/manifests/exports + staged-auth cleanup

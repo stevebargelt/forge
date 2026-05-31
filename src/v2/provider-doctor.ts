@@ -23,15 +23,19 @@ export type AuthProbe = {
 export function probeAuth(mode: EffectiveAuth): AuthProbe {
   switch (mode) {
     case "bedrock": {
-      const on = process.env.CLAUDE_CODE_USE_BEDROCK === "1";
+      // Availability is about AWS CREDENTIALS, not the CLAUDE_CODE_USE_BEDROCK
+      // env var. That var is the auto-SELECTION signal (auth: auto picks bedrock
+      // from it) — but a PINNED bedrock profile works regardless, because the
+      // claude-bedrock runtime sets CLAUDE_CODE_USE_BEDROCK=1 itself. So report on
+      // AWS profile/config presence; surface the selection var as info only.
       const aws =
         !!process.env.AWS_PROFILE ||
         hasAwsSsoConfigured() ||
         existsSync(join(homedir(), ".aws", "config"));
-      if (on && aws) return { mode, status: "available", detail: "CLAUDE_CODE_USE_BEDROCK=1, AWS config present" };
-      if (on) return { mode, status: "unavailable", detail: "CLAUDE_CODE_USE_BEDROCK=1 but no AWS_PROFILE / ~/.aws/config" };
-      if (aws) return { mode, status: "unknown", detail: "AWS config present but CLAUDE_CODE_USE_BEDROCK not set" };
-      return { mode, status: "unavailable", detail: "CLAUDE_CODE_USE_BEDROCK not set, no AWS config" };
+      const sel = process.env.CLAUDE_CODE_USE_BEDROCK === "1" ? "; CLAUDE_CODE_USE_BEDROCK=1" : "";
+      return aws
+        ? { mode, status: "available", detail: `AWS profile/config present${sel}` }
+        : { mode, status: "unavailable", detail: "no AWS_PROFILE / ~/.aws config" };
     }
     case "api":
       return process.env.ANTHROPIC_API_KEY
@@ -60,18 +64,27 @@ export type AvailabilityCheck = { ok: true } | { ok: false; reason: string };
 
 // Dispatch-time fail-loud gate (ADR §6). Runs only in policy mode. CONSERVATIVE:
 // blocks only on a DEFINITIVE "unavailable" probe — "unknown" always proceeds, so
-// uncertainty (e.g. an uncached OAuth hint) never blocks a legitimate run. A
-// profile that opted into on_unavailable=fallback proceeds too: Crawl has no
-// fallback ACTION yet (that lands in Walk/Run), so we don't fail it loud here.
+// uncertainty (e.g. an uncached OAuth hint) never blocks a legitimate run.
+//
+// on_unavailable=fallback does NOT silently proceed: Crawl has no fallback ACTION
+// (same-capability lower-cost substitution lands in Walk/Run). Proceeding would
+// run the container straight into a broken auth — exactly the "silently runs on
+// the wrong model" outcome the ADR forbids. So an unavailable+fallback profile
+// fails loud too, with a message that names fallback as not-yet-implemented.
 export function checkResolvedAvailability(res: ModelResolution): AvailabilityCheck {
   if (res.resolvedBy === "legacy" || !res.auth) return { ok: true };
   const probe = probeAuth(res.auth);
   if (probe.status !== "unavailable") return { ok: true };
-  if (res.onUnavailable === "fallback") return { ok: true };
-  return {
-    ok: false,
-    reason:
-      `profile '${res.profile}' requires provider '${res.provider}' auth '${res.auth}', ` +
-      `which is unavailable in this environment: ${probe.detail}`,
-  };
+  const base =
+    `profile '${res.profile}' requires provider '${res.provider}' auth '${res.auth}', ` +
+    `which is unavailable in this environment: ${probe.detail}`;
+  if (res.onUnavailable === "fallback") {
+    return {
+      ok: false,
+      reason:
+        `${base}. on_unavailable=fallback is not implemented until AWN-7 Walk/Run — ` +
+        `failing rather than running on a different model than policy specified.`,
+    };
+  }
+  return { ok: false, reason: base };
 }

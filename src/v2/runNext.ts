@@ -975,6 +975,9 @@ async function runContainer(args: {
   if (resolvedBlock) {
     logEvent("model.profile_resolved", { runId: args.runId, taskId: args.taskId, payload: resolvedBlock });
   }
+  // Usage attribution: prefer the resolved capability alias (policy mode); fall
+  // back to the workflow-declared alias (legacy, where resolution.alias is unset).
+  const usageAlias = args.resolution.alias ?? args.workflowAlias;
 
   // #176: stage the auth profile (resolve + reconcile localhost origins) for
   // injection. Fail fast on missing/expired — don't run a browser step against
@@ -1055,7 +1058,7 @@ async function runContainer(args: {
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
-    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.workflowAlias ? { alias: args.workflowAlias } : {}) });
+    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
@@ -1065,7 +1068,7 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
   // #155: capture token usage from the stream-json log. Best-effort.
-  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.workflowAlias ? { alias: args.workflowAlias } : {}) });
+  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
   // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /
   // crash / normal branches — so a hung or crashed agent's records still land on
   // the timeline. The events precede the terminal event, matching when written.
