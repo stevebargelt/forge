@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { hasAwsSsoConfigured, readOauthHint } from "../util/creds.js";
-import type { EffectiveAuth } from "./model-resolution.js";
+import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
 
 export type ProbeStatus = "available" | "unavailable" | "unknown";
 
@@ -54,4 +54,24 @@ export function probeAuth(mode: EffectiveAuth): AuthProbe {
 // All anthropic auth modes, in the order doctor displays them.
 export function doctorReport(): AuthProbe[] {
   return (["subscription", "api", "bedrock"] as const).map(probeAuth);
+}
+
+export type AvailabilityCheck = { ok: true } | { ok: false; reason: string };
+
+// Dispatch-time fail-loud gate (ADR §6). Runs only in policy mode. CONSERVATIVE:
+// blocks only on a DEFINITIVE "unavailable" probe — "unknown" always proceeds, so
+// uncertainty (e.g. an uncached OAuth hint) never blocks a legitimate run. A
+// profile that opted into on_unavailable=fallback proceeds too: Crawl has no
+// fallback ACTION yet (that lands in Walk/Run), so we don't fail it loud here.
+export function checkResolvedAvailability(res: ModelResolution): AvailabilityCheck {
+  if (res.resolvedBy === "legacy" || !res.auth) return { ok: true };
+  const probe = probeAuth(res.auth);
+  if (probe.status !== "unavailable") return { ok: true };
+  if (res.onUnavailable === "fallback") return { ok: true };
+  return {
+    ok: false,
+    reason:
+      `profile '${res.profile}' requires provider '${res.provider}' auth '${res.auth}', ` +
+      `which is unavailable in this environment: ${probe.detail}`,
+  };
 }

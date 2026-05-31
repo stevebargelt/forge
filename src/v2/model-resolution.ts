@@ -28,7 +28,7 @@
 
 import { loadModelPolicy, resolveModelForTask, type LoadContext } from "./loader.js";
 import { detectCredsMode } from "../util/creds.js";
-import type { CostTier } from "./schema.js";
+import type { CostTier, OnUnavailable } from "./schema.js";
 
 // Effective auth is the AuthMode enum minus "auto" — "auto" is an INPUT that
 // resolves to one of these, and only the resolved value is ever recorded.
@@ -52,6 +52,9 @@ export type ModelResolution = {
   /** Runtime YAML to execute with: bound from (provider, auth) in policy mode,
    *  or the step's runtime name in legacy mode. */
   runtime: string;
+  /** Effective on_unavailable (profile override ?? policy default). "fail" in
+   *  legacy mode (irrelevant — no dispatch availability gate runs in legacy). */
+  onUnavailable: OnUnavailable;
 };
 
 // Pass-1 fallback: agent role -> default capability activity. Small + local for
@@ -137,6 +140,7 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
       costTier: undefined,
       resolvedBy: "legacy",
       runtime: runtimeName,
+      onUnavailable: "fail",
     };
   }
 
@@ -196,6 +200,7 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     costTier: entry.cost_tier,
     resolvedBy,
     runtime,
+    onUnavailable: profile.on_unavailable ?? policy.on_unavailable,
   };
 }
 

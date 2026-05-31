@@ -128,6 +128,61 @@ defaults:
   assert.equal(manifest.model!.model, "policy-chosen-model");
   assert.equal(manifest.model!.auth, "api");
   assert.equal(manifest.model!.runtime, "claude-apikey");
+
+  // Lifecycle: a model.profile_resolved event fired for the task.
+  const events = eventsForTask(r.taskId).map((e) => e.eventType);
+  assert.ok(events.includes("model.profile_resolved"), `expected model.profile_resolved in ${events.join(",")}`);
+});
+
+test("invoke: policy mode fails loud when the resolved auth is unavailable", async () => {
+  setupApikeyRuntimeStub();
+  // Force api unavailable: clear ANTHROPIC_API_KEY for this test, restore after.
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-policy-unavail-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".forge", "model-policy.yml"),
+    `
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      default: { model: m, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`
+  );
+
+  let dockerCalled = false;
+  const spyExec: DockerExecFn = async (a) => {
+    dockerCalled = true;
+    return makeStubExec({ status: "complete" })(a);
+  };
+
+  try {
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "should not run",
+      projectDir,
+      dockerExec: spyExec,
+    });
+
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /unavailable/);
+    assert.equal(dockerCalled, false, "container must not spawn when auth is unavailable");
+
+    const events = eventsForTask(r.taskId).map((e) => e.eventType);
+    assert.ok(events.includes("model.profile_unavailable"), `expected model.profile_unavailable in ${events.join(",")}`);
+    assert.ok(!events.includes("container.started"), "no container.started on a fail-loud unavailable");
+  } finally {
+    if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedKey;
+  }
 });
 
 test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke' workflow", async () => {

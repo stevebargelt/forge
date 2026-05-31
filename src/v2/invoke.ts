@@ -34,6 +34,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime } from "./loader.js";
 import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
+import { checkResolvedAvailability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -206,6 +207,24 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
+  }
+
+  // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
+  // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
+  const availability = checkResolvedAvailability(resolution);
+  if (!availability.ok) {
+    logEvent("model.profile_unavailable", {
+      runId,
+      taskId,
+      payload: { profile: resolution.profile, provider: resolution.provider, auth: resolution.auth, reason: availability.reason },
+    });
+    failTask(taskId, { runId, kind: classify({}), error: availability.reason });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error: availability.reason };
+  }
+  const resolvedBlock = manifestModelBlock(resolution);
+  if (resolvedBlock) {
+    logEvent("model.profile_resolved", { runId, taskId, payload: resolvedBlock });
   }
 
   // #176: resolve the requested auth profile and fail fast BEFORE spawning a

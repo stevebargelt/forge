@@ -29,7 +29,14 @@ export type EventType =
   | "container.killed"
   | "container.idle_timeout"
   | "auth.profile_applied"
-  | "auth.profile_failed";
+  | "auth.profile_failed"
+  // AWN-7 model resolution (policy mode). profile_resolved: a task resolved to a
+  // profile/model. profile_unavailable: fail-loud — resolved auth has no working
+  // credentials. fallback_applied: a same-capability lower-cost substitution was
+  // made (vocabulary reserved for Walk/Run; not emitted in Crawl).
+  | "model.profile_resolved"
+  | "model.profile_unavailable"
+  | "model.fallback_applied";
 
 export type Event = {
   id: number;

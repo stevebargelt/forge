@@ -46,6 +46,7 @@ import {
   manifestModelBlock,
   type ModelResolution,
 } from "./model-resolution.js";
+import { checkResolvedAvailability } from "./provider-doctor.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
@@ -951,6 +952,28 @@ async function runContainer(args: {
     const msg = `loadRuntime failed: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
+  }
+
+  // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
+  // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
+  const availability = checkResolvedAvailability(args.resolution);
+  if (!availability.ok) {
+    logEvent("model.profile_unavailable", {
+      runId: args.runId,
+      taskId: args.taskId,
+      payload: {
+        profile: args.resolution.profile,
+        provider: args.resolution.provider,
+        auth: args.resolution.auth,
+        reason: availability.reason,
+      },
+    });
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: availability.reason });
+    return { kind: "failed", error: availability.reason };
+  }
+  const resolvedBlock = manifestModelBlock(args.resolution);
+  if (resolvedBlock) {
+    logEvent("model.profile_resolved", { runId: args.runId, taskId: args.taskId, payload: resolvedBlock });
   }
 
   // #176: stage the auth profile (resolve + reconcile localhost origins) for
