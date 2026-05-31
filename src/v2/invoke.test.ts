@@ -2,7 +2,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
@@ -50,6 +51,84 @@ result:
   file: /task/result.json
 `);
 }
+
+// AWN-7: a claude-apikey runtime stub the (anthropic, api) binding resolves to.
+// Additive — legacy tests use the literal claude.yml, which loadRuntime prefers.
+function setupApikeyRuntimeStub(): void {
+  const fhome = process.env.FORGE_HOME!;
+  const p = join(fhome, "runtimes", "claude-apikey.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `
+name: claude-apikey
+description: test stub
+image: test-image:latest
+models:
+  default: runtime-default-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+test("invoke: policy mode stamps the resolution record on the task row + manifest", async () => {
+  setupApikeyRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Project-scoped policy so we don't pollute the shared FORGE_HOME (which would
+  // flip every other invoke test into policy mode). auth: api is pinned → binds
+  // to the claude-apikey runtime, deterministically (no env detection).
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-policy-proj-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".forge", "model-policy.yml"),
+    `
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      default: { model: policy-chosen-model, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`
+  );
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do policy work",
+    projectDir,
+    dockerExec: makeStubExec({ status: "complete" }),
+  });
+
+  assert.equal(r.status, "complete");
+  const task = getTask(r.taskId);
+  assert.ok(task);
+  // Concrete model came from the profile map, not the runtime default.
+  assert.equal(task!.agentModel, "policy-chosen-model");
+  assert.equal(task!.resolvedProfile, "claude-api");
+  assert.equal(task!.resolvedProvider, "anthropic");
+  assert.equal(task!.resolvedAuth, "api");
+  assert.equal(task!.resolvedBy, "defaults.profile");
+
+  const dir = taskDir(r.runId, r.taskId);
+  const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as TaskManifest;
+  assert.ok(manifest.model, "policy mode should write a manifest model block");
+  assert.equal(manifest.model!.profile, "claude-api");
+  assert.equal(manifest.model!.model, "policy-chosen-model");
+  assert.equal(manifest.model!.auth, "api");
+  assert.equal(manifest.model!.runtime, "claude-apikey");
+});
 
 test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke' workflow", async () => {
   setupRuntimeStub();

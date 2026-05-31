@@ -194,3 +194,53 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     runtime,
   };
 }
+
+// The task-row fields a resolution implies. Use at every task-creation site so
+// the row, runtime selection, and manifest agree. In legacy mode the resolved_*
+// fields stay undefined and agentAlias falls back to the workflow-declared alias
+// (preserving pre-AWN-7 agent_alias behavior for usage rollups).
+export type TaskModelFields = {
+  agentAlias: string | undefined;
+  agentModel: string;
+  resolvedProfile?: string;
+  resolvedProvider?: string;
+  resolvedAuth?: string;
+  resolvedBy?: string;
+};
+
+export function taskModelFields(
+  res: ModelResolution,
+  workflowAlias: string | undefined
+): TaskModelFields {
+  const agentAlias = res.alias ?? workflowAlias;
+  if (res.resolvedBy === "legacy") {
+    return { agentAlias, agentModel: res.model };
+  }
+  return {
+    agentAlias,
+    agentModel: res.model,
+    resolvedProfile: res.profile,
+    resolvedProvider: res.provider,
+    resolvedAuth: res.auth,
+    resolvedBy: res.resolvedBy,
+  };
+}
+
+// The manifest `model` block a resolution implies — written only in policy mode.
+// Returns undefined in legacy mode (resolvedBy="legacy") so the manifest simply
+// omits the block, matching pre-AWN-7 manifests.
+export function manifestModelBlock(res: ModelResolution):
+  | { alias: string; model: string; profile: string; provider: string; auth: string; costTier: string; resolvedBy: string; runtime: string }
+  | undefined {
+  if (res.resolvedBy === "legacy") return undefined;
+  return {
+    alias: res.alias ?? "",
+    model: res.model,
+    profile: res.profile ?? "",
+    provider: res.provider ?? "",
+    auth: res.auth ?? "",
+    costTier: res.costTier ?? "",
+    resolvedBy: res.resolvedBy,
+    runtime: res.runtime,
+  };
+}

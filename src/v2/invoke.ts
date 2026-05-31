@@ -32,7 +32,8 @@ import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { loadRuntime, resolveModelForTask } from "./loader.js";
+import { loadRuntime } from "./loader.js";
+import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -46,6 +47,7 @@ export type InvokeArgs = {
   projectDir: string;
   designDir?: string;
   modelAlias?: string;       // override the step's model alias
+  modelProfile?: string;     // AWN-7: --profile, the top profile-selection precedence (policy mode)
   runtimeName?: string;      // override the runtime to load (default: "claude")
   readOnlyProject?: boolean; // mount /project ro (default: false)
   authProfile?: string;      // #176: name of a captured auth profile to inject (authenticated browser testing)
@@ -157,6 +159,16 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     }),
   };
 
+  // AWN-7: resolve the model (capability + profile) before inserting the row, so
+  // the task carries its resolution record and the spawn uses the bound runtime.
+  const resolution = resolveModel({
+    agentRole: args.agentRole,
+    stepAlias: args.modelAlias,
+    cliProfile: args.modelProfile,
+    runtimeName: args.runtimeName ?? "claude",
+    ctx: { projectDir: args.projectDir },
+  });
+
   // Insert task row first; the spawn writes files into the task dir and the
   // dashboard / forge status reads the row.
   const task: Task = {
@@ -164,8 +176,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     runId,
     phase: "task",
     agentRole: args.agentRole,
-    agentAlias: args.modelAlias,
-    agentModel: resolveModelForTask(args.runtimeName ?? "claude", args.modelAlias),
+    ...taskModelFields(resolution, args.modelAlias),
     status: "pending",
     taskPackage,
     createdAt: new Date().toISOString(),
@@ -189,7 +200,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Load runtime + build docker args.
   let runtime: Runtime;
   try {
-    runtime = loadRuntime(step.runtime);
+    runtime = loadRuntime(resolution.runtime);
   } catch (e) {
     const error = `loadRuntime failed: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
@@ -243,6 +254,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     container: { name: `forge-${taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
     ...(args.contract ? { contract: args.contract } : {}),
+    ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
   });
 
   const ctx: SpawnContext = {
@@ -250,7 +262,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     TASK_DIR: dir,
     PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
-    MODEL: resolveModel(step.model, runtime),
+    MODEL: resolution.model,
     SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task, args.contract),
     DESIGN_DIR: args.designDir,
@@ -403,11 +415,6 @@ function renderInvokeTaskPackage(tp: TaskPackage, task: string, contract?: TaskC
     `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,
     ``,
   ].join("\n");
-}
-
-function resolveModel(alias: string | undefined, runtime: Runtime): string {
-  if (!alias) return runtime.models.default!;
-  return runtime.models[alias] ?? runtime.models.default!;
 }
 
 export type { DockerExecArgs, DockerExecFn };

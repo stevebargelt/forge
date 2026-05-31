@@ -39,7 +39,13 @@ import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanu
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { loadRuntime, resolveModelForTask } from "./loader.js";
+import { loadRuntime } from "./loader.js";
+import {
+  resolveModel,
+  taskModelFields,
+  manifestModelBlock,
+  type ModelResolution,
+} from "./model-resolution.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
@@ -284,6 +290,16 @@ async function dispatchSingleStep(args: {
     }),
   };
 
+  // AWN-7: resolve the model once (capability + profile). Computed regardless of
+  // `existing` because runContainer needs the runtime/model even on a re-dispatch;
+  // the resolved_* row fields are written only on first creation.
+  const resolution = resolveModel({
+    agentRole,
+    stepAlias: step.model,
+    runtimeName: step.runtime,
+    ctx: { projectDir: args.projectDir },
+  });
+
   if (!existing) {
     const task: Task = {
       id: taskId,
@@ -291,8 +307,7 @@ async function dispatchSingleStep(args: {
       parentId: args.parentId,
       phase,
       agentRole,
-      agentAlias: step.model,
-      agentModel: resolveModelForTask(step.runtime, step.model),
+      ...taskModelFields(resolution, step.model),
       status: "pending",
       taskPackage,
       createdAt: new Date().toISOString(),
@@ -312,8 +327,8 @@ async function dispatchSingleStep(args: {
     projectMode: "rw",
     designDir: args.designDir,
     taskPackage,
-    runtimeName: step.runtime,
-    model: step.model,
+    resolution,
+    workflowAlias: step.model,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
@@ -528,14 +543,19 @@ async function runOneRed(args: {
     }),
     artifact: args.artifact,
   };
+  const redResolution = resolveModel({
+    agentRole: args.red.agent,
+    stepAlias: args.red.model,
+    runtimeName: args.step.runtime,
+    ctx: { projectDir: args.projectDir },
+  });
   insertTask({
     id: redTaskId,
     runId: args.runId,
     parentId: args.primaryTaskId,
     phase: args.step.id,
     agentRole: args.red.agent,
-    agentAlias: args.red.model,
-    agentModel: resolveModelForTask(args.step.runtime, args.red.model),
+    ...taskModelFields(redResolution, args.red.model),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),
@@ -549,8 +569,8 @@ async function runOneRed(args: {
     projectMode: "ro",
     designDir: args.designDir,
     taskPackage,
-    runtimeName: args.step.runtime,
-    model: args.red.model,
+    resolution: redResolution,
+    workflowAlias: args.red.model,
     dockerExec: args.dockerExec,
   });
 
@@ -836,14 +856,19 @@ async function runFanoutChild(args: {
     }),
   };
 
+  const childResolution = resolveModel({
+    agentRole,
+    stepAlias: step.model,
+    runtimeName: step.runtime,
+    ctx: { projectDir: args.projectDir },
+  });
   insertTask({
     id: childTaskId,
     runId: args.runId,
     parentId: args.parentId,
     phase: step.id,
     agentRole,
-    agentAlias: step.model,
-    agentModel: resolveModelForTask(step.runtime, step.model),
+    ...taskModelFields(childResolution, step.model),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),
@@ -857,8 +882,8 @@ async function runFanoutChild(args: {
     projectMode: "rw",
     designDir: args.designDir,
     taskPackage,
-    runtimeName: step.runtime,
-    model: step.model,
+    resolution: childResolution,
+    workflowAlias: step.model,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
@@ -897,8 +922,12 @@ async function runContainer(args: {
   projectMode: "rw" | "ro";
   designDir?: string;
   taskPackage: TaskPackage;
-  runtimeName: string;
-  model: string | undefined;
+  // AWN-7: the model resolution chosen at the call site (drives runtime + MODEL +
+  // the manifest model block). resolution.runtime is the runtime to load.
+  resolution: ModelResolution;
+  // The workflow-declared alias (step.model / red.model) — used for the
+  // model_calls usage rollup, preserving pre-AWN-7 alias attribution.
+  workflowAlias?: string;
   // #176: name of a captured auth profile to inject. Callers pass this only for
   // browser-capable PRIMARY steps; reds never do (read-only, no credential).
   authProfile?: string;
@@ -917,7 +946,7 @@ async function runContainer(args: {
 
   let runtime: Runtime;
   try {
-    runtime = loadRuntime(args.runtimeName);
+    runtime = loadRuntime(args.resolution.runtime);
   } catch (e) {
     const msg = `loadRuntime failed: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
@@ -963,6 +992,7 @@ async function runContainer(args: {
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
     container: { name: `forge-${args.taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
   });
 
   const spawnCtx: SpawnContext = {
@@ -970,7 +1000,7 @@ async function runContainer(args: {
     TASK_DIR: dir,
     PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.projectMode,
-    MODEL: resolveModel(args.model, runtime),
+    MODEL: args.resolution.model,
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,
@@ -1002,7 +1032,7 @@ async function runContainer(args: {
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
-    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
+    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.workflowAlias ? { alias: args.workflowAlias } : {}) });
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
@@ -1012,7 +1042,7 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
   // #155: capture token usage from the stream-json log. Best-effort.
-  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.model ? { alias: args.model } : {}) });
+  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(args.workflowAlias ? { alias: args.workflowAlias } : {}) });
   // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /
   // crash / normal branches — so a hung or crashed agent's records still land on
   // the timeline. The events precede the terminal event, matching when written.
@@ -1122,11 +1152,6 @@ function renderTaskPackage(tp: TaskPackage): string {
     `Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}.`,
     ``,
   ].join("\n");
-}
-
-function resolveModel(alias: string | undefined, runtime: Runtime): string {
-  if (!alias) return runtime.models["default"]!;
-  return runtime.models[alias] ?? runtime.models["default"]!;
 }
 
 // #176: the run-level auth profile (from `forge new --auth-profile`) applies
