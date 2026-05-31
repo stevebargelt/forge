@@ -415,6 +415,13 @@ export function registerShow(program: Command): void {
           const alias = task.agentAlias ? ` (${task.agentAlias})` : "";
           console.log(`  model:     ${task.agentModel}${alias}`);
         }
+        // AWN-7: in policy mode, explain WHY this model — the named profile,
+        // provider/effective-auth, and the rule that selected it.
+        if (task.resolvedProfile) {
+          console.log(
+            `  profile:   ${task.resolvedProfile} (${task.resolvedProvider}/${task.resolvedAuth}) — ${task.resolvedBy}`
+          );
+        }
         console.log(`  status:    ${task.status}`);
         if (failureKind) console.log(`  failure:   ${failureKind}`);
         if (contract) {
