@@ -5,30 +5,25 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-30 (overnight, autonomous). Observability RUN milestone COMPLETE — the entire Crawl→Walk→Run roadmap is shipped.**
+**Last session ended 2026-05-30.** AWN (Agentic Workflow Next-steps) milestone landed + AWN-7 provider-resolution ADR accepted.
 
-**Where we left off:** Worked autonomously through the night per the user's request ("get as far as you can"). Closed all 5 WALK review findings, then filed + shipped the ENTIRE Observability RUN milestone (#209–213, all closed). 745 forge tests + 12 dashboard tests green; zero DB pollution throughout. ~16 commits this stretch; ~39 commits ahead of origin total, all local/unpushed on main.
-
-**Observability RUN — COMPLETE (#209–213, all closed):**
-- #209 RUN-1 runs-query: `forge runs query` — filter historical runs by --status/--failure-kind/--project/--workflow/--since, --json. src/v2/runs-query.ts (in-process; failure_kind scans events via failureKindForTask). Shares runMatchesFilters.
-- #210 RUN-2 metrics: `forge metrics` — success rate, failure-kind histogram, median task duration by --by workflow|phase|role, operational counts (idle kills/cancels/retries/red blocks). src/v2/metrics.ts. Distinct from forge usage (token/cost).
-- #211 RUN-3 ops-dashboard: dashboard 'ops' tab (stat cards + failure-kind bar chart + median durations). opsMetrics inlined in dashboard/src/queries.ts — verified /api/ops returns IDENTICAL numbers to `forge metrics --json` (no drift). Browser-tools verified.
-- #212 RUN-4 bundle: `forge bundle <run-id>` — sanitized debug archive (--out/--include-prompts/--tar/--json). SECURITY: ALLOWLIST not denylist — auth-state.json (mode-0600 bearer token) is never copied; security test seeds a secret token and asserts it leaks into NO bundled file. Logs bounded to 256KB tails. src/v2/bundle.ts + usageForTask accessor.
-- #213 RUN-5 otel: `forge export --run <id> --format jsonl|otel`. JSONL = one event/line. OTLP/JSON = run root span + task child spans sharing one trace, lifecycle events as span events; deterministic 16-byte trace/8-byte span ids, BigInt unix-nanos, failed→ERROR status. src/v2/export.ts. No OTel SDK dep.
-
-**Pre-RUN this session (WALK review findings, all fixed):** idle countdown measures from spawn when no stdout (hung agents now expire, not full-budget-forever) across show/status/watch/dashboard; dashboard reads bounded 64KB log tails on poll (not full files); progress.jsonl ingested on idle-timeout + crash paths (not just normal exit); docs refreshed (observability.md + concepts.md — task.crashed removed).
-
-**Roadmap status:** docs/observability.md Status banner updated — Crawl + Walk + Run ALL shipped. New CLI surface: forge runs query, forge metrics, forge bundle, forge export. New dashboard 'ops' tab. Run-stage §"Optional External Export" OTLP path landed via forge export.
-
-**Event vocabulary (cumulative this multi-session arc):** ADDED run.reactivated, container.killed (emitted), task.progress/artifact/decision. REMOVED task.submitted. Invariant holds: every EventType has a real emission path. failure_kind stays event-payload, not a column.
+**Where we left off:** Reconciled two independent provider-abstraction design docs into ONE accepted ADR — `learnings/decisions/2026-05-30_provider-resolution.md` (graduates docs/provider-abstraction-design.md + docs/provider-agnostic-models.md, both now banner-marked superseded). The last several turns were review-finding fixes ON the ADR itself: profile-owns-provider/auth/map-not-one-model, two-pass resolution (capability intent vs profile selection), and the `auth: auto | bedrock | api | subscription` enum. ADR is fully locked — no open clarifications.
 
 **Picked up next (priority):**
-1. **OPEN DECISION — #203 orchestrator-done notifications.** Still undecided: the GATE (turn-duration vs commit-landed vs orchestrator-decides). Channel = ntfy (live). Twilio NOT configured. INTERIM: orchestrator ntfys on blocker/decision/batch-landed via curl $NTFY_URL (memory feedback_ntfy_when_needed). This is the main open thread — needs the user's call before building.
-2. **#200** forge show stdout/stderr tail still dumps raw stream-json blobs (cosmetic; the bounded-read landed, text-extraction did not). Now that #200 is the only observability-adjacent loose end, consider it.
-3. **#141** SQL schema single-source-of-truth — relevant if failure_kind ever gets promoted to a column (deferred; metrics/runs-query work all stayed event-payload).
-4. Older active: #106 provider abstraction (needs arch), #112 transactional dispatch, #167 awaiting_human_input ~60% wired, #173/#185 reaper.
+1. **Start AWN-7 Crawl (#220) — design is locked, this is now implementation.** Build the `model_profiles` schema + Zod validation in the loader, grow `resolveModelForTask` (src/v2/loader.ts) from alias→model into the two-pass resolver (capability pass: workflow `model:`/agent default; profile pass: CLI `--profile`→project→user→forge default→fallback; then `model = profile.map[alias]`). Ship `forge model resolve` + `forge providers doctor` as the observable proof. Claude-only across bedrock/api/subscription pinnable profiles — NO new provider, NO usage-parser yet (that's Walk). Fail-loud-on-unavailable default.
+2. **OPEN DECISION — #202/#203 orchestrator-done notifications.** Still the main undecided product thread: the GATE (turn-duration vs commit-landed vs orchestrator-decides). Channel = ntfy (live); Twilio NOT configured. INTERIM: orchestrator ntfys on blocker/decision/batch-landed via curl $NTFY_URL (memory feedback_ntfy_when_needed). Needs the user's call before building.
+3. **#223** AWN-4 phase-2 contract enforcement (phase 1 schema+surfacing shipped as #217). **#222** heartbeat-based session reaper. **#200** forge show still dumps raw stream-json blobs (cosmetic; bounded-read landed, text-extraction did not).
 
-**Decisions worth not relitigating:** bundle = allowlist (never denylist) for sanitization. opsMetrics inlined in dashboard but kept numerically identical to metrics.ts (verified, no drift). export is a path not a source of truth (no OTel SDK dep). runs-query/metrics are in-process scans (failure_kind isn't a column). progress channel = task-dir file not stdout. Derived run status supersedes #157. ntfy only when needed, never per-turn. Never bare tsx --test on host. No AI attribution in git/GitHub.
+**Decisions worth not relitigating (this session):**
+- **Provider-resolution ADR is accepted** — capability-alias (workflow intent) and profile (provider+auth+capability→model map+per-model cost tier) are ORTHOGONAL; a profile does NOT pin one concrete model; resolution is TWO passes not one precedence list; `auth: auto` delegates to env detection, a pinned mode fails loud rather than silently falling back; cost tier is a coarse per-model label; runtime YAML stays the execution mechanism (NO full ModelDriver interface — only a per-provider usage-parser hook, deferred to Walk); full broker REJECTED as first cut; staged Crawl (resolution+auth pinning) / Walk (Codex+usage parser) / Run (bounded orchestrator choice).
+- #106 is superseded by AWN-7/#220 (don't reopen the old provider ticket).
+- AWN-2 = file-based per-run O_EXCL lock serializing next/gate/retry; markTaskComplete is a CAS (cancelled task can't be overwritten by a late successful container). AWN-3 retry creates a PRIMARY task (parentId undefined), not a child. AWN-5 grading runs at the GATE decision, not just stored. AWN-6 project-command auth: project owns login, forge owns scoping/mounting; reds never get auth. writeSecretFile = random temp + O_EXCL + atomic rename (0600, symlink-safe). AWN-8 bundle/export sanitization = ALLOWLIST not denylist.
+- forge status reconciliation only touches tasks with a `container.started` event (host-side session tasks are NOT containerized — reconciling them orphaned 5 real running sessions earlier; fixed) and is scoped to workspace-filtered runs.
+
+**Shipped (for reference — git log is canonical):**
+- AWN-1 #214 lifecycle reconciliation; AWN-2 #215 per-run lock + task-level CAS; AWN-3 #216 retry-by-failure_kind + lineage; AWN-4 #217 task contract (phase 1); AWN-5 #218 review-quality protocol; AWN-6 #219 project-command auth; AWN-8 #221 hygiene hardening (secret exclusion + staged-auth cleanup).
+- AWN-7 #220: provider-resolution ADR (design only — implementation is Crawl, see above).
+- ~6 review-finding fix commits folded in (auth-file hygiene, grading-at-gate, exclusive secret temp, zero-findings-fail downgrade, cancel race).
 
 ## Active
 
