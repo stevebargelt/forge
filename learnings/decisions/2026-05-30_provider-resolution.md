@@ -31,21 +31,32 @@ invariant:
 
 ### 1. Three concepts, kept separate
 
-| Concept | Lives in | Decided by |
-|---|---|---|
-| **Capability alias** (`review`, `design`, `reasoning`, `fast`) | workflow YAML step | workflow author |
-| **Profile** — a named policy bundle (provider + model + auth mode + capabilities + cost tier) | `model-policy.yml` | forge default / user / project |
-| **Driver / runtime** — how a provider is *run* | `seeds/runtimes/*.yml` | forge (data, not workflow concern) |
+| Concept | Lives in | Decided by | Owns |
+|---|---|---|---|
+| **Capability alias** (`review`, `design`, `reasoning`, `fast`) | workflow YAML step | workflow author | *what the task needs* — task intent |
+| **Profile** — a named policy bundle | `model-policy.yml` | forge default / user / project | *who runs it* — **provider + auth mode + a capability→model map + per-model cost tier** |
+| **Driver / runtime** — how a provider is *run* | `seeds/runtimes/*.yml` | forge (data, not workflow concern) | the container invocation |
 
-Workflows declare a **capability alias**, never a concrete model. `activity: review`
-+ `model: review` means "the model this provider uses for review work." Policy
-selects a **profile** (hence provider + auth); the provider's runtime maps the
-alias → concrete model id. Forge defaults are expressed as `activity → profile`,
-so they survive model-version bumps.
+**A profile does NOT pin one concrete model.** It owns the provider, the auth mode,
+a **capability→model map**, and cost tiers. The concrete model is resolved *through*
+the profile by the task's capability alias:
 
-This merges the two explorations: profiles (the named-bundle idea) carry auth
-mode, cost tier, availability and the allowed-list; the capability alias keeps
-workflow YAML provider- and version-neutral.
+```
+concrete model = profile.map[ capability alias ]
+```
+
+e.g. profile `claude-bedrock` = `{ provider: anthropic, auth: bedrock,
+map: { review: sonnet, reasoning: opus, fast: haiku } }`. A task with
+`activity: review` resolved to that profile runs `sonnet` on Bedrock. The same
+alias against a `codex-subscription` profile resolves whatever *that* provider maps
+`review` to. This is the hybrid of the two explorations: the **named profile** (from
+the other doc) owns provider/auth/cost/map; the **capability alias** (from mine)
+keeps workflow YAML provider- and version-neutral. Workflows never name a concrete
+model; forge defaults are `activity → profile`, so they survive model-version bumps.
+
+One profile per (provider, auth-mode) — `claude-subscription`, `claude-bedrock`,
+`codex-subscription` — each carrying the full alias map. This avoids a
+combinatorial profile-per-activity explosion.
 
 ### 2. Auth mode is a transport choice — auto-detected by default, **pinnable** in policy
 
@@ -66,14 +77,26 @@ Everything else (`result.json`, `progress.jsonl`, bounded logs, lifecycle events
 is already provider-neutral. The typed driver interface is revisited only if
 runtime YAML proves insufficient — not on spec.
 
-### 4. Resolution precedence (explicit rules, highest wins)
+### 4. Resolution: two independent passes (don't conflate intent with provider)
 
+Capability (task intent) and profile (who runs it) are resolved **separately**.
+Workflow `activity:`/`model:` is *intent*, not a profile override — it must not
+compete in the same precedence list as `--profile`.
+
+**Pass 1 — capability (what the task needs):** highest wins
+1. Workflow step `model:` alias (explicit task intent).
+2. Agent default activity (e.g. `red-security` → `review`).
+→ yields a **capability alias**.
+
+**Pass 2 — profile (who runs it):** highest wins
 1. **CLI override** — `forge invoke <agent> --profile <name>`.
 2. **Project policy** — `<project>/.forge/model-policy.yml`.
 3. **User policy** — `~/.forge/model-policy.yml`.
-4. **Workflow step** — `activity:` + capability alias.
-5. **Forge default** — built-in `activity → profile` map.
-6. **Availability fallback** — only when policy explicitly allows it (see §6).
+4. **Forge default** — built-in `activity → profile` map.
+5. **Availability fallback** — only when policy explicitly allows it (see §6).
+→ yields a **profile** (hence provider + auth).
+
+**Then:** `concrete model = profile.map[ capability alias ]`.
 
 User/project policy strictly beats forge default. **Orchestrator choice is allowed
 only *inside* the bounds set by user/project policy** (§5) — it is not a
@@ -107,7 +130,11 @@ deterministic resolution with the precedence above, per-agent/activity overrides
 auth-mode pinning, fail-loud default, and the observability surface (§8). Ship with
 **Claude only**, across bedrock/api/subscription as pinnable profiles. Proves the
 policy model and auth-pinning with **zero new-provider risk** and no usage-parser
-work yet. Goals 1–3 felt immediately.
+work yet. Realizes **goal 2** (user override per agent/activity), **goal 3**
+(single-provider mapping), and the **mechanism** for goal 1 — including
+*within-provider* per-activity defaults (e.g. `review → sonnet`, `reasoning →
+opus`). Goal 1's motivating *cross-provider* case (design agents default to Codex)
+is only realizable once a second provider exists — that lands in **Walk**.
 
 **Walk — Codex/OpenAI as a real second provider.** Add a `codex-*` runtime YAML +
 the Codex **usage-parser hook**, and a smoke task running a red through Codex
@@ -141,9 +168,11 @@ event-stream invariant — not a new column.)
 
 ### 9. Cost tier is a coarse, hand-maintained label
 
-`cheap | standard | premium` per profile, **not** a computed dollar figure. Prices
-drift and OAuth/subscription has no per-token cost (why `model_calls` dropped its
-cost column). Guardrails reason over the qualitative tier.
+`cheap | standard | premium` per **model in a profile's map** (not per profile —
+a profile spanning `fast`/`reasoning` mixes tiers), **not** a computed dollar
+figure. Prices drift and OAuth/subscription has no per-token cost (why
+`model_calls` dropped its cost column). Guardrails reason over the qualitative tier
+of the *resolved* `(profile, model)`.
 
 ## Resolved open questions
 
