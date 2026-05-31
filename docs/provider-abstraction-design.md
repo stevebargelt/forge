@@ -1,5 +1,9 @@
 # Provider abstraction — design exploration
 
+> **Superseded (graduated) 2026-05-30** by
+> `learnings/decisions/2026-05-30_provider-resolution.md`. Kept as provenance for
+> the accepted decision; not a live spec.
+
 **Status:** exploring (pre-ADR). Ties to AWN-7 (#220, "Provider Runtime
 Abstraction"; supersedes #106). This captures the options and open questions
 *before* any hot-path code, so the architecture is reviewable. It graduates to
