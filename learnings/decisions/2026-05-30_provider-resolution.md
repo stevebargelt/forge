@@ -61,10 +61,23 @@ combinatorial profile-per-activity explosion.
 ### 2. Auth mode is a transport choice — auto-detected by default, **pinnable** in policy
 
 bedrock / api-key / subscription are auth/transport modes under a profile, not
-separate workflow or agent types. Default behavior is env auto-detection (as
-today, FORGE-DEC-007/013). **But policy may pin a specific auth mode** — goal 2's
-"`red-security` → Claude **Bedrock** specifically" requires it. A pin in a
-profile/override beats auto-detection.
+separate workflow or agent types. The profile's `auth:` field is an explicit enum
+that reconciles "profile owns auth" with "auto-detected by default":
+
+```yaml
+auth: auto        # resolve to one of subscription | api | bedrock by env detection
+                  #   (FORGE-DEC-007/013) — the default when auth: is omitted
+auth: bedrock     # PIN bedrock; fail loud (§6) if bedrock auth isn't available
+auth: api         # pin api-key
+auth: subscription
+```
+
+So `auth: auto` is the default behavior (the profile *owns* the field; its value
+just delegates to env detection), and `auth: bedrock` is a hard pin — goal 2's
+"`red-security` → **Bedrock** specifically." A pinned mode never silently falls
+back to another auth mode; if its credentials are absent, resolution fails loud
+(§6) unless the profile opts into fallback. There is no contradiction: the profile
+always owns `auth:`; `auto` is one of the values it can own.
 
 ### 3. Execution layer: runtime YAML stays; add only a usage-parser hook
 
@@ -187,13 +200,14 @@ of the *resolved* `(profile, model)`.
 - **Project policy defining new profiles** → allowed; but `allowed_profiles`
   (admin/global) bounds *orchestrator* autonomy regardless.
 - **Full broker / control plane** → **rejected as first implementation.** Revisit
-  only if Phases 1–3 prove insufficient.
+  only if Crawl/Walk/Run prove insufficient.
 
 ## Consequences
 
 - New file: `model-policy.yml` (global + per-project), Zod-validated.
-- New schema: `model_profiles`, `defaults.activity`, `overrides.agents`,
-  `allowed_profiles`, `on_unavailable`. **Touches `~/.forge/forge.db` only if the
+- New schema: `model_profiles` (each: `provider`, `auth: auto|bedrock|api|subscription`,
+  capability→model `map`, per-model `cost_tier`), `defaults.activity`,
+  `overrides.agents`, `allowed_profiles`, `on_unavailable`. **Touches `~/.forge/forge.db` only if the
   resolution record is persisted beyond `manifest.json`** — flag before shipping
   (machine-wide migration blast radius).
 - `resolveModelForTask` (`src/v2/loader.ts`) grows from alias→model into the full
