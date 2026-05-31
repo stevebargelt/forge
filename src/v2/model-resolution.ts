@@ -118,6 +118,11 @@ export type ResolveOpts = {
   stepAlias?: string | undefined;
   /** CLI `--profile` override (highest profile-selection precedence). */
   cliProfile?: string | undefined;
+  /** Provenance label recorded as `resolvedBy` when `cliProfile` wins. Defaults
+   *  to "cli.--profile" (a single `forge invoke --profile`). `forge new --profile`
+   *  passes "run.profile" so `forge show` distinguishes a whole-run operator pin
+   *  from a per-agent flag. Ignored unless `cliProfile` is set. */
+  profileSource?: string | undefined;
   /** The step's `runtime:` field — used only in legacy mode. Default "claude". */
   runtimeName?: string | undefined;
   ctx?: LoadContext;
@@ -155,7 +160,7 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
   const activityDefault = policy.defaults.activity[capability];
   if (opts.cliProfile) {
     profileName = opts.cliProfile;
-    resolvedBy = "cli.--profile";
+    resolvedBy = opts.profileSource ?? "cli.--profile";
   } else if (agentOverride) {
     profileName = agentOverride;
     resolvedBy = `overrides.agents.${opts.agentRole}`;

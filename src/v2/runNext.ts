@@ -298,6 +298,8 @@ async function dispatchSingleStep(args: {
     agentRole,
     stepAlias: step.model,
     runtimeName: step.runtime,
+    cliProfile: runModelProfile(args.runMetadata),
+    profileSource: "run.profile",
     ctx: { projectDir: args.projectDir },
   });
 
@@ -356,6 +358,7 @@ async function dispatchSingleStep(args: {
       primaryResult: result,
       projectDir: args.projectDir,
       designDir: args.designDir,
+      runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
     });
 
@@ -432,6 +435,7 @@ async function dispatchReds(args: {
   primaryResult: unknown;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
 }): Promise<{ verdicts: Verdict[]; authoritativeFail: boolean }> {
   const artifact = JSON.stringify(args.primaryResult, null, 2);
@@ -445,6 +449,7 @@ async function dispatchReds(args: {
       artifact,
       projectDir: args.projectDir,
       designDir: args.designDir,
+      runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
     }),
   );
@@ -528,6 +533,7 @@ async function runOneRed(args: {
   artifact: string;
   projectDir: string;
   designDir?: string;
+  runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
 }): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
@@ -548,6 +554,8 @@ async function runOneRed(args: {
     agentRole: args.red.agent,
     stepAlias: args.red.model,
     runtimeName: args.step.runtime,
+    cliProfile: runModelProfile(args.runMetadata),
+    profileSource: "run.profile",
     ctx: { projectDir: args.projectDir },
   });
   insertTask({
@@ -861,6 +869,8 @@ async function runFanoutChild(args: {
     agentRole,
     stepAlias: step.model,
     runtimeName: step.runtime,
+    cliProfile: runModelProfile(args.runMetadata),
+    profileSource: "run.profile",
     ctx: { projectDir: args.projectDir },
   });
   insertTask({
@@ -1188,4 +1198,17 @@ function authProfileForRole(runMetadata: Record<string, unknown>, role: string):
   const profile = runMetadata["authProfile"];
   if (typeof profile !== "string" || !profile) return undefined;
   return roleUsesBrowser(role) ? profile : undefined;
+}
+
+// AWN-7: a run-level model-profile override (from `forge new --profile`) pins
+// EVERY task in the run — primary, red, and fanout child — to one profile at
+// the highest profile-selection precedence (above agent overrides and activity
+// defaults), exactly as `forge invoke --profile` does for a single agent.
+// Returns undefined when the run wasn't started with --profile, leaving
+// project/user policy in charge; in legacy mode (no model-policy.yml) the
+// resolver ignores it. Passed with profileSource "run.profile" so the manifest
+// and `forge show` distinguish a whole-run operator pin from a per-invoke flag.
+function runModelProfile(runMetadata: Record<string, unknown>): string | undefined {
+  const profile = runMetadata["modelProfile"];
+  return typeof profile === "string" && profile ? profile : undefined;
 }

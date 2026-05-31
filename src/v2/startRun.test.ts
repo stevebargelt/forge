@@ -78,3 +78,26 @@ test("startRun: designDir lands in metadata when provided", () => {
   const run = getRun(result.runId);
   assert.equal((run!.metadata as Record<string, unknown>)["designDir"], "/tmp/some-design-corpus");
 });
+
+test("startRun: modelProfile lands in metadata when provided (AWN-7 --profile)", () => {
+  const result = startRun({
+    workflow: HELLO_WORKFLOW,
+    title: "with profile",
+    inputs: { brief: "x" },
+    projectDir: "/tmp",
+    modelProfile: "claude-bedrock",
+  });
+  const run = getRun(result.runId);
+  assert.equal((run!.metadata as Record<string, unknown>)["modelProfile"], "claude-bedrock");
+});
+
+test("startRun: no modelProfile key when --profile omitted", () => {
+  const result = startRun({
+    workflow: HELLO_WORKFLOW,
+    title: "no profile",
+    inputs: { brief: "x" },
+    projectDir: "/tmp",
+  });
+  const run = getRun(result.runId);
+  assert.ok(!("modelProfile" in (run!.metadata as Record<string, unknown>)));
+});

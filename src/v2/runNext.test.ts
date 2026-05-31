@@ -8,7 +8,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -498,6 +498,103 @@ test("runNext: reds — all authoritative reds pass → primary moves to awaitin
   const verdicts = verdictsForTask(primary.id);
   assert.equal(verdicts.length, 2);
   assert.ok(verdicts.every((v) => v.verdict === "pass"));
+});
+
+// AWN-7: a run-level model profile (`forge new --profile`, stored as
+// metadata.modelProfile) must pin EVERY task in the run — primary and red —
+// at the highest profile-selection precedence, beating both agent overrides
+// and activity defaults, and recording resolvedBy="run.profile". Writes a
+// throwaway policy + claude-apikey runtime into FORGE_HOME and removes them in
+// finally so the legacy-mode tests sharing this process aren't affected.
+test("runNext: run-level --profile (metadata.modelProfile) pins primary AND red, beating agent overrides", async () => {
+  const policyPath = join(process.env.FORGE_HOME!, "model-policy.yml");
+  const apikeyRuntimePath = join(process.env.FORGE_HOME!, "runtimes", "claude-apikey.yml");
+  process.env.ANTHROPIC_API_KEY = "sk-stub"; // makes auth:api available (probeAuth)
+
+  // default-api is what defaults/overrides would select; pinned-api is the
+  // run override. red-wide has an explicit agent override to default-api so the
+  // assertion proves run.profile beats overrides.agents, not just the default.
+  writeFileSync(policyPath, `
+on_unavailable: fail
+model_profiles:
+  default-api:
+    provider: anthropic
+    auth: api
+    map:
+      review:  { model: model-default-review, cost_tier: standard }
+      default: { model: model-default,        cost_tier: standard }
+  pinned-api:
+    provider: anthropic
+    auth: api
+    map:
+      review:  { model: model-pinned-review, cost_tier: premium }
+      default: { model: model-pinned,        cost_tier: premium }
+defaults:
+  profile: default-api
+  activity:
+    review: default-api
+overrides:
+  agents:
+    red-wide: default-api
+allowed_profiles: [default-api, pinned-api]
+`);
+  if (!existsSync(apikeyRuntimePath)) {
+    mkdirSync(dirname(apikeyRuntimePath), { recursive: true });
+    writeFileSync(apikeyRuntimePath, `name: claude-apikey
+description: test stub apikey runtime
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  }
+
+  try {
+    const { runId } = startRun({
+      workflow: REDS_AUTH_ALL_PASS_WORKFLOW,
+      title: "run profile pin",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+      modelProfile: "pinned-api",
+    });
+
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+      { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    ]);
+
+    await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+
+    const tasks = tasksForRun(runId);
+    const primary = tasks.find((t) => t.parentId === undefined)!;
+    const reds = tasks.filter((t) => t.parentId === primary.id);
+    assert.equal(reds.length, 2);
+
+    // Primary: capability "default" → pinned-api's default model, via run.profile.
+    assert.equal(primary.resolvedProfile, "pinned-api");
+    assert.equal(primary.resolvedBy, "run.profile");
+    assert.equal(primary.agentModel, "model-pinned");
+
+    // Both reds: capability "review" → pinned-api's review model, via run.profile —
+    // overriding red-wide's explicit agent override (default-api) too.
+    for (const red of reds) {
+      assert.equal(red.resolvedProfile, "pinned-api");
+      assert.equal(red.resolvedBy, "run.profile");
+      assert.equal(red.agentModel, "model-pinned-review");
+    }
+  } finally {
+    rmSync(policyPath, { force: true });
+  }
 });
 
 test("runNext: AWN-5 grading is ENFORCED on verdict ingestion — malformed rejected, weak downgraded (finding)", async () => {

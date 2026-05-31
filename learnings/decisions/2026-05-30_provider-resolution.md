@@ -102,7 +102,10 @@ compete in the same precedence list as `--profile`.
 → yields a **capability alias**.
 
 **Pass 2 — profile (who runs it):** highest wins
-1. **CLI override** — `forge invoke <agent> --profile <name>`.
+1. **CLI / run override** — `forge invoke <agent> --profile <name>` (one agent),
+   or `forge new <workflow> --profile <name>` (pins every task in the run —
+   primary, red, fanout — stored as `metadata.modelProfile`, recorded as
+   `resolvedBy: run.profile`).
 2. **Project policy** — `<project>/.forge/model-policy.yml`.
 3. **User policy** — `~/.forge/model-policy.yml`.
 4. **Forge default** — built-in `activity → profile` map.

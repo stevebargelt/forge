@@ -130,6 +130,24 @@ test("policy: --profile beats everything", () => {
   assert.equal(r.model, "claude-sonnet-4-6");
 });
 
+test("policy: profileSource labels the cliProfile provenance (run.profile vs default cli.--profile)", () => {
+  writePolicy();
+  // forge new --profile pins the whole run → run.profile provenance.
+  const run = resolveModel({ agentRole: "red-security", stepAlias: "review", cliProfile: "claude-subscription", profileSource: "run.profile" });
+  assert.equal(run.profile, "claude-subscription");
+  assert.equal(run.resolvedBy, "run.profile");
+  // Same precedence, just a different recorded source label.
+  assert.equal(run.model, "claude-sonnet-4-6");
+});
+
+test("policy: profileSource is ignored when no cliProfile is set", () => {
+  writePolicy();
+  // red-security has an agent override; profileSource must NOT relabel it.
+  const r = resolveModel({ agentRole: "red-security", stepAlias: "review", profileSource: "run.profile" });
+  assert.equal(r.profile, "claude-bedrock");
+  assert.equal(r.resolvedBy, "overrides.agents.red-security");
+});
+
 test("policy: overrides.agents beats defaults.activity", () => {
   writePolicy();
   // red-security default activity is "review"; defaults.activity.review →

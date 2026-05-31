@@ -31,6 +31,10 @@ export type StartRunArgs = {
    *  of this run. Stored in metadata; runNext scopes it to browser-capable
    *  roles. */
   authProfile?: string;
+  /** AWN-7: run-level model-profile override (`forge new --profile`). Stored in
+   *  metadata; runNext pins every task (primary/red/fanout) to it at the highest
+   *  profile-selection precedence. No-op in legacy mode (no model-policy.yml). */
+  modelProfile?: string;
 };
 
 export type StartRunResult = {
@@ -52,6 +56,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.designDir) metadata["designDir"] = args.designDir;
   if (args.workspace) metadata["workspace"] = args.workspace;
   if (args.authProfile) metadata["authProfile"] = args.authProfile;
+  if (args.modelProfile) metadata["modelProfile"] = args.modelProfile;
 
   const run: Run = {
     id: runId,

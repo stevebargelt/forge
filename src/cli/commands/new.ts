@@ -23,6 +23,7 @@ export function registerNew(program: Command): void {
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--meta <json>", "extra run metadata as JSON")
     .option("--auth-profile <name>", "inject a captured auth profile (#176) into browser-verify steps so they test the app authenticated")
+    .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       validateCredsForNewRun();
@@ -69,6 +70,8 @@ export function registerNew(program: Command): void {
         }
       }
 
+      const modelProfile = (options as { profile?: string }).profile;
+
       const { runId } = startRun({
         workflow,
         title,
@@ -77,6 +80,7 @@ export function registerNew(program: Command): void {
         designDir,
         workspace,
         authProfile,
+        modelProfile,
       });
 
       console.log(`Created run ${runId}`);
