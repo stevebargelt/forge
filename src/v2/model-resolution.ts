@@ -27,6 +27,7 @@
 // project can't silently expand orchestrator autonomy. Off by default today.
 
 import { loadModelPolicy, resolveModelForTask, type LoadContext } from "./loader.js";
+import { detectCredsMode } from "../util/creds.js";
 import type { CostTier } from "./schema.js";
 
 // Effective auth is the AuthMode enum minus "auto" — "auto" is an INPUT that
@@ -95,12 +96,15 @@ function bindRuntime(provider: string, auth: EffectiveAuth): string {
   return runtime;
 }
 
-// Effective auth detection — mirrors loader's detectRuntimeName() / v1
-// detectCredsMode(), but yields the auth MODE rather than a runtime name. Used
-// only when a profile declares auth: auto.
+// Effective auth detection for `auth: auto`. Delegates to the authoritative
+// detectCredsMode() (FORGE-DEC-007/013) so the recorded auth matches what forge
+// actually runs — same precedence as runtime selection (CLAUDE_CODE_USE_BEDROCK,
+// then ANTHROPIC_API_KEY, AWS_PROFILE, ~/.aws SSO config, else oauth). Mapping
+// the CredsMode enum onto the profile auth vocabulary.
 export function detectAuthMode(): EffectiveAuth {
-  if (process.env.CLAUDE_CODE_USE_BEDROCK === "1") return "bedrock";
-  if (process.env.ANTHROPIC_API_KEY) return "api";
+  const mode = detectCredsMode();
+  if (mode === "bedrock") return "bedrock";
+  if (mode === "anthropic-apikey") return "api";
   return "subscription";
 }
 

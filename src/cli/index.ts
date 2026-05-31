@@ -26,6 +26,8 @@ import { registerSweep } from "./commands/sweep.js";
 import { registerCancel } from "./commands/cancel.js";
 import { registerClaude } from "./commands/claude.js";
 import { registerDesign } from "./commands/design.js";
+import { registerModel } from "./commands/model.js";
+import { registerProviders } from "./commands/providers.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -70,6 +72,8 @@ registerSweep(program);
 registerCancel(program);
 registerClaude(program);
 registerDesign(program);
+registerModel(program);
+registerProviders(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);

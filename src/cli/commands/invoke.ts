@@ -15,6 +15,7 @@ export function registerInvoke(program: Command): void {
     .option("--project <dir>", "project directory mounted at /project (default: cwd)")
     .option("--design-dir <dir>", "optional design corpus, mounted RO at /design")
     .option("--model <alias>", "override model alias (spec-writer | fast-orchestrator | etc.)")
+    .option("--profile <name>", "AWN-7: force a model profile (policy mode) — highest profile-selection precedence")
     .option("--runtime <name>", "override runtime YAML name (default: claude)")
     .option("--read-only", "mount /project read-only (default for adversarial / review work)")
     .option("--auth-profile <name>", "inject an auth profile so the agent tests the app authenticated (never sees the credential): a project-command profile from <project>/.forge/auth-profiles.yml (AWN-6, runs the project's own login) or a captured #176 profile")
@@ -29,6 +30,7 @@ export function registerInvoke(program: Command): void {
       project?: string;
       designDir?: string;
       model?: string;
+      profile?: string;
       runtime?: string;
       readOnly?: boolean;
       authProfile?: string;
@@ -60,6 +62,7 @@ export function registerInvoke(program: Command): void {
         projectDir,
         designDir: opts.designDir ? resolve(opts.designDir) : undefined,
         modelAlias: opts.model,
+        modelProfile: opts.profile,
         runtimeName: opts.runtime,
         readOnlyProject: opts.readOnly,
         authProfile: opts.authProfile,

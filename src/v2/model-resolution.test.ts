@@ -189,8 +189,10 @@ test("policy: unlisted role with no alias → 'default' capability", () => {
 
 // ---- Effective auth ----
 
-test("policy: auth: auto resolves to subscription by default (no env)", () => {
+test("policy: auth: auto resolves to subscription under bedrock hard-off + no apikey", () => {
   writePolicy();
+  // Hard-off makes detection deterministic regardless of host ~/.aws config.
+  process.env.CLAUDE_CODE_USE_BEDROCK = "0";
   const r = resolveModel({ agentRole: "engineer", stepAlias: "review", cliProfile: "claude-auto" });
   assert.equal(r.auth, "subscription");
   assert.equal(r.runtime, "claude-oauth");
@@ -245,10 +247,12 @@ defaults:
 });
 
 test("detectAuthMode: env precedence bedrock > api > subscription", () => {
+  // Hard-off baseline → subscription, independent of host ~/.aws SSO config.
+  process.env.CLAUDE_CODE_USE_BEDROCK = "0";
   assert.equal(detectAuthMode(), "subscription");
-  process.env.ANTHROPIC_API_KEY = "sk-x";
+  process.env.ANTHROPIC_API_KEY = "sk-x"; // hard-off + apikey → api
   assert.equal(detectAuthMode(), "api");
-  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1"; // explicit bedrock wins
   assert.equal(detectAuthMode(), "bedrock");
 });
 
