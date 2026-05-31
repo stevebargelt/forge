@@ -26,7 +26,16 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at      TEXT NOT NULL,
   started_at      TEXT,
   completed_at    TEXT,
-  error           TEXT
+  error           TEXT,
+  -- AWN-7: per-task model resolution record (policy mode). Null in legacy mode
+  -- (no model-policy.yml) and for pre-AWN-7 rows. agent_alias/agent_model above
+  -- already carry the capability alias + concrete model; these add the named
+  -- policy decision that explains the selection. resolved_auth is the EFFECTIVE
+  -- mode (never 'auto'). resolved_by names the rule that chose the profile.
+  resolved_profile  TEXT,
+  resolved_provider TEXT,
+  resolved_auth     TEXT,
+  resolved_by       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

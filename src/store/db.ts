@@ -22,6 +22,20 @@ function applyMigrations(db: DatabaseInstance): void {
   if (!haveTasks.has("agent_model")) {
     db.exec(`ALTER TABLE tasks ADD COLUMN agent_model TEXT`);
   }
+  // AWN-7: per-task model resolution record (policy mode). Additive + nullable —
+  // old binaries tolerate the extra columns; new binaries ALTER on first open.
+  if (!haveTasks.has("resolved_profile")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_profile TEXT`);
+  }
+  if (!haveTasks.has("resolved_provider")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_provider TEXT`);
+  }
+  if (!haveTasks.has("resolved_auth")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_auth TEXT`);
+  }
+  if (!haveTasks.has("resolved_by")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN resolved_by TEXT`);
+  }
 
   // Phase rename: investigation.frame → investigation.frame-question. UPDATE
   // any existing task rows so dashboards / status / loadWorkflow can resolve

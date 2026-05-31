@@ -17,6 +17,10 @@ type TaskRow = {
   started_at: string | null;
   completed_at: string | null;
   error: string | null;
+  resolved_profile: string | null;
+  resolved_provider: string | null;
+  resolved_auth: string | null;
+  resolved_by: string | null;
 };
 
 function rowToTask(row: TaskRow): Task {
@@ -28,6 +32,10 @@ function rowToTask(row: TaskRow): Task {
     agentRole: row.agent_role,
     agentAlias: row.agent_alias ?? undefined,
     agentModel: row.agent_model ?? undefined,
+    resolvedProfile: row.resolved_profile ?? undefined,
+    resolvedProvider: row.resolved_provider ?? undefined,
+    resolvedAuth: row.resolved_auth ?? undefined,
+    resolvedBy: row.resolved_by ?? undefined,
     status: row.status as TaskStatus,
     taskPackage: JSON.parse(row.task_package) as TaskPackage,
     result: row.result ? JSON.parse(row.result) : undefined,
@@ -41,8 +49,8 @@ function rowToTask(row: TaskRow): Task {
 export function insertTask(task: Task): void {
   getDb()
     .prepare(
-      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, created_at, started_at, completed_at, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, created_at, started_at, completed_at, error, resolved_profile, resolved_provider, resolved_auth, resolved_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.id,
@@ -58,7 +66,11 @@ export function insertTask(task: Task): void {
       task.createdAt,
       task.startedAt ?? null,
       task.completedAt ?? null,
-      task.error ?? null
+      task.error ?? null,
+      task.resolvedProfile ?? null,
+      task.resolvedProvider ?? null,
+      task.resolvedAuth ?? null,
+      task.resolvedBy ?? null
     );
 }
 

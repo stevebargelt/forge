@@ -99,6 +99,14 @@ export type Task = {
   // Resolved model id that ran (or will run) the task — what claude --model received.
   // Captured at task creation alongside agentAlias; null for legacy rows.
   agentModel?: string;
+  // AWN-7 model resolution record (policy mode only). All undefined in legacy
+  // mode (no model-policy.yml) and for pre-AWN-7 rows. agentAlias/agentModel
+  // above carry the capability alias + concrete model; these add the named
+  // policy decision that explains the selection.
+  resolvedProfile?: string; // named profile chosen (e.g. "claude-bedrock")
+  resolvedProvider?: string; // e.g. "anthropic"
+  resolvedAuth?: string; // EFFECTIVE auth mode — never "auto"
+  resolvedBy?: string; // rule that selected the profile (e.g. "overrides.agents.red-security")
   status: TaskStatus;
   taskPackage: TaskPackage;
   result?: unknown;

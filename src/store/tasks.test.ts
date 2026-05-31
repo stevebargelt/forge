@@ -35,6 +35,10 @@ function task(overrides: Partial<Task> = {}): Task {
     agentRole: overrides.agentRole ?? "framer",
     agentAlias: overrides.agentAlias,
     agentModel: overrides.agentModel,
+    resolvedProfile: overrides.resolvedProfile,
+    resolvedProvider: overrides.resolvedProvider,
+    resolvedAuth: overrides.resolvedAuth,
+    resolvedBy: overrides.resolvedBy,
     status: overrides.status ?? "pending",
     taskPackage: overrides.taskPackage ?? {
       taskId: overrides.id ?? "task-1",
@@ -67,6 +71,37 @@ test("insertTask + getTask round-trips", () => {
   assert.ok(got);
   assert.equal(got!.id, "task-a");
   assert.equal(got!.status, "pending");
+});
+
+test("insertTask round-trips the AWN-7 resolution record", () => {
+  insertTask(
+    task({
+      id: "task-res",
+      agentRole: "red-security",
+      agentAlias: "review",
+      agentModel: "us.anthropic.claude-sonnet-4-6",
+      resolvedProfile: "claude-bedrock",
+      resolvedProvider: "anthropic",
+      resolvedAuth: "bedrock",
+      resolvedBy: "overrides.agents.red-security",
+    })
+  );
+  const got = getTask("task-res");
+  assert.ok(got);
+  assert.equal(got!.resolvedProfile, "claude-bedrock");
+  assert.equal(got!.resolvedProvider, "anthropic");
+  assert.equal(got!.resolvedAuth, "bedrock");
+  assert.equal(got!.resolvedBy, "overrides.agents.red-security");
+});
+
+test("insertTask leaves resolution fields undefined in legacy mode", () => {
+  insertTask(task({ id: "task-legacy" }));
+  const got = getTask("task-legacy");
+  assert.ok(got);
+  assert.equal(got!.resolvedProfile, undefined);
+  assert.equal(got!.resolvedProvider, undefined);
+  assert.equal(got!.resolvedAuth, undefined);
+  assert.equal(got!.resolvedBy, undefined);
 });
 
 test("markTaskRunning sets status, started_at, clears stale error and result", () => {
