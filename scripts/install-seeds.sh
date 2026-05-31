@@ -32,6 +32,17 @@ if [[ -d "$HERE/seeds/workflows" ]]; then
   cp -R $CP_FLAG "$HERE/seeds/workflows/." "$DEST/workflows/"
 fi
 
+# Model-policy example (v2, AWN-7). Installed as model-policy.EXAMPLE.yml — NOT
+# the active model-policy.yml. Model resolution stays in legacy mode until a user
+# deliberately copies the example to ~/.forge/model-policy.yml. Installing the
+# example must never flip behavior.
+if [[ -f "$HERE/seeds/model-policy.example.yml" ]]; then
+  if [[ "$CP_FLAG" == "-f" || ! -f "$DEST/model-policy.example.yml" ]]; then
+    echo "Installing model-policy.example.yml into $DEST/"
+    cp "$HERE/seeds/model-policy.example.yml" "$DEST/model-policy.example.yml"
+  fi
+fi
+
 # RACI seed (v2). The orchestrator references this at
 # `~/.forge/forge-raci.md` to classify prompts and route work.
 if [[ -f "$HERE/seeds/forge-raci.md" ]]; then

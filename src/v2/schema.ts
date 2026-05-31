@@ -295,3 +295,119 @@ export const RuntimeSchema = z.object({
 export type Runtime = z.infer<typeof RuntimeSchema>;
 export type Auth = z.infer<typeof AuthDefSchema>;
 export type Mount = z.infer<typeof MountDefSchema>;
+
+// ------------------------------------------------------------------
+// Model policy YAML (model-policy.yml) — AWN-7 Crawl (FORGE-DEC provider-resolution)
+// ------------------------------------------------------------------
+//
+// Policy is OPT-IN. When no model-policy.yml exists at either the project or
+// workspace path, forge uses the legacy runtime.models[alias] resolution and
+// behavior is unchanged. A policy file flips resolution into the two-pass model:
+//   capability alias (workflow intent) -> profile.map[alias].model (concrete)
+//   profile.provider + effective auth  -> runtime (execution mechanism)
+//
+// Separation of concerns (the ADR's core reconciliation):
+//   profile  owns POLICY     — provider + auth intent + capability->model/cost map
+//   runtime  owns EXECUTION   — image + command + mounts + prompt/result + env detect
+//   forge    owns BINDING     — (provider, effective_auth) -> runtime YAML name
+
+// Coarse, hand-maintained per-model label (ADR §9). NOT a computed dollar figure
+// — OAuth/subscription has no per-token cost and prices drift. Guardrails reason
+// over the qualitative tier of the resolved (profile, model).
+const CostTierSchema = z.enum(["cheap", "standard", "premium"]);
+
+// Auth/transport mode for a profile. `auto` delegates to env detection
+// (FORGE-DEC-007/013) at resolution time; the others PIN a mode and fail loud
+// if its credentials are absent (unless the profile opts into fallback). The
+// EFFECTIVE mode (never `auto`) is what gets recorded in the DB/manifest.
+const AuthModeSchema = z.enum(["auto", "subscription", "api", "bedrock"]);
+
+// What to do when a resolved profile has no working auth in the environment.
+// fail = clear error naming provider + missing auth (default); fallback = pick a
+// same-or-lower-cost alternative bounded by allowed_profiles (lands in Run).
+const OnUnavailableSchema = z.enum(["fail", "fallback"]);
+
+const CapabilityEntrySchema = z.object({
+  model: z.string().min(1),
+  cost_tier: CostTierSchema,
+});
+
+const ModelProfileSchema = z
+  .object({
+    // provider is intentionally an open string, NOT an enum: a new provider
+    // (openai) should not require a schema bump. The (provider, effective_auth)
+    // -> runtime binding table is where an unknown provider fails loud.
+    provider: z.string().min(1),
+    auth: AuthModeSchema,
+    // capability alias -> { model, cost_tier }. At least one alias required.
+    map: z.record(z.string(), CapabilityEntrySchema),
+    // Profile-scoped override of the policy-level on_unavailable default. Lets a
+    // non-critical profile opt into fallback without changing global behavior.
+    on_unavailable: OnUnavailableSchema.optional(),
+  })
+  .superRefine((profile, ctx) => {
+    if (Object.keys(profile.map).length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["map"],
+        message: "profile map must contain at least one capability alias",
+      });
+    }
+  });
+
+export const ModelPolicySchema = z
+  .object({
+    // Global default; per-profile on_unavailable overrides it. Defaults to fail
+    // (fail loud — never silently run a different model than policy specified).
+    on_unavailable: OnUnavailableSchema.default("fail"),
+    model_profiles: z.record(z.string(), ModelProfileSchema),
+    defaults: z.object({
+      // Ultimate fallback profile when no activity/agent override matches.
+      profile: z.string().min(1),
+      // activity (capability) -> profile. The forge-default selection layer.
+      activity: z.record(z.string(), z.string()).default({}),
+    }),
+    overrides: z
+      .object({
+        // agent role -> profile. Realizes goal 2 (pin one agent to a provider).
+        agents: z.record(z.string(), z.string()).default({}),
+      })
+      .default({ agents: {} }),
+    // Bounds orchestrator autonomy (Run). Empty/absent = all defined profiles
+    // allowed. Informational in Crawl; enforced once orchestrator choice lands.
+    allowed_profiles: z.array(z.string()).default([]),
+  })
+  .superRefine((policy, ctx) => {
+    const profileNames = new Set(Object.keys(policy.model_profiles));
+    if (profileNames.size === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["model_profiles"],
+        message: "at least one profile must be defined",
+      });
+    }
+    const checkRef = (name: string, path: (string | number)[]) => {
+      if (!profileNames.has(name)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path,
+          message: `references unknown profile '${name}' (defined: ${[...profileNames].join(", ") || "none"})`,
+        });
+      }
+    };
+    checkRef(policy.defaults.profile, ["defaults", "profile"]);
+    for (const [activity, name] of Object.entries(policy.defaults.activity)) {
+      checkRef(name, ["defaults", "activity", activity]);
+    }
+    for (const [agent, name] of Object.entries(policy.overrides.agents)) {
+      checkRef(name, ["overrides", "agents", agent]);
+    }
+    policy.allowed_profiles.forEach((name, i) => checkRef(name, ["allowed_profiles", i]));
+  });
+
+export type ModelPolicy = z.infer<typeof ModelPolicySchema>;
+export type ModelProfile = z.infer<typeof ModelProfileSchema>;
+export type CapabilityEntry = z.infer<typeof CapabilityEntrySchema>;
+export type AuthMode = z.infer<typeof AuthModeSchema>;
+export type CostTier = z.infer<typeof CostTierSchema>;
+export type OnUnavailable = z.infer<typeof OnUnavailableSchema>;

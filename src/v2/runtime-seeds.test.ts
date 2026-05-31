@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { RuntimeSchema } from "./schema.js";
+import { RuntimeSchema, ModelPolicySchema } from "./schema.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, "..", "..");
@@ -29,3 +29,11 @@ for (const name of RUNTIMES) {
     assert.equal(r.data!.name, name, "runtime name should match filename");
   });
 }
+
+test("model-policy.example.yml parses + Zod-validates", () => {
+  const path = join(REPO_ROOT, "seeds", "model-policy.example.yml");
+  const raw = readFileSync(path, "utf8");
+  const parsed = parseYaml(raw);
+  const r = ModelPolicySchema.safeParse(parsed);
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
+});

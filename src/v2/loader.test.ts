@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadWorkflow, loadRuntime } from "./loader.js";
+import { loadWorkflow, loadRuntime, loadModelPolicy } from "./loader.js";
 
 const VALID_WORKFLOW = `
 name: feature
@@ -175,4 +175,58 @@ test("loadRuntime: project override replaces workspace YAML", () => {
 
   const rt = loadRuntime("claude-bedrock", { projectDir });
   assert.equal(rt.image, "custom-image:v2");
+});
+
+const VALID_POLICY = `
+on_unavailable: fail
+model_profiles:
+  claude-subscription:
+    provider: anthropic
+    auth: subscription
+    map:
+      review: { model: claude-sonnet-4-6, cost_tier: standard }
+defaults:
+  profile: claude-subscription
+  activity: { review: claude-subscription }
+`;
+
+test("loadModelPolicy: returns undefined when no policy file exists (legacy mode)", () => {
+  // Neither workspace nor project has model-policy.yml — must not throw.
+  assert.equal(loadModelPolicy(), undefined);
+  assert.equal(loadModelPolicy({ projectDir }), undefined);
+});
+
+test("loadModelPolicy: reads + validates the workspace policy", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), VALID_POLICY);
+  const policy = loadModelPolicy();
+  assert.ok(policy);
+  assert.equal(policy.defaults.profile, "claude-subscription");
+  assert.equal(policy.model_profiles["claude-subscription"]?.map["review"]?.model, "claude-sonnet-4-6");
+});
+
+test("loadModelPolicy: project policy replaces workspace policy", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), VALID_POLICY);
+  const override = VALID_POLICY.replace("claude-sonnet-4-6", "claude-opus-4-8");
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "model-policy.yml"), override);
+
+  const policy = loadModelPolicy({ projectDir });
+  assert.equal(policy?.model_profiles["claude-subscription"]?.map["review"]?.model, "claude-opus-4-8");
+});
+
+test("loadModelPolicy: validation error names the file path", () => {
+  // defaults.profile references a profile that isn't defined.
+  writeFileSync(
+    join(homeDir, "model-policy.yml"),
+    VALID_POLICY.replace("profile: claude-subscription", "profile: ghost")
+  );
+  let err: unknown;
+  try {
+    loadModelPolicy();
+  } catch (e) {
+    err = e;
+  }
+  assert.ok(err instanceof Error);
+  assert.match((err as Error).message, /model-policy/);
+  assert.match((err as Error).message, /unknown profile 'ghost'/);
 });

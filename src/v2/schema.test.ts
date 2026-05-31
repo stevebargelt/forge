@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WorkflowSchema, RuntimeSchema } from "./schema.js";
+import { WorkflowSchema, RuntimeSchema, ModelPolicySchema } from "./schema.js";
 
 // ------------------------------------------------------------------
 // Minimal valid fixtures
@@ -273,4 +273,132 @@ test("Runtime: defaults are applied", () => {
   assert.equal(r.container.remove_on_exit, true);
   assert.equal(r.container.idle_timeout_seconds, 300);
   assert.equal(r.result.stdout_log, "container.stdout.log");
+});
+
+// ------------------------------------------------------------------
+// ModelPolicy (AWN-7) — opt-in policy YAML
+// ------------------------------------------------------------------
+
+const minimalPolicy = {
+  model_profiles: {
+    "claude-subscription": {
+      provider: "anthropic",
+      auth: "subscription",
+      map: {
+        reasoning: { model: "claude-opus-4-8", cost_tier: "premium" },
+        review: { model: "claude-sonnet-4-6", cost_tier: "standard" },
+      },
+    },
+    "claude-bedrock": {
+      provider: "anthropic",
+      auth: "bedrock",
+      on_unavailable: "fail",
+      map: { review: { model: "us.anthropic.claude-sonnet-4-6", cost_tier: "standard" } },
+    },
+  },
+  defaults: {
+    profile: "claude-subscription",
+    activity: { review: "claude-subscription" },
+  },
+  overrides: { agents: { "red-security": "claude-bedrock" } },
+  allowed_profiles: ["claude-subscription", "claude-bedrock"],
+};
+
+test("ModelPolicy accepts a minimal valid policy", () => {
+  const r = ModelPolicySchema.safeParse(minimalPolicy);
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
+});
+
+test("ModelPolicy: on_unavailable defaults to fail; overrides default", () => {
+  const r = ModelPolicySchema.parse(minimalPolicy);
+  assert.equal(r.on_unavailable, "fail");
+  assert.equal(r.model_profiles["claude-subscription"]!.on_unavailable, undefined);
+  assert.equal(r.model_profiles["claude-bedrock"]!.on_unavailable, "fail");
+  // optional sections default to empty rather than undefined
+  assert.deepEqual(r.overrides.agents, { "red-security": "claude-bedrock" });
+});
+
+test("ModelPolicy: defaults.profile must reference an existing profile", () => {
+  const bad = { ...minimalPolicy, defaults: { ...minimalPolicy.defaults, profile: "ghost" } };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+  assert.match(JSON.stringify(r.error!.issues), /unknown profile 'ghost'/);
+});
+
+test("ModelPolicy: defaults.activity.* must reference an existing profile", () => {
+  const bad = {
+    ...minimalPolicy,
+    defaults: { profile: "claude-subscription", activity: { review: "ghost" } },
+  };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+  assert.match(JSON.stringify(r.error!.issues), /unknown profile 'ghost'/);
+});
+
+test("ModelPolicy: overrides.agents.* must reference an existing profile", () => {
+  const bad = { ...minimalPolicy, overrides: { agents: { "red-security": "ghost" } } };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+  assert.match(JSON.stringify(r.error!.issues), /unknown profile 'ghost'/);
+});
+
+test("ModelPolicy: allowed_profiles entries must reference existing profiles", () => {
+  const bad = { ...minimalPolicy, allowed_profiles: ["claude-subscription", "ghost"] };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+  assert.match(JSON.stringify(r.error!.issues), /unknown profile 'ghost'/);
+});
+
+test("ModelPolicy: a profile map must contain at least one capability alias", () => {
+  const bad = {
+    ...minimalPolicy,
+    model_profiles: {
+      ...minimalPolicy.model_profiles,
+      "claude-subscription": { provider: "anthropic", auth: "subscription", map: {} },
+    },
+  };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+  assert.match(JSON.stringify(r.error!.issues), /at least one capability alias/);
+});
+
+test("ModelPolicy: at least one profile must be defined", () => {
+  const bad = {
+    model_profiles: {},
+    defaults: { profile: "x", activity: {} },
+  };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+});
+
+test("ModelPolicy: auth enum rejects unknown modes", () => {
+  const bad = {
+    ...minimalPolicy,
+    model_profiles: {
+      ...minimalPolicy.model_profiles,
+      "claude-subscription": {
+        provider: "anthropic",
+        auth: "magic",
+        map: { review: { model: "claude-sonnet-4-6", cost_tier: "standard" } },
+      },
+    },
+  };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
+});
+
+test("ModelPolicy: cost_tier enum rejects unknown tiers", () => {
+  const bad = {
+    ...minimalPolicy,
+    model_profiles: {
+      "claude-subscription": {
+        provider: "anthropic",
+        auth: "subscription",
+        map: { review: { model: "claude-sonnet-4-6", cost_tier: "luxury" } },
+      },
+    },
+    defaults: { profile: "claude-subscription", activity: {} },
+  };
+  const r = ModelPolicySchema.safeParse(bad);
+  assert.ok(!r.success);
 });

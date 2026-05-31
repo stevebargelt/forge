@@ -18,7 +18,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { WorkflowSchema, RuntimeSchema, type Workflow, type Runtime } from "./schema.js";
+import {
+  WorkflowSchema,
+  RuntimeSchema,
+  ModelPolicySchema,
+  type Workflow,
+  type Runtime,
+  type ModelPolicy,
+} from "./schema.js";
 
 // Resolved lazily so tests can swap FORGE_HOME between cases. Cheap.
 function forgeHome(): string {
@@ -135,6 +142,43 @@ function detectRuntimeName(_ctx: LoadContext): string {
   if (process.env.CLAUDE_CODE_USE_BEDROCK === "1") return "claude-bedrock";
   if (process.env.ANTHROPIC_API_KEY) return "claude-apikey";
   return "claude-oauth";
+}
+
+/** Load model-policy.yml if present. Policy is OPT-IN: returns undefined when no
+ *  file exists at either the project or workspace path, and callers fall back to
+ *  legacy runtime.models[alias] resolution (behavior unchanged). When present,
+ *  the project file fully replaces the workspace file — same override semantics
+ *  as workflows/runtimes. Throws (with the path) on parse / validation failure.
+ *
+ *  Note: this returns the single effective policy document. The ADR's §4 Pass-2
+ *  precedence (project > user > forge-default) is applied by the resolver that
+ *  consumes this, not here. */
+export function loadModelPolicy(ctx: LoadContext = {}): ModelPolicy | undefined {
+  const projectPath = ctx.projectDir
+    ? join(ctx.projectDir, ".forge", "model-policy.yml")
+    : undefined;
+  const workspacePath = join(forgeHome(), "model-policy.yml");
+
+  const path =
+    projectPath && existsSync(projectPath)
+      ? projectPath
+      : existsSync(workspacePath)
+        ? workspacePath
+        : undefined;
+  if (!path) return undefined; // no policy → legacy resolution, behavior unchanged
+
+  const raw = readFileSync(path, "utf8");
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (e) {
+    throw new Error(`model-policy (${path}): YAML parse error — ${(e as Error).message}`);
+  }
+  const result = ModelPolicySchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(formatZodError(`model-policy (${path})`, result.error));
+  }
+  return result.data;
 }
 
 function formatZodError(prefix: string, err: import("zod").ZodError): string {

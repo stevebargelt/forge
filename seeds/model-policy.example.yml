@@ -1,0 +1,77 @@
+# forge v2 — model policy (EXAMPLE / opt-in) — AWN-7
+#
+# Copy this to ~/.forge/model-policy.yml (or <project>/.forge/model-policy.yml)
+# to switch model resolution into POLICY MODE. With NO model-policy.yml present,
+# forge uses legacy resolution (workflow alias -> runtime.models[alias]) and
+# behavior is unchanged — installing this example file does NOT activate it.
+#
+# Policy mode resolves in two passes:
+#   1. capability  — workflow step `model:` alias, else the agent's default
+#                    activity, yields a capability alias (e.g. `review`).
+#   2. profile     — CLI --profile > project policy > user policy > forge default,
+#                    yields a profile (hence provider + auth).
+# then:  concrete model = model_profiles[<profile>].map[<capability>].model
+# and:   (provider, effective_auth) -> runtime YAML (the execution mechanism).
+#
+# A profile owns POLICY (provider + auth intent + capability->model/cost map).
+# The runtime YAML still owns EXECUTION (image, command, mounts, prompt/result).
+
+# Global default when a resolved profile has no working auth in this environment.
+# fail = clear error naming the provider + missing auth (never silently run a
+# different model than policy specified). Override per-profile below.
+on_unavailable: fail
+
+model_profiles:
+  # Personal Claude Pro / Max via OAuth subscription. Opus available.
+  claude-subscription:
+    provider: anthropic
+    auth: subscription
+    map:
+      reasoning: { model: claude-opus-4-8,   cost_tier: premium }
+      review:    { model: claude-sonnet-4-6, cost_tier: standard }
+      fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
+      default:   { model: claude-sonnet-4-6, cost_tier: standard }
+
+  # AWS Bedrock. Work-account Bedrock does NOT expose Opus — `reasoning` maps to
+  # Sonnet (strongest available there). This is why a profile owns its own map.
+  claude-bedrock:
+    provider: anthropic
+    auth: bedrock
+    on_unavailable: fail
+    map:
+      reasoning: { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      review:    { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+      fast:      { model: us.anthropic.claude-haiku-4-5-20251001-v1:0, cost_tier: cheap }
+      default:   { model: us.anthropic.claude-sonnet-4-6, cost_tier: standard }
+
+  # Anthropic API key (escape hatch).
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      reasoning: { model: claude-opus-4-8,   cost_tier: premium }
+      review:    { model: claude-sonnet-4-6, cost_tier: standard }
+      fast:      { model: claude-haiku-4-5,   cost_tier: cheap }
+      default:   { model: claude-sonnet-4-6, cost_tier: standard }
+
+defaults:
+  # Ultimate fallback when no activity/agent override matches.
+  profile: claude-subscription
+  # capability (activity) -> profile.
+  activity:
+    reasoning: claude-subscription
+    review:    claude-subscription
+    fast:      claude-subscription
+
+overrides:
+  # agent role -> profile. Pin specific agents to a specific provider/auth.
+  # Example (goal 2): force adversarial security review onto Bedrock specifically.
+  agents:
+    red-security: claude-bedrock
+
+# Bounds orchestrator autonomy (enforced once bounded orchestrator choice lands
+# in the Run stage). Empty/absent = all defined profiles allowed.
+allowed_profiles:
+  - claude-subscription
+  - claude-bedrock
+  - claude-api
