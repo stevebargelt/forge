@@ -25,11 +25,10 @@ detect:
 image: agent-dev-worker:latest
 
 models:
-  # NOTE: only consulted in LEGACY mode (no model-policy.yml). In policy mode the
-  # concrete model comes from the profile's capability map. `default` is a
-  # PLACEHOLDER — verify the valid `codex exec -m <model>` id for your account
-  # and set the real model in your profile map.
-  default: gpt-5-codex
+  # Only consulted in LEGACY mode (no model-policy.yml); in policy mode the
+  # concrete model comes from the profile's capability map. Default mirrors the
+  # operator's configured codex model (`~/.codex/config.toml`).
+  default: gpt-5.5
 
 auth:
   mode: codex-auth   # RO-mount ~/.codex/auth.json; entrypoint copies to CODEX_HOME
@@ -56,16 +55,18 @@ invocation:
   command: codex
   args:
     - exec
-    - --json
+    - --json                                       # JSONL events on stdout (usage parser reads these)
+    - --dangerously-bypass-approvals-and-sandbox   # forge container IS the sandbox; codex's own sandbox would block writing /task/result.json + editing /project (RO project mount still enforces reds at the OS layer). Mirrors claude --dangerously-skip-permissions.
+    - --skip-git-repo-check                        # /project isn't guaranteed to be a git repo
     - -m
     - "${MODEL}"
     - --cd
     - /project
-    - "-"            # read the prompt from stdin
-  # ASSUMPTION: codex exec has no separate system-prompt flag (unlike claude's
-  # --append-system-prompt), so the composed system prompt is prepended to the
-  # task package in the single stdin stream. If codex gains a native system-prompt
-  # input, switch to it. The system prompt still carries the result.json contract.
+    - "-"                                          # read the prompt from stdin
+  # Verified against codex-cli 0.135.0: `codex exec` has NO system-prompt flag
+  # (no --append-system-prompt equivalent), so the composed system prompt is
+  # prepended to the task package in the single stdin stream. The system prompt
+  # carries the result.json contract the agent must honor.
   stdin: |
     ${SYSTEM_PROMPT}
 
