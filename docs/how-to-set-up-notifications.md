@@ -261,7 +261,9 @@ Every milestone is **always recorded** as an `orchestrator.milestone` event (aud
 | `batch_complete` | only if the run has been going ≥ 10 min |
 | `plan_started` | suppressed by default (low importance) |
 
-`--dedupe-key` suppresses a *repeat* push for the same key within a run (the event is still recorded). Delivery uses the same `FORGE_NOTIFY` providers — with none configured, the milestone records but doesn't push. Per-run policy (`quiet`/`normal`/`verbose`) and the orchestrator-emits-only-at-checkpoints contract are the next slices.
+`--dedupe-key` suppresses a *repeat* push for the same key within a run (the event is still recorded). Delivery uses the same `FORGE_NOTIFY` providers — with none configured, the milestone records but doesn't push.
+
+The **orchestrator contract** — emit milestones only at semantic checkpoints, never on ordinary replies — is shipped: it lives in `seeds/orchestrator-template.md` and is installed into every project's `CLAUDE.md` via `forge init`/`forge upgrade`. The one remaining slice is **per-run policy** (`quiet`/`normal`/`verbose` via `--notify-policy`), still future.
 
 ## What's coming next (and what isn't)
 
