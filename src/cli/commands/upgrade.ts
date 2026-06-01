@@ -162,7 +162,18 @@ export function registerUpgrade(program: Command): void {
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
       if (!isForgeProject) {
-        console.log(`[4/4] project init: skipped`);
+        // #231 follow-up: flag the never-initialized case loudly + actionably,
+        // instead of a terse "skipped". upgrade is for EXISTING projects; a
+        // project with no forge block has never been `forge init`'d.
+        if (options.skipProject) {
+          console.log(`[4/4] project init: skipped (--skip-project)`);
+        } else if (!existsSync(projectClaudeMd)) {
+          console.log(`[4/4] project init: SKIPPED — no CLAUDE.md in ${cwd}`);
+          console.warn(`        ⚠ this directory has never been initialized for forge. Run \`forge init\` here first (upgrade is for existing projects).`);
+        } else {
+          console.log(`[4/4] project init: SKIPPED — CLAUDE.md has no forge orchestrator block`);
+          console.warn(`        ⚠ this project was never \`forge init\`'d (or you're not in the project root). Run \`forge init\` here to set it up.`);
+        }
       } else {
         // #231: provisioning (commands/hooks/gitignore) runs UNCONDITIONALLY —
         // it's machine-local setup independent of the CLAUDE.md block state, and
