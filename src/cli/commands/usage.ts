@@ -64,15 +64,17 @@ export function registerUsage(program: Command): void {
     .option("--by <dim>", "role | workflow | project | model | alias (default: role)", "role")
     .option("--since <window>", "time window: 1d | 7d | 30d | all (default: all)", "all")
     .option("--project <dir>", "filter to one project's runs")
+    .option("--run <id>", "filter to a single run (e.g. the per-provider split within one run)")
+    .option("--task <id>", "filter to a single task")
     .option("--json", "emit JSON instead of a table")
     .option("--limit <n>", "max rows (default: 50)", (v) => parseInt(v, 10), 50)
-    .action((opts: { by: string; since: string; project?: string; json?: boolean; limit: number }) => {
+    .action((opts: { by: string; since: string; project?: string; run?: string; task?: string; json?: boolean; limit: number }) => {
       ensureForgeDirs();
       const by = parseGroupBy(opts.by);
       const sinceClause = parseSinceClause(opts.since);
-      const rows = aggregate(by, sinceClause, opts.project, opts.limit);
+      const rows = aggregate({ by, sinceClause, projectFilter: opts.project, runFilter: opts.run, taskFilter: opts.task, limit: opts.limit });
       if (opts.json) {
-        console.log(JSON.stringify({ groupBy: by, since: opts.since, project: opts.project ?? null, rows }, null, 2));
+        console.log(JSON.stringify({ groupBy: by, since: opts.since, project: opts.project ?? null, run: opts.run ?? null, task: opts.task ?? null, rows }, null, 2));
         return;
       }
       if (rows.length === 0) {
@@ -149,7 +151,15 @@ function parseSinceClause(raw: string): string {
   return `AND mc.created_at >= '${cutoff}'`;
 }
 
-function aggregate(by: GroupBy, sinceClause: string, projectFilter: string | undefined, limit: number): Row[] {
+function aggregate(opts: {
+  by: GroupBy;
+  sinceClause: string;
+  projectFilter: string | undefined;
+  runFilter?: string | undefined;
+  taskFilter?: string | undefined;
+  limit: number;
+}): Row[] {
+  const { by, sinceClause, projectFilter, runFilter, taskFilter, limit } = opts;
   // Build the GROUP BY expression based on dimension.
   const groupExpr: Record<GroupBy, string> = {
     role:     "COALESCE(t.agent_role, '(unknown role)')",
@@ -158,7 +168,10 @@ function aggregate(by: GroupBy, sinceClause: string, projectFilter: string | und
     model:    "COALESCE(mc.model,     '(unknown model)')",
     alias:    "COALESCE(mc.alias,     '(no alias)')",
   };
-  const projectClause = projectFilter ? `AND r.project_dir = '${projectFilter.replace(/'/g, "''")}'` : "";
+  const sqlLit = (v: string) => `'${v.replace(/'/g, "''")}'`;
+  const projectClause = projectFilter ? `AND r.project_dir = ${sqlLit(projectFilter)}` : "";
+  const runClause = runFilter ? `AND t.run_id = ${sqlLit(runFilter)}` : "";
+  const taskClause = taskFilter ? `AND mc.task_id = ${sqlLit(taskFilter)}` : "";
   const sql = `
     SELECT
       ${groupExpr[by]} AS bucket,
@@ -173,6 +186,8 @@ function aggregate(by: GroupBy, sinceClause: string, projectFilter: string | und
     WHERE 1 = 1
       ${sinceClause}
       ${projectClause}
+      ${runClause}
+      ${taskClause}
     GROUP BY bucket
     ORDER BY (SUM(mc.input_tokens) + SUM(mc.cache_creation_tokens) + SUM(mc.cache_read_tokens) + SUM(mc.output_tokens)) DESC
     LIMIT ?
