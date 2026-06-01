@@ -212,6 +212,33 @@ for Walk**: it would make forge own the agent loop (tool execution, approvals,
 streaming, result discipline, sandboxing), which cuts against forge's model where
 the *containerized agent runtime* owns the loop and forge owns lifecycle/
 scoping/mounting. A much larger architectural step, off the table for Walk.
+
+**Walk W1 plan (revised 2026-05-31, against the local CLI).** Local Codex auth is
+**ChatGPT subscription**, not API key (`codex doctor`: `~/.codex/auth.json`, mode
+`chatgpt`, stored API key false). And `agent-dev-worker:latest` does **not** ship
+Codex (`command -v codex` → 127; the Dockerfile installs `@anthropic-ai/claude-code`
+only). So W1 leads with **subscription**, not apikey:
+
+1. Add the Codex CLI to `docker/agent-dev-worker.Dockerfile` (image rebuild).
+2. Add `seeds/runtimes/codex-subscription.yml` invoking
+   `codex exec --json -m ${MODEL} --cd /project -`.
+3. `RUNTIME_BINDING`: `openai/subscription → codex-subscription`.
+   `openai/api → codex-apikey` is a **later** second mode, not first.
+4. **Auth handling (hard constraint):** never pass `~/.codex/auth.json` through
+   prompts or logs. Either a forge-managed auth volume (the claude-oauth model) or
+   a read-only mounted auth file copied into a writable container `CODEX_HOME`
+   (the bedrock model — codex refreshes tokens, so the in-container copy must be
+   writable). Decision pending; mirrors the AWN-6/AWN-8 secret discipline.
+5. **Keep `claude-bedrock` as the regression path** — the user runs Bedrock at
+   work. Walk must prove **mixed** policy (codex + claude coexisting), not replace
+   work auth. Target shape:
+
+   ```yaml
+   overrides:
+     agents:
+       red-security: claude-bedrock
+       red-wide: codex-subscription
+   ```
 2. **`RUNTIME_BINDING`** (`src/v2/model-resolution.ts`) has only an `anthropic`
    row and fails loud otherwise. Add `openai → { api: codex-apikey, subscription:
    codex-subscription }` + the two `seeds/runtimes/codex-*.yml`.
