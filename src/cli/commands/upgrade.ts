@@ -6,6 +6,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   applyOrchestratorBlock,
+  looksLikeForgeProject,
   executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
@@ -62,16 +63,21 @@ export function registerUpgrade(program: Command): void {
 
       const cwd = process.cwd();
       const projectClaudeMd = join(cwd, "CLAUDE.md");
-      const willReinitProject = !options.skipProject &&
+      // #231: provision the project (slash commands + hooks + block) whenever the
+      // cwd looks like a forge orchestrator project — a marker OR the heading.
+      // The block markers no longer gate provisioning; commands/hooks are
+      // machine-local setup that every machine needs even when CLAUDE.md is
+      // committed and well-fenced. `forge init` remains for genuinely new projects.
+      const isForgeProject = !options.skipProject &&
         existsSync(projectClaudeMd) &&
-        readFileSync(projectClaudeMd, "utf8").includes("<!-- forge:orchestrator-start -->");
+        looksLikeForgeProject(readFileSync(projectClaudeMd, "utf8"));
 
       const dryRun = options.dryRun ?? false;
       const prefix = dryRun ? "(dry-run) " : "";
 
       console.log(`${prefix}forge upgrade`);
       console.log(`  Forge repo:    ${forgeRepoDir}`);
-      console.log(`  Project (cwd): ${willReinitProject ? cwd : (options.skipProject ? "(skipped)" : "(no orchestrator block found in CLAUDE.md; skipping)")}`);
+      console.log(`  Project (cwd): ${isForgeProject ? cwd : (options.skipProject ? "(skipped)" : "(not a forge project here — no orchestrator block/heading; run `forge init` to set one up)")}`);
       console.log("");
 
       // Step 1: git pull
@@ -155,53 +161,54 @@ export function registerUpgrade(program: Command): void {
       // hook installs (commit-msg, claude session hooks, slash commands).
       // Re-running the install plans is idempotent: already-current entries
       // no-op; updates apply when the template/source has moved.
-      if (!willReinitProject) {
+      if (!isForgeProject) {
         console.log(`[4/4] project init: skipped`);
       } else {
+        // #231: provisioning (commands/hooks/gitignore) runs UNCONDITIONALLY —
+        // it's machine-local setup independent of the CLAUDE.md block state, and
+        // is what makes /orient + /handoff available. The block refresh is a
+        // separate best-effort step that never blocks provisioning.
+        const projForgeDir = join(cwd, ".forge");
+        if (!dryRun && !existsSync(projForgeDir)) mkdirSync(projForgeDir, { recursive: true });
+
+        // Block refresh (best-effort): replace / repair / append / or ask for
+        // manual markers — never silently skip, never duplicate.
         const templatePath = join(forgeRepoDir, "seeds", "orchestrator-template.md");
         if (!existsSync(templatePath)) {
-          console.log(`[4/4] project init: FAILED — template not found at ${templatePath}`);
+          console.log(`[4/4] project init: block SKIPPED — template not found at ${templatePath}`);
         } else {
           const template = readFileSync(templatePath, "utf8");
           const existing = readFileSync(projectClaudeMd, "utf8");
-          const next = applyOrchestratorBlock(existing, template);
-          if (next !== existing) {
-            if (dryRun) {
-              console.log(`[4/4] project init: would update orchestrator block in ${projectClaudeMd}`);
-            } else {
-              writeFileSync(projectClaudeMd, next);
-              console.log(`[4/4] project init: updated orchestrator block`);
-              // Ensure .forge/ exists for project overrides (init does this too).
-              const projForgeDir = join(cwd, ".forge");
-              if (!existsSync(projForgeDir)) {
-                mkdirSync(projForgeDir, { recursive: true });
-              }
-            }
+          const result = applyOrchestratorBlock(existing, template);
+          if (result.action === "needs-markers") {
+            console.log(`[4/4] project init: orchestrator block needs manual markers`);
+            console.warn(`        ⚠ ${result.message}`);
+          } else if (result.content === existing) {
+            console.log(`[4/4] project init: orchestrator block already current`);
+          } else if (dryRun) {
+            console.log(`[4/4] project init: would ${result.action} orchestrator block in ${projectClaudeMd}`);
           } else {
-            console.log(`[4/4] project init: CLAUDE.md already current`);
+            writeFileSync(projectClaudeMd, result.content);
+            console.log(`[4/4] project init: ${result.action} orchestrator block`);
           }
+        }
 
-          // Refresh hook installs alongside the orchestrator block so projects
-          // init'd before #153/#118/slash-commands shipped pick up the new
-          // pieces. Each plan is idempotent — already-linked → no-op; new
-          // installs land; updated commands get symlinked; legacy
-          // .claude/settings.json forge hooks get migrated to settings.local.json.
-          const commitMsg = planCommitMsgHook(cwd);
-          const claudeHooks = planClaudeHooks(cwd);
-          const slashCmds = planClaudeCommands(cwd);
-          const gitignore = planGitignoreEntries(cwd);
-          if (dryRun) {
-            console.log(`        commit-msg hook: ${commitMsg.action}`);
-            console.log(`        claude hooks:    ${claudeHooks.action}`);
-            console.log(`        slash commands:  ${slashCmds.action}`);
-            console.log(`        .gitignore:      ${gitignore.action}`);
-          } else {
-            console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
-            console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
-            console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
-            warnSkippedClaudeCommands(slashCmds);
-            console.log(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
-          }
+        // Hook / command / gitignore plans — idempotent (already-linked → no-op).
+        const commitMsg = planCommitMsgHook(cwd);
+        const claudeHooks = planClaudeHooks(cwd);
+        const slashCmds = planClaudeCommands(cwd);
+        const gitignore = planGitignoreEntries(cwd);
+        if (dryRun) {
+          console.log(`        commit-msg hook: ${commitMsg.action}`);
+          console.log(`        claude hooks:    ${claudeHooks.action}`);
+          console.log(`        slash commands:  ${slashCmds.action}`);
+          console.log(`        .gitignore:      ${gitignore.action}`);
+        } else {
+          console.log(`        commit-msg hook: ${executeHookPlan(commitMsg)}`);
+          console.log(`        claude hooks:    ${executeClaudeHooksPlan(claudeHooks)}`);
+          console.log(`        slash commands:  ${executeClaudeCommandsPlan(slashCmds)}`);
+          warnSkippedClaudeCommands(slashCmds);
+          console.log(`        .gitignore:      ${executeGitignoreEntriesPlan(gitignore)}`);
         }
       }
 

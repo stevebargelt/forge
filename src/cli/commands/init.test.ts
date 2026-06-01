@@ -37,49 +37,85 @@ Different body.
 
 test("applyOrchestratorBlock: appends to empty CLAUDE.md", () => {
   const out = applyOrchestratorBlock("", TEMPLATE);
-  assert.equal(out, TEMPLATE + "\n");
+  assert.equal(out.content, TEMPLATE + "\n");
+  assert.equal(out.action, "appended");
 });
 
 test("applyOrchestratorBlock: appends with separator when CLAUDE.md has content", () => {
   const existing = "# my project\n\nSome notes.\n";
   const out = applyOrchestratorBlock(existing, TEMPLATE);
-  assert.ok(out.startsWith("# my project"));
-  assert.ok(out.includes("Some notes."));
-  assert.ok(out.includes("<!-- forge:orchestrator-start -->"));
-  assert.ok(out.includes("<!-- forge:orchestrator-end -->"));
+  assert.equal(out.action, "appended");
+  assert.ok(out.content.startsWith("# my project"));
+  assert.ok(out.content.includes("Some notes."));
+  assert.ok(out.content.includes("<!-- forge:orchestrator-start -->"));
+  assert.ok(out.content.includes("<!-- forge:orchestrator-end -->"));
 });
 
 test("applyOrchestratorBlock: replaces existing block in place", () => {
   const before = `# my project\n\nSome notes.\n\n${TEMPLATE}\n\n## After section\n\nMore content.\n`;
   const out = applyOrchestratorBlock(before, TEMPLATE_V2);
-  assert.ok(out.includes("# my project"));
-  assert.ok(out.includes("Some notes."));
-  assert.ok(out.includes("# forge orchestrator (v2)"));
-  assert.ok(!out.includes("# forge orchestrator\n"));  // old block gone
-  assert.ok(out.includes("## After section"));
-  assert.ok(out.includes("More content."));
+  assert.equal(out.action, "replaced");
+  assert.ok(out.content.includes("# my project"));
+  assert.ok(out.content.includes("Some notes."));
+  assert.ok(out.content.includes("# forge orchestrator (v2)"));
+  assert.ok(!out.content.includes("# forge orchestrator\n"));  // old block gone
+  assert.ok(out.content.includes("## After section"));
+  assert.ok(out.content.includes("More content."));
 });
 
 test("applyOrchestratorBlock: idempotent — replacing block with same content yields same text", () => {
   const once = applyOrchestratorBlock("# project\n\nbody.\n", TEMPLATE);
-  const twice = applyOrchestratorBlock(once, TEMPLATE);
-  assert.equal(once, twice);
+  const twice = applyOrchestratorBlock(once.content, TEMPLATE);
+  assert.equal(once.content, twice.content);
+  assert.equal(twice.action, "unchanged");
 });
 
-test("applyOrchestratorBlock: unbalanced markers throws (only start marker)", () => {
-  const corrupt = "<!-- forge:orchestrator-start -->\nbody";
-  assert.throws(
-    () => applyOrchestratorBlock(corrupt, TEMPLATE),
-    /unbalanced/i
-  );
+// #231: a lone START marker can't infer the block end → needs-markers (no throw).
+test("applyOrchestratorBlock: lone start marker → needs-markers (no throw)", () => {
+  const out = applyOrchestratorBlock("<!-- forge:orchestrator-start -->\nbody", TEMPLATE);
+  assert.equal(out.action, "needs-markers");
+  assert.equal(out.content, "<!-- forge:orchestrator-start -->\nbody", "content untouched");
+  assert.match(out.message ?? "", /end marker/i);
 });
 
-test("applyOrchestratorBlock: unbalanced markers throws (only end marker)", () => {
-  const corrupt = "body\n<!-- forge:orchestrator-end -->\n";
-  assert.throws(
-    () => applyOrchestratorBlock(corrupt, TEMPLATE),
-    /unbalanced/i
-  );
+// #231: a lone END marker WITH a heading to anchor the start → auto-repair.
+test("applyOrchestratorBlock: lone end marker + heading → repaired in place", () => {
+  const before = [
+    "# my project",
+    "",
+    "# forge orchestrator",
+    "You are the orchestrator.",
+    "<!-- forge:orchestrator-end -->",
+    "",
+    "## Stack + project context",
+    "- **Project**: Acme",
+    "",
+  ].join("\n");
+  const out = applyOrchestratorBlock(before, TEMPLATE_WITH_STACK);
+  assert.equal(out.action, "repaired");
+  assert.ok(out.content.includes("<!-- forge:orchestrator-start -->"), "start marker inserted");
+  assert.ok(out.content.includes("# forge orchestrator (v2)"), "block refreshed to template");
+  assert.ok(!out.content.includes("You are the orchestrator."), "old body replaced");
+  assert.ok(out.content.includes("# my project"), "head preserved");
+  assert.ok(out.content.includes("- **Project**: Acme"), "project-specific tail preserved");
+  assert.ok(!out.content.includes("<!-- placeholder -->"), "template placeholder not injected on repair");
+});
+
+// #231: a lone END marker with NO heading to anchor → needs-markers (can't guess).
+test("applyOrchestratorBlock: lone end marker without heading → needs-markers", () => {
+  const out = applyOrchestratorBlock("body\n<!-- forge:orchestrator-end -->\n", TEMPLATE);
+  assert.equal(out.action, "needs-markers");
+  assert.match(out.message ?? "", /start marker/i);
+});
+
+// #231: an unfenced legacy block (heading, no markers) → needs-markers, not a
+// duplicate (the end boundary vs project tail is ambiguous).
+test("applyOrchestratorBlock: unfenced heading, no markers → needs-markers (no duplicate)", () => {
+  const before = "# my project\n\n# forge orchestrator\nold body\n\n## Stack\n- thing\n";
+  const out = applyOrchestratorBlock(before, TEMPLATE);
+  assert.equal(out.action, "needs-markers");
+  assert.equal(out.content, before, "content untouched — no second block appended");
+  assert.match(out.message ?? "", /unfenced/i);
 });
 
 test("applyOrchestratorBlock: preserves content before AND after the block on update", () => {
@@ -97,12 +133,12 @@ test("applyOrchestratorBlock: preserves content before AND after the block on up
   ].join("\n");
 
   const out = applyOrchestratorBlock(before, TEMPLATE_V2);
-  assert.ok(out.includes("# project"));
-  assert.ok(out.includes("## Setup"));
-  assert.ok(out.includes("Some setup notes."));
-  assert.ok(out.includes("## Conventions"));
-  assert.ok(out.includes("Use ts not js."));
-  assert.ok(out.includes("# forge orchestrator (v2)"));
+  assert.ok(out.content.includes("# project"));
+  assert.ok(out.content.includes("## Setup"));
+  assert.ok(out.content.includes("Some setup notes."));
+  assert.ok(out.content.includes("## Conventions"));
+  assert.ok(out.content.includes("Use ts not js."));
+  assert.ok(out.content.includes("# forge orchestrator (v2)"));
 });
 
 test("applyOrchestratorBlock: upgrade preserves project-specific Stack section after end marker", () => {
@@ -121,17 +157,18 @@ test("applyOrchestratorBlock: upgrade preserves project-specific Stack section a
   ].join("\n");
 
   const out = applyOrchestratorBlock(existing, TEMPLATE_WITH_STACK);
-  assert.ok(out.includes("# forge orchestrator (v2)"), "orchestrator block should be updated");
-  assert.ok(!out.includes("You are the orchestrator."), "old block body should be gone");
-  assert.ok(out.includes("Acme — real project data"), "project-specific Stack content must survive");
-  assert.ok(!out.includes("<!-- placeholder -->"), "template placeholder must NOT be injected");
+  assert.ok(out.content.includes("# forge orchestrator (v2)"), "orchestrator block should be updated");
+  assert.ok(!out.content.includes("You are the orchestrator."), "old block body should be gone");
+  assert.ok(out.content.includes("Acme — real project data"), "project-specific Stack content must survive");
+  assert.ok(!out.content.includes("<!-- placeholder -->"), "template placeholder must NOT be injected");
 });
 
 test("applyOrchestratorBlock: first-time append includes post-marker Stack placeholder", () => {
   const existing = "# my project\n\nSome notes.\n";
   const out = applyOrchestratorBlock(existing, TEMPLATE_WITH_STACK);
-  assert.ok(out.includes("## Stack + project context"), "Stack section should be seeded on first init");
-  assert.ok(out.includes("<!-- placeholder -->"), "placeholder should appear on first init");
+  assert.equal(out.action, "appended");
+  assert.ok(out.content.includes("## Stack + project context"), "Stack section should be seeded on first init");
+  assert.ok(out.content.includes("<!-- placeholder -->"), "placeholder should appear on first init");
 });
 
 // ----- planCommitMsgHook (#147 follow-up: ban-AI-attribution hook) -----

@@ -50,6 +50,17 @@ const FORGE_SLASH_COMMANDS: ReadonlyArray<string> = ["orient.md", "handoff.md"];
 
 const START_MARKER = "<!-- forge:orchestrator-start -->";
 const END_MARKER = "<!-- forge:orchestrator-end -->";
+// The orchestrator block's leading heading — used to anchor block repair (#231)
+// when a marker is missing.
+const ORCH_HEADING = "# forge orchestrator";
+
+// True when a CLAUDE.md looks like a forge orchestrator project: it has either
+// fence marker or the orchestrator heading. `forge upgrade` uses this to decide
+// whether to provision a project (commands/hooks) — independent of whether the
+// block markers are balanced (#231).
+export function looksLikeForgeProject(claudeMd: string): boolean {
+  return claudeMd.includes(START_MARKER) || claudeMd.includes(END_MARKER) || claudeMd.includes(ORCH_HEADING);
+}
 
 export function registerInit(program: Command): void {
   program
@@ -69,7 +80,8 @@ export function registerInit(program: Command): void {
       const templateBody = readTemplate();
 
       const existing = existsSync(claudeMdPath) ? readFileSync(claudeMdPath, "utf8") : "";
-      const next = applyOrchestratorBlock(existing, templateBody);
+      const blockResult = applyOrchestratorBlock(existing, templateBody);
+      const next = blockResult.content;
 
       const willWrite = next !== existing;
       const willCreateForgeDir = !existsSync(forgeProjectDir);
@@ -83,12 +95,13 @@ export function registerInit(program: Command): void {
 
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
-        console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${willWrite ? "WOULD update" : "no change"}`);
+        console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${blockStatus(blockResult.action, !!existing)}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
         console.log(`  .gitignore:       ${describeGitignorePlan(gitignorePlan)}`);
+        if (blockResult.action === "needs-markers") console.warn(`  ⚠ orchestrator block: ${blockResult.message}`);
         return;
       }
 
@@ -104,7 +117,8 @@ export function registerInit(program: Command): void {
       const gitignoreResult = installHooks ? executeGitignoreEntriesPlan(gitignorePlan) : "skipped (--no-install-hooks)";
 
       console.log(`forge init complete in ${projectDir}`);
-      console.log(`  CLAUDE.md:        ${willWrite ? (existing ? "updated orchestrator block" : "created with orchestrator block") : "already current (no change)"}`);
+      console.log(`  CLAUDE.md:        ${blockStatus(blockResult.action, !!existing)}`);
+      if (blockResult.action === "needs-markers") console.warn(`  ⚠ orchestrator block: ${blockResult.message}`);
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
@@ -211,54 +225,127 @@ function readTemplate(): string {
   );
 }
 
+export type BlockAction = "replaced" | "repaired" | "appended" | "unchanged" | "needs-markers";
+export type BlockResult = { content: string; action: BlockAction; message?: string };
+
+// Human-readable status line for a block action.
+function blockStatus(action: BlockAction, hadFile: boolean): string {
+  switch (action) {
+    case "replaced": return "updated orchestrator block";
+    case "repaired": return "repaired + updated orchestrator block (inserted missing marker)";
+    case "appended": return hadFile ? "appended orchestrator block" : "created with orchestrator block";
+    case "unchanged": return "already current (no change)";
+    case "needs-markers": return "block left untouched — needs manual markers (see warning)";
+  }
+}
+
+// Splice the template's orchestrator block (the region between the template's
+// own markers) into `existing`, replacing the region between its start/end
+// markers. Head (before start) and tail (after end — e.g. project-specific
+// "Stack + project context") are preserved verbatim.
+function spliceBlock(existing: string, template: string, startIdx: number, endIdx: number): string {
+  const endLineEnd = existing.indexOf("\n", endIdx + END_MARKER.length);
+  const tail = endLineEnd >= 0 ? existing.slice(endLineEnd + 1) : "";
+  const head = existing.slice(0, startIdx);
+
+  const tmplStartIdx = template.indexOf(START_MARKER);
+  const tmplEndIdx = template.indexOf(END_MARKER);
+  let block: string;
+  if (tmplStartIdx >= 0 && tmplEndIdx > tmplStartIdx) {
+    const tmplEndLineEnd = template.indexOf("\n", tmplEndIdx + END_MARKER.length);
+    block = tmplEndLineEnd >= 0
+      ? template.slice(tmplStartIdx, tmplEndLineEnd + 1)
+      : template.slice(tmplStartIdx);
+  } else {
+    block = template;
+  }
+
+  const headJoin = head && !head.endsWith("\n\n") ? (head.endsWith("\n") ? "\n" : "\n\n") : "";
+  const tailJoin = tail ? (tail.startsWith("\n") ? "" : "\n") : "";
+  return head + headJoin + ensureTrailingNewline(block) + tailJoin + tail;
+}
+
+// Index of the `# forge orchestrator` heading at a line start, at or before
+// `before`. -1 if absent.
+function headingIdxBefore(existing: string, before: number): number {
+  let idx = existing.lastIndexOf(ORCH_HEADING, before);
+  while (idx > 0) {
+    if (existing[idx - 1] === "\n") return idx;
+    idx = existing.lastIndexOf(ORCH_HEADING, idx - 1);
+  }
+  return idx === 0 ? 0 : -1;
+}
+
+function lineOf(s: string, idx: number): number {
+  return s.slice(0, idx).split("\n").length;
+}
+
+// Decide how to apply the orchestrator block. NEVER throws (#231) — returns an
+// action so callers can message and, crucially, still provision commands/hooks.
+//   - balanced markers        → replace in place
+//   - lone END + heading      → repair: insert the missing start before the
+//                               heading, then replace (the Pixtron case)
+//   - lone START, or unfenced  → "needs-markers": the end boundary can't be
+//     legacy block (no markers) inferred without risking the project-specific
+//                               tail, so ask for manual markers (don't guess /
+//                               duplicate)
+//   - genuinely no block      → append a fresh fenced block
 // Exported for testing.
-export function applyOrchestratorBlock(existing: string, template: string): string {
+export function applyOrchestratorBlock(existing: string, template: string): BlockResult {
   const startIdx = existing.indexOf(START_MARKER);
   const endIdx = existing.indexOf(END_MARKER);
 
+  // Balanced markers → replace in place.
   if (startIdx >= 0 && endIdx > startIdx) {
-    // Replace existing block in place. End at the end-marker line (include
-    // the marker itself plus its trailing newline if present).
-    const endLineEnd = existing.indexOf("\n", endIdx + END_MARKER.length);
-    const tail = endLineEnd >= 0 ? existing.slice(endLineEnd + 1) : "";
-    const head = existing.slice(0, startIdx);
+    const content = spliceBlock(existing, template, startIdx, endIdx);
+    return { content, action: content === existing ? "unchanged" : "replaced" };
+  }
 
-    // Extract only the orchestrator block (between markers) from the
-    // template. Content after the end marker (e.g. "Stack + project
-    // context") is project-specific and must not be overwritten on upgrade.
-    const tmplStartIdx = template.indexOf(START_MARKER);
-    const tmplEndIdx = template.indexOf(END_MARKER);
-    let block: string;
-    if (tmplStartIdx >= 0 && tmplEndIdx > tmplStartIdx) {
-      const tmplEndLineEnd = template.indexOf("\n", tmplEndIdx + END_MARKER.length);
-      block = tmplEndLineEnd >= 0
-        ? template.slice(tmplStartIdx, tmplEndLineEnd + 1)
-        : template.slice(tmplStartIdx);
-    } else {
-      block = template;
+  // Lone END marker → repair if a heading anchors the missing start.
+  if (startIdx < 0 && endIdx >= 0) {
+    const hIdx = headingIdxBefore(existing, endIdx);
+    if (hIdx >= 0) {
+      const repaired = existing.slice(0, hIdx) + START_MARKER + "\n\n" + existing.slice(hIdx);
+      return {
+        content: spliceBlock(repaired, template, repaired.indexOf(START_MARKER), repaired.indexOf(END_MARKER)),
+        action: "repaired",
+      };
     }
-
-    // Ensure exactly one blank line on each side of the block when there's
-    // surrounding content. If head/tail is empty, no blank line needed.
-    const headJoin = head && !head.endsWith("\n\n") ? (head.endsWith("\n") ? "\n" : "\n\n") : "";
-    const tailJoin = tail ? (tail.startsWith("\n") ? "" : "\n") : "";
-    return head + headJoin + ensureTrailingNewline(block) + tailJoin + tail;
+    return {
+      content: existing,
+      action: "needs-markers",
+      message: `'${END_MARKER}' present with no matching start marker and no '${ORCH_HEADING}' heading to anchor it — add '${START_MARKER}' where the block begins, then re-run.`,
+    };
   }
 
-  if (startIdx >= 0 || endIdx >= 0) {
-    // Corrupted: one marker without the other. Refuse to touch.
-    throw new Error(
-      `CLAUDE.md has an unbalanced forge orchestrator block (one marker present, other missing). ` +
-      `Fix manually or remove both markers and re-run 'forge init'.`
-    );
+  // Lone START marker → end boundary unknown; don't guess.
+  if (startIdx >= 0 && endIdx < 0) {
+    return {
+      content: existing,
+      action: "needs-markers",
+      message: `'${START_MARKER}' present with no matching '${END_MARKER}' — add the end marker after the orchestrator block (before any project-specific content), then re-run.`,
+    };
   }
 
-  // No existing block. Append (with a separator if there's existing content).
+  // No markers at all.
+  const hIdx = headingIdxBefore(existing, existing.length);
+  if (hIdx >= 0) {
+    // Unfenced legacy block: the end boundary is ambiguous (block vs your
+    // project-specific tail), so repairing it automatically could swallow or
+    // duplicate content. Manual markers only.
+    return {
+      content: existing,
+      action: "needs-markers",
+      message: `unfenced '${ORCH_HEADING}' block at line ${lineOf(existing, hIdx)} with no markers — add '${START_MARKER}' before it and '${END_MARKER}' after the block (before your project-specific sections), then re-run. forge can't infer the block's end safely.`,
+    };
+  }
+
+  // Genuinely no block → append a fresh fenced one.
   if (existing.length === 0) {
-    return ensureTrailingNewline(template);
+    return { content: ensureTrailingNewline(template), action: "appended" };
   }
   const sep = existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
-  return existing + sep + ensureTrailingNewline(template);
+  return { content: existing + sep + ensureTrailingNewline(template), action: "appended" };
 }
 
 function ensureTrailingNewline(s: string): string {

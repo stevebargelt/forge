@@ -16,9 +16,11 @@ This runs four steps in sequence:
 1. **`git pull --ff-only`** in the forge repo (`~/code/forge` by default; override via `--forge-repo` or `FORGE_REPO_DIR`). Refuses if the working tree is dirty — protects in-progress forge changes.
 2. **`npm install`** in the forge repo. Picks up new top-level deps and new workspace deps (e.g. the `dashboard/` workspace's `marked` after #140).
 3. **`FORCE=1 ./scripts/install-seeds.sh`** to refresh `~/.forge/agents/`, `constraints/`, `workflows/`, `runtimes/`, and `forge-raci.md` from the new seeds.
-4. **Re-init the current project's `CLAUDE.md`** orchestrator block (only if the file already has the fence-marked block; otherwise skipped). The block is replaced in place — content before and after is preserved.
+4. **Provision the current project** (when the cwd's `CLAUDE.md` looks like a forge project — a fence marker *or* a `# forge orchestrator` heading). This **always** installs/refreshes the per-machine pieces — slash commands (`/orient`, `/handoff`), Claude session hooks, `.gitignore` entries — because those are machine-local and not committed, so every new machine needs them even when `CLAUDE.md` is committed. It then refreshes the orchestrator **block**: replaced in place when fenced (head/tail preserved); **repaired** when only the end marker is present (start re-inserted before the heading); and for an unfenced legacy block or a lone start marker it leaves the block untouched and prints exactly which markers to add (the end can't be inferred without risking your project-specific tail). `forge init` is for genuinely new projects; `forge upgrade` is the path for existing ones (#231).
 
 Output is compact — one line per step plus any orphan-warnings from the seeds install.
+
+> `forge upgrade` does **not** rebuild the agent Docker image or run provider login. After pulling Dockerfile changes (e.g. the Codex CLI), run `bash docker/build.sh`; and `codex login` / `forge auth login` are per-machine (#229).
 
 ## Useful flags
 
