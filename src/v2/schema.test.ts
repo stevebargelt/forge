@@ -39,6 +39,37 @@ test("WorkflowSchema accepts a minimal feature workflow", () => {
   assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
 });
 
+// #227: step/red capability field is `activity:`; the legacy `model:` is a
+// deprecated alias that must keep parsing (Zod would otherwise silently drop it).
+test("#227 back-compat: a step/red `model:` aliases to `activity:`", () => {
+  const r = WorkflowSchema.safeParse({
+    name: "legacy-vocab",
+    description: "uses the deprecated model: field",
+    steps: [
+      {
+        id: "review", agent: "engineer", model: "review", gate: "verdict",
+        reds: [{ agent: "red-wide", model: "review", authority: "authoritative" }],
+      },
+    ],
+  });
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
+  if (r.success) {
+    const step = r.data.steps[0]!;
+    assert.equal(step.activity, "review", "step model: -> activity");
+    assert.equal(step.reds[0]!.activity, "review", "red model: -> activity");
+    assert.ok(!("model" in step), "deprecated model: key is not retained on the step");
+  }
+});
+
+test("#227: a step's `activity:` is preferred and parses directly", () => {
+  const r = WorkflowSchema.parse({
+    name: "new-vocab",
+    description: "uses activity:",
+    steps: [{ id: "s", agent: "engineer", activity: "reasoning", gate: "auto" }],
+  });
+  assert.equal(r.steps[0]!.activity, "reasoning");
+});
+
 test("WorkflowSchema applies defaults to omitted fields", () => {
   const r = WorkflowSchema.parse(minimalWorkflow);
   const step = r.steps[0]!;

@@ -173,7 +173,7 @@ export async function gate(
         parentId: taskId,
         phase: targetStep.id,
         agentRole: targetStep.agent ?? task.agentRole,
-        agentAlias: targetStep.model,
+        agentAlias: targetStep.activity,
         status: "pending",
         taskPackage: tp,
         createdAt: nowIso(),

@@ -297,7 +297,7 @@ async function dispatchSingleStep(args: {
   // the resolved_* row fields are written only on first creation.
   const resolution = resolveModel({
     agentRole,
-    stepAlias: step.model,
+    stepAlias: step.activity,
     runtimeName: step.runtime,
     cliProfile: runModelProfile(args.runMetadata),
     profileSource: "run.profile",
@@ -311,7 +311,7 @@ async function dispatchSingleStep(args: {
       parentId: args.parentId,
       phase,
       agentRole,
-      ...taskModelFields(resolution, step.model),
+      ...taskModelFields(resolution, step.activity),
       status: "pending",
       taskPackage,
       createdAt: new Date().toISOString(),
@@ -332,7 +332,7 @@ async function dispatchSingleStep(args: {
     designDir: args.designDir,
     taskPackage,
     resolution,
-    workflowAlias: step.model,
+    workflowAlias: step.activity,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
@@ -553,7 +553,7 @@ async function runOneRed(args: {
   };
   const redResolution = resolveModel({
     agentRole: args.red.agent,
-    stepAlias: args.red.model,
+    stepAlias: args.red.activity,
     runtimeName: args.step.runtime,
     cliProfile: runModelProfile(args.runMetadata),
     profileSource: "run.profile",
@@ -565,7 +565,7 @@ async function runOneRed(args: {
     parentId: args.primaryTaskId,
     phase: args.step.id,
     agentRole: args.red.agent,
-    ...taskModelFields(redResolution, args.red.model),
+    ...taskModelFields(redResolution, args.red.activity),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),
@@ -580,7 +580,7 @@ async function runOneRed(args: {
     designDir: args.designDir,
     taskPackage,
     resolution: redResolution,
-    workflowAlias: args.red.model,
+    workflowAlias: args.red.activity,
     dockerExec: args.dockerExec,
   });
 
@@ -867,7 +867,7 @@ async function runFanoutChild(args: {
 
   const childResolution = resolveModel({
     agentRole,
-    stepAlias: step.model,
+    stepAlias: step.activity,
     runtimeName: step.runtime,
     cliProfile: runModelProfile(args.runMetadata),
     profileSource: "run.profile",
@@ -879,7 +879,7 @@ async function runFanoutChild(args: {
     parentId: args.parentId,
     phase: step.id,
     agentRole,
-    ...taskModelFields(childResolution, step.model),
+    ...taskModelFields(childResolution, step.activity),
     status: "pending",
     taskPackage,
     createdAt: nowIso(),
@@ -894,7 +894,7 @@ async function runFanoutChild(args: {
     designDir: args.designDir,
     taskPackage,
     resolution: childResolution,
-    workflowAlias: step.model,
+    workflowAlias: step.activity,
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
@@ -936,7 +936,7 @@ async function runContainer(args: {
   // AWN-7: the model resolution chosen at the call site (drives runtime + MODEL +
   // the manifest model block). resolution.runtime is the runtime to load.
   resolution: ModelResolution;
-  // The workflow-declared alias (step.model / red.model) — used for the
+  // The workflow-declared alias (step.activity / red.activity) — used for the
   // model_calls usage rollup, preserving pre-AWN-7 alias attribution.
   workflowAlias?: string;
   // #176: name of a captured auth profile to inject. Callers pass this only for

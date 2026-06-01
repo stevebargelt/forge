@@ -34,12 +34,39 @@ const InputDefSchema = z.object({
   help: z.string().optional(),
 });
 
-const RedDefSchema = z.object({
-  agent: NameSchema,
-  model: z.string().optional(),
-  authority: z.enum(["authoritative", "specialist"]),
-  gate_on_verdict: z.boolean().default(true),
-});
+// #227: a step/red's capability field is named `activity:` (it names a capability
+// intent — "review", "reasoning" — resolved against defaults.activity / the
+// profile map, NOT a concrete model). The legacy name was `model:`, which was
+// Claude/legacy-shaped and misleading. Accept the old name as a deprecated alias
+// so existing workflow YAMLs keep working; warn once per process to nudge
+// migration. Zod would otherwise silently DROP an unknown `model:` key and let
+// the capability fall back — a silent behavior change, so the alias is required,
+// not just nice-to-have.
+let warnedModelFieldDeprecation = false;
+function aliasModelToActivity(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const o = raw as Record<string, unknown>;
+  if (o["model"] === undefined || o["activity"] !== undefined) return raw;
+  if (!warnedModelFieldDeprecation) {
+    warnedModelFieldDeprecation = true;
+    console.error(
+      "forge: workflow step/red field `model:` is deprecated — rename to `activity:` " +
+        "(it names a capability, not a concrete model). Still accepted for now.",
+    );
+  }
+  const { model, ...rest } = o;
+  return { ...rest, activity: model };
+}
+
+const RedDefSchema = z.preprocess(
+  aliasModelToActivity,
+  z.object({
+    agent: NameSchema,
+    activity: z.string().optional(), // capability alias; legacy name `model:` (deprecated, aliased)
+    authority: z.enum(["authoritative", "specialist"]),
+    gate_on_verdict: z.boolean().default(true),
+  }),
+);
 
 const FanoutFromUpstreamSchema = z.object({
   step: NameSchema,
@@ -67,11 +94,17 @@ const FanoutDefSchema = z.object({
 // rationale (modeled after Jeff's `approval: final` pattern).
 const GateSchema = z.enum(["human", "verdict", "auto", "none"]).default("auto");
 
-const StepSchema = z
+const StepSchema = z.preprocess(
+  aliasModelToActivity,
+  z
   .object({
     id: NameSchema,
     agent: NameSchema.optional(),
-    model: z.string().optional(),
+    activity: z.string().optional(), // capability alias; legacy name `model:` (deprecated, aliased above)
+    // runtime: LEGACY-ONLY. Consulted only when no model-policy.yml is active
+    // (resolveModelForTask). In policy mode the runtime is derived from the
+    // resolved (provider, auth) binding and this field is IGNORED. Defaults to
+    // claude; seeds don't set it — don't add it to policy-era workflows.
     runtime: NameSchema.default("claude"),
     depends_on: z.array(NameSchema).default([]),
     gate: GateSchema,
@@ -127,7 +160,8 @@ const StepSchema = z
         message: "gate: verdict requires at least one red (nothing to aggregate otherwise)",
       });
     }
-  });
+  }),
+);
 
 export const WorkflowSchema = z
   .object({

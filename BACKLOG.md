@@ -563,6 +563,43 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 ### #225 — AWN-7 Run: bounded orchestrator choice + adaptive routing (allowed_profiles ceiling, cost-tier guardrail)
 
+### #227 — Workflow-step vocabulary is Claude/legacy-shaped: deprecate step runtime:, rename model: -> activity:/capability:
+Surfaced by the AWN-7 Walk mixed-provider smoke: a workflow step that routes to Codex via policy still literally reads `runtime: claude`. The smoke proves policy wins, but the step YAML vocabulary is provider/legacy-shaped and confusing.
+
+Two fields in StepSchema (src/v2/schema.ts) are the problem:
+
+1. `runtime: NameSchema.default("claude")` — used ONLY in legacy mode (resolveModelForTask). In policy mode the resolver derives the runtime from the (provider, effective_auth) binding and IGNORES this field entirely. So `runtime: claude` on a step that runs on Codex is dead, misleading config.
+
+2. `model: z.string().optional()` — despite the name it holds a CAPABILITY ALIAS (e.g. "review", "reasoning"), threaded as `stepAlias` (pass-1 capability intent), NOT a concrete model. The ADR's pass-1 vocabulary is "capability"/"activity" (cf. `defaults.activity`), so this should be `activity:` (or `capability:`).
+
+Proposed direction (align to vocabulary forge already chose):
+- Rename step `model:` -> `activity:` (matches `defaults.activity` and the ADR's capability pass).
+- Deprecate step `runtime:`: meaningless in policy mode. Either drop it once legacy mode retires, or rename to `legacy_runtime:` and document it as the no-policy escape hatch only.
+
+Back-compat is the real work (cross-cutting — every workflow YAML uses these):
+- Loader accepts old names with a deprecation warning and maps old->new; do NOT hard-break existing seed/per-project/~/.forge workflows.
+- Update all seed workflows (seeds/workflows/*) + docs (how-to-new-workflow, concepts, how-to-model-policy) in the same change.
+
+Scope: schema + loader alias layer + seed workflows + docs. Medium, cross-cutting, reversible. No DB schema change. Tie-in: ADR learnings/decisions/2026-05-30_provider-resolution.md (capability vs profile vocabulary).
+
+
+### #228 — Classify provider error events as model_error + surface the cause (not generic container_crash)
+Observed during AWN-7 Walk W4 (Codex failure-path validation). A Codex run with an invalid model exits 1 with no result.json, so classify() returns container_crash — correct (it IS in the taxonomy, #220 acceptance met), but lossy. The actual cause is right there in the stdout JSONL:
+
+  {"type":"error","message":"...status 400 ... The 'X' model is not supported when using Codex with a ChatGPT account."}
+  {"type":"turn.failed","error":{"message":"..."}}
+
+forge flattens this to `container_crash (exit 1)`; the precise reason is dropped. There's already a `model_error` FailureKind in the enum (failure-kind.ts) that fits, currently only settable via explicit ctx.source.
+
+This is PROVIDER-AGNOSTIC, not codex-specific: claude model/quota errors also collapse to container_crash/result_missing today.
+
+Proposal:
+- On a failed task, scan the result/output stream for a provider error signal (codex: type:"error"/"turn.failed"; claude: stream error events) and pass source:"model_error" to classify, plus carry the human-readable message into the task.failed error.
+- Keep it best-effort + provider-keyed (reuse the same provider dispatch as the usage parser); fall back to container_crash when no signal is found.
+
+Ties to #200 (forge show should extract text from stream-json blobs rather than dump them) — same "surface the meaning, not the raw stream" theme. Small, isolated, improves failure diagnostics for all providers.
+
+
 ## Done (recent)
 
 ### #226 — AWN-7 Walk-prep: provider-aware availability/auth seam (no Codex yet)

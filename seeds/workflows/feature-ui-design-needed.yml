@@ -29,7 +29,7 @@ inputs:
 steps:
   - id: brief
     agent: prompt-author
-    model: spec-writer
+    activity: spec-writer
     gate: human
     workflow_additions: |
       inputs.brief contains the feature + UI brief. Use the ui-design template at
@@ -50,7 +50,7 @@ steps:
 
   - id: architect
     agent: architecture-advisor
-    model: spec-writer
+    activity: spec-writer
     depends_on: [ui-review]
     gate: human
     on_reject: brief    # architect reject → redo brief (revise design first)
@@ -65,17 +65,17 @@ steps:
       See architect seed.
     reds:
       - agent: red-wide
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
       - agent: red-narrow
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
   - id: plan
     agent: tech-lead
-    model: default
+    activity: default
     depends_on: [architect]
     gate: human
     workflow_additions: |
@@ -89,7 +89,7 @@ steps:
   # settle (per-parent dispatch, not per-child). See #139 for the design call.
   - id: build
     agent: engineer                    # fallback for steps with discipline=general or unmapped
-    model: default
+    activity: default
     depends_on: [plan]
     gate: verdict     # any authoritative red's fail blocks; human can force-advance with rationale
     workflow_additions: |
@@ -112,29 +112,29 @@ steps:
       failure_mode: fail-phase
     reds:
       - agent: red-wide
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-narrow
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-frontend
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-backend
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
       - agent: red-security
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: authoritative
         gate_on_verdict: true
 
   - id: verify
     agent: test-engineer
-    model: default
+    activity: default
     depends_on: [build]
     gate: human
     workflow_additions: |

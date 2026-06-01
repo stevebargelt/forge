@@ -125,7 +125,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const step: Step = {
     id: "task",                           // synthetic phase id; matches v1 single-task runs
     agent: args.agentRole,
-    model: args.modelAlias,
+    activity: args.modelAlias,            // capability alias (CLI --model); legacy field name was `model`
     runtime: args.runtimeName ?? "claude",
     depends_on: [],
     gate: "auto",

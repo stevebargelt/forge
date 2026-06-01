@@ -20,7 +20,7 @@ const WORKFLOW: Workflow = {
   description: "",
   inputs: [],
   steps: [
-    { id: "architect", agent: "architect", model: "spec-writer", runtime: "claude", depends_on: [], gate: "human", manual: false, reds: [] },
+    { id: "architect", agent: "architect", activity: "spec-writer", runtime: "claude", depends_on: [], gate: "human", manual: false, reds: [] },
   ],
 };
 

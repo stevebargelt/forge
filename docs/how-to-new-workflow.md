@@ -23,7 +23,7 @@ inputs:
 steps:
   - id: review
     agent: assessor
-    model: spec-writer
+    activity: spec-writer
     gate: human
     workflow_additions: |
       For each lens, output {lens, findings: [{severity, summary, evidence, recommendation}]}.
@@ -36,13 +36,13 @@ steps:
       failure_mode: continue
     reds:
       - agent: red-wide
-        model: fast-orchestrator
+        activity: fast-orchestrator
         authority: specialist
         gate_on_verdict: false
 
   - id: report
     agent: reporter
-    model: default
+    activity: default
     depends_on: [review]
     gate: auto
     workflow_additions: |
@@ -52,6 +52,8 @@ steps:
 ### Step 2: ensure the agent dirs exist
 
 `agent: assessor` resolves to `~/.forge/agents/assessor/`. That directory must contain a `CLAUDE.md` (the agent's base prompt). If you reference a new role, see `how-to-new-agent.md`.
+
+> **Step field vocabulary (#227).** `activity:` names a *capability intent* (e.g. `review`, `reasoning`, or a legacy runtime alias like `spec-writer`) — it is resolved against `defaults.activity` / the profile map (policy mode) or `runtime.models[alias]` (legacy mode). The old field name `model:` is a **deprecated alias** (still accepted, warns once). Do **not** set `runtime:` on new workflows: it's a legacy-only escape hatch consulted solely when no `model-policy.yml` is active; under a policy the runtime is derived from the resolved provider+auth, and the field is ignored.
 
 ### Step 3: install and test
 
