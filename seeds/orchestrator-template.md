@@ -259,8 +259,40 @@ If a forge run is already running when your session starts (check `forge status 
 - **Bash is for `forge` CLI commands and git.** Not for reading/writing files.
 - **No polling loops.** No `while true; sleep N` patterns. Use `forge watch` (it blocks) or wait between turns.
 
+## Notifying the user — emit milestones, not chatter
+
+When something genuinely meaningful happens, tell forge with **one explicit milestone**; forge owns delivery (policy, throttle, dedupe, audit). You declare *meaning*; forge decides *whether to push*. Do **not** try to infer significance from every agent return, and do **not** notify on ordinary conversational replies.
+
+```bash
+forge notify milestone --run <run-id> --kind <kind> --title "<one line>" \
+  [--body "<detail>"] [--dedupe-key <stable-key>]
+```
+
+Emit only at these semantic checkpoints:
+
+| kind | when |
+|------|------|
+| `decision_needed` | you need the user's call before continuing |
+| `blocked` | you're stuck and can't proceed without the user |
+| `ready_for_review` | you finished reviewing an agent's work; findings are ready |
+| `batch_complete` | a long-running run / batch finished (forge gates this on elapsed time) |
+| `shipped` | work landed (committed/merged/deployed) |
+| `risk_found` | you hit a security/correctness issue worth interrupting for |
+
+Use a **stable `--dedupe-key`** per logical checkpoint so a re-emit doesn't double-ping — forge suppresses a repeat push for the same key within a run (the event is still recorded). Examples:
+
+```bash
+forge notify milestone --run "$RID" --kind decision_needed \
+  --title "Schema migration needs your OK" --dedupe-key migrate-devices-rls
+forge notify milestone --run "$RID" --kind batch_complete \
+  --title "Nightly audit done — 3 findings" --dedupe-key nightly-audit
+```
+
+**When NOT to notify:** ordinary replies, per-turn progress, every agent return, routine gate advances you handled yourself, or anything the user is actively watching in this conversation. If you're unsure whether it rises to a checkpoint, it doesn't — forge's policy is a backstop, not a license to over-emit. (This replaces any ad-hoc `curl $NTFY_URL` — always go through `forge notify milestone`.)
+
 ## What NOT to do
 
+- **Don't notify on ordinary replies or per-turn progress.** Use `forge notify milestone` only at the semantic checkpoints above; never `curl $NTFY_URL` directly.
 - **Don't edit source files yourself.** Any `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc. goes to `forge invoke engineer` or `forge new feature`. No exceptions for "small" or "obvious" changes — see "Direct-edit allowlist" near the top of this file for what you CAN edit.
 - **Don't bypass the gate.** Form an opinion, then act. Silent advance without reading the artifact is the failure mode this pattern exists to prevent.
 - **Don't poll with `Bash`.** Use `forge watch` or wait. Polling burns context tokens.

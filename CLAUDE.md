@@ -129,8 +129,6 @@ When you read an implementer's result, verify the seed was honored:
 
 The **test-engineer** runs in the pipeline's verify phase. It writes integration and E2E tests — durable test files committed to the repo, not a one-shot report. Its output should include `test_files_written` and `tests_written`. If it returns zero tests written, that's a finding — reject.
 
-**Testing an authenticated app:** default to **programmatic login** — a dedicated test user + the project's own harness logging in fresh each run (e.g. Playwright `globalSetup` → `signInWithPassword` → `storageState`). No human, no expiry, nothing committed. Do NOT reach for `forge auth-profile` capture/inject by default — that's the narrow fallback for apps with no scriptable login (third-party SSO/MFA). forge never logs in interactively. See `learnings/decisions/2026-05-28_auth-profile-cdp-localstorage-injection.md`.
-
 For **exploratory manual QA** (clicking through the app as a user, testing edge cases), invoke `manual-qa` on-demand — it is NOT in the default pipeline. Use it when:
 - The diff is UI-heavy or user-facing
 - You want someone to poke at edge cases (empty states, overflow, weird inputs)
@@ -289,6 +287,21 @@ wait
 # read each result.json, aggregate verdicts, present to user
 ```
 
+**Quick implementation (the common case for small changes):**
+```bash
+# Engineer makes the change
+forge invoke engineer --task "fix the overflow on the dashboard usage table" --run-title "fix usage table overflow"
+# read result, verify self-validation passed, then:
+forge invoke test-engineer --task "verify: engineer fixed overflow on dashboard usage table — write integration tests for the table rendering" --run <same-id>
+# UI change on a web app — add exploratory testing:
+forge invoke manual-qa --task "exploratory test: dashboard usage table — try with 0 rows, 100 rows, long model names, narrow viewport" --run <same-id>
+```
+
+**Test backfill (no implementation, just adding coverage):**
+```bash
+forge invoke test-engineer --task "write integration tests for src/v2/spawn.ts — cover container startup, mount validation, and error paths"
+```
+
 The pattern: ONE invoke per agent, chained or parallelized by you. Forge doesn't manage the composition — you do, in the conversation.
 
 ## Available workflows (pipeline only)
@@ -331,8 +344,40 @@ If a forge run is already running when your session starts (check `forge status 
 - **Bash is for `forge` CLI commands and git.** Not for reading/writing files.
 - **No polling loops.** No `while true; sleep N` patterns. Use `forge watch` (it blocks) or wait between turns.
 
+## Notifying the user — emit milestones, not chatter
+
+When something genuinely meaningful happens, tell forge with **one explicit milestone**; forge owns delivery (policy, throttle, dedupe, audit). You declare *meaning*; forge decides *whether to push*. Do **not** try to infer significance from every agent return, and do **not** notify on ordinary conversational replies.
+
+```bash
+forge notify milestone --run <run-id> --kind <kind> --title "<one line>" \
+  [--body "<detail>"] [--dedupe-key <stable-key>]
+```
+
+Emit only at these semantic checkpoints:
+
+| kind | when |
+|------|------|
+| `decision_needed` | you need the user's call before continuing |
+| `blocked` | you're stuck and can't proceed without the user |
+| `ready_for_review` | you finished reviewing an agent's work; findings are ready |
+| `batch_complete` | a long-running run / batch finished (forge gates this on elapsed time) |
+| `shipped` | work landed (committed/merged/deployed) |
+| `risk_found` | you hit a security/correctness issue worth interrupting for |
+
+Use a **stable `--dedupe-key`** per logical checkpoint so a re-emit doesn't double-ping — forge suppresses a repeat push for the same key within a run (the event is still recorded). Examples:
+
+```bash
+forge notify milestone --run "$RID" --kind decision_needed \
+  --title "Schema migration needs your OK" --dedupe-key migrate-devices-rls
+forge notify milestone --run "$RID" --kind batch_complete \
+  --title "Nightly audit done — 3 findings" --dedupe-key nightly-audit
+```
+
+**When NOT to notify:** ordinary replies, per-turn progress, every agent return, routine gate advances you handled yourself, or anything the user is actively watching in this conversation. If you're unsure whether it rises to a checkpoint, it doesn't — forge's policy is a backstop, not a license to over-emit. (This replaces any ad-hoc `curl $NTFY_URL` — always go through `forge notify milestone`.)
+
 ## What NOT to do
 
+- **Don't notify on ordinary replies or per-turn progress.** Use `forge notify milestone` only at the semantic checkpoints above; never `curl $NTFY_URL` directly.
 - **Don't edit source files yourself.** Any `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc. goes to `forge invoke engineer` or `forge new feature`. No exceptions for "small" or "obvious" changes — see "Direct-edit allowlist" near the top of this file for what you CAN edit.
 - **Don't bypass the gate.** Form an opinion, then act. Silent advance without reading the artifact is the failure mode this pattern exists to prevent.
 - **Don't poll with `Bash`.** Use `forge watch` or wait. Polling burns context tokens.
