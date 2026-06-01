@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deriveDefaultDesignDir, defaultPenFileName } from "./new.js";
+import { deriveDefaultDesignDir, defaultPenFileName, assertNoControlPlaneMeta } from "./new.js";
 
 // #67: design-touching workflows default --design-dir to <projectDir>/designs/
 // (per-project shared corpus), replacing the prior ~/code/<sanitized-title>/
@@ -50,4 +50,28 @@ test("defaultPenFileName: uses basename of projectDir", () => {
 
 test("defaultPenFileName: handles trailing slash gracefully", () => {
   assert.equal(defaultPenFileName("/Users/x/code/forge/"), "forge.pen");
+});
+
+// AWN-7: --meta is workflow input, not a control-plane backdoor. modelProfile
+// (and the other reserved keys) must only be settable through their flags, so a
+// user can't pin a provider via `--meta '{"modelProfile":"x"}'`.
+test("assertNoControlPlaneMeta: rejects modelProfile in --meta", () => {
+  assert.throws(
+    () => assertNoControlPlaneMeta({ modelProfile: "claude-bedrock" }),
+    /reserved key 'modelProfile'/,
+  );
+});
+
+test("assertNoControlPlaneMeta: rejects every reserved key", () => {
+  for (const key of ["workspace", "designDir", "authProfile"]) {
+    assert.throws(
+      () => assertNoControlPlaneMeta({ [key]: "x" }),
+      new RegExp(`reserved key '${key}'`),
+      `expected ${key} to be rejected`,
+    );
+  }
+});
+
+test("assertNoControlPlaneMeta: allows ordinary workflow inputs", () => {
+  assert.doesNotThrow(() => assertNoControlPlaneMeta({ brief: "ship it", priority: "high" }));
 });

@@ -164,6 +164,18 @@ fallback — not a special case.
 
 ### 7. Staging — Crawl / Walk / Run (same vocabulary as the observability roadmap)
 
+> **Status — Crawl SHIPPED (2026-05-31, #220).** Landed: opt-in `model-policy.yml`
+> schema + loader; the two-pass resolver (`src/v2/model-resolution.ts`) with the
+> precedence in §3; resolution record persisted on the task row + `manifest.json`;
+> lifecycle events `model.profile_resolved` / `model.profile_unavailable`; the
+> fail-loud availability gate; `forge model resolve` + `forge providers doctor`;
+> and the profile-pin surface — `forge invoke --profile` (one agent) and
+> `forge new --profile` (whole run, `resolvedBy: run.profile`). Control-plane
+> metadata (`designDir`/`authProfile`/`modelProfile`/`workspace`) is stripped from
+> task inputs and rejected from `--meta`. Claude-only across bedrock/api/
+> subscription; no second provider, no usage-parser yet. **Walk (#224)** and
+> **Run (#225)** remain as planned below.
+
 **Crawl — resolution engine + Claude auth modes.** Build `model_profiles` schema,
 deterministic resolution with the precedence above, per-agent/activity overrides,
 auth-mode pinning, fail-loud default, and the observability surface (§8). Ship with

@@ -47,6 +47,7 @@ import {
   type ModelResolution,
 } from "./model-resolution.js";
 import { checkResolvedAvailability } from "./provider-doctor.js";
+import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
@@ -270,10 +271,10 @@ async function dispatchSingleStep(args: {
   // dispatch has no carried inputs, so this is a no-op there.
   const carried = (existing?.taskPackage?.inputs as Record<string, unknown> | undefined) ?? {};
   const inputs: Record<string, unknown> = { ...carried, ...args.runMetadata, upstream };
-  // designDir + authProfile live at the docker mount layer; don't expose them
-  // as input values (the profile name would otherwise ride into the prompt).
-  delete (inputs as Record<string, unknown>)["designDir"];
-  delete (inputs as Record<string, unknown>)["authProfile"];
+  // Control-plane metadata (designDir/authProfile/modelProfile/workspace) lives
+  // at the mount / policy / scoping layer — never expose it as an input value,
+  // or e.g. the pinned profile name would ride into the composed prompt.
+  for (const key of CONTROL_PLANE_METADATA_KEYS) delete inputs[key];
   if (args.fanoutInput) {
     inputs[args.fanoutInput.key] = args.fanoutInput.value;
   }
@@ -850,8 +851,7 @@ async function runFanoutChild(args: {
     [inputKey]: args.value,
     fanoutIndex: args.index,
   };
-  delete childInputs["designDir"];
-  delete childInputs["authProfile"];
+  for (const key of CONTROL_PLANE_METADATA_KEYS) delete childInputs[key];
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
     runId: args.runId,

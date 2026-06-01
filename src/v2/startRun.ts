@@ -41,6 +41,21 @@ export type StartRunResult = {
   runId: string;
 };
 
+// Run-metadata keys that are CONTROL-PLANE, not task input. Each is set from a
+// dedicated CLI surface (--design-dir, --auth-profile, --profile) or derived
+// (--workspace), stored in run metadata for the runner/mounts/scoping, and MUST
+// NOT leak into task inputs or composed prompts — that would let a profile name
+// or workspace path ride into the model's context and blur the "policy chooses
+// models; workflows describe work" boundary. `forge new` rejects these from
+// --meta (so they can only be set through their explicit flags); runNext strips
+// them wherever run metadata is poured into task inputs.
+export const CONTROL_PLANE_METADATA_KEYS = [
+  "designDir",
+  "authProfile",
+  "modelProfile",
+  "workspace",
+] as const;
+
 export function startRun(args: StartRunArgs): StartRunResult {
   // Validate inputs against workflow's input block.
   for (const inputDef of args.workflow.inputs) {

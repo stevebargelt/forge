@@ -585,6 +585,9 @@ result:
     assert.equal(primary.resolvedBy, "run.profile");
     assert.equal(primary.agentModel, "model-pinned");
 
+    // The pin is control-plane — it must NOT leak into the task inputs/prompt.
+    assert.ok(!("modelProfile" in primary.taskPackage.inputs), "modelProfile must not ride into primary task inputs");
+
     // Both reds: capability "review" → pinned-api's review model, via run.profile —
     // overriding red-wide's explicit agent override (default-api) too.
     for (const red of reds) {
@@ -847,6 +850,47 @@ test("runNext: fanout — plan returns N claims, research spawns N children, par
   const wave3 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec });
   assert.deepEqual(wave3.dispatchedSteps, []);
   assert.equal(wave3.runStatus, "complete");
+});
+
+// AWN-7 leak guard: a run-level --profile (metadata.modelProfile) pours through
+// run metadata into fanout child inputs unless stripped. The leak is independent
+// of policy mode — modelProfile is in metadata regardless — so this runs in
+// legacy mode (no model-policy.yml) and asserts the child task packages are
+// clean of every control-plane key.
+test("runNext: fanout — control-plane metadata (modelProfile/workspace) is stripped from child task inputs", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: FANOUT_WORKFLOW,
+    title: "fanout leak guard",
+    inputs: {},
+    projectDir: "/tmp/test-project",
+    workspace: "/tmp/test-workspace",
+    modelProfile: "some-profile",
+  });
+
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", claims: ["a", "b"] } },
+    { matches: (id) => id.startsWith("task-research-"), result: { status: "complete", evidence: "x" } },
+  ]);
+
+  await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // plan
+  await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // research fanout
+
+  const tasks = tasksForRun(runId);
+  const parent = tasks.find((t) => t.phase === "research" && t.parentId === undefined)!;
+  const children = tasks.filter((t) => t.phase === "research" && t.parentId === parent.id);
+  assert.equal(children.length, 2);
+  for (const child of children) {
+    assert.ok(!("modelProfile" in child.taskPackage.inputs), "modelProfile must not leak into fanout child inputs");
+    assert.ok(!("workspace" in child.taskPackage.inputs), "workspace must not leak into fanout child inputs");
+    // the real per-child input is still present
+    assert.ok(["a", "b"].includes(child.taskPackage.inputs["claim"] as string), "the fanout claim input survives the strip");
+  }
+  assert.deepEqual(
+    children.map((c) => c.taskPackage.inputs["claim"]).sort(),
+    ["a", "b"],
+    "both claims dispatched exactly once",
+  );
 });
 
 test("runNext: fanout — failure_mode=fail-phase short-circuits and parent fails", async () => {

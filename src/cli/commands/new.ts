@@ -5,7 +5,7 @@ import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
-import { startRun } from "../../v2/startRun.js";
+import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
 
 // v2: workflow names are arbitrary YAML files in ~/.forge/workflows/.
 // We don't enforce a fixed list; the loader raises if the YAML is missing.
@@ -38,6 +38,7 @@ export function registerNew(program: Command): void {
       // Build the inputs object from the workflow's declared inputs + CLI flags.
       // The runner validates required inputs in startRun.
       const inputs: Record<string, unknown> = options.meta ? JSON.parse(options.meta) : {};
+      assertNoControlPlaneMeta(inputs);
       if (options.brief) inputs["brief"] = options.brief;
       if (options.question) inputs["question"] = options.question;
       if (options.prd) inputs["prd"] = options.prd;
@@ -90,6 +91,21 @@ export function registerNew(program: Command): void {
       if (designDir) console.log(`Design dir: ${designDir}`);
       console.log(`\nNext:\n  forge next ${runId}`);
     });
+}
+
+// --meta is workflow input, not a control-plane backdoor. Reject the reserved
+// keys (modelProfile/workspace/designDir/authProfile) so a profile/workspace/
+// mount can only be set through its explicit flag, never smuggled in as freeform
+// metadata where it would also leak into the task prompt. Exported for testing.
+export function assertNoControlPlaneMeta(meta: Record<string, unknown>): void {
+  for (const key of CONTROL_PLANE_METADATA_KEYS) {
+    if (key in meta) {
+      throw new Error(
+        `--meta may not set the reserved key '${key}' — use the dedicated flag instead ` +
+          `(--profile / --workspace / --design-dir / --auth-profile)`
+      );
+    }
+  }
 }
 
 // Default design-dir convention (#67): a per-project shared design corpus at
