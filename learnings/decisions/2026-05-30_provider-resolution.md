@@ -200,7 +200,18 @@ shipped code — this is the work list, not aspiration):
 1. **`captureUsageForTask`** (`src/store/model-calls.ts`) hard-parses claude-code
    `--output-format=stream-json`; called from `runNext.ts` and `invoke.ts`. This
    IS the per-provider **usage-parser hook** — route parsing by the resolved
-   provider. Largest Walk item; the Layer-1 usage work.
+   provider. Largest Walk item; the Layer-1 usage work, and the first real proof
+   the hook is provider-shaped rather than claude-shaped.
+
+**Codex execution model (decided 2026-05-31).** Codex runs as a **container CLI**,
+not via the OpenAI API. The runtime invokes `codex exec --json -m <model> --cd
+/project -` and parses the **Codex CLI event stream**. Forge must NOT assume the
+claude-code `--output-format stream-json` event shape — the codex parser is a
+distinct hook implementation keyed on provider. **OpenAI-API-direct is rejected
+for Walk**: it would make forge own the agent loop (tool execution, approvals,
+streaming, result discipline, sandboxing), which cuts against forge's model where
+the *containerized agent runtime* owns the loop and forge owns lifecycle/
+scoping/mounting. A much larger architectural step, off the table for Walk.
 2. **`RUNTIME_BINDING`** (`src/v2/model-resolution.ts`) has only an `anthropic`
    row and fails loud otherwise. Add `openai → { api: codex-apikey, subscription:
    codex-subscription }` + the two `seeds/runtimes/codex-*.yml`.
