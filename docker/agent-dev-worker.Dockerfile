@@ -31,6 +31,12 @@ ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
     && npm install -g @anthropic-ai/claude-code
 
+# Codex CLI (AWN-7 Walk): second provider runtime. Pinned for reproducible
+# builds; bump CODEX_CLI_VERSION to upgrade. Provides the `codex` bin used by
+# seeds/runtimes/codex-subscription.yml (`codex exec --json`).
+ARG CODEX_CLI_VERSION=0.135.0
+RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
+
 # Alternate package managers commonly used by projects forge runs against (#146).
 # pnpm: required by Next.js / modern Node projects (e.g. harebrained-apps).
 # yarn: still common in older projects. Both small; install in one layer.

@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { hasAwsSsoConfigured, readOauthHint } from "../util/creds.js";
+import { hasAwsSsoConfigured, readOauthHint, codexAuthFile } from "../util/creds.js";
 import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
 
 export type ProbeStatus = "available" | "unavailable" | "unknown";
@@ -25,6 +25,7 @@ export type AuthProbe = {
 // (OPENAI_API_KEY for api; codex subscription) when the Codex provider lands.
 const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
   anthropic: ["subscription", "api", "bedrock"],
+  openai: ["subscription"], // Codex; api (codex-apikey) is the deferred second mode
 };
 
 // Provider-aware availability probe. The auth vocabulary (subscription/api/
@@ -33,15 +34,27 @@ const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
 // An unprobeable provider returns "unknown" (never blocks); today only anthropic
 // resolves at all (unknown providers fail loud earlier at bindRuntime).
 export function probeAuth(provider: string | undefined, mode: EffectiveAuth): AuthProbe {
-  if (provider !== "anthropic") {
-    return {
-      provider: provider ?? "(none)",
-      mode,
-      status: "unknown",
-      detail: `no availability probe for provider '${provider ?? "(none)"}' yet (AWN-7 Walk)`,
-    };
+  if (provider === "anthropic") return { provider, ...probeAnthropic(mode) };
+  if (provider === "openai") return { provider, ...probeOpenai(mode) };
+  return {
+    provider: provider ?? "(none)",
+    mode,
+    status: "unknown",
+    detail: `no availability probe for provider '${provider ?? "(none)"}' yet (AWN-7 Walk)`,
+  };
+}
+
+// Codex auth (AWN-7 Walk). subscription availability = the host credential
+// (~/.codex/auth.json) is present — host-side check, no docker call, mirroring
+// the bedrock/api env probes. api (codex-apikey) is the deferred second mode.
+function probeOpenai(mode: EffectiveAuth): Omit<AuthProbe, "provider"> {
+  if (mode === "subscription") {
+    const file = codexAuthFile();
+    return existsSync(file)
+      ? { mode, status: "available", detail: `Codex subscription credential present (${file})` }
+      : { mode, status: "unavailable", detail: "no ~/.codex/auth.json — run `codex login`" };
   }
-  return { provider, ...probeAnthropic(mode) };
+  return { mode, status: "unknown", detail: `openai/${mode} probe not implemented (Walk: subscription only)` };
 }
 
 function probeAnthropic(mode: EffectiveAuth): Omit<AuthProbe, "provider"> {

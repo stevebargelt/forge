@@ -274,6 +274,29 @@ test("detectAuthMode: env precedence bedrock > api > subscription", () => {
   assert.equal(detectAuthMode(), "bedrock");
 });
 
+// ---- Walk: openai/subscription binds to the codex-subscription runtime ----
+
+test("policy: openai + subscription profile binds runtime to codex-subscription", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), `
+on_unavailable: fail
+model_profiles:
+  codex-sub:
+    provider: openai
+    auth: subscription
+    map:
+      review:  { model: gpt-5-codex, cost_tier: standard }
+      default: { model: gpt-5-codex, cost_tier: standard }
+defaults:
+  profile: codex-sub
+  activity: {}
+`);
+  const r = resolveModel({ agentRole: "red-wide", stepAlias: "review", cliProfile: "codex-sub" });
+  assert.equal(r.provider, "openai");
+  assert.equal(r.auth, "subscription");
+  assert.equal(r.runtime, "codex-subscription");
+  assert.equal(r.model, "gpt-5-codex");
+});
+
 // ---- Project policy replaces workspace policy (file-level, not merge) ----
 
 test("policy: project model-policy.yml replaces workspace", () => {

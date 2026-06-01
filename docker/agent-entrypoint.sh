@@ -27,4 +27,17 @@ if [ "${FORGE_NO_BROWSER:-0}" != "1" ] && command -v chromium >/dev/null 2>&1; t
     >/tmp/chromium.log 2>&1 &
 fi
 
+# Codex (AWN-7 Walk): when the RO-mounted subscription credential is present,
+# copy it into a writable CODEX_HOME so `codex` can refresh tokens in-container.
+# The refreshed copy dies with the container; the host ~/.codex/auth.json (the
+# source of truth) is never written from here. No-op for non-codex runtimes.
+if [ -f /forge-codex-auth/auth.json ]; then
+  CODEX_HOME="${CODEX_HOME:-/tmp/codex-home}"
+  mkdir -p "$CODEX_HOME"
+  chmod 700 "$CODEX_HOME"
+  cp /forge-codex-auth/auth.json "$CODEX_HOME/auth.json"
+  chmod 600 "$CODEX_HOME/auth.json"
+  export CODEX_HOME
+fi
+
 exec "$@"

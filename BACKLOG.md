@@ -563,7 +563,11 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 ### #225 — AWN-7 Run: bounded orchestrator choice + adaptive routing (allowed_profiles ceiling, cost-tier guardrail)
 
+## Done (recent)
+
 ### #226 — AWN-7 Walk-prep: provider-aware availability/auth seam (no Codex yet)
+**Closed:** 2026-06-01. Commit `579f895`.
+
 First prep slice for AWN-7 Walk (#224). Closes the provider-blind availability seam BEFORE a second provider exists, so adding Codex is a localized extension, not a mid-Walk signature retrofit. No behavior change today — only `anthropic` resolves (unknown providers fail loud at `bindRuntime`).
 
 Seam (shipped code):
@@ -583,8 +587,6 @@ Acceptance:
 
 Deferred to Walk proper (#224): detectAuthMode provider-awareness, RUNTIME_BINDING openai row + codex-*.yml runtimes, the captureUsageForTask per-provider hook, failure_kind review.
 
-
-## Done (recent)
 
 ### #220 — AWN-7 provider-runtime: extract Claude execution behind a provider interface (supersedes #106)
 **Closed:** 2026-06-01. Commit `8a4773e`.

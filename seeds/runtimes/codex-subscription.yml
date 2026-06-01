@@ -1,0 +1,84 @@
+# forge v2 — codex-subscription runtime (AWN-7 Walk)
+#
+# Codex (OpenAI) via ChatGPT subscription. The container runs the `codex` CLI in
+# `exec --json` mode. Auth is the host's ChatGPT-subscription credential
+# (~/.codex/auth.json): forge RO-mounts ONLY that file (auth.mode: codex-auth),
+# and agent-entrypoint.sh copies it into a writable CODEX_HOME so in-container
+# token refresh works and dies with the container.
+#
+# Decision: Codex runs as a container CLI, NOT the OpenAI API direct — the
+# containerized runtime owns the agent loop. See
+# learnings/decisions/2026-05-30_provider-resolution.md §7.
+#
+# Installed at ~/.forge/runtimes/codex-subscription.yml by install-seeds.sh.
+
+name: codex-subscription
+description: |
+  Codex (OpenAI) via ChatGPT subscription. Second provider proof for AWN-7 Walk.
+
+detect:
+  # No auto-detection clause — codex-subscription is selected by policy
+  # (an openai/subscription profile), never auto-detected from env.
+  env: []
+  files: []
+
+image: agent-dev-worker:latest
+
+models:
+  # NOTE: only consulted in LEGACY mode (no model-policy.yml). In policy mode the
+  # concrete model comes from the profile's capability map. `default` is a
+  # PLACEHOLDER — verify the valid `codex exec -m <model>` id for your account
+  # and set the real model in your profile map.
+  default: gpt-5-codex
+
+auth:
+  mode: codex-auth   # RO-mount ~/.codex/auth.json; entrypoint copies to CODEX_HOME
+
+env: {}
+
+mounts:
+  - host: "${TASK_DIR}"
+    container: /task
+    mode: rw
+
+  - host: "${PROJECT_DIR}"
+    container: /project
+    mode: "${PROJECT_MODE:-rw}"      # 'ro' for red agents; runner sets per-step
+
+  - host: "${DESIGN_DIR}"
+    container: /design
+    mode: ro
+    optional: true
+  # No browser-tools skill mount: that's a claude-skills capability codex doesn't
+  # consume. Revisit if codex grows an equivalent.
+
+invocation:
+  command: codex
+  args:
+    - exec
+    - --json
+    - -m
+    - "${MODEL}"
+    - --cd
+    - /project
+    - "-"            # read the prompt from stdin
+  # ASSUMPTION: codex exec has no separate system-prompt flag (unlike claude's
+  # --append-system-prompt), so the composed system prompt is prepended to the
+  # task package in the single stdin stream. If codex gains a native system-prompt
+  # input, switch to it. The system prompt still carries the result.json contract.
+  stdin: |
+    ${SYSTEM_PROMPT}
+
+    ---
+
+    ${TASK_PACKAGE_MARKDOWN}
+
+container:
+  name: "forge-${TASK_ID}"
+  remove_on_exit: true
+  idle_timeout_seconds: 600
+
+result:
+  file: /task/result.json
+  stdout_log: container.stdout.log
+  stderr_log: container.stderr.log

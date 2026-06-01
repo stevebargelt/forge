@@ -232,6 +232,17 @@ export function awsConfigDir(): string {
   return process.env.FORGE_AWS_DIR ?? join(homedir(), ".aws");
 }
 
+// AWN-7 Walk: host path to the Codex ChatGPT-subscription credential
+// (`~/.codex/auth.json`, mode chatgpt). forge mounts ONLY this file read-only
+// into codex containers (never the whole ~/.codex dir, which also holds
+// sessions/history/config); the entrypoint copies it into a writable CODEX_HOME
+// so in-container token refresh works and dies with the container. FORGE_CODEX_DIR
+// overrides the parent dir (tests).
+export function codexAuthFile(): string {
+  const dir = process.env.FORGE_CODEX_DIR ?? join(homedir(), ".codex");
+  return join(dir, "auth.json");
+}
+
 // -------- OAuth identity hint (#97 follow-up: oauth detail) --------
 //
 // Anthropic OAuth credentials live inside the forge-claude-oauth Docker

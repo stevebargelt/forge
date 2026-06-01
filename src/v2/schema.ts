@@ -240,7 +240,9 @@ const DetectDefSchema = z.object({
 });
 
 const AuthDefSchema = z.object({
-  mode: z.enum(["env-snapshot", "mount", "apikey", "oauth-volume"]),
+  // codex-auth (AWN-7 Walk): RO-mount the host Codex subscription credential
+  // (~/.codex/auth.json); the entrypoint copies it into a writable CODEX_HOME.
+  mode: z.enum(["env-snapshot", "mount", "apikey", "oauth-volume", "codex-auth"]),
 });
 
 const MountDefSchema = z.object({

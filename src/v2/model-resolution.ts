@@ -76,13 +76,17 @@ function defaultActivityForRole(role: string): string {
   return DEFAULT_ACTIVITY_BY_ROLE[role] ?? "default";
 }
 
-// (provider, effective auth) -> runtime YAML name. THE Crawl seam. Codex (Walk)
-// adds rows: openai -> { api: "codex-apikey", subscription: "codex-subscription" }.
+// (provider, effective auth) -> runtime YAML name. THE Crawl seam. Walk adds the
+// openai/subscription row (Codex via ChatGPT subscription); openai/api
+// (codex-apikey) is the deferred second auth mode.
 const RUNTIME_BINDING: Record<string, Partial<Record<EffectiveAuth, string>>> = {
   anthropic: {
     subscription: "claude-oauth",
     api: "claude-apikey",
     bedrock: "claude-bedrock",
+  },
+  openai: {
+    subscription: "codex-subscription",
   },
 };
 

@@ -62,6 +62,7 @@ beforeEach(() => {
     FORGE_AWS_DIR: process.env.FORGE_AWS_DIR,
     FORGE_AUTH_MODE: process.env.FORGE_AUTH_MODE,
     FORGE_AWS_CREDS_FOR_TEST: process.env.FORGE_AWS_CREDS_FOR_TEST,
+    FORGE_CODEX_DIR: process.env.FORGE_CODEX_DIR,
   };
   for (const k of Object.keys(envSnap)) delete process.env[k];
 });
@@ -205,6 +206,27 @@ test("buildDockerArgs: apikey auth mode passes ANTHROPIC_API_KEY", () => {
 test("buildDockerArgs: apikey auth mode throws when ANTHROPIC_API_KEY is unset", () => {
   const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
   assert.throws(() => buildDockerArgs(rt, BASE_CTX), /ANTHROPIC_API_KEY/);
+});
+
+test("buildDockerArgs: codex-auth RO-mounts only ~/.codex/auth.json (not the dir)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-codex-spawn-"));
+  process.env.FORGE_CODEX_DIR = dir;
+  writeFileSync(join(dir, "auth.json"), '{"mode":"chatgpt"}');
+
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "codex-auth" } };
+  const { args } = buildDockerArgs(rt, BASE_CTX);
+  const mount = pickMount(args, "/forge-codex-auth/auth.json");
+  assert.equal(mount, `${join(dir, "auth.json")}:/forge-codex-auth/auth.json:ro`);
+  // No AWS/anthropic credential injected on the codex path.
+  assert.equal(pickEnv(args).AWS_ACCESS_KEY_ID, undefined);
+  assert.equal(pickEnv(args).ANTHROPIC_API_KEY, undefined);
+});
+
+test("buildDockerArgs: codex-auth throws when ~/.codex/auth.json is missing (no phantom-dir mount)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-codex-empty-"));
+  process.env.FORGE_CODEX_DIR = dir; // exists but no auth.json inside
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "codex-auth" } };
+  assert.throws(() => buildDockerArgs(rt, BASE_CTX), /codex login/);
 });
 
 test("buildDockerArgs: warns (not silent) when an optional browser-tools skill mount is skipped", () => {

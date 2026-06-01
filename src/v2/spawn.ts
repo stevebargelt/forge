@@ -24,6 +24,7 @@ import {
   oauthVolumeName,
   awsConfigDir,
   resolveAwsProfile,
+  codexAuthFile,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
 
@@ -49,6 +50,11 @@ export type SpawnContext = SubstContext & {
 // Fixed in-container path for the mounted auth-profile state. A top-level path
 // (not under /home/agent) avoids nesting under the oauth-volume mount.
 const AUTH_STATE_CONTAINER_PATH = "/forge-auth/state.json";
+
+// Fixed in-container path for the RO-mounted Codex credential (AWN-7 Walk). The
+// entrypoint detects this file and copies it into a writable CODEX_HOME. A
+// top-level path (not under /home/agent) keeps it off the oauth-volume mount.
+const CODEX_AUTH_CONTAINER_PATH = "/forge-codex-auth/auth.json";
 
 export type BuildArgsResult = {
   args: string[];
@@ -91,6 +97,20 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     }
     case "oauth-volume": {
       args.push("-v", `${oauthVolumeName()}:/home/agent`);
+      break;
+    }
+    case "codex-auth": {
+      // AWN-7 Walk: RO-mount ONLY the Codex subscription credential file (never
+      // the whole ~/.codex dir). Fail loud if it's absent — bind-mounting a
+      // missing source would make docker create a phantom dir at the host path.
+      // The entrypoint copies it into a writable CODEX_HOME for token refresh.
+      const authFile = codexAuthFile();
+      if (!existsSync(authFile)) {
+        throw new Error(
+          `auth.mode=codex-auth but ${authFile} is missing — run \`codex login\` on the host`,
+        );
+      }
+      args.push("-v", `${authFile}:${CODEX_AUTH_CONTAINER_PATH}:ro`);
       break;
     }
   }

@@ -4,6 +4,9 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { probeAuth, doctorReport, checkResolvedAvailability } from "./provider-doctor.js";
 import type { ModelResolution } from "./model-resolution.js";
 
@@ -29,6 +32,7 @@ beforeEach(() => {
     CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     AWS_PROFILE: process.env.AWS_PROFILE,
+    FORGE_CODEX_DIR: process.env.FORGE_CODEX_DIR,
   };
   for (const k of Object.keys(snap)) delete process.env[k];
 });
@@ -86,10 +90,31 @@ test("probeAuth: undefined provider → unknown (defensive)", () => {
   assert.equal(p.status, "unknown");
 });
 
-test("doctorReport: returns all three anthropic auth modes, each tagged with provider", () => {
+test("doctorReport: anthropic modes + openai/subscription, each tagged with provider", () => {
   const report = doctorReport();
-  assert.deepEqual(report.map((r) => r.mode), ["subscription", "api", "bedrock"]);
-  assert.ok(report.every((r) => r.provider === "anthropic"));
+  assert.deepEqual(
+    report.map((r) => `${r.provider}/${r.mode}`),
+    ["anthropic/subscription", "anthropic/api", "anthropic/bedrock", "openai/subscription"],
+  );
+});
+
+// Walk: openai/subscription (Codex) availability = host ~/.codex/auth.json present.
+test("probeAuth(openai, subscription): available iff ~/.codex/auth.json present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-codex-"));
+  process.env.FORGE_CODEX_DIR = dir;
+  try {
+    assert.equal(probeAuth("openai", "subscription").status, "unavailable");
+    writeFileSync(join(dir, "auth.json"), '{"mode":"chatgpt"}');
+    const p = probeAuth("openai", "subscription");
+    assert.equal(p.status, "available");
+    assert.equal(p.provider, "openai");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("probeAuth(openai, api): unknown — codex-apikey is the deferred second mode", () => {
+  assert.equal(probeAuth("openai", "api").status, "unknown");
 });
 
 test("checkResolvedAvailability: legacy resolution always ok (no policy gate)", () => {
