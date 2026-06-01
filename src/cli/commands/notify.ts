@@ -12,6 +12,7 @@ import {
   PATHS,
 } from "../../notify/consent.js";
 import { subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody } from "../../notify/format.js";
+import { emitMilestone, MILESTONE_KINDS } from "../../notify/milestone.js";
 
 const CONFIRMATION_WINDOW_MIN = 10;
 
@@ -56,6 +57,40 @@ export function registerNotify(program: Command): void {
         }
       }
       if (anyFailed) process.exitCode = 1;
+    });
+
+  // ----- milestone (#202/#203) -----
+  notify
+    .command("milestone")
+    .description("Declare an orchestrator checkpoint. Always recorded as an orchestrator.milestone event; forge applies policy + dedupe to decide whether to push.")
+    .requiredOption("--run <id>", "run id this milestone belongs to")
+    .requiredOption("--kind <kind>", `milestone kind: ${MILESTONE_KINDS.join(" | ")}`)
+    .requiredOption("--title <title>", "short one-line title")
+    .option("--body <body>", "optional longer body (defaults to the title)")
+    .option("--dedupe-key <key>", "suppress a duplicate push for this key within the run")
+    .option("--json", "emit JSON instead of a human line")
+    .action(async (opts: { run: string; kind: string; title: string; body?: string; dedupeKey?: string; json?: boolean }) => {
+      try {
+        const res = await emitMilestone({
+          runId: opts.run,
+          kind: opts.kind,
+          title: opts.title,
+          ...(opts.body ? { body: opts.body } : {}),
+          ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
+        });
+        if (opts.json) {
+          console.log(JSON.stringify({ recorded: true, kind: opts.kind, dispatched: res.dispatched, reason: res.decision.reason, importance: res.importance }, null, 2));
+          return;
+        }
+        console.log(`✓ recorded orchestrator.milestone [${opts.kind}]`);
+        console.log(`  ${res.dispatched ? "→ pushed" : "→ no push"}: ${res.decision.reason}`);
+        if (res.decision.send && !res.dispatched) {
+          console.log(`  (policy said send, but no provider configured — set FORGE_NOTIFY. See docs/how-to-set-up-notifications.md)`);
+        }
+      } catch (e) {
+        console.error(`forge notify milestone: ${(e as Error).message}`);
+        process.exitCode = 1;
+      }
     });
 
   // ----- subscribe -----

@@ -57,11 +57,11 @@ function computeDurationMs(run: Run): number | undefined {
   return Math.max(0, end - start);
 }
 
-function isAnyProviderEnabled(): boolean {
+export function isAnyProviderEnabled(): boolean {
   return isTwilioEnabled() || isNtfyEnabled();
 }
 
-async function dispatch(body: string, title?: string): Promise<void> {
+export async function dispatch(body: string, title?: string): Promise<void> {
   if (isTwilioEnabled()) {
     const result = await notifyTwilio(body);
     if (!result.ok) console.error(`forge notify: SMS failed — ${result.error}`);

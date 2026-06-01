@@ -36,7 +36,11 @@ export type EventType =
   // made (vocabulary reserved for Walk/Run; not emitted in Crawl).
   | "model.profile_resolved"
   | "model.profile_unavailable"
-  | "model.fallback_applied";
+  | "model.fallback_applied"
+  // #202/#203: an orchestrator-declared checkpoint (forge notify milestone). The
+  // orchestrator owns *meaning*; forge owns delivery/dedupe/policy. Always
+  // recorded (audit trail) regardless of whether a push was sent.
+  | "orchestrator.milestone";
 
 export type Event = {
   id: number;

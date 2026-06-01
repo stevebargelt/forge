@@ -239,6 +239,30 @@ FORGE_NOTIFY= forge new feature "..." --brief "..."
 
 Setting `FORGE_NOTIFY=` (empty) for the one command keeps your shell-wide config intact.
 
+## Orchestrator milestones (#202/#203)
+
+The lifecycle notifications above fire on run/task *status* transitions. **Milestones** are different: the orchestrator declares a *meaningful checkpoint* explicitly, and forge decides whether to push — avoiding the trap of inferring "significant" from every agent return.
+
+```bash
+forge notify milestone \
+  --run <run-id> \
+  --kind decision_needed \
+  --title "AWN-7 Walk smoke complete" \
+  --body "Codex-only + mixed-provider passed; W4 remains." \
+  --dedupe-key awn-7-walk-smoke
+```
+
+Every milestone is **always recorded** as an `orchestrator.milestone` event (audit trail, in `forge show`), independent of whether a push goes out. Forge then applies a conservative default policy:
+
+| kind | push? |
+|------|-------|
+| `decision_needed`, `blocked`, `risk_found` | always (interrupt-worthy) |
+| `acceptance_green`, `ready_for_review`, `shipped` | always |
+| `batch_complete` | only if the run has been going ≥ 10 min |
+| `plan_started` | suppressed by default (low importance) |
+
+`--dedupe-key` suppresses a *repeat* push for the same key within a run (the event is still recorded). Delivery uses the same `FORGE_NOTIFY` providers — with none configured, the milestone records but doesn't push. Per-run policy (`quiet`/`normal`/`verbose`) and the orchestrator-emits-only-at-checkpoints contract are the next slices.
+
 ## What's coming next (and what isn't)
 
 - **Other providers** (Pushover, Slack webhook) — not on the roadmap. If one becomes useful, it gets its own doc and a value for `FORGE_NOTIFY`.
