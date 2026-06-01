@@ -50,6 +50,8 @@ export type ActivityEntry = {
   phase: string;
   status: string;
   completedAt: string;
+  /** Wall-clock run-time (started_at → completed_at) in ms; null if either is missing. */
+  durationMs: number | null;
   result: unknown | null; // parsed JSON
   parentId: string | null;
 };
@@ -58,7 +60,7 @@ export type ActivityEntry = {
  *  Used for the activity feed. */
 export function recentActivity(limit = 100, sinceIso?: string, projectDir?: string): ActivityEntry[] {
   let sql = `
-    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.completed_at,
+    SELECT t.id, t.run_id, t.parent_id, t.phase, t.agent_role, t.agent_model, t.status, t.result, t.started_at, t.completed_at,
            r.title, r.workflow, r.project_dir
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
@@ -86,6 +88,7 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
     agent_model: string | null;
     status: string;
     result: string | null;
+    started_at: string | null;
     completed_at: string;
     title: string;
     workflow: string;
@@ -94,6 +97,9 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
 
   return rows.map((r) => {
     const meta = resolveProjectMeta(r.project_dir);
+    const durationMs = r.started_at
+      ? Math.max(0, new Date(r.completed_at).getTime() - new Date(r.started_at).getTime())
+      : null;
     return {
       taskId: r.id,
       runId: r.run_id,
@@ -107,6 +113,7 @@ export function recentActivity(limit = 100, sinceIso?: string, projectDir?: stri
       phase: r.phase,
       status: r.status,
       completedAt: r.completed_at,
+      durationMs,
       parentId: r.parent_id,
       result: r.result ? safeJsonParse(r.result) : null,
     };
@@ -323,6 +330,9 @@ export function taskDetail(taskId: string): TaskDetail | null {
     phase: taskRow.phase,
     status: taskRow.status,
     completedAt: taskRow.completed_at ?? "",
+    durationMs: taskRow.started_at && taskRow.completed_at
+      ? Math.max(0, new Date(taskRow.completed_at).getTime() - new Date(taskRow.started_at).getTime())
+      : null,
     parentId: taskRow.parent_id,
     result: taskRow.result ? safeJsonParse(taskRow.result) : null,
   };

@@ -357,7 +357,7 @@ function InFlightItem({ task, onClick, muted }) {
         </div>
         <div class="faint mono" style="font-size: 11px;">${task.phase} · ${task.taskId}</div>
       </div>
-      <div class="muted mono" style="font-size: 11px;">${formatRelativeTime(task.startedAt)}</div>
+      <div class="muted mono" style="font-size: 11px;" title="run-time so far">${task.startedAt ? html`⏱ ${formatDuration(Date.now() - new Date(task.startedAt).getTime())}` : formatRelativeTime(task.startedAt)}</div>
     </div>
   `;
 }
@@ -375,6 +375,7 @@ function FeedCard({ entry, onClick }) {
         </div>
         <div class="row">
           <span class="badge status-${entry.status}">${entry.status.replace(/_/g, " ")}</span>
+          ${entry.durationMs != null ? html`<span class="muted mono" style="font-size: 11px;" title="run-time (started → completed)">⏱ ${formatDuration(entry.durationMs)}</span>` : null}
           <span class="muted mono" style="font-size: 11px;">${formatRelativeTime(entry.completedAt)}</span>
         </div>
       </div>
@@ -575,6 +576,18 @@ function formatRelativeTime(iso) {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   return `${day}d ago`;
+}
+
+// Wall-clock run-time of a finished task. Sub-minute shows seconds; longer keeps
+// seconds for at-a-glance precision (matches `forge show`'s duration intent).
+function formatDuration(ms) {
+  if (ms == null) return null;
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
 }
 
 function truncate(s, max) {
