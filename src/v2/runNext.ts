@@ -988,6 +988,13 @@ async function runContainer(args: {
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
   // back to the workflow-declared alias (legacy, where resolution.alias is unset).
   const usageAlias = args.resolution.alias ?? args.workflowAlias;
+  // AWN-7: provider/model drive the per-provider usage parser (openai → codex
+  // JSONL; else claude stream-json). Undefined in legacy mode → claude parser.
+  const usageMeta = {
+    ...(usageAlias ? { alias: usageAlias } : {}),
+    ...(args.resolution.provider ? { provider: args.resolution.provider } : {}),
+    ...(args.resolution.model ? { model: args.resolution.model } : {}),
+  };
 
   // #176: stage the auth profile (resolve + reconcile localhost origins) for
   // injection. Fail fast on missing/expired — don't run a browser step against
@@ -1068,7 +1075,7 @@ async function runContainer(args: {
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
-    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
+    captureUsageForTask(stdoutPath, { taskId: args.taskId, ...usageMeta });
     // WALK-3: ingest progress on the crash path too — last decision/progress
     // records are most valuable in failure cases.
     emitAgentProgressEvents(dir, args.runId, args.taskId);
@@ -1078,7 +1085,7 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
   // #155: capture token usage from the stream-json log. Best-effort.
-  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...(usageAlias ? { alias: usageAlias } : {}) });
+  captureUsageForTask(stdoutPath, { taskId: args.taskId, ...usageMeta });
   // WALK-3: ingest progress as soon as exec returns — BEFORE the idle-timeout /
   // crash / normal branches — so a hung or crashed agent's records still land on
   // the timeline. The events precede the terminal event, matching when written.

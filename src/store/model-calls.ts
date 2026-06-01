@@ -151,16 +151,82 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// AWN-7 Walk: per-provider usage parser. Codex (`codex exec --json`) emits JSONL
+// events on stdout — entirely unlike claude-code's stream-json. Token usage is a
+// single `turn.completed` event per turn:
+//   { type:"turn.completed", usage:{ input_tokens, cached_input_tokens,
+//                                    output_tokens, reasoning_output_tokens } }
+// Verified against codex-cli 0.135.0.
+//
+// Mapping onto model_calls (kept consistent with the claude convention so the
+// `forge usage` cache math is uniform):
+//   input_tokens is the TOTAL prompt; cached_input_tokens is the cached SUBSET.
+//   So non-cached input = input_tokens − cached_input_tokens, and the cached
+//   portion is the cache_read column. output_tokens already includes reasoning
+//   tokens (reasoning_output_tokens is a breakdown subset), so we don't add it.
+//   Codex exposes no cache-CREATION counter → cache_creation stays 0.
+//
+// request_id is `${thread_id}#${turnIndex}` so a multi-turn run yields one row
+// per turn (matching claude's one-row-per-request model) instead of the last
+// turn overwriting the first under insertUsageRows' (task_id, request_id) key.
+export function extractUsageFromCodexLog(
+  logPath: string,
+  opts?: { taskId?: string; alias?: string; model?: string },
+): UsageRow[] {
+  let raw: string;
+  try { raw = readFileSync(logPath, "utf8"); }
+  catch { return []; }
+
+  const rows: UsageRow[] = [];
+  let threadId: string | undefined;
+  let turnIndex = 0;
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let event: unknown;
+    try { event = JSON.parse(line); }
+    catch { continue; }
+    if (!isObject(event)) continue;
+
+    if (event["type"] === "thread.started" && typeof event["thread_id"] === "string") {
+      threadId = event["thread_id"];
+      continue;
+    }
+
+    if (event["type"] === "turn.completed" && isObject(event["usage"])) {
+      const u = event["usage"];
+      const cached = numField(u, "cached_input_tokens");
+      const totalInput = numField(u, "input_tokens");
+      rows.push({
+        taskId: opts?.taskId ?? null,
+        requestId: `${threadId ?? "codex"}#${turnIndex++}`,
+        model: opts?.model ?? "codex",
+        alias: opts?.alias ?? null,
+        inputTokens: Math.max(0, totalInput - cached),
+        outputTokens: numField(u, "output_tokens"),
+        cacheReadTokens: cached,
+        cacheCreationTokens: 0,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  return rows;
+}
+
 // Capture usage from a just-completed task's stdout log into model_calls.
 // Best-effort: swallows all errors so a telemetry failure can never block or
 // alter task semantics. Call site is right after docker exec returns, in both
-// invoke.ts and runNext.ts spawn paths.
+// invoke.ts and runNext.ts spawn paths. AWN-7: dispatches the parser by provider
+// — openai → codex JSONL; everything else (anthropic, legacy) → claude stream-json.
 export function captureUsageForTask(
   stdoutPath: string,
-  opts: { taskId: string; alias?: string },
+  opts: { taskId: string; alias?: string; provider?: string; model?: string },
 ): { rowCount: number; error?: string } {
   try {
-    const rows = extractUsageFromStdoutLog(stdoutPath, opts);
+    const rows = opts.provider === "openai"
+      ? extractUsageFromCodexLog(stdoutPath, opts)
+      : extractUsageFromStdoutLog(stdoutPath, opts);
     if (rows.length === 0) return { rowCount: 0 };
     insertUsageRows(rows);
     return { rowCount: rows.length };

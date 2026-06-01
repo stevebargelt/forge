@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extractUsageFromStdoutLog } from "./model-calls.js";
+import { extractUsageFromStdoutLog, extractUsageFromCodexLog } from "./model-calls.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "forge-usage-test-")); });
@@ -175,4 +175,60 @@ test("extractUsageFromStdoutLog: rejects negative or non-numeric token counts (d
   assert.equal(rows[0]?.outputTokens, 0);
   assert.equal(rows[0]?.cacheReadTokens, 0);
   assert.equal(rows[0]?.cacheCreationTokens, 100, "valid fields still extracted");
+});
+
+// ---- Codex (AWN-7 Walk): `codex exec --json` JSONL usage parser ----
+// Event shapes are the real ones captured from codex-cli 0.135.0.
+
+test("extractUsageFromCodexLog: maps turn.completed usage (input is total; cached is the subset)", () => {
+  const path = writeLog("codex.jsonl", [
+    { type: "thread.started", thread_id: "019e835b-220d-7f91" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "ok" } },
+    { type: "turn.completed", usage: { input_tokens: 21860, cached_input_tokens: 20224, output_tokens: 81, reasoning_output_tokens: 0 } },
+  ]);
+  const rows = extractUsageFromCodexLog(path, { taskId: "task-1", alias: "review", model: "gpt-5.5" });
+  assert.equal(rows.length, 1);
+  const r = rows[0]!;
+  assert.equal(r.inputTokens, 1636, "non-cached input = input_tokens - cached_input_tokens");
+  assert.equal(r.cacheReadTokens, 20224, "cached subset → cache_read");
+  assert.equal(r.outputTokens, 81);
+  assert.equal(r.cacheCreationTokens, 0, "codex exposes no cache-creation counter");
+  assert.equal(r.model, "gpt-5.5");
+  assert.equal(r.alias, "review");
+  assert.equal(r.requestId, "019e835b-220d-7f91#0");
+});
+
+test("extractUsageFromCodexLog: a multi-turn thread yields one row per turn (no overwrite)", () => {
+  const path = writeLog("codex-multi.jsonl", [
+    { type: "thread.started", thread_id: "th_X" },
+    { type: "turn.completed", usage: { input_tokens: 100, cached_input_tokens: 0, output_tokens: 10 } },
+    { type: "turn.completed", usage: { input_tokens: 200, cached_input_tokens: 50, output_tokens: 20 } },
+  ]);
+  const rows = extractUsageFromCodexLog(path, { taskId: "t", model: "gpt-5.5" });
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.requestId), ["th_X#0", "th_X#1"]);
+  assert.equal(rows[1]!.inputTokens, 150);
+  assert.equal(rows[1]!.cacheReadTokens, 50);
+});
+
+test("extractUsageFromCodexLog: tolerates corrupt lines and non-usage events; [] when no turn.completed", () => {
+  const path = join(dir, "codex-noise.jsonl");
+  writeFileSync(path, [
+    "not json at all",
+    JSON.stringify({ type: "thread.started", thread_id: "th_Y" }),
+    JSON.stringify({ type: "item.started", item: { type: "command_execution", command: "ls" } }),
+  ].join("\n") + "\n");
+  assert.deepEqual(extractUsageFromCodexLog(path), []);
+});
+
+test("extractUsageFromCodexLog: cached > input never produces negative input (clamped to 0)", () => {
+  const path = writeLog("codex-clamp.jsonl", [
+    { type: "thread.started", thread_id: "th_Z" },
+    { type: "turn.completed", usage: { input_tokens: 10, cached_input_tokens: 50, output_tokens: 5 } },
+  ]);
+  const rows = extractUsageFromCodexLog(path, {});
+  assert.equal(rows[0]!.inputTokens, 0);
+  assert.equal(rows[0]!.cacheReadTokens, 50);
+  assert.equal(rows[0]!.model, "codex", "model falls back when not provided");
 });
