@@ -538,26 +538,6 @@ Polish: when the log looks like Claude stream-json (JSONL with type fields), ext
 
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
-### #220 — AWN-7 provider-runtime: extract Claude execution behind a provider interface (supersedes #106)
-docs/agentic-workflow-next-steps.md §7. Make Claude/Codex/future agents interchangeable behind one forge lifecycle.
-
-SUPERSEDES #106 (provider abstraction — "NEEDS ARCHITECTURE WORK"). AWN-7 is the same work with a concrete interface spec.
-
-Scope — runtime/provider interface covering:
-- prompt composition, process launch, streaming output, result parsing, usage/cost capture, cancellation, error classification.
-- Move Claude-specific assumptions behind a Claude provider.
-- Add a Codex provider only AFTER the interface is explicit enough to preserve lifecycle semantics.
-- Workflow YAML + task contracts stay provider-neutral.
-
-Acceptance:
-- Existing Claude behavior passes through the interface with no regression.
-- Provider output streams into the same container logs + lifecycle events.
-- Provider failures map into the same failure_kind taxonomy.
-- A smoke task runs through a second provider without changing workflow definitions.
-
-Note: runtime YAMLs already exist (seeds/runtimes/claude-*.yml) + loader; this formalizes the execution interface, not just config. Largest/most architectural item — sequence last per the doc. Second of the broadening trio.
-
-
 ### #222 — Session/orchestrator tasks stuck 'running' need a heartbeat-based reaper (not container-based)
 Surfaced during AWN-1 (#214): the real DB has several task-session-* (phase=session, role=orchestrator) tasks stuck status='running' from orchestrator/design sessions that ended without finalizing. AWN-1's reconcile deliberately SKIPS them (no container.started — they're host-side), so they stay 'running' forever and inflate forge status / dashboard "in flight".
 
@@ -583,7 +563,50 @@ Builds directly on #217's TaskContract type + contract.ts.
 
 ### #225 — AWN-7 Run: bounded orchestrator choice + adaptive routing (allowed_profiles ceiling, cost-tier guardrail)
 
+### #226 — AWN-7 Walk-prep: provider-aware availability/auth seam (no Codex yet)
+First prep slice for AWN-7 Walk (#224). Closes the provider-blind availability seam BEFORE a second provider exists, so adding Codex is a localized extension, not a mid-Walk signature retrofit. No behavior change today — only `anthropic` resolves (unknown providers fail loud at `bindRuntime`).
+
+Seam (shipped code):
+- `probeAuth(mode)` (src/v2/provider-doctor.ts) checks ANTHROPIC_API_KEY for ANY `api` auth, AWS for bedrock, OAuth hint for subscription — provider is never consulted. An `openai/api` profile would wrongly probe ANTHROPIC_API_KEY.
+- `checkResolvedAvailability(res)` calls `probeAuth(res.auth)` — drops `res.provider`.
+- `doctorReport()` hard-lists the three anthropic modes.
+
+Scope:
+- Thread `provider` through: `probeAuth(provider, mode)`; `checkResolvedAvailability` passes `res.provider`; `doctorReport` iterates known providers (today: just anthropic).
+- Unknown provider → `status: "unknown"` with a clear detail (defensive; unreachable until Walk adds the runtime+binding).
+- Anthropic logic byte-identical. Update the two callers in src/cli/commands (model.ts `--check`, providers.ts doctor).
+
+Acceptance:
+- All existing provider-doctor / model-resolution tests pass unchanged.
+- New test: an `openai/api` resolution does NOT report available off ANTHROPIC_API_KEY (proves provider is honored).
+- `forge providers doctor` output unchanged for an anthropic-only environment.
+
+Deferred to Walk proper (#224): detectAuthMode provider-awareness, RUNTIME_BINDING openai row + codex-*.yml runtimes, the captureUsageForTask per-provider hook, failure_kind review.
+
+
 ## Done (recent)
+
+### #220 — AWN-7 provider-runtime: extract Claude execution behind a provider interface (supersedes #106)
+**Closed:** 2026-06-01. Commit `8a4773e`.
+
+docs/agentic-workflow-next-steps.md §7. Make Claude/Codex/future agents interchangeable behind one forge lifecycle.
+
+SUPERSEDES #106 (provider abstraction — "NEEDS ARCHITECTURE WORK"). AWN-7 is the same work with a concrete interface spec.
+
+Scope — runtime/provider interface covering:
+- prompt composition, process launch, streaming output, result parsing, usage/cost capture, cancellation, error classification.
+- Move Claude-specific assumptions behind a Claude provider.
+- Add a Codex provider only AFTER the interface is explicit enough to preserve lifecycle semantics.
+- Workflow YAML + task contracts stay provider-neutral.
+
+Acceptance:
+- Existing Claude behavior passes through the interface with no regression.
+- Provider output streams into the same container logs + lifecycle events.
+- Provider failures map into the same failure_kind taxonomy.
+- A smoke task runs through a second provider without changing workflow definitions.
+
+Note: runtime YAMLs already exist (seeds/runtimes/claude-*.yml) + loader; this formalizes the execution interface, not just config. Largest/most architectural item — sequence last per the doc. Second of the broadening trio.
+
 
 ### #221 — AWN-8 hygiene-hardening: complete secret exclusion across bundles/logs/manifests/exports + staged-auth cleanup
 **Closed:** 2026-05-30. Commit `48eedf6`.

@@ -190,7 +190,40 @@ is only realizable once a second provider exists — that lands in **Walk**.
 **Walk — Codex/OpenAI as a real second provider.** Add a `codex-*` runtime YAML +
 the Codex **usage-parser hook**, and a smoke task running a red through Codex
 without touching workflow YAML. Proves the interface is real, not theoretical.
-This is where the Layer-1 usage work actually lands.
+This is where the Layer-1 usage work actually lands. (Inherits the #220
+acceptance criterion "a smoke task runs through a second provider without
+changing workflow definitions" — that was always Walk, not Crawl.)
+
+**The Claude-coupling seams Walk must generalize** (mapped post-Crawl, against the
+shipped code — this is the work list, not aspiration):
+
+1. **`captureUsageForTask`** (`src/store/model-calls.ts`) hard-parses claude-code
+   `--output-format=stream-json`; called from `runNext.ts` and `invoke.ts`. This
+   IS the per-provider **usage-parser hook** — route parsing by the resolved
+   provider. Largest Walk item; the Layer-1 usage work.
+2. **`RUNTIME_BINDING`** (`src/v2/model-resolution.ts`) has only an `anthropic`
+   row and fails loud otherwise. Add `openai → { api: codex-apikey, subscription:
+   codex-subscription }` + the two `seeds/runtimes/codex-*.yml`.
+3. **`detectAuthMode`** (`src/v2/model-resolution.ts`) maps Claude env
+   (`CLAUDE_CODE_USE_BEDROCK`/`ANTHROPIC_API_KEY`/AWS) for `auth: auto`. openai
+   auto-detection differs (`OPENAI_API_KEY`, codex subscription; no bedrock) —
+   make it provider-aware.
+4. **`failure_kind` classify** — review against Codex's error/exit surface; a
+   provider whose errors don't map into the existing taxonomy violates #220's
+   "failures map into the same failure_kind taxonomy" acceptance.
+
+What is NOT a seam (already provider-neutral, confirmed): the `model-policy.yml`
+schema (`provider` is an open string, fails loud at the binding table — no schema
+bump for a new provider); workflow YAML + task contracts; the resolution
+precedence; the lifecycle/event surface.
+
+**Walk-prep / hardening (do FIRST, no Codex code, no behavior change today):** the
+availability path is provider-blind — `probeAuth(mode)` checks `ANTHROPIC_API_KEY`
+for *any* `api` auth, and `checkResolvedAvailability` / `doctorReport` ignore
+`provider`. Today only `anthropic` resolves (unknown providers die at
+`bindRuntime`), so it's latent — but threading `provider` through the probe NOW
+makes Walk's Codex addition a localized extension instead of a mid-Walk signature
+retrofit. This is the first prep slice.
 
 **Run — bounded orchestrator choice + adaptive routing (goal 4).** Add
 `allowed_profiles` + cost-tier + budget guardrail + capability-request resolution

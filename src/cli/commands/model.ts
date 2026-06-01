@@ -48,7 +48,7 @@ export function registerModel(program: Command): void {
         }
 
         const probe: AuthProbe | undefined =
-          opts.check && resolution.auth ? probeAuth(resolution.auth) : undefined;
+          opts.check && resolution.auth ? probeAuth(resolution.provider, resolution.auth) : undefined;
 
         if (opts.json) {
           console.log(JSON.stringify({ ...resolution, ...(probe ? { availability: probe } : {}) }, null, 2));

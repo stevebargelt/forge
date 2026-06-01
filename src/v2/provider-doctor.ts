@@ -15,12 +15,36 @@ import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
 export type ProbeStatus = "available" | "unavailable" | "unknown";
 
 export type AuthProbe = {
+  provider: string;
   mode: EffectiveAuth;
   status: ProbeStatus;
   detail: string;
 };
 
-export function probeAuth(mode: EffectiveAuth): AuthProbe {
+// Which (provider, auth) pairs forge can probe today. Walk adds an `openai` row
+// (OPENAI_API_KEY for api; codex subscription) when the Codex provider lands.
+const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
+  anthropic: ["subscription", "api", "bedrock"],
+};
+
+// Provider-aware availability probe. The auth vocabulary (subscription/api/
+// bedrock) is shared, but what makes a mode "available" is provider-specific —
+// `api` means ANTHROPIC_API_KEY for anthropic, OPENAI_API_KEY for openai (Walk).
+// An unprobeable provider returns "unknown" (never blocks); today only anthropic
+// resolves at all (unknown providers fail loud earlier at bindRuntime).
+export function probeAuth(provider: string | undefined, mode: EffectiveAuth): AuthProbe {
+  if (provider !== "anthropic") {
+    return {
+      provider: provider ?? "(none)",
+      mode,
+      status: "unknown",
+      detail: `no availability probe for provider '${provider ?? "(none)"}' yet (AWN-7 Walk)`,
+    };
+  }
+  return { provider, ...probeAnthropic(mode) };
+}
+
+function probeAnthropic(mode: EffectiveAuth): Omit<AuthProbe, "provider"> {
   switch (mode) {
     case "bedrock": {
       // Availability is about AWS CREDENTIALS, not the CLAUDE_CODE_USE_BEDROCK
@@ -55,9 +79,12 @@ export function probeAuth(mode: EffectiveAuth): AuthProbe {
   }
 }
 
-// All anthropic auth modes, in the order doctor displays them.
+// Every probeable (provider, auth) pair, in display order. Iterates the provider
+// table so a new provider's rows appear automatically once it's added there.
 export function doctorReport(): AuthProbe[] {
-  return (["subscription", "api", "bedrock"] as const).map(probeAuth);
+  return Object.entries(PROBEABLE_AUTH_BY_PROVIDER).flatMap(([provider, modes]) =>
+    modes.map((mode) => probeAuth(provider, mode)),
+  );
 }
 
 export type AvailabilityCheck = { ok: true } | { ok: false; reason: string };
@@ -73,7 +100,7 @@ export type AvailabilityCheck = { ok: true } | { ok: false; reason: string };
 // fails loud too, with a message that names fallback as not-yet-implemented.
 export function checkResolvedAvailability(res: ModelResolution): AvailabilityCheck {
   if (res.resolvedBy === "legacy" || !res.auth) return { ok: true };
-  const probe = probeAuth(res.auth);
+  const probe = probeAuth(res.provider, res.auth);
   if (probe.status !== "unavailable") return { ok: true };
   const base =
     `profile '${res.profile}' requires provider '${res.provider}' auth '${res.auth}', ` +

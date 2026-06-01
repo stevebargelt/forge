@@ -40,37 +40,56 @@ afterEach(() => {
   }
 });
 
-test("probeAuth(api): available iff ANTHROPIC_API_KEY set", () => {
-  assert.equal(probeAuth("api").status, "unavailable");
+test("probeAuth(anthropic, api): available iff ANTHROPIC_API_KEY set", () => {
+  assert.equal(probeAuth("anthropic", "api").status, "unavailable");
   process.env.ANTHROPIC_API_KEY = "sk-x";
-  assert.equal(probeAuth("api").status, "available");
+  const p = probeAuth("anthropic", "api");
+  assert.equal(p.status, "available");
+  assert.equal(p.provider, "anthropic");
 });
 
-test("probeAuth(bedrock): available when AWS present + CLAUDE_CODE_USE_BEDROCK=1", () => {
+test("probeAuth(anthropic, bedrock): available when AWS present + CLAUDE_CODE_USE_BEDROCK=1", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "test-profile";
-  const p = probeAuth("bedrock");
+  const p = probeAuth("anthropic", "bedrock");
   assert.equal(p.status, "available");
 });
 
-test("probeAuth(bedrock): available on AWS creds alone — a pinned profile doesn't need CLAUDE_CODE_USE_BEDROCK", () => {
+test("probeAuth(anthropic, bedrock): available on AWS creds alone — a pinned profile doesn't need CLAUDE_CODE_USE_BEDROCK", () => {
   // The claude-bedrock runtime injects CLAUDE_CODE_USE_BEDROCK=1 itself; the host
   // env var is the auto-SELECTION signal, not an availability requirement.
   process.env.AWS_PROFILE = "test-profile"; // AWS creds present, no env var
-  const p = probeAuth("bedrock");
+  const p = probeAuth("anthropic", "bedrock");
   assert.equal(p.status, "available");
 });
 
-test("probeAuth(subscription): unknown with no cached OAuth hint", () => {
+test("probeAuth(anthropic, subscription): unknown with no cached OAuth hint", () => {
   // test-setup gives a fresh empty FORGE_HOME — no oauth-hint.json.
-  const p = probeAuth("subscription");
+  const p = probeAuth("anthropic", "subscription");
   assert.equal(p.status, "unknown");
   assert.match(p.detail, /forge auth/);
 });
 
-test("doctorReport: returns all three anthropic auth modes in order", () => {
+// Walk-prep (#226): the probe is provider-aware. An openai/api profile must NOT
+// report available off ANTHROPIC_API_KEY — the auth vocabulary is shared but
+// availability is provider-specific. Today openai is unprobeable → "unknown".
+test("probeAuth: a non-anthropic provider does NOT borrow ANTHROPIC_API_KEY availability", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-x"; // would make anthropic/api available
+  const p = probeAuth("openai", "api");
+  assert.equal(p.status, "unknown", "openai/api must not read as available off an anthropic key");
+  assert.equal(p.provider, "openai");
+  assert.match(p.detail, /Walk/);
+});
+
+test("probeAuth: undefined provider → unknown (defensive)", () => {
+  const p = probeAuth(undefined, "api");
+  assert.equal(p.status, "unknown");
+});
+
+test("doctorReport: returns all three anthropic auth modes, each tagged with provider", () => {
   const report = doctorReport();
   assert.deepEqual(report.map((r) => r.mode), ["subscription", "api", "bedrock"]);
+  assert.ok(report.every((r) => r.provider === "anthropic"));
 });
 
 test("checkResolvedAvailability: legacy resolution always ok (no policy gate)", () => {

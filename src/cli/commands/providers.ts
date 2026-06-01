@@ -20,10 +20,10 @@ export function registerProviders(program: Command): void {
         return;
       }
 
-      console.log("Provider auth status (anthropic):");
+      console.log("Provider auth status:");
       for (const p of report) {
         const icon = p.status === "available" ? "✓" : p.status === "unavailable" ? "✗" : "?";
-        console.log(`  ${icon} ${p.mode.padEnd(13)}${p.status.padEnd(13)}${p.detail}`);
+        console.log(`  ${icon} ${`${p.provider}/${p.mode}`.padEnd(24)}${p.status.padEnd(13)}${p.detail}`);
       }
       console.log("");
       console.log("'?' = couldn't determine from the host (e.g. OAuth lives in a docker volume).");
