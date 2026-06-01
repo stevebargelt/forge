@@ -305,12 +305,13 @@ of the *resolved* `(profile, model)`.
   **Codex** (Walk). Sequenced.
 - **Cost tier qualitative vs numeric** → **qualitative first.**
 - **`activity` on steps** → inferred from agent role by default; explicit override
-  allowed. **Crawl shipped this via the existing step `model:` alias, NOT a new
-  `activity:` field.** In policy mode the workflow step's `model:` value IS the
-  capability alias (Pass 1 item 1) — e.g. `model: review`. So the "explicit
-  override" is `model:`, and no separate `activity:` field was added to the step
-  schema. A dedicated `activity:` field can be added later if a step ever needs to
-  declare capability and a concrete-model hint independently; nothing needs it yet.
+  allowed via the step's capability field (Pass 1 item 1) — e.g. `activity: review`.
+  **Crawl shipped this on the existing step `model:` alias; #227 (post-Walk) renamed
+  the field to `activity:`** to match this vocabulary (`defaults.activity`) and stop
+  it reading as a concrete-model hint. The legacy `model:` spelling is still accepted
+  as a deprecated alias (Zod preprocess, warns once) so existing workflows don't
+  break. There is still ONE capability field per step — not a separate
+  capability-plus-model-hint pair; nothing needs that yet.
 - **Project policy defining new profiles** → allowed; but `allowed_profiles`
   (admin/global) bounds *orchestrator* autonomy regardless.
 - **Full broker / control plane** → **rejected as first implementation.** Revisit

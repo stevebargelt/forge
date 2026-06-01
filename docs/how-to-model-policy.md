@@ -90,8 +90,30 @@ Every policy-mode task writes provider + model + auth + `resolvedBy` into its
 `manifest.json` and emits `model.profile_resolved` (or
 `model.profile_unavailable` when the gate fails).
 
-## Scope (Crawl)
+## Mixed-provider (Walk — shipped)
 
-Claude-only across bedrock/api/subscription. A second provider (Codex) and the
-usage-parser hook land in **Walk (#224)**; bounded orchestrator choice
-(`allowed_profiles`, cost-tier guardrails) lands in **Run (#225)**.
+Two providers are live: **anthropic** (subscription/api/bedrock) and **openai**
+(Codex via ChatGPT subscription). Routing is per-agent, so the SAME workflow YAML
+runs across providers — the policy decides:
+
+```yaml
+overrides:
+  agents:
+    red-security: claude-bedrock      # anthropic
+    red-wide: codex-subscription      # openai/Codex
+```
+
+Codex runs the `codex` CLI in a container (`codex exec --json`); its auth is the
+host `~/.codex/auth.json` (`codex login` first — `forge providers doctor` shows
+`openai/subscription` availability). Per-provider token usage is captured into
+`model_calls` automatically. Today Codex is **subscription-only** (openai/api /
+`codex-apikey` is not wired yet).
+
+> The runtime seed `codex-subscription.yml` must be installed (`install-seeds.sh`)
+> into `~/.forge/runtimes/` for an openai profile to dispatch.
+
+## Still future — Run (#225)
+
+Bounded orchestrator *choice*: `allowed_profiles` as a ceiling + cost-tier
+guardrails so the orchestrator can pick a profile within policy bounds rather
+than only honoring fixed overrides.
