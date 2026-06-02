@@ -7,18 +7,19 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 **Last session ended 2026-06-02.**
 
-**Where we left off:** Docs-drift Crawl→Walk→Run (#236–242) fully shipped, hardened (3 review fixes), AND validated end-to-end forge-on-forge: the `documentation-maintainer` ran twice corruption-safe (typecheck clean both times), the ship-time advisory was tested PRE→POST resolution through the real `forge notify milestone --kind shipped` CLI on run-196, and the documenter caught + fixed real drift in the wild (quick-start.md step 7 still called `forge show` the architect's risks view). Session ended on `/handoff`. 15 commits unpushed.
+**This session (2026-06-02, continued):** #246 SHIPPED — operator surfaces are now project-configurable via `<project>/.forge/docs-surfaces.yml` (full replacement of forge defaults, fail-soft on malformed). Commits `cb7ecf9` (code+tests, 927/927) + `41fab28` (concepts.md, documenter-produced). Docs-impact inference is no longer forge-on-forge-only. Both commits local (unpushed).
+
+**Where we left off:** Docs-drift Crawl→Walk→Run (#236–242) fully shipped, hardened (3 review fixes), AND validated end-to-end forge-on-forge: the `documentation-maintainer` ran twice corruption-safe (typecheck clean both times), the ship-time advisory was tested PRE→POST resolution through the real `forge notify milestone --kind shipped` CLI on run-196, and the documenter caught + fixed real drift in the wild (quick-start.md step 7 still called `forge show` the architect's risks view).
 
 **Picked up next (priority):**
 1. **#243 — L2 precision (added-vs-removed discrimination).** The precondition to upgrade #242's ADVISORY warning into a real verdict gate. Precision path is in `learnings/decisions/2026-06-01_docs-drift-l2-noise-measurement.md`: only a REMOVED/RENAMED primitive is a drift candidate; gate `forge <verb>` on a known-command set; namespace flags to their command. Re-measure after; only then consider enforcing.
-2. **#246 — cross-project OPERATOR_SURFACES.** `src/v2/contract.ts` hardcodes forge's own paths, so docs-impact inference (forge show suggest + shipped advisory) does NOT fire on non-forge projects — only the explicit contract flag does. Make it project-configurable (`.forge` config and/or project-type defaults). Until then, docs-impact inference is forge-on-forge only.
-3. **#245 — node_modules corruption fix (container-local volume in spawn.ts).** Now FILED. UNVALIDATABLE on this clean Mac — needs the CyberArk corp Mac (only place the silent SIGKILL fires). Real unblocker for forge-on-forge CODE agents (markdown-only agents are already proven safe). Keep separate atomic commits from #187.
-4. **#225 — AWN-7 Run (bounded orchestrator choice).** Last AWN-7 stage, still deferred. #234 (notify per-run policy) still waits on real milestone traffic.
+2. **#245 — node_modules corruption fix (container-local volume in spawn.ts).** FILED. UNVALIDATABLE on this clean Mac — needs the CyberArk corp Mac (only place the silent SIGKILL fires). Real unblocker for forge-on-forge CODE agents (markdown-only agents are already proven safe). Keep separate atomic commits from #187.
+3. **#225 — AWN-7 Run (bounded orchestrator choice).** Last AWN-7 stage, still deferred. #234 (notify per-run policy) still waits on real milestone traffic.
 
 **External state to remember:**
-- **15 commits unpushed** to origin/main (BACKLOG.md also dirty from this handoff). User runs direct-to-main, no CI/PR.
-- **run-196-show-detail-view-8fab25** now carries two `E2E test` shipped milestones (dedupe keys `e2e-advisory-pre`/`-post`) plus a legitimate `documentation-maintainer` task that fixed quick-start.md — test artifacts on a real run, harmless audit noise.
-- **Docker Desktop daemon wedged this session** (500 on `/_ping`; first documenter invoke died exit 125 / container_crash). Fixed with `docker desktop restart`. If an invoke fails with container_crash 125, check daemon health first — it's infra, not the agent.
+- **Local commits unpushed** to origin/main (incl. this session's #246 pair). User runs direct-to-main, no CI/PR.
+- **run-196-show-detail-view-8fab25** carries two `E2E test` shipped milestones (dedupe keys `e2e-advisory-pre`/`-post`) plus a legitimate `documentation-maintainer` task that fixed quick-start.md — test artifacts on a real run, harmless audit noise.
+- **Docker Desktop daemon wedged a prior session** (500 on `/_ping`; documenter invoke died exit 125 / container_crash). Fixed with `docker desktop restart`. If an invoke fails with container_crash 125, check daemon health first — it's infra, not the agent.
 - Pixtron (`~/code/pixtron`): staged regression policies at `.forge/model-policy.{claude-only,mixed}.yml` (toggle via `cp`→`model-policy.yml`).
 - This Mac's agent image has Codex CLI (`@openai/codex@0.135.0`); `codex-subscription.yml` in `~/.forge/runtimes/`; Codex auth = existing `~/.codex/auth.json`.
 
@@ -30,8 +31,9 @@ When you start a session, read this file. When you finish, update it: move close
 - **#187 (native arm64): MEASURED ~3× CPU but ~12% end-to-end — parked, not urgent.** Don't re-benchmark. Notifications gate settled (`forge notify milestone`, no raw curl). #227 vocab: step field is `activity:` (`model:` deprecated alias), `runtime:` legacy-only.
 
 **Shipped (reference — git log is canonical):**
+- #246 (cross-project: operator surfaces project-configurable via `.forge/docs-surfaces.yml`) — this session.
 - Docs-drift complete: #239 (L1 seed-parity tests), #240 (L2 grep prototype + measured don't-enforce verdict), #238 (docs_drift red finding category), #236 (documentation-maintainer agent), #237 (route durable docs + narrow orchestrator allowlist), #241 (operator_behavior_changed contract field + forge show suggest), #242 (advisory shipped warning). Plus review-fixes commit + concepts/quick-start doc updates (documenter-produced, gated).
-- Filed open: #243 (L2 precision), #245 (corruption fix), #246 (cross-project surfaces).
+- Filed open: #243 (L2 precision), #245 (corruption fix).
 
 ## Active
 
@@ -634,15 +636,17 @@ VALIDATION CONSTRAINT: must be validated on the CyberArk-EDR corp Mac — the on
 spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004/005/006/009) — write the learnings entry as part of this. Keep the change as a SEPARATE atomic commit from #187 (native arm64); they share an image-rebuild + validation sitting but are orthogonal. This is the real unblocker for forge-on-forge CODE agents (markdown-only agents like documentation-maintainer are already corruption-safe).
 
 
+## Done (recent)
+
 ### #246 — Docs drift — cross-project: make OPERATOR_SURFACES project-configurable (inference is forge-path-hardcoded)
+**Closed:** 2026-06-02. Commit `cb7ecf9`.
+
 src/v2/contract.ts OPERATOR_SURFACES is hardcoded to forge's own layout (src/cli/, seeds/, src/notify/, ...). On any non-forge project the path inference matches nothing, so forge show's docs-impact auto-suggest and the #242 shipped advisory's 'impacted' detection never fire automatically — they only work if the orchestrator explicitly sets operator_behavior_changed:true in the task contract.
 
 The documenter agent, the docs_drift red category, and the advisory's resolution-detection (docs_updated / deferral) all work generically — only the path INFERENCE is forge-specific.
 
 Fix options: per-project .forge config (e.g. docs-surfaces: [globs]) that overrides/extends the defaults, and/or project-type defaults (a React app's operator surfaces differ from a CLI's). Until this lands, docs-impact inference is forge-on-forge only; document that limitation where operator_behavior_changed is described.
 
-
-## Done (recent)
 
 ### #242 — Docs drift — Run: unresolved docs impact blocks 'shipped'
 **Closed:** 2026-06-02. Commit `53f680c`.
