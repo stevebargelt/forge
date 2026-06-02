@@ -13,11 +13,14 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getRun } from "../store/runs.js";
 import { tasksForRun } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
 import {
   inferOperatorBehaviorChanged,
+  loadOperatorSurfaces,
   operatorSurfacesTouched,
+  OPERATOR_SURFACES,
   type TaskContract,
 } from "./contract.js";
 
@@ -34,15 +37,20 @@ export interface RunDocsImpact {
   surfaces: string[]; // distinct operator surfaces touched across the run
 }
 
-/** Pure assessment over per-task signals — no IO, so it unit-tests cleanly. */
-export function assessDocsImpact(signals: readonly TaskDocsSignals[]): RunDocsImpact {
+/** Pure assessment over per-task signals — no IO, so it unit-tests cleanly.
+ *  `operatorSurfaces` defaults to forge's own set; assessRunDocsImpact passes the
+ *  project-resolved list so cross-project inference fires (#246). */
+export function assessDocsImpact(
+  signals: readonly TaskDocsSignals[],
+  operatorSurfaces: readonly string[] = OPERATOR_SURFACES
+): RunDocsImpact {
   const surfaces = new Set<string>();
   let impacted = false;
   let resolved = false;
   for (const s of signals) {
-    if (s.contractFlag || inferOperatorBehaviorChanged(s.filesModified)) {
+    if (s.contractFlag || inferOperatorBehaviorChanged(s.filesModified, operatorSurfaces)) {
       impacted = true;
-      for (const surf of operatorSurfacesTouched(s.filesModified)) surfaces.add(surf);
+      for (const surf of operatorSurfacesTouched(s.filesModified, operatorSurfaces)) surfaces.add(surf);
     }
     if (s.docsUpdated || s.deferred) resolved = true;
   }
@@ -89,5 +97,7 @@ export function assessRunDocsImpact(runId: string): RunDocsImpact {
       deferred: typeof reason === "string" && reason.length > 0,
     };
   });
-  return assessDocsImpact(signals);
+  // #246: resolve the run's project surfaces so inference works off-forge.
+  const surfaces = loadOperatorSurfaces(getRun(runId)?.projectDir);
+  return assessDocsImpact(signals, surfaces);
 }

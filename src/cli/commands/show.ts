@@ -12,7 +12,7 @@ import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 import { reconcileRun } from "../../v2/reconcile.js";
-import { docsImpactSuggestion, type TaskContract } from "../../v2/contract.js";
+import { docsImpactSuggestion, loadOperatorSurfaces, type TaskContract } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 
 export type ShowResult =
@@ -447,7 +447,11 @@ export function registerShow(program: Command): void {
         }
         // Docs-drift Walk (#241): if the completed task touched operator surfaces,
         // suggest the documentation-maintainer (advisory only — not a gate yet).
-        const docsSuggest = docsImpactSuggestion(getResultFilesModified(tDir));
+        // #246: surfaces are project-configurable via <project>/.forge/docs-surfaces.yml.
+        const docsSuggest = docsImpactSuggestion(
+          getResultFilesModified(tDir),
+          loadOperatorSurfaces(getRun(task.runId)?.projectDir)
+        );
         if (docsSuggest) console.log(`  docs impact: ${docsSuggest}`);
         console.log(`  container: forge-${task.id}`);
         console.log(`  elapsed:   ${elapsed}`);

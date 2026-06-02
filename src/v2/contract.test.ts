@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -9,6 +9,8 @@ import {
   TaskContractSchema,
   inferOperatorBehaviorChanged,
   docsImpactSuggestion,
+  loadOperatorSurfaces,
+  OPERATOR_SURFACES,
 } from "./contract.js";
 
 let dir: string;
@@ -140,4 +142,48 @@ test("docsImpactSuggestion: names the hit surfaces and the documenter, or null",
   assert.match(s!, /seeds\/runtimes\//);
   assert.match(s!, /documentation-maintainer/);
   assert.equal(docsImpactSuggestion(["docs/concepts.md"]), null);
+});
+
+test("inferOperatorBehaviorChanged: honors an explicit project surface list", () => {
+  const projectSurfaces = ["src/routes/", "src/components/"];
+  // A non-forge project's surfaces — forge's own src/cli/ is NOT one of them.
+  assert.equal(inferOperatorBehaviorChanged(["src/routes/api.ts"], projectSurfaces), true);
+  assert.equal(inferOperatorBehaviorChanged(["src/cli/commands/usage.ts"], projectSurfaces), false);
+});
+
+// ------------------------------------------------------------------
+// #246: project-configurable operator surfaces (docs-surfaces.yml)
+// ------------------------------------------------------------------
+
+function writeDocsSurfaces(projectDir: string, body: string): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "docs-surfaces.yml"), body);
+}
+
+test("loadOperatorSurfaces: no projectDir → forge defaults", () => {
+  assert.deepEqual(loadOperatorSurfaces(), OPERATOR_SURFACES);
+});
+
+test("loadOperatorSurfaces: absent override file → forge defaults", () => {
+  assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
+});
+
+test("loadOperatorSurfaces: present file FULLY replaces defaults (not a merge)", () => {
+  writeDocsSurfaces(dir, "surfaces:\n  - src/routes/\n  - public/\n");
+  const surfaces = loadOperatorSurfaces(dir);
+  assert.deepEqual(surfaces, ["src/routes/", "public/"]);
+  // Replacement, not extension: forge's own surfaces must be gone.
+  assert.ok(!surfaces.includes("src/cli/"));
+  // And inference uses them end-to-end.
+  assert.equal(inferOperatorBehaviorChanged(["src/routes/x.ts"], surfaces), true);
+  assert.equal(inferOperatorBehaviorChanged(["src/cli/commands/x.ts"], surfaces), false);
+});
+
+test("loadOperatorSurfaces: malformed file → fail-soft to defaults (advisory must not crash)", () => {
+  writeDocsSurfaces(dir, "surfaces: not-a-list\n");
+  assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
+  writeDocsSurfaces(dir, "wrong_key: [a]\n"); // .strict() rejects unknown key
+  assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
+  writeDocsSurfaces(dir, ":\n  : not yaml :\n");
+  assert.deepEqual(loadOperatorSurfaces(dir), OPERATOR_SURFACES);
 });
