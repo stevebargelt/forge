@@ -130,7 +130,7 @@ Run run-add-login-7c2a91: 1 task(s) awaiting gate.
 forge show task-architect-f68eb8
 ```
 
-Shows the architecture-advisor's risks and constraints. If looks good:
+Shows the diagnostic view for the architect task: status, event timeline, red verdicts (if any), artifacts, and suggested next command. To read the architect's output (decisions, risks, open questions), open the `result.json` listed in the artifacts section. If looks good:
 
 ```bash
 forge gate task-architect-f68eb8 advance
