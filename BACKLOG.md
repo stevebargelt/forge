@@ -5,31 +5,33 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-01.** Huge session: AWN-7 Crawl finished + Walk shipped (Codex as a real second provider), forge-upgrade hardening, orchestrator-milestone notifications, a measured #187 verdict, and a documentation-drift design that got filed as #236–242.
+**Last session ended 2026-06-02.**
 
-**Where we left off:** Closed a long design discussion on documentation drift. Settled model: docs are an artifact — authored by a routed `documentation-maintainer` agent; the orchestrator routes-and-gates, never casually edits durable/operator docs (that's where drift kept happening — 5× this session, all caught by the user). Filed the whole Crawl→Walk→Run plan as #236–242. Nothing built yet — it's a captured design.
+**Where we left off:** Docs-drift Crawl→Walk→Run (#236–242) fully shipped, hardened (3 review fixes), AND validated end-to-end forge-on-forge: the `documentation-maintainer` ran twice corruption-safe (typecheck clean both times), the ship-time advisory was tested PRE→POST resolution through the real `forge notify milestone --kind shipped` CLI on run-196, and the documenter caught + fixed real drift in the wild (quick-start.md step 7 still called `forge show` the architect's risks view). Session ended on `/handoff`. 15 commits unpushed.
 
 **Picked up next (priority):**
-1. **Docs-drift Crawl (#236–242), freshest thread.** Cheapest/safest first: **#239** (L1 parity tests — seed examples/configs parse + match current schema; pure upside, zero design risk) and **#240** (L2 changed-primitive grep — PROTOTYPE + MEASURE noise, do NOT enforce yet; high-signal primitives only per the ticket). Then **#236 + #237** as a pair (documenter agent + narrow the orchestrator allowlist — the agent is only useful once the orchestrator stops authoring).
-2. **node_modules corruption fix (FORGE-DEC-011) — UNFILED, needs a ticket.** Root cause is grpcfuse xattr + CyberArk EDR (environmental, NOT arch). Fix = container-local `node_modules` volume in `spawn.ts` (standard Docker shadow-volume pattern); supersedes FORGE-DEC-011's "no code fix yet" status. Bundle the *sitting* with #187 (shared image rebuild + validation) but keep *separate atomic commits* — they're orthogonal. **Must validate on the CyberArk corp Mac** (only place the silent SIGKILL triggers; a clean Mac won't prove it). This is the real unblocker for forge-on-forge *code* agents.
-3. **AWN-7 #225 (Run — bounded orchestrator choice)** is the last AWN-7 stage (deferred all session). **#234** (notify Walk: per-run quiet/normal/verbose) waits until real milestone traffic shows what's noisy.
+1. **#243 — L2 precision (added-vs-removed discrimination).** The precondition to upgrade #242's ADVISORY warning into a real verdict gate. Precision path is in `learnings/decisions/2026-06-01_docs-drift-l2-noise-measurement.md`: only a REMOVED/RENAMED primitive is a drift candidate; gate `forge <verb>` on a known-command set; namespace flags to their command. Re-measure after; only then consider enforcing.
+2. **#246 — cross-project OPERATOR_SURFACES.** `src/v2/contract.ts` hardcodes forge's own paths, so docs-impact inference (forge show suggest + shipped advisory) does NOT fire on non-forge projects — only the explicit contract flag does. Make it project-configurable (`.forge` config and/or project-type defaults). Until then, docs-impact inference is forge-on-forge only.
+3. **#245 — node_modules corruption fix (container-local volume in spawn.ts).** Now FILED. UNVALIDATABLE on this clean Mac — needs the CyberArk corp Mac (only place the silent SIGKILL fires). Real unblocker for forge-on-forge CODE agents (markdown-only agents are already proven safe). Keep separate atomic commits from #187.
+4. **#225 — AWN-7 Run (bounded orchestrator choice).** Last AWN-7 stage, still deferred. #234 (notify per-run policy) still waits on real milestone traffic.
 
 **External state to remember:**
-- Pixtron (`~/code/pixtron`): staged regression policies at `.forge/model-policy.{claude-only,mixed}.yml` (toggle via `cp`→`model-policy.yml`); its CLAUDE.md orchestrator start-marker was repaired this session. The three regression runs (legacy #25, Claude-only #26, mixed #24) all passed.
-- This Mac's agent image was rebuilt with the Codex CLI (`@openai/codex@0.135.0`) + Go 1.26.3; `codex-subscription.yml` runtime is installed in `~/.forge/runtimes/`. Codex auth = the existing `~/.codex/auth.json` (ChatGPT subscription); no separate login needed.
-- #187 / corruption-fix validation must run on the CyberArk-EDR corp machine, not a clean Mac.
+- **15 commits unpushed** to origin/main (BACKLOG.md also dirty from this handoff). User runs direct-to-main, no CI/PR.
+- **run-196-show-detail-view-8fab25** now carries two `E2E test` shipped milestones (dedupe keys `e2e-advisory-pre`/`-post`) plus a legitimate `documentation-maintainer` task that fixed quick-start.md — test artifacts on a real run, harmless audit noise.
+- **Docker Desktop daemon wedged this session** (500 on `/_ping`; first documenter invoke died exit 125 / container_crash). Fixed with `docker desktop restart`. If an invoke fails with container_crash 125, check daemon health first — it's infra, not the agent.
+- Pixtron (`~/code/pixtron`): staged regression policies at `.forge/model-policy.{claude-only,mixed}.yml` (toggle via `cp`→`model-policy.yml`).
+- This Mac's agent image has Codex CLI (`@openai/codex@0.135.0`); `codex-subscription.yml` in `~/.forge/runtimes/`; Codex auth = existing `~/.codex/auth.json`.
 
 **Decisions worth not relitigating:**
-- **#187 (native arm64): MEASURED — ~3× faster CPU work but only ~12% end-to-end** (a real task is ~82% cloud model time). Parked: real but modest, NOT urgent, NOT the stall fix. Don't re-benchmark.
-- **The #25 idle-timeout was a hung `npm run typecheck` tool call (n=1), cause UNKNOWN — NOT attributed to emulation** (both runs emulated; the clean run did the same command in 47s). Don't claim emulation caused it without evidence.
-- **Notifications gate is SETTLED:** orchestrator declares milestones (`forge notify milestone`), forge owns delivery/dedupe/policy/audit. Raw `curl $NTFY_URL` is RETIRED — use the command (contract in seeds/orchestrator-template.md).
-- **Docs-drift = present-but-wrong, not absence.** Author via routed documenter; detection layered (L1 deterministic / L2 high-signal grep measure-first / L3 semantic review); build on AWN-4/AWN-5 machinery, not a new platform; gate on a drift VERDICT not "docs task ran". Allowlist boundary: BACKLOG + session notes + small handoffs stay orchestrator-direct; docs/learnings/seeds-prose/how-tos/examples route to the documenter.
-- **Corruption (FORGE-DEC-011) is grpcfuse+EDR, not arch;** #187 does NOT fix it (orthogonal). A markdown-only docs agent is corruption-safe and could run on forge itself.
-- **#227:** workflow step capability field is `activity:` (legacy `model:` accepted as deprecated alias); `runtime:` is legacy-only (ignored in policy mode).
+- **Markdown-only agents ARE corruption-safe forge-on-forge — VALIDATED.** The documenter ran twice on the forge repo, typecheck stayed clean. The "no agents forge-on-forge" rule is specifically about native-module-building agents (engineer via forge-test), NOT markdown-only ones. (#245 is the root-cause code fix.)
+- **#242 ship advisory is ADVISORY-ONLY (warn, never block)** until #243 L2 precision + L3 ship-time wiring make a hard verdict gate safe. Do NOT build a hard block on the coarse signal — that's the "docs task ran" rubber-stamp #242 explicitly warns against.
+- **OPERATOR_SURFACES excludes docs/ and learnings/** from `operator_behavior_changed` inference on purpose — a docs-only change is the remediation, not a behavior change; including it would circularly flag the documenter's own output and trip the advisory.
+- **#241 ships only the coarse `operator_behavior_changed` bool**, NOT the 6-way docs_impact enum — let the enum emerge from real usage (premature precision).
+- **#187 (native arm64): MEASURED ~3× CPU but ~12% end-to-end — parked, not urgent.** Don't re-benchmark. Notifications gate settled (`forge notify milestone`, no raw curl). #227 vocab: step field is `activity:` (`model:` deprecated alias), `runtime:` legacy-only.
 
 **Shipped (reference — git log is canonical):**
-- AWN-7 Crawl finished + `forge new --profile` (#220); Walk-prep provider-aware probe (#226); **AWN-7 Walk — Codex provider**: codex-subscription runtime, `codex-auth` mount, Dockerfile codex CLI, per-provider usage parser, Codex-only + mixed-provider smokes, failure-kind verified (#224); workflow vocab `model:`→`activity:` (#227); `forge upgrade` fully-provisions + block-repair (#230/#231); `forge usage --run/--task` (#233); orchestrator-milestones command + contract (#202/#203 Crawl+Run, #235); dashboard per-task run-time column.
-- Filed open: #228 (model_error classify), #229 (upgrade image-staleness check), #232 (retry-orphan), #234 (notify Walk), #236–242 (docs-drift Crawl/Walk/Run). Plus UNFILED: the FORGE-DEC-011 corruption fix.
+- Docs-drift complete: #239 (L1 seed-parity tests), #240 (L2 grep prototype + measured don't-enforce verdict), #238 (docs_drift red finding category), #236 (documentation-maintainer agent), #237 (route durable docs + narrow orchestrator allowlist), #241 (operator_behavior_changed contract field + forge show suggest), #242 (advisory shipped warning). Plus review-fixes commit + concepts/quick-start doc updates (documenter-produced, gated).
+- Filed open: #243 (L2 precision), #245 (corruption fix), #246 (cross-project surfaces).
 
 ## Active
 
@@ -630,6 +632,14 @@ Root cause is grpcfuse xattr + CyberArk EDR (environmental, NOT arch — #187 do
 VALIDATION CONSTRAINT: must be validated on the CyberArk-EDR corp Mac — the only place the silent SIGKILL triggers. A clean Mac won't prove it. Do NOT mark complete on clean-Mac testing alone.
 
 spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004/005/006/009) — write the learnings entry as part of this. Keep the change as a SEPARATE atomic commit from #187 (native arm64); they share an image-rebuild + validation sitting but are orthogonal. This is the real unblocker for forge-on-forge CODE agents (markdown-only agents like documentation-maintainer are already corruption-safe).
+
+
+### #246 — Docs drift — cross-project: make OPERATOR_SURFACES project-configurable (inference is forge-path-hardcoded)
+src/v2/contract.ts OPERATOR_SURFACES is hardcoded to forge's own layout (src/cli/, seeds/, src/notify/, ...). On any non-forge project the path inference matches nothing, so forge show's docs-impact auto-suggest and the #242 shipped advisory's 'impacted' detection never fire automatically — they only work if the orchestrator explicitly sets operator_behavior_changed:true in the task contract.
+
+The documenter agent, the docs_drift red category, and the advisory's resolution-detection (docs_updated / deferral) all work generically — only the path INFERENCE is forge-specific.
+
+Fix options: per-project .forge config (e.g. docs-surfaces: [globs]) that overrides/extends the defaults, and/or project-type defaults (a React app's operator surfaces differ from a CLI's). Until this lands, docs-impact inference is forge-on-forge only; document that limitation where operator_behavior_changed is described.
 
 
 ## Done (recent)
