@@ -5,25 +5,31 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-05-30.** AWN (Agentic Workflow Next-steps) milestone landed + AWN-7 provider-resolution ADR accepted.
+**Last session ended 2026-06-01.** Huge session: AWN-7 Crawl finished + Walk shipped (Codex as a real second provider), forge-upgrade hardening, orchestrator-milestone notifications, a measured #187 verdict, and a documentation-drift design that got filed as #236–242.
 
-**Where we left off:** Reconciled two independent provider-abstraction design docs into ONE accepted ADR — `learnings/decisions/2026-05-30_provider-resolution.md` (graduates docs/provider-abstraction-design.md + docs/provider-agnostic-models.md, both now banner-marked superseded). The last several turns were review-finding fixes ON the ADR itself: profile-owns-provider/auth/map-not-one-model, two-pass resolution (capability intent vs profile selection), and the `auth: auto | bedrock | api | subscription` enum. ADR is fully locked — no open clarifications.
+**Where we left off:** Closed a long design discussion on documentation drift. Settled model: docs are an artifact — authored by a routed `documentation-maintainer` agent; the orchestrator routes-and-gates, never casually edits durable/operator docs (that's where drift kept happening — 5× this session, all caught by the user). Filed the whole Crawl→Walk→Run plan as #236–242. Nothing built yet — it's a captured design.
 
 **Picked up next (priority):**
-1. **Start AWN-7 Crawl (#220) — design is locked, this is now implementation.** Build the `model_profiles` schema + Zod validation in the loader, grow `resolveModelForTask` (src/v2/loader.ts) from alias→model into the two-pass resolver (capability pass: workflow `model:`/agent default; profile pass: CLI `--profile`→project→user→forge default→fallback; then `model = profile.map[alias]`). Ship `forge model resolve` + `forge providers doctor` as the observable proof. Claude-only across bedrock/api/subscription pinnable profiles — NO new provider, NO usage-parser yet (that's Walk). Fail-loud-on-unavailable default.
-2. **OPEN DECISION — #202/#203 orchestrator-done notifications.** Still the main undecided product thread: the GATE (turn-duration vs commit-landed vs orchestrator-decides). Channel = ntfy (live); Twilio NOT configured. INTERIM: orchestrator ntfys on blocker/decision/batch-landed via curl $NTFY_URL (memory feedback_ntfy_when_needed). Needs the user's call before building.
-3. **#223** AWN-4 phase-2 contract enforcement (phase 1 schema+surfacing shipped as #217). **#222** heartbeat-based session reaper. **#200** forge show still dumps raw stream-json blobs (cosmetic; bounded-read landed, text-extraction did not).
+1. **Docs-drift Crawl (#236–242), freshest thread.** Cheapest/safest first: **#239** (L1 parity tests — seed examples/configs parse + match current schema; pure upside, zero design risk) and **#240** (L2 changed-primitive grep — PROTOTYPE + MEASURE noise, do NOT enforce yet; high-signal primitives only per the ticket). Then **#236 + #237** as a pair (documenter agent + narrow the orchestrator allowlist — the agent is only useful once the orchestrator stops authoring).
+2. **node_modules corruption fix (FORGE-DEC-011) — UNFILED, needs a ticket.** Root cause is grpcfuse xattr + CyberArk EDR (environmental, NOT arch). Fix = container-local `node_modules` volume in `spawn.ts` (standard Docker shadow-volume pattern); supersedes FORGE-DEC-011's "no code fix yet" status. Bundle the *sitting* with #187 (shared image rebuild + validation) but keep *separate atomic commits* — they're orthogonal. **Must validate on the CyberArk corp Mac** (only place the silent SIGKILL triggers; a clean Mac won't prove it). This is the real unblocker for forge-on-forge *code* agents.
+3. **AWN-7 #225 (Run — bounded orchestrator choice)** is the last AWN-7 stage (deferred all session). **#234** (notify Walk: per-run quiet/normal/verbose) waits until real milestone traffic shows what's noisy.
 
-**Decisions worth not relitigating (this session):**
-- **Provider-resolution ADR is accepted** — capability-alias (workflow intent) and profile (provider+auth+capability→model map+per-model cost tier) are ORTHOGONAL; a profile does NOT pin one concrete model; resolution is TWO passes not one precedence list; `auth: auto` delegates to env detection, a pinned mode fails loud rather than silently falling back; cost tier is a coarse per-model label; runtime YAML stays the execution mechanism (NO full ModelDriver interface — only a per-provider usage-parser hook, deferred to Walk); full broker REJECTED as first cut; staged Crawl (resolution+auth pinning) / Walk (Codex+usage parser) / Run (bounded orchestrator choice).
-- #106 is superseded by AWN-7/#220 (don't reopen the old provider ticket).
-- AWN-2 = file-based per-run O_EXCL lock serializing next/gate/retry; markTaskComplete is a CAS (cancelled task can't be overwritten by a late successful container). AWN-3 retry creates a PRIMARY task (parentId undefined), not a child. AWN-5 grading runs at the GATE decision, not just stored. AWN-6 project-command auth: project owns login, forge owns scoping/mounting; reds never get auth. writeSecretFile = random temp + O_EXCL + atomic rename (0600, symlink-safe). AWN-8 bundle/export sanitization = ALLOWLIST not denylist.
-- forge status reconciliation only touches tasks with a `container.started` event (host-side session tasks are NOT containerized — reconciling them orphaned 5 real running sessions earlier; fixed) and is scoped to workspace-filtered runs.
+**External state to remember:**
+- Pixtron (`~/code/pixtron`): staged regression policies at `.forge/model-policy.{claude-only,mixed}.yml` (toggle via `cp`→`model-policy.yml`); its CLAUDE.md orchestrator start-marker was repaired this session. The three regression runs (legacy #25, Claude-only #26, mixed #24) all passed.
+- This Mac's agent image was rebuilt with the Codex CLI (`@openai/codex@0.135.0`) + Go 1.26.3; `codex-subscription.yml` runtime is installed in `~/.forge/runtimes/`. Codex auth = the existing `~/.codex/auth.json` (ChatGPT subscription); no separate login needed.
+- #187 / corruption-fix validation must run on the CyberArk-EDR corp machine, not a clean Mac.
 
-**Shipped (for reference — git log is canonical):**
-- AWN-1 #214 lifecycle reconciliation; AWN-2 #215 per-run lock + task-level CAS; AWN-3 #216 retry-by-failure_kind + lineage; AWN-4 #217 task contract (phase 1); AWN-5 #218 review-quality protocol; AWN-6 #219 project-command auth; AWN-8 #221 hygiene hardening (secret exclusion + staged-auth cleanup).
-- AWN-7 #220: provider-resolution ADR (design only — implementation is Crawl, see above).
-- ~6 review-finding fix commits folded in (auth-file hygiene, grading-at-gate, exclusive secret temp, zero-findings-fail downgrade, cancel race).
+**Decisions worth not relitigating:**
+- **#187 (native arm64): MEASURED — ~3× faster CPU work but only ~12% end-to-end** (a real task is ~82% cloud model time). Parked: real but modest, NOT urgent, NOT the stall fix. Don't re-benchmark.
+- **The #25 idle-timeout was a hung `npm run typecheck` tool call (n=1), cause UNKNOWN — NOT attributed to emulation** (both runs emulated; the clean run did the same command in 47s). Don't claim emulation caused it without evidence.
+- **Notifications gate is SETTLED:** orchestrator declares milestones (`forge notify milestone`), forge owns delivery/dedupe/policy/audit. Raw `curl $NTFY_URL` is RETIRED — use the command (contract in seeds/orchestrator-template.md).
+- **Docs-drift = present-but-wrong, not absence.** Author via routed documenter; detection layered (L1 deterministic / L2 high-signal grep measure-first / L3 semantic review); build on AWN-4/AWN-5 machinery, not a new platform; gate on a drift VERDICT not "docs task ran". Allowlist boundary: BACKLOG + session notes + small handoffs stay orchestrator-direct; docs/learnings/seeds-prose/how-tos/examples route to the documenter.
+- **Corruption (FORGE-DEC-011) is grpcfuse+EDR, not arch;** #187 does NOT fix it (orthogonal). A markdown-only docs agent is corruption-safe and could run on forge itself.
+- **#227:** workflow step capability field is `activity:` (legacy `model:` accepted as deprecated alias); `runtime:` is legacy-only (ignored in policy mode).
+
+**Shipped (reference — git log is canonical):**
+- AWN-7 Crawl finished + `forge new --profile` (#220); Walk-prep provider-aware probe (#226); **AWN-7 Walk — Codex provider**: codex-subscription runtime, `codex-auth` mount, Dockerfile codex CLI, per-provider usage parser, Codex-only + mixed-provider smokes, failure-kind verified (#224); workflow vocab `model:`→`activity:` (#227); `forge upgrade` fully-provisions + block-repair (#230/#231); `forge usage --run/--task` (#233); orchestrator-milestones command + contract (#202/#203 Crawl+Run, #235); dashboard per-task run-time column.
+- Filed open: #228 (model_error classify), #229 (upgrade image-staleness check), #232 (retry-orphan), #234 (notify Walk), #236–242 (docs-drift Crawl/Walk/Run). Plus UNFILED: the FORGE-DEC-011 corruption fix.
 
 ## Active
 
@@ -559,29 +565,7 @@ Follow-up to AWN-4 phase 1 (#217, which landed the TaskContract schema + manifes
 Builds directly on #217's TaskContract type + contract.ts.
 
 
-### #224 — AWN-7 Walk: Codex/OpenAI as a real second provider (usage-parser hook)
-
 ### #225 — AWN-7 Run: bounded orchestrator choice + adaptive routing (allowed_profiles ceiling, cost-tier guardrail)
-
-### #227 — Workflow-step vocabulary is Claude/legacy-shaped: deprecate step runtime:, rename model: -> activity:/capability:
-Surfaced by the AWN-7 Walk mixed-provider smoke: a workflow step that routes to Codex via policy still literally reads `runtime: claude`. The smoke proves policy wins, but the step YAML vocabulary is provider/legacy-shaped and confusing.
-
-Two fields in StepSchema (src/v2/schema.ts) are the problem:
-
-1. `runtime: NameSchema.default("claude")` — used ONLY in legacy mode (resolveModelForTask). In policy mode the resolver derives the runtime from the (provider, effective_auth) binding and IGNORES this field entirely. So `runtime: claude` on a step that runs on Codex is dead, misleading config.
-
-2. `model: z.string().optional()` — despite the name it holds a CAPABILITY ALIAS (e.g. "review", "reasoning"), threaded as `stepAlias` (pass-1 capability intent), NOT a concrete model. The ADR's pass-1 vocabulary is "capability"/"activity" (cf. `defaults.activity`), so this should be `activity:` (or `capability:`).
-
-Proposed direction (align to vocabulary forge already chose):
-- Rename step `model:` -> `activity:` (matches `defaults.activity` and the ADR's capability pass).
-- Deprecate step `runtime:`: meaningless in policy mode. Either drop it once legacy mode retires, or rename to `legacy_runtime:` and document it as the no-policy escape hatch only.
-
-Back-compat is the real work (cross-cutting — every workflow YAML uses these):
-- Loader accepts old names with a deprecation warning and maps old->new; do NOT hard-break existing seed/per-project/~/.forge workflows.
-- Update all seed workflows (seeds/workflows/*) + docs (how-to-new-workflow, concepts, how-to-model-policy) in the same change.
-
-Scope: schema + loader alias layer + seed workflows + docs. Medium, cross-cutting, reversible. No DB schema change. Tie-in: ADR learnings/decisions/2026-05-30_provider-resolution.md (capability vs profile vocabulary).
-
 
 ### #228 — Classify provider error events as model_error + surface the cause (not generic container_crash)
 Observed during AWN-7 Walk W4 (Codex failure-path validation). A Codex run with an invalid model exits 1 with no result.json, so classify() returns container_crash — correct (it IS in the taxonomy, #220 acceptance met), but lossy. The actual cause is right there in the stdout JSONL:
@@ -600,7 +584,206 @@ Proposal:
 Ties to #200 (forge show should extract text from stream-json blobs rather than dump them) — same "surface the meaning, not the raw stream" theme. Small, isolated, improves failure diagnostics for all providers.
 
 
+### #229 — forge upgrade doesn't rebuild the agent image or check provider auth — Codex upgrades silently incomplete
+Surfaced while documenting the AWN-7 Walk upgrade path. `forge upgrade` does: git pull, npm install, FORCE=1 install-seeds, re-init CLAUDE.md. It does NOT rebuild the agent-dev-worker image or check provider auth.
+
+The bite: install-seeds now ships seeds/runtimes/codex-subscription.yml, so after `forge upgrade` an openai/subscription profile RESOLVES fine — but the agent image still lacks the `codex` CLI until `docker/build.sh` runs. The container then fails at exec (codex: not found) with no hint that the image is stale. Same class of gap the first pipeline smoke hit (runtime seed present, but not wired).
+
+Proposals (any subset):
+- `forge upgrade` detects image staleness (e.g. compare a Dockerfile hash / label against the installed image) and warns, or runs docker/build.sh behind a --rebuild-image flag.
+- `forge providers doctor` (or a new `forge doctor`) checks that each runtime referenced by RUNTIME_BINDING has its CLI present in the image, not just that host auth exists.
+- Document the image-rebuild + `codex login` steps in how-to-upgrade.md (currently silent on both).
+
+Low-risk, operability-only. Tie-in: AWN-7 Walk (#224, codex runtime), how-to-upgrade.md.
+
+
+### #232 — forge invoke retry orphans the task when the failed attempt already auto-closed the run
+Hit during the AWN-7 Pixtron regression Test 1. Sequence:
+1. `forge invoke engineer` — attempt 1 idle_timeout'd (task failed).
+2. A `forge invoke` run auto-closes when its lone top-level task terminates (closeRunIfIdle in invoke.ts fires on complete OR failed). So the failed attempt flipped the run to `complete`.
+3. A subsequent `forge retry` created a PENDING task against that now-complete run, and `forge next` refused to dispatch it (run is terminal) → the retry task is orphaned (pending forever, never runs).
+4. Workaround that worked: a fresh `forge invoke` (new run) succeeded in 50s — so the underlying hang was transient (typecheck), not the retry path.
+
+Bug: retry must not strand a task. Either (a) `forge retry` should reactivate the run (run.status -> active) when it attaches a retry task to a terminal run — mirroring invoke.ts #201's reactivation on attach; or (b) `forge next` should reactivate a complete run that has a fresh pending task; or (c) retrying the sole task of an auto-closed invoke run is disallowed with a clear message pointing at re-invoke.
+
+Likely interaction between the invoke auto-close (closeRunIfIdle) and AWN-3 retry (retry creates a primary task). Relates to AWN-2/AWN-3 run-state + #201 reactivation. Repro is reliable: idle_timeout (or any failure) a single-task invoke run, then `forge retry` it.
+
+
+### #234 — Orchestrator milestones — Walk: per-run notification policy (quiet|normal|verbose) + --notify-policy
+Builds on the Crawl slice (forge notify milestone + orchestrator.milestone events + default per-kind policy + dedupe, shipped e168fcc, #202/#203).
+
+Add a per-run notification policy stored in run metadata:
+- quiet: only interrupt-worthy kinds (decision_needed, blocked, risk_found).
+- normal (default): the Crawl per-kind policy as-is.
+- verbose: also push the suppressed-by-default kinds (plan_started, batch_complete regardless of elapsed).
+- `forge new <wf> --notify-policy <p>` and `forge invoke <agent> --notify-policy <p>` set it (stored like modelProfile/authProfile in run metadata; CONTROL_PLANE_METADATA_KEYS so it never leaks into prompts — see #227).
+- emitMilestone reads the run's policy and adjusts decideMilestone (the policy table becomes policy-aware: quiet drops normal-importance always-kinds to suppressed; verbose promotes suppressed).
+
+Out of scope: the orchestrator-contract (when to emit) — that's the Run slice.
+
+
+### #236 — Docs drift — Crawl 1: documentation-maintainer agent seed
+The authoring home for operator-facing docs — the docs analog of the engineer. NOT marketing copy: maintains operator docs, ADRs, examples, upgrade notes, seed prose/comments.
+
+- Seed: seeds/agents/documentation-maintainer/CLAUDE.md.
+- Artifact-driven inputs: changed files, relevant tickets, manifest/events (if any), a user-facing behavior summary, likely-affected doc paths.
+- Returns a docs result contract: { docs_updated: [], docs_not_updated_reason: null|string, stale_docs_found: [], operator_behavior_changed: bool }.
+- Markdown-only -> corruption-safe: FORGE-DEC-011 (grpcfuse xattr / native-module) does NOT apply (no node_modules touch), so it can run even forge-on-forge.
+
+META (applies across the Docs Crawl set): the problem is DRIFT (present-but-wrong docs), not absence — hit 5x in one session, all caught by the user, none by the orchestrator. Build on existing machinery (AWN-4 contracts, AWN-5 reds, result schemas), NOT a new docs platform. Gate on a drift VERDICT, never a "docs task ran" checkbox. Fire on operator_behavior_changed, not "file touched". Allow deferred-with-reason. Models the #202/#203 Crawl/Walk/Run staging.
+
+
+### #237 — Docs drift — Crawl 2: narrow orchestrator direct-edit allowlist; route docs-impact tasks
+The orchestrator routes durable/operator-facing doc changes to documentation-maintainer (Crawl 1) and stops casual direct edits — that's exactly where drift keeps happening (5x this session). Docs are an artifact, like code.
+
+Update seeds/orchestrator-template.md (+ re-render forge's own CLAUDE.md via forge upgrade).
+
+STAYS orchestrator-direct: BACKLOG.md (via forge backlog CLI), session notes, small handoff/status notes. (Not "orchestrator writes nothing durable" — it must keep working memory + backlog state.)
+
+ROUTES through the documenter: docs/**, learnings/decisions/**, seeds/** prose/comments/templates, CLI how-tos, runtime/model/auth/notification examples, README-style guidance.
+
+Also: add orchestrator guidance "when behavior changes, route a docs-impact task," and a "Docs impact: none/updated/deferred" line in PR/review output.
+
+
+### #238 — Docs drift — Crawl 3: docs-drift finding category in red/review output
+Add a docs-drift ("stale docs") finding category to red + review output (AWN-5 findings). The check is "do docs match SHIPPED BEHAVIOR," NOT "are docs present" — the latter passes on present-but-wrong docs, which is the actual failure mode.
+
+Artifact-driven: the red/reviewer receives the diff + user-facing behavior summary + affected doc paths and flags docs that still describe the old behavior. Findings feed the result contract's stale_docs_found (Crawl 1). This is the semantic (L3) layer — it catches prose/status staleness ("Scope (Crawl)", "next slice", ADR contradictions) that the mechanical layers (Crawl 4/5) can't.
+
+
+### #239 — Docs drift — Crawl 4: L1 parity tests for config/examples/runtime seeds
+Deterministic tests (no LLM) that seed examples + configs PARSE and MATCH the current schema/vocabulary:
+- seeds/model-policy.example.yml (parses under ModelPolicySchema; uses current vocab e.g. activity: not model:)
+- seeds/workflows/* (parse under WorkflowSchema)
+- seeds/runtimes/* (parse under RuntimeSchema; e.g. codex-subscription.yml)
+
+Cheapest drift layer (L1). Would have caught this session's model:->activity: example drift mechanically. Runs in the normal test suite. Catches the config/example class only; prose drift is Crawl 3/5.
+
+
+### #240 — Docs drift — Crawl 5: prototype L2 changed-primitive grep; MEASURE noise before enforcement
+Prototype a check that, for primitives changed in a diff, greps docs/ seeds/ learnings/ for stale mentions and surfaces them as findings — the highest-leverage drift detector (literally what was done by hand 5x this session). Self-maintains the "likely-affected doc paths" (no static surface->docs map to rot).
+
+HIGH-SIGNAL primitives ONLY (no giant keyword list):
+- command names: `forge notify milestone`, `forge model resolve`, `forge providers doctor`
+- flags: --profile, --auth-profile, --notify-policy
+- schema fields: activity:, runtime:, model-policy.yml, allowed_profiles
+- event names: orchestrator.milestone, model.profile_resolved
+- runtime names: codex-subscription, claude-bedrock
+
+AVOID broad terms (model, test, run, auth, workflow) unless paired with a known namespace / nearby token.
+
+MEASURE the false-positive rate first. Do NOT wire it as an enforcing gate until precision is proven — prototype + report noise, then decide.
+
+
+### #241 — Docs drift — Walk: docs_impact / operator_behavior_changed on task contracts
+Add docs_impact (none|operator|architecture|migration|api|examples) and/or operator_behavior_changed:bool to AWN-4 task contracts. Depends on Crawl 1-3.
+
+- Default-inferred from changed paths (src/cli, seeds, docs, learnings/decisions, runtimes, auth/model/notify code); orchestrator can override explicitly.
+- Auto-suggest documenter (Crawl 1) invocation when those surfaces change.
+- Start COARSE: operator_behavior_changed:bool is the gate input. Let the 6-way enum emerge from real usage rather than over-specifying up front (premature precision).
+
+
+### #242 — Docs drift — Run: unresolved docs impact blocks 'shipped'
+Acceptance gate (final slice). A feature cannot be "shipped"/complete if operator_behavior_changed is true and docs impact is unresolved. Depends on Walk + the detection layers (Crawl 3/4/5).
+
+- Gate on the drift VERDICT (mechanical L1/L2 clean + semantic L3 clean, OR stale-found-and-resolved) — NOT a "docs task ran" checkbox (that's the present-but-wrong rubber-stamp failure).
+- Allow deferred-with-reason (docs_not_updated_reason) so it doesn't block when docs genuinely aren't needed.
+- Fire on operator_behavior_changed, not "a doc-ish file was touched" — over-firing erodes the gate into ceremony.
+
+
 ## Done (recent)
+
+### #235 — Orchestrator milestones — Run: orchestrator-contract to emit milestones only at checkpoint boundaries
+**Closed:** 2026-06-01. Commit `b138af1`.
+
+Final slice of #202/#203 (Crawl shipped e168fcc; Walk = per-run policy). This is a SEED/prompt contract, not enforceable code: teach the forge-orchestrator CLAUDE.md block to emit `forge notify milestone` at natural checkpoints and NEVER on ordinary conversational replies.
+
+Checkpoints (from the design):
+- "finished implementing the slice and tests pass" -> batch_complete / acceptance_green
+- "finished reviewing the agent's changes; findings ready" -> ready_for_review
+- "need your decision before continuing" -> decision_needed
+- "long-running workflow complete" -> batch_complete (forge gates on elapsed)
+- "found a security/correctness issue worth interrupting for" -> risk_found / blocked
+- "shipped" -> shipped
+
+Add to the orchestrator block: emit at checkpoint boundaries only; use a stable --dedupe-key per logical checkpoint; let forge's policy/dedupe handle throttling (don't self-censor — emit the milestone, forge decides delivery). Forge remains the backstop (policy/dedupe/audit) regardless of orchestrator discipline. Update CONTRIBUTING/orchestrator-template seed so all projects get it via forge init/upgrade.
+
+Note: supersedes the interim "curl $NTFY_URL for blocker/decision/batch-landed" guidance (memory feedback_ntfy_when_needed) — the milestone command is the proper mechanism.
+
+
+### #233 — forge usage has no per-run/per-task scoping; silently ignores a positional runId
+**Closed:** 2026-06-01. Commit `0fb68bf`.
+
+Hit during the AWN-7 Pixtron regression Test 2. `forge usage <runId>` returned the host-global aggregate (every role/run on the host) — the positional runId was silently ignored. usage.ts options are only --by / --since / --project / --json / --limit; there is no --run or --task filter and no positional, so an extra arg is dropped.
+
+Two issues:
+1. Silent-ignore is misleading — `forge usage <runId>` looks like it scoped but didn't. At minimum error on an unrecognized positional.
+2. No way to get a single run's or task's token cost from the CLI. The model_calls rows carry task_id (and task->run_id), so the data is there; usageForTask() already reads per-task in code. The `forge usage` doc deliberately punts per-run UX to the dashboard, but a CLI/orchestrator session can't use the dashboard — a --run / --task filter is the cheap programmatic answer.
+
+Proposal: add `--run <id>` and `--task <id>` filters to the usage WHERE clause (LEFT JOIN runs r is already there). Optionally `forge show <task> --usage` to fold the token row into the resolution view. Low-risk, additive.
+
+Relevant to AWN-7 per-policy regression testing (wanting the engineer-vs-red per-provider cost in isolation).
+
+
+### #230 — forge init/upgrade silently skips on unbalanced orchestrator markers (dangling end, missing start)
+**Closed:** 2026-06-01. Commit `2819fe6`.
+
+Hit live on the Pixtron project: its CLAUDE.md had `<!-- forge:orchestrator-end -->` but the matching start marker was gone (stray edit). `forge upgrade` checks only `includes("<!-- forge:orchestrator-start -->")` (upgrade.ts:67) and `forge init` keys the in-place replace on BOTH markers (init.ts:216-219, startIdx>=0 && endIdx>startIdx). With start absent:
+- upgrade reports "no orchestrator block found; skipping" and skips step 4 — silently, forever, even though a (half-fenced) block is clearly present.
+- init would APPEND a second fenced block rather than repair, producing a duplicate + a dangling end marker.
+
+The user saw a block in CLAUDE.md and couldn't reconcile it with the "no block found" message.
+
+Proposal:
+- Detect an unbalanced marker pair (exactly one of start/end present, or end-before-start) and surface it: warn with the line number and the literal fix ("missing <!-- forge:orchestrator-start --> before your orchestrator section"), rather than silently treating it as "no block".
+- Optionally offer `forge init --repair` (or auto-insert the missing marker) when exactly one marker is found and the heading `# forge orchestrator` is present.
+- A lone/duplicate marker should never cause init to append a second block.
+
+Low-risk, operability. Tie-in: how-to-upgrade.md (document the marker contract).
+
+
+### #231 — forge upgrade must fully provision existing projects (commands+hooks unconditional, repair block) — init is new-project-only
+**Closed:** 2026-06-01. Commit `2819fe6`.
+
+Design intent (user, confirmed): `forge upgrade` is THE command for existing projects; `forge init` is for NEW projects only. Today upgrade violates this — its step 4 (project init) is gated on the orchestrator block marker, so a project missing/with-unbalanced markers gets ALL of step 4 skipped, including slash-command + hook installation. That left a freshly-`forge upgrade`d machine with no `/orient` command, and the only workaround was `forge init` — which is wrong (init appends a second fenced block on a malformed file -> duplicate).
+
+Also note: `.claude/commands/` and `.claude/settings.local.json` are per-machine (gitignored), so even a git-synced project with a committed, well-fenced CLAUDE.md needs upgrade to (re)create the command symlinks + hooks on each new machine. Step 4 must do that.
+
+Required behavior for `forge upgrade` on an existing project:
+- ALWAYS install/refresh slash commands (orient.md, handoff.md symlinks) + Claude hooks + .gitignore entries — these are machine-local provisioning, independent of the CLAUDE.md block state. Never gate them on the block marker.
+- Block handling: replace in place when fenced; REPAIR when unbalanced (lone end/start marker — folds in #230); APPEND when a `# forge orchestrator` heading exists but no markers; do nothing only when there's genuinely no block AND no heading. Never silently skip the whole step.
+- `forge init` stays the new-project bootstrap (no CLAUDE.md / first run); it should also stop blindly appending when an unfenced block already exists (dedup with upgrade's repair path).
+
+Acceptance: on a machine where a project's CLAUDE.md is committed+fenced but `.claude/` is fresh, a single `forge upgrade` from the project dir makes `/orient` available. A project with a dangling end-marker is repaired by upgrade, not skipped, and never duplicated.
+
+Supersedes/絶includes #230 (unbalanced-marker detection is one case here).
+
+
+### #224 — AWN-7 Walk: Codex/OpenAI as a real second provider (usage-parser hook)
+**Closed:** 2026-06-01. Commit `b09bc79`.
+
+
+### #227 — Workflow-step vocabulary is Claude/legacy-shaped: deprecate step runtime:, rename model: -> activity:/capability:
+**Closed:** 2026-06-01. Commit `e0c3384`.
+
+Surfaced by the AWN-7 Walk mixed-provider smoke: a workflow step that routes to Codex via policy still literally reads `runtime: claude`. The smoke proves policy wins, but the step YAML vocabulary is provider/legacy-shaped and confusing.
+
+Two fields in StepSchema (src/v2/schema.ts) are the problem:
+
+1. `runtime: NameSchema.default("claude")` — used ONLY in legacy mode (resolveModelForTask). In policy mode the resolver derives the runtime from the (provider, effective_auth) binding and IGNORES this field entirely. So `runtime: claude` on a step that runs on Codex is dead, misleading config.
+
+2. `model: z.string().optional()` — despite the name it holds a CAPABILITY ALIAS (e.g. "review", "reasoning"), threaded as `stepAlias` (pass-1 capability intent), NOT a concrete model. The ADR's pass-1 vocabulary is "capability"/"activity" (cf. `defaults.activity`), so this should be `activity:` (or `capability:`).
+
+Proposed direction (align to vocabulary forge already chose):
+- Rename step `model:` -> `activity:` (matches `defaults.activity` and the ADR's capability pass).
+- Deprecate step `runtime:`: meaningless in policy mode. Either drop it once legacy mode retires, or rename to `legacy_runtime:` and document it as the no-policy escape hatch only.
+
+Back-compat is the real work (cross-cutting — every workflow YAML uses these):
+- Loader accepts old names with a deprecation warning and maps old->new; do NOT hard-break existing seed/per-project/~/.forge workflows.
+- Update all seed workflows (seeds/workflows/*) + docs (how-to-new-workflow, concepts, how-to-model-policy) in the same change.
+
+Scope: schema + loader alias layer + seed workflows + docs. Medium, cross-cutting, reversible. No DB schema change. Tie-in: ADR learnings/decisions/2026-05-30_provider-resolution.md (capability vs profile vocabulary).
+
 
 ### #226 — AWN-7 Walk-prep: provider-aware availability/auth seam (no Codex yet)
 **Closed:** 2026-06-01. Commit `579f895`.
