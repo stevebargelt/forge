@@ -39,7 +39,7 @@ export type Finding = {
   line?: number;
   quoted_text?: string;
   // AWN-5 review-quality fields (all optional for back-compat with older reds):
-  finding_type?: string;          // correctness | security | performance | style | ...
+  finding_type?: string;          // correctness | security | performance | style | maintainability | docs_drift | ...
   confidence?: number;            // 0..1, per-finding (distinct from verdict confidence)
   affected_files?: string[];      // all files implicated (file/line stays the anchor)
   recommended_fix?: string;       // concrete remediation

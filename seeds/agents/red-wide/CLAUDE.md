@@ -62,7 +62,7 @@ Findings that refer to specific code SHOULD include `file`, `line`, and `quoted_
 ## Review-quality fields (AWN-5)
 
 Enrich each finding with these fields (all optional but strongly preferred):
-- `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability`.
+- `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability` | `docs_drift` (see below).
 - `confidence`: 0.0–1.0 — your confidence THIS finding is real. A high-severity finding with low confidence and no evidence/anchor is auto-downgraded by forge.
 - `affected_files`: every file implicated (the `file`/`line` anchor stays the primary citation).
 - `recommended_fix`: the concrete change that resolves it.
@@ -71,3 +71,16 @@ Enrich each finding with these fields (all optional but strongly preferred):
 **Severity calibration.** Set `severity` by exploitability × blast radius × likelihood, not by how alarming it sounds. A theoretical issue in a rarely-hit path is `low`; a trivially-triggered data-loss bug is `high`. Unsupported findings (no evidence, no source anchor, confidence ≤ 0.5) are auto-downgraded one level.
 
 **Invariants verified.** Add a top-level `"invariants_verified": [...]` to your verdict listing the specific invariants/criteria you actually checked (e.g. "cancel remains idempotent", "reds never receive auth state"). State what you verified, not only what you found.
+
+## Docs-drift findings (`finding_type: "docs_drift"`)
+
+When the artifact under review **changes operator-visible behavior** — a renamed flag, a new/removed command, a changed default, a new event, a vocabulary change (`model:` → `activity:`), an altered workflow or config shape — the durable docs that describe that behavior are now suspect. A stale doc is a criterion that is unmet: the doc claims X, the shipped code does Y.
+
+**The check is "do the docs match SHIPPED BEHAVIOR," NOT "do docs exist."** Present-but-wrong is the failure mode; a doc that confidently describes the old behavior is worse than a missing one, because it reads as authoritative. "Docs are present" is not a pass.
+
+How to run it:
+- Establish the NEW behavior from the artifact: the working-tree code at `/project/<path>` (the engineer's `files_modified` tell you where) plus the architect intent / tech-lead plan in `## Spec`. If the task package includes a user-facing behavior summary or affected-doc paths, use them; otherwise infer the affected docs from the changed primitives (grep the changed flag/command/field/event names across `/project/docs`, `README*`, `/project/learnings`, how-tos, seed prose, and example configs).
+- Read the candidate docs at `/project/<path>` and compare. Flag any that still describe the old behavior, contradict the shipped change, or carry stale status prose ("Scope (Crawl)", "next slice", an ADR that now contradicts the code).
+- **Anchor the finding to the STALE DOC, not the code.** Set `file`/`line`/`quoted_text` to the stale doc line (the validator reads `/project/<file>` and checks the quote — it is file-type agnostic, so `.md` and `.yml` anchor exactly like `.ts`). A docs_drift finding citing the code instead of the stale prose will be dropped or miss the point.
+
+These findings feed the `documentation-maintainer`'s `stale_docs_found` — your job is to *catch* the drift, not fix it. This is the semantic layer: it catches prose/status staleness the mechanical parity checks (seed-parity tests, changed-primitive grep) can't see.

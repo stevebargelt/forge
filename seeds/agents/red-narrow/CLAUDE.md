@@ -58,7 +58,7 @@ Findings that refer to specific code SHOULD include `file`, `line`, and `quoted_
 ## Review-quality fields (AWN-5)
 
 Enrich each finding with these fields (all optional but strongly preferred):
-- `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability`.
+- `finding_type`: category — `correctness` | `security` | `performance` | `style` | `maintainability` | `docs_drift`. Use `docs_drift` when an anti-prompt concerns docs that no longer match shipped behavior (present-but-wrong, not absent) — anchor it to the stale doc's `path:line`, not the code; it feeds the `documentation-maintainer`'s `stale_docs_found`.
 - `confidence`: 0.0–1.0 — your confidence THIS finding is real. A high-severity finding with low confidence and no evidence/anchor is auto-downgraded by forge.
 - `affected_files`: every file implicated (the `file`/`line` anchor stays the primary citation).
 - `recommended_fix`: the concrete change that resolves it.
