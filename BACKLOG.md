@@ -622,14 +622,6 @@ Add a per-run notification policy stored in run metadata:
 Out of scope: the orchestrator-contract (when to emit) — that's the Run slice.
 
 
-### #241 — Docs drift — Walk: docs_impact / operator_behavior_changed on task contracts
-Add docs_impact (none|operator|architecture|migration|api|examples) and/or operator_behavior_changed:bool to AWN-4 task contracts. Depends on Crawl 1-3.
-
-- Default-inferred from changed paths (src/cli, seeds, docs, learnings/decisions, runtimes, auth/model/notify code); orchestrator can override explicitly.
-- Auto-suggest documenter (Crawl 1) invocation when those surfaces change.
-- Start COARSE: operator_behavior_changed:bool is the gate input. Let the 6-way enum emerge from real usage rather than over-specifying up front (premature precision).
-
-
 ### #242 — Docs drift — Run: unresolved docs impact blocks 'shipped'
 Acceptance gate (final slice). A feature cannot be "shipped"/complete if operator_behavior_changed is true and docs impact is unresolved. Depends on Walk + the detection layers (Crawl 3/4/5).
 
@@ -649,6 +641,16 @@ spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004
 
 
 ## Done (recent)
+
+### #241 — Docs drift — Walk: docs_impact / operator_behavior_changed on task contracts
+**Closed:** 2026-06-02. Commit `e98b2d5`.
+
+Add docs_impact (none|operator|architecture|migration|api|examples) and/or operator_behavior_changed:bool to AWN-4 task contracts. Depends on Crawl 1-3.
+
+- Default-inferred from changed paths (src/cli, seeds, docs, learnings/decisions, runtimes, auth/model/notify code); orchestrator can override explicitly.
+- Auto-suggest documenter (Crawl 1) invocation when those surfaces change.
+- Start COARSE: operator_behavior_changed:bool is the gate input. Let the 6-way enum emerge from real usage rather than over-specifying up front (premature precision).
+
 
 ### #238 — Docs drift — Crawl 3: docs-drift finding category in red/review output
 **Closed:** 2026-06-02. Commit `11fbab2`.
