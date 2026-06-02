@@ -12,7 +12,7 @@ import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 import { reconcileRun } from "../../v2/reconcile.js";
-import type { TaskContract } from "../../v2/contract.js";
+import { docsImpactSuggestion, type TaskContract } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 
 export type ShowResult =
@@ -204,6 +204,20 @@ export function getManifestContract(taskDirPath: string): TaskContract | undefin
     return manifest.contract;
   } catch {
     return undefined;
+  }
+}
+
+// Docs-drift Walk (#241): the files an implementer reported touching, for
+// operator-surface inference. Tolerant of a missing/malformed result.
+export function getResultFilesModified(taskDirPath: string): string[] {
+  try {
+    const raw = readFileSync(join(taskDirPath, "result.json"), "utf8");
+    const result = JSON.parse(raw) as { files_modified?: unknown };
+    return Array.isArray(result.files_modified)
+      ? result.files_modified.filter((f): f is string => typeof f === "string")
+      : [];
+  } catch {
+    return [];
   }
 }
 
@@ -429,7 +443,12 @@ export function registerShow(program: Command): void {
           if (contract.allowed_paths?.length) console.log(`    allowed:   ${contract.allowed_paths.join(", ")}`);
           if (contract.validation?.commands?.length) console.log(`    validate:  ${contract.validation.commands.join(" ; ")}`);
           if (contract.review?.invariants?.length) console.log(`    invariants: ${contract.review.invariants.join(" | ")}`);
+          if (contract.operator_behavior_changed) console.log(`    operator behavior: changes — docs impact expected`);
         }
+        // Docs-drift Walk (#241): if the completed task touched operator surfaces,
+        // suggest the documentation-maintainer (advisory only — not a gate yet).
+        const docsSuggest = docsImpactSuggestion(getResultFilesModified(tDir));
+        if (docsSuggest) console.log(`  docs impact: ${docsSuggest}`);
         console.log(`  container: forge-${task.id}`);
         console.log(`  elapsed:   ${elapsed}`);
         console.log(`  last output: ${lastOutputAgo}`);

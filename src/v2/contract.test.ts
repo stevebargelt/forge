@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseContractFile, renderContract, TaskContractSchema } from "./contract.js";
+import {
+  parseContractFile,
+  renderContract,
+  TaskContractSchema,
+  inferOperatorBehaviorChanged,
+  docsImpactSuggestion,
+} from "./contract.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "forge-contract-")); });
@@ -82,4 +88,40 @@ test("renderContract: includes objective, allowed paths, validation, invariants,
   assert.match(md, /npm test/);
   assert.match(md, /cancel remains idempotent/);
   assert.match(md, /deviate/i, "tells the agent to report deviations");
+});
+
+// ------------------------------------------------------------------
+// Docs-drift Walk (#241): operator_behavior_changed + inference
+// ------------------------------------------------------------------
+
+test("TaskContractSchema accepts operator_behavior_changed and rejects a non-bool", () => {
+  assert.ok(TaskContractSchema.safeParse({ objective: "x", operator_behavior_changed: true }).success);
+  assert.ok(!TaskContractSchema.safeParse({ objective: "x", operator_behavior_changed: "yes" }).success);
+});
+
+test("renderContract: surfaces the operator-behavior note only when set", () => {
+  const withFlag = renderContract(TaskContractSchema.parse({ objective: "x", operator_behavior_changed: true }));
+  assert.match(withFlag, /[Oo]perator behavior changes/);
+  assert.match(withFlag, /docs/i);
+  const without = renderContract(TaskContractSchema.parse({ objective: "x" }));
+  assert.doesNotMatch(without, /[Oo]perator behavior changes/);
+});
+
+test("inferOperatorBehaviorChanged: true for behavior surfaces, false for docs-only", () => {
+  assert.equal(inferOperatorBehaviorChanged(["src/cli/commands/usage.ts"]), true);
+  assert.equal(inferOperatorBehaviorChanged(["seeds/workflows/feature.yml"]), true);
+  assert.equal(inferOperatorBehaviorChanged(["src/notify/milestone.ts"]), true);
+  // Pure-docs change is the remediation, not a behavior change — must NOT flag.
+  assert.equal(inferOperatorBehaviorChanged(["docs/concepts.md", "learnings/decisions/x.md"]), false);
+  assert.equal(inferOperatorBehaviorChanged(["src/store/schema.ts"]), false);
+  assert.equal(inferOperatorBehaviorChanged([]), false);
+});
+
+test("docsImpactSuggestion: names the hit surfaces and the documenter, or null", () => {
+  const s = docsImpactSuggestion(["src/cli/commands/usage.ts", "seeds/runtimes/codex-subscription.yml"]);
+  assert.ok(s);
+  assert.match(s!, /src\/cli\//);
+  assert.match(s!, /seeds\/runtimes\//);
+  assert.match(s!, /documentation-maintainer/);
+  assert.equal(docsImpactSuggestion(["docs/concepts.md"]), null);
 });

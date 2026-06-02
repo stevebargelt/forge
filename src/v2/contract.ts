@@ -25,10 +25,65 @@ export const TaskContractSchema = z
       .object({ required: z.boolean().optional(), invariants: z.array(z.string()).optional() })
       .strict()
       .optional(),
+    // Docs-drift Walk (#241): does this task change operator-visible behavior?
+    // COARSE on purpose — a single bool, not the 6-way docs_impact enum. The
+    // enum is deferred until real usage shows it's needed (avoid premature
+    // precision). The orchestrator may declare it explicitly; otherwise it is
+    // default-inferred from changed paths (see inferOperatorBehaviorChanged).
+    // #242 (Run) will use this as the gate input for blocking `shipped`.
+    operator_behavior_changed: z.boolean().optional(),
   })
   .strict();
 
 export type TaskContract = z.infer<typeof TaskContractSchema>;
+
+// Behavior-defining surfaces whose change implies operator-facing docs may now
+// be stale. Deliberately EXCLUDES docs/ and learnings/ — a docs-only change is
+// not a behavior change, it's the remediation; inferring `operator_behavior_changed`
+// from a docs edit would flag the documentation-maintainer's own output (and
+// circularly trip the #242 gate). Coarse + directory-stable to avoid the
+// keyword-list rot #240 measured; tune as real usage accrues.
+export const OPERATOR_SURFACES: readonly string[] = [
+  "src/cli/", // commands + flags the operator invokes
+  "seeds/workflows/", // workflow shapes
+  "seeds/runtimes/", // provider/auth runtimes
+  "seeds/constraints/", // force-level rules agents obey
+  "seeds/orchestrator-template.md", // the orchestrator contract
+  "seeds/forge-raci.md", // work-type routing
+  "seeds/model-policy.example.yml", // the example operators copy
+  "src/notify/", // notification behavior + flags
+  "src/util/auth-profiles", // auth modes/profiles
+  "src/util/creds", // credential handling
+  "src/v2/loader.ts", // model/policy resolution + vocabulary
+];
+
+function matchesSurface(path: string): string | null {
+  const p = path.replace(/^\.?\//, "");
+  for (const s of OPERATOR_SURFACES) {
+    if (p === s || p.startsWith(s)) return s;
+  }
+  return null;
+}
+
+/** Default inference for `operator_behavior_changed`: true if any changed path
+ *  touches a behavior-defining operator surface. The orchestrator can override
+ *  by setting the contract field explicitly. */
+export function inferOperatorBehaviorChanged(changedPaths: readonly string[]): boolean {
+  return changedPaths.some((p) => matchesSurface(p) !== null);
+}
+
+/** Auto-suggest the documentation-maintainer when changed paths hit operator
+ *  surfaces. Returns a one-line suggestion naming the surfaces, or null when
+ *  nothing operator-facing changed. */
+export function docsImpactSuggestion(changedPaths: readonly string[]): string | null {
+  const hit = new Set<string>();
+  for (const p of changedPaths) {
+    const s = matchesSurface(p);
+    if (s) hit.add(s);
+  }
+  if (hit.size === 0) return null;
+  return `operator surfaces changed (${[...hit].join(", ")}) — durable docs may be stale; consider: forge invoke documentation-maintainer`;
+}
 
 /** Parse + validate a contract file (YAML or JSON — JSON is valid YAML). The
  *  contract may be the file root or under a top-level `contract:` key. */
@@ -60,6 +115,7 @@ export function renderContract(c: TaskContract): string {
   if (c.auth_profile) lines.push("", `**Auth profile:** ${c.auth_profile}`);
   if (c.risk) lines.push("", `**Risk:** ${c.risk}`);
   if (c.review?.invariants?.length) lines.push("", `**Invariants** (must hold):`, ...c.review.invariants.map((inv) => `- ${inv}`));
+  if (c.operator_behavior_changed) lines.push("", `**Operator behavior changes** with this task — operator-facing docs (commands, flags, defaults, examples) will need updating to match. Note the doc impact in your result so it isn't lost.`);
   lines.push("", "If you must deviate from this contract (touch a path outside the allowed set, skip a validation, etc.), state the deviation and why explicitly in your result.");
   return lines.join("\n");
 }
