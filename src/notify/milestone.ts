@@ -15,6 +15,7 @@
 import { logEvent, eventsForRun } from "../store/events.js";
 import { getRun } from "../store/runs.js";
 import { dispatch, isAnyProviderEnabled } from "./trigger.js";
+import { assessRunDocsImpact, formatDocsImpactWarning } from "../v2/docs-impact.js";
 
 export const MILESTONE_KINDS = [
   "plan_started",
@@ -86,6 +87,9 @@ export type EmitMilestoneResult = {
   dispatched: boolean;
   decision: MilestoneDecision;
   importance: Importance;
+  // #242: advisory docs-impact warning, set only on `shipped` when the run
+  // changed operator behavior without resolving docs. Never blocks delivery.
+  docsImpactWarning?: string;
 };
 
 // Record the milestone event (always) + apply policy/dedupe + dispatch if the
@@ -121,6 +125,14 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
     dispatched = true;
   }
 
+  // #242 — Run (advisory): on `shipped`, warn if the run changed operator
+  // behavior without resolving the docs impact. Non-blocking; the milestone is
+  // still recorded and dispatched.
+  const docsImpactWarning =
+    kind === "shipped"
+      ? formatDocsImpactWarning(assessRunDocsImpact(args.runId), args.runId) ?? undefined
+      : undefined;
+
   // Always record — audit trail independent of delivery.
   logEvent("orchestrator.milestone", {
     runId: args.runId,
@@ -132,8 +144,9 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
       ...(args.dedupeKey ? { dedupeKey: args.dedupeKey } : {}),
       dispatched,
       reason: decision.reason,
+      ...(docsImpactWarning ? { docsImpactWarning } : {}),
     },
   });
 
-  return { dispatched, decision, importance };
+  return { dispatched, decision, importance, ...(docsImpactWarning ? { docsImpactWarning } : {}) };
 }

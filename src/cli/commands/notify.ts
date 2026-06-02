@@ -79,13 +79,16 @@ export function registerNotify(program: Command): void {
           ...(opts.dedupeKey ? { dedupeKey: opts.dedupeKey } : {}),
         });
         if (opts.json) {
-          console.log(JSON.stringify({ recorded: true, kind: opts.kind, dispatched: res.dispatched, reason: res.decision.reason, importance: res.importance }, null, 2));
+          console.log(JSON.stringify({ recorded: true, kind: opts.kind, dispatched: res.dispatched, reason: res.decision.reason, importance: res.importance, ...(res.docsImpactWarning ? { docsImpactWarning: res.docsImpactWarning } : {}) }, null, 2));
           return;
         }
         console.log(`✓ recorded orchestrator.milestone [${opts.kind}]`);
         console.log(`  ${res.dispatched ? "→ pushed" : "→ no push"}: ${res.decision.reason}`);
         if (res.decision.send && !res.dispatched) {
           console.log(`  (policy said send, but no provider configured — set FORGE_NOTIFY. See docs/how-to-set-up-notifications.md)`);
+        }
+        if (res.docsImpactWarning) {
+          console.warn(`  ⚠ ${res.docsImpactWarning}`);
         }
       } catch (e) {
         console.error(`forge notify milestone: ${(e as Error).message}`);

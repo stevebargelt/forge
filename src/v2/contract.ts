@@ -72,17 +72,24 @@ export function inferOperatorBehaviorChanged(changedPaths: readonly string[]): b
   return changedPaths.some((p) => matchesSurface(p) !== null);
 }
 
-/** Auto-suggest the documentation-maintainer when changed paths hit operator
- *  surfaces. Returns a one-line suggestion naming the surfaces, or null when
- *  nothing operator-facing changed. */
-export function docsImpactSuggestion(changedPaths: readonly string[]): string | null {
+/** The distinct operator surfaces a set of changed paths touched (empty when
+ *  none). The building block for both the inference and the suggestion. */
+export function operatorSurfacesTouched(changedPaths: readonly string[]): string[] {
   const hit = new Set<string>();
   for (const p of changedPaths) {
     const s = matchesSurface(p);
     if (s) hit.add(s);
   }
-  if (hit.size === 0) return null;
-  return `operator surfaces changed (${[...hit].join(", ")}) — durable docs may be stale; consider: forge invoke documentation-maintainer`;
+  return [...hit];
+}
+
+/** Auto-suggest the documentation-maintainer when changed paths hit operator
+ *  surfaces. Returns a one-line suggestion naming the surfaces, or null when
+ *  nothing operator-facing changed. */
+export function docsImpactSuggestion(changedPaths: readonly string[]): string | null {
+  const hit = operatorSurfacesTouched(changedPaths);
+  if (hit.length === 0) return null;
+  return `operator surfaces changed (${hit.join(", ")}) — durable docs may be stale; consider: forge invoke documentation-maintainer`;
 }
 
 /** Parse + validate a contract file (YAML or JSON — JSON is valid YAML). The
