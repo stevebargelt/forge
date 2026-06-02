@@ -113,8 +113,24 @@ test("inferOperatorBehaviorChanged: true for behavior surfaces, false for docs-o
   assert.equal(inferOperatorBehaviorChanged(["src/notify/milestone.ts"]), true);
   // Pure-docs change is the remediation, not a behavior change — must NOT flag.
   assert.equal(inferOperatorBehaviorChanged(["docs/concepts.md", "learnings/decisions/x.md"]), false);
+  // DB schema is internal, not operator vocabulary — prefix match must not bleed
+  // src/v2/schema.ts onto src/store/schema.ts.
   assert.equal(inferOperatorBehaviorChanged(["src/store/schema.ts"]), false);
   assert.equal(inferOperatorBehaviorChanged([]), false);
+});
+
+test("inferOperatorBehaviorChanged: covers vocabulary/resolution/provisioning surfaces", () => {
+  // Regression for the gap where schema/resolution/provider/provisioning changes
+  // could silently bypass docs-impact inference.
+  for (const f of [
+    "src/v2/schema.ts",            // workflow/runtime/policy vocabulary
+    "src/v2/model-resolution.ts",  // capability/profile -> model
+    "src/v2/provider-doctor.ts",   // forge providers doctor
+    "src/v2/contract.ts",          // the contract shape itself
+    "scripts/install-seeds.sh",    // what forge upgrade provisions
+  ]) {
+    assert.equal(inferOperatorBehaviorChanged([f]), true, `${f} should be an operator surface`);
+  }
 });
 
 test("docsImpactSuggestion: names the hit surfaces and the documenter, or null", () => {

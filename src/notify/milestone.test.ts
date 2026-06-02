@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decideMilestone, emitMilestone, isMilestoneKind, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { decideMilestone, emitMilestone, isMilestoneKind, composeDispatchBody, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
 import { insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
+import { taskDir } from "../util/paths.js";
 import { logEvent, eventsForRun } from "../store/events.js";
-import type { Run } from "../types/index.js";
+import type { Run, Task } from "../types/index.js";
 
 function mkRun(id: string, createdAt = new Date().toISOString()): Run {
   const run: Run = {
@@ -92,4 +96,53 @@ test("emitMilestone: unknown kind throws; missing run throws", async () => {
   const run = mkRun("run-ms-5");
   await assert.rejects(() => emitMilestone({ runId: run.id, kind: "bogus", title: "x" }), /unknown milestone kind/);
   await assert.rejects(() => emitMilestone({ runId: "no-such-run", kind: "blocked", title: "x" }), /run not found/);
+});
+
+// ---- #242 advisory docs-impact on shipped ----
+
+function mkCompleteTask(runId: string, id: string, filesModified: string[]): void {
+  const task: Task = {
+    id,
+    runId,
+    phase: "engineer",
+    agentRole: "engineer",
+    status: "complete",
+    taskPackage: { taskId: id, runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  };
+  insertTask(task);
+  const dir = taskDir(runId, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", files_modified: filesModified }));
+}
+
+test("composeDispatchBody: appends the advisory to the pushed body, or returns base", () => {
+  assert.equal(composeDispatchBody("done"), "done");
+  const withWarn = composeDispatchBody("done", "UNRESOLVED docs impact");
+  assert.match(withWarn, /done/);
+  assert.match(withWarn, /⚠ UNRESOLVED docs impact/);
+});
+
+test("emitMilestone: shipped on a run that changed operator surfaces returns + records the advisory", async () => {
+  const run = mkRun("run-ms-ship-1");
+  mkCompleteTask(run.id, "task-eng-ship-1", ["src/cli/commands/usage.ts"]); // operator surface, no docs work
+  const res = await emitMilestone({ runId: run.id, kind: "shipped", title: "feature X" });
+  assert.ok(res.docsImpactWarning, "advisory computed for shipped with unresolved impact");
+  assert.match(res.docsImpactWarning!, /UNRESOLVED/);
+  const evt = eventsForRun(run.id).find((e) => e.eventType === "orchestrator.milestone");
+  assert.ok((evt!.payload as Record<string, unknown>)["docsImpactWarning"], "advisory recorded in the event payload");
+});
+
+test("emitMilestone: shipped on a docs-only run yields no advisory", async () => {
+  const run = mkRun("run-ms-ship-2");
+  mkCompleteTask(run.id, "task-doc-ship-2", ["docs/concepts.md"]); // remediation, not a behavior change
+  const res = await emitMilestone({ runId: run.id, kind: "shipped", title: "doc tidy" });
+  assert.equal(res.docsImpactWarning, undefined);
+});
+
+test("emitMilestone: non-shipped kinds never compute the advisory", async () => {
+  const run = mkRun("run-ms-ship-3");
+  mkCompleteTask(run.id, "task-eng-ship-3", ["src/cli/commands/usage.ts"]);
+  const res = await emitMilestone({ runId: run.id, kind: "ready_for_review", title: "rfr" });
+  assert.equal(res.docsImpactWarning, undefined);
 });

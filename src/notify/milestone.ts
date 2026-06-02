@@ -52,6 +52,12 @@ export function isMilestoneKind(s: string): s is MilestoneKind {
   return (MILESTONE_KINDS as readonly string[]).includes(s);
 }
 
+/** Compose the dispatched body: the milestone body with the advisory appended
+ *  when present, so a remote ntfy/Twilio recipient sees the ship-time warning. */
+export function composeDispatchBody(baseBody: string, docsImpactWarning?: string): string {
+  return docsImpactWarning ? `${baseBody}\n\n⚠ ${docsImpactWarning}` : baseBody;
+}
+
 export type MilestoneDecision = { send: boolean; reason: string };
 
 // Pure policy decision. Dedupe (run-scoped, key-scoped) wins over everything:
@@ -119,19 +125,21 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
 
   const decision = decideMilestone(kind, runElapsedMs, alreadyDispatchedKey, args.dedupeKey);
 
-  let dispatched = false;
-  if (decision.send && isAnyProviderEnabled()) {
-    await dispatch(args.body ?? args.title, `forge: ${kind} — ${args.title}`);
-    dispatched = true;
-  }
-
   // #242 — Run (advisory): on `shipped`, warn if the run changed operator
-  // behavior without resolving the docs impact. Non-blocking; the milestone is
-  // still recorded and dispatched.
+  // behavior without resolving the docs impact. Computed BEFORE dispatch so it
+  // can ride along in the pushed body — a remote ntfy/Twilio recipient is
+  // exactly who needs the ship-time warning. Non-blocking; the milestone is
+  // still recorded and dispatched regardless.
   const docsImpactWarning =
     kind === "shipped"
       ? formatDocsImpactWarning(assessRunDocsImpact(args.runId), args.runId) ?? undefined
       : undefined;
+
+  let dispatched = false;
+  if (decision.send && isAnyProviderEnabled()) {
+    await dispatch(composeDispatchBody(args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
+    dispatched = true;
+  }
 
   // Always record — audit trail independent of delivery.
   logEvent("orchestrator.milestone", {

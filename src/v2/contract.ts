@@ -30,7 +30,8 @@ export const TaskContractSchema = z
     // enum is deferred until real usage shows it's needed (avoid premature
     // precision). The orchestrator may declare it explicitly; otherwise it is
     // default-inferred from changed paths (see inferOperatorBehaviorChanged).
-    // #242 (Run) will use this as the gate input for blocking `shipped`.
+    // #242 (Run) uses this as an ADVISORY ship-time signal (warn, don't block)
+    // until L2 precision (#243) + L3 verdict wiring make a hard gate safe.
     operator_behavior_changed: z.boolean().optional(),
   })
   .strict();
@@ -54,7 +55,12 @@ export const OPERATOR_SURFACES: readonly string[] = [
   "src/notify/", // notification behavior + flags
   "src/util/auth-profiles", // auth modes/profiles
   "src/util/creds", // credential handling
-  "src/v2/loader.ts", // model/policy resolution + vocabulary
+  "src/v2/loader.ts", // workflow/runtime/policy loading
+  "src/v2/schema.ts", // workflow/runtime/policy vocabulary (activity:, runtime:, ...)
+  "src/v2/model-resolution.ts", // capability/profile -> model resolution
+  "src/v2/provider-doctor.ts", // `forge providers doctor` behavior
+  "src/v2/contract.ts", // the task-contract shape operators/agents declare
+  "scripts/install-seeds.sh", // what `forge upgrade` provisions
 ];
 
 function matchesSurface(path: string): string | null {
