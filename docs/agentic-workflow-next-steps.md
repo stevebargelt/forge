@@ -122,6 +122,7 @@ contract:
       - npm test -- src/v2/cancel.test.ts
   auth_profile: null
   risk: medium
+  operator_behavior_changed: false
   review:
     required: true
     invariants:
