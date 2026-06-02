@@ -622,12 +622,6 @@ Add a per-run notification policy stored in run metadata:
 Out of scope: the orchestrator-contract (when to emit) — that's the Run slice.
 
 
-### #238 — Docs drift — Crawl 3: docs-drift finding category in red/review output
-Add a docs-drift ("stale docs") finding category to red + review output (AWN-5 findings). The check is "do docs match SHIPPED BEHAVIOR," NOT "are docs present" — the latter passes on present-but-wrong docs, which is the actual failure mode.
-
-Artifact-driven: the red/reviewer receives the diff + user-facing behavior summary + affected doc paths and flags docs that still describe the old behavior. Findings feed the result contract's stale_docs_found (Crawl 1). This is the semantic (L3) layer — it catches prose/status staleness ("Scope (Crawl)", "next slice", ADR contradictions) that the mechanical layers (Crawl 4/5) can't.
-
-
 ### #241 — Docs drift — Walk: docs_impact / operator_behavior_changed on task contracts
 Add docs_impact (none|operator|architecture|migration|api|examples) and/or operator_behavior_changed:bool to AWN-4 task contracts. Depends on Crawl 1-3.
 
@@ -646,7 +640,23 @@ Acceptance gate (final slice). A feature cannot be "shipped"/complete if operato
 
 ### #243 — Docs drift — L2 precision: discriminate added-vs-removed primitives before any enforcement
 
+### #245 — node_modules corruption fix: container-local node_modules volume in spawn.ts (supersedes FORGE-DEC-011)
+Root cause is grpcfuse xattr + CyberArk EDR (environmental, NOT arch — #187 does NOT fix it; orthogonal). Fix = container-local node_modules volume in spawn.ts (standard Docker shadow-volume pattern) so the container never writes native-module artifacts back through the grpcfuse project mount. Supersedes FORGE-DEC-011's 'no code fix yet' status.
+
+VALIDATION CONSTRAINT: must be validated on the CyberArk-EDR corp Mac — the only place the silent SIGKILL triggers. A clean Mac won't prove it. Do NOT mark complete on clean-Mac testing alone.
+
+spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004/005/006/009) — write the learnings entry as part of this. Keep the change as a SEPARATE atomic commit from #187 (native arm64); they share an image-rebuild + validation sitting but are orthogonal. This is the real unblocker for forge-on-forge CODE agents (markdown-only agents like documentation-maintainer are already corruption-safe).
+
+
 ## Done (recent)
+
+### #238 — Docs drift — Crawl 3: docs-drift finding category in red/review output
+**Closed:** 2026-06-02. Commit `11fbab2`.
+
+Add a docs-drift ("stale docs") finding category to red + review output (AWN-5 findings). The check is "do docs match SHIPPED BEHAVIOR," NOT "are docs present" — the latter passes on present-but-wrong docs, which is the actual failure mode.
+
+Artifact-driven: the red/reviewer receives the diff + user-facing behavior summary + affected doc paths and flags docs that still describe the old behavior. Findings feed the result contract's stale_docs_found (Crawl 1). This is the semantic (L3) layer — it catches prose/status staleness ("Scope (Crawl)", "next slice", ADR contradictions) that the mechanical layers (Crawl 4/5) can't.
+
 
 ### #237 — Docs drift — Crawl 2: narrow orchestrator direct-edit allowlist; route docs-impact tasks
 **Closed:** 2026-06-02. Commit `64aa226`.
