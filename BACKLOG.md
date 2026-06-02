@@ -622,57 +622,10 @@ Add a per-run notification policy stored in run metadata:
 Out of scope: the orchestrator-contract (when to emit) — that's the Run slice.
 
 
-### #236 — Docs drift — Crawl 1: documentation-maintainer agent seed
-The authoring home for operator-facing docs — the docs analog of the engineer. NOT marketing copy: maintains operator docs, ADRs, examples, upgrade notes, seed prose/comments.
-
-- Seed: seeds/agents/documentation-maintainer/CLAUDE.md.
-- Artifact-driven inputs: changed files, relevant tickets, manifest/events (if any), a user-facing behavior summary, likely-affected doc paths.
-- Returns a docs result contract: { docs_updated: [], docs_not_updated_reason: null|string, stale_docs_found: [], operator_behavior_changed: bool }.
-- Markdown-only -> corruption-safe: FORGE-DEC-011 (grpcfuse xattr / native-module) does NOT apply (no node_modules touch), so it can run even forge-on-forge.
-
-META (applies across the Docs Crawl set): the problem is DRIFT (present-but-wrong docs), not absence — hit 5x in one session, all caught by the user, none by the orchestrator. Build on existing machinery (AWN-4 contracts, AWN-5 reds, result schemas), NOT a new docs platform. Gate on a drift VERDICT, never a "docs task ran" checkbox. Fire on operator_behavior_changed, not "file touched". Allow deferred-with-reason. Models the #202/#203 Crawl/Walk/Run staging.
-
-
-### #237 — Docs drift — Crawl 2: narrow orchestrator direct-edit allowlist; route docs-impact tasks
-The orchestrator routes durable/operator-facing doc changes to documentation-maintainer (Crawl 1) and stops casual direct edits — that's exactly where drift keeps happening (5x this session). Docs are an artifact, like code.
-
-Update seeds/orchestrator-template.md (+ re-render forge's own CLAUDE.md via forge upgrade).
-
-STAYS orchestrator-direct: BACKLOG.md (via forge backlog CLI), session notes, small handoff/status notes. (Not "orchestrator writes nothing durable" — it must keep working memory + backlog state.)
-
-ROUTES through the documenter: docs/**, learnings/decisions/**, seeds/** prose/comments/templates, CLI how-tos, runtime/model/auth/notification examples, README-style guidance.
-
-Also: add orchestrator guidance "when behavior changes, route a docs-impact task," and a "Docs impact: none/updated/deferred" line in PR/review output.
-
-
 ### #238 — Docs drift — Crawl 3: docs-drift finding category in red/review output
 Add a docs-drift ("stale docs") finding category to red + review output (AWN-5 findings). The check is "do docs match SHIPPED BEHAVIOR," NOT "are docs present" — the latter passes on present-but-wrong docs, which is the actual failure mode.
 
 Artifact-driven: the red/reviewer receives the diff + user-facing behavior summary + affected doc paths and flags docs that still describe the old behavior. Findings feed the result contract's stale_docs_found (Crawl 1). This is the semantic (L3) layer — it catches prose/status staleness ("Scope (Crawl)", "next slice", ADR contradictions) that the mechanical layers (Crawl 4/5) can't.
-
-
-### #239 — Docs drift — Crawl 4: L1 parity tests for config/examples/runtime seeds
-Deterministic tests (no LLM) that seed examples + configs PARSE and MATCH the current schema/vocabulary:
-- seeds/model-policy.example.yml (parses under ModelPolicySchema; uses current vocab e.g. activity: not model:)
-- seeds/workflows/* (parse under WorkflowSchema)
-- seeds/runtimes/* (parse under RuntimeSchema; e.g. codex-subscription.yml)
-
-Cheapest drift layer (L1). Would have caught this session's model:->activity: example drift mechanically. Runs in the normal test suite. Catches the config/example class only; prose drift is Crawl 3/5.
-
-
-### #240 — Docs drift — Crawl 5: prototype L2 changed-primitive grep; MEASURE noise before enforcement
-Prototype a check that, for primitives changed in a diff, greps docs/ seeds/ learnings/ for stale mentions and surfaces them as findings — the highest-leverage drift detector (literally what was done by hand 5x this session). Self-maintains the "likely-affected doc paths" (no static surface->docs map to rot).
-
-HIGH-SIGNAL primitives ONLY (no giant keyword list):
-- command names: `forge notify milestone`, `forge model resolve`, `forge providers doctor`
-- flags: --profile, --auth-profile, --notify-policy
-- schema fields: activity:, runtime:, model-policy.yml, allowed_profiles
-- event names: orchestrator.milestone, model.profile_resolved
-- runtime names: codex-subscription, claude-bedrock
-
-AVOID broad terms (model, test, run, auth, workflow) unless paired with a known namespace / nearby token.
-
-MEASURE the false-positive rate first. Do NOT wire it as an enforcing gate until precision is proven — prototype + report noise, then decide.
 
 
 ### #241 — Docs drift — Walk: docs_impact / operator_behavior_changed on task contracts
@@ -691,7 +644,70 @@ Acceptance gate (final slice). A feature cannot be "shipped"/complete if operato
 - Fire on operator_behavior_changed, not "a doc-ish file was touched" — over-firing erodes the gate into ceremony.
 
 
+### #243 — Docs drift — L2 precision: discriminate added-vs-removed primitives before any enforcement
+
 ## Done (recent)
+
+### #237 — Docs drift — Crawl 2: narrow orchestrator direct-edit allowlist; route docs-impact tasks
+**Closed:** 2026-06-02. Commit `64aa226`.
+
+The orchestrator routes durable/operator-facing doc changes to documentation-maintainer (Crawl 1) and stops casual direct edits — that's exactly where drift keeps happening (5x this session). Docs are an artifact, like code.
+
+Update seeds/orchestrator-template.md (+ re-render forge's own CLAUDE.md via forge upgrade).
+
+STAYS orchestrator-direct: BACKLOG.md (via forge backlog CLI), session notes, small handoff/status notes. (Not "orchestrator writes nothing durable" — it must keep working memory + backlog state.)
+
+ROUTES through the documenter: docs/**, learnings/decisions/**, seeds/** prose/comments/templates, CLI how-tos, runtime/model/auth/notification examples, README-style guidance.
+
+Also: add orchestrator guidance "when behavior changes, route a docs-impact task," and a "Docs impact: none/updated/deferred" line in PR/review output.
+
+
+### #236 — Docs drift — Crawl 1: documentation-maintainer agent seed
+**Closed:** 2026-06-02. Commit `b11d1c8`.
+
+The authoring home for operator-facing docs — the docs analog of the engineer. NOT marketing copy: maintains operator docs, ADRs, examples, upgrade notes, seed prose/comments.
+
+- Seed: seeds/agents/documentation-maintainer/CLAUDE.md.
+- Artifact-driven inputs: changed files, relevant tickets, manifest/events (if any), a user-facing behavior summary, likely-affected doc paths.
+- Returns a docs result contract: { docs_updated: [], docs_not_updated_reason: null|string, stale_docs_found: [], operator_behavior_changed: bool }.
+- Markdown-only -> corruption-safe: FORGE-DEC-011 (grpcfuse xattr / native-module) does NOT apply (no node_modules touch), so it can run even forge-on-forge.
+
+META (applies across the Docs Crawl set): the problem is DRIFT (present-but-wrong docs), not absence — hit 5x in one session, all caught by the user, none by the orchestrator. Build on existing machinery (AWN-4 contracts, AWN-5 reds, result schemas), NOT a new docs platform. Gate on a drift VERDICT, never a "docs task ran" checkbox. Fire on operator_behavior_changed, not "file touched". Allow deferred-with-reason. Models the #202/#203 Crawl/Walk/Run staging.
+
+
+### #244 — __tmp
+**Closed:** 2026-06-02.
+
+x
+
+
+### #240 — Docs drift — Crawl 5: prototype L2 changed-primitive grep; MEASURE noise before enforcement
+**Closed:** 2026-06-02. Commit `c96296e`.
+
+Prototype a check that, for primitives changed in a diff, greps docs/ seeds/ learnings/ for stale mentions and surfaces them as findings — the highest-leverage drift detector (literally what was done by hand 5x this session). Self-maintains the "likely-affected doc paths" (no static surface->docs map to rot).
+
+HIGH-SIGNAL primitives ONLY (no giant keyword list):
+- command names: `forge notify milestone`, `forge model resolve`, `forge providers doctor`
+- flags: --profile, --auth-profile, --notify-policy
+- schema fields: activity:, runtime:, model-policy.yml, allowed_profiles
+- event names: orchestrator.milestone, model.profile_resolved
+- runtime names: codex-subscription, claude-bedrock
+
+AVOID broad terms (model, test, run, auth, workflow) unless paired with a known namespace / nearby token.
+
+MEASURE the false-positive rate first. Do NOT wire it as an enforcing gate until precision is proven — prototype + report noise, then decide.
+
+
+### #239 — Docs drift — Crawl 4: L1 parity tests for config/examples/runtime seeds
+**Closed:** 2026-06-02. Commit `bd26b2b`.
+
+Deterministic tests (no LLM) that seed examples + configs PARSE and MATCH the current schema/vocabulary:
+- seeds/model-policy.example.yml (parses under ModelPolicySchema; uses current vocab e.g. activity: not model:)
+- seeds/workflows/* (parse under WorkflowSchema)
+- seeds/runtimes/* (parse under RuntimeSchema; e.g. codex-subscription.yml)
+
+Cheapest drift layer (L1). Would have caught this session's model:->activity: example drift mechanically. Runs in the normal test suite. Catches the config/example class only; prose drift is Crawl 3/5.
+
 
 ### #235 — Orchestrator milestones — Run: orchestrator-contract to emit milestones only at checkpoint boundaries
 **Closed:** 2026-06-01. Commit `b138af1`.
