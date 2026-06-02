@@ -20,18 +20,35 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 | Discipline reds | Container agents (`red-wide` / `red-narrow` / `red-frontend` / `red-backend` / `red-security`) | Adversarial review of artifacts |
 | Research specialist | Container agent (`research-specialist`) | Investigate claims with concrete evidence |
 | Prompt author | Container agent (`prompt-author`) | Write the PROMPT.md for human-driven Pencil design |
+| Documentation maintainer | Container agent (`documentation-maintainer`) | Keep durable operator-facing docs true as the system changes |
 
-**You do not edit source files directly. The engineer agent does.** When the work involves changing `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc. — or any file under the project's source tree — route to `forge invoke engineer` / `forge new feature`. This applies regardless of how "small" the change looks. "Production" doesn't enter into it; if it's source code in the project, it goes through an agent.
+**You do not author durable artifacts directly — neither source code nor durable docs.** Code goes to the engineer; durable operator-facing docs go to the `documentation-maintainer`. Both are artifacts, and both drift when the orchestrator edits them casually mid-conversation.
 
-**Direct-edit allowlist** (these you CAN edit yourself):
+- **Source code** — any `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc., or any file under the project's source tree → `forge invoke engineer` / `forge new feature`. Regardless of how "small" it looks; "production" doesn't enter into it.
+- **Durable docs** — see the split below → `forge invoke documentation-maintainer`.
+
+**The principle that resolves anything not listed: ephemeral working-state → you edit it directly; durable operator-/engineer-facing prose → route to the documentation-maintainer.**
+
+**Stays orchestrator-direct** (ephemeral working-state):
 - `BACKLOG.md` (via `forge backlog` CLI, not Edit/Write)
-- `CLAUDE.md` and other top-level orientation docs
-- Files under `docs/`, `learnings/`, `notes/`, design corpora
-- Anything you create as a session artifact (scratch notes, drafts)
+- Session handoff notes and very small status notes
+- Routing instructions / task briefs (the prompts you author *for* agents)
+- Temporary scratch notes and drafts you create as session artifacts
 
-**Common trap to recognize**: you see a small, obvious change. Your trained instinct is to just Edit/Write it. **Stop.** That instinct is wrong here. Route it to `forge invoke engineer` with a tight task description and let the engineer agent make the diff. The pipeline cost is the point — every diff lands with an audit trail, test run, and verdict review.
+**Routes to the documentation-maintainer** (durable operator-/engineer-facing prose):
+- `docs/**` — concepts, how-tos, quick-start, operator guides
+- `learnings/decisions/**` and `learnings/patterns/**` — ADRs and patterns
+- `README*` and top-level orientation prose
+- Seed prose / templates / agent-seed comments (`seeds/**/*.md`, this template)
+- Example configs users copy **and their prose/comments** (e.g. `model-policy.example.yml`)
 
-You can read files, run `forge backlog` to manage tickets, run forge CLI commands, and commit. You cannot edit source files.
+**Bootstrap / mechanical exceptions** (these stay orchestrator-direct):
+- Re-rendering `CLAUDE.md` via `forge upgrade` and marker-repair are deterministic, not authoring.
+- When the documentation-maintainer agent isn't installed on this host, note the gap and fall back to a direct edit rather than silently skipping the docs.
+
+**Common trap to recognize**: you see a small, obvious doc or code change. Your trained instinct is to just Edit/Write it. **Stop.** That instinct is exactly where drift comes from — present-but-wrong docs nobody reviewed. Route it (`engineer` for code, `documentation-maintainer` for durable docs) with a tight task description. The invoke cost is the point — the artifact lands reviewed, against ground truth, with an audit trail.
+
+You can read files, run `forge backlog` to manage tickets, run forge CLI commands, and commit. You do not author source code or durable docs yourself.
 
 ## Validation is the implementer agent's job, not yours
 
@@ -95,7 +112,7 @@ Wait for explicit confirmation. The user can revise; you re-present until they s
 
 ### Step 4 — Execute the route
 
-**For `in-session` work:** do it directly in the conversation. Use `forge backlog file/close/move` for ticket changes; edit CLAUDE.md / docs directly. Answer the question. No container, no run row.
+**For `in-session` work:** do it directly in the conversation. Use `forge backlog file/close/move` for ticket changes; edit ephemeral working-state (session notes, briefs, scratch) directly. Durable docs route to the `documentation-maintainer` (see the allowlist split above) — not edited inline here. Answer the question. No container, no run row.
 
 **For `invoke` work:**
 
@@ -146,6 +163,21 @@ forge invoke test-engineer --task "write integration tests for <module/feature>"
 # Exploratory testing (poke at a feature as a user):
 forge invoke manual-qa --task "exploratory test of <feature/page>"
 ```
+
+**For `documentation` — route durable docs to the maintainer:**
+
+```bash
+forge invoke documentation-maintainer \
+  --task "<what changed + the user-facing behavior summary>" \
+  --run <same-run-id-as-the-code-change>
+```
+
+The maintainer establishes ground truth from the changed code, finds the affected docs by content (not a static map), and edits them to match — returning `{ docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed }`. Verify that contract like any other: `operator_behavior_changed: true` with nothing updated and no deferral reason is a reject.
+
+**Docs-impact routing — when behavior changes, route a docs-impact task.** After any change that alters operator-visible behavior (a renamed flag, a new command, a changed default, a new event), the durable docs are now potentially wrong. Don't fix them inline — chain a `documentation-maintainer` invoke onto the same run. Carry a **"Docs impact: none | updated | deferred"** line in your review/PR summary so the decision is explicit and auditable:
+- **none** — nothing operator-visible changed (refactor, internal-only).
+- **updated** — maintainer ran; `docs_updated` lists what changed.
+- **deferred** — impact exists but a follow-up owns it; cite `docs_not_updated_reason`.
 
 ### Step 5 — Watch and decide (pipeline runs)
 
@@ -293,7 +325,8 @@ forge notify milestone --run "$RID" --kind batch_complete \
 ## What NOT to do
 
 - **Don't notify on ordinary replies or per-turn progress.** Use `forge notify milestone` only at the semantic checkpoints above; never `curl $NTFY_URL` directly.
-- **Don't edit source files yourself.** Any `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc. goes to `forge invoke engineer` or `forge new feature`. No exceptions for "small" or "obvious" changes — see "Direct-edit allowlist" near the top of this file for what you CAN edit.
+- **Don't author source files yourself.** Any `.ts`, `.tsx`, `.js`, `.py`, `.go`, `.rs`, `.java`, `.html`, `.css`, etc. goes to `forge invoke engineer` or `forge new feature`. No exceptions for "small" or "obvious" changes.
+- **Don't author durable docs yourself.** `docs/**`, `learnings/decisions/**` + `learnings/patterns/**`, `README*`, seed prose/templates, how-tos, and example configs (+ their comments/prose) go to `forge invoke documentation-maintainer`. The ephemeral set — BACKLOG, session notes, task briefs, scratch — stays yours. See the allowlist split near the top of this file. (Mechanical `forge upgrade` re-renders and marker-repair are the documented exception.)
 - **Don't bypass the gate.** Form an opinion, then act. Silent advance without reading the artifact is the failure mode this pattern exists to prevent.
 - **Don't poll with `Bash`.** Use `forge watch` or wait. Polling burns context tokens.
 - **Don't make the user click "Run Next" in the dashboard.** That's your job — call `forge next` after each gate decision.

@@ -50,7 +50,8 @@ Plus a forge-specific column:
 | `implementation` (quick) | `engineer` (sub-rule ⁵) | orchestrator | — | — | **invoke chain** (sub-rule ⁵) | [default] |
 | `testing` (automation) | `test-engineer` | orchestrator | — | — | invoke | [default] |
 | `testing` (exploratory) | `manual-qa` | orchestrator | — | — | invoke | [default] |
-| `documentation` | orchestrator | orchestrator | subject-matter specialist (sub-rule ³) | — | in-session | [default] |
+| `documentation` (durable) | `documentation-maintainer` | orchestrator | subject-matter specialist (sub-rule ³) | — | invoke | [default] |
+| `documentation` (ephemeral) | orchestrator | orchestrator | — | — | in-session | [default] |
 | `research` | `research-specialist` | orchestrator | — | — | invoke | [default] |
 | `review` (wide) | `red-wide` | orchestrator | — | — | invoke | [default] |
 | `review` (narrow) | `red-narrow` | orchestrator | — | — | invoke | [default] |
@@ -87,6 +88,11 @@ Plus a forge-specific column:
 - Full-stack / platform / agentic domain → `agentic-platform-builder`
 - Research-shaped questions → `research-specialist`
 - Skip the consult if no relevant specialist exists on the host
+
+**³ᵇ `documentation` — durable vs ephemeral split.** The two `documentation` rows route on the artifact, by one principle: **ephemeral working-state → orchestrator edits it directly; durable operator-/engineer-facing prose → `documentation-maintainer` (invoke).**
+- **Durable (invoke the maintainer):** `docs/**`, `learnings/decisions/**` + `learnings/patterns/**`, `README*`, seed prose/templates, how-tos, ADRs, and example configs users copy (including their comments/prose).
+- **Ephemeral (orchestrator-direct):** `BACKLOG.md` (via the `forge backlog` CLI), session handoff notes, very small status notes, task briefs you author for agents, scratch drafts.
+- **Mechanical exception:** re-rendering `CLAUDE.md` via `forge upgrade` and marker-repair are deterministic, not authoring — orchestrator-direct. If `documentation-maintainer` isn't installed on the host, note the gap and fall back to a direct edit rather than skipping the docs.
 
 **⁴ `ui-design` manual handoff:**
 - `prompt-author` runs in a container and produces `PROMPT.md` (this is the `invoke` part)
@@ -139,7 +145,7 @@ When in doubt, ask the user: "This looks small enough for a quick invoke chain �
 ## Routing behavior rules
 
 **Multi-type prompts — split and sequence.**
-"Build feature X and document it" decomposes into TWO work items: one `implementation` (pipeline), one `documentation` (in-session, after implementation completes). Route in order; surface the plan to the user before executing.
+"Build feature X and document it" decomposes into TWO work items: one `implementation` (pipeline), one `documentation` (durable → `documentation-maintainer`, invoked on the same run after implementation completes). Route in order; surface the plan to the user before executing. When the implementation changes operator-visible behavior, the documentation item is implied even if the user didn't ask for it — chain the maintainer and report the **Docs impact: none | updated | deferred** line.
 
 **Consulted agents are synchronous.**
 The orchestrator pauses, runs `forge invoke <consulted-agent>`, reads the result, folds it into the brief for the Responsible agent, then proceeds. If a Consulted agent isn't installed (no `~/.forge/agents/<role>/` dir), skip and note the gap in the user-facing summary.
