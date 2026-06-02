@@ -7,6 +7,7 @@ Steps:
 1. Run these in parallel:
    - `forge backlog notes show` — the handoff from the prior session
    - `forge backlog list --status active` — currently-open tickets (titles only)
+   - `forge backlog list --status done 2>&1 | head -30` — recently closed tickets, for reconciling against the notes' priorities
    - `git status` — working tree state
    - `git log --oneline origin/main..HEAD 2>/dev/null` — unpushed commits ahead of origin (silently empty if no remote)
    - `forge projects show "$(basename "$PWD")" 2>/dev/null` — this project's run history + live sessions (silent if forge doesn't know about it)
@@ -16,7 +17,9 @@ Steps:
    - **Picking up:** the "Picked up next" line from the notes block, plus the most recent commit subject
    - **State:** current branch · N commits ahead of origin · dirty/clean
    - **Active tickets:** total count + the top 3 by sticky number
-   - **Needs attention:** unpushed commits older than a day, in-flight forge runs that aren't this session, stale notes (notes block missing a "Picked up next" section)
+   - **Needs attention:** unpushed commits older than a day, in-flight forge runs that aren't this session, stale notes (notes block missing a "Picked up next" section), stale ticket refs (from reconciliation below)
+
+   **Ticket reconciliation (do this before reporting):** Extract every `#<number>` reference from the notes' "Picked up next" section. For each one, check whether it appears in the active list. Any ref that does NOT appear in the active list — it shows up in the done list, or is absent altogether — is stale. Surface each stale ref under **Needs attention** as: _"notes list #N as a next step, but it is no longer active (closed/merged) — likely already shipped; the live next move is elsewhere."_ If the closing commit sha is visible in the git log output, cite it. Do not treat the notes' priority list as live until every ticket ref has been verified against the active list.
 
 3. End with one question: **"What do we forge next?"** Let the user steer. Do not volunteer a plan or start work; orientation is a pre-condition for work, not work itself.
 

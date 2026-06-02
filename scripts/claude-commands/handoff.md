@@ -36,6 +36,8 @@ Steps:
    **Shipped (for reference):** <punch list of ticket IDs + one-liners. Git log is canonical; this is orientation only. Keep tight.>
    ```
 
+   **Reconciliation guard for "Picked up next":** Before listing any ticket under "Picked up next", verify it still appears in the active list and is not in the done list and not referenced by a merge commit from this session. Any ticket that closed or landed this session belongs under **Shipped (for reference)**, never under "Picked up next". If a next move is not a ticket (e.g. an external review, hardware verification, a manual deploy step), state it explicitly as a non-ticket thread — don't assign it a `#number` ref — so it is not mistaken for a backlog item and is not lost when ticket refs are pruned.
+
 3. Final status line: report branch ahead-of-origin count + uncommitted file count. If commits are unpushed, ask whether to push. **Do not auto-push.**
 
 Do NOT:
