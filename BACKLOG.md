@@ -636,7 +636,112 @@ VALIDATION CONSTRAINT: must be validated on the CyberArk-EDR corp Mac — the on
 spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004/005/006/009) — write the learnings entry as part of this. Keep the change as a SEPARATE atomic commit from #187 (native arm64); they share an image-rebuild + validation sitting but are orthogonal. This is the real unblocker for forge-on-forge CODE agents (markdown-only agents like documentation-maintainer are already corruption-safe).
 
 
+### #247 — Implementer seeds' mandatory validation misses tsc type-check + format-check — forge-clean changes fail CI
+**Process finding (from Pixtron, 2026-06-02).** Pixtron #16 failed CI twice on changes the forge container reported `complete`/clean: a real `tsc` type error, and unformatted files. This will recur on every forge-authored web-admin change. Sibling to #178 (there: forge-test picks the wrong test *runner*; here: the sanctioned validation path is missing two mandatory *steps* — type-check and format-check).
+
+**Root mechanic:** `forge-test` runs the test runner (node:test / jest), which **transpiles** TS — it strips types without checking them. "Tests pass" ≠ "`tsc --noEmit` clean." And neither implementer nor test-engineer seed runs a formatter check, so unformatted files sail through to CI's `prettier --check` gate.
+
+**Ground truth in the seeds (verified 2026-06-02):**
+- `seeds/agents/engineer/CLAUDE.md:70` — *does* mention type-check: `Run npm run typecheck (Node) or go vet ./... (Go) if applicable.` But it's weak two ways: (a) **soft** — "if applicable" lets a diligent-but-rushed agent skip it; the HARD rule (line 66) is forge-test only. (b) **name-brittle** — hardcodes the script name `typecheck`; a project whose script is `type-check` (Pixtron web-admin) won't match, so the agent runs nothing and reports clean.
+- `seeds/agents/test-engineer/CLAUDE.md` — **no type-check at all.** Validation is entirely forge-test running the suite.
+- **Neither seed mentions `prettier` / format-check.** Pure gap.
+
+**Fix direction:** make type-check + format-check **mandatory** validation steps in the implementer seeds (engineer + the specialists) and test-engineer, gated like forge-test is. Make them **project-aware** (mirror the runner-detection approach #178 proposes), not a hardcoded script name:
+- Type-check: discover from package.json `scripts` — try `type-check`, `typecheck`, `tsc`; else `npx tsc --noEmit` when a `tsconfig.json` exists. Only "n/a" when the project genuinely has no TS.
+- Format-check: discover `format:check` / `lint` / a `prettier` devDep → `npx prettier --check` on touched files; "n/a" only when no formatter is configured.
+- Tighten the seed language: a project that HAS these gates and the agent skipped one is `status: failed`, same hard-rule framing as the existing validation contract (engineer seed lines 66/86-90). "if applicable" should mean "the project has no such gate," not "optional."
+- Consider surfacing `typecheck_run` / `format_checked` (or folding into the existing validation fields) so the orchestrator can reject a `complete` that skipped an available gate — same enforcement pattern as `tests_run`.
+
+**Why it matters:** forge exists to make the container's `complete` trustworthy. A `complete` that fails CI on `tsc`/format is exactly the false-confidence failure the validation contract is meant to prevent — and it's systematic for any TS web project, not a one-off.
+
+**Relation:** sibling to #178 (forge-test runner detection) and adjacent to #125 (seeds *mentioning* forge-test). Distinct axis: which validation *steps* are mandatory + how they're discovered.
+
+
+### #249 — Handoff notes: derive 'Picked up next' from a backlog priority model instead of hand-listing (Fix B, gated)
+**Follow-on to #248 (Fix A shipped in 5387cd8).** Fix A added reconciliation so /orient + /handoff catch stale ticket refs in the notes. This is the structural alternative discussed alongside it: stop hand-listing tickets in "Picked up next" at all — render them live from the backlog so they cannot drift ("derive, don't denormalize").
+
+**Why it is gated, not done now:** the backlog has NO priority model today. The Active section is ordered by sticky number (filing order), not priority — the "Picked up next" prose is currently the only place priority ordering is expressed. So "render the list live" first requires INVENTING a priority signal (section position, a `priority:` field, or a tag) in a markdown format #174 already flags as fragile to parse/edit. And the notes' real value is the per-item next-move reasoning (e.g. "precondition for #242's verdict gate; re-measure before enforcing"), which `forge backlog list` can't produce — it returns titles only. So B necessarily becomes a HYBRID: derived ranked list + hand-written per-item reasoning + non-ticket threads, plus a cross-project notes-format migration and both skills co-evolving.
+
+**Prerequisite (file/scope first):** a backlog priority model — a way to express + read ticket priority order independent of sticky number. Without it, B has nothing to derive from. Once it exists, the /orient + /handoff change to render-live is small.
+
+**Decision (session 2026-06-02):** ship A (done), park B behind the priority-model prerequisite. A removes the status drift that was actually biting; B only removes ordering duplication. Revisit if drift persists despite A.
+
+**Relation:** follow-on to #248; blocked-on a not-yet-filed backlog-priority-model ticket; touches #174 (fragile notes/backlog parser).
+
+
+### #250 — Ops intelligence substrate — forge ops check: read-only incident detection with recommended-action metadata
+**Reframe:** not an "Ops dashboard MVP" — an **Ops intelligence substrate**. One detection core off the SQLite blackboard, many consumers. Derived from two research lenses (run-ops-surface-lens-a-detection-surface-6fbb91 = detection surface: 15 surfaced / 24 latent-detectable / 7 schema-blocked; run-ops-surface-lens-b-operator-pain-e2645a = 8 ranked operator pains) + user direction 2026-06-02.
+
+**Why the reframe:** the consumer is the ORCHESTRATOR, not a human at a terminal. The user never issues CLI; the orchestrator runs every command and the user converses with it. So the first deliverable is an orchestrator-facing primitive, not a web board.
+
+### #251 — Dual-research workflow: v2-native replacement for old investigation
+**Captured from user direction 2026-06-02.** We want the dual-research / synthesis shape as a v2-native replacement for the removed `investigation` pipeline. This is about the workflow semantics; the broader config/setup ergonomics are split to #252.
+
+**Research workflow shape to preserve:** create a v2-native replacement for the old `investigation` pipeline, likely named `research-synthesis` rather than resurrecting `investigation`. Flow:
+- Frame the user question into concrete research lanes / claims.
+- Fan out independent dual researchers per lane: primary evidence and counter-evidence / skeptic.
+- Keep those researchers independent; neither should read the other's output before synthesis.
+- Synthesize both sides into `supported | refuted | inconclusive` judgments with cited evidence and disagreement notes.
+- Avoid normal red `pass/fail` semantics on investigator outputs. #73 was right: research needs opposing evidence and synthesis, not red-verdict review vocabulary.
+
+**Provider/model routing requirement:** support intentional mixed-provider research, e.g. `research-primary` on Claude model/profile X and `research-skeptic` on Codex/OpenAI model/profile Y. Current shipped model policy can do this through agent-role profile overrides, but that implies creating/distinguishing roles and writing policy YAML. Long-term ergonomic option: step-level profile overrides such as `overrides.steps[research-synthesis.research-primary]`, so two steps can share the same seed while using different providers.
+
+**Open design point:** decide whether this is a first-class pipeline (`forge new research-synthesis ...`) or an orchestrator-driven invoke template that still records a coherent run. The workflow wants auditability, fanout, and dashboard state, so a YAML workflow is likely justified despite v2's current "pipelines are implementation" bias.
+
+**Relations:** #73 (research category mistake), #225 (bounded provider/profile choice), #252 (collaborative setup should generate any needed policy/config), #42 (new workflow docs need a non-existing workflow example), stale `docs/how-to-new-analysis.md` still describes removed `investigation` pipeline.
+
+
+### #252 — Collaborative project config setup — stop making humans hand-write Forge YAML
+**Split from #251 per user direction 2026-06-02.** The product smell is setup friction: Forge is accumulating "write this YAML by hand" steps (`docs-surfaces.yml`, `model-policy.yml`, future workflow/provider routing). That is the wrong primary UX. The user does not want to hand-author config files; setup should happen collaboratively during `forge init`, `forge upgrade`, or the first run that needs the config.
+
+**Config UX requirement:** Forge should guide configuration through an orchestrator-mediated flow:
+- On `forge init` or `forge upgrade`, detect missing/partial project config and ask concise setup questions.
+- On first run of a workflow that requires config, pause and offer to generate the needed project-local files.
+- Generated files should be explicit and reviewable (`<project>/.forge/docs-surfaces.yml`, `<project>/.forge/model-policy.yml`, future workflow/provider config), but the orchestrator/CLI should author them from choices.
+- Preserve direct YAML editing as an expert escape hatch, not the primary setup path.
+
+**Possible command shapes:** `forge init --configure`, `forge config doctor`, `forge config setup <capability>`, or first-run prompts from commands like `forge new research-synthesis ...` when required config is missing. The exact surface is open; the principle is collaborative setup, not "read docs and write YAML."
+
+**New-machine requirement:** make it easy to set up a new machine with Forge. The setup path should verify/install seeds, runtimes, auth/provider availability, project hooks/slash commands, model policy, docs surfaces, and any workflow-specific config needed for the project. This overlaps #229 but is broader than image rebuild/provider auth checks.
+
+**Why this matters:** Forge's promise is conversational orchestration across projects and machines. Every hand-written YAML prerequisite erodes the first-run/new-machine experience. Config should remain declarative on disk for auditability, but discovered and generated through Forge.
+
+**Relations:** #246 (docs-surfaces project config introduced the pattern), #225 (bounded provider/profile choice), #229 (new-machine upgrade/init completeness), #251 (research-synthesis will need provider/profile setup), #42 (workflow docs should not normalize hand-authored YAML as the default user path).
+
+
 ## Done (recent)
+
+### #248 — Handoff notes drift: /handoff + /orient never reconcile ticket refs against backlog Active/Done + git
+**Closed:** 2026-06-02. Commit `5387cd8`.
+
+**Recurring process bug (observed across projects — LiveBig, and live in the forge session 2026-06-02).** The handoff notes block lists tickets under "Picked up next" that have already merged and dropped off the active list (e.g. LiveBig #24 `c51b9dd`, #26 `ca5540c`). Because forge uses the notes block as start-of-session operating context, the orchestrator re-scopes or duplicates already-shipped work. Same class of bug as the docs-drift arc (#236–242): present-but-wrong prose vs. ground truth — except here the stale artifact is the handoff itself.
+
+**Root cause: the notes are a hand-maintained denormalized cache of state that is authoritative elsewhere (backlog Active/Done + git merge commits), and nothing reconciles the cache.**
+
+Neither end of the session loop does the join:
+- **/handoff (write side)** fetches `forge backlog list --status done | head -30` — so it KNOWS what merged — but its instruction is "draft 2-3 starting moves," not "cross-check each ticket against Done + git merges and drop the ones that landed." No reconciliation step. The `head -30` cap can also hide an older merge.
+- **Close→notes are two separate manual acts.** `forge backlog close` moves a ticket but does NOT touch the notes' priority list (reproduced this session: #246 closed via CLI but stayed in "Picked up next" until a reviewer caught it). /handoff is supposed to re-sync — but from the author's memory, not a mechanical diff.
+- **/handoff explicitly defers correctness to /orient** ("If the synthesis is wrong, they'll catch it in the next session's /orient") — but **/orient's only staleness check is structural** ("notes block missing a 'Picked up next' section"), never semantic. It prints the active list AND the notes' priorities side-by-side but never JOINS them. The intended safety net has no check wired; it offloads to the human's eyeballs, which is exactly the reconciliation that gets skipped.
+- **"Picked up next" conflates two content kinds**: tickets (status authoritative elsewhere → should be derived/validated, not hand-copied) and non-ticket threads (e.g. "LiveBig live-game hardware verification, which isn't a ticket" → the notes genuinely OWN these). They share one prose blob, so the load-bearing non-ticket thread hides among stale ticket refs.
+
+**Ground truth (skills verified 2026-06-02):** source copies at `scripts/claude-commands/{handoff,orient}.md` install to `.claude/commands/`. A fix edits the source.
+
+---
+
+**Fix direction A — reconciliation at both ends (cheap, additive, kills the symptom directly).** Both skills already hold the needed data.
+- /orient: extract `#\d+` from "Picked up next", join against `forge backlog list --status active` + recent merge commits; flag mismatches under **Needs attention** ("notes list #24 as next, but merged `c51b9dd` and off active"). Turns the toothless structural check into a real one.
+- /handoff: before writing a ticket into "Picked up next", verify it's still Active with no merge commit; route landed ones to "Shipped" instead.
+- No format change, no migration. Catches the actual failure (stale ticket STATUS).
+
+**Fix direction B — structural "derive, don't denormalize" (correct in principle, but costs more than it looks).** Make "Picked up next" carry only a live-rendered pointer to the prioritized backlog + the non-ticket threads/narrative.
+- **Hidden cost: the backlog has NO priority model today.** The Active section is ordered by sticky number (filing order), not priority — the "Picked up next" prose is currently the ONLY place priority ordering is expressed. Deriving the list means INVENTING a priority signal (section position, a `priority:` field, or a tag) in a markdown format #174 already flags as fragile to parse/edit.
+- **Can't fully eliminate the prose.** The notes' real value is the per-item *next-move reasoning* ("precondition for #242's verdict gate; precision path in <ADR>; re-measure after") — not derivable from `forge backlog list`, which gives titles only. So B becomes a HYBRID: derived list + hand-written reasoning + non-ticket threads. More moving parts, plus a seam between derived and hand-written content.
+- **Format change → cross-project migration** of every project's notes block + both skills co-evolving.
+
+**Recommendation:** A first (directly addresses the drift symptom, zero migration). Treat B as a separate, larger effort gated on a real backlog priority model — and note B's "derive" only removes ordering duplication, while A removes the status drift that's actually biting. They're not lesser/greater versions of the same fix; they address different parts. Decision pending (see session discussion).
+
+**Relation:** symptom-sibling to the docs-drift arc (stale prose vs ground truth). Touches #174 (fragile notes/backlog parser) as a headwind for any structured-field approach.
+
 
 ### #246 — Docs drift — cross-project: make OPERATOR_SURFACES project-configurable (inference is forge-path-hardcoded)
 **Closed:** 2026-06-02. Commit `cb7ecf9`.
