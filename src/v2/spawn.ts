@@ -122,7 +122,15 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
 
   // Mounts.
   let browserToolsHostPath: string | undefined;
+  // Container path the project bind mount lands at (e.g. /project). Captured so
+  // we can set it as the working directory below — the image's WORKDIR is the
+  // ephemeral /workspace, so without an explicit -w any cwd-relative write
+  // (scaffolders: `pnpm create`, `npm init`, generated node_modules/dist) lands
+  // in a non-persisted path and is silently discarded on container removal.
+  // Identified by the mount whose host template is the project dir.
+  let projectContainerPath: string | undefined;
   for (const mount of runtime.mounts) {
+    if (mount.host === "${PROJECT_DIR}") projectContainerPath = mount.container;
     const hostResolved = mount.optional
       ? substituteOptional(mount.host, ctx)
       : substitute(mount.host, ctx);
@@ -183,6 +191,14 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     }
     args.push("-v", `${ctx.AUTH_STATE_HOST_PATH}:${AUTH_STATE_CONTAINER_PATH}:ro`);
     args.push("-e", `BROWSER_TOOLS_STORAGE_STATE=${AUTH_STATE_CONTAINER_PATH}`);
+  }
+
+  // Working directory = the persistent project bind mount (not the image's
+  // ephemeral /workspace WORKDIR). Aligns Claude runtimes with codex (which
+  // already targets /project) and with every agent seed's /project contract,
+  // so cwd-relative writes persist to the host instead of vanishing on exit.
+  if (projectContainerPath) {
+    args.push("-w", projectContainerPath);
   }
 
   // Image.

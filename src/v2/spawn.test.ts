@@ -170,6 +170,26 @@ test("buildDockerArgs: PROJECT_MODE=ro is honored for reds", () => {
   assert.match(pickMount(args, "/project")!, /:ro$/);
 });
 
+test("buildDockerArgs: working dir is set to the project mount (-w /project), not the ephemeral /workspace WORKDIR", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+  const wIdx = args.indexOf("-w");
+  assert.notEqual(wIdx, -1, "-w flag must be present so cwd-relative writes persist");
+  assert.equal(args[wIdx + 1], "/project");
+  // Must precede the image (docker flags come before the image positional).
+  assert.ok(wIdx < args.indexOf(BASE_RUNTIME.image), "-w must come before the image");
+});
+
+test("buildDockerArgs: no -w when the runtime declares no project mount", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    mounts: [{ host: "${TASK_DIR}", container: "/task", mode: "rw", optional: false }],
+  };
+  const { args } = buildDockerArgs(rt, BASE_CTX);
+  assert.equal(args.indexOf("-w"), -1, "without a project mount, fall back to the image WORKDIR");
+});
+
 test("buildDockerArgs: optional DESIGN_DIR mount is skipped when unset", () => {
   process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
   process.env.AWS_PROFILE = "adx-dev";
