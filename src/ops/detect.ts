@@ -52,11 +52,11 @@ export function detectRetryOrphan(db: DatabaseInstance, opts: OpsCheckOptions = 
       taskId: row.taskId,
       evidence: [`run ${row.runId} is ${row.runStatus}`, `child task ${row.taskId} (${row.phase}) is pending`],
       recommendedAction: {
-        type: "repair_unavailable",
-        autonomy: "manual-only",
-        command: null,
+        type: "repair",
+        autonomy: "ask",
+        command: `forge ops repair ${row.taskId}`,
         reason:
-          "a pending task under a terminal run will never dispatch (forge next treats the run as terminal) and reconcile does not touch pending tasks; no DB-safe automated repair exists yet (needs an explicit repair path — see #232).",
+          "a pending task stranded under a terminal run will never dispatch; `forge ops repair` marks it failed (orphaned) to clear the inconsistent state. Re-invoke if the work is still wanted (#232). Autonomy is 'ask' — confirm before running.",
       },
     })
   );

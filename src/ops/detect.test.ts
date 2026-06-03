@@ -45,9 +45,9 @@ test("detectRetryOrphan: flags a pending task under a terminal run", () => {
   assert.equal(i.confidence, "db-confirmed");
   assert.equal(i.severity, "high");
   assert.equal(i.taskId, "task-a");
-  assert.equal(i.recommendedAction.type, "repair_unavailable");
-  assert.equal(i.recommendedAction.command, null);
-  assert.equal(i.recommendedAction.autonomy, "manual-only");
+  assert.equal(i.recommendedAction.type, "repair");
+  assert.equal(i.recommendedAction.autonomy, "ask");
+  assert.equal(i.recommendedAction.command, "forge ops repair task-a");
 });
 
 test("detectRetryOrphan: also flags abandoned runs; ignores active runs and non-pending tasks", () => {

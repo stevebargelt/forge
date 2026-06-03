@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 import type { Incident } from "../../types/index.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { runOpsCheck } from "../../ops/detect.js";
+import { performOpsRepair, type OpsRepairOutcome } from "../../ops/repair.js";
+import { getTask } from "../../store/tasks.js";
+import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-lock.js";
 
 // `forge ops check` — read-only incident detection over the blackboard (#250).
 // The orchestrator runs `--json` and decides what to act on or surface; humans
@@ -44,5 +47,53 @@ export function registerOps(program: Command): void {
         return;
       }
       console.log(renderHuman(incidents));
+    });
+
+  ops
+    .command("repair")
+    .argument("<task-id>", "the orphaned task to repair")
+    .option("--dry-run", "report what would change; write nothing")
+    .option("--json", "emit JSON result")
+    .description(
+      "Repair a retry_orphan: mark a pending task stranded under a terminal run as failed (orphaned). Refuses anything that is not a genuine orphan."
+    )
+    .action((taskId: string, opts: { dryRun?: boolean; json?: boolean }) => {
+      ensureForgeDirs();
+      // Serialize the mutation against a concurrent next/gate/retry on the same
+      // run (mirrors cancel/retry). dry-run writes nothing, so it takes no lock.
+      const runId = getTask(taskId)?.runId;
+      let outcome: OpsRepairOutcome;
+      try {
+        if (!opts.dryRun && runId) acquireRunLock(runId, "ops repair");
+        try {
+          outcome = performOpsRepair(taskId, { dryRun: opts.dryRun });
+        } finally {
+          if (!opts.dryRun && runId) releaseRunLock(runId);
+        }
+      } catch (e) {
+        if (e instanceof RunBusyError) {
+          process.stderr.write(`forge ops repair: ${e.message}\n  Another forge command is mutating this run. Wait for it to finish.\n`);
+          process.exit(1);
+        }
+        throw e;
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ dryRun: opts.dryRun ?? false, ...outcome }, null, 2));
+        if (outcome.kind === "unknown" || outcome.kind === "refused") process.exit(1);
+        return;
+      }
+
+      if (outcome.kind === "unknown") {
+        process.stderr.write(`forge ops repair: unknown task '${taskId}'\n`);
+        process.exit(1);
+      }
+      if (outcome.kind === "refused") {
+        process.stderr.write(`forge ops repair: refused — ${outcome.reason}\n`);
+        process.exit(1);
+      }
+      const verb = outcome.dryRun ? "(dry-run) would mark" : "Marked";
+      console.log(`${verb} task ${outcome.taskId} failed (orphaned); run ${outcome.runId} left terminal/untouched.`);
+      if (outcome.dryRun) console.log("No writes.");
     });
 }
