@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
-// File format matches docs/agentic-workflow-next-steps.md §4 (snake_case YAML/
+// File format matches learnings/decisions/agentic-workflow-next-steps.md §4 (snake_case YAML/
 // JSON). .strict() rejects unknown keys so a typo'd field is a loud error, not a
 // silently-ignored contract clause.
 export const TaskContractSchema = z

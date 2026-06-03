@@ -1,4 +1,4 @@
-// Integration tests for task-manifest (#197, docs/observability.md Crawl §5).
+// Integration tests for task-manifest (#197, learnings/decisions/observability.md Crawl §5).
 // Verify the manifest end-to-end across the dispatch → task-manifest → show boundary.
 //
 // Unit tests in invoke.test.ts, runNext.test.ts, show.test.ts cover each layer in
