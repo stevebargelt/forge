@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { skeletonBacklogContent } from "../../backlog/skeleton.js";
 
 // #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
 // write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
@@ -76,6 +77,7 @@ export function registerInit(program: Command): void {
       }
       const claudeMdPath = join(projectDir, "CLAUDE.md");
       const forgeProjectDir = join(projectDir, ".forge");
+      const backlogMdPath = join(projectDir, "BACKLOG.md");
 
       const templateBody = readTemplate();
 
@@ -85,6 +87,11 @@ export function registerInit(program: Command): void {
 
       const willWrite = next !== existing;
       const willCreateForgeDir = !existsSync(forgeProjectDir);
+      // BACKLOG.md is project-committed scaffolding (like CLAUDE.md / .forge/),
+      // not per-developer config — so it's created regardless of
+      // --no-install-hooks. Only ever created, never overwritten: an existing
+      // backlog is the canonical task list and must not be clobbered.
+      const willCreateBacklog = !existsSync(backlogMdPath);
 
       // Hook install plans (--no-install-hooks bypasses all of them).
       const installHooks = options.installHooks !== false;
@@ -96,6 +103,7 @@ export function registerInit(program: Command): void {
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
         console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${blockStatus(blockResult.action, !!existing)}`);
+        console.log(`  BACKLOG.md:       ${willCreateBacklog ? "WOULD create skeleton" : "exists (left as-is)"}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
@@ -111,6 +119,9 @@ export function registerInit(program: Command): void {
       if (willCreateForgeDir) {
         mkdirSync(forgeProjectDir, { recursive: true });
       }
+      if (willCreateBacklog) {
+        createBacklogSkeleton(backlogMdPath);
+      }
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
       const slashCommandsResult = installHooks ? executeClaudeCommandsPlan(slashCommandsPlan) : "skipped (--no-install-hooks)";
@@ -119,6 +130,7 @@ export function registerInit(program: Command): void {
       console.log(`forge init complete in ${projectDir}`);
       console.log(`  CLAUDE.md:        ${blockStatus(blockResult.action, !!existing)}`);
       if (blockResult.action === "needs-markers") console.warn(`  ⚠ orchestrator block: ${blockResult.message}`);
+      console.log(`  BACKLOG.md:       ${willCreateBacklog ? "created skeleton" : "already exists (left as-is)"}`);
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
@@ -205,6 +217,16 @@ function resolveHookSource(): string {
   throw new Error(
     `commit-msg hook source not found. Looked at:\n  ${candidates.join("\n  ")}`
   );
+}
+
+// Write the starter BACKLOG.md. Refuses to overwrite an existing file — the
+// backlog is the canonical task list and clobbering it would lose real work.
+// Exported for testing. Callers gate on existsSync before invoking; this
+// re-checks as a guard so the helper is safe to call directly.
+export function createBacklogSkeleton(backlogMdPath: string): "created" | "exists" {
+  if (existsSync(backlogMdPath)) return "exists";
+  writeFileSync(backlogMdPath, skeletonBacklogContent());
+  return "created";
 }
 
 function readTemplate(): string {
