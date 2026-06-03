@@ -7,6 +7,12 @@
 // ship-time wiring — building a hard block on today's coarse signal would be the
 // "docs task ran" rubber-stamp #242 explicitly warns against.
 //
+// SUPERSEDED-IN-PART (#257): the primary guarantee is now a docs PHASE in the
+// feature pipelines — documentation-maintainer runs every pipeline run, so the
+// hard-gate-on-coarse-signal plan above was not pursued. This advisory survives
+// as a cheap pre-check and as the backstop for quick-invoke chains, which have
+// no docs phase.
+//
 // Coarse signal: impact = a task declared operator_behavior_changed in its
 // contract OR touched an operator surface (inference). resolved = some task
 // reported docs_updated, or recorded a deferral reason (docs_not_updated_reason).
