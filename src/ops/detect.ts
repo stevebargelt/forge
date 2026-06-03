@@ -6,12 +6,14 @@
 // dashboard/src/queries.ts made for cross-run aggregates) rather than N+1 loops.
 //
 // Read-only by construction: this module opens getDb({ readOnly: true }) and
-// imports NO mutating store helper. The boundary with reconcile.ts is deliberate
-// — ops DETECTS and reports; reconcile.ts is the only place that REPAIRS, and it
-// owns the conservative container-liveness judgment. Where ops sees a condition
-// reconcile does not actually fix (a pending task under a terminal run; a running
-// task whose liveness the DB can't see), it emits `repair_unavailable` rather
-// than recommend a repair that wouldn't work.
+// imports NO mutating store helper — detection never mutates. The repair half
+// lives in ops/repair.ts (the `forge ops repair` command); detectors only name
+// the recommended command, they don't run it. The boundary with reconcile.ts is
+// deliberate — reconcile owns the conservative container-liveness judgment for
+// running tasks; where a condition has a safe, shape-guarded repair, the detector
+// points at `forge ops repair` (retry_orphan), and where none exists yet it emits
+// `repair_unavailable` rather than recommend a repair that wouldn't work
+// (inconsistent_run_state, whose true repair needs liveness confirmation).
 
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { Incident } from "../types/index.js";
@@ -30,8 +32,8 @@ type OrphanRow = { taskId: string; runId: string; phase: string; runStatus: stri
 
 /** A pending task under a terminal run (#232). `forge next` won't dispatch it
  *  (the run is terminal) and reconcile.ts skips it (it only acts on `running`
- *  tasks), so it sits pending forever. db-confirmed (pure status join); but no
- *  current command safely repairs it → repair_unavailable. */
+ *  tasks), so it sits pending forever. db-confirmed (pure status join); repaired
+ *  by `forge ops repair` (autonomy "ask"). */
 export function detectRetryOrphan(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
   const rows = db
     .prepare(
