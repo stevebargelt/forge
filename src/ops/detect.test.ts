@@ -7,6 +7,7 @@ import { insertTask } from "../store/tasks.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
 import { detectRetryOrphan, detectInconsistentRunState, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
+import { renderHuman } from "../cli/commands/ops.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -145,4 +146,52 @@ test("makeIncident: allows a db-confirmed auto-safe action", () => {
     evidence: [], recommendedAction: { type: "repair", autonomy: "auto-safe", command: "forge x", reason: "ok" },
   });
   assert.equal(i.recommendedAction.autonomy, "auto-safe");
+});
+
+// ── read-only invariant (the load-bearing #250 safety claim) ─────────────────
+
+test("runOpsCheck never mutates state — run/task statuses and event count unchanged", () => {
+  // A DB with both incident conditions present, plus a healthy active run.
+  insertRun(mkRun("run-term", "complete"));
+  insertTask(mkTask("t-pending", "run-term", "pending"));   // retry_orphan
+  insertTask(mkTask("t-running", "run-term", "running"));   // inconsistent_run_state
+  insertRun(mkRun("run-live", "active"));
+  insertTask(mkTask("t-live", "run-live", "running"));      // healthy, not flagged
+
+  const snapshot = () => ({
+    tasks: db.prepare("SELECT id, status FROM tasks ORDER BY id").all(),
+    runs: db.prepare("SELECT id, status FROM runs ORDER BY id").all(),
+    events: (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n,
+  });
+
+  const before = snapshot();
+  const incidents = runOpsCheck();
+  assert.equal(incidents.length, 2, "detected the two conditions (precondition for a meaningful no-mutation check)");
+
+  const after = snapshot();
+  assert.deepEqual(after.tasks, before.tasks, "task statuses must be unchanged");
+  assert.deepEqual(after.runs, before.runs, "run statuses must be unchanged");
+  assert.equal(after.events, before.events, "no events written");
+});
+
+// ── CLI rendering ────────────────────────────────────────────────────────────
+
+test("renderHuman: clean state", () => {
+  assert.equal(renderHuman([]), "No ops incidents.");
+});
+
+test("renderHuman: surfaces kind, location, autonomy, and the repair_unavailable action", () => {
+  const out = renderHuman([
+    makeIncident({
+      kind: "retry_orphan", severity: "high", confidence: "db-confirmed",
+      runId: "run-x", taskId: "task-y", evidence: ["run run-x is complete", "child task task-y is pending"],
+      recommendedAction: { type: "repair_unavailable", autonomy: "manual-only", command: null, reason: "no DB-safe repair" },
+    }),
+  ]);
+  assert.match(out, /retry_orphan/);
+  assert.match(out, /db-confirmed/);
+  assert.match(out, /run-x \/ task-y/);
+  assert.match(out, /\(repair_unavailable\)/);   // command null → renders the action type
+  assert.match(out, /manual-only/);
+  assert.match(out, /no DB-safe repair/);
 });

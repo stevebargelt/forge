@@ -8,7 +8,7 @@ import { runOpsCheck } from "../../ops/detect.js";
 // The orchestrator runs `--json` and decides what to act on or surface; humans
 // get the plain rendering. This command NEVER mutates state.
 
-function renderHuman(incidents: Incident[]): string {
+export function renderHuman(incidents: Incident[]): string {
   if (incidents.length === 0) return "No ops incidents.";
   const lines: string[] = [`${incidents.length} ops incident(s):`, ""];
   for (const i of incidents) {
