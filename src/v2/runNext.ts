@@ -32,6 +32,7 @@ import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
+import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
@@ -90,6 +91,11 @@ export async function runNext(args: {
       runStatus: run.status,
     };
   }
+
+  // Self-heal orphaned duplicate primaries before computing the ready queue, so a
+  // stranded pending retry-primary neither poisons phase advancement nor keeps the
+  // run from completing at the end. No-op on healthy runs.
+  finalizeOrphanedPrimaries(args.runId);
 
   const tasks = tasksForRun(args.runId);
   const ready = computeReadyQueue(args.workflow, tasks);

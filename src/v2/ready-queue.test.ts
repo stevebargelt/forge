@@ -160,3 +160,64 @@ test("computeReadyQueue: child (red) tasks don't affect dep satisfaction", () =>
   assert.equal(ready.length, 1);
   assert.equal(ready[0]!.id, "b");
 });
+
+// ----- duplicate-primary robustness (orphaned retry primary) -----
+// Models the forge-site bug: `forge retry` minted a parallel pending primary
+// (created LATER than the real one) while another rerun path completed the
+// phase. The ready queue must treat the phase as done and not re-dispatch it,
+// and must still satisfy a downstream dep from the complete primary.
+
+test("computeReadyQueue: phase with a complete primary is NOT re-dispatched despite a newer orphan pending primary", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-real", phase: "build", status: "complete", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "build-orphan", phase: "build", status: "pending", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(ready.map((s) => s.id), [], "complete primary wins; orphan pending must not trigger a redundant wave");
+});
+
+test("computeReadyQueue: downstream dep is satisfied by a complete primary even when a NEWER orphan primary is pending", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "verify", agent: "test-engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-real", phase: "build", status: "complete", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "build-orphan", phase: "build", status: "pending", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(ready.map((s) => s.id), ["verify"], "verify must become ready off the complete build primary, not be blocked by the newer orphan");
+});
+
+test("computeReadyQueue: a failed orphan primary also does not shadow a complete primary's dep", () => {
+  // After self-healing, the orphan is `failed` (most-recent primary) — must still
+  // not block the downstream step.
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "verify", agent: "test-engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-real", phase: "build", status: "complete", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "build-orphan", phase: "build", status: "failed", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(ready.map((s) => s.id), ["verify"]);
+});
+
+test("computeReadyQueue: legit retry (old failed + new pending, NO complete) still re-dispatches and blocks downstream", () => {
+  // Regression guard: the duplicate-primary fix must NOT change normal retry. With
+  // no complete primary, the phase is still pending work and downstream waits.
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "verify", agent: "test-engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-1", phase: "build", status: "failed", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "build-2", phase: "build", status: "pending", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(ready.map((s) => s.id), ["build"], "retry replacement is dispatched; verify stays blocked until build completes");
+});

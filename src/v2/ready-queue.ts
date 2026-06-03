@@ -32,37 +32,42 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
 
   const ready: Step[] = [];
   for (const step of workflow.steps) {
-    // Skip if any task already exists for this step (regardless of status).
-    // Re-dispatching a step (e.g. after reject) is handled separately by the
-    // gate machinery, which inserts a fresh pending task that this function
-    // will then pick up.
-    const existing = tasksByPhase.get(step.id);
-    if (existing && existing.length > 0) {
-      // Special case: if all existing tasks for this step are failed AND a
-      // pending replacement exists (e.g. from gate request-changes), the
-      // replacement is the one we want to dispatch. For simplicity in v1:
-      // pending is the signal that the step needs dispatch. Other statuses
-      // mean "in progress or done; not ready".
-      const hasPending = existing.some((t) => t.status === "pending");
-      if (!hasPending) continue;
-      // If a pending task exists for this step, still need to check deps.
-    }
+    const existing = tasksByPhase.get(step.id) ?? [];
 
-    // Check all depends_on are complete.
-    const depsMet = step.depends_on.every((depId) => {
-      const depTasks = tasksByPhase.get(depId);
-      if (!depTasks || depTasks.length === 0) return false;
-      // Use the most recent primary (non-child) task as the dep's status.
-      const primary = depTasks
-        .filter((t) => t.parentId === undefined)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-        .pop();
-      if (!primary) return false;
-      return COMPLETE_LIKE.has(primary.status);
-    });
+    // A phase with a COMPLETE primary is done — skip it, even if a stray pending
+    // primary also exists. That pairing (complete + pending primary) is only ever
+    // produced by the duplicate-primary bug: `forge retry` mints a parallel
+    // pending primary, and if another rerun path completes the phase first, the
+    // retry's pending row is left orphaned. Re-dispatching here would run a
+    // redundant wave; treating the complete primary as authoritative ignores the
+    // orphan. Legit retries never hit this: there the old primary is `failed`,
+    // not `complete`, so there's no complete primary to skip on.
+    if (hasCompletePrimary(existing)) continue;
+
+    // No complete primary. If a task row exists but none is pending, the step is
+    // in progress or terminally failed-without-retry — not ready. A pending row
+    // (fresh dispatch, or a gate request-changes / retry replacement) means the
+    // step still needs dispatch, so fall through to the deps check.
+    if (existing.length > 0 && !existing.some((t) => t.status === "pending")) continue;
+
+    // Deps: a dependency phase is satisfied if ANY of its primaries is complete —
+    // not just the most-recent one. Using "most recent" let an orphaned pending
+    // duplicate primary (created after, but never run) shadow the real complete
+    // primary, permanently blocking the downstream step. "Any complete" is
+    // identical to "most recent" in the normal one-primary-per-phase case and in
+    // legit retries (old failed + new pending ⇒ no complete ⇒ still blocks until
+    // the retry completes); it only diverges to fix the duplicate-primary bug.
+    const depsMet = step.depends_on.every((depId) =>
+      hasCompletePrimary(tasksByPhase.get(depId) ?? []),
+    );
 
     if (depsMet) ready.push(step);
   }
 
   return ready;
+}
+
+// True when at least one primary (non-child) task in the set is complete.
+function hasCompletePrimary(tasks: Task[]): boolean {
+  return tasks.some((t) => t.parentId === undefined && COMPLETE_LIKE.has(t.status));
 }

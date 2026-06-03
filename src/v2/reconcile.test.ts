@@ -137,3 +137,49 @@ test("reconcile: terminalizing an orphaned task ALSO removes its staged auth-sta
   assert.equal(getTask("task-auth")!.status, "failed");
   assert.equal(existsSync(join(dir, "auth-state.json")), false, "staged auth must be cleaned up on reconcile-terminalize");
 });
+
+// ----- finalizeOrphanedPrimaries (duplicate-primary self-heal) -----
+
+test("reconcile: orphaned pending primary in a phase already completed → failed/orphaned + reconciled event", () => {
+  // The forge-site shape: a real build primary completed; a later `forge retry`
+  // primary is stranded pending. (Primaries here are NOT containerized — they're
+  // the parent fanout rows; insertTask directly, no container.started.)
+  insertTask(mkTask("build-real", { phase: "build", status: "complete" }));
+  insertTask(mkTask("build-orphan", { phase: "build", status: "pending", createdAt: "2026-05-30T01:00:00Z" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+  assert.deepEqual(
+    r.taskChanges,
+    [{ taskId: "build-orphan", from: "pending", to: "failed", reason: "orphaned_duplicate_primary" }],
+  );
+  assert.equal(getTask("build-orphan")!.status, "failed");
+  assert.equal(getTask("build-real")!.status, "complete", "the real primary is untouched");
+  const types = eventsForTask("build-orphan").map((e) => e.eventType);
+  assert.ok(types.includes("task.failed") && types.includes("task.reconciled"));
+  const failed = eventsForTask("build-orphan").find((e) => e.eventType === "task.failed")!;
+  assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned");
+});
+
+test("reconcile: a pending primary with NO completed sibling primary is left alone (legit pending work)", () => {
+  insertTask(mkTask("build-1", { phase: "build", status: "failed" }));
+  insertTask(mkTask("build-2", { phase: "build", status: "pending", createdAt: "2026-05-30T01:00:00Z" }));
+  const r = reconcileRun(RUN.id, ALIVE);
+  assert.equal(r.taskChanges.length, 0, "no complete primary ⇒ this is a normal retry, not an orphan");
+  assert.equal(getTask("build-2")!.status, "pending");
+});
+
+test("reconcile: orphan-primary finalize is idempotent", () => {
+  insertTask(mkTask("build-real", { phase: "build", status: "complete" }));
+  insertTask(mkTask("build-orphan", { phase: "build", status: "pending", createdAt: "2026-05-30T01:00:00Z" }));
+  reconcileRun(RUN.id, ALIVE);
+  const second = reconcileRun(RUN.id, ALIVE);
+  assert.equal(second.taskChanges.length, 0, "second pass finds the orphan already failed");
+});
+
+test("reconcile: a completed-phase child (red) task is never treated as an orphan primary", () => {
+  insertTask(mkTask("build-real", { phase: "build", status: "complete" }));
+  insertTask(mkTask("build-red", { phase: "build", status: "pending", parentId: "build-real", createdAt: "2026-05-30T01:00:00Z" }));
+  const r = reconcileRun(RUN.id, ALIVE);
+  assert.equal(r.taskChanges.length, 0, "children are not primaries — left alone");
+  assert.equal(getTask("build-red")!.status, "pending");
+});

@@ -92,6 +92,15 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     cleanupStagedAuth(taskDir(t.runId, t.id));
   }
 
+  // Orphaned duplicate primaries: a pending primary in a phase that another
+  // primary already completed. Produced by the duplicate-primary bug (`forge
+  // retry` mints a parallel pending primary; a different rerun path completes the
+  // phase first, stranding the retry's row). Left alone it never runs yet keeps
+  // the run out of "complete" (it's non-terminal pending work) and, before the
+  // ready-queue was made duplicate-tolerant, blocked the next phase. Finalize it
+  // as failed/orphaned so the run can advance and complete.
+  for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
+
   // Run-level: an active run with no remaining non-terminal work is no longer in
   // flight. We only complete it when there are no further workflow steps to come
   // — unambiguous only for single-step invoke runs; pipelines are finalized by
@@ -109,6 +118,37 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
   }
 
   return { runId, taskChanges, ...(runChange ? { runChange } : {}) };
+}
+
+/** Mark as failed any PENDING primary task in a phase that another primary has
+ *  already COMPLETED — an orphaned duplicate primary (see the duplicate-primary
+ *  bug in ready-queue.ts). Pending-only: a `running` duplicate may be doing real
+ *  work and is left for container-liveness reconciliation. Idempotent (a second
+ *  pass finds the orphan already failed). Returns what it changed. Exported so
+ *  `forge next` can self-heal on the advance path, not only on status/show. */
+export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] {
+  const primariesByPhase = new Map<string, { id: string; status: string }[]>();
+  for (const t of tasksForRun(runId)) {
+    if (t.parentId !== undefined) continue; // primaries only
+    const arr = primariesByPhase.get(t.phase) ?? [];
+    arr.push({ id: t.id, status: t.status });
+    primariesByPhase.set(t.phase, arr);
+  }
+
+  const changes: TaskReconcileChange[] = [];
+  for (const primaries of primariesByPhase.values()) {
+    if (!primaries.some((p) => p.status === "complete")) continue;
+    for (const p of primaries) {
+      if (p.status !== "pending") continue;
+      const error =
+        "orphaned: duplicate pending primary in a phase already completed by another primary";
+      markTaskFailed(p.id, error);
+      logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
+      logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
+      changes.push({ taskId: p.id, from: "pending", to: "failed", reason: "orphaned_duplicate_primary" });
+    }
+  }
+  return changes;
 }
 
 /** Reconcile a specific set of runs. Callers pass exactly the run ids they will
