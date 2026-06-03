@@ -5,34 +5,35 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-02.**
+**Last session ended 2026-06-03.**
 
-**Where we left off:** Shipped the first slice of #250 (Ops intelligence substrate) — `forge ops check [--json]`: a read-only incident detector over the blackboard. Contract, invariant constructor, two db-confirmed detectors, CLI command, 13 tests, AND the first consumer (`/orient` now surfaces incidents). Validated live (detector counts match independent raw SQL; no mutation; cwd-scoping works). Everything committed and pushed to origin/main.
+**Where we left off:** Built the repair half of the Ops substrate — `forge ops repair <task-id> [--dry-run] [--json]`: a shape-guarded fix for `retry_orphan` (marks a pending task stranded under a terminal run as failed/orphaned, mirroring reconcile's vocab; run left untouched). `detectRetryOrphan` now recommends it (autonomy "ask"). The detect→recommend→repair loop is closed for retry_orphan. 7 new tests (947 total), dry-run-validated against the 5 real orphans. All pushed to origin/main.
 
 **Picked up next (priority):**
-1. **#250 continue — next detectors.** Substrate + contract + `makeIncident` invariant + read-only boundary are in place; adding a detector is now a pure function over the readonly handle. Next pair (both db-confirmed, same pattern as shipped): `gate_wait_exceeded`/`red_wait_exceeded` (timestamp math: `task.awaiting_gate`→`gate.decided`) and `verdict_authority_conflict` (advisory-fail + authoritative-pass). Then the db-candidate pair: `run_stalled` (MUST exclude `awaiting_*` states — architecture review flagged this) and `task_long_running` (wall-clock, distinct from idle-timeout). Then consumers beyond /orient (dashboard render, notification escalation — note the dedupe-vs-read-only decision in #250 is still open).
-2. **Docs-drift fix-docs items NOT yet routed.** The docs-seed-drift audit (run wf_359e548a-4dd this session) found 9 mechanical doc fixes that still need a documentation-maintainer pass: `feature-design-needed`→`feature-ui-design-needed` and `feature-design-provided`→`feature-ui-design-provided` across `docs/how-to-new-feature.md` + `how-to-new-agent.md`; a dead `src/workflows/*.ts` path + `implementer` agent ref in how-to-new-agent.md; and `ui-design`/`ui-design-revise` in concepts.md:42. The `investigation` refs (how-to-new-analysis.md, concepts.md) resolve via #251 (rewrite toward research-synthesis, not just deprecate).
-3. **#247** — implementer-seed validation gap (forge `complete` ≠ CI-green: missing tsc type-check + prettier). Forge-meta seed prose → documentation-maintainer.
-4. **#251 / #252** — research-synthesis v2 workflow + collaborative config setup (both user-filed this session; larger design work). #245 still blocked on the CyberArk corp Mac.
+1. **5 live retry_orphans are detected but NOT yet repaired** (non-ticket action; needs user authorization — they live in OTHER projects: pocket-v1, ticket-5-data-pusher, web-admin). `forge ops check --all --json | jq -r '.[].taskId'` lists them; `forge ops repair <id>` clears each (dry-run first to eyeball). User chose push-not-repair last session because it mutates other projects' state.
+2. **#250 continue — next detectors.** Next db-confirmed pair: `gate_wait_exceeded`/`red_wait_exceeded` (timestamp: `task.awaiting_gate`→`gate.decided`) and `verdict_authority_conflict` (advisory-fail + authoritative-pass). Then db-candidate pair: `run_stalled` (MUST exclude `awaiting_*` states) and `task_long_running` (wall-clock). The detector + repair patterns are both established now.
+3. **#232 prevention half still open.** The repair path shipped (`forge ops repair`), but the PREVENTION (retry/next shouldn't strand a task in the first place — reactivate the run on retry-attach, or disallow with a clear message) is not done. Decide whether #232 stays open for prevention or splits into a separate ticket.
+4. **Docs-drift fix-docs renames still NOT routed** (non-ticket; from audit run wf_359e548a-4dd): `feature-design-*`→`feature-ui-design-*` in `how-to-new-feature.md` + `how-to-new-agent.md`; a dead `src/workflows/*.ts` path + `implementer` agent ref; `ui-design`/`ui-design-revise` in `concepts.md:42`. → documentation-maintainer. (`investigation` refs resolve via #251.)
+5. **#247** (validation gap: forge `complete` ≠ CI-green); **#251/#252** (research-synthesis workflow + collaborative config setup — larger design); **#245** still blocked on the CyberArk corp Mac.
 
 **External state to remember:**
-- **5 real `retry_orphan`s live in the host DB** (pocket-v1, ticket-5-data-pusher, web-admin) — pending tasks under terminal runs that will never dispatch. `forge ops check --all` surfaces them; they're `repair_unavailable` today (the repair path is #232).
-- **`disableWorkflows: true` is now set in `~/.claude/settings.json`** — typing "workflow" no longer triggers the harness Workflow tool. (The real key is `disableWorkflows`; `workflowKeywordTriggerEnabled` does NOT exist — a guide agent hallucinated it.)
-- This Mac's agent image has Codex CLI; markdown-only agents (documentation-maintainer) are corruption-safe forge-on-forge and were used 3× this session.
+- **Untracked file `docs/prds/forge-website-platform.md`** appeared this session (user-created, out-of-band). Deliberately left uncommitted — decide whether to track it.
+- **5 live `retry_orphan`s in the host DB** (see Picked-up-next #1).
+- **`disableWorkflows: true` in `~/.claude/settings.json`** — "workflow" no longer triggers the harness Workflow tool. (Real key is `disableWorkflows`; `workflowKeywordTriggerEnabled` does NOT exist.)
+- Markdown-only agents (documentation-maintainer) are corruption-safe forge-on-forge.
 
 **Decisions worth not relitigating:**
-- **Ops (#250) is the ORCHESTRATOR's substrate, not a human dashboard.** The user never issues CLI; actions are orchestrator-mediated command-plans, not copyable-for-human commands. MVP = read-only, DB-only, detect-only — NO mutation, NO auto-remediation, NO dashboard buttons first.
-- **`confidence` gates `autonomy`** — a db-candidate incident may never carry an `auto-safe` action (enforced in `makeIncident`). Confidence = detection certainty; repairability is separate.
-- **Ops uses `getDb({readOnly:true})`, NOT a forked dashboard-style standalone Database** (user direction). Constraint: read-only handle + no mutating-helper imports. The idempotent migration-on-cold-open is shared infra every forge command triggers, not an ops-specific mutation.
-- **retry_orphan / inconsistent_run_state correctly recommend `repair_unavailable`** — verified `reconcile.ts` does NOT fix them (it only acts on `running` tasks + `active` invoke runs).
-- **The investigation deprecate-vs-build question is resolved → BUILD** (#251 research-synthesis), not merely deprecate the docs.
-- **architecture-advisor was tested and performed well** (caught the getDb readonly-migration trap). Its `#252` cross-ref was ACCURATE — I wrongly called it hallucinated by inferring from "what I filed"; verify ticket refs via `forge backlog show`, the user files tickets too.
+- **retry_orphan repair = clean up (mark failed/orphaned), NOT reactivate-and-run** (chose option A; reactivating a terminal run crosses into #232 prevention / retry-lifecycle redesign).
+- **`forge ops repair` is shape-guarded on purpose — deliberately NOT a reuse of `forge cancel`.** Refusing anything that isn't exactly a pending-task-under-terminal-run is the trust point ("repair one impossible state," not "cancel any task").
+- **Repair autonomy = "ask"** — orchestrator surfaces + waits; `/orient` reports incidents, never repairs.
+- **`inconsistent_run_state` stays `repair_unavailable`** — its true repair needs live container-liveness confirmation (separate slice).
+- **Ops is the ORCHESTRATOR's substrate, not a human dashboard** — actions are orchestrator-mediated command-plans, not copyable-for-human commands.
+- **Ops uses `getDb({readOnly:true})`, not a forked dashboard-style Database**; constraint = read-only handle + no mutating-helper imports. `confidence` gates `autonomy` (db-candidate ≠ auto-safe).
+- **investigation → BUILD** (#251 research-synthesis), not deprecate. **Verify ticket refs via `forge backlog show`** — don't infer existence from what you filed (the user files tickets too).
 
 **Shipped (for reference — git log is canonical):**
-- #246 — operator surfaces project-configurable (`<project>/.forge/docs-surfaces.yml` + concepts.md).
-- #248 Fix A — `/handoff` + `/orient` reconcile ticket refs against backlog Active/Done + git (#249 = the gated Fix B follow-on).
-- #250 first slice — `forge ops check` (Incident/RecommendedAction contract in src/types, `makeIncident` invariant, `src/ops/` detectors, CLI command, 13 tests, /orient consumer).
-- Filed this session: #247, #249, #250 (closed #248); user filed #251, #252.
+- #250 repair half — `forge ops repair` (shape-guarded, run-locked, `task.failed`+`failure_kind=orphaned`+`task.reconciled`/`retry_orphan_repaired` events); `detectRetryOrphan` recommends it.
+- Earlier this session: #250 first slice (`forge ops check` + /orient consumer), #246 (operator surfaces project-configurable), #248 Fix A (handoff/orient ticket reconciliation). Filed #247/#249/#250; user filed #251/#252.
 
 ## Active
 
