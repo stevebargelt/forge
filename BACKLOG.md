@@ -35,6 +35,8 @@ When you start a session, read this file. When you finish, update it: move close
 - #250 repair half — `forge ops repair` (shape-guarded, run-locked, `task.failed`+`failure_kind=orphaned`+`task.reconciled`/`retry_orphan_repaired` events); `detectRetryOrphan` recommends it.
 - Earlier this session: #250 first slice (`forge ops check` + /orient consumer), #246 (operator surfaces project-configurable), #248 Fix A (handoff/orient ticket reconciliation). Filed #247/#249/#250; user filed #251/#252.
 
+Fixed high-sev silent work-loss bug (commit fb97c69): buildDockerArgs never passed -w, so containers ran with cwd=/workspace (image WORKDIR, ephemeral) while project is mounted at /project. cwd-relative writes (scaffolders: pnpm create/install, node_modules, dist) were discarded on container removal despite status:complete. Fix derives workdir from the project mount's container path → -w /project. claude-* runtimes only (codex already targeted /project). Filed #254 for the defense-in-depth guardrail (fail when result.json claims files_modified but bind mount unchanged). NOTE: the live forge-site run run-scaffold-astro-starlight-site-first-slice-bones-a9716b (other workspace, /Users/stevebargelt/code/forge-site) is awaiting_gate with build-0's 15 files already lost — needs re-dispatch of the scaffold step AFTER the agent image picks up new spawns; that run is the forge-site orchestrator's recovery.
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -736,6 +738,18 @@ spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004
 
 
 ## Done (recent)
+
+### #256 — forge cancel <task> abandons a still-advanceable mid-pipeline run (no non-terminal tasks ≠ dead)
+**Closed:** 2026-06-03. Commit `38d428e`.
+
+
+### #254 — Post-task persistence assertion: fail tasks whose result.json claims files_modified but the /project bind mount is unchanged
+**Closed:** 2026-06-03. Commit `5b2197e`.
+
+
+### #255 — forge retry --force orphans a duplicate primary parent; no clean way to drop an orphaned pending primary on an ACTIVE run (cancel abandons, ops repair is terminal-only)
+**Closed:** 2026-06-03. Commit `3bb0deb`.
+
 
 ### #248 — Handoff notes drift: /handoff + /orient never reconcile ticket refs against backlog Active/Done + git
 **Closed:** 2026-06-02. Commit `5387cd8`.
