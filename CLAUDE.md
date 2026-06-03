@@ -237,7 +237,7 @@ forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
 
 (Adjust flags for the workflow variant: `feature-ui-design-needed` adds `--design-dir`; `feature-ui-design-provided` uses `--prd`.)
 
-The pipeline runs architect → tech-lead → engineer (specialist per step) → test-engineer with reds. You watch it via `forge watch <run-id>`.
+The pipeline runs architect → tech-lead → engineer (specialist per step) → test-engineer with reds → documentation-maintainer docs phase. You watch it via `forge watch <run-id>`.
 
 **For `testing` — standalone invoke:**
 
@@ -259,9 +259,20 @@ forge invoke documentation-maintainer \
 
 The maintainer establishes ground truth from the changed code, finds the affected docs by content (not a static map), and edits them to match — returning `{ docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed }`. Verify that contract like any other: `operator_behavior_changed: true` with nothing updated and no deferral reason is a reject.
 
-**Docs-impact routing — when behavior changes, route a docs-impact task.** After any change that alters operator-visible behavior (a renamed flag, a new command, a changed default, a new event), the durable docs are now potentially wrong. Don't fix them inline — chain a `documentation-maintainer` invoke onto the same run. Carry a **"Docs impact: none | updated | deferred"** line in your review/PR summary so the decision is explicit and auditable:
+**Docs-impact routing — when operator-visible behavior changes, docs must be reconciled.** The path depends on how the change was made:
+
+- **PIPELINE runs (`forge new feature ...`):** the docs phase runs automatically as the final pipeline step (`gate: auto`). Do NOT manually chain a `documentation-maintainer` invoke — that double-handles it. Instead, review the docs phase result like any other `gate: auto` step: check `docs_updated`, `docs_not_updated_reason`, and `operator_behavior_changed`. Advance or reject on that basis.
+- **QUICK-INVOKE chains (`forge invoke engineer ...`) and ad-hoc behavior changes outside a pipeline:** there is no docs phase. After any change that alters operator-visible behavior (a renamed flag, a new command, a changed default, a new event), chain a `documentation-maintainer` invoke onto the same run:
+
+```bash
+forge invoke documentation-maintainer \
+  --task "<what changed + the user-facing behavior summary>" \
+  --run <same-run-id-as-the-code-change>
+```
+
+Carry a **"Docs impact: none | updated | deferred"** line in your review/PR summary so the decision is explicit and auditable — this convention applies to both paths:
 - **none** — nothing operator-visible changed (refactor, internal-only).
-- **updated** — maintainer ran; `docs_updated` lists what changed.
+- **updated** — maintainer ran (or docs phase completed); `docs_updated` lists what changed.
 - **deferred** — impact exists but a follow-up owns it; cite `docs_not_updated_reason`.
 
 ### Step 5 — Watch and decide (pipeline runs)
@@ -284,6 +295,7 @@ You're the verifier for `gate: auto` steps. Your standard:
 - **Tech-lead plan:** is each step independently testable with clear file boundaries and acceptance criteria? Or is it a wishlist? Concrete → advance. Vague → reject and ask for specificity.
 - **Engineer / specialist output:** does the diff match the plan? Did they touch only the files the plan listed? **Did they validate?** Implementer seeds require `tests_run` in the result, plus `screenshots` if `files_modified` includes visual file types **and the project is a web app** (not mobile/React Native). **Missing validation fields are a hard reject — never advance past an unvalidated diff.** If the engineer returned `status: complete` without `tests_run`, the seed was violated; reject and request rerun. Files outside scope → flag.
 - **Test engineer output:** did they write real integration/E2E tests? Check `test_files_written` — if empty or missing, reject. Check `tests_written` vs `tests_passed` — all tests must pass. For web apps, E2E tests should include browser-tools verification with screenshots. A test-engineer that only re-ran the engineer's unit tests has failed its role — reject.
+- **Documentation maintainer output (docs phase, `gate: auto`):** did the maintainer actually reconcile docs against what changed? Check `docs_updated` — if empty, `docs_not_updated_reason` must explain why. `operator_behavior_changed: true` with empty `docs_updated` and no `docs_not_updated_reason` is a contradiction — reject.
 - **Manual QA output** (invoke-only, not every run): did they test real user scenarios? Check `scenarios_tested` — a verdict based on one scenario is weak. Check `findings` — each finding should have reproduction steps and a screenshot. A pass with no evidence is a rubber stamp — send back.
 - **Red verdict (verdict gate):** read the findings. Real catch → present to user. Procedural noise → advance over with rationale; tell the user briefly.
 
