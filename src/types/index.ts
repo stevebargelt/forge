@@ -136,3 +136,52 @@ export type VerdictRow = {
   findings: Finding[];
   createdAt: string;
 };
+
+// Ops intelligence substrate (#250). The shared, consumer-neutral contract for a
+// "needs attention" incident detected from the blackboard. One detection core;
+// the orchestrator, dashboard, notifications, and /orient each own their own
+// policy over this shape. Read-only by construction — incidents describe state,
+// they never mutate it.
+
+/** Detection certainty, NOT repairability. `db-confirmed` = the condition is a
+ *  pure DB fact (e.g. a pending task under a terminal run). `db-candidate` =
+ *  likely, but the DB can't distinguish it from a benign case (e.g. "stalled" vs
+ *  "waiting on a human"), so it needs out-of-band confirmation before any
+ *  destructive action. `external-required` = undetectable without a probe
+ *  (auth/docker/log) — follow-on, not MVP. */
+export type IncidentConfidence = "db-confirmed" | "db-candidate" | "external-required";
+
+export type IncidentSeverity = "low" | "medium" | "high";
+
+/** `repair` = a concrete command safely resolves it. `repair_unavailable` = the
+ *  condition is real but no current command safely fixes it (carries command:
+ *  null). `investigate` / `escalate` = needs a human/orchestrator judgment. */
+export type RecommendedActionType = "repair" | "repair_unavailable" | "investigate" | "escalate";
+
+/** How much latitude the orchestrator has. `auto-safe` may only ride on a
+ *  `db-confirmed` incident — you cannot safely auto-act on something the DB
+ *  can't fully confirm (enforced by makeIncident). `ask` = surface to the user
+ *  for the call. `manual-only` = no automated path. */
+export type IncidentAutonomy = "auto-safe" | "ask" | "manual-only";
+
+export type RecommendedAction = {
+  type: RecommendedActionType;
+  autonomy: IncidentAutonomy;
+  /** The CLI command the orchestrator could run, or null when none applies
+   *  (always null for `repair_unavailable`). */
+  command: string | null;
+  reason: string;
+};
+
+export type IncidentKind = "retry_orphan" | "inconsistent_run_state";
+
+export type Incident = {
+  kind: IncidentKind;
+  severity: IncidentSeverity;
+  confidence: IncidentConfidence;
+  runId: string;
+  taskId: string | null;
+  /** Human-readable facts that justify the incident. */
+  evidence: string[];
+  recommendedAction: RecommendedAction;
+};
