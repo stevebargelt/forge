@@ -2,7 +2,7 @@
 
 Three feature workflows: `feature` (no UI design needed), `feature-ui-design-provided` (design already done — pass with `--prd`), and `feature-ui-design-needed` (design needed first).
 
-This doc walks the design-needed flow with a concrete example. All three workflows share an architect → plan → build → verify core; `feature-ui-design-needed` prepends a `brief` (prompt-author) and `ui-review` (manual) phase before that.
+This doc walks the design-needed flow with a concrete example. All three workflows share an architect → plan → build → verify → docs core; `feature-ui-design-needed` prepends a `brief` (prompt-author) and `ui-review` (manual) phase before that.
 
 ## Example
 
@@ -52,6 +52,10 @@ Gate: `verdict`. The phase advances automatically if reds pass.
 ### `verify`
 
 Output: `{test_files_written, tests_written, tests_run, tests_passed, tests_failed, coverage_summary}`. No reds. Gate: `human`.
+
+### `docs`
+
+Output: `{docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed}`. No reds. Gate: `auto` — the orchestrator reviews the contract and advances without a human stop.
 
 ## When something goes wrong
 

@@ -47,7 +47,7 @@ Start `claude` from inside the project directory. The orchestrator block that `f
 
 You never type a `forge` command. The orchestrator does, on your behalf. Examples of what this looks like:
 
-- *"Add OAuth login using the existing user table"* → orchestrator classifies as implementation, runs `forge new feature "add-oauth-login" --brief "..."`, watches the architect → plan → engineer → qa pipeline, presents each gate, lands the commit.
+- *"Add OAuth login using the existing user table"* → orchestrator classifies as implementation, runs `forge new feature "add-oauth-login" --brief "..."`, watches the architect → plan → build → verify → docs pipeline, presents each gate, lands the commit.
 - *"Audit `src/auth/session.ts` for security issues"* → orchestrator classifies as review, runs `forge invoke red-security --task "..." --read-only`, presents findings.
 - *"What runs are in flight for this project?"* → in-session: orchestrator runs `forge status --json` and summarizes.
 

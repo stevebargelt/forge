@@ -144,11 +144,11 @@ Forge creates the `plan` task under the next phase.
 forge next run-add-login-7c2a91
 ```
 
-The pipeline runs phase-by-phase: architect → tech-lead (plan) → engineer (build, with reds in parallel) → test-engineer (verify). Gate each step with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
+The pipeline runs phase-by-phase: architect → tech-lead (plan) → engineer (build, with reds in parallel) → test-engineer (verify) → documentation-maintainer (docs). Gate each step with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
 
 ## 9. End of run
 
-After `verify` completes (auto-gate), the run is marked `complete`.
+After `docs` completes (auto-gate), the run is marked `complete`.
 
 ```bash
 forge status run-add-login-7c2a91

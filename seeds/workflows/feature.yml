@@ -12,7 +12,7 @@
 #     within wave; today's reds-as-parallel-children is also expressed as DAG implicitly)
 
 name: feature
-description: Feature work without UI/UX design. Architect → plan → build → verify.
+description: Feature work without UI/UX design. Architect → plan → build → verify → docs.
 
 # Model rationale: only architect uses spec-writer (Opus). plan / build / verify
 # use default (Sonnet) — translating architecture to a plan, implementing
