@@ -11,6 +11,7 @@ export type FailureKind =
   | "idle_timeout"
   | "result_missing"
   | "result_malformed"
+  | "work_not_persisted"  // result claims files_modified but none landed on the host project mount (#254)
   | "auth_missing"
   | "auth_expired"
   | "auth_injection_failed"

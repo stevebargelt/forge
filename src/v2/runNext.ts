@@ -33,6 +33,7 @@ import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries } from "./reconcile.js";
+import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
@@ -349,6 +350,17 @@ async function dispatchSingleStep(args: {
   }
 
   const result = dispatchResult.result;
+
+  // #254: persistence assertion. If the agent reports a complete result with
+  // files_modified but none of those files landed on the host project mount, the
+  // work was written to an ephemeral path and discarded — fail loudly (don't run
+  // reds, don't gate over an empty diff) instead of advancing on a green lie.
+  const persistence = checkResultPersistence(args.projectDir, result);
+  if (!persistence.ok) {
+    const error = persistenceErrorMessage(persistence);
+    failTask(taskId, { runId: args.runId, kind: "work_not_persisted", error, result });
+    return "failed";
+  }
 
   // Reds: spawn after primary completes. Each red is a child task.
   // Aggregate verdicts then set primary status per policy.

@@ -24,6 +24,7 @@ import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
+import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
@@ -383,6 +384,19 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     failTask(taskId, { runId, kind: classify({ resultState: "missing" }), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
+  }
+
+  // #254: persistence assertion (rw project only — a read-only mount can't
+  // persist by design, so files_modified there isn't loss). If the result claims
+  // files but none reached the host, the work was discarded; fail loudly.
+  if (!args.readOnlyProject) {
+    const persistence = checkResultPersistence(args.projectDir, result);
+    if (!persistence.ok) {
+      const error = persistenceErrorMessage(persistence);
+      failTask(taskId, { runId, kind: "work_not_persisted", error, result });
+      closeRunIfIdle(false);
+      return { runId, taskId, status: "failed", error };
+    }
   }
 
   // AWN-2 task-level race: a concurrent `forge cancel` may have already marked
