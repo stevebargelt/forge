@@ -119,3 +119,23 @@ steps:
       changes through real user flows and component interactions.
       Output {test_files_written, tests_written, tests_run, tests_passed, tests_failed,
       coverage_summary}.
+
+  # ----- docs -----
+  # Docs is a guaranteed phase (#257), not an orchestrator afterthought. Forge's
+  # docs-impact assessment (src/v2/docs-impact.ts) is advisory-only — it warns,
+  # it never blocks — so feature runs silently shipped without doc updates. A
+  # phase the documentation-maintainer runs every time can't be skipped. gate:
+  # auto so the orchestrator reviews the contract and advances without a human stop.
+  - id: docs
+    agent: documentation-maintainer
+    activity: default
+    depends_on: [verify]
+    gate: auto
+    workflow_additions: |
+      Reconcile operator-facing documentation with what this run built. Read the
+      upstream build and verify results to see what changed, establish ground
+      truth from the project tree, then find the affected docs by content and edit
+      them to match. If nothing operator-visible changed, say so explicitly via
+      docs_not_updated_reason rather than leaving the field empty.
+      Output {docs_updated, docs_not_updated_reason, stale_docs_found,
+      operator_behavior_changed}.
