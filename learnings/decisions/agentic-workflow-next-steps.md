@@ -1,5 +1,9 @@
 # Agentic Workflow Next Steps
 
+> **Roadmap largely shipped** — task contracts, project auth, provider abstraction,
+> and secret hygiene have all landed. Kept as historical provenance; not a live
+> operator how-to.
+
 Forge's north star is still agent-driven work under orchestrator control: agents
 think, plan, implement, test, and review; Forge owns the durable contracts,
 lifecycle, evidence, and safety boundaries around that work.

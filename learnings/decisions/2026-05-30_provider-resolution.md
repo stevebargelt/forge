@@ -4,7 +4,7 @@
 **Date:** 2026-05-30
 **Ticket:** AWN-7 (#220, "Provider Runtime Abstraction"). Supersedes #106.
 **Supersedes (graduates) the two exploration docs:**
-`docs/provider-abstraction-design.md` and `docs/provider-agnostic-models.md`.
+`learnings/decisions/provider-abstraction-design.md` and `learnings/decisions/provider-agnostic-models.md`.
 Those captured two independent designs; this ADR is the reconciled decision.
 
 ## Context

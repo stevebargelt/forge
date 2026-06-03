@@ -1,5 +1,10 @@
 # Observability Roadmap
 
+> **Roadmap shipped** — Crawl, Walk, and Run stages have all landed. This document
+> is historical provenance for the observability design; it is not a live operator
+> how-to. Live commands: `forge show`, `forge status`, `forge watch`,
+> `forge runs query`, `forge metrics`, `forge export`, `forge bundle`.
+
 Forge already records useful evidence: run rows, task rows, event rows, verdicts,
 container stdout/stderr logs, `result.json`, model usage, `forge status`,
 `forge watch`, and the dashboard. The gap is that these pieces do not yet form a
