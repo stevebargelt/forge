@@ -1,16 +1,17 @@
 # How-to: start a feature workflow
 
-Two feature workflows: `feature-design-provided` (PRD exists, design exists, skip architect) and `feature-design-needed` (PRD exists, no design — add architect first).
+Three feature workflows: `feature` (no UI design needed), `feature-ui-design-provided` (design already done — pass with `--prd`), and `feature-ui-design-needed` (design needed first).
 
-This doc walks the design-needed flow with a concrete example. The design-provided flow is identical except the architect phase is absent.
+This doc walks the design-needed flow with a concrete example. All three workflows share an architect → plan → build → verify core; `feature-ui-design-needed` prepends a `brief` (prompt-author) and `ui-review` (manual) phase before that.
 
 ## Example
 
-You have a PRD at `~/code/atlas/prd/clock-skew-fix.md`. You don't have a design yet.
+You have a feature brief but no design yet. Designs will land at `~/code/atlas/designs/`.
 
 ```bash
-forge new feature-design-needed "clock-skew-fix" \
-  --prd ~/code/atlas/prd/clock-skew-fix.md
+forge new feature-ui-design-needed "clock-skew-fix" \
+  --brief "fix clock skew between services" \
+  --design-dir ~/code/atlas/designs
 forge next run-clock-skew-fix-<suffix> --project ~/code/atlas
 ```
 
@@ -38,7 +39,7 @@ Output: `{steps: [{id, summary, files, acceptance}]}`. No reds. Gate: `human`.
 
 ### `build`
 
-Output: `{steps_completed, diff_summary, files_modified}`. The implementer edits files inside the container; the host project directory is mounted `rw`.
+Output: `{steps_completed, diff_summary, files_modified}`. The engineer (or discipline specialist) edits files inside the container; the host project directory is mounted `rw`.
 
 Reds: wide + narrow, **authoritative authority + `gateOnVerdict: true`**. If either red returns `fail`, the task is set to `blocked_by_red` and the run halts. To override:
 
@@ -50,7 +51,7 @@ Gate: `verdict`. The phase advances automatically if reds pass.
 
 ### `verify`
 
-Output: `{tests_run, tests_passed, tests_failed, evidence}`. No reds. Gate: `human`.
+Output: `{test_files_written, tests_written, tests_run, tests_passed, tests_failed, coverage_summary}`. No reds. Gate: `human`.
 
 ## When something goes wrong
 

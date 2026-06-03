@@ -106,15 +106,17 @@ These aren't enforced by forge — they're conventions in agent seeds. The dashb
 }
 ```
 
-### `qa-engineer`
+### `test-engineer`
 
 ```json
 {
   "status": "complete",
+  "test_files_written": ["tests/..."],
+  "tests_written": 12,
   "tests_run": 12,
   "tests_passed": 12,
   "tests_failed": 0,
-  "evidence": "..."
+  "coverage_summary": "..."
 }
 ```
 

@@ -43,7 +43,7 @@ forge takes approach (A) — see `seeds/runtimes/claude-*.yml`'s mount block.
 
 `browser-tools` needs a Chromium running on port 9222 with remote debugging. On the host, `~/pi-skills/browser-tools/start-chrome.sh` handles that. In containers, you need either:
 - A host Chromium reachable via `host.docker.internal:9222` (the simpler path)
-- Chromium baked into the image (forge does this in `docker/agent-dev-worker/Dockerfile`)
+- Chromium baked into the image (forge does this in `docker/agent-dev-worker.Dockerfile`)
 
 For a non-forge project running purely on the host, the host Chrome is fine — start it with the script before the agent session, and the symlink wiring takes care of the rest.
 

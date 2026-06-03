@@ -49,21 +49,21 @@ In v0 this file is metadata for the operator; the actual tool restrictions are e
 
 ### Step 3: wire into a workflow
 
-Open the workflow file (e.g. `src/workflows/feature-design-needed.ts`) and add the role to a phase's `reds`:
+Open the workflow YAML (e.g. `~/.forge/workflows/feature-ui-design-needed.yml`; source at `seeds/workflows/`; see `docs/how-to-new-workflow.md`) and add the role to a step's `reds` list:
 
-```ts
-{
-  name: "build",
-  agents: [agent("implementer", "spec-writer")],
-  reds: {
-    wide: agent("red-wide", "fast-orchestrator"),
-    narrow: agent("red-narrow", "fast-orchestrator"),
-    parallel: true,
-    authority: "authoritative",
-    gateOnVerdict: true,
-  },
-  // ... or replace red-wide entirely with security-reviewer for security-sensitive features
-}
+```yaml
+  - id: build
+    agent: engineer
+    # ...
+    reds:
+      - agent: red-wide
+        activity: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: security-reviewer   # ← add your new role here
+        activity: fast-orchestrator
+        authority: authoritative
+        gate_on_verdict: true
 ```
 
 You can also add the role as a blue agent in a fanout phase to run a focused security pass.
@@ -71,8 +71,8 @@ You can also add the role as a blue agent in a fanout phase to run a focused sec
 ### Step 4: test
 
 ```bash
-npm run typecheck
-forge new feature-design-needed "test-security-reviewer" --prd /tmp/test.md
+forge new feature-ui-design-needed "test-security-reviewer" \
+  --brief "test brief" --design-dir /tmp/designs
 forge next run-test-security-reviewer-<suffix> --project /tmp/test-project
 ```
 

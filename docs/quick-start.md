@@ -102,7 +102,7 @@ Next:
   forge next run-add-login-7c2a91
 ```
 
-`forge new` records the current directory as the run's `projectDir`. Agent containers will mount it at `/project` (read-write for implementers, read-only for reds). You can override with `--project <dir>` if you want to drive a run for a different repo from your current cwd.
+`forge new` records the current directory as the run's `projectDir`. Agent containers will mount it at `/project` (read-write for engineers, read-only for reds). You can override with `--project <dir>` if you want to drive a run for a different repo from your current cwd.
 
 ## 6. Dispatch the first phase
 
@@ -144,7 +144,7 @@ Forge creates the `plan` task under the next phase.
 forge next run-add-login-7c2a91
 ```
 
-The pipeline runs phase-by-phase: architect → tech-lead (plan) → engineer (build, with reds in parallel) → qa-engineer (verify). Gate each step with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
+The pipeline runs phase-by-phase: architect → tech-lead (plan) → engineer (build, with reds in parallel) → test-engineer (verify). Gate each step with `advance`, `reject`, or `request-changes --rationale "..."`. The run can't move to the next phase until every sibling is gated.
 
 ## 9. End of run
 
