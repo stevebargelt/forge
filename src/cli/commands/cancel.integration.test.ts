@@ -418,3 +418,56 @@ test("integ cancel: --dry-run cancel emits no events", () => {
   assert.equal(events.length, 0, "dry-run must write no rows to the events table");
   assert.equal(getRun(BASE_RUN.id)!.status, "active", "dry-run must not change run status");
 });
+
+// ─── 7. Advanceable-run guard (#255 follow-up, end-to-end via the REAL default
+//        canAdvance: writes a workflow YAML and exercises loadWorkflow +
+//        computeReadyQueue + the cancelled-task projection) ─────────────────────
+
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const ADVANCE_WF_NAME = "cancel-advance-test";
+const ADVANCE_WF_YAML = `name: ${ADVANCE_WF_NAME}
+description: build then verify, for the cancel-advanceability guard
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+  - id: verify
+    agent: test-engineer
+    depends_on: [build]
+`;
+
+function installAdvanceWorkflow() {
+  const dir = join(process.env.FORGE_HOME!, "workflows");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${ADVANCE_WF_NAME}.yml`), ADVANCE_WF_YAML);
+}
+
+test("integ cancel: cancelling an orphan in a COMPLETED phase leaves the run active (verify is ready)", () => {
+  installAdvanceWorkflow();
+  const run: Run = { id: "run-advance", workflow: ADVANCE_WF_NAME, title: "advance", status: "active", createdAt: "2026-06-03T00:00:00Z" };
+  insertRun(run);
+  // The forge-site shape: build completed (real primary), plus a stranded orphan
+  // pending primary in the same phase. verify hasn't been created yet.
+  insertTask(makeTask("build-real", { runId: run.id, phase: "build", status: "complete" }));
+  insertTask(makeTask("build-orphan", { runId: run.id, phase: "build", status: "pending", createdAt: "2026-06-03T01:00:00Z" }));
+
+  const outcome = performCancel("build-orphan", {}, () => {}); // REAL default canAdvance
+
+  assert.equal(getTask("build-orphan")!.status, "failed", "orphan is cancelled");
+  assert.equal(getRun("run-advance")!.status, "active", "run stays active — verify is ready off the complete build primary");
+  if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, false);
+});
+
+test("integ cancel: cancelling the sole running task of a not-yet-advanced phase abandons the run", () => {
+  installAdvanceWorkflow();
+  const run: Run = { id: "run-advance-2", workflow: ADVANCE_WF_NAME, title: "advance2", status: "active", createdAt: "2026-06-03T00:00:00Z" };
+  insertRun(run);
+  // build is the only work and it's running — no completed phase, nothing downstream ready.
+  insertTask(makeTask("build-running", { runId: run.id, phase: "build", status: "running" }));
+
+  performCancel("build-running", {}, () => {}); // REAL default canAdvance
+
+  assert.equal(getRun("run-advance-2")!.status, "abandoned", "no ready next step ⇒ genuinely dead ⇒ abandon");
+});

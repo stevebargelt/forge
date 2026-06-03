@@ -273,3 +273,38 @@ test("cancel run: does NOT emit events on dry-run", () => {
   assert.ok(!types.includes("task.cancelled"), "dry-run must not emit task.cancelled");
   assert.ok(!types.includes("run.cancelled"), "dry-run must not emit run.cancelled");
 });
+
+// ----- #255 follow-up: cancel must not abandon a still-advanceable run -----
+// The abandon decision now consults a canAdvance predicate (injected here for
+// determinism; production loads the run's workflow and checks the ready queue).
+
+test("cancel task: run NOT abandoned when the run can still advance (advanceable)", () => {
+  insertTask(makeTask({ id: "task-orphan", status: "pending" }));
+  const outcome = performCancel("task-orphan", {}, () => {}, () => true);
+  assert.equal(getRun(RUN.id)!.status, "active", "a run with a ready next step stays active");
+  if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, false);
+  assert.equal(getTask("task-orphan")!.status, "failed", "the cancelled task is still failed");
+});
+
+test("cancel task: run abandoned when no tasks remain AND the run cannot advance", () => {
+  insertTask(makeTask({ id: "task-last", status: "running" }));
+  const outcome = performCancel("task-last", {}, () => {}, () => false);
+  assert.equal(getRun(RUN.id)!.status, "abandoned");
+  if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, true);
+});
+
+test("cancel task: --dry-run reports runAbandoned=false for an advanceable run and writes nothing", () => {
+  insertTask(makeTask({ id: "task-dry-adv", status: "pending" }));
+  const outcome = performCancel("task-dry-adv", { dryRun: true }, () => {}, () => true);
+  if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, false);
+  assert.equal(getRun(RUN.id)!.status, "active");
+  assert.equal(getTask("task-dry-adv")!.status, "pending", "dry-run leaves the task untouched");
+});
+
+test("cancel task: invoke run (default canAdvance) abandons on sole-task cancel — no workflow to advance", () => {
+  const invokeRun: Run = { ...RUN, id: "run-invoke-cancel", workflow: "invoke" };
+  insertRun(invokeRun);
+  insertTask(makeTask({ id: "task-inv", runId: "run-invoke-cancel", status: "running" }));
+  performCancel("task-inv", {}); // default canAdvance: invoke short-circuits to false
+  assert.equal(getRun("run-invoke-cancel")!.status, "abandoned");
+});

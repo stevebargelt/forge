@@ -6,7 +6,9 @@ import { killContainer } from "../../v2/docker-exec.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { logEvent } from "../../store/events.js";
 import { acquireRunLock, releaseRunLock } from "../../util/run-lock.js";
-import type { Task } from "../../types/index.js";
+import { loadWorkflow } from "../../v2/loader.js";
+import { computeReadyQueue } from "../../v2/ready-queue.js";
+import type { Run, Task, TaskStatus } from "../../types/index.js";
 
 const TERMINAL = new Set(["complete", "failed"]);
 
@@ -15,6 +17,34 @@ function isTerminal(t: Task): boolean {
 }
 
 export type KillFn = (containerName: string) => void;
+
+// Can the run still make forward progress once the cancelled task is gone?
+// Cancelling a single task should abandon the run only when the run is genuinely
+// dead — not when a completed phase can still advance to a not-yet-created next
+// phase (the trap: cancelling a stray/orphan task while build is complete and
+// verify is ready would abandon a perfectly advanceable run). The cancelled task
+// is projected as `failed` so the answer is identical for dry-run and real, and
+// so the task's own pending/running row can't count itself as "ready work".
+// Injected like killFn so the decision stays unit-testable without filesystem
+// workflow state.
+export type CanAdvanceFn = (run: Run, cancelledTaskId: string) => boolean;
+
+function defaultCanAdvance(run: Run, cancelledTaskId: string): boolean {
+  // Invoke runs have no multi-step workflow to advance — a cancelled task is the
+  // end of the line. A workflow that can't be loaded can't be reasoned about, so
+  // fall back to the historical "abandon when nothing's left" behavior.
+  if (run.workflow === "invoke") return false;
+  let workflow;
+  try {
+    workflow = loadWorkflow(run.workflow, run.projectDir ? { projectDir: run.projectDir } : {});
+  } catch {
+    return false;
+  }
+  const projected = tasksForRun(run.id).map((t) =>
+    t.id === cancelledTaskId ? { ...t, status: "failed" as TaskStatus } : t,
+  );
+  return computeReadyQueue(workflow, projected).length > 0;
+}
 
 export type CancelOpts = { dryRun?: boolean; json?: boolean };
 
@@ -29,6 +59,7 @@ export function performCancel(
   id: string,
   opts: CancelOpts,
   killFn: KillFn = (name) => killContainer(name),
+  canAdvance: CanAdvanceFn = defaultCanAdvance,
 ): CancelOutcome {
   const task = getTask(id);
   if (task) {
@@ -36,6 +67,11 @@ export function performCancel(
       return { kind: "task-terminal", taskId: task.id, runId: task.runId, status: task.status };
     }
 
+    const taskRun = getRun(task.runId);
+    // Abandon the run only when this task was the last non-terminal work AND the
+    // run can't still advance through its workflow. A completed phase whose next
+    // step is ready keeps the run alive (don't abandon over a cancelled orphan).
+    const runStillAdvances = taskRun ? canAdvance(taskRun, task.id) : false;
     let runAbandoned = false;
     if (!opts.dryRun) {
       killFn(`forge-${task.id}`);
@@ -43,7 +79,7 @@ export function performCancel(
       failTask(task.id, { runId: task.runId, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
       logEvent("task.cancelled", { runId: task.runId, taskId: task.id, payload: { via: "forge cancel" } });
       const remaining = tasksForRun(task.runId).filter((t) => !isTerminal(t));
-      if (remaining.length === 0) {
+      if (remaining.length === 0 && !runStillAdvances) {
         updateRunStatus(task.runId, "abandoned");
         logEvent("run.cancelled", { runId: task.runId, payload: { via: "forge cancel" } });
         logEvent("run.abandoned", { runId: task.runId, payload: { via: "forge cancel" } });
@@ -51,7 +87,7 @@ export function performCancel(
       }
     } else {
       const others = tasksForRun(task.runId).filter((t) => t.id !== task.id && !isTerminal(t));
-      runAbandoned = others.length === 0;
+      runAbandoned = others.length === 0 && !runStillAdvances;
     }
 
     return { kind: "task-cancelled", taskId: task.id, runId: task.runId, killed: !opts.dryRun, runAbandoned };
