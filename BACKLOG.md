@@ -7,33 +7,32 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 **Last session ended 2026-06-02.**
 
-**This session (2026-06-02, continued):** #246 SHIPPED — operator surfaces are now project-configurable via `<project>/.forge/docs-surfaces.yml` (full replacement of forge defaults, fail-soft on malformed). Commits `cb7ecf9` (code+tests, 927/927) + `41fab28` (concepts.md, documenter-produced). Docs-impact inference is no longer forge-on-forge-only. Both commits local (unpushed).
-
-**Where we left off:** Docs-drift Crawl→Walk→Run (#236–242) fully shipped, hardened (3 review fixes), AND validated end-to-end forge-on-forge: the `documentation-maintainer` ran twice corruption-safe (typecheck clean both times), the ship-time advisory was tested PRE→POST resolution through the real `forge notify milestone --kind shipped` CLI on run-196, and the documenter caught + fixed real drift in the wild (quick-start.md step 7 still called `forge show` the architect's risks view).
+**Where we left off:** Shipped the first slice of #250 (Ops intelligence substrate) — `forge ops check [--json]`: a read-only incident detector over the blackboard. Contract, invariant constructor, two db-confirmed detectors, CLI command, 13 tests, AND the first consumer (`/orient` now surfaces incidents). Validated live (detector counts match independent raw SQL; no mutation; cwd-scoping works). Everything committed and pushed to origin/main.
 
 **Picked up next (priority):**
-1. **#243 — L2 precision (added-vs-removed discrimination).** The precondition to upgrade #242's ADVISORY warning into a real verdict gate. Precision path is in `learnings/decisions/2026-06-01_docs-drift-l2-noise-measurement.md`: only a REMOVED/RENAMED primitive is a drift candidate; gate `forge <verb>` on a known-command set; namespace flags to their command. Re-measure after; only then consider enforcing.
-2. **#245 — node_modules corruption fix (container-local volume in spawn.ts).** FILED. UNVALIDATABLE on this clean Mac — needs the CyberArk corp Mac (only place the silent SIGKILL fires). Real unblocker for forge-on-forge CODE agents (markdown-only agents are already proven safe). Keep separate atomic commits from #187.
-3. **#225 — AWN-7 Run (bounded orchestrator choice).** Last AWN-7 stage, still deferred. #234 (notify per-run policy) still waits on real milestone traffic.
+1. **#250 continue — next detectors.** Substrate + contract + `makeIncident` invariant + read-only boundary are in place; adding a detector is now a pure function over the readonly handle. Next pair (both db-confirmed, same pattern as shipped): `gate_wait_exceeded`/`red_wait_exceeded` (timestamp math: `task.awaiting_gate`→`gate.decided`) and `verdict_authority_conflict` (advisory-fail + authoritative-pass). Then the db-candidate pair: `run_stalled` (MUST exclude `awaiting_*` states — architecture review flagged this) and `task_long_running` (wall-clock, distinct from idle-timeout). Then consumers beyond /orient (dashboard render, notification escalation — note the dedupe-vs-read-only decision in #250 is still open).
+2. **Docs-drift fix-docs items NOT yet routed.** The docs-seed-drift audit (run wf_359e548a-4dd this session) found 9 mechanical doc fixes that still need a documentation-maintainer pass: `feature-design-needed`→`feature-ui-design-needed` and `feature-design-provided`→`feature-ui-design-provided` across `docs/how-to-new-feature.md` + `how-to-new-agent.md`; a dead `src/workflows/*.ts` path + `implementer` agent ref in how-to-new-agent.md; and `ui-design`/`ui-design-revise` in concepts.md:42. The `investigation` refs (how-to-new-analysis.md, concepts.md) resolve via #251 (rewrite toward research-synthesis, not just deprecate).
+3. **#247** — implementer-seed validation gap (forge `complete` ≠ CI-green: missing tsc type-check + prettier). Forge-meta seed prose → documentation-maintainer.
+4. **#251 / #252** — research-synthesis v2 workflow + collaborative config setup (both user-filed this session; larger design work). #245 still blocked on the CyberArk corp Mac.
 
 **External state to remember:**
-- **Local commits unpushed** to origin/main (incl. this session's #246 pair). User runs direct-to-main, no CI/PR.
-- **run-196-show-detail-view-8fab25** carries two `E2E test` shipped milestones (dedupe keys `e2e-advisory-pre`/`-post`) plus a legitimate `documentation-maintainer` task that fixed quick-start.md — test artifacts on a real run, harmless audit noise.
-- **Docker Desktop daemon wedged a prior session** (500 on `/_ping`; documenter invoke died exit 125 / container_crash). Fixed with `docker desktop restart`. If an invoke fails with container_crash 125, check daemon health first — it's infra, not the agent.
-- Pixtron (`~/code/pixtron`): staged regression policies at `.forge/model-policy.{claude-only,mixed}.yml` (toggle via `cp`→`model-policy.yml`).
-- This Mac's agent image has Codex CLI (`@openai/codex@0.135.0`); `codex-subscription.yml` in `~/.forge/runtimes/`; Codex auth = existing `~/.codex/auth.json`.
+- **5 real `retry_orphan`s live in the host DB** (pocket-v1, ticket-5-data-pusher, web-admin) — pending tasks under terminal runs that will never dispatch. `forge ops check --all` surfaces them; they're `repair_unavailable` today (the repair path is #232).
+- **`disableWorkflows: true` is now set in `~/.claude/settings.json`** — typing "workflow" no longer triggers the harness Workflow tool. (The real key is `disableWorkflows`; `workflowKeywordTriggerEnabled` does NOT exist — a guide agent hallucinated it.)
+- This Mac's agent image has Codex CLI; markdown-only agents (documentation-maintainer) are corruption-safe forge-on-forge and were used 3× this session.
 
 **Decisions worth not relitigating:**
-- **Markdown-only agents ARE corruption-safe forge-on-forge — VALIDATED.** The documenter ran twice on the forge repo, typecheck stayed clean. The "no agents forge-on-forge" rule is specifically about native-module-building agents (engineer via forge-test), NOT markdown-only ones. (#245 is the root-cause code fix.)
-- **#242 ship advisory is ADVISORY-ONLY (warn, never block)** until #243 L2 precision + L3 ship-time wiring make a hard verdict gate safe. Do NOT build a hard block on the coarse signal — that's the "docs task ran" rubber-stamp #242 explicitly warns against.
-- **OPERATOR_SURFACES excludes docs/ and learnings/** from `operator_behavior_changed` inference on purpose — a docs-only change is the remediation, not a behavior change; including it would circularly flag the documenter's own output and trip the advisory.
-- **#241 ships only the coarse `operator_behavior_changed` bool**, NOT the 6-way docs_impact enum — let the enum emerge from real usage (premature precision).
-- **#187 (native arm64): MEASURED ~3× CPU but ~12% end-to-end — parked, not urgent.** Don't re-benchmark. Notifications gate settled (`forge notify milestone`, no raw curl). #227 vocab: step field is `activity:` (`model:` deprecated alias), `runtime:` legacy-only.
+- **Ops (#250) is the ORCHESTRATOR's substrate, not a human dashboard.** The user never issues CLI; actions are orchestrator-mediated command-plans, not copyable-for-human commands. MVP = read-only, DB-only, detect-only — NO mutation, NO auto-remediation, NO dashboard buttons first.
+- **`confidence` gates `autonomy`** — a db-candidate incident may never carry an `auto-safe` action (enforced in `makeIncident`). Confidence = detection certainty; repairability is separate.
+- **Ops uses `getDb({readOnly:true})`, NOT a forked dashboard-style standalone Database** (user direction). Constraint: read-only handle + no mutating-helper imports. The idempotent migration-on-cold-open is shared infra every forge command triggers, not an ops-specific mutation.
+- **retry_orphan / inconsistent_run_state correctly recommend `repair_unavailable`** — verified `reconcile.ts` does NOT fix them (it only acts on `running` tasks + `active` invoke runs).
+- **The investigation deprecate-vs-build question is resolved → BUILD** (#251 research-synthesis), not merely deprecate the docs.
+- **architecture-advisor was tested and performed well** (caught the getDb readonly-migration trap). Its `#252` cross-ref was ACCURATE — I wrongly called it hallucinated by inferring from "what I filed"; verify ticket refs via `forge backlog show`, the user files tickets too.
 
-**Shipped (reference — git log is canonical):**
-- #246 (cross-project: operator surfaces project-configurable via `.forge/docs-surfaces.yml`) — this session.
-- Docs-drift complete: #239 (L1 seed-parity tests), #240 (L2 grep prototype + measured don't-enforce verdict), #238 (docs_drift red finding category), #236 (documentation-maintainer agent), #237 (route durable docs + narrow orchestrator allowlist), #241 (operator_behavior_changed contract field + forge show suggest), #242 (advisory shipped warning). Plus review-fixes commit + concepts/quick-start doc updates (documenter-produced, gated).
-- Filed open: #243 (L2 precision), #245 (corruption fix).
+**Shipped (for reference — git log is canonical):**
+- #246 — operator surfaces project-configurable (`<project>/.forge/docs-surfaces.yml` + concepts.md).
+- #248 Fix A — `/handoff` + `/orient` reconcile ticket refs against backlog Active/Done + git (#249 = the gated Fix B follow-on).
+- #250 first slice — `forge ops check` (Incident/RecommendedAction contract in src/types, `makeIncident` invariant, `src/ops/` detectors, CLI command, 13 tests, /orient consumer).
+- Filed this session: #247, #249, #250 (closed #248); user filed #251, #252.
 
 ## Active
 
@@ -707,6 +706,32 @@ spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004
 **Why this matters:** Forge's promise is conversational orchestration across projects and machines. Every hand-written YAML prerequisite erodes the first-run/new-machine experience. Config should remain declarative on disk for auditability, but discovered and generated through Forge.
 
 **Relations:** #246 (docs-surfaces project config introduced the pattern), #225 (bounded provider/profile choice), #229 (new-machine upgrade/init completeness), #251 (research-synthesis will need provider/profile setup), #42 (workflow docs should not normalize hand-authored YAML as the default user path).
+
+
+### #253 — Provider adapter surfaces — demote CLAUDE.md and slash commands from Forge truth to generated adapters
+**Captured from user direction 2026-06-02.** Provider-agnostic Forge has a discrepancy problem: some important operator surfaces are inherently provider-specific. `CLAUDE.md`, `.claude/commands/orient.md`, `.claude/commands/handoff.md`, and `.claude/settings.local.json` are Claude Code adapter surfaces, not provider-neutral Forge primitives. Treating them as Forge truth will keep causing drift as Codex / other provider surfaces come online.
+
+**Principle:** Forge should have a provider-agnostic core and provider-specific operator adapters.
+
+**Provider-agnostic core:** durable semantics and machine-readable primitives owned by Forge, e.g. `forge ops check --json`, `forge backlog ...`, workflow YAML, model-policy/profile resolution, project config under `.forge/`, and future orientation/handoff state commands if needed.
+
+**Provider-specific adapters:** render the core semantics into the affordances of one tool:
+- Claude Code: `CLAUDE.md`, `.claude/commands/orient.md`, `.claude/commands/handoff.md`, `.claude/settings.local.json` hooks.
+- Codex / other tools: equivalent instruction files, command surfaces, session hooks, or no-op/CLI-only fallback depending on what the tool supports.
+- Generic fallback: Forge CLI commands + docs, no provider-local slash-command assumptions.
+
+**Design rule:** provider-specific files may exist, but they must be thin renderings of Forge-owned semantics. `/orient` should not be the canonical implementation of orientation; it should be a Claude adapter that runs Forge primitives and synthesizes them. `/handoff` should similarly render a Forge-owned handoff/update protocol rather than becoming the only place that protocol lives. `CLAUDE.md` should be treated as the Claude Code rendering of an orchestrator contract, not the contract itself.
+
+**Practical direction:**
+- Define an adapter compatibility matrix, e.g. `claude-code: full`, `codex: partial`, `generic: CLI-only`.
+- Teach `forge init` / `forge upgrade` to install/update adapters based on configured provider/tooling rather than assuming Claude-only surfaces forever.
+- Move heavy logic out of provider-specific prose and into Forge CLI JSON/state commands where possible.
+- Keep provider-specific docs honest: Claude supports slash commands today; other providers may consume the same Forge core through different affordances.
+- Avoid duplicating behavior across adapters. If `/orient` and a future Codex adapter disagree, the bug is that the behavior is not in the provider-neutral core.
+
+**Why this matters:** #252 says setup/config should be collaborative and generated rather than hand-authored YAML. The same applies to provider-specific operator surfaces: they should be generated adapters over a Forge-owned contract. Otherwise every provider adds another hand-maintained prompt/doc surface and provider-agnostic routing becomes performative.
+
+**Relations:** #252 (collaborative setup / generated config), #250 (`forge ops check --json` is the right kind of provider-neutral primitive), #248 (`/orient` + `/handoff` reconciliation lives today in Claude slash-command prose), #225 (bounded provider/profile choice), provider-agnostic model work / AWN-7.
 
 
 ## Done (recent)
