@@ -827,16 +827,19 @@ Build a provider-neutral routing policy system from Forge's human-readable RACI,
 **Relations:** #253 (provider adapter surfaces — downstream consumer), #252 (collaborative setup), #225 (provider/profile choice), #250 (provider-neutral ops primitive), #174 (backlog edit-body verb — needed to maintain these), `seeds/forge-raci.md`, `seeds/orchestrator-template.md`.
 
 
-### #274 — RACI policy Story 1: pin the constrained RACI format + clean vocabulary
+### #274 — RACI policy Story 1: implement the RACI record-block format + clean vocabulary
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
-Pin the RACI's machine-readable shape AND clean its vocabulary. The format choice is the key slice-one decision — the compiler and both validators key off it (you can't validate loose prose).
+Implement the DECIDED RACI format and clean its vocabulary. Format is settled (see PRD "Constrained RACI Format"): one constrained record block per route — NOT a pipe table, NOT frontmatter, NOT embedded YAML. Record blocks stay visibly RACI-shaped for humans and parse deterministically. The compiler and both validators key off this.
 
 Acceptance:
-- Choose a deterministically-parseable RACI shape (constrained Markdown table, table + embedded structure, or frontmatter) — simplest reliable parse, still reads as a governance table to a human. No dependence on loose prose.
-- `Accountable` is `human` in every row, stated as a policy-level invariant (not a per-row column in the typed policy).
-- `Informed` uses the controlled record/surface vocabulary, not vague downstream parties.
-- `Responsible` may be `human`, `orchestrator`, agent role, workflow, or CLI action; `Consulted` may be agent roles or evidence sources.
+- Implement the record-block format + brutal parsing rules: one block per route headed by an h3 `route: <key>` marker; fixed lowercase field names; route keys unique; lists comma-separated symbols; `none` the only empty-list sentinel; conditionals as `name:when=condition`; no multiline values; free prose outside blocks ignored.
+- Required fields per block: classification_hints, responsible, accountable, path, consulted, required_followups, informed, force_rules. `command` required iff `path: cli`, forbidden otherwise. No generic `target` field.
+- `path` enum: in_session, invoke, invoke_chain, workflow, manual, cli. `responsible` is the dispatch target for non-cli paths; for cli, responsible is the action symbol and command is the literal invocation.
+- `accountable` is `human` in every block (visible reminder); the compiler hoists it to `governance.accountable: human` and never emits per-route accountable in routing-policy.yml.
+- classification_hints are advisory only — never code-dispatched (Forge does not keyword-match prompts into routes); the orchestrator and `forge route explain` may use/surface them.
+- `force_rules` resolve to known static-baseline rule IDs and cannot remove globally-required rules.
+- `Informed` uses the controlled record/surface vocabulary; `Consulted` is agent roles or evidence sources.
 - The file states plainly that the RACI is the human-authored SOURCE that compiles into routing policy (direction RACI -> policy), and removes language implying Markdown prose is the operational policy.
 
 Relations: #273, #253, #252, `seeds/forge-raci.md`.

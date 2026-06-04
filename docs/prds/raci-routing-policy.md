@@ -221,19 +221,83 @@ routes:
       - ops_check
 ```
 
-(`accountable: human` is the policy-level invariant, not repeated per route.)
+(`accountable: human` is the policy-level invariant in the `governance` header,
+not repeated per route. Each derived route also carries `force_rules` and
+advisory `classification_hints`, mirroring the RACI block; `command` appears only
+on `cli` routes. Example abbreviated for readability.)
 
-## Constrained RACI Format (forced first decision)
+## Constrained RACI Format (decided)
 
-Validate-first forces this: **you cannot validate loose prose.** So the first
-slice must pin the RACI's machine-readable shape — a constrained table, or a
-table plus embedded structure, or YAML frontmatter — chosen for the simplest
-reliable deterministic parse. This is a feature, not a tax: a constrained shape
-is precisely what stops the RACI drifting back into the mush that made it inert.
+Validate-first forces a deterministic shape — you cannot validate loose prose.
 
-This is the **key open design decision** in slice one. Everything (the compiler,
-both validators, the rendered view) keys off it. Preference: the simplest shape
-that parses deterministically and still reads as a governance table to a human.
+**Decision: one constrained _record block_ per route.** Not a pipe table (a
+~10-field Markdown table is hostile to humans and brittle for agents); not
+frontmatter or embedded YAML (those make YAML the real source and reduce the RACI
+to decoration — the inversion this epic rejects). A strict record block keeps the
+source visibly RACI-shaped for humans and trivially parseable for the compiler,
+and holds as long as the policy surface stays intentionally small.
+
+### Block shape
+
+```text
+### route: bug_fix
+
+classification_hints: bug, defect, failing test
+responsible: engineer
+accountable: human
+path: invoke_chain
+consulted: affected_code, existing_tests
+required_followups: test-engineer
+informed: user_summary, backlog:when=ticketed, docs_impact:when=operator_behavior_changed
+force_rules: requires_tests
+```
+
+A `cli` route carries `command` (the literal invocation); `responsible` is the
+CLI-action symbol:
+
+```text
+### route: ops_retry_orphan_repair
+
+classification_hints: retry_orphan, orphaned retry
+responsible: forge-ops-repair
+accountable: human
+path: cli
+command: forge ops repair
+consulted: ops_incident
+required_followups: none
+informed: user_summary, event_log, ops_check
+force_rules: ops_repair_ask
+```
+
+### Parsing rules (brutal and simple)
+
+- A route block starts with `### route: <route_key>`. Route keys must be unique.
+- Fixed lowercase field names. Required: `classification_hints`, `responsible`,
+  `accountable`, `path`, `consulted`, `required_followups`, `informed`,
+  `force_rules`.
+- `command` is required **iff** `path: cli`; forbidden otherwise.
+- `path` enum: `in_session`, `invoke`, `invoke_chain`, `workflow`, `manual`,
+  `cli`.
+- `responsible` is the dispatch target for non-`cli` paths (agent role / workflow
+  name / `human` / `orchestrator`); for `cli`, `responsible` is the action symbol
+  and `command` is what runs. There is no separate `target` field.
+- `accountable` must be `human` in every block — the visible governance reminder.
+  `raci validate` enforces it; the compiler **hoists it to the policy header**
+  (`governance.accountable: human`) and never emits per-route accountable in
+  `routing-policy.yml`.
+- Lists are comma-separated symbols. `none` is the only empty-list sentinel.
+- Conditionals use `name:when=condition` (e.g. `backlog:when=ticketed`).
+- No multiline field values. No prose-only fields. Free prose **outside** route
+  blocks is ignored by the compiler — so the RACI can still carry human context.
+- `classification_hints` are **advisory only**: the orchestrator may use them to
+  understand/choose a route and `forge route explain` may surface them, but Forge
+  code never keyword-matches user prompts into routes (preserves the "no NL
+  classification by code" out-of-scope line).
+- `force_rules` must resolve to known IDs in the static force-rule baseline
+  (Story 4) and cannot remove a globally-required rule.
+
+If the block ever proves too cramped, the answer is Story 8 (effective governance
+view) and Story 9 (edit tool) — **not** embedded YAML.
 
 ## Authoring Channels (all gated by the validator)
 
@@ -460,18 +524,22 @@ governance source; the derived routing policy becomes the orchestrator /
 provider-adapter operational source of truth; two validators keep every
 authoring path safe. Its own epic; #253 consumes it later.
 
-### Story 1 - Pin the constrained RACI format + clean its vocabulary
+### Story 1 - Implement the RACI record-block format + clean its vocabulary
 
-- Choose the deterministically-parseable RACI shape (constrained table / table +
-  embedded structure / frontmatter) — the key design decision everything keys
-  off.
-- `Accountable` is `human` in every row (and a policy-level invariant, not a
-  per-row column in the typed policy).
-- `Informed` uses the controlled record/surface vocabulary, not vague prose.
-- `Responsible` may be `human`, `orchestrator`, agent role, workflow, or CLI
-  action; `Consulted` may be agent roles or evidence sources.
+- Implement the **decided** format: one constrained record block per route (see
+  "Constrained RACI Format") with the brutal parsing rules. No pipe table, no
+  frontmatter, no embedded YAML.
+- Required fields per block: `classification_hints` (advisory), `responsible`,
+  `accountable` (must be `human`), `path`, `consulted`, `required_followups`,
+  `informed`, `force_rules`; plus `command` iff `path: cli`.
+- `Accountable` shows `human` in every block (visible reminder) but is hoisted to
+  the policy header by the compiler, never stored per-route in the typed policy.
+- `Informed` uses the controlled record/surface vocabulary; `Consulted` is agent
+  roles or evidence sources; `Responsible` is `human` / `orchestrator` / agent /
+  workflow / cli-action symbol.
 - The file states plainly that the RACI is the human-authored source that
-  compiles into the routing policy.
+  compiles into the routing policy; free prose outside route blocks is allowed
+  (ignored by the compiler).
 
 ### Story 2 - Define routing-policy schema
 
