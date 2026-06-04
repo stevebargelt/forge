@@ -1276,3 +1276,116 @@ test("runNext: a pipeline task cancelled mid-spawn stays failed; no task.complet
   assert.ok(types.includes("task.failed"), "task.failed (cancelled) emitted");
   assert.ok(!types.includes("task.completed"), "no task.completed after cancellation");
 });
+
+// ---------------------------------------------------------------------------
+// forge-site regression: reds aren't fed the artifact, and fanout build reds
+// never dispatch. Three independent gaps in the v2 red-feed path.
+// ---------------------------------------------------------------------------
+
+const FANOUT_REDS_WORKFLOW: Workflow = {
+  name: "test-fanout-reds",
+  description: "build fanout with authoritative reds on the parent",
+  inputs: [],
+  steps: [
+    { id: "plan", agent: "planner", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "verdict",
+      manual: false,
+      depends_on: ["plan"],
+      runtime: "claude",
+      reds: [
+        { agent: "red-wide", authority: "authoritative", gate_on_verdict: true },
+        { agent: "red-narrow", authority: "authoritative", gate_on_verdict: true },
+      ],
+      fanout: {
+        from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+        max_concurrency: 2,
+        failure_mode: "fail-phase",
+      },
+    },
+  ],
+};
+
+test("runNext: fanout reds — build fanout dispatches authoritative reds on the parent (forge-site Symptom B)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: FANOUT_REDS_WORKFLOW, title: "fanout reds", inputs: {}, projectDir: "/tmp/test-project" });
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", steps: ["s1", "s2"] } },
+    { matches: (id) => id.startsWith("task-red-build-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", diff_summary: "did the thing", files_modified: [] } },
+  ]);
+  await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
+  await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
+
+  const tasks = tasksForRun(runId);
+  const parent = tasks.find((t) => t.phase === "build" && t.parentId === undefined)!;
+  const reds = tasks.filter((t) => t.parentId === parent.id && t.agentRole.startsWith("red-"));
+  assert.equal(reds.length, 2, "build fanout must dispatch 2 reds on the parent (was 0 — the bug)");
+  assert.ok(reds.every((t) => t.status === "complete"));
+  assert.equal(parent.status, "awaiting_gate", "verdict gate + all reds pass → awaiting_gate");
+  assert.equal(verdictsForTask(parent.id).length, 2, "verdicts recorded for the fanout parent");
+});
+
+test("runNext: fanout reds — an authoritative red fail blocks the fanout parent (forge-site Symptom B)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: FANOUT_REDS_WORKFLOW, title: "fanout reds fail", inputs: {}, projectDir: "/tmp/test-project" });
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", steps: ["s1"] } },
+    { matches: (id) => id.startsWith("task-red-build-"), result: { status: "complete", verdict: "fail", confidence: 0.9, findings: [{ severity: "high", summary: "broken", evidence: "x" }] } },
+    { matches: (id) => id.startsWith("task-build-"), result: { status: "complete", diff_summary: "did the thing", files_modified: [] } },
+  ]);
+  await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
+  await runNext({ runId, workflow: FANOUT_REDS_WORKFLOW, dockerExec: exec });
+
+  const parent = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  assert.equal(parent.status, "blocked_by_red", "an authoritative red fail must block the fanout parent, not silently awaiting_gate");
+});
+
+test("runNext: reds receive the artifact in their package (forge-site Symptom A — artifact)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "red artifact", inputs: {}, projectDir: "/tmp/test-project" });
+  const exec = makeRoutingExec([
+    { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "the-reviewed-thing" } },
+    { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+  ]);
+  await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.parentId === undefined)!;
+  const red = tasks.find((t) => t.parentId === primary.id)!;
+  const pkg = readFileSync(join(taskDir(runId, red.id), "package.md"), "utf8");
+  assert.match(pkg, /## Artifact under review/, "red package must include the artifact section");
+  assert.match(pkg, /the-reviewed-thing/, "red package must contain the primary's result.json");
+  assert.ok(
+    Array.isArray((red.taskPackage.inputs as Record<string, unknown>).failureModes),
+    "failureModes input present (inputs no longer empty {})",
+  );
+});
+
+test("runNext: reds receive force-level anti-prompts as failureModes (forge-site Symptom A — failureModes)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const cdir = join(process.env.FORGE_HOME as string, "constraints");
+  mkdirSync(cdir, { recursive: true });
+  const cfile = join(cdir, "zz-test-antiprompt.md");
+  writeFileSync(
+    cfile,
+    ["---", "id: zz-test-antiprompt", "level: force", "roles: []", "workflows: []", 'antiPrompt: "Demonstrate the artifact is broken"', "---", "", "body", ""].join("\n"),
+  );
+  try {
+    const { runId } = startRun({ workflow: REDS_AUTH_ALL_PASS_WORKFLOW, title: "red failuremodes", inputs: {}, projectDir: "/tmp/test-project" });
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+      { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    ]);
+    await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+    const tasks = tasksForRun(runId);
+    const primary = tasks.find((t) => t.parentId === undefined)!;
+    const red = tasks.find((t) => t.parentId === primary.id)!;
+    const fm = (red.taskPackage.inputs as Record<string, unknown>).failureModes as string[];
+    assert.ok(fm.includes("Demonstrate the artifact is broken"), "force-level antiPrompt fed to the red as a failureMode");
+  } finally {
+    rmSync(cfile, { force: true });
+  }
+});

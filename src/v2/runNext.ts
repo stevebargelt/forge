@@ -36,6 +36,7 @@ import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
+import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -556,12 +557,25 @@ async function runOneRed(args: {
   dockerExec?: DockerExecFn;
 }): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
+  // failureModes: the force-level anti-prompts for the artifact under review.
+  // Scoped to the PRIMARY (blue) role/workflow/phase being audited, not the red's
+  // own role — a constraint like atlas-stack-rn lists roles [architecture-advisor,
+  // engineer]. red-narrow requires these as a `failureModes` input; without them it
+  // reports "missing required failureModes input" (forge-site bug).
+  const failureModes = filterConstraints(loadAllConstraints(join(homeForge(), "constraints")), {
+    role: args.step.agent ?? "",
+    workflow: args.workflow.name,
+    phase: args.step.id,
+    level: "force",
+  })
+    .map((c) => c.antiPrompt)
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
   const taskPackage: TaskPackage = {
     taskId: redTaskId,
     runId: args.runId,
     phase: args.step.id,
     role: args.red.agent,
-    inputs: {},
+    inputs: { failureModes },
     composedSystemPrompt: composeSystemPrompt({
       role: args.red.agent,
       workflow: args.workflow,
@@ -824,6 +838,38 @@ async function dispatchFanoutStep(args: {
   if (anyFailed && fanout.failure_mode === "fail-phase") {
     failTask(parentId, { runId: args.runId, kind: classify({}), error: "fanout: at least one child failed (failure_mode=fail-phase)", result: parentResult });
     return "failed";
+  }
+
+  // Reds run per-parent on the aggregate (FORGE-DEC / #139: not per-child). The
+  // single-step path does this; the fanout path used to skip it entirely, so the
+  // build phase's authoritative reds never dispatched and the verdict gate had no
+  // verdicts to resolve (forge-site bug). Mirror dispatchSingleStep's reds block.
+  if (step.reds.length > 0) {
+    setTaskStatus(parentId, "awaiting_red");
+    logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
+
+    const aggregate = await dispatchReds({
+      runId: args.runId,
+      workflow: args.workflow,
+      step,
+      primaryTaskId: parentId,
+      primaryResult: parentResult,
+      projectDir: args.projectDir,
+      designDir: args.designDir,
+      runMetadata: args.runMetadata,
+      dockerExec: args.dockerExec,
+    });
+
+    if (aggregate.authoritativeFail) {
+      setTaskStatus(parentId, "blocked_by_red");
+      logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
+      markTaskAwaitingGate(parentId, parentResult);
+      setTaskStatus(parentId, "blocked_by_red");
+      const runForNotify = getRun(args.runId);
+      if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
+      return "blocked_by_red";
+    }
+    return finalizePrimary(parentId, args.runId, step.gate, parentResult);
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult);
@@ -1195,7 +1241,7 @@ function emptyTaskPackage(taskId: string, runId: string, phase: string, role: st
 }
 
 function renderTaskPackage(tp: TaskPackage): string {
-  return [
+  const sections = [
     `# Task ${tp.taskId}`,
     ``,
     `Run: ${tp.runId}`,
@@ -1208,6 +1254,15 @@ function renderTaskPackage(tp: TaskPackage): string {
     JSON.stringify(tp.inputs, null, 2),
     "```",
     ``,
+  ];
+  // Reds receive the upstream artifact (the primary's result.json) here. The red
+  // seeds read it from `## Artifact under review` by name; without this section a
+  // red sees only empty inputs and reports "no artifact provided" (forge-site bug).
+  if (typeof tp.artifact === "string" && tp.artifact.trim().length > 0) {
+    sections.push(`## Artifact under review`, ``, "```json", tp.artifact, "```", ``);
+  }
+  return [
+    ...sections,
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json with at minimum the fields {"status": "complete"|"failed", ...role-specific output}.`,
