@@ -84,20 +84,34 @@ Only read BACKLOG.md whole if you genuinely need cross-ticket scanning. `forge b
 
 ### Step 1 — Classify the prompt
 
-Read `@~/.forge/forge-raci.md` if you haven't already this session. Then classify the prompt into ONE work type:
+Classify the prompt into ONE work type (the routing itself comes from the compiled policy in Step 2, not from memory):
 
 `strategy` · `planning` · `ticketing` · `implementation` · `testing` · `documentation` · `research` · `review` · `architecture` · `ui-design` · `orientation` · `meta`
 
 If the prompt spans multiple work types, **split and sequence** — decompose into discrete work items, route each in order. If classification is ambiguous after one read, ask ONE targeted question before proceeding.
 
-### Step 2 — Look up the RACI
+### Step 2 — Resolve the route from the compiled policy
 
-From `~/.forge/forge-raci.md`, identify:
-- **Responsible** — the agent that does the work (or you, for in-session work types)
-- **Accountable** — who owns the outcome (you, by default; user for `ui-design`)
-- **Consulted** — agents whose input you gather BEFORE the Responsible agent runs
-- **Informed** — downstream parties to notify after work completes (forge: usually file updates, not agent notifications)
-- **Path** — `in-session` / `invoke` / `pipeline`
+The RACI (`~/.forge/forge-raci.md`) is the human-readable SOURCE; the **compiled routing policy** (`~/.forge/routing-policy.yml`) is what you operationally route from. Map the classified work type to a concrete **route key** and look it up — don't route from memory:
+
+```bash
+forge route explain <route-key> --json
+```
+
+Work-type → route-key:
+- `implementation` → `implementation_full` (pipeline-worthy) or `implementation_quick` (small change)
+- `testing` → `testing_automation` or `testing_exploratory`
+- `documentation` → `documentation_durable` or `documentation_ephemeral`
+- `review` → one or more of `review_wide` / `review_narrow` / `review_frontend` / `review_backend` / `review_security`
+- everything else maps 1:1 (`strategy`, `planning`, `ticketing`, `research`, `architecture`, `ui-design`→`ui_design`, `orientation`, `meta`)
+
+`route explain --json` returns the full executable route — **route per that result**:
+- **`path`** — how to dispatch: `in_session` / `invoke` / `invoke_chain` / `workflow` / `manual` / `cli`.
+- **`responsible`** — who/what does the work (agent role, workflow name, CLI action, or `orchestrator`/`human`). **Accountable is always the human** — it's a policy-header invariant, not per-route.
+- **`required_followups`** — mandatory after the responsible work (e.g. `implementation_quick` → `test-engineer`).
+- **`consulted`** — run BEFORE the responsible work; **`informed`** — post-work closure targets, with `when=` conditions.
+
+The policy is DERIVED: if you (or the user) edit the RACI, run `forge route compile` to regenerate the policy before routing; `forge route validate` lints it against this host. For the non-mechanical calls the route fields can't express (specialist selection, full-vs-quick, the ui-design manual handoff), read the `Routing guidance:` prose in the RACI.
 
 ### Step 3 — Present the plan
 
