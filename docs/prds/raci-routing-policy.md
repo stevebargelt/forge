@@ -168,6 +168,7 @@ governance:
 
 routes:
   bug_fix:
+    classification_hints: [bug, defect, failing test]
     responsible: engineer
     path: invoke_chain
     required_followups:
@@ -183,6 +184,8 @@ routes:
           when: operator_behavior_changed
       - notification:
           when: run_policy_allows
+    force_rules:
+      - requires_tests
 
   implementation_full:
     responsible: feature
@@ -224,7 +227,8 @@ routes:
 (`accountable: human` is the policy-level invariant in the `governance` header,
 not repeated per route. Each derived route also carries `force_rules` and
 advisory `classification_hints`, mirroring the RACI block; `command` appears only
-on `cli` routes. Example abbreviated for readability.)
+on `cli` routes. The `bug_fix` route above is shown complete; the others are
+abbreviated for readability.)
 
 ## Constrained RACI Format (decided)
 
@@ -442,8 +446,10 @@ forge route explain --json <work-type>
 ```
 
 The orchestrator classifies a prompt, calls `forge route explain`, and routes per
-the structured answer (responsible / path / required followups / informed) — a
-real code path consuming the policy, not prose sitting in an LLM's context. Proof
+the **full executable route** it returns (responsible, path, `command` for `cli`,
+consulted, required_followups, informed-with-conditions, classification_hints,
+force_rules) — a real code path consuming the policy, not prose in an LLM's
+context. Proof
 of life: **editing the RACI demonstrably changes the route the orchestrator
 takes.** One consumed surface is enough to prove it; full provider-adapter
 generation (rendering `CLAUDE.md` etc. from policy) is the deferred downstream
@@ -543,10 +549,10 @@ authoring path safe. Its own epic; #253 consumes it later.
 
 ### Story 2 - Define routing-policy schema
 
-Add a typed schema for `routing-policy.yml`: route name, responsible, path,
-workflow/command/agent details, consulted, required followups, informed targets
-with optional conditions, force-level rule markers. `accountable` is a
-policy-header invariant.
+Add a typed schema for `routing-policy.yml`: route name, `classification_hints`
+(advisory), responsible, path, workflow/command/agent details, consulted,
+required followups, informed targets with optional conditions, `force_rules`
+markers. `accountable` is a policy-header invariant.
 
 ### Story 3 - Compile RACI to routing policy
 
@@ -573,11 +579,13 @@ point the orchestrator-template at the generated policy as its routing source fo
 at least one work-type. The orchestrator classifies a prompt, calls
 `forge route explain`, and routes per the structured answer.
 
-Acceptance: given a prompt, the orchestrator classifies -> `forge route explain`
--> routes per the returned policy (responsible / path / required followups /
-informed); **editing the RACI demonstrably changes the route taken.** One
-consumed surface is enough. This is distinct from Story 10 (full provider-adapter
-*generation*), which stays deferred.
+Acceptance: `forge route explain` returns the **full executable route**
+(responsible, path, `command` for `cli`, consulted, required_followups,
+informed-with-conditions, classification_hints, force_rules) — a CLI route
+without `command` is under-specified. Given a prompt, the orchestrator classifies
+-> `forge route explain` -> routes per the returned route; **editing the RACI
+demonstrably changes the route taken.** One consumed surface is enough. Distinct
+from Story 10 (full provider-adapter *generation*), which stays deferred.
 
 ### Story 6 - Orchestrator-mediated authoring (primary channel)
 

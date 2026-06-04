@@ -851,7 +851,7 @@ Relations: #273, #253, #252, `seeds/forge-raci.md`.
 Add a typed schema for the DERIVED `routing-policy.yml`.
 
 Acceptance:
-- Schema includes route name, responsible, path, workflow/command/agent details as appropriate, consulted, required followups, informed targets with optional conditions, and force-level rule markers.
+- Schema includes route name, classification_hints (advisory), responsible, path, workflow/command/agent details as appropriate, consulted, required followups, informed targets with optional conditions, and force_rules markers.
 - `accountable` is a policy-HEADER invariant fixed to `human` — NOT a per-row field. The schema enforces `human` at the header and rejects any per-row accountable.
 - Controlled vocabularies exist for responsible, consulted, informed, and path values.
 - Tests cover valid minimal policy, the header accountable invariant, a rejected per-row accountable, unknown values, conditional informed targets, and required followups.
@@ -987,7 +987,7 @@ The gate that CLOSES the inert-artifact risk — sequenced right after Story 5 (
 Ship `forge route explain` (with `--json`) and point the orchestrator-template at the generated policy as its routing source for at least one work-type. The orchestrator classifies a prompt, calls `forge route explain`, and routes per the structured answer — a real code path consuming the policy, not prose in an LLM's context.
 
 Acceptance:
-- `forge route explain <work-type>` and `--json` return the route: responsible / path / required followups / informed targets.
+- `forge route explain <work-type>` and `--json` return the FULL executable route: responsible, path, command (required for `path: cli`), consulted, required_followups, informed (with conditions), classification_hints, and force_rules. A CLI route without command is under-specified.
 - Orchestrator-template instructs the orchestrator to consume `forge route explain` as the routing source (at least one work-type; ideally all).
 - Proof of life: editing the RACI demonstrably CHANGES the route the orchestrator takes (test: change a route in the RACI, recompile, `route explain` reflects it, orchestrator routes differently).
 - Distinct from #283 (Story 10, full provider-adapter generation), which stays deferred.
