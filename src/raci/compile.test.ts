@@ -100,3 +100,45 @@ test("the real seeds/forge-raci.md compiles and validates", () => {
   assert.equal(policy.governance.accountable, "human");
   assert.ok(Object.keys(policy.routes).length >= 19);
 });
+
+test("representative seed routes compile to the expected shape", () => {
+  const policy = compileRaciDocument(readFileSync(SEED_PATH, "utf8"));
+
+  const implFull = policy.routes.implementation_full;
+  assert.ok(implFull);
+  assert.equal(implFull.responsible, "feature");
+  assert.equal(implFull.path, "workflow");
+  assert.equal(implFull.command, undefined);
+  assert.deepEqual(implFull.informed, [
+    { name: "user_summary" },
+    { name: "backlog", when: "ticketed" },
+    { name: "docs_impact", when: "operator_behavior_changed" },
+  ]);
+
+  const implQuick = policy.routes.implementation_quick;
+  assert.ok(implQuick);
+  assert.equal(implQuick.responsible, "engineer");
+  assert.equal(implQuick.path, "invoke_chain");
+  assert.deepEqual(implQuick.consulted, ["affected_code", "existing_tests"]);
+  assert.deepEqual(implQuick.required_followups, ["test-engineer"]);
+
+  const uiDesign = policy.routes.ui_design;
+  assert.ok(uiDesign);
+  assert.equal(uiDesign.responsible, "prompt-author");
+  assert.equal(uiDesign.path, "invoke");
+  assert.deepEqual(uiDesign.consulted, ["design_artifacts"]);
+  assert.deepEqual(uiDesign.informed, [
+    { name: "user_summary" },
+    { name: "handoff_notes", when: "session_boundary" },
+  ]);
+
+  const orientation = policy.routes.orientation;
+  assert.ok(orientation);
+  assert.equal(orientation.responsible, "orchestrator");
+  assert.equal(orientation.path, "in_session");
+
+  const research = policy.routes.research;
+  assert.ok(research);
+  assert.equal(research.responsible, "research-specialist");
+  assert.equal(research.path, "invoke");
+});
