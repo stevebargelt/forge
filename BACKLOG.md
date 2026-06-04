@@ -854,7 +854,7 @@ Acceptance:
 - Schema includes route name, classification_hints (advisory), responsible, path, workflow/command/agent details as appropriate, consulted, required followups, informed targets with optional conditions, and force_rules markers.
 - `accountable` is a policy-HEADER invariant fixed to `human` — NOT a per-row field. The schema enforces `human` at the header and rejects any per-row accountable.
 - Controlled vocabularies exist for responsible, consulted, informed, and path values.
-- Tests cover valid minimal policy, the header accountable invariant, a rejected per-row accountable, unknown values, conditional informed targets, and required followups.
+- Tests cover valid minimal policy, the header accountable invariant, a rejected per-row accountable, unknown values, conditional informed targets, required followups, classification_hints shape (advisory list, optional, no conditionals), and force_rules shape (list of symbols that must resolve to known static-baseline rule IDs; unknown rule ID rejected).
 
 Relations: #273.
 
