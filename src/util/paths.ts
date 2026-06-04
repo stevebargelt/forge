@@ -9,6 +9,11 @@ export const CONSTRAINTS_DIR = join(FORGE_HOME, "constraints");
 // The installed host RACI source (authoring view). `forge raci validate` lints
 // this by default.
 export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
+// Installed workflows; the derived routing policy. `forge route validate`
+// resolves workflow symbols against WORKFLOWS_DIR and lints ROUTING_POLICY_PATH
+// by default.
+export const WORKFLOWS_DIR = join(FORGE_HOME, "workflows");
+export const ROUTING_POLICY_PATH = join(FORGE_HOME, "routing-policy.yml");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 
