@@ -331,6 +331,12 @@ APIs/data/business-logic, `review_security` for auth/crypto/secrets/input
 validation. Selected reviews run in parallel; verdicts aggregate at the
 orchestrator level.
 
+**Routing guidance: `research` target.** Today `research` dispatches the installed
+`research-specialist` agent (`path: invoke`). When #251 lands a v2-native
+`research-synthesis` workflow, repoint this route to that workflow
+(`path: workflow`, `responsible: research-synthesis`). Kept on today's agent until
+then.
+
 **Routing guidance: multi-type prompts — split and sequence.** "Build feature X
 and document it" decomposes into `implementation_full` then `documentation_durable`
 (on the same run, after implementation). When implementation changes

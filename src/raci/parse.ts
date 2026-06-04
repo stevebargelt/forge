@@ -23,6 +23,9 @@ import { type RouteRecord, type RoutePath, type InformedTarget, ROUTE_PATHS } fr
 const ROUTE_HEADER_RE = /^### route: (.+)$/;
 const FIELD_RE = /^([a-z_]+): (.+)$/;
 const WHEN_SEP = ":when=";
+/** A symbol: lowercase letters, digits, hyphen, underscore. Route keys, agent
+ *  roles, workflow names, evidence sources, informed targets + conditions. */
+const SYMBOL_RE = /^[a-z0-9_-]+$/;
 
 const REQUIRED_FIELDS = [
   "classification_hints",
@@ -60,6 +63,9 @@ export function parseRaci(content: string): RouteRecord[] {
     }
 
     const routeKey = header[1]!.trim();
+    if (!SYMBOL_RE.test(routeKey)) {
+      throw new RaciParseError(`malformed route key "${routeKey}" (expected [a-z0-9_-]+)`);
+    }
     if (seenKeys.has(routeKey)) {
       throw new RaciParseError(`duplicate route key: ${routeKey}`);
     }
@@ -106,6 +112,13 @@ function buildRoute(routeKey: string, fields: Map<string, string>): RouteRecord 
     );
   }
 
+  const responsible = fields.get("responsible")!;
+  if (!SYMBOL_RE.test(responsible)) {
+    throw new RaciParseError(
+      `route ${routeKey}: responsible "${responsible}" is malformed (expected [a-z0-9_-]+)`,
+    );
+  }
+
   const path = fields.get("path")!;
   if (!(ROUTE_PATHS as readonly string[]).includes(path)) {
     throw new RaciParseError(
@@ -123,31 +136,72 @@ function buildRoute(routeKey: string, fields: Map<string, string>): RouteRecord 
 
   return {
     route: routeKey,
-    classificationHints: parseList(fields.get("classification_hints")!),
-    responsible: fields.get("responsible")!,
+    // classification_hints are advisory free phrases (spaces allowed), so they
+    // skip the symbol charset check — but still reject empty items / mixed none.
+    classificationHints: splitList(routeKey, "classification_hints", fields.get("classification_hints")!),
+    responsible,
     accountable: "human",
     path: path as RoutePath,
     ...(hasCommand ? { command: fields.get("command")! } : {}),
-    consulted: parseList(fields.get("consulted")!),
-    requiredFollowups: parseList(fields.get("required_followups")!),
-    informed: parseInformed(fields.get("informed")!),
-    forceRules: parseList(fields.get("force_rules")!),
+    consulted: parseSymbolList(routeKey, "consulted", fields.get("consulted")!),
+    requiredFollowups: parseSymbolList(routeKey, "required_followups", fields.get("required_followups")!),
+    informed: parseInformed(routeKey, fields.get("informed")!),
+    forceRules: parseSymbolList(routeKey, "force_rules", fields.get("force_rules")!),
   };
 }
 
-/** Comma-separated symbols; `none` is the only empty-list sentinel. */
-function parseList(value: string): string[] {
+/** Split a comma-separated list. `none` is the only empty-list sentinel and must
+ *  stand alone. Empty items (stray/leading/trailing commas) are rejected — the
+ *  grammar is brutal, not forgiving. Item-level charset is NOT checked here
+ *  (classification_hints are free phrases); see parseSymbolList for symbol fields. */
+function splitList(routeKey: string, field: string, value: string): string[] {
   if (value === "none") return [];
-  return value
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const items = value.split(",").map((s) => s.trim());
+  for (const item of items) {
+    if (item === "") {
+      throw new RaciParseError(
+        `route ${routeKey}: field "${field}" has an empty list item — check for stray/leading/trailing commas; use "none" for an empty list`,
+      );
+    }
+    if (item === "none") {
+      throw new RaciParseError(
+        `route ${routeKey}: field "${field}" mixes "none" with other values — "none" must stand alone`,
+      );
+    }
+  }
+  return items;
 }
 
-function parseInformed(value: string): InformedTarget[] {
-  return parseList(value).map((item) => {
+/** A symbol-only list: every item must match SYMBOL_RE. */
+function parseSymbolList(routeKey: string, field: string, value: string): string[] {
+  const items = splitList(routeKey, field, value);
+  for (const item of items) {
+    if (!SYMBOL_RE.test(item)) {
+      throw new RaciParseError(
+        `route ${routeKey}: field "${field}" has a malformed symbol "${item}" (expected [a-z0-9_-]+)`,
+      );
+    }
+  }
+  return items;
+}
+
+/** informed targets: `name` or `name:when=condition`. Both name and condition
+ *  must be symbols. */
+function parseInformed(routeKey: string, value: string): InformedTarget[] {
+  return splitList(routeKey, "informed", value).map((item) => {
     const idx = item.indexOf(WHEN_SEP);
-    if (idx === -1) return { name: item };
-    return { name: item.slice(0, idx), when: item.slice(idx + WHEN_SEP.length) };
+    const name = idx === -1 ? item : item.slice(0, idx);
+    const when = idx === -1 ? undefined : item.slice(idx + WHEN_SEP.length);
+    if (!SYMBOL_RE.test(name)) {
+      throw new RaciParseError(
+        `route ${routeKey}: informed target "${name}" is malformed (expected [a-z0-9_-]+)`,
+      );
+    }
+    if (when !== undefined && !SYMBOL_RE.test(when)) {
+      throw new RaciParseError(
+        `route ${routeKey}: informed condition "${when}" on "${name}" is malformed (expected [a-z0-9_-]+)`,
+      );
+    }
+    return when === undefined ? { name } : { name, when };
   });
 }

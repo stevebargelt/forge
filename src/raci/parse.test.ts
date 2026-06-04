@@ -136,3 +136,67 @@ test("empty document yields no routes", () => {
   assert.deepEqual(parseRaci(""), []);
   assert.deepEqual(parseRaci("# just prose\n\nnothing here\n"), []);
 });
+
+// --- strict list / symbol grammar ---
+
+test("empty list item (double comma) throws", () => {
+  const block = BUG_FIX.replace(
+    "consulted: affected_code, existing_tests",
+    "consulted: affected_code,, existing_tests",
+  );
+  assert.throws(() => parseRaci(block), /empty list item/);
+});
+
+test("leading comma throws", () => {
+  const block = BUG_FIX.replace(
+    "consulted: affected_code, existing_tests",
+    "consulted: , affected_code",
+  );
+  assert.throws(() => parseRaci(block), /empty list item/);
+});
+
+test("trailing comma throws (classification_hints too)", () => {
+  const block = BUG_FIX.replace(
+    "classification_hints: bug, defect, failing test",
+    "classification_hints: bug,",
+  );
+  assert.throws(() => parseRaci(block), /empty list item/);
+});
+
+test("`none` mixed with other values throws", () => {
+  const block = BUG_FIX.replace("force_rules: requires_tests", "force_rules: none, requires_tests");
+  assert.throws(() => parseRaci(block), /"none" must stand alone/);
+});
+
+test("malformed symbol in a symbol-only field throws", () => {
+  const block = BUG_FIX.replace(
+    "consulted: affected_code, existing_tests",
+    "consulted: affected code",
+  );
+  assert.throws(() => parseRaci(block), /malformed symbol "affected code"/);
+});
+
+test("classification_hints still allow spaces (free phrases)", () => {
+  const [r] = parseRaci(BUG_FIX);
+  assert.deepEqual(r!.classificationHints, ["bug", "defect", "failing test"]);
+});
+
+test("malformed informed target throws", () => {
+  const block = BUG_FIX.replace(/^informed: .+$/m, "informed: User_Summary");
+  assert.throws(() => parseRaci(block), /informed target "User_Summary" is malformed/);
+});
+
+test("empty when= condition throws", () => {
+  const block = BUG_FIX.replace(/^informed: .+$/m, "informed: backlog:when=");
+  assert.throws(() => parseRaci(block), /informed condition "" on "backlog" is malformed/);
+});
+
+test("malformed route key throws", () => {
+  const block = BUG_FIX.replace("### route: bug_fix", "### route: Bug Fix");
+  assert.throws(() => parseRaci(block), /malformed route key "Bug Fix"/);
+});
+
+test("malformed responsible throws", () => {
+  const block = BUG_FIX.replace("responsible: engineer", "responsible: red wide");
+  assert.throws(() => parseRaci(block), /responsible "red wide" is malformed/);
+});
