@@ -20,10 +20,12 @@ fi
 # Trap cleans up the staged cert even on failure.
 trap 'rm -f "$HERE/corp-root.pem"' EXIT
 
-# Pinned to linux/amd64 (#128): Google Chrome / Chromium-for-Testing don't
-# ship Linux/arm64 binaries. The browser-tools skill needs headless Chrome on
-# :9222. On Apple Silicon, this image runs under Rosetta — acceptable Chrome
-# perf trade-off vs. dragging Playwright's bundled arm64 build back in just
-# for its Chromium. amd64 hosts run native.
-docker build --platform linux/amd64 -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
+# Native build (#187): no --platform pin, so the image is built for the host's
+# architecture (arm64 on Apple Silicon, amd64 on Linux/CI) and runs natively —
+# no Rosetta tax. The amd64 pin only ever existed to satisfy the amd64-only
+# Chrome-for-Testing for browser-tools; #187 repointed that at Playwright's
+# arm64-capable chromium, so the pin's sole justification is gone. If you ever
+# need a cross-arch image (e.g. amd64 from this Mac for a Linux server), use
+# `docker buildx build --platform linux/amd64` explicitly for that one-off.
+docker build -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
 echo "Built agent-dev-worker."
