@@ -5,37 +5,37 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-03.**
+**Last session ended 2026-06-04.**
 
-**Where we left off:** Built the repair half of the Ops substrate — `forge ops repair <task-id> [--dry-run] [--json]`: a shape-guarded fix for `retry_orphan` (marks a pending task stranded under a terminal run as failed/orphaned, mirroring reconcile's vocab; run left untouched). `detectRetryOrphan` now recommends it (autonomy "ask"). The detect→recommend→repair loop is closed for retry_orphan. 7 new tests (947 total), dry-run-validated against the 5 real orphans. All pushed to origin/main.
+**Where we left off:** Long session. Cleared the forge-site bug reports (Issues 1 & 3), did a full docs/ audit + cull, made docs a real pipeline phase, removed the container arch friction (native arm64), and scoped+spiked the pi (pi.dev) integration epic. Last concrete thread: just closed the #259 pi spike; offered to start #260 (add pi to the agent image) next — user has not yet said go on it.
 
-**Picked up next (priority):**
-1. **5 live retry_orphans are detected but NOT yet repaired** (non-ticket action; needs user authorization — they live in OTHER projects: pocket-v1, ticket-5-data-pusher, web-admin). `forge ops check --all --json | jq -r '.[].taskId'` lists them; `forge ops repair <id>` clears each (dry-run first to eyeball). User chose push-not-repair last session because it mutates other projects' state.
-2. **#250 continue — next detectors.** Next db-confirmed pair: `gate_wait_exceeded`/`red_wait_exceeded` (timestamp: `task.awaiting_gate`→`gate.decided`) and `verdict_authority_conflict` (advisory-fail + authoritative-pass). Then db-candidate pair: `run_stalled` (MUST exclude `awaiting_*` states) and `task_long_running` (wall-clock). The detector + repair patterns are both established now.
-3. **#232 prevention half still open.** The repair path shipped (`forge ops repair`), but the PREVENTION (retry/next shouldn't strand a task in the first place — reactivate the run on retry-attach, or disallow with a clear message) is not done. Decide whether #232 stays open for prevention or splits into a separate ticket.
-4. **Docs-drift fix-docs renames still NOT routed** (non-ticket; from audit run wf_359e548a-4dd): `feature-design-*`→`feature-ui-design-*` in `how-to-new-feature.md` + `how-to-new-agent.md`; a dead `src/workflows/*.ts` path + `implementer` agent ref; `ui-design`/`ui-design-revise` in `concepts.md:42`. → documentation-maintainer. (`investigation` refs resolve via #251.)
-5. **#247** (validation gap: forge `complete` ≠ CI-green); **#251/#252** (research-synthesis workflow + collaborative config setup — larger design); **#245** still blocked on the CyberArk corp Mac.
+**Picked up next:**
+1. **pi epic #258 — Crawl phase.** Critical path: **#260** (add `@earendil-works/pi-coding-agent` to docker/agent-dev-worker.Dockerfile) → **#261** (pi runtime YAML + spawn invocation, mirrors codex) → **#262** (usage parser — also do the LIVE event-stream capture here to validate the schema) → **#263** (system-prompt/context injection — the hard one; likely wants an architecture-advisor consult, relates #253) → **#264** (first role end-to-end). The spike's schema findings are in `docs/prds/pi-258/spike-259-pi-json-event-schema.md` — read it before #262.
+2. **#245 corp-Mac validation — NON-TICKET hardware-verification thread (not a code task).** The shadow-volume fix is code-complete (02ca0b9, FORGE-DEC-019) and validated on the clean Mac (ext4 not grpcfuse, host modules hidden, agent writes, no leak). #245 stays OPEN until Steve confirms the silent SIGKILL is gone on the CyberArk-EDR Mac (run a code agent against a Node project there, then a `forge` cmd on the host — no exit 137). Then close #245.
+3. **Standing backlog:** #247 (`complete` ≠ CI-green — the validation sibling of the docs-phase work), #250 (ops detectors continuation), #251/#252 (research-synthesis workflow + collaborative config), #272 (small: implementer seeds should tell agents node_modules is now a fresh container-local volume — install before build; #245 companion).
 
 **External state to remember:**
-- **Untracked file `docs/prds/forge-website-platform.md`** appeared this session (user-created, out-of-band). Deliberately left uncommitted — decide whether to track it.
-- **5 live `retry_orphan`s in the host DB** (see Picked-up-next #1).
-- **`disableWorkflows: true` in `~/.claude/settings.json`** — "workflow" no longer triggers the harness Workflow tool. (Real key is `disableWorkflows`; `workflowKeywordTriggerEnabled` does NOT exist.)
-- Markdown-only agents (documentation-maintainer) are corruption-safe forge-on-forge.
+- **The agent image was rebuilt this session** (native arm64; + `sudo` installed; + entrypoint chowns the #245 node_modules shadow volume). It's live as `agent-dev-worker` — every project's next agent run uses it. No rebuild needed unless the Dockerfile changes again (e.g. #260 adds pi → will need a rebuild).
+- forge-site repo (/Users/stevebargelt/code/forge-site) is a separate project forge runs against; its bug reports drove Issues 1 & 3 this session. There may be an "Issue 2" the user hasn't pasted yet.
 
 **Decisions worth not relitigating:**
-- **retry_orphan repair = clean up (mark failed/orphaned), NOT reactivate-and-run** (chose option A; reactivating a terminal run crosses into #232 prevention / retry-lifecycle redesign).
-- **`forge ops repair` is shape-guarded on purpose — deliberately NOT a reuse of `forge cancel`.** Refusing anything that isn't exactly a pending-task-under-terminal-run is the trust point ("repair one impossible state," not "cancel any task").
-- **Repair autonomy = "ask"** — orchestrator surfaces + waits; `/orient` reports incidents, never repairs.
-- **`inconsistent_run_state` stays `repair_unavailable`** — its true repair needs live container-liveness confirmation (separate slice).
-- **Ops is the ORCHESTRATOR's substrate, not a human dashboard** — actions are orchestrator-mediated command-plans, not copyable-for-human commands.
-- **Ops uses `getDb({readOnly:true})`, not a forked dashboard-style Database**; constraint = read-only handle + no mutating-helper imports. `confidence` gates `autonomy` (db-candidate ≠ auto-safe).
-- **investigation → BUILD** (#251 research-synthesis), not deprecate. **Verify ticket refs via `forge backlog show`** — don't infer existence from what you filed (the user files tickets too).
+- **Docs is now a guaranteed pipeline PHASE (#257), not a hard gate.** The #242/#243 docs-drift hard-gate approach was SUPERSEDED, not completed. #243 (L2 grep precision) is no longer on the enforcement critical path — reframe/downgrade it, don't pursue the grep-gated block. The docs-impact advisory (src/v2/docs-impact.ts) is now just a cheap pre-check + quick-chain backstop.
+- **#259 schema came from pi's published .d.ts (authoritative), not a live run** — better for the parser than one noisy capture. Key finding: pi pre-computes cost (`usage.cost.total`), so the pi usage parser records cost directly — NO forge price table needed for pi runs. Live capture deferred to #262 (credential-gated; no API keys in env, OAuth creds are in other tools' formats pi can't read).
+- **GPIO/Pixtron flawed-logic thread: resolved Pixtron-side, NO forge implication.** Closed — don't chase it.
+- **synthesizer seed is KEPT pending #251** (dormant-by-decision; don't auto-cull it in a seed sweep). qa-engineer WAS culled (#179).
+- **#245 volume strategy: anonymous (per-run), darwin+rw only.** Not named/persistent; escape hatch FORGE_NO_NM_SHADOW=1. Validation requires the corp Mac — do NOT close on clean-Mac testing.
+- **#187 build: native-only, no multi-arch buildx** (single Apple-Silicon Mac, no CI consumer). browser-tools repointed at Playwright's arm64 chromium.
+- **Found+fixed a latent bug:** the agent image configured NOPASSWD sudoers (DEC-009) but never installed `sudo` — now installed (in the #245 commit).
+- **Tooling gotcha:** don't put backticks in `forge invoke --task "..."` (zsh command-substitutes them, silently mangling the agent prompt); use a single-quoted heredoc. Saved to memory.
 
-**Shipped (for reference — git log is canonical):**
-- #250 repair half — `forge ops repair` (shape-guarded, run-locked, `task.failed`+`failure_kind=orphaned`+`task.reconciled`/`retry_orphan_repaired` events); `detectRetryOrphan` recommends it.
-- Earlier this session: #250 first slice (`forge ops check` + /orient consumer), #246 (operator surfaces project-configurable), #248 Fix A (handoff/orient ticket reconciliation). Filed #247/#249/#250; user filed #251/#252.
-
-Fixed high-sev silent work-loss bug (commit fb97c69): buildDockerArgs never passed -w, so containers ran with cwd=/workspace (image WORKDIR, ephemeral) while project is mounted at /project. cwd-relative writes (scaffolders: pnpm create/install, node_modules, dist) were discarded on container removal despite status:complete. Fix derives workdir from the project mount's container path → -w /project. claude-* runtimes only (codex already targeted /project). Filed #254 for the defense-in-depth guardrail (fail when result.json claims files_modified but bind mount unchanged). NOTE: the live forge-site run run-scaffold-astro-starlight-site-first-slice-bones-a9716b (other workspace, /Users/stevebargelt/code/forge-site) is awaiting_gate with build-0's 15 files already lost — needs re-dispatch of the scaffold step AFTER the agent image picks up new spawns; that run is the forge-site orchestrator's recovery.
+**Shipped (for reference — git log is canonical, 18 commits ahead of origin, UNPUSHED):**
+- #257 docs as a pipeline phase (3d99ebe + operator-doc, template, CLAUDE.md re-render, docs-impact note commits)
+- #179 removed orphaned qa-engineer seed + fixed stale how-to docs (ebf919d, a64649a); plus the docs cull/relocate (4373585, af9c6cb, 6cafe6d)
+- #269 reds fed the artifact + failureModes + fanout reds dispatch (435a9e6); #271 frontend Playwright fallback (ef51999)
+- #187 native arm64 image (ad1126c) + FORGE-DEC-018 (4de51f0)
+- #245 node_modules shadow volume (02ca0b9) + FORGE-DEC-019 (28814ba) — code-complete, NOT closed
+- #259 pi spike findings (1e5e019)
+- Filed this session (active): epic #258 + pi sub-stories #260–#268, #270 (reds ## Spec section), #272 (seed node_modules guidance)
 
 ## Active
 
@@ -438,19 +438,6 @@ Two related rough edges, both hit 2026-05-29 while filing #173.
 **Relation:** distinct from #125 (which is "implementer seeds don't *mention* forge-test"). Here forge-test IS used and picks the wrong runner. #125 is documentation; this is forge-test's runner assumption.
 
 
-### #179 — Cleanup: qa-engineer is an orphaned #164 leftover — remove seed + fix stale docs (pipeline verify is test-engineer now)
-**Leftover from #164** (closed), which moved the pipeline verify phase from `qa-engineer` to `test-engineer` and intended to "rework qa-engineer -> manual-qa (rename or deprecate)" + "update workflow definitions referencing qa-engineer." The workflows were updated (all three `feature*.yml` now use `agent: test-engineer` for verify), but the deprecation tail was left:
-
-- `seeds/agents/qa-engineer/` seed dir still exists (no current workflow references it; confirmed via grep).
-- `docs/quick-start.md:147` still says the pipeline verify phase is `qa-engineer` — stale, should read `test-engineer`.
-- `docs/SCHEMA-CONTRACT.md:109` still documents a `qa-engineer` role.
-- (Historical PRD drafts under `docs/prds/yaml-orchestrator-116/` also mention it — those are frozen design docs, leave as-is.)
-
-**Why it matters:** orphaned seeds + stale docs are exactly the contract-vs-behavior drift this session keeps surfacing — a future session reading quick-start would think verify is qa-engineer, contradicting the workflows + the orchestrator template. Old pipeline runs in the DB show `qa-engineer` verify tasks writing 0 test files; that role is dead in the current pipeline.
-
-**Fix:** remove the `qa-engineer` seed dir (or, if any value remains, fold it into `manual-qa` per #164's intent), update `quick-start.md:147` and `SCHEMA-CONTRACT.md:109` to `test-engineer`. Small, isolated, docs + seed only.
-
-
 ### #184 — Auth-profile polish (optional follow-ups from #176)
 Optional refinements after the #176 auth-profile epic shipped (none blocking):
 
@@ -475,28 +462,6 @@ This is the #173 Tier-2 "dead-container / parent-died orphan" case that was expl
 **Operational note:** don't wrap `forge invoke` in an external `timeout` — rely on the per-agent idle-watchdog (10m) instead; an external timeout that kills the parent orphans the task. For parallel panels, launch and let the idle-watchdog bound each agent.
 
 Relates to #173 (idle-watchdog, closed).
-
-
-### #187 — Native arm64 (multi-arch) agent image — drop the amd64 Rosetta tax on Apple Silicon
-**Broad perf win.** docker/build.sh pins `--platform linux/amd64`, so on Apple Silicon EVERY agent container runs under Rosetta/qemu emulation (2-4x slower CPU). This taxes every run — builds, tests, browser work, the review panel that triggered this investigation (red-wide blew past a 10-min ceiling largely due to emulation + contention).
-
-**Sole root cause:** the headless Chrome baked for the browser-tools skill (`:9222`) comes from `@puppeteer/browsers install chrome` (Chrome for Testing), which Google publishes for linux64 only — no official Linux/arm64 binary. build.sh pins amd64 for that one dependency; everything else pays the tax as collateral.
-
-**Why it's achievable now (and the codebase contradicts itself):** build.sh claims Chromium-for-Testing has no arm64; the Dockerfile comment (lines 43-44) claims it "ships both arm64 and amd64" and that we "need multi-arch long-term." Chrome FOR TESTING is genuinely amd64-only on Linux, BUT:
-- #180 already bakes Playwright's chromium into the image (project E2E). Playwright's chromium DOES ship linux-arm64.
-- browser-tools uses puppeteer-core, which can drive any chromium via `executablePath`.
-So: point browser-tools at Playwright's (already-present, arm64-capable) chromium, drop the @puppeteer/browsers Chrome-for-Testing dependency, and the amd64 pin's only justification is gone. The thing build.sh was avoiding ("dragging Playwright's arm64 chromium back in") is already done by #180.
-
-**Proposed:**
-- Repoint browser-tools' `:9222` Chrome to Playwright's chromium (executablePath), removing the @puppeteer/browsers chrome install. Verify browser-start/nav/screenshot + auth-inject all work against it.
-- Build the image native arm64 on Apple Silicon; multi-arch (buildx) so amd64 hosts (CI/Linux servers) still get amd64.
-- Reconcile/remove the contradictory amd64-vs-arm64 comments in build.sh + Dockerfile; update the #128 decision record.
-
-**Verify:** agent-entrypoint.sh launches the right chromium binary on :9222; better-sqlite3/sharp/Go toolchain build native arm64 (all arch-agnostic or arm64-available); the browser-tools skill is host-mounted (pi-skills) so it's arch-neutral — only the in-container chromium binary path matters.
-
-**Caveat:** quantify the actual win per step before committing effort — pure-reasoning agents are network-bound (Claude API) and gain less; CPU/browser/build/test-heavy steps gain most. But the review panel evidence suggests it's material.
-
-Relates to #128 (container Chrome + retire Playwright MCP), #180 (Playwright chromium baked in).
 
 
 ### #190 — Auth-profile review findings + expiry/refresh-token fix (consolidated)
@@ -737,7 +702,192 @@ spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004
 **Relations:** #252 (collaborative setup / generated config), #250 (`forge ops check --json` is the right kind of provider-neutral primitive), #248 (`/orient` + `/handoff` reconciliation lives today in Claude slash-command prose), #225 (bounded provider/profile choice), provider-agnostic model work / AWN-7.
 
 
+### #258 — [EPIC] Integrate pi (pi.dev) as a third agent runtime — multi-provider + local models
+**Goal:** Add pi (pi.dev, npm `@earendil-works/pi-coding-agent`) as a third agent runtime alongside claude and codex. pi is a container CLI that runs headless (`pi -p --mode json`) emitting JSONL events — codex-shaped — so it slots into forge's existing provider/runtime seam (AWN-7, #220/#224). One integration unlocks pi's 15+ providers (Google, Mistral, Groq, Cerebras, xAI, …) plus local models (Ollama/LM Studio/vLLM via `~/.pi/agent/models.json`) without a native CLI per provider.
+
+**Why:** Multi-provider + local-model access in one integration; cheap/fast reds & triage (Groq/Cerebras/Ollama) fitting the cost-conscious pre-launch stance; reuses the pi-skills forge already mounts.
+
+**Integration surface:**
+- Docker image: `npm i -g --ignore-scripts @earendil-works/pi-coding-agent` in `agent-dev-worker.Dockerfile`.
+- Runtime YAML: `seeds/runtimes/pi-*.yml` mirroring `codex-subscription.yml`.
+- Invocation: `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y`.
+- Auth: env-var API keys per provider (ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY…); OAuth via pre-seeded `~/.pi/agent/auth.json` (like the forge-claude-oauth volume).
+- Usage parser: parse JSONL; `agent_end` = completion; token-usage fields are UNDOCUMENTED (see the spike).
+- Model mapping: model-policy resolves (provider, model) then passes pi `--provider/--model`; needs an alias-translation layer.
+- System prompt: `composeSystemPrompt` -> pi `SYSTEM.md`/prompt (the novel mapping; relates to #253 adapter surfaces).
+- Errors: pi `auto_retry`/`errorMessage` events -> `model_error` (#228).
+
+**Phasing:** Spike (de-risk usage fields) -> Crawl (minimal pi-apikey runtime, one role end-to-end) -> Walk (model-policy, OAuth, error classification) -> Run (local models).
+
+**Sub-stories:** filed as children that reference this epic (search backlog for "pi runtime" / "pi:").
+
+**Related:** #220 #224 #226 #228 #229 #253 (provider seam + adapter surfaces), #129 (pi-skills).
+
+**Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
+
+
+### #260 — pi: add pi to the agent-dev-worker Docker image
+**Phase:** Crawl. Part of #258.
+Install pi in `docker/agent-dev-worker.Dockerfile` (`npm i -g --ignore-scripts @earendil-works/pi-coding-agent`, or `pi.dev/install.sh`).
+**Acceptance:** image builds; `pi --version` runs as the agent UID (1000); image-size delta noted. Flag that `forge upgrade` does not auto-rebuild the image (#229), so rollout needs a manual rebuild.
+
+
+### #261 — pi: runtime YAML + spawn invocation (env-var API-key mode)
+**Phase:** Crawl. Part of #258.
+Add `seeds/runtimes/pi-apikey.yml` mirroring `codex-subscription.yml`; wire spawn to run `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y` and capture stdout JSONL. Auth: pass the provider API key as an env var into the container.
+**Acceptance:** a `forge invoke` bound to the pi runtime dispatches a container that runs pi and returns captured output.
+**Depends on:** Docker-image story.
+
+
+### #262 — pi: usage-parser hook (parse JSONL events)
+**Phase:** Crawl. Part of #258.
+Implement a provider-keyed usage parser for pi's JSONL (per the spike's field mapping), extracting tokens/model into forge's usage record — same pattern as the codex parser (#224).
+**Acceptance:** parser unit-tested against the spike's committed sample stream; a usage row is recorded for a pi task.
+**Depends on:** spike, runtime story.
+
+
+### #263 — pi: system-prompt / context injection mapping
+**Phase:** Crawl (the novel design work). Part of #258.
+Map `composeSystemPrompt` + constraints into pi. pi loads context from `.pi/SYSTEM.md` / `AGENTS.md` / `CLAUDE.md` (cwd + parents). Decide the injection path: write the composed system prompt to `.pi/SYSTEM.md` in the container vs prepend to the `-p` prompt; use `--no-context-files` so pi does not double-load the project's CLAUDE.md.
+**Acceptance:** a pi agent receives forge's seed + constraints exactly once; red read-only project mount still enforced.
+**Note:** likely needs an architecture-advisor consult; relates to #253 (provider adapter surfaces — SYSTEM.md/AGENTS.md as a generated adapter).
+**Depends on:** runtime story.
+
+
+### #264 — pi: first role end-to-end through pi (Crawl exit)
+**Phase:** Crawl exit criterion. Part of #258.
+Route one role (e.g. a red on a cheap provider like Groq/Cerebras, or engineer on a chosen model) through the pi runtime and complete a real task end-to-end: dispatch -> pi -> result.json -> usage captured -> gate.
+**Acceptance:** a full forge task completes via pi with correct status + usage and output-schema parity with claude/codex tasks.
+**Depends on:** Docker image, runtime, usage parser, system-prompt mapping.
+
+
+### #265 — pi: model-policy integration + alias mapping
+**Phase:** Walk. Part of #258.
+Wire pi into `model-policy.yml` resolution; build alias translation between forge aliases and pi provider/model names (`openai/gpt-4o`, `sonnet:high`, `--models` cycling).
+**Acceptance:** a profile resolving to a pi provider routes correctly; an unknown alias fails loud, not silently.
+**Depends on:** end-to-end story.
+
+
+### #266 — pi: OAuth auth mode (pre-seeded ~/.pi/agent/auth.json) + auth seam
+**Phase:** Walk. Part of #258.
+Support pi OAuth providers (Claude Pro / ChatGPT / Copilot) via a pre-seeded `~/.pi/agent/auth.json` mounted into the container (mirror the forge-claude-oauth volume); integrate with the provider-availability/auth seam (#226).
+**Acceptance:** a pi run authenticates via mounted auth.json without interactive login; expiry/refresh behavior documented.
+**Depends on:** runtime story.
+
+
+### #267 — pi: error-event classification -> model_error
+**Phase:** Walk. Part of #258.
+Map pi `auto_retry_*` / `errorMessage` events and provider errors to forge's `model_error` classification with the cause surfaced — extends #228.
+**Acceptance:** a forced provider error on a pi task is classified `model_error` (not generic container_crash) with the cause string.
+**Depends on:** usage-parser story.
+
+
+### #268 — pi: local models via models.json (Ollama/LM Studio/vLLM)
+**Phase:** Run. Part of #258.
+Enable local/custom models through `~/.pi/agent/models.json` (any OpenAI/Anthropic/Google-compatible endpoint). Target cheap/free reds and triage on local hardware.
+**Acceptance:** a forge red/triage task runs against a local Ollama model via pi; recorded cost ~0.
+**Depends on:** end-to-end story, model-policy mapping.
+
+
+### #270 — Reds: render the ## Spec section (architect intent + tech-lead plan) for cross-checking
+**Follow-up from #269.** The red seeds reference a `## Spec` section — "compare against the architect's intent + the tech-lead's plan (both in `## Spec`)" — but `renderTaskPackage` never produces it. Reds still function (they audit the artifact + read /project read-only), so this is degraded context, not a hard failure (#269 fixed the hard failures: artifact + failureModes + fanout dispatch).
+
+**Scope:** thread the upstream architect result + tech-lead plan into the red task package (dispatchReds has the run's tasks available) and render a `## Spec` section. Gives reds the intent to grade against, not just the diff. Small, isolated.
+
+
+### #272 — Implementer seeds: tell agents node_modules is a fresh container-local volume — install before build (#245 companion)
+**Companion to #245** (container-local node_modules shadow volume, commit 02ca0b9). With the shadow volume, the container's `/project/node_modules` starts EMPTY (the host's modules are intentionally hidden, and on darwin they're wrong-platform anyway). Build/test agents must run a clean install (npm/pnpm/yarn, per the project) before building/testing, instead of leaning on the mounted host modules.
+
+Today agents muddle through (the forge-site run showed them hand-fetching `@esbuild/linux-x64`/rollup) — a clean `npm install` into the fresh volume is strictly better, but the implementer seeds should say so explicitly so it's reliable, not improvised.
+
+**Scope:** add a short note to the implementer seeds (engineer, frontend-specialist, backend-specialist, agentic-platform-builder) — "the container's node_modules is a fresh volume, not the host's; run the project's install before building/testing." `forge-test` already rebuilds its own deps in scratch, so tests are covered; this is about dev-server/build steps. Markdown-only → documentation-maintainer.
+
+Low priority until #245 is validated on the corp Mac (the shadow volume is darwin-only and agents already install in practice), but worth doing so the behavior is documented rather than emergent.
+
+
 ## Done (recent)
+
+### #259 — pi: spike — headless --mode json run + usage-field discovery
+**Closed:** 2026-06-04. Commit `1e5e019`.
+
+**Phase:** Spike (de-risk). Part of #258.
+De-risks the one hard unknown: pi's token-usage fields are undocumented.
+Run pi with one API-key provider, `pi -p "<prompt>" --mode json`, capture the JSONL stream. Identify which event(s) carry input/output token counts, the model/provider actually used, and stop reason; confirm `agent_end` is the completion signal.
+**Acceptance:** a documented mapping pi-JSON-event -> {input_tokens, output_tokens, model, stop_reason} sufficient to write the parser, plus a captured sample event stream committed as a test fixture. No production code.
+**Blocks:** the usage-parser story.
+
+
+### #187 — Native arm64 (multi-arch) agent image — drop the amd64 Rosetta tax on Apple Silicon
+**Closed:** 2026-06-04. Commit `ad1126c`.
+
+**Broad perf win.** docker/build.sh pins `--platform linux/amd64`, so on Apple Silicon EVERY agent container runs under Rosetta/qemu emulation (2-4x slower CPU). This taxes every run — builds, tests, browser work, the review panel that triggered this investigation (red-wide blew past a 10-min ceiling largely due to emulation + contention).
+
+**Sole root cause:** the headless Chrome baked for the browser-tools skill (`:9222`) comes from `@puppeteer/browsers install chrome` (Chrome for Testing), which Google publishes for linux64 only — no official Linux/arm64 binary. build.sh pins amd64 for that one dependency; everything else pays the tax as collateral.
+
+**Why it's achievable now (and the codebase contradicts itself):** build.sh claims Chromium-for-Testing has no arm64; the Dockerfile comment (lines 43-44) claims it "ships both arm64 and amd64" and that we "need multi-arch long-term." Chrome FOR TESTING is genuinely amd64-only on Linux, BUT:
+- #180 already bakes Playwright's chromium into the image (project E2E). Playwright's chromium DOES ship linux-arm64.
+- browser-tools uses puppeteer-core, which can drive any chromium via `executablePath`.
+So: point browser-tools at Playwright's (already-present, arm64-capable) chromium, drop the @puppeteer/browsers Chrome-for-Testing dependency, and the amd64 pin's only justification is gone. The thing build.sh was avoiding ("dragging Playwright's arm64 chromium back in") is already done by #180.
+
+**Proposed:**
+- Repoint browser-tools' `:9222` Chrome to Playwright's chromium (executablePath), removing the @puppeteer/browsers chrome install. Verify browser-start/nav/screenshot + auth-inject all work against it.
+- Build the image native arm64 on Apple Silicon; multi-arch (buildx) so amd64 hosts (CI/Linux servers) still get amd64.
+- Reconcile/remove the contradictory amd64-vs-arm64 comments in build.sh + Dockerfile; update the #128 decision record.
+
+**Verify:** agent-entrypoint.sh launches the right chromium binary on :9222; better-sqlite3/sharp/Go toolchain build native arm64 (all arch-agnostic or arm64-available); the browser-tools skill is host-mounted (pi-skills) so it's arch-neutral — only the in-container chromium binary path matters.
+
+**Caveat:** quantify the actual win per step before committing effort — pure-reasoning agents are network-bound (Claude API) and gain less; CPU/browser/build/test-heavy steps gain most. But the review panel evidence suggests it's material.
+
+Relates to #128 (container Chrome + retire Playwright MCP), #180 (Playwright chromium baked in).
+
+
+### #271 — frontend-specialist seed: Playwright/E2E fallback when browser-tools unavailable (stop failing correct code)
+**Closed:** 2026-06-04. Commit `ef51999`.
+
+**From a forge-site run (Issue 3a).** task-build-0-caa1ac returned `status: failed, error: "visual-verification-blocked: Chrome not available"` on code that was actually correct. The container's browser-tools is broken (browser-start.js targets the macOS Chrome path; :9222 refused; browser-tools npm install fails on the read-only fs), and the frontend seed treats "no browser" as a HARD failure (CLAUDE.md line ~100) with no fallback — so correct UI work is reported failed. Meanwhile Playwright (`test:e2e`) DID run in-container against the built dist.
+
+**Fix (seed prose):** add a visual-validation fallback chain to the frontend-specialist seed:
+1. Primary: browser-tools (:9222) as today.
+2. Fallback: if browser-tools/:9222 is genuinely unavailable, use the project's Playwright/E2E suite (real headless chromium in-container) and capture its artifacts in `screenshots`.
+3. Only `status: failed` when NEITHER path is available.
+When browser-tools is down but Playwright validated AND code/tests pass: return `status: complete` with an explicit caveat (browser-tools infra gap, see #187) — do NOT fail correct work. Preserve the anti-skip intent: must still attempt visual validation; never substitute type-check alone.
+
+**Related infra (tracked, not this ticket):** #187 (point browser-tools at the baked Playwright arm64 chromium — fixes browser-tools in-container), #245 (container-local node_modules shadow volume — fixes the arch mismatch / Issue 3b). This seed change is the immediate stop-bleeding fix; #187/#245 fix the underlying container.
+
+
+### #269 — Reds not fed the artifact; authoritative build (fanout) reds never dispatch
+**Closed:** 2026-06-04. Commit `435a9e6`.
+
+**Reported from a forge-site run.** The build phase's adversarial review silently did not run; a force-advance could ship an unreviewed diff.
+
+**Three root causes in the v2 red-feed path (v1 src/spine deleted in #116; incompletely ported):**
+1. **Fanout reds never dispatch (Symptom B):** `dispatchFanoutStep` aggregated children then jumped straight to `finalizePrimary` — it omitted the reds block that `dispatchSingleStep` has. So the build parent went to awaiting_gate with zero red task rows; the verdict gate had no verdicts to resolve.
+2. **Artifact dropped (Symptom A / red-wide):** `renderTaskPackage` rendered only `## Inputs`; it never rendered `tp.artifact`. The red seeds read the artifact from a `## Artifact under review` section, so reds saw empty inputs and reported "no artifact provided."
+3. **failureModes missing (Symptom A / red-narrow):** `runOneRed` set `inputs: {}`; force-level anti-prompts (which red-narrow requires as a `failureModes` input) were never populated. `compose.ts` left this "out of scope" and nothing else did it.
+
+**Fix:** wire per-parent reds dispatch into the fanout path (mirror dispatchSingleStep); render `## Artifact under review` from `tp.artifact`; populate `inputs.failureModes` from force-level antiPrompts scoped to the reviewed (blue) role/workflow/phase. 4 regression tests added.
+
+**Follow-up (separate):** reds also reference a `## Spec` section (architect intent + tech-lead plan) that the renderer doesn't produce — degraded context, not a hard failure. Filed separately.
+
+
+### #257 — Docs as a pipeline phase — add a documentation-maintainer step to the feature workflows (supersedes the stalled hard-gate approach)
+**Closed:** 2026-06-03. Commit `3d99ebe`.
+
+
+### #179 — Cleanup: qa-engineer is an orphaned #164 leftover — remove seed + fix stale docs (pipeline verify is test-engineer now)
+**Closed:** 2026-06-03. Commit `ebf919d`.
+
+**Leftover from #164** (closed), which moved the pipeline verify phase from `qa-engineer` to `test-engineer` and intended to "rework qa-engineer -> manual-qa (rename or deprecate)" + "update workflow definitions referencing qa-engineer." The workflows were updated (all three `feature*.yml` now use `agent: test-engineer` for verify), but the deprecation tail was left:
+
+- `seeds/agents/qa-engineer/` seed dir still exists (no current workflow references it; confirmed via grep).
+- `docs/quick-start.md:147` still says the pipeline verify phase is `qa-engineer` — stale, should read `test-engineer`.
+- `docs/SCHEMA-CONTRACT.md:109` still documents a `qa-engineer` role.
+- (Historical PRD drafts under `docs/prds/yaml-orchestrator-116/` also mention it — those are frozen design docs, leave as-is.)
+
+**Why it matters:** orphaned seeds + stale docs are exactly the contract-vs-behavior drift this session keeps surfacing — a future session reading quick-start would think verify is qa-engineer, contradicting the workflows + the orchestrator template. Old pipeline runs in the DB show `qa-engineer` verify tasks writing 0 test files; that role is dead in the current pipeline.
+
+**Fix:** remove the `qa-engineer` seed dir (or, if any value remains, fold it into `manual-qa` per #164's intent), update `quick-start.md:147` and `SCHEMA-CONTRACT.md:109` to `test-engineer`. Small, isolated, docs + seed only.
+
 
 ### #256 — forge cancel <task> abandons a still-advanceable mid-pipeline run (no non-terminal tasks ≠ dead)
 **Closed:** 2026-06-03. Commit `38d428e`.
