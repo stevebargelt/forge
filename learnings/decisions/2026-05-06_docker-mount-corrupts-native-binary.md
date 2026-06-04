@@ -2,7 +2,7 @@
 
 **ID**: FORGE-DEC-011
 **Date**: 2026-05-06
-**Status**: Documented (gotcha, no code fix yet)
+**Status**: Superseded by FORGE-DEC-019 (`2026-06-04_node-modules-shadow-volume.md`)
 **Decided by**: Steven (forge build, hit during dashboard run-dashboard-4f86a9 build phase)
 **Supersedes**: N/A
 **Scope**: forge
