@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute } from "./route.js";
 import { compileRaciDocument } from "../../raci/compile.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
@@ -62,6 +62,43 @@ test("an explicit but missing --raci is raci_not_found", () => {
   const v = validateRoutePolicyFile(policyPath, { raciPath: join(dir, "no-raci.md"), host: all });
   assert.equal(v.ok, false);
   assert.equal(v.findings[0]!.code, "raci_not_found");
+});
+
+test("explainRoute returns the full route for an exact key", () => {
+  const policy = compileRaciDocument(readFileSync(SEED_PATH, "utf8"));
+  const res = explainRoute(policy, "implementation_quick");
+  assert.ok(res.ok);
+  assert.equal(res.route.responsible, "engineer");
+  assert.equal(res.route.path, "invoke_chain");
+  assert.deepEqual(res.route.required_followups, ["test-engineer"]);
+});
+
+test("explainRoute flags an unknown key (and lists known routes)", () => {
+  const policy = compileRaciDocument(readFileSync(SEED_PATH, "utf8"));
+  const res = explainRoute(policy, "not_a_route");
+  assert.equal(res.ok, false);
+  assert.ok(!res.ok && res.findings[0]!.code === "unknown_route");
+  assert.ok(!res.ok && /research/.test(res.findings[0]!.message));
+});
+
+test("explainRoute flags a schema-invalid policy", () => {
+  const res = explainRoute({ version: 1, governance: { accountable: "user" }, routes: {} }, "x");
+  assert.equal(res.ok, false);
+});
+
+test("proof of life: editing the RACI changes the explained route", () => {
+  const raci = readFileSync(SEED_PATH, "utf8");
+
+  const before = explainRoute(compileRaciDocument(raci), "research");
+  assert.ok(before.ok);
+  assert.equal(before.route.responsible, "research-specialist");
+
+  // Edit the RACI source, recompile, explain again — the route must change.
+  const edited = raci.replace("responsible: research-specialist", "responsible: deep-researcher");
+  const after = explainRoute(compileRaciDocument(edited), "research");
+  assert.ok(after.ok);
+  assert.equal(after.route.responsible, "deep-researcher");
+  assert.notEqual(before.route.responsible, after.route.responsible);
 });
 
 test("renderHuman shows mode + findings", () => {
