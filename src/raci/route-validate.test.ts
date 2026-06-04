@@ -72,6 +72,24 @@ test("cli responsible resolves against the action registry", () => {
   assert.ok(bad.findings.some((f) => f.code === "responsible_unresolved" && f.route === "ops"));
 });
 
+test("a built-in does not bypass path resolution (cli + orchestrator is flagged)", () => {
+  // path: cli with a non-CLI-action responsible must NOT validate just because
+  // it's a built-in symbol.
+  const policy = compile(
+    `### route: bad_cli\nclassification_hints: x\nresponsible: orchestrator\naccountable: human\npath: cli\ncommand: forge made up\nconsulted: none\nrequired_followups: none\ninformed: user_summary\nforce_rules: none`,
+  );
+  const v = validateRoutePolicy(policy, all);
+  assert.ok(v.findings.some((f) => f.code === "responsible_unresolved" && f.route === "bad_cli"));
+});
+
+test("a built-in required followup is rejected (followups must be agents)", () => {
+  const policy = compile(
+    `### route: x\nclassification_hints: y\nresponsible: orchestrator\naccountable: human\npath: in_session\nconsulted: none\nrequired_followups: orchestrator\ninformed: user_summary\nforce_rules: none`,
+  );
+  const v = validateRoutePolicy(policy, none);
+  assert.ok(v.findings.some((f) => f.code === "followup_unresolved" && f.route === "x"));
+});
+
 test("schema-invalid input yields schema_error and stops", () => {
   const v = validateRoutePolicy({ version: 1, governance: { accountable: "user" }, routes: {} }, all);
   assert.equal(v.ok, false);

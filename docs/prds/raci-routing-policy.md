@@ -382,7 +382,9 @@ environment**. Runs at compile / deploy / resolve time, needs the host.
   `consulted` point at installed agents, known workflows, real CLI commands).
   **Evidence-source** `consulted` values (e.g. `affected_code`, `existing_tests`)
   resolve against the fixed evidence-source set, not host install state.
-- project overrides stay within force-level rules
+- project overrides stay within force-level rules — **delivered with project
+  override support (#280)**, which adds the override input; the #278 slice
+  validates a single policy + optional RACI source only
 - **drift check**: when a RACI source is present, the policy still agrees with it
 - runs **standalone where no RACI exists** — e.g. a provider host shipped only
   the compiled policy (the #253 adapter case)

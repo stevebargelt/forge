@@ -82,9 +82,10 @@ function resolveRoute(routeKey: string, route: PolicyRoute, host: HostEnv, findi
     }
   }
 
-  // required_followups — installed agent roles.
+  // required_followups — executable agent followups. Built-ins (orchestrator /
+  // human) are NOT valid here; a followup must be an installed agent.
   for (const f of route.required_followups) {
-    if (!BUILTIN_SYMBOLS.has(f) && !host.agentInstalled(f)) {
+    if (!host.agentInstalled(f)) {
       findings.push({
         code: "followup_unresolved",
         route: routeKey,
@@ -109,12 +110,17 @@ function resolveRoute(routeKey: string, route: PolicyRoute, host: HostEnv, findi
 
 function resolveResponsible(routeKey: string, route: PolicyRoute, host: HostEnv, findings: RouteFinding[]): void {
   const r = route.responsible;
-  if (BUILTIN_SYMBOLS.has(r)) return; // human / orchestrator — always valid
-
   const flag = (message: string) =>
     findings.push({ code: "responsible_unresolved", route: routeKey, message });
 
+  // Resolution is path-specific. Built-ins (orchestrator / human) are valid ONLY
+  // for in_session / manual — they must not bypass resolution on executable
+  // paths (e.g. `path: cli, responsible: orchestrator` is invalid).
   switch (route.path) {
+    case "in_session":
+    case "manual":
+      if (!BUILTIN_SYMBOLS.has(r)) flag(`${route.path} responsible "${r}" must be a built-in (orchestrator/human)`);
+      break;
     case "cli":
       if (!CLI_ACTIONS.has(r)) flag(`cli responsible "${r}" is not a known CLI action`);
       break;
@@ -124,10 +130,6 @@ function resolveResponsible(routeKey: string, route: PolicyRoute, host: HostEnv,
     case "invoke":
     case "invoke_chain":
       if (!host.agentInstalled(r)) flag(`agent "${r}" is not installed on this host`);
-      break;
-    case "in_session":
-    case "manual":
-      flag(`${route.path} responsible "${r}" should be a built-in (orchestrator/human)`);
       break;
   }
 }

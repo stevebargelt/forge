@@ -827,35 +827,6 @@ Build a provider-neutral routing policy system from Forge's human-readable RACI,
 **Relations:** #253 (provider adapter surfaces — downstream consumer), #252 (collaborative setup), #225 (provider/profile choice), #250 (provider-neutral ops primitive), #174 (backlog edit-body verb — needed to maintain these), `seeds/forge-raci.md`, `seeds/orchestrator-template.md`.
 
 
-### #275 — RACI policy Story 2: define routing-policy schema
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Add a typed schema for the DERIVED `routing-policy.yml`.
-
-Acceptance:
-- Schema (`src/raci/policy-schema.ts`, Zod) for the DERIVED `routing-policy.yml`: top-level `version` + `governance.accountable` (literal `human`) + `routes` (record keyed by route-symbol). Per route: `classification_hints?` (non-empty strings), `responsible` (symbol = dispatch target; no separate target/workflow field), `path` (enum), `command` (required iff `path: cli`), `consulted` / `required_followups` / `force_rules` (symbol lists), `informed` (normalized objects `{name, when?}`).
-- `accountable` is a policy-HEADER invariant fixed to `human` — NOT a per-route field. `.strict()` rejects a per-route `accountable`.
-- `informed` is normalized object form in the policy (`{name, when?}`), never the source's `name:when=cond` string. `none` is a RACI-SOURCE sentinel only — the policy uses empty arrays, and `none` inside an array is rejected.
-- `path` is a controlled enum; symbol fields use the #274 symbol grammar (SHAPE only). Semantic resolution — do force_rules / responsible / consulted resolve to baseline IDs / installed agents — is deferred to #277/#278.
-- Tests cover: valid minimal policy; header accountable invariant; missing/non-human accountable rejected; per-route accountable rejected; valid CLI route with command; CLI route missing command rejected; non-CLI route with command rejected; empty arrays valid; `none` rejected in arrays; classification_hints shape (non-empty strings, spaces allowed); informed normalized-object shape (bare string + empty `when` rejected); malformed symbols + route keys rejected; unknown path rejected; version must be 1.
-
-Relations: #273.
-
-
-### #276 — RACI policy Story 3: compile RACI to routing policy
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Add a compiler that reads the constrained RACI (Story 1 format) and emits `routing-policy.yml`.
-
-Acceptance:
-- Compiler parses the Story 1 constrained format deterministically; no dependence on loose prose.
-- Generated policy validates against the Story 2 schema.
-- Direction is strictly RACI -> policy; the compiler never writes back to the RACI.
-- Tests cover representative rows: implementation full, implementation quick, documentation durable, review, ui-design/manual, ops repair, and orientation.
-
-Relations: #273.
-
-
 ### #277 — RACI policy Story 4: add forge raci validate (authoring-view lint)
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
@@ -881,7 +852,7 @@ Add `forge route validate` — validates the DERIVED policy as an executable pol
 Acceptance:
 - Reports schema errors against the Story 2 schema.
 - Resolves against THIS host: the agent/workflow/CLI-action symbols raci validate shape-checked actually exist (responsible/consulted point at installed agents, known workflows, real CLI commands). Evidence-source consulted values (e.g. `affected_code`, `existing_tests`) resolve against the fixed evidence-source set, NOT host install state.
-- Verifies project overrides stay within force-level rules.
+- (Project-override force-rule protection is NOT in this slice — route validate here takes one policy + optional RACI source, with no override input. That check is delivered with project override support, #280.)
 - Drift check: when a RACI source is present, the policy still agrees with it.
 - Runs STANDALONE where no RACI exists (e.g. a provider host shipped only the compiled policy — the #253 adapter case).
 - Supports JSON output for orchestrator/provider-adapter use.
@@ -979,6 +950,39 @@ Relations: #273, #278 (depends on route validate), #283 (the full-generation suc
 
 
 ## Done (recent)
+
+### #276 — RACI policy Story 3: compile RACI to routing policy
+**Closed:** 2026-06-04.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add a compiler that reads the constrained RACI (Story 1 format) and emits `routing-policy.yml`.
+
+Acceptance:
+- Compiler parses the Story 1 constrained format deterministically; no dependence on loose prose.
+- Generated policy validates against the Story 2 schema.
+- Direction is strictly RACI -> policy; the compiler never writes back to the RACI.
+- Tests cover representative rows: implementation full, implementation quick, documentation durable, review, ui-design/manual, ops repair, and orientation.
+
+Relations: #273.
+
+
+### #275 — RACI policy Story 2: define routing-policy schema
+**Closed:** 2026-06-04.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add a typed schema for the DERIVED `routing-policy.yml`.
+
+Acceptance:
+- Schema (`src/raci/policy-schema.ts`, Zod) for the DERIVED `routing-policy.yml`: top-level `version` + `governance.accountable` (literal `human`) + `routes` (record keyed by route-symbol). Per route: `classification_hints?` (non-empty strings), `responsible` (symbol = dispatch target; no separate target/workflow field), `path` (enum), `command` (required iff `path: cli`), `consulted` / `required_followups` / `force_rules` (symbol lists), `informed` (normalized objects `{name, when?}`).
+- `accountable` is a policy-HEADER invariant fixed to `human` — NOT a per-route field. `.strict()` rejects a per-route `accountable`.
+- `informed` is normalized object form in the policy (`{name, when?}`), never the source's `name:when=cond` string. `none` is a RACI-SOURCE sentinel only — the policy uses empty arrays, and `none` inside an array is rejected.
+- `path` is a controlled enum; symbol fields use the #274 symbol grammar (SHAPE only). Semantic resolution — do force_rules / responsible / consulted resolve to baseline IDs / installed agents — is deferred to #277/#278.
+- Tests cover: valid minimal policy; header accountable invariant; missing/non-human accountable rejected; per-route accountable rejected; valid CLI route with command; CLI route missing command rejected; non-CLI route with command rejected; empty arrays valid; `none` rejected in arrays; classification_hints shape (non-empty strings, spaces allowed); informed normalized-object shape (bare string + empty `when` rejected); malformed symbols + route keys rejected; unknown path rejected; version must be 1.
+
+Relations: #273.
+
 
 ### #274 — RACI policy Story 1: implement the RACI record-block format + clean vocabulary
 **Closed:** 2026-06-04.
