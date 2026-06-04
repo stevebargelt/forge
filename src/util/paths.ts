@@ -6,6 +6,9 @@ export const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 export const RUNS_DIR = join(FORGE_HOME, "runs");
 export const AGENTS_DIR = join(FORGE_HOME, "agents");
 export const CONSTRAINTS_DIR = join(FORGE_HOME, "constraints");
+// The installed host RACI source (authoring view). `forge raci validate` lints
+// this by default.
+export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 

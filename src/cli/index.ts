@@ -29,6 +29,7 @@ import { registerDesign } from "./commands/design.js";
 import { registerModel } from "./commands/model.js";
 import { registerProviders } from "./commands/providers.js";
 import { registerOps } from "./commands/ops.js";
+import { registerRaci } from "./commands/raci.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -76,6 +77,7 @@ registerDesign(program);
 registerModel(program);
 registerProviders(program);
 registerOps(program);
+registerRaci(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
