@@ -72,6 +72,13 @@ test("cli responsible resolves against the action registry", () => {
   assert.ok(bad.findings.some((f) => f.code === "responsible_unresolved" && f.route === "ops"));
 });
 
+test("a cli command that doesn't match the registered action is flagged", () => {
+  const bad = structuredClone(compile(CLI_BLOCK)) as any;
+  bad.routes.ops.command = "forge made up";
+  const v = validateRoutePolicy(bad, none);
+  assert.ok(v.findings.some((f) => f.code === "command_mismatch" && f.route === "ops"));
+});
+
 test("a built-in does not bypass path resolution (cli + orchestrator is flagged)", () => {
   // path: cli with a non-CLI-action responsible must NOT validate just because
   // it's a built-in symbol.

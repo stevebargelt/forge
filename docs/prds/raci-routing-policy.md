@@ -190,7 +190,6 @@ routes:
   implementation_full:
     responsible: feature
     path: workflow
-    workflow: feature
     consulted:
       - architecture-advisor
     informed:

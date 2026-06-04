@@ -121,9 +121,19 @@ function resolveResponsible(routeKey: string, route: PolicyRoute, host: HostEnv,
     case "manual":
       if (!BUILTIN_SYMBOLS.has(r)) flag(`${route.path} responsible "${r}" must be a built-in (orchestrator/human)`);
       break;
-    case "cli":
-      if (!CLI_ACTIONS.has(r)) flag(`cli responsible "${r}" is not a known CLI action`);
+    case "cli": {
+      const expected = CLI_ACTIONS.get(r);
+      if (expected === undefined) {
+        flag(`cli responsible "${r}" is not a known CLI action`);
+      } else if (route.command !== expected) {
+        findings.push({
+          code: "command_mismatch",
+          route: routeKey,
+          message: `cli command "${route.command}" does not match the registered invocation for "${r}" (expected "${expected}")`,
+        });
+      }
       break;
+    }
     case "workflow":
       if (!host.workflowKnown(r)) flag(`workflow "${r}" is not known on this host`);
       break;
