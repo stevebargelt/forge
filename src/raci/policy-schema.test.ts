@@ -151,3 +151,22 @@ test("version must be 1", () => {
   p.version = 2;
   assert.equal(ok(p), false);
 });
+
+test("a policy with zero routes is rejected", () => {
+  const p = clone();
+  p.routes = {};
+  assert.equal(ok(p), false);
+});
+
+test("blank (whitespace-only) command is rejected", () => {
+  const p = clone();
+  p.routes.bug_fix.path = "cli";
+  p.routes.bug_fix.command = "   ";
+  assert.equal(ok(p), false);
+});
+
+test("blank (whitespace-only) classification hint is rejected", () => {
+  const p = clone();
+  p.routes.bug_fix.classification_hints = ["bug", "   "];
+  assert.equal(ok(p), false);
+});

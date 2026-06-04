@@ -36,12 +36,15 @@ const symbolList = z.array(symbol);
  *  record key schema (route keys named "none" are an unlikely non-issue). */
 const symbolKey = z.string().regex(SYMBOL_RE, "route key must be a symbol [a-z0-9_-]+");
 
-/** classification_hints: advisory free phrases (spaces allowed), non-empty,
+/** A non-blank string — rejects "" and whitespace-only. */
+const nonBlank = (msg: string) => z.string().refine((s) => s.trim().length > 0, msg);
+
+/** classification_hints: advisory free phrases (spaces allowed), non-blank,
  *  not `none`, no conditionals. */
-const hint = z
-  .string()
-  .min(1, "classification hint must be non-empty")
-  .refine((s) => s !== "none", NONE_IN_POLICY);
+const hint = nonBlank("classification hint must be non-blank").refine(
+  (s) => s !== "none",
+  NONE_IN_POLICY,
+);
 
 /** informed target — normalized object form; optional symbolic condition. */
 const InformedTargetSchema = z
@@ -56,7 +59,7 @@ const PolicyRouteSchema = z
     classification_hints: z.array(hint).optional(),
     responsible: symbol,
     path: z.enum(ROUTE_PATHS),
-    command: z.string().min(1).optional(),
+    command: nonBlank("command must be non-blank").optional(),
     consulted: symbolList,
     required_followups: symbolList,
     informed: z.array(InformedTargetSchema),
@@ -90,7 +93,9 @@ export const RoutingPolicySchema = z
   .object({
     version: z.literal(1),
     governance: GovernanceSchema,
-    routes: z.record(symbolKey, PolicyRouteSchema),
+    routes: z
+      .record(symbolKey, PolicyRouteSchema)
+      .refine((r) => Object.keys(r).length > 0, "policy must define at least one route"),
   })
   .strict();
 
