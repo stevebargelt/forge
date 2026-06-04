@@ -805,6 +805,193 @@ Today agents muddle through (the forge-site run showed them hand-fetching `@esbu
 Low priority until #245 is validated on the corp Mac (the shadow volume is darwin-only and agents already install in practice), but worth doing so the behavior is documented rather than emergent.
 
 
+### #273 — EPIC: RACI-to-routing-policy system
+**PRD:** `docs/prds/raci-routing-policy.md`.
+
+Build a provider-neutral routing policy system from Forge's human-readable RACI, to an external-user robustness standard. The RACI stays the human-authored governance SOURCE; the derived routing policy becomes the orchestrator/provider-adapter operational source of truth; two validators keep every authoring path safe.
+
+**Its own epic, not under #253.** Routing governance — a human safely shaping how work is routed — stands on its own whether or not provider adapters ever exist. #253 (provider adapters) is a downstream consumer that renders from the routing policy.
+
+**Core decision:**
+- RACI (constrained markdown) = human-authored SOURCE / governance view.
+- `routing-policy.yml` = typed machine-readable DERIVED execution policy, compiled from the RACI. Direction is RACI -> policy, never the inverse.
+- `forge raci validate` lints the authoring view (host-independent); `forge route validate` lints the operational policy (host-resolvable + drift).
+- Provider adapters render FROM the routing policy, not from prose.
+
+**Governance rule:** `Accountable` is always `human` — a policy-level invariant, not a per-row column. Agents and orchestrators execute; the human owns outcomes.
+
+**Authoring:** humans never hand-edit loose prose. RACI-writing paths run `forge raci validate`; direct raw-policy edits are an unsupported expert escape hatch gated by `forge route validate`; the primary channel is orchestrator-mediated (conversation -> propose -> validate -> human-confirm diff -> commit), and a dedicated edit tool is deferred.
+
+**Stories:** the PRD holds the authoritative breakdown; each story is a separate ticket tagged `Epic: #273`. This epic deliberately does NOT re-enumerate stories inline — that inline list is exactly what went stale.
+
+**Relations:** #253 (provider adapter surfaces — downstream consumer), #252 (collaborative setup), #225 (provider/profile choice), #250 (provider-neutral ops primitive), #174 (backlog edit-body verb — needed to maintain these), `seeds/forge-raci.md`, `seeds/orchestrator-template.md`.
+
+
+### #274 — RACI policy Story 1: pin the constrained RACI format + clean vocabulary
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Pin the RACI's machine-readable shape AND clean its vocabulary. The format choice is the key slice-one decision — the compiler and both validators key off it (you can't validate loose prose).
+
+Acceptance:
+- Choose a deterministically-parseable RACI shape (constrained Markdown table, table + embedded structure, or frontmatter) — simplest reliable parse, still reads as a governance table to a human. No dependence on loose prose.
+- `Accountable` is `human` in every row, stated as a policy-level invariant (not a per-row column in the typed policy).
+- `Informed` uses the controlled record/surface vocabulary, not vague downstream parties.
+- `Responsible` may be `human`, `orchestrator`, agent role, workflow, or CLI action; `Consulted` may be agent roles or evidence sources.
+- The file states plainly that the RACI is the human-authored SOURCE that compiles into routing policy (direction RACI -> policy), and removes language implying Markdown prose is the operational policy.
+
+Relations: #273, #253, #252, `seeds/forge-raci.md`.
+
+
+### #275 — RACI policy Story 2: define routing-policy schema
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add a typed schema for the DERIVED `routing-policy.yml`.
+
+Acceptance:
+- Schema includes route name, responsible, path, workflow/command/agent details as appropriate, consulted, required followups, informed targets with optional conditions, and force-level rule markers.
+- `accountable` is a policy-HEADER invariant fixed to `human` — NOT a per-row field. The schema enforces `human` at the header and rejects any per-row accountable.
+- Controlled vocabularies exist for responsible, consulted, informed, and path values.
+- Tests cover valid minimal policy, the header accountable invariant, a rejected per-row accountable, unknown values, conditional informed targets, and required followups.
+
+Relations: #273.
+
+
+### #276 — RACI policy Story 3: compile RACI to routing policy
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add a compiler that reads the constrained RACI (Story 1 format) and emits `routing-policy.yml`.
+
+Acceptance:
+- Compiler parses the Story 1 constrained format deterministically; no dependence on loose prose.
+- Generated policy validates against the Story 2 schema.
+- Direction is strictly RACI -> policy; the compiler never writes back to the RACI.
+- Tests cover representative rows: implementation full, implementation quick, documentation durable, review, ui-design/manual, ops repair, and orientation.
+
+Relations: #273.
+
+
+### #277 — RACI policy Story 4: add forge raci validate (authoring-view lint)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add `forge raci validate` — a host-INDEPENDENT lint of the human-authored RACI document. Makes no claim about what is installed on any host. (The host-resolvable half is `forge route validate`, Story 5.)
+
+Acceptance:
+- Reports parse failures against the Story 1 constrained format.
+- Verifies `accountable` is `human` everywhere.
+- Verifies `informed` values are from the fixed controlled vocabulary.
+- Verifies `responsible` / `consulted` are well-formed SYMBOLIC names of the right kind (agent / workflow / CLI-action / evidence-source) — shape only; existence-on-a-host is route validate's job.
+- Reports any force-level rule weakened by the file, checked against the static force-rule baseline shipped with Forge (built-in policy constraints + `seeds/constraints/`), NOT against host state.
+- Supports JSON output.
+- Tests cover clean RACI, parse error, bad accountable, off-vocab informed, malformed symbolic name, and force-rule weakening.
+
+Relations: #273.
+
+
+### #278 — RACI policy Story 5: add forge route validate (operational-policy lint)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add `forge route validate` — validates the DERIVED policy as an executable policy in an environment. Runs at compile/deploy/resolve time and needs the host. Complements the host-independent `forge raci validate` (Story 4).
+
+Acceptance:
+- Reports schema errors against the Story 2 schema.
+- Resolves against THIS host: the agent/workflow/CLI-action symbols raci validate shape-checked actually exist (responsible/consulted point at installed agents, known workflows, real CLI commands). Evidence-source consulted values (e.g. `affected_code`, `existing_tests`) resolve against the fixed evidence-source set, NOT host install state.
+- Verifies project overrides stay within force-level rules.
+- Drift check: when a RACI source is present, the policy still agrees with it.
+- Runs STANDALONE where no RACI exists (e.g. a provider host shipped only the compiled policy — the #253 adapter case).
+- Supports JSON output for orchestrator/provider-adapter use.
+- Tests cover clean policy, schema-invalid, unresolved host name, override force-rule weakening, RACI/policy drift, and standalone (no-RACI) cases.
+
+Relations: #273, #253.
+
+
+### #279 — RACI policy Story 6: orchestrator-mediated authoring (primary edit channel)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Wire the conversation-driven edit loop as the PRIMARY way a human changes routing: the operator says what they want in plain language, the orchestrator translates it to a concrete RACI edit, gated by the validator. This is the channel that makes the non-technical-human-within-guardrails goal real with zero new UI.
+
+Acceptance:
+- Flow: propose -> `raci validate` -> compile -> `route validate` -> show the operator the rendered diff -> human confirms -> commit.
+- Never a silent self-edit: changing governance always requires explicit human confirmation of the diff (the orchestrator would be editing the rules it operates by — a self-modification loop).
+- Every change is audited (commit / logged entry), reviewable after the fact.
+- The validator structurally prevents an invalid write (unknown agent, non-human accountable, weakened force rule).
+- Tests/fixtures cover an accepted edit, a rejected (invalid) proposed edit, and the confirm-gate.
+
+Relations: #273, `seeds/orchestrator-template.md`.
+
+
+### #280 — RACI policy Story 7: project override support
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Support project-specific RACI/policy files under `<project>/.forge/`. A concrete near-term need: Forge already orchestrates real work across a portfolio, and different projects plausibly want different routing.
+
+Acceptance:
+- Project RACI override path (`<project>/.forge/forge-raci.md`) is real and wired into the prompt path, not merely documented (it currently is NOT — see PRD Problem).
+- Project generated policy path (`<project>/.forge/routing-policy.yml`) is real.
+- Validation makes clear whether project policy is full replacement or merge. Initial: full replacement.
+- Project overrides may add/specialize routes but may NOT weaken force-level rules (validator-enforced).
+- Tests cover host default, project override, invalid project override, and force-level weakening refusal.
+
+Relations: #273, #252, #253.
+
+
+### #281 — RACI policy Story 8: effective governance view / diff preview
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Render a READ-ONLY effective-governance view and change-preview diff FROM the RACI source plus its generated policy — surfacing what the current RACI compiles to (and what a proposed edit would change), so the table a human reads can't silently lie about what the policy does.
+
+Acceptance:
+- The view is generated from RACI + compiled policy; it NEVER writes back to the RACI. Direction stays RACI -> policy, never policy -> RACI.
+- Shows the effective routes a human reads as a governance table.
+- Powers the diff the orchestrator-mediated channel (Story 6) shows before a human confirms.
+- Tests cover render-from-source and a representative proposed-edit diff.
+
+Relations: #273.
+
+
+### #282 — RACI policy Story 9: dedicated edit tool (deferred convenience)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+A CLI wizard or dashboard form that writes the RACI within guardrails, sitting on top of `forge raci validate`. DEFERRED: the orchestrator-mediated channel (Story 6) already gives a non-technical operator a safe authoring loop with zero new UI, so the standalone tool is a later convenience for direct manipulation, not a foundation piece.
+
+Acceptance:
+- Tool writes only valid RACI (every write passes `raci validate`; structurally cannot emit an unknown agent, non-human accountable, or weakened force rule).
+- Picks `responsible` / `consulted` / `informed` from known vocab rather than free text.
+- Form/wizard shape decided at build time (CLI wizard vs dashboard form).
+- Lower priority than Stories 1-8.
+
+Relations: #273.
+
+
+### #283 — RACI policy Story 10: provider adapter generation (#253 seam)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+After the routing policy is stable, use it as input to provider adapter GENERATION per #253 — rendering adapter surfaces FROM the policy. Distinct from #284 (Story 5b), which proves ONE surface consumes the policy by hand; this is the full generated-adapter lift. Downstream consumer; does NOT block the routing-policy MVP.
+
+Acceptance:
+- Define how Claude Code adapter surfaces (`CLAUDE.md`, `.claude/commands/*`, hooks) RENDER from routing policy.
+- Define equivalent or fallback behavior for Codex / generic adapters (these may have only the compiled policy, no RACI — see Story 5 standalone validation).
+- Adapter generation fails or warns when the routing policy is invalid.
+- Shared behavior lives in provider-neutral primitives/policy, not duplicated per adapter.
+
+Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
+
+
+### #284 — RACI policy Story 5b: consumption proof — orchestrator routes from generated policy (MVP proving gate)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+The gate that CLOSES the inert-artifact risk — sequenced right after Story 5 (#278), part of the MVP, NOT deferred. A validated, compiled policy that no surface reads is still inert, just checkable; the MVP is not done until one surface routes from the generated policy.
+
+Ship `forge route explain` (with `--json`) and point the orchestrator-template at the generated policy as its routing source for at least one work-type. The orchestrator classifies a prompt, calls `forge route explain`, and routes per the structured answer — a real code path consuming the policy, not prose in an LLM's context.
+
+Acceptance:
+- `forge route explain <work-type>` and `--json` return the route: responsible / path / required followups / informed targets.
+- Orchestrator-template instructs the orchestrator to consume `forge route explain` as the routing source (at least one work-type; ideally all).
+- Proof of life: editing the RACI demonstrably CHANGES the route the orchestrator takes (test: change a route in the RACI, recompile, `route explain` reflects it, orchestrator routes differently).
+- Distinct from #283 (Story 10, full provider-adapter generation), which stays deferred.
+
+Relations: #273, #278 (depends on route validate), #283 (the full-generation successor), `seeds/orchestrator-template.md`.
+
+
 ## Done (recent)
 
 ### #259 — pi: spike — headless --mode json run + usage-field discovery
