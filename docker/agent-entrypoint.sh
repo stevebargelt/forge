@@ -40,4 +40,13 @@ if [ -f /forge-codex-auth/auth.json ]; then
   export CODEX_HOME
 fi
 
+# #245: when forge mounts a container-local node_modules shadow volume (set via
+# spawn.ts), Docker creates it root-owned. The agent runs as UID 1000 and must
+# be able to `npm install` into it, so chown it to agent. Only touches the
+# explicit shadow path, never the bind-mounted host node_modules (which has no
+# FORGE_NM_SHADOW set), so host files are never written through grpcfuse.
+if [ -n "${FORGE_NM_SHADOW:-}" ] && [ -d "${FORGE_NM_SHADOW}" ]; then
+  sudo chown agent:agent "${FORGE_NM_SHADOW}" 2>/dev/null || true
+fi
+
 exec "$@"

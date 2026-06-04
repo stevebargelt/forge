@@ -170,6 +170,35 @@ test("buildDockerArgs: PROJECT_MODE=ro is honored for reds", () => {
   assert.match(pickMount(args, "/project")!, /:ro$/);
 });
 
+test("buildDockerArgs: #245 shadows node_modules with an anonymous volume on macOS rw mounts", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  delete process.env.FORGE_NO_NM_SHADOW;
+  const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+  const hasShadow = args.includes("/project/node_modules");
+  if (process.platform === "darwin") {
+    assert.ok(hasShadow, "darwin rw mount must shadow /project/node_modules to block grpcfuse write-back");
+  } else {
+    assert.ok(!hasShadow, "non-darwin hosts have no grpcfuse — no shadow volume");
+  }
+});
+
+test("buildDockerArgs: #245 never shadows node_modules on ro (red) mounts", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_MODE: "ro" });
+  assert.ok(!args.includes("/project/node_modules"), "reds (ro) never write node_modules, so never shadow");
+});
+
+test("buildDockerArgs: #245 FORGE_NO_NM_SHADOW=1 disables the node_modules shadow", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.FORGE_NO_NM_SHADOW = "1";
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+    assert.ok(!args.includes("/project/node_modules"), "escape hatch must disable the shadow volume");
+  } finally {
+    delete process.env.FORGE_NO_NM_SHADOW;
+  }
+});
+
 test("buildDockerArgs: working dir is set to the project mount (-w /project), not the ephemeral /workspace WORKDIR", () => {
   process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=AK,AWS_SECRET_ACCESS_KEY=SK,AWS_SESSION_TOKEN=TK";
   const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);

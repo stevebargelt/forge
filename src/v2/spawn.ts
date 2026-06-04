@@ -129,6 +129,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // in a non-persisted path and is silently discarded on container removal.
   // Identified by the mount whose host template is the project dir.
   let projectContainerPath: string | undefined;
+  let projectMode: string | undefined;
   for (const mount of runtime.mounts) {
     if (mount.host === "${PROJECT_DIR}") projectContainerPath = mount.container;
     const hostResolved = mount.optional
@@ -161,6 +162,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     }
 
     const mode = substitute(mount.mode, ctx);
+    if (mount.host === "${PROJECT_DIR}") projectMode = mode;
     args.push("-v", `${hostPath}:${mount.container}:${mode}`);
     if (mount.container.includes("/skills/browser-tools")) browserToolsHostPath = hostPath;
   }
@@ -191,6 +193,32 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     }
     args.push("-v", `${ctx.AUTH_STATE_HOST_PATH}:${AUTH_STATE_CONTAINER_PATH}:ro`);
     args.push("-e", `BROWSER_TOOLS_STORAGE_STATE=${AUTH_STATE_CONTAINER_PATH}`);
+  }
+
+  // #245: shadow the project's node_modules with a container-local anonymous
+  // volume on macOS rw mounts (supersedes FORGE-DEC-011). Docker Desktop's
+  // grpcfuse stamps a `com.docker.grpcfuse.ownership` xattr on native binaries
+  // the container writes (e.g. better-sqlite3.node); CyberArk-class EDR then
+  // silently SIGKILLs the HOST node processes that load them. The anonymous
+  // volume keeps every node_modules write inside the container (never written
+  // back through grpcfuse) AND hides the host's wrong-platform (macOS-arm64)
+  // modules so the agent installs correct linux ones instead of hand-patching.
+  // --rm auto-removes the volume on exit. Scoped to:
+  //   - darwin only: Linux hosts have no grpcfuse and matching-arch modules.
+  //   - rw mounts only: reds (ro) never write, so they can't corrupt anything.
+  //   - escape hatch FORGE_NO_NM_SHADOW=1 to disable without a code change.
+  if (
+    projectContainerPath &&
+    projectMode === "rw" &&
+    process.platform === "darwin" &&
+    process.env.FORGE_NO_NM_SHADOW !== "1"
+  ) {
+    const shadowPath = `${projectContainerPath}/node_modules`;
+    args.push("-v", shadowPath);
+    // Docker creates the anonymous volume root-owned, but the agent runs as
+    // UID 1000 and must `npm install` into it. Signal the path so the entrypoint
+    // chowns it to agent (NOPASSWD sudo) before exec'ing the agent command.
+    args.push("-e", `FORGE_NM_SHADOW=${shadowPath}`);
   }
 
   // Working directory = the persistent project bind mount (not the image's

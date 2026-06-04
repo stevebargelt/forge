@@ -9,8 +9,11 @@ COPY corp-root.pem /usr/local/share/ca-certificates/corp-root.crt
 RUN update-ca-certificates
 
 # Tooling. Done after CA trust is in place so every HTTPS call below works behind the proxy.
+# sudo: the agent user gets NOPASSWD sudo (DEC-009) and the entrypoint uses it
+# to chown the #245 node_modules shadow volume — but Ubuntu's base image has no
+# sudo binary, so the sudoers line below was previously inert. Install it here.
 RUN apt-get update && apt-get install -y \
-    git wget jq openssh-client python3 python3-pip build-essential \
+    git wget jq openssh-client python3 python3-pip build-essential sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
