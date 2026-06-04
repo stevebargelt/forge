@@ -1,199 +1,379 @@
 # forge RACI — work-type routing for the orchestrator
 
-The orchestrator reads this on every request to classify the prompt and pick a route.
+This file is the **human-authored source** for routing. The `### route:` blocks
+below are the canonical, machine-readable record: they compile to
+`routing-policy.yml` (the derived execution policy the orchestrator and provider
+adapters consume). See `docs/prds/raci-routing-policy.md`.
+
+Two kinds of content live here:
+- **Route blocks** (`### route: <key>`) — compiled. One constrained record block
+  per route, fixed fields, brutal parse rules (below).
+- **Routing guidance** — everything else is non-compiled human context, ignored
+  by the compiler. Prose that materially affects routing is prefixed
+  `Routing guidance:` / `Notes:` so the parser boundary is obvious.
 
 **How to use this file:**
-- Rows marked `[default]` ship with forge — don't modify unless a project genuinely needs different routing
-- Rows marked `[project]` are project-customizable (override by copying this file to `<project>/.forge/forge-raci.md`)
-- If a specialist agent doesn't exist on your machine (`~/.forge/agents/<role>/` missing), the orchestrator handles that work type directly in-session
+- These routes ship with forge — don't modify unless a project genuinely needs
+  different routing.
+- A project overrides by copying this file to `<project>/.forge/forge-raci.md`.
+- If a `responsible` agent isn't installed on the host (`~/.forge/agents/<role>/`
+  missing), the orchestrator handles that work type directly in-session.
+
+**Record-block grammar (brutal + simple):**
+- A route block starts with `### route: <route_key>`. Route keys are unique.
+- Fixed lowercase field names, one `key: value` per line, no multiline values.
+- Required: `classification_hints`, `responsible`, `accountable`, `path`,
+  `consulted`, `required_followups`, `informed`, `force_rules`.
+- `command` is required iff `path: cli`; forbidden otherwise.
+- `path` enum: `in_session`, `invoke`, `invoke_chain`, `workflow`, `manual`, `cli`.
+- `responsible` is the dispatch target for non-`cli` paths (agent role / workflow
+  name / `human` / `orchestrator`); for `cli`, `responsible` is the action symbol
+  and `command` is what runs.
+- `accountable` is `human` in every block — the visible governance reminder. The
+  compiler hoists it to the policy header; outcomes are always the human's.
+- Lists are comma-separated symbols; `none` is the only empty-list sentinel.
+- `informed` targets may be conditional: `name:when=condition`.
+- `classification_hints` are advisory — the orchestrator may use them to choose a
+  route; forge code never keyword-matches prompts into routes.
 
 ---
 
 ## Work type taxonomy
 
-Classify every incoming prompt into ONE of these types before looking up the RACI. If a prompt spans multiple types, **split and sequence** — decompose into discrete work items, route each in order.
-
-| Work Type | Prompt examples |
-|-----------|-----------------|
-| `strategy` | "What should I prioritize?", "Is this worth building?", "What's the LOE on this?" |
-| `planning` | "What should I work on next?", "Help me triage the backlog" |
-| `ticketing` | "File a backlog item for X", "Move #N to Done", "Refresh BACKLOG.md notes" |
-| `implementation` | "Build feature X", "Fix bug Y", "Refactor Z" — the work type that triggers the **pipeline** (full) or **invoke chain** (quick) |
-| `testing` | "Write tests for X", "Add E2E coverage for the dashboard", "Test this feature", "QA the latest changes", "Catch up on test coverage" |
-| `documentation` | "Document how X works", "Update CLAUDE.md", "Write a how-to for Y" |
-| `research` | "How does X work?", "What does Z's source say about Y?", "Investigate this claim" |
-| `review` | "Review my plan", "Audit this diff", "Red-team this artifact" |
-| `architecture` | "Should I use X or Y?", "Design the boundaries for Z", "What's the right pattern?" |
-| `ui-design` | "Design the UI for X", "Revise the existing design for Y" |
-| `orientation` | "What's the current state?", "Where were we?", "What's in flight?" |
-| `meta` | "How does forge work?", "Update the orchestrator template", "Add a new agent" |
+Classify every incoming prompt into ONE work type before routing. If a prompt
+spans multiple types, **split and sequence** — decompose into discrete work
+items, route each in order. The `classification_hints` in each route block carry
+example phrasing.
 
 ---
 
-## RACI table
+## Routes
 
-Columns (standard RACI):
-- **Responsible** — the agent that DOES the work. **Exactly one** value per row. (For `implementation`, the selection happens via sub-rule at routing time but the cell points to a single chosen agent.)
-- **Accountable** — the party that OWNS the outcome — signs off, takes the blame, has the final call. **Exactly one** value per row.
-- **Consulted** — two-way communication BEFORE work begins. The orchestrator invokes consulted agents first and folds their input into the brief for the Responsible agent. **Can be multiple** (comma-separated).
-- **Informed** — one-way communication AFTER work completes. Notification, not decision-making input. **Can be multiple** (comma-separated). For forge this is mostly file updates (BACKLOG.md, ADRs), not agent invocations.
+### route: strategy
 
-Plus a forge-specific column:
-- **Path** — how the orchestrator invokes the Responsible work. `in-session` = orchestrator does it directly in chat; `invoke` = `forge invoke <agent>`; `pipeline` = `forge new <workflow>`.
+classification_hints: what should I prioritize, is this worth building, what's the LOE
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
 
-| Work Type | Responsible | Accountable | Consulted | Informed | Path | Row |
-|-----------|-------------|-------------|-----------|----------|------|-----|
-| `strategy` | orchestrator | orchestrator | `architecture-advisor` (when scope is non-trivial) | — | in-session | [default] |
-| `planning` | orchestrator | orchestrator | `architecture-advisor` (when sequencing depends on architectural risk) | — | in-session | [default] |
-| `ticketing` | orchestrator | orchestrator | — | — | in-session | [default] |
-| `implementation` (full) | see sub-rule ¹ | orchestrator | `architecture-advisor` (sub-rule ²) | — | **pipeline** (`forge new feature`) | [default] |
-| `implementation` (quick) | `engineer` (sub-rule ⁵) | orchestrator | — | — | **invoke chain** (sub-rule ⁵) | [default] |
-| `testing` (automation) | `test-engineer` | orchestrator | — | — | invoke | [default] |
-| `testing` (exploratory) | `manual-qa` | orchestrator | — | — | invoke | [default] |
-| `documentation` (durable) | `documentation-maintainer` | orchestrator | subject-matter specialist (sub-rule ³) | — | invoke | [default] |
-| `documentation` (ephemeral) | orchestrator | orchestrator | — | — | in-session | [default] |
-| `research` | `research-specialist` | orchestrator | — | — | invoke | [default] |
-| `review` (wide) | `red-wide` | orchestrator | — | — | invoke | [default] |
-| `review` (narrow) | `red-narrow` | orchestrator | — | — | invoke | [default] |
-| `review` (frontend) | `red-frontend` | orchestrator | — | — | invoke | [default] |
-| `review` (backend) | `red-backend` | orchestrator | — | — | invoke | [default] |
-| `review` (security) | `red-security` | orchestrator | — | — | invoke | [default] |
-| `architecture` | `architecture-advisor` | orchestrator | relevant specialist (sub-rule ³) | — | invoke | [default] |
-| `ui-design` | `prompt-author` | user | — | — | invoke + manual handoff ⁴ | [default] |
-| `orientation` | orchestrator | orchestrator | — | — | in-session | [default] |
-| `meta` | orchestrator | orchestrator | — | — | in-session | [default] |
+### route: planning
+
+classification_hints: what should I work on next, help me triage the backlog
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: ticketing
+
+classification_hints: file a backlog item, move to done, refresh notes
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary, backlog:when=ticketed
+force_rules: none
+
+### route: implementation_full
+
+classification_hints: build feature, multi-file change, architectural implications, cross-cutting
+responsible: feature
+accountable: human
+path: workflow
+consulted: none
+required_followups: none
+informed: user_summary, backlog:when=ticketed, docs_impact:when=operator_behavior_changed
+force_rules: none
+
+### route: implementation_quick
+
+classification_hints: bug fix, small feature, ui tweak, targeted refactor
+responsible: engineer
+accountable: human
+path: invoke_chain
+consulted: affected_code, existing_tests
+required_followups: test-engineer
+informed: user_summary, backlog:when=ticketed, docs_impact:when=operator_behavior_changed
+force_rules: none
+
+### route: testing_automation
+
+classification_hints: write tests, add e2e coverage, test backfill, catch up coverage
+responsible: test-engineer
+accountable: human
+path: invoke
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: testing_exploratory
+
+classification_hints: exploratory test, QA the changes, poke edge cases
+responsible: manual-qa
+accountable: human
+path: invoke
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: documentation_durable
+
+classification_hints: document how X works, write a how-to, update operator docs, write an ADR
+responsible: documentation-maintainer
+accountable: human
+path: invoke
+consulted: none
+required_followups: none
+informed: user_summary, docs_impact:when=operator_behavior_changed
+force_rules: none
+
+### route: documentation_ephemeral
+
+classification_hints: session notes, task brief, scratch draft, small status note
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: research
+
+classification_hints: how does X work, what does the source say, investigate this claim
+responsible: research-specialist
+accountable: human
+path: invoke
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: review_wide
+
+classification_hints: audit this diff, broad review, review my plan
+responsible: red-wide
+accountable: human
+path: invoke
+consulted: affected_code
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: review_narrow
+
+classification_hints: deep review, narrow audit, scrutinize this change
+responsible: red-narrow
+accountable: human
+path: invoke
+consulted: affected_code
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: review_frontend
+
+classification_hints: ui review, accessibility audit, styles review
+responsible: red-frontend
+accountable: human
+path: invoke
+consulted: affected_code
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: review_backend
+
+classification_hints: api review, data review, business-logic audit
+responsible: red-backend
+accountable: human
+path: invoke
+consulted: affected_code
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: review_security
+
+classification_hints: security audit, auth review, crypto review, secrets review
+responsible: red-security
+accountable: human
+path: invoke
+consulted: affected_code
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: architecture
+
+classification_hints: should I use X or Y, design the boundaries, what's the right pattern
+responsible: architecture-advisor
+accountable: human
+path: invoke
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: ui_design
+
+classification_hints: design the UI, revise the existing design
+responsible: prompt-author
+accountable: human
+path: invoke
+consulted: design_artifacts
+required_followups: none
+informed: user_summary, handoff_notes:when=session_boundary
+force_rules: none
+
+### route: orientation
+
+classification_hints: what's the current state, where were we, what's in flight
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
+
+### route: meta
+
+classification_hints: how does forge work, update the orchestrator template, add a new agent
+responsible: orchestrator
+accountable: human
+path: in_session
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none
 
 ---
 
-## Routing sub-rules
+## Routing guidance (NOT compiled)
 
-**¹ `implementation` specialist selection** (the tech-lead chooses, NOT the orchestrator):
-- The implementation pipeline (`forge new feature`) runs architect → tech-lead → engineer → test-engineer with reds
-- The **tech-lead** decides which engineer specialist handles each plan step:
-  - Backend-only work → `backend-specialist`
-  - Frontend-only work → `frontend-specialist`
-  - Security-sensitive work (auth, crypto, secret handling, input validation) → `security-advisor`
-  - Cross-layer, full-stack, or platform/agentic work → `agentic-platform-builder`
-  - General single-layer work without a clear specialty → `engineer` (the generalist)
-- The orchestrator's job is **just** to kick off the pipeline — it doesn't pre-route to a specialist
+Everything below is non-compiled human guidance. The compiler ignores it; it
+exists to capture judgment the record blocks can't express. Where a note
+materially affects routing it is prefixed `Routing guidance:`.
 
-**² `architecture-advisor` consult on `implementation`:**
-- The pipeline already includes an `architect` phase as the first step. The orchestrator does NOT pre-consult architecture-advisor before invoking the pipeline — the pipeline handles that.
-- The "Consulted" entry here is informational: the pipeline DOES consult the architecture-advisor as its first phase.
+**Routing guidance: `strategy` / `planning` consults.** When scope is non-trivial
+(or sequencing depends on architectural risk), the orchestrator may first invoke
+`architecture-advisor` and fold its input into the answer. This consult is a
+judgment call, not a hard rule, so the route blocks carry `consulted: none`.
 
-**³ Subject-matter specialist selection** (for `documentation` and `architecture` consults):
-- Backend domain → `backend-specialist`
-- Frontend domain → `frontend-specialist`
-- Security domain → `security-advisor`
-- Full-stack / platform / agentic domain → `agentic-platform-builder`
-- Research-shaped questions → `research-specialist`
-- Skip the consult if no relevant specialist exists on the host
+**Routing guidance: `implementation_full` specialist selection** (the tech-lead
+chooses, NOT the orchestrator). The pipeline (`forge new feature`, the `feature`
+workflow) runs architect → tech-lead → engineer → test-engineer with reds. The
+tech-lead decides which engineer specialist handles each plan step:
+- Backend-only → `backend-specialist`
+- Frontend-only → `frontend-specialist`
+- Security-sensitive (auth, crypto, secret handling, input validation) → `security-advisor`
+- Cross-layer / full-stack / platform/agentic → `agentic-platform-builder`
+- General single-layer work → `engineer` (generalist)
 
-**³ᵇ `documentation` — durable vs ephemeral split.** The two `documentation` rows route on the artifact, by one principle: **ephemeral working-state → orchestrator edits it directly; durable operator-/engineer-facing prose → `documentation-maintainer` (invoke).**
-- **Durable (invoke the maintainer):** `docs/**`, `learnings/decisions/**` + `learnings/patterns/**`, `README*`, seed prose/templates, how-tos, ADRs, and example configs users copy (including their comments/prose).
-- **Ephemeral (orchestrator-direct):** `BACKLOG.md` (via the `forge backlog` CLI), session handoff notes, very small status notes, task briefs you author for agents, scratch drafts.
-- **Mechanical exception:** re-rendering `CLAUDE.md` via `forge upgrade` and marker-repair are deterministic, not authoring — orchestrator-direct. If `documentation-maintainer` isn't installed on the host, note the gap and fall back to a direct edit rather than skipping the docs.
+The orchestrator's job is just to kick off the pipeline. The architect phase is
+the pipeline's own first step — the orchestrator does NOT pre-consult
+architecture-advisor (hence `consulted: none` on `implementation_full`).
 
-**⁴ `ui-design` manual handoff:**
-- `prompt-author` runs in a container and produces `PROMPT.md` (this is the `invoke` part)
-- The human (you) then runs `PROMPT.md` against Pencil + Claude Code on the host, exports `.pen` + `designs/*.png`, and runs `forge submit <task-id>` to hand the artifacts back to forge
-- This second phase is intentionally NOT a RACI row because no agent is involved — it's irreducibly human work. The orchestrator's job is to make sure the user knows the handoff is theirs to drive
-- Accountable = user because design judgment is irreducibly the user's call
+**Routing guidance: `implementation_quick` — invoke chain.** Bug fixes, small
+features, UI tweaks, and targeted refactors skip the pipeline. The engineer
+builds and self-validates; then the **test-engineer is NOT optional** —
+`required_followups: test-engineer` is mandatory. Skipping it is how "simple UI
+updates" break the app. manual-qa is optional at the orchestrator's judgment for
+user-facing/visual/high-risk changes. No reds run in the quick path. The engineer
+specialist is picked the same way as the pipeline's (frontend-specialist,
+backend-specialist, etc.).
 
-**⁵ `implementation` (quick) — invoke chain for small changes:**
+Routing guidance: Full vs quick — full pipeline for new/multi-file/architectural
+or cross-cutting work that needs an architect's risk assessment; quick chain for
+a single-module bug fix, a one-or-two-file feature, a UI/styling/copy tweak, or a
+targeted refactor within clear boundaries. When in doubt, ask the user.
 
-Not every implementation task needs the full pipeline. Bug fixes, small features, UI tweaks, and targeted refactors use the quick path: a chain of invokes driven by the orchestrator. The orchestrator picks the path based on scope — see "Full vs quick implementation" below.
+**Routing guidance: subject-matter specialist consults** (for
+`documentation_durable` and `architecture`). The specific specialist is chosen at
+routing time — backend → `backend-specialist`, frontend → `frontend-specialist`,
+security → `security-advisor`, full-stack/platform → `agentic-platform-builder`,
+research-shaped → `research-specialist`. Because the choice is sub-rule-driven (no
+single fixed symbol), the route blocks carry `consulted: none`; skip the consult
+if no relevant specialist exists on the host.
 
-The quick chain:
-```
-forge invoke engineer --task "..." --run-title "<title>"
-# read result, verify engineer self-validated, then ALWAYS:
-forge invoke test-engineer --task "verify: <what the engineer changed>" --run <same-run-id>
-# for UI-facing changes on web apps, optionally:
-forge invoke manual-qa --task "exploratory test of <feature>" --run <same-run-id>
-```
+**Routing guidance: `documentation` durable vs ephemeral.** Ephemeral
+working-state → orchestrator edits directly (`documentation_ephemeral`): BACKLOG
+via `forge backlog`, session handoff notes, task briefs, scratch drafts. Durable
+operator-/engineer-facing prose → `documentation-maintainer`
+(`documentation_durable`): `docs/**`, `learnings/decisions/**` +
+`learnings/patterns/**`, `README*`, seed prose/templates, how-tos, ADRs, example
+configs. Mechanical exception: re-rendering `CLAUDE.md` via `forge upgrade` and
+marker-repair are orchestrator-direct. If the maintainer isn't installed, note
+the gap and fall back to a direct edit.
 
-Key rules:
-- **test-engineer is NOT optional** in the quick chain. The whole point of quick implementation is to skip ceremony (architect, tech-lead, reds) without skipping verification. The engineer builds; the test-engineer proves it works. Skipping the test-engineer invoke is how "simple UI updates" break the app.
-- The engineer specialist selection follows the same logic as sub-rule ¹ — the orchestrator picks the right specialist (`frontend-specialist`, `backend-specialist`, etc.) based on the task.
-- manual-qa is optional and at the orchestrator's judgment. Invoke it when the change is user-facing, visual, or high-risk.
-- No reds run in the quick path. If the change warrants adversarial review, use the full pipeline.
+**Routing guidance: `ui_design` manual handoff.** `prompt-author` runs in a
+container and produces `PROMPT.md` (the `invoke` the route block names). The human
+then drives Pencil + Claude Code on the host, exports `.pen` + `designs/*.png`,
+and runs `forge submit <task-id>` to hand the artifacts back — irreducibly human
+work that no route block models. Outcome accountability is the human's
+(`accountable: human`).
 
-**Full vs quick implementation — how the orchestrator decides:**
+**Routing guidance: `review` selection.** The five review routes are independent.
+Always run `review_wide` and `review_narrow` for any non-trivial artifact; add
+`review_frontend` when it touches UI/styles/accessibility, `review_backend` for
+APIs/data/business-logic, `review_security` for auth/crypto/secrets/input
+validation. Selected reviews run in parallel; verdicts aggregate at the
+orchestrator level.
 
-| Signal | Path |
-|--------|------|
-| New feature, multi-file, architectural implications | Full pipeline |
-| Cross-cutting change spanning multiple layers | Full pipeline |
-| Work that needs an architect's risk assessment | Full pipeline |
-| Bug fix in a single module | Quick chain |
-| Small feature addition (one or two files) | Quick chain |
-| UI tweak, styling change, copy update | Quick chain |
-| Targeted refactor within clear boundaries | Quick chain |
+**Routing guidance: multi-type prompts — split and sequence.** "Build feature X
+and document it" decomposes into `implementation_full` then `documentation_durable`
+(on the same run, after implementation). When implementation changes
+operator-visible behavior, the documentation item is implied even if unasked —
+chain the maintainer and report the `Docs impact: none | updated | deferred` line.
 
-When in doubt, ask the user: "This looks small enough for a quick invoke chain — or would you prefer the full pipeline?"
+**Routing guidance: consulted agents are synchronous.** The orchestrator pauses,
+runs `forge invoke <consulted-agent>`, reads the result, folds it into the brief
+for the responsible agent, then proceeds. If a consulted agent isn't installed,
+skip and note the gap.
 
-**Review routing**: the five `review (...)` rows are independent. The orchestrator selects which reviews to run based on the artifact:
-- Always run `review (wide)` and `review (narrow)` for any non-trivial diff or artifact
-- Add `review (frontend)` when the artifact touches UI / styles / accessibility
-- Add `review (backend)` when the artifact touches APIs / data / business logic
-- Add `review (security)` when the artifact touches auth / crypto / secrets / input validation
-- Selected reviews run in parallel via simultaneous `forge invoke` calls; verdicts aggregate at the orchestrator level (similar to how the pipeline's `gate: verdict` aggregates reds)
+Notes: `informed` targets are post-work closure hygiene (record/surface targets),
+not agent notifications. Work-closure hygiene (updating BACKLOG, writing ADRs to
+`learnings/decisions/**` or patterns to `learnings/patterns/**`) is project
+hygiene the orchestrator does as part of completing the request.
 
----
-
-## Routing behavior rules
-
-**Multi-type prompts — split and sequence.**
-"Build feature X and document it" decomposes into TWO work items: one `implementation` (pipeline), one `documentation` (durable → `documentation-maintainer`, invoked on the same run after implementation completes). Route in order; surface the plan to the user before executing. When the implementation changes operator-visible behavior, the documentation item is implied even if the user didn't ask for it — chain the maintainer and report the **Docs impact: none | updated | deferred** line.
-
-**Consulted agents are synchronous.**
-The orchestrator pauses, runs `forge invoke <consulted-agent>`, reads the result, folds it into the brief for the Responsible agent, then proceeds. If a Consulted agent isn't installed (no `~/.forge/agents/<role>/` dir), skip and note the gap in the user-facing summary.
-
-**Informed targets are downstream parties to notify after work completes.**
-For forge today, most rows have no Informed (—). The orchestrator carries each agent's output forward as context for the next invocation rather than relying on persistent inter-agent notification.
-
-**Work-closure hygiene is separate from RACI Informed.** After any work completes, the orchestrator may need to:
-- Update BACKLOG.md (when a tracked ticket changes state, or to capture a note worth a future session)
-- Write to `learnings/decisions/<name>.md` (for architectural decisions worth keeping)
-- Write to `learnings/patterns/<name>.md` (for cross-cutting patterns worth re-using)
-
-These are *project hygiene*, not *informing parties*. The orchestrator does them as part of completing the request. They don't belong in the RACI's Informed column.
-
-**Ambiguous prompts.**
-If a prompt can't be classified after one read, ask ONE targeted clarifying question. Don't ask for a full spec — just enough to pick the right work type.
-
-**The `implementation` trigger is strict.**
-Only `implementation` work modifies source code. It takes one of two paths — full pipeline (architect → tech-lead → engineer → test-engineer with reds) for substantial work, or quick invoke chain (engineer → test-engineer, optionally manual-qa) for small changes. Both paths include test-engineer verification. Even complex multi-agent work in other categories (e.g., a research task that needs `research-specialist` + then `synthesizer`-style aggregation) is orchestrator-driven via multiple `forge invoke` calls without a pipeline.
-
-**The `testing` trigger is standalone.**
-`testing` work does NOT modify source code (other than adding test files). It's always a direct invoke — `test-engineer` for writing automated tests, `manual-qa` for exploratory testing. Use `testing` for catch-up coverage ("write integration tests for the auth flow"), post-hoc verification ("test the dashboard changes"), or test backfill ("we need E2E tests for module X").
-
-**When the orchestrator is "Responsible" itself.**
-Many rows have the orchestrator as Responsible (strategy, planning, ticketing, orientation, meta). This is intentional — those work types are conversation-shaped, not artifact-shaped. The orchestrator does them in the chat with the user, optionally consulting specialists for input. No `forge invoke` needed.
+Notes: when the orchestrator is `responsible` itself (strategy, planning,
+ticketing, documentation_ephemeral, orientation, meta) the work is
+conversation-shaped — handled in chat, no `forge invoke`. Always present a plan
+before kicking off any `invoke` or `workflow` work; most requests resolve in one
+or two invokes; when in doubt, ask the user.
 
 ---
 
 ## Path conventions
 
-- **`in-session`** — orchestrator handles in the conversation directly. No container, no run row. Examples: updating BACKLOG.md, answering "what's in flight," writing rationale for a ticket.
-- **`invoke`** — `forge invoke <agent-role> --task "<description>" --project <dir>`. Spawns one container with the named agent, returns when done, writes a one-step run row visible in the dashboard. Most non-implementation work uses this.
-- **`pipeline`** — `forge new feature "<title>" --brief "<brief>" --project <dir>`. Multi-step workflow with gates and reds. Reserved for `implementation`.
-
----
-
-## Notes for the orchestrator
-
-- **Always present a plan before kicking off any `invoke` or `pipeline` work.** Tell the user: which agent, what task, why this routing. Wait for confirmation.
-- **Most user requests resolve in one or two invokes.** A research question is one `research-specialist` invoke. An architecture question is one `architecture-advisor` invoke. A "build this feature" request is one `forge new feature` pipeline. Don't over-decompose.
-- **You can chain invokes for complex non-implementation work.** If the user asks "research X and then propose an architecture for it," that's a `research-specialist` invoke followed by an `architecture-advisor` invoke — both driven by you, no pipeline.
-- **When in doubt, ask the user.** Routing is your judgment call but you're not infallible. "I'd handle this as research — sound right?" is cheap insurance.
+- **`in_session`** — orchestrator handles it in the conversation. No container,
+  no run row.
+- **`invoke`** — `forge invoke <agent-role> --task "<description>"`. One
+  container, returns when done, one-step run row.
+- **`invoke_chain`** — a sequence of invokes the orchestrator drives (e.g.
+  engineer → test-engineer) without a pipeline.
+- **`workflow`** — `forge new <workflow>`. Multi-step run with gates and reds.
+- **`manual`** — irreducibly human work on the host (no agent dispatched).
+- **`cli`** — a direct forge CLI operation; the literal invocation is in `command`.
 
 ---
 
 ## Routing log
 
-The orchestrator appends a one-line entry to `<project>/.forge/routing-log.md` after every routed request (if the file exists; created lazily when the first non-trivial request is routed). Useful for after-the-fact "why did the orchestrator do X" auditing.
+The orchestrator appends a one-line entry to `<project>/.forge/routing-log.md`
+after every routed request (created lazily on first non-trivial routing). Useful
+for after-the-fact "why did the orchestrator route X this way" auditing.
 
 ```
 | Date | Prompt summary | Classified | Responsible | Consulted | Path |
