@@ -27,6 +27,14 @@ export const EVIDENCE_SOURCES: ReadonlySet<string> = new Set([
   "design_artifacts",
 ]);
 
+/** Symbols always valid regardless of host — no resolution needed. */
+export const BUILTIN_SYMBOLS: ReadonlySet<string> = new Set(["human", "orchestrator"]);
+
+/** Fixed CLI-action registry — symbols a `path: cli` route's `responsible` may
+ *  name. Each denotes a real forge operation; the route carries the literal
+ *  invocation in `command`. Used by route validate (#278). */
+export const CLI_ACTIONS: ReadonlySet<string> = new Set(["forge-ops-repair"]);
+
 /** Static force-rule baseline. PLACEHOLDER: routing-scoped force rules are not
  *  yet defined (the seed uses `force_rules: none` everywhere), so this is empty.
  *  While empty, force-rule resolution is DORMANT — validators must not pretend a

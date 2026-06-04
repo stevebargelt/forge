@@ -1,0 +1,107 @@
+// Operational-policy lint tests (#278) — pure core with injected host.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { validateRoutePolicy, type HostEnv } from "./route-validate.js";
+import { compileRaciDocument } from "./compile.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SEED_PATH = join(HERE, "..", "..", "seeds", "forge-raci.md");
+
+const all: HostEnv = { agentInstalled: () => true, workflowKnown: () => true };
+const none: HostEnv = { agentInstalled: () => false, workflowKnown: () => false };
+
+const raci = () => readFileSync(SEED_PATH, "utf8");
+const seedPolicy = () => compileRaciDocument(raci());
+
+function compile(block: string): unknown {
+  return compileRaciDocument(block);
+}
+
+const CLI_BLOCK = `### route: ops
+classification_hints: retry
+responsible: forge-ops-repair
+accountable: human
+path: cli
+command: forge ops repair
+consulted: none
+required_followups: none
+informed: user_summary
+force_rules: none`;
+
+test("seed policy resolves clean when everything is installed", () => {
+  const v = validateRoutePolicy(seedPolicy(), all);
+  assert.equal(v.ok, true, JSON.stringify(v.findings));
+  assert.equal(v.mode, "standalone");
+});
+
+test("agents and workflows are flagged when nothing is installed", () => {
+  const v = validateRoutePolicy(seedPolicy(), none);
+  assert.equal(v.ok, false);
+  // engineer (invoke_chain) and feature (workflow) are unresolved...
+  assert.ok(v.findings.some((f) => f.code === "responsible_unresolved" && f.route === "implementation_quick"));
+  assert.ok(v.findings.some((f) => f.code === "responsible_unresolved" && f.route === "implementation_full"));
+  // ...but orchestrator/in_session routes are built-in and resolve.
+  assert.ok(!v.findings.some((f) => f.route === "orientation"));
+});
+
+test("evidence-source consults resolve even when not installed agents", () => {
+  const v = validateRoutePolicy(seedPolicy(), none);
+  // implementation_quick consults affected_code + existing_tests (evidence sources)
+  assert.ok(!v.findings.some((f) => f.code === "consulted_unresolved" && f.route === "implementation_quick"));
+});
+
+test("an unknown consulted symbol is flagged", () => {
+  const policy = compile(
+    `### route: x\nclassification_hints: y\nresponsible: orchestrator\naccountable: human\npath: in_session\nconsulted: not_a_real_thing\nrequired_followups: none\ninformed: user_summary\nforce_rules: none`,
+  );
+  const v = validateRoutePolicy(policy, none);
+  assert.ok(v.findings.some((f) => f.code === "consulted_unresolved" && f.route === "x"));
+});
+
+test("cli responsible resolves against the action registry", () => {
+  const good = validateRoutePolicy(compile(CLI_BLOCK), none);
+  assert.equal(good.ok, true, JSON.stringify(good.findings));
+
+  const badPolicy = structuredClone(compile(CLI_BLOCK)) as any;
+  badPolicy.routes.ops.responsible = "made-up-action";
+  const bad = validateRoutePolicy(badPolicy, none);
+  assert.ok(bad.findings.some((f) => f.code === "responsible_unresolved" && f.route === "ops"));
+});
+
+test("schema-invalid input yields schema_error and stops", () => {
+  const v = validateRoutePolicy({ version: 1, governance: { accountable: "user" }, routes: {} }, all);
+  assert.equal(v.ok, false);
+  assert.ok(v.findings.every((f) => f.code === "schema_error"));
+});
+
+test("standalone mode does not produce drift findings", () => {
+  const v = validateRoutePolicy(seedPolicy(), all);
+  assert.equal(v.mode, "standalone");
+  assert.ok(!v.findings.some((f) => f.code === "policy_drift"));
+});
+
+test("with-raci mode: matching policy has no drift", () => {
+  const v = validateRoutePolicy(seedPolicy(), all, raci());
+  assert.equal(v.mode, "with-raci");
+  assert.equal(v.ok, true, JSON.stringify(v.findings));
+});
+
+test("with-raci mode: a differing route is reported as drift", () => {
+  const mutated = structuredClone(seedPolicy()) as any;
+  mutated.routes.implementation_quick.responsible = "frontend-specialist";
+  const v = validateRoutePolicy(mutated, all, raci());
+  assert.ok(v.findings.some((f) => f.code === "policy_drift" && f.route === "implementation_quick"));
+});
+
+test("with-raci mode: a route missing from the policy is drift", () => {
+  const mutated = structuredClone(seedPolicy()) as any;
+  delete mutated.routes.research;
+  const v = validateRoutePolicy(mutated, all, raci());
+  assert.ok(
+    v.findings.some((f) => f.code === "policy_drift" && f.route === "research" && /missing from the policy/.test(f.message)),
+  );
+});
