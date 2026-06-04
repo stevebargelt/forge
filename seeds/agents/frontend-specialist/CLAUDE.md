@@ -97,7 +97,10 @@ No host/container native-module mismatch for Go — run directly from `/project`
 3. **Eyeball the screenshot before declaring complete.** Does the change look right? Did it break adjacent UI? Did the layout reflow correctly? If you'd flag any of those concerns reviewing someone else's work, flag them here too — `status: "failed"` with what to fix, or `status: "complete"` with explicit notes about what you noticed.
 4. Include screenshot path(s) in the `screenshots` field of your result.
 - **Tests passing on frontend code is necessary but NOT sufficient.** A component can pass tests while rendering broken visuals. Never substitute "type-check + tests pass" for visual verification on a web-app UI diff.
-- **"No browser" is a hard failure, not a footnote.** Headless Chrome on `:9222` + the `browser-tools` scripts are part of this container. If `:9222` is unreachable (`curl -s localhost:9222/json/version` fails) or the `browser-tools` scripts are missing, the *environment* is broken: return `status: "failed"` naming the gap. Do NOT report `complete` with "no visual verification — validated by type-check only"; a missing browser is a blocker to surface, not a step to skip.
+- **Visual validation uses an ordered fallback chain — attempt visual validation before declaring a gap.**
+  1. **PRIMARY — browser-tools on :9222** (as above): preferred path.
+  2. **FALLBACK — Playwright / E2E suite**: if `:9222` is genuinely unreachable (`curl -s localhost:9222/json/version` fails) OR the `browser-tools` scripts are missing, check whether the project has a Playwright or E2E suite (`npm run test:e2e`, `npx playwright test`, or similar in `package.json`). Playwright drives real headless Chromium in-container and validates rendered output. Run it, capture its screenshots/artifacts in `screenshots`, and return `status: "complete"` with a caveat in `notes` — e.g. `"browser-tools/:9222 unavailable in container; visual validation via Playwright E2E. Known container infra gap."`.
+  3. **NO PATH — both unavailable**: only when browser-tools *and* a Playwright/E2E suite are both absent should you return `status: "failed"` naming both gaps. Do NOT return `complete` with "validated by type-check only" when no visual path exists.
 - **"No dev server" is not an excuse to skip visual verification.** You have the project source, you have the package.json, you can start it. If the dev server genuinely cannot start (missing deps, broken config), that's a finding — report it as `status: "failed"`, don't silently mark verification as unavailable.
 
 **For mobile apps (React Native, Expo):**
@@ -105,8 +108,8 @@ No host/container native-module mismatch for Go — run directly from `/project`
 - Run tests. State `"visual_verification": "not available for React Native"` in your result.
 - If Expo web preview is available, you may use browser-tools against it, but note it's a web approximation.
 
-**If you cannot validate** (no test path possible AND no applicable visual verification):
-- Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate.
+**If you cannot validate** (no test path possible AND no visual-validation path — browser-tools unavailable AND no Playwright/E2E suite):
+- Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate and which visual paths were unavailable.
 - Never `status: "complete"` on unvalidated frontend work.
 
 **Why this is a hard rule**: frontend bugs are visual; tests catch logic but not layout/styling/rendering. browser-tools is how you see what the user will see. Skipping that step ships visual bugs.
@@ -128,7 +131,7 @@ No host/container native-module mismatch for Go — run directly from `/project`
 }
 ```
 
-If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped validation, that's also `status: "failed"` — never `complete`.
+If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped visual validation entirely (no browser-tools AND no Playwright/E2E fallback available), that's also `status: "failed"` — never `complete`.
 
 ## Discipline
 
