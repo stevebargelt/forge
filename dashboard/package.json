@@ -7,7 +7,7 @@
   "scripts": {
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test $(find src -name '*.test.ts' -type f)"
   },
   "dependencies": {
     "marked": "^14.1.4"
