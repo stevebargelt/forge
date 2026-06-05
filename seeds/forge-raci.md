@@ -352,7 +352,10 @@ then.
 and document it" decomposes into `implementation_full` then `documentation_durable`
 (on the same run, after implementation). When implementation changes
 operator-visible behavior, the documentation item is implied even if unasked —
-chain the maintainer and report the `Docs impact: none | updated | deferred` line.
+resolve the docs-impact lifecycle and report the final `Docs impact: updated |
+not needed: <reason> | deferred: #<ticket>` line (or `none`); a non-`none` impact
+must be resolved before the run is complete, and a deferral requires a filed
+backlog ticket.
 
 **Routing guidance: consulted agents are synchronous.** The orchestrator pauses,
 runs `forge invoke <consulted-agent>`, reads the result, folds it into the brief
