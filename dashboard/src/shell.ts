@@ -197,6 +197,8 @@ section.feed { margin-top: 24px; }
 .badge.status-blocked_by_red { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 .badge.status-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
 .badge.status-pending { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }
+/* #290: a running task whose container is gone — stale DB row, needs reconcile. */
+.badge.status-reconcile_candidate { background: rgba(250, 204, 21, 0.18); color: var(--warn); }
 
 .detail-overlay {
   position: fixed; inset: 0;

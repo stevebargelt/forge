@@ -19,6 +19,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { Incident } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
+import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
 
 export type OpsCheckOptions = {
   /** Scope to one project's runs (runs.project_dir). Omit for the host-wide view. */
@@ -100,9 +101,52 @@ export function detectInconsistentRunState(db: DatabaseInstance, opts: OpsCheckO
   );
 }
 
+/** A `running` task whose container is GONE (#290). The DB row is stale — the
+ *  work finished (or the container died) but no lifecycle command has run
+ *  reconcileRun to finalize it, so it shows as live for hours. Unlike the two
+ *  detectors above this needs an external probe (docker + result.json on disk),
+ *  so confidence is `external-required` and the only safe action is to ASK the
+ *  orchestrator to run a lifecycle command — detection itself never reconciles.
+ *
+ *  Conservative by the shared classifier: `liveness_unknown` (docker down/
+ *  ambiguous) and `anomalous_result_while_alive` (container still up) are NOT
+ *  reconcile candidates and emit no incident here. The SQL guard means only
+ *  running+containerized tasks are ever docker-probed. */
+export function detectReconcileCandidate(
+  db: DatabaseInstance,
+  opts: OpsCheckOptions = {},
+  probe: LivenessProbe = probeContainerLiveness
+): Incident[] {
+  return findReconcileCandidates(db, { projectDir: opts.projectDir }, probe)
+    .filter((c) => c.classification === "reconcile_candidate")
+    .map((c) => {
+      const finished = c.reason === "container_gone_result_present";
+      return makeIncident({
+        kind: "reconcile_candidate",
+        severity: "medium",
+        confidence: "external-required",
+        runId: c.runId,
+        taskId: c.taskId,
+        evidence: [
+          `task ${c.taskId} is recorded running but its container forge-${c.taskId} is gone`,
+          finished ? "a valid result.json exists — the work finished but the DB write was lost" : "no valid result.json — the container died without usable output (orphan)",
+        ],
+        recommendedAction: {
+          type: "repair",
+          autonomy: "ask",
+          command: `forge show ${c.taskId} --json`,
+          reason: finished
+            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task as complete. Detection is read-only — confirm before reconciling."
+            : "run a lifecycle command (forge show/status/next) to let reconcile finalize this orphaned task as failed. Detection is read-only — confirm before reconciling.",
+        },
+      });
+    });
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
+  detectReconcileCandidate,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.

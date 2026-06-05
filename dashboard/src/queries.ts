@@ -15,6 +15,12 @@ import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta } from "@forge/project-meta";
 import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
 import { governanceView, type GovernanceView } from "@forge/governance";
+import {
+  findReconcileCandidates,
+  type LivenessProbe,
+  type ReconcileClassification,
+  type ReconcileReason,
+} from "@forge/reconcile-candidate";
 
 export { type ProjectRecord };
 
@@ -134,11 +140,22 @@ export type InFlightEntry = {
   phase: string;
   status: string;
   startedAt: string | null;
+  /** #290: non-null only when this running task's container is GONE — the DB row
+   *  is stale and needs reconciliation. The dashboard badges it as a reconcile
+   *  candidate instead of ordinary running. Null for healthy/non-running tasks.
+   *  Read-only: derived from a docker + result.json probe, never reconciled here. */
+  reconcile: { classification: ReconcileClassification; reason: ReconcileReason } | null;
 };
 
 /** Tasks currently running, awaiting gate, awaiting red, or awaiting human input.
- *  Includes both primary tasks and red children. */
-export function inFlight(projectDir?: string): InFlightEntry[] {
+ *  Includes both primary tasks and red children.
+ *
+ *  Running tasks are additionally classified against container liveness (#290):
+ *  a `running` row whose container is gone is annotated as a reconcile candidate
+ *  so the dashboard stops faithfully showing stale `running`. The probe is
+ *  injectable for tests; the classifier only docker-probes running+containerized
+ *  tasks. Detection is read-only — the dashboard never calls reconcileRun. */
+export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEntry[] {
   const where = projectDir ? `AND r.project_dir = ?` : ``;
   const params = projectDir ? [projectDir] : [];
   const rows = db().prepare(`
@@ -163,6 +180,15 @@ export function inFlight(projectDir?: string): InFlightEntry[] {
     project_dir: string | null;
   }>;
 
+  // #290: classify running+containerized tasks by liveness once, map by taskId.
+  // Only `reconcile_candidate` (container gone) becomes an annotation; alive,
+  // liveness_unknown, and anomalous tasks render as ordinary running.
+  const candidates = new Map(
+    findReconcileCandidates(db(), { projectDir }, probe)
+      .filter((c) => c.classification === "reconcile_candidate")
+      .map((c) => [c.taskId, { classification: c.classification, reason: c.reason }])
+  );
+
   return rows.map((r) => {
     const meta = resolveProjectMeta(r.project_dir);
     return {
@@ -178,6 +204,7 @@ export function inFlight(projectDir?: string): InFlightEntry[] {
       phase: r.phase,
       status: r.status,
       startedAt: r.started_at,
+      reconcile: candidates.get(r.id) ?? null,
     };
   });
 }

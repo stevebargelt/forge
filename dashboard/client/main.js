@@ -367,9 +367,19 @@ function InFlightSection({ inFlight, orchCollapsed, onToggleOrch, onTaskClick })
 }
 
 function InFlightItem({ task, onClick, muted }) {
+  // #290: a running task whose container is gone is a reconcile candidate, not
+  // ordinary live work — badge it distinctly so the dashboard stops showing
+  // stale `running`. The title carries the reason + the read-only nature.
+  const reconcileTitle = task.reconcile
+    ? (task.reconcile.reason === "container_gone_result_present"
+        ? "container gone, valid result exists — finished but unreconciled. Run forge show/status/next to finalize."
+        : "container gone, no result — orphaned. Run forge show/status/next to finalize.")
+    : null;
   return html`
     <div class=${"item" + (muted ? " item-muted" : "")} onClick=${onClick}>
-      <span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>
+      ${task.reconcile
+        ? html`<span class="badge status-reconcile_candidate" title=${reconcileTitle}>reconcile candidate</span>`
+        : html`<span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>`}
       <div>
         <div>
           <${ProjectChip} entry=${task} />

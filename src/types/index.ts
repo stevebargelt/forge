@@ -173,7 +173,7 @@ export type RecommendedAction = {
   reason: string;
 };
 
-export type IncidentKind = "retry_orphan" | "inconsistent_run_state";
+export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate";
 
 export type Incident = {
   kind: IncidentKind;
