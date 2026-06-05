@@ -827,35 +827,6 @@ Build a provider-neutral routing policy system from Forge's human-readable RACI,
 **Relations:** #253 (provider adapter surfaces — downstream consumer), #252 (collaborative setup), #225 (provider/profile choice), #250 (provider-neutral ops primitive), #174 (backlog edit-body verb — needed to maintain these), `seeds/forge-raci.md`, `seeds/orchestrator-template.md`.
 
 
-### #280 — RACI policy Story 7: project override support
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Support project-specific RACI/policy files under `<project>/.forge/`. A concrete near-term need: Forge already orchestrates real work across a portfolio, and different projects plausibly want different routing.
-
-Acceptance:
-- Project RACI override path (`<project>/.forge/forge-raci.md`) is real and wired into the prompt path, not merely documented (it currently is NOT — see PRD Problem).
-- Project generated policy path (`<project>/.forge/routing-policy.yml`) is real.
-- Validation makes clear whether project policy is full replacement or merge. Initial: full replacement.
-- Project overrides may add/specialize routes but may NOT weaken force-level rules (validator-enforced).
-- Tests cover host default, project override, invalid project override, and force-level weakening refusal.
-
-Relations: #273, #252, #253.
-
-
-### #281 — RACI policy Story 8: effective governance view / diff preview
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Render a READ-ONLY effective-governance view and change-preview diff FROM the RACI source plus its generated policy — surfacing what the current RACI compiles to (and what a proposed edit would change), so the table a human reads can't silently lie about what the policy does.
-
-Acceptance:
-- The view is generated from RACI + compiled policy; it NEVER writes back to the RACI. Direction stays RACI -> policy, never policy -> RACI.
-- Shows the effective routes a human reads as a governance table.
-- Powers the diff the orchestrator-mediated channel (Story 6) shows before a human confirms.
-- Tests cover render-from-source and a representative proposed-edit diff.
-
-Relations: #273.
-
-
 ### #282 — RACI policy Story 9: dedicated edit tool (deferred convenience)
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
@@ -868,6 +839,34 @@ Acceptance:
 - Lower priority than Stories 1-8.
 
 Relations: #273.
+
+
+### #285 — Dashboard: read-only routing/governance panel
+**Epic:** #273. **Depends on:** #281.
+
+Surface the active RACI-derived routing policy in the dashboard as observability, not control. The dashboard is currently an information-only surface and should stay that way for the near future; routing/governance visibility should show how Forge will route work for the current project without introducing a second RACI edit path.
+
+Scope:
+- Add a read-only dashboard panel/view backed by the same effective-governance data as `forge route governance --json`.
+- Show the effective policy source (`host` vs `project`), policy path, validity/staleness state, and the accountable header.
+- Render the route matrix: route key / work type, path, responsible target, command when applicable, consulted evidence or agents, required followups, informed targets, force rules, and classification hints.
+- When a project override is active, show the host-vs-project route diff and clearly distinguish added, removed, and modified routes.
+- Warn on uncompiled project overrides, missing policies, invalid policies, and policy/RACI drift instead of showing a clean-looking route table.
+- Show recent RACI audit entries if available, so policy changes are visible without reading `~/.forge/raci-audit.log`.
+
+Non-goals:
+- No dashboard mutation, apply buttons, merge buttons, raw policy editing, or RACI editing in this story.
+- No prompt classification by code; an "explain route" selector may look up an exact route key only, matching `forge route explain`.
+- No full provider-adapter generation; #283 owns rendering provider-specific surfaces from the policy.
+
+Acceptance:
+- Dashboard displays the same effective route data as the route governance CLI/API for host-default routing.
+- Dashboard displays project override source and host-vs-project diff when opened from a project with `<project>/.forge/routing-policy.yml`.
+- Dashboard surfaces uncompiled override / missing policy / invalid policy / drift findings as warnings or errors, not as a normal healthy table.
+- Tests cover host default, project override diff, and at least one unhealthy state.
+- The dashboard remains read-only; there is no write endpoint and no UI control that mutates RACI or routing policy.
+
+Relations: #273, #281, #280, #279, #284.
 
 
 ### #283 — RACI policy Story 10: provider adapter generation (#253 seam)
@@ -885,6 +884,39 @@ Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
 
 
 ## Done (recent)
+
+### #281 — RACI policy Story 8: effective governance view / diff preview
+**Closed:** 2026-06-05.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Render a READ-ONLY effective-governance view and change-preview diff FROM the RACI source plus its generated policy — surfacing what the current RACI compiles to (and what a proposed edit would change), so the table a human reads can't silently lie about what the policy does.
+
+Acceptance:
+- The view is generated from RACI + compiled policy; it NEVER writes back to the RACI. Direction stays RACI -> policy, never policy -> RACI.
+- Shows the effective routes a human reads as a governance table.
+- Powers the diff the orchestrator-mediated channel (Story 6) shows before a human confirms.
+- Tests cover render-from-source and a representative proposed-edit diff.
+
+Relations: #273.
+
+
+### #280 — RACI policy Story 7: project override support
+**Closed:** 2026-06-05.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Support project-specific RACI/policy files under `<project>/.forge/`. A concrete near-term need: Forge already orchestrates real work across a portfolio, and different projects plausibly want different routing.
+
+Acceptance:
+- Project RACI override path (`<project>/.forge/forge-raci.md`) is real and wired into the prompt path, not merely documented (it currently is NOT — see PRD Problem).
+- Project generated policy path (`<project>/.forge/routing-policy.yml`) is real.
+- Validation makes clear whether project policy is full replacement or merge. Initial: full replacement.
+- Project overrides may add/specialize routes but may NOT weaken force-level rules (validator-enforced).
+- Tests cover host default, project override, invalid project override, and force-level weakening refusal.
+
+Relations: #273, #252, #253.
+
 
 ### #279 — RACI policy Story 6: orchestrator-mediated authoring (primary edit channel)
 **Closed:** 2026-06-05.
