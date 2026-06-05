@@ -40,6 +40,16 @@ RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
 ARG CODEX_CLI_VERSION=0.135.0
 RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
 
+# pi coding agent (#258 Crawl / #260): third provider runtime. Provides the `pi`
+# bin (bin: dist/cli.js) used by seeds/runtimes/pi-apikey.yml.
+# IMPORTANT version constraint: pi's `latest` (0.78.x) declares engines node>=22,
+# but this image is on Node 20. We pin the `legacy-node20` line (0.74.2, engines
+# node>=20.6.0) so pi runs on this image. Bump PI_CLI_VERSION to a 0.78+ release
+# only after the image moves to Node 22. --ignore-scripts: pi is pure JS, no
+# native build step — skip any postinstall (matches the #260 install recipe).
+ARG PI_CLI_VERSION=0.74.2
+RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_CLI_VERSION}
+
 # Alternate package managers commonly used by projects forge runs against (#146).
 # pnpm: required by Next.js / modern Node projects (e.g. harebrained-apps).
 # yarn: still common in older projects. Both small; install in one layer.
