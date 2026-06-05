@@ -16,6 +16,7 @@ import {
   resolvePolicyPath,
   resolveRaciPath,
   projectPolicyPath,
+  projectRaciPath,
   type RoutingSource,
 } from "../../raci/project.js";
 
@@ -158,6 +159,16 @@ function loadPolicy(path: string): RoutingPolicy | undefined {
 export type ResolvedSource = RoutingSource | "explicit";
 export type ProjectRouteValidation = RouteValidation & { source: ResolvedSource; path: string };
 
+/** A project RACI override exists but hasn't been compiled. Consumers must fail
+ *  on this rather than fall back to host — routing from host while an override
+ *  source is in force is exactly the bug #280 is meant to prevent. */
+function overrideNotCompiledFinding(projectDir: string): RouteFinding {
+  return {
+    code: "override_not_compiled",
+    message: `project RACI override exists (${projectRaciPath(projectDir)}) but its policy is not compiled — run: forge route compile --project ${projectDir}`,
+  };
+}
+
 /** Resolve the effective policy (project override or host), validate it, and —
  *  when it is a PROJECT override — additionally enforce that it does not weaken a
  *  force rule the host policy mandates (#280). The drift RACI is the effective
@@ -173,9 +184,21 @@ export function validateRoutingResolved(opts: {
   const host = opts.host ?? realHost;
   const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
 
-  const resolved: { source: ResolvedSource; path: string } = opts.explicitPolicy
+  const resolved: { source: ResolvedSource; path: string; uncompiledOverride?: boolean } = opts.explicitPolicy
     ? { source: "explicit", path: resolve(opts.explicitPolicy) }
     : resolvePolicyPath(opts.projectDir);
+
+  // An uncompiled project override must fail here, not silently validate the host
+  // policy (or a missing path) — tell the operator to compile the override.
+  if (resolved.source === "project" && resolved.uncompiledOverride && opts.projectDir !== undefined) {
+    return {
+      ok: false,
+      mode: "with-raci",
+      findings: [overrideNotCompiledFinding(opts.projectDir)],
+      source: "project",
+      path: resolved.path,
+    };
+  }
 
   // Drift RACI: explicit wins; otherwise the effective RACI for this context, but
   // only when it exists (an absent RACI means standalone, not an error).
@@ -268,6 +291,19 @@ export function registerRoute(program: Command): void {
       const resolved = policyArg
         ? { source: "explicit" as const, path: resolve(policyArg) }
         : resolvePolicyPath(projectDir);
+
+      // A project RACI override with no compiled policy must NOT fall back to host
+      // — that would route the live prompt path from the wrong policy.
+      if (!policyArg && "uncompiledOverride" in resolved && resolved.uncompiledOverride) {
+        const finding = overrideNotCompiledFinding(projectDir);
+        if (opts.json) {
+          console.log(JSON.stringify({ source: "project", path: resolved.path, ok: false, findings: [finding] }, null, 2));
+        } else {
+          process.stderr.write(`[${finding.code}] ${finding.message}\n`);
+        }
+        process.exit(1);
+      }
+
       const res = explainRouteFile(resolved.path, routeKey);
       if (opts.json) {
         console.log(JSON.stringify({ source: resolved.source, path: resolved.path, ...res }, null, 2));

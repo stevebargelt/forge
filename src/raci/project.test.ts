@@ -56,3 +56,14 @@ test("resolvePolicyPath: no override falls back to the host default", () => {
   assert.equal(r.path, ROUTING_POLICY_PATH);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("resolvePolicyPath: a project RACI override with no compiled policy does NOT fall back to host", () => {
+  const dir = project();
+  writeFileSync(projectRaciPath(dir), "### route: x"); // override source exists...
+  const r = resolvePolicyPath(dir); // ...but no routing-policy.yml
+  assert.equal(r.source, "project", "must stay project, not silently fall back to host");
+  assert.equal(r.exists, false);
+  assert.equal(r.uncompiledOverride, true);
+  assert.equal(r.path, projectPolicyPath(dir));
+  rmSync(dir, { recursive: true, force: true });
+});

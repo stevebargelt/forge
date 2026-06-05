@@ -182,6 +182,19 @@ test("validateRoutingResolved: a project override that drops a host force rule i
   rmSync(proj, { recursive: true, force: true });
 });
 
+test("validateRoutingResolved: a project RACI override with no compiled policy fails (compile, not host fallback)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-proj-"));
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  // Override SOURCE exists, but it was never compiled to a project policy.
+  writeFileSync(join(dir, ".forge", "forge-raci.md"), readFileSync(SEED_PATH, "utf8"));
+  const v = validateRoutingResolved({ projectDir: dir, host: all, hostPolicyPath: policyPath });
+  assert.equal(v.source, "project", "must not fall back to host while an override source is in force");
+  assert.equal(v.ok, false);
+  assert.ok(v.findings.some((f) => f.code === "override_not_compiled"));
+  assert.match(v.findings[0]!.message, /forge route compile --project/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("validateRoutingResolved: an explicit policy path is the escape hatch (source=explicit, no override check)", () => {
   const v = validateRoutingResolved({ explicitPolicy: policyPath, host: all });
   assert.equal(v.source, "explicit");
