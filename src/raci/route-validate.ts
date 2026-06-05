@@ -171,6 +171,16 @@ export function checkForceRuleWeakening(host: RoutingPolicy, project: RoutingPol
   return findings;
 }
 
+/** Drift between what a RACI compiles to and an actual policy, as a standalone
+ *  finding list. Reused by the read-only governance view (#281/#281-fix) so a
+ *  STALE compiled policy cannot present itself as authoritative governance. Pure
+ *  comparison — no host resolution, no enforcement. */
+export function computePolicyDrift(compiledFromRaci: RoutingPolicy, policy: RoutingPolicy): RouteFinding[] {
+  const findings: RouteFinding[] = [];
+  driftFindings(compiledFromRaci, policy, findings);
+  return findings;
+}
+
 function driftFindings(compiled: RoutingPolicy, actual: RoutingPolicy, findings: RouteFinding[]): void {
   if (compiled.version !== actual.version || !isDeepStrictEqual(compiled.governance, actual.governance)) {
     findings.push({ code: "policy_drift", message: "policy header (version/governance) differs from the compiled RACI" });

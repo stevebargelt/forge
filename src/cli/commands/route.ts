@@ -6,6 +6,7 @@ import { ROUTING_POLICY_PATH, RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR } from "../..
 import {
   validateRoutePolicy,
   checkForceRuleWeakening,
+  computePolicyDrift,
   type HostEnv,
   type RouteValidation,
   type RouteFinding,
@@ -234,6 +235,9 @@ export type GovernanceView =
       routes: Record<string, PolicyRoute>;
       /** Host-vs-project route diff; present only for a project override. */
       diff?: RouteChangeSummary;
+      /** Drift between the in-force policy and what its OWN RACI source compiles
+       *  to. Non-empty => the table is STALE and may not match the live rules. */
+      drift?: RouteFinding[];
     }
   | { ok: false; source: ResolvedSource; path: string; findings: RouteFinding[] };
 
@@ -266,6 +270,25 @@ export function governanceView(opts: { projectDir?: string; hostPolicyPath?: str
     if (hostPolicy) diff = summarizeRouteChanges(hostPolicy, policy);
   }
 
+  // Drift: is the in-force policy still what its OWN RACI source compiles to? A
+  // stale policy would make the table lie (PRD Story 8). Read-only — compile the
+  // effective RACI in memory and compare; never recompile to disk. The RACI for
+  // the policy's source: project RACI for a project policy, host RACI for host.
+  // A project policy with NO project RACI is standalone — nothing to drift against.
+  let drift: RouteFinding[] | undefined;
+  const raciForSource = resolved.source === "project" && opts.projectDir !== undefined
+    ? projectRaciPath(opts.projectDir)
+    : RACI_PATH;
+  if (existsSync(raciForSource)) {
+    try {
+      const compiled = compileRaciDocument(readFileSync(raciForSource, "utf8"));
+      const d = computePolicyDrift(compiled, policy);
+      if (d.length > 0) drift = d;
+    } catch (e) {
+      drift = [{ code: "raci_compile_error", message: `effective RACI source does not compile: ${(e as Error).message}` }];
+    }
+  }
+
   return {
     ok: true,
     source: resolved.source,
@@ -273,11 +296,20 @@ export function governanceView(opts: { projectDir?: string; hostPolicyPath?: str
     accountable: policy.governance.accountable,
     routes: policy.routes,
     ...(diff ? { diff } : {}),
+    ...(drift ? { drift } : {}),
   };
 }
 
 function renderGovernance(view: Extract<GovernanceView, { ok: true }>): string {
   const lines: string[] = [];
+  if (view.drift && view.drift.length) {
+    const fix = `forge route compile${view.source === "project" ? " --project <dir>" : ""}`;
+    lines.push(`# ⚠ DRIFT — the compiled policy is STALE vs its RACI source; the table below may NOT match the live rules. Run: ${fix}`);
+    for (const f of view.drift) {
+      lines.push(`#   [${f.code}]${f.route ? ` [route: ${f.route}]` : ""} ${f.message}`);
+    }
+    lines.push("");
+  }
   lines.push(`# effective governance — source: ${view.source} (${view.path})`);
   lines.push(`# accountable: ${view.accountable} (header invariant — always human)`);
   lines.push("");
@@ -413,7 +445,10 @@ export function registerRoute(program: Command): void {
       } else {
         process.stderr.write(`${view.findings.map((f) => `[${f.code}] ${f.message}`).join("\n")}\n`);
       }
-      if (!view.ok) process.exit(1);
+      // Drift is a non-silent failure: the table is shown, but exit non-zero so a
+      // stale policy can't pass unnoticed in automation either.
+      const drifted = view.ok && (view.drift?.length ?? 0) > 0;
+      if (!view.ok || drifted) process.exit(1);
     });
 
   route

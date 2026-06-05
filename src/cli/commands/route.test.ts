@@ -228,8 +228,27 @@ test("governanceView: a project override shows source=project, executable routes
   const mod = g.diff!.modified.find((m) => m.route === "implementation_quick");
   assert.ok(mod);
   assert.ok(mod!.fields.some((f) => f.field === "responsible" && f.before === "engineer" && f.after === "backend-specialist"));
+  assert.ok(!g.drift, "a freshly-compiled override must not report drift");
 
   rmSync(dirname(hostPolicyPath), { recursive: true, force: true });
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("governanceView: a policy stale vs its RACI surfaces drift (the table can't silently lie)", () => {
+  const seed = readFileSync(SEED_PATH, "utf8");
+  const proj = projectFrom(seed); // raci + policy both from seed — consistent to start
+  // Edit the project RACI but DON'T recompile: the policy is now stale.
+  const mutatedRaci = seed.replace(
+    "responsible: engineer\naccountable: human\npath: invoke_chain",
+    "responsible: backend-specialist\naccountable: human\npath: invoke_chain",
+  );
+  writeFileSync(join(proj, ".forge", "forge-raci.md"), mutatedRaci);
+
+  const g = governanceView({ projectDir: proj, hostPolicyPath: policyPath });
+  assert.ok(g.ok, "the table is still shown...");
+  assert.ok(g.drift && g.drift.length > 0, "...but drift must be surfaced");
+  assert.ok(g.drift!.some((f) => f.code === "policy_drift" && f.route === "implementation_quick"));
+
   rmSync(proj, { recursive: true, force: true });
 });
 
