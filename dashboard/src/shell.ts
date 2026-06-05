@@ -496,4 +496,38 @@ section.usage-section { margin-top: 20px; }
   margin-bottom: 12px;
 }
 .usage-timeseries svg { display: block; width: 100%; height: auto; }
+
+/* #285: routing / governance panel (read-only). */
+.gov-view { display: flex; flex-direction: column; }
+.gov-header { margin-bottom: 16px; }
+.gov-card { margin-bottom: 8px; }
+.badge.gov-src-host { background: rgba(122, 159, 255, 0.15); color: var(--accent); }
+.badge.gov-src-project { background: rgba(192, 132, 252, 0.18); color: var(--magenta); }
+.badge.gov-path { background: var(--bg-elev-2); color: var(--fg-dim); }
+.badge.gov-bad { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.gov-added { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.gov-removed { background: rgba(248, 113, 113, 0.15); color: var(--err); }
+.badge.gov-modified { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+.gov-error { border: 1px solid var(--err); }
+.gov-drift { border: 1px solid var(--warn); }
+.gov-warn-title { color: var(--warn); margin-bottom: 8px; }
+.gov-error .gov-warn-title { color: var(--err); }
+.gov-finding { padding: 2px 0; }
+.gov-diff-line { padding: 4px 0; }
+.gov-field { padding: 1px 0; }
+.gov-audit-row + .gov-audit-row { border-top: 1px solid var(--border); }
+.gov-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.gov-table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  padding: 4px 10px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.gov-table td { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+.gov-table tr:last-child td { border-bottom: none; }
+.gov-route-key { color: var(--fg); }
+.gov-hints { font-size: 11px; margin-top: 2px; max-width: 240px; }
 `;

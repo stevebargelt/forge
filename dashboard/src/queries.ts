@@ -14,6 +14,7 @@ import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta } from "@forge/project-meta";
 import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
+import { governanceView, type GovernanceView } from "@forge/governance";
 
 export { type ProjectRecord };
 
@@ -745,4 +746,44 @@ export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: stri
 // the schema; on a real install it's a no-op. Acceptable cost.
 export function projectsForDashboard(): ProjectRecord[] {
   return sortProjects(listProjects(), "activity");
+}
+
+// #285: read-only routing/governance read model for the dashboard panel. Backed
+// by the SAME governanceView() core as `forge route governance --json`, so the
+// dashboard can't drift from the CLI's view of routing. Augments it with the tail
+// of the host RACI audit log so policy changes are visible without reading the
+// file. Read-only: there is no write counterpart.
+const AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
+
+export type RaciAuditEntry = {
+  timestamp: string;
+  action: string;
+  current_raci: string;
+  candidate: string;
+  routes_added: string[];
+  routes_removed: string[];
+  routes_modified: string[];
+  validation: { raci: boolean; route: boolean };
+};
+
+export type GovernancePanel = GovernanceView & { recentAudit: RaciAuditEntry[] };
+
+/** Tail of the host-global RACI audit log (newest first). Tolerates a missing
+ *  file (no changes yet) and skips any unparseable line. */
+function recentRaciAudit(limit: number): RaciAuditEntry[] {
+  if (!existsSync(AUDIT_LOG_PATH)) return [];
+  const lines = readFileSync(AUDIT_LOG_PATH, "utf8").split("\n").filter((l) => l.trim() !== "");
+  const out: RaciAuditEntry[] = [];
+  for (const line of lines.slice(-limit)) {
+    try {
+      out.push(JSON.parse(line) as RaciAuditEntry);
+    } catch {
+      /* skip a corrupt line rather than fail the whole panel */
+    }
+  }
+  return out.reverse();
+}
+
+export function routingGovernance(projectDir?: string): GovernancePanel {
+  return { ...governanceView({ projectDir }), recentAudit: recentRaciAudit(8) };
 }

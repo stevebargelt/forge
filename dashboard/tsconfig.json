@@ -17,7 +17,8 @@
       "@forge/types": ["../src/types/index.ts"],
       "@forge/project-meta": ["../src/util/project-meta.ts"],
       "@forge/projects": ["../src/util/projects.ts"],
-      "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"]
+      "@forge/heartbeats": ["../src/util/orchestrator-heartbeats.ts"],
+      "@forge/governance": ["../src/raci/governance.ts"]
     }
   },
   "include": ["src/**/*.ts"]

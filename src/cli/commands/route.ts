@@ -6,19 +6,22 @@ import { ROUTING_POLICY_PATH, RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR } from "../..
 import {
   validateRoutePolicy,
   checkForceRuleWeakening,
-  computePolicyDrift,
   type HostEnv,
   type RouteValidation,
   type RouteFinding,
 } from "../../raci/route-validate.js";
 import { compileRaciDocument } from "../../raci/compile.js";
-import { summarizeRouteChanges, type RouteChangeSummary } from "../../raci/propose.js";
-import { RoutingPolicySchema, type PolicyRoute, type RoutingPolicy } from "../../raci/policy-schema.js";
+import { RoutingPolicySchema, type PolicyRoute } from "../../raci/policy-schema.js";
+import {
+  governanceView,
+  loadPolicy,
+  overrideNotCompiledFinding,
+  type GovernanceView,
+} from "../../raci/governance.js";
 import {
   resolvePolicyPath,
   resolveRaciPath,
   projectPolicyPath,
-  projectRaciPath,
   type RoutingSource,
 } from "../../raci/project.js";
 
@@ -145,31 +148,8 @@ export function explainRouteFile(policyPath: string, routeKey: string): RouteExp
   return explainRoute(policyObj, routeKey);
 }
 
-/** Parse a policy file into a typed policy, or undefined if absent/invalid. Used
- *  only for the project-override force-rule comparison — a malformed host or
- *  project policy is surfaced by the normal validation path, not here. */
-function loadPolicy(path: string): RoutingPolicy | undefined {
-  if (!existsSync(path)) return undefined;
-  try {
-    const parsed = RoutingPolicySchema.safeParse(parseYaml(readFileSync(path, "utf8")));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export type ResolvedSource = RoutingSource | "explicit";
 export type ProjectRouteValidation = RouteValidation & { source: ResolvedSource; path: string };
-
-/** A project RACI override exists but hasn't been compiled. Consumers must fail
- *  on this rather than fall back to host — routing from host while an override
- *  source is in force is exactly the bug #280 is meant to prevent. */
-function overrideNotCompiledFinding(projectDir: string): RouteFinding {
-  return {
-    code: "override_not_compiled",
-    message: `project RACI override exists (${projectRaciPath(projectDir)}) but its policy is not compiled — run: forge route compile --project ${projectDir}`,
-  };
-}
 
 /** Resolve the effective policy (project override or host), validate it, and —
  *  when it is a PROJECT override — additionally enforce that it does not weaken a
@@ -224,80 +204,6 @@ export function validateRoutingResolved(opts: {
   }
 
   return { ok: findings.length === 0, mode: base.mode, findings, source: resolved.source, path: resolved.path };
-}
-
-export type GovernanceView =
-  | {
-      ok: true;
-      source: ResolvedSource;
-      path: string;
-      accountable: string;
-      routes: Record<string, PolicyRoute>;
-      /** Host-vs-project route diff; present only for a project override. */
-      diff?: RouteChangeSummary;
-      /** Drift between the in-force policy and what its OWN RACI source compiles
-       *  to. Non-empty => the table is STALE and may not match the live rules. */
-      drift?: RouteFinding[];
-    }
-  | { ok: false; source: ResolvedSource; path: string; findings: RouteFinding[] };
-
-/** READ-ONLY effective-governance view (#281): the routes the resolved policy
- *  compiles to, plus a host-vs-project diff when the source is a project override.
- *  Never writes, never validates, never merges — it only shows what's in force.
- *  Host policy path is injectable so the diff is testable without real ~/.forge. */
-export function governanceView(opts: { projectDir?: string; hostPolicyPath?: string }): GovernanceView {
-  const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
-  const resolved = resolvePolicyPath(opts.projectDir);
-
-  if (resolved.source === "project" && resolved.uncompiledOverride && opts.projectDir !== undefined) {
-    return { ok: false, source: "project", path: resolved.path, findings: [overrideNotCompiledFinding(opts.projectDir)] };
-  }
-
-  const policy = loadPolicy(resolved.path);
-  if (!policy) {
-    const suffix = resolved.source === "project" && opts.projectDir ? ` --project ${opts.projectDir}` : "";
-    return {
-      ok: false,
-      source: resolved.source,
-      path: resolved.path,
-      findings: [{ code: "policy_not_found", message: `routing policy not found or invalid: ${resolved.path} (run: forge route compile${suffix})` }],
-    };
-  }
-
-  let diff: RouteChangeSummary | undefined;
-  if (resolved.source === "project") {
-    const hostPolicy = loadPolicy(hostPolicyPath);
-    if (hostPolicy) diff = summarizeRouteChanges(hostPolicy, policy);
-  }
-
-  // Drift: is the in-force policy still what its OWN RACI source compiles to? A
-  // stale policy would make the table lie (PRD Story 8). Read-only — compile the
-  // effective RACI in memory and compare; never recompile to disk. The RACI for
-  // the policy's source: project RACI for a project policy, host RACI for host.
-  // A project policy with NO project RACI is standalone — nothing to drift against.
-  let drift: RouteFinding[] | undefined;
-  const raciForSource = resolved.source === "project" && opts.projectDir !== undefined
-    ? projectRaciPath(opts.projectDir)
-    : RACI_PATH;
-  if (existsSync(raciForSource)) {
-    try {
-      const compiled = compileRaciDocument(readFileSync(raciForSource, "utf8"));
-      const d = computePolicyDrift(compiled, policy);
-      if (d.length > 0) drift = d;
-    } catch (e) {
-      drift = [{ code: "raci_compile_error", message: `effective RACI source does not compile: ${(e as Error).message}` }];
-    }
-  }
-
-  return {
-    ok: true,
-    source: resolved.source,
-    path: resolved.path,
-    accountable: policy.governance.accountable,
-    routes: policy.routes,
-    ...(diff ? { diff } : {}),
-    ...(drift ? { drift } : {}),
-  };
 }
 
 function renderGovernance(view: Extract<GovernanceView, { ok: true }>): string {

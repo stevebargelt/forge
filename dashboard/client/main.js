@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/
 import htm from "https://esm.sh/htm@3.1.1";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
+import { GovernanceView } from "./governance.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -31,6 +32,7 @@ function App() {
   const [usageSince, setUsageSince] = useState("30d");
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
+  const [governance, setGovernance] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -96,6 +98,22 @@ function App() {
     return () => clearInterval(id);
   }, [pollOps, view]);
 
+  const pollGovernance = useCallback(async () => {
+    try {
+      const q = projectFilter ? `?projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
+      const res = await fetch(`/api/governance${q}`);
+      if (res.ok) setGovernance(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [projectFilter]);
+
+  useEffect(() => {
+    if (view !== "governance") return;
+    pollGovernance();
+    const id = setInterval(pollGovernance, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollGovernance, view]);
+
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -122,6 +140,7 @@ function App() {
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
+            <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>governance</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -131,6 +150,8 @@ function App() {
 
       ${view === "projects"
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
+        : view === "governance"
+        ? html`<${GovernanceView} data=${governance} />`
         : view === "ops"
         ? html`<${OpsView} data=${ops} since=${opsSince} onSinceChange=${setOpsSince} />`
         : view === "usage"
@@ -177,6 +198,7 @@ function initialView() {
   if (h === "projects") return "projects";
   if (h === "usage") return "usage";
   if (h === "ops") return "ops";
+  if (h === "governance") return "governance";
   return "activity";
 }
 

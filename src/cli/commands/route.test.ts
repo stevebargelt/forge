@@ -8,7 +8,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved, governanceView } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved } from "./route.js";
+import { governanceView } from "../../raci/governance.js";
 import { compileRaciDocument } from "../../raci/compile.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
