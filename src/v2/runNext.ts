@@ -20,6 +20,7 @@ import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./doc
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
+import { resolveRuntimeMetadata } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
@@ -1027,6 +1028,10 @@ async function runContainer(args: {
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
   }
+  // #292: the runtime's EXECUTION metadata (parser/prompt/auth strategy), resolved
+  // once and threaded into the manifest + usage capture — behavior chosen from the
+  // runtime, not the upstream provider name.
+  const runtimeMeta = resolveRuntimeMetadata(runtime);
 
   // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
   // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
@@ -1052,10 +1057,12 @@ async function runContainer(args: {
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
   // back to the workflow-declared alias (legacy, where resolution.alias is unset).
   const usageAlias = args.resolution.alias ?? args.workflowAlias;
-  // AWN-7: provider/model drive the per-provider usage parser (openai → codex
-  // JSONL; else claude stream-json). Undefined in legacy mode → claude parser.
+  // #292: the runtime's log_format selects the usage parser (codex-jsonl → codex;
+  // else claude stream-json) — an execution fact, not the provider. provider is
+  // still recorded for attribution + as the captureUsageForTask legacy fallback.
   const usageMeta = {
     ...(usageAlias ? { alias: usageAlias } : {}),
+    logFormat: runtimeMeta.logFormat,
     ...(args.resolution.provider ? { provider: args.resolution.provider } : {}),
     ...(args.resolution.model ? { model: args.resolution.model } : {}),
   };
@@ -1099,6 +1106,7 @@ async function runContainer(args: {
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
     container: { name: `forge-${args.taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    runtime: { name: args.resolution.runtime, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
   });
 

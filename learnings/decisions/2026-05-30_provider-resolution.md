@@ -85,7 +85,18 @@ Forge already abstracts ~80% of execution via runtime YAML (command, args, promp
 delivery, mounts, auth mode, result contract are **data**). We do **not** build a
 full typed `ModelDriver` interface yet. The one genuine code gap is **usage
 capture**: `extractUsageFromStdoutLog` parses Claude's stream-json; a second
-provider emits a different stream, so we add a **per-provider usage-parser hook**.
+provider emits a different stream, so we add a usage-parser hook.
+
+> **Superseded by #292 (runtime metadata seam):** the usage-parser hook is keyed
+> off the runtime's declared `log_format` (`claude-stream-json` / `codex-jsonl` /
+> `pi-jsonl`) — an EXECUTION fact — NOT the upstream provider. AWN-7 Walk's
+> original `provider === "openai"` dispatch survives only as a legacy fallback in
+> `captureUsageForTask` for runtimes that predate the metadata. `runtime_kind`,
+> `log_format`, `prompt_strategy`, and `auth_strategy` are now first-class runtime
+> YAML fields (`resolveRuntimeMetadata` infers them for pre-#292 runtimes). This
+> is what lets a third runtime (Pi) be added without an `if (provider === …)`
+> branch. See `docs/prds/provider-agnostic-runtime-pi.md`.
+
 Everything else (`result.json`, `progress.jsonl`, bounded logs, lifecycle events)
 is already provider-neutral. The typed driver interface is revisited only if
 runtime YAML proves insufficient — not on spec.

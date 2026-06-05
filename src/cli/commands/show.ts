@@ -196,6 +196,26 @@ export function getManifestIdleTimeoutMs(taskDirPath: string): number | undefine
   }
 }
 
+// #292: the runtime EXECUTION metadata this task ran under, from its manifest.
+// Undefined for pre-#292 manifests. Lets forge show report runtime behavior
+// (parser/prompt/auth strategy) distinctly from upstream provider/model.
+export type ManifestRuntime = {
+  name: string;
+  kind: string;
+  logFormat: string;
+  promptStrategy: string;
+  authStrategy: string;
+};
+export function getManifestRuntime(taskDirPath: string): ManifestRuntime | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const manifest = JSON.parse(raw) as { runtime?: ManifestRuntime };
+    return manifest.runtime;
+  } catch {
+    return undefined;
+  }
+}
+
 // AWN-4: the task contract this task was dispatched under, from its manifest.
 export function getManifestContract(taskDirPath: string): TaskContract | undefined {
   try {
@@ -373,6 +393,7 @@ export function registerShow(program: Command): void {
         const { task, verdicts, events } = result;
         const tDir = taskDir(task.runId, task.id);
         const contract = getManifestContract(tDir);
+        const runtimeMeta = getManifestRuntime(tDir);
         const stdoutLog = join(tDir, "container.stdout.log");
         const stderrLog = join(tDir, "container.stderr.log");
         const resultJson = join(tDir, "result.json");
@@ -402,6 +423,7 @@ export function registerShow(program: Command): void {
                 events,
                 diagnostic: {
                   containerName: `forge-${task.id}`,
+                  runtime: runtimeMeta ?? null,
                   failureKind: failureKind ?? null,
                   elapsed,
                   lastOutputAgo,
@@ -434,6 +456,12 @@ export function registerShow(program: Command): void {
         if (task.resolvedProfile) {
           console.log(
             `  profile:   ${task.resolvedProfile} (${task.resolvedProvider}/${task.resolvedAuth}) — ${task.resolvedBy}`
+          );
+        }
+        // #292: runtime EXECUTION facts, distinct from the model SELECTION above.
+        if (runtimeMeta) {
+          console.log(
+            `  runtime:   ${runtimeMeta.name} [${runtimeMeta.kind}] — log=${runtimeMeta.logFormat}, prompt=${runtimeMeta.promptStrategy}, auth=${runtimeMeta.authStrategy}`
           );
         }
         console.log(`  status:    ${task.status}`);

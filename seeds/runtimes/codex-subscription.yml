@@ -16,6 +16,14 @@ name: codex-subscription
 description: |
   Codex (OpenAI) via ChatGPT subscription. Second provider proof for AWN-7 Walk.
 
+# #292: runtime EXECUTION metadata — declared explicitly so usage parsing keys off
+# log_format (codex-jsonl), NOT the upstream provider name. This is the seam that
+# lets a third runtime (Pi) be added without an "if provider == ..." branch.
+runtime_kind: codex
+log_format: codex-jsonl              # `codex exec --json` emits JSONL events
+prompt_strategy: stdin-prepend       # no system-prompt flag; prompt prepended to stdin
+auth_strategy: codex-auth            # RO-mount ~/.codex/auth.json → CODEX_HOME
+
 detect:
   # No auto-detection clause — codex-subscription is selected by policy
   # (an openai/subscription profile), never auto-detected from env.

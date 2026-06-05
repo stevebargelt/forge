@@ -18,6 +18,18 @@ export type TaskManifest = {
   // to now. Optional: pre-#202 manifests omit it, and show falls back.
   container: { name: string; idleTimeoutMs?: number };
   auth: { profileRequested: boolean; stateMounted: boolean };
+  // #292: the runtime EXECUTION metadata this task ran under, distinct from the
+  // model block below (model SELECTION). `name` is the runtime YAML; the rest are
+  // the resolved execution facts (parser/prompt/auth strategy). Optional: pre-#292
+  // manifests omit it. Surfaced by forge show so an operator can tell runtime
+  // behavior apart from upstream provider/model.
+  runtime?: {
+    name: string;
+    kind: "claude-code" | "codex" | "pi";
+    logFormat: "claude-stream-json" | "codex-jsonl" | "pi-jsonl";
+    promptStrategy: "claude-stdin-package" | "stdin-prepend" | "runtime-context-file";
+    authStrategy: "oauth-volume" | "codex-auth" | "env-provider-api-key" | "pi-auth-json" | "local-endpoint" | "aws-bedrock";
+  };
   // AWN-4: the task contract this task was dispatched under, if any. Surfaced in
   // forge show; consumed by the agent via its rendered package.
   contract?: TaskContract;

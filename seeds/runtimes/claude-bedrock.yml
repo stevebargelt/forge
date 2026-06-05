@@ -12,6 +12,14 @@ description: |
   FORGE_AUTH_MODE=mount falls back to the legacy ~/.aws bind mount for
   multi-hour containers.
 
+# #292: runtime EXECUTION metadata — see claude-oauth.yml for the rationale.
+# auth_strategy is the abstract category; auth.mode below is the docker-wiring
+# detail (env-snapshot vs mount) that spawn.ts consumes — both are Bedrock.
+runtime_kind: claude-code
+log_format: claude-stream-json
+prompt_strategy: claude-stdin-package
+auth_strategy: aws-bedrock
+
 # Pre-flight: detects whether this runtime is applicable. Runner picks the first
 # runtime whose detection clauses are satisfied. Today's detectCredsMode() logic
 # folds in here.

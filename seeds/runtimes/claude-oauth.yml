@@ -12,6 +12,14 @@ description: |
   Claude via Anthropic OAuth (Claude Pro / Max). Personal-Mac default.
   Supports Opus 4.7 via Claude Pro subscription.
 
+# #292: runtime EXECUTION metadata — what behavior this runtime implies, declared
+# explicitly so the runner chooses parser/prompt/auth wiring from here, not from
+# the upstream provider name. (provider/model are model-SELECTION facts.)
+runtime_kind: claude-code
+log_format: claude-stream-json       # claude-code --output-format stream-json
+prompt_strategy: claude-stdin-package # system prompt via --append-system-prompt; package on stdin
+auth_strategy: oauth-volume          # forge-claude-oauth-v2 volume at /home/agent
+
 detect:
   # No env signal; this is the fallback runtime when bedrock isn't detected
   # and ANTHROPIC_API_KEY isn't set. The runner's detection logic checks

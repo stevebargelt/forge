@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
+import { resolveRuntimeMetadata } from "./schema.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -209,6 +210,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
+  // #292: the runtime's EXECUTION metadata (parser/prompt/auth strategy), resolved
+  // once. Threaded into the manifest + usage capture so behavior is chosen from the
+  // runtime, not from the upstream provider name.
+  const runtimeMeta = resolveRuntimeMetadata(runtime);
 
   // AWN-7: fail loud BEFORE spawning if the resolved auth is unavailable (policy
   // mode, on_unavailable=fail). A no-op in legacy mode. Then record the resolution.
@@ -273,6 +278,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
     container: { name: `forge-${taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
+    runtime: { name: resolution.runtime, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(args.contract ? { contract: args.contract } : {}),
     ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
   });
@@ -280,10 +286,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
   // back to the workflow-declared alias (legacy, where resolution.alias is unset).
   const usageAlias = resolution.alias ?? args.modelAlias;
-  // AWN-7: provider/model select the per-provider usage parser (openai → codex
-  // JSONL; else claude stream-json). Undefined in legacy mode → claude parser.
+  // #292: the runtime's log_format selects the usage parser (codex-jsonl → codex;
+  // else claude stream-json) — an execution fact, not the provider. provider is
+  // still recorded for attribution + as the captureUsageForTask legacy fallback.
   const usageMeta = {
     ...(usageAlias ? { alias: usageAlias } : {}),
+    logFormat: runtimeMeta.logFormat,
     ...(resolution.provider ? { provider: resolution.provider } : {}),
     ...(resolution.model ? { model: resolution.model } : {}),
   };

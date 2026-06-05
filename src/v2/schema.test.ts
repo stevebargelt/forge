@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WorkflowSchema, RuntimeSchema, ModelPolicySchema } from "./schema.js";
+import { WorkflowSchema, RuntimeSchema, ModelPolicySchema, resolveRuntimeMetadata } from "./schema.js";
 
 // ------------------------------------------------------------------
 // Minimal valid fixtures
@@ -304,6 +304,84 @@ test("Runtime: defaults are applied", () => {
   assert.equal(r.container.remove_on_exit, true);
   assert.equal(r.container.idle_timeout_seconds, 300);
   assert.equal(r.result.stdout_log, "container.stdout.log");
+});
+
+// ------------------------------------------------------------------
+// #292: runtime EXECUTION metadata seam
+// ------------------------------------------------------------------
+
+test("#292: a pre-#292 runtime (no metadata fields) still validates", () => {
+  // The whole back-compat guarantee: a custom host runtime authored before #292
+  // must not break on upgrade.
+  const r = RuntimeSchema.safeParse(minimalRuntime);
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
+});
+
+test("#292: resolveRuntimeMetadata infers claude execution facts from a bare claude runtime", () => {
+  const meta = resolveRuntimeMetadata(RuntimeSchema.parse(minimalRuntime));
+  assert.deepEqual(meta, {
+    runtimeKind: "claude-code",
+    logFormat: "claude-stream-json",
+    promptStrategy: "claude-stdin-package",
+    authStrategy: "aws-bedrock", // minimalRuntime auth.mode is env-snapshot
+  });
+});
+
+test("#292: resolveRuntimeMetadata infers codex execution facts from a codex invocation", () => {
+  const codexRuntime = {
+    ...minimalRuntime,
+    name: "codex-subscription",
+    auth: { mode: "codex-auth" as const },
+    invocation: { command: "codex", args: ["exec", "--json"] },
+  };
+  const meta = resolveRuntimeMetadata(RuntimeSchema.parse(codexRuntime));
+  assert.deepEqual(meta, {
+    runtimeKind: "codex",
+    logFormat: "codex-jsonl",
+    promptStrategy: "stdin-prepend",
+    authStrategy: "codex-auth",
+  });
+});
+
+test("#292: explicit metadata fields win over inference", () => {
+  // A claude-command runtime that DECLARES codex-jsonl must resolve to codex-jsonl
+  // — the explicit field is authoritative, proving behavior is chosen from
+  // metadata, not from the command/provider.
+  const r = RuntimeSchema.parse({
+    ...minimalRuntime,
+    log_format: "codex-jsonl",
+    prompt_strategy: "stdin-prepend",
+  });
+  const meta = resolveRuntimeMetadata(r);
+  assert.equal(meta.logFormat, "codex-jsonl");
+  assert.equal(meta.promptStrategy, "stdin-prepend");
+});
+
+test("#292: a Pi-shaped runtime declares all four fields and validates — no Pi binary needed", () => {
+  const piRuntime = {
+    ...minimalRuntime,
+    name: "pi-local",
+    runtime_kind: "pi",
+    log_format: "pi-jsonl",
+    prompt_strategy: "stdin-prepend",
+    auth_strategy: "env-provider-api-key",
+    auth: { mode: "apikey" as const },
+    invocation: { command: "pi", args: ["--mode", "json"] },
+  };
+  const r = RuntimeSchema.safeParse(piRuntime);
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error.issues, null, 2));
+  const meta = resolveRuntimeMetadata(r.data!);
+  assert.deepEqual(meta, {
+    runtimeKind: "pi",
+    logFormat: "pi-jsonl",
+    promptStrategy: "stdin-prepend",
+    authStrategy: "env-provider-api-key",
+  });
+});
+
+test("#292: rejects an unknown log_format", () => {
+  const r = RuntimeSchema.safeParse({ ...minimalRuntime, log_format: "made-up-format" });
+  assert.ok(!r.success);
 });
 
 // ------------------------------------------------------------------

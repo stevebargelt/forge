@@ -11,6 +11,12 @@ description: |
   Claude via Anthropic API key. Activated when ANTHROPIC_API_KEY is set
   in the env at spawn time. The key is passed to the container as -e.
 
+# #292: runtime EXECUTION metadata — see claude-oauth.yml for the rationale.
+runtime_kind: claude-code
+log_format: claude-stream-json
+prompt_strategy: claude-stdin-package
+auth_strategy: env-provider-api-key   # ANTHROPIC_API_KEY injected as -e
+
 detect:
   env:
     - ANTHROPIC_API_KEY

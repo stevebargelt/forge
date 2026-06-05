@@ -279,6 +279,31 @@ const AuthDefSchema = z.object({
   mode: z.enum(["env-snapshot", "mount", "apikey", "oauth-volume", "codex-auth"]),
 });
 
+// #292 — runtime metadata seam. These declare a runtime's EXECUTION BEHAVIOR
+// explicitly, so downstream code (usage parsing, prompt injection, auth wiring)
+// chooses from runtime metadata instead of inferring from upstream provider/
+// profile names. The PRD's correction (docs/prds/provider-agnostic-runtime-pi.md):
+// provider/model are model-SELECTION facts; runtime_kind/log_format/etc. are
+// EXECUTION facts. All four are optional in YAML so a pre-#292 custom runtime
+// still loads — resolveRuntimeMetadata() infers any missing field from existing
+// signals (the one place legacy inference lives).
+const RuntimeKindSchema = z.enum(["claude-code", "codex", "pi"]);
+const LogFormatSchema = z.enum(["claude-stream-json", "codex-jsonl", "pi-jsonl"]);
+const PromptStrategySchema = z.enum(["claude-stdin-package", "stdin-prepend", "runtime-context-file"]);
+// auth_strategy is the ABSTRACT, provider-independent auth category — distinct
+// from auth.mode (the docker-wiring detail spawn.ts consumes; env-snapshot vs
+// mount are both the aws-bedrock strategy). It defaults by deriving from
+// auth.mode (see resolveRuntimeMetadata) so the two can never contradict.
+// `aws-bedrock` extends the PRD's illustrative list, which omitted Bedrock.
+const AuthStrategySchema = z.enum([
+  "oauth-volume",
+  "codex-auth",
+  "env-provider-api-key",
+  "pi-auth-json",
+  "local-endpoint",
+  "aws-bedrock",
+]);
+
 const MountDefSchema = z.object({
   host: z.string().min(1),
   container: z.string().min(1),
@@ -307,6 +332,12 @@ const ResultDefSchema = z.object({
 export const RuntimeSchema = z.object({
   name: NameSchema,
   description: z.string().min(1),
+  // #292 runtime metadata — see the schema comment above. Optional for back-compat;
+  // normalized to always-present by resolveRuntimeMetadata().
+  runtime_kind: RuntimeKindSchema.optional(),
+  log_format: LogFormatSchema.optional(),
+  prompt_strategy: PromptStrategySchema.optional(),
+  auth_strategy: AuthStrategySchema.optional(),
   detect: DetectDefSchema.optional(),
   image: z.string().min(1),
   // Model aliases: at least 'default' must be present so unspecified-model
@@ -331,6 +362,45 @@ export const RuntimeSchema = z.object({
 export type Runtime = z.infer<typeof RuntimeSchema>;
 export type Auth = z.infer<typeof AuthDefSchema>;
 export type Mount = z.infer<typeof MountDefSchema>;
+
+export type RuntimeKind = z.infer<typeof RuntimeKindSchema>;
+export type LogFormat = z.infer<typeof LogFormatSchema>;
+export type PromptStrategy = z.infer<typeof PromptStrategySchema>;
+export type AuthStrategy = z.infer<typeof AuthStrategySchema>;
+
+/** The #292 runtime metadata, with every field resolved to a concrete value. */
+export type RuntimeMetadata = {
+  runtimeKind: RuntimeKind;
+  logFormat: LogFormat;
+  promptStrategy: PromptStrategy;
+  authStrategy: AuthStrategy;
+};
+
+// auth.mode (docker-wiring detail) → abstract auth_strategy default. The ONLY
+// derivation between the two vocabularies, so they can't drift: env-snapshot and
+// mount are both Bedrock wiring → aws-bedrock.
+const AUTH_MODE_TO_STRATEGY: Record<Auth["mode"], AuthStrategy> = {
+  "oauth-volume": "oauth-volume",
+  "codex-auth": "codex-auth",
+  apikey: "env-provider-api-key",
+  "env-snapshot": "aws-bedrock",
+  mount: "aws-bedrock",
+};
+
+/** Resolve a runtime's #292 execution metadata to concrete values. Explicit YAML
+ *  fields win; anything omitted (a pre-#292 runtime) is INFERRED here — the single
+ *  place legacy "guess behavior from the invocation" logic lives, so the rest of
+ *  the codebase keys off metadata, never off provider names. `codex` is inferred
+ *  from the invocation command; `pi` is never inferred (Pi runtimes declare it). */
+export function resolveRuntimeMetadata(rt: Runtime): RuntimeMetadata {
+  const isCodex = rt.invocation.command === "codex";
+  return {
+    runtimeKind: rt.runtime_kind ?? (isCodex ? "codex" : "claude-code"),
+    logFormat: rt.log_format ?? (isCodex ? "codex-jsonl" : "claude-stream-json"),
+    promptStrategy: rt.prompt_strategy ?? (isCodex ? "stdin-prepend" : "claude-stdin-package"),
+    authStrategy: rt.auth_strategy ?? AUTH_MODE_TO_STRATEGY[rt.auth.mode],
+  };
+}
 
 // ------------------------------------------------------------------
 // Model policy YAML (model-policy.yml) — AWN-7 Crawl (FORGE-DEC provider-resolution)

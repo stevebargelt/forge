@@ -217,14 +217,30 @@ export function extractUsageFromCodexLog(
 // Capture usage from a just-completed task's stdout log into model_calls.
 // Best-effort: swallows all errors so a telemetry failure can never block or
 // alter task semantics. Call site is right after docker exec returns, in both
-// invoke.ts and runNext.ts spawn paths. AWN-7: dispatches the parser by provider
-// — openai → codex JSONL; everything else (anthropic, legacy) → claude stream-json.
+// invoke.ts and runNext.ts spawn paths.
+//
+// #292: the parser is chosen from the runtime's `log_format` (an EXECUTION fact),
+// NOT the upstream provider (a model-SELECTION fact). `codex-jsonl` → codex JSONL;
+// every other log format → claude stream-json. `provider` is retained only as a
+// legacy fallback for the pre-#292 path where no log_format is threaded through
+// (the openai → codex mapping AWN-7 originally used); once every spawn site
+// passes log_format this fallback is dead. A `pi-jsonl` parser arrives with #262.
+// #292: the parser choice, isolated as a pure decision so it can be unit-tested
+// independent of the DB insert. Returns the parser to run. log_format (an
+// EXECUTION fact) is authoritative; provider is only the legacy fallback for the
+// pre-#292 path where no log_format is threaded through. `pi-jsonl` joins here
+// with #262.
+export function selectUsageParser(opts: { logFormat?: string; provider?: string }): "codex" | "claude" {
+  if (opts.logFormat !== undefined) return opts.logFormat === "codex-jsonl" ? "codex" : "claude";
+  return opts.provider === "openai" ? "codex" : "claude"; // legacy fallback
+}
+
 export function captureUsageForTask(
   stdoutPath: string,
-  opts: { taskId: string; alias?: string; provider?: string; model?: string },
+  opts: { taskId: string; alias?: string; logFormat?: string; provider?: string; model?: string },
 ): { rowCount: number; error?: string } {
   try {
-    const rows = opts.provider === "openai"
+    const rows = selectUsageParser(opts) === "codex"
       ? extractUsageFromCodexLog(stdoutPath, opts)
       : extractUsageFromStdoutLog(stdoutPath, opts);
     if (rows.length === 0) return { rowCount: 0 };
