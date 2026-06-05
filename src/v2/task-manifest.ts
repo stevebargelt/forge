@@ -27,7 +27,7 @@ export type TaskManifest = {
     name: string;
     kind: "claude-code" | "codex" | "pi";
     logFormat: "claude-stream-json" | "codex-jsonl" | "pi-jsonl";
-    promptStrategy: "claude-stdin-package" | "stdin-prepend" | "runtime-context-file";
+    promptStrategy: "claude-stdin-package" | "stdin-prepend" | "runtime-context-file" | "message-arg";
     authStrategy: "oauth-volume" | "codex-auth" | "env-provider-api-key" | "pi-auth-json" | "local-endpoint" | "aws-bedrock";
   };
   // AWN-4: the task contract this task was dispatched under, if any. Surfaced in

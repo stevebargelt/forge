@@ -1,0 +1,91 @@
+# forge v2 — pi-apikey runtime (#258 Crawl / #261)
+#
+# pi (pi.dev) coding agent via a provider API key passed as an env var. The
+# container runs the `pi` CLI in `-p --mode json` (non-interactive, JSONL events
+# on stdout). Crawl proof for the third agent runtime — selected EXPLICITLY with
+# `forge invoke --runtime pi-apikey`; it is NOT auto-detected and NOT yet in the
+# model-policy provider binding (that's #265).
+#
+# Scope note (#261): this Crawl runtime is anthropic-bound for the proof —
+# auth.mode: apikey injects ANTHROPIC_API_KEY and the invocation pins
+# `--provider anthropic`. Generalizing provider/key selection and policy binding
+# is #265; OAuth (~/.pi/agent/auth.json) is #266; local models are #268.
+#
+# Installed at ~/.forge/runtimes/pi-apikey.yml by install-seeds.sh.
+
+name: pi-apikey
+description: |
+  pi (pi.dev) via a provider API key (env var). Third agent runtime, Crawl proof.
+  Run with: forge invoke --runtime pi-apikey.
+
+# #292 runtime EXECUTION metadata — declared explicitly so usage parsing and
+# prompt handling key off these, not the provider name. log_format: pi-jsonl has
+# no usage parser yet (#262) — captureUsageForTask fails loud on it until then.
+# prompt_strategy: message-arg — system prompt via --append-system-prompt, task
+# package as a positional message (the injection mapping itself is #263).
+runtime_kind: pi
+log_format: pi-jsonl
+prompt_strategy: message-arg
+auth_strategy: env-provider-api-key
+
+detect:
+  # Not auto-detected — selected only via `forge invoke --runtime pi-apikey`.
+  env: []
+  files: []
+
+image: agent-dev-worker:latest
+
+models:
+  # Only consulted in legacy mode (no model-policy.yml). Concrete model id handed
+  # to pi as ${MODEL}; provider is pinned in the invocation below.
+  default: claude-sonnet-4-6
+
+auth:
+  mode: apikey   # injects ANTHROPIC_API_KEY=<host value> as -e; pi reads it for
+  # the anthropic provider. No mount, no volume. Spawn-time fresh.
+
+env:
+  # pi needs no headless browser; skip the entrypoint's Chromium startup.
+  FORGE_NO_BROWSER: "1"
+
+mounts:
+  - host: "${TASK_DIR}"
+    container: /task
+    mode: rw
+
+  - host: "${PROJECT_DIR}"
+    container: /project
+    mode: "${PROJECT_MODE:-rw}"      # 'ro' for red agents; runner sets per-step
+
+  - host: "${DESIGN_DIR}"
+    container: /design
+    mode: ro
+    optional: true
+  # No browser-tools skill mount: not a pi capability in Crawl.
+
+invocation:
+  command: pi
+  args:
+    - -p                              # --print: non-interactive, process prompt and exit
+    - --mode
+    - json                            # JSONL events on stdout (usage parser: #262)
+    - --no-context-files              # don't auto-load /project AGENTS.md/CLAUDE.md
+    - --no-session                    # ephemeral; don't persist a session file
+    - --provider
+    - anthropic                       # Crawl: anthropic-bound (see scope note above)
+    - --model
+    - "${MODEL}"
+    - --append-system-prompt
+    - "${SYSTEM_PROMPT}"
+    - "${TASK_PACKAGE_MARKDOWN}"      # task package as the positional message
+  # No `stdin:` — pi reads the prompt from args (message-arg), unlike claude/codex.
+
+container:
+  name: "forge-${TASK_ID}"
+  remove_on_exit: true
+  idle_timeout_seconds: 600
+
+result:
+  file: /task/result.json
+  stdout_log: container.stdout.log
+  stderr_log: container.stderr.log

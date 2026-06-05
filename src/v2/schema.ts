@@ -289,7 +289,12 @@ const AuthDefSchema = z.object({
 // signals (the one place legacy inference lives).
 const RuntimeKindSchema = z.enum(["claude-code", "codex", "pi"]);
 const LogFormatSchema = z.enum(["claude-stream-json", "codex-jsonl", "pi-jsonl"]);
-const PromptStrategySchema = z.enum(["claude-stdin-package", "stdin-prepend", "runtime-context-file"]);
+// `message-arg`: system prompt via a CLI flag (e.g. pi --append-system-prompt) and
+// the task package as a positional message argument — not stdin. Added for pi
+// (#261); the actual prompt-injection MAPPING logic is #263's concern, this is
+// only the truthful declaration so resolveRuntimeMetadata doesn't mislabel pi as
+// claude-stdin-package.
+const PromptStrategySchema = z.enum(["claude-stdin-package", "stdin-prepend", "runtime-context-file", "message-arg"]);
 // auth_strategy is the ABSTRACT, provider-independent auth category — distinct
 // from auth.mode (the docker-wiring detail spawn.ts consumes; env-snapshot vs
 // mount are both the aws-bedrock strategy). It defaults by deriving from

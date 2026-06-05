@@ -365,3 +365,60 @@ test("buildDockerArgs: AUTH_STATE_HOST_PATH throws when browser-tools lacks the 
   const ctx: SpawnContext = { ...BASE_CTX, AUTH_STATE_HOST_PATH: "/home/u/.forge/auth/qa-admin.storage.json" };
   assert.throws(() => buildDockerArgs(rt, ctx), /auth-inject\.js/);
 });
+
+// ── #261: pi-apikey runtime dispatch wiring ──────────────────────────────────
+// Build docker args from the REAL pi-apikey seed and assert the pi command shape.
+// Deterministic, no container/network — proves spawn can invoke pi.
+
+import { readFileSync as _readFileSync } from "node:fs";
+import { dirname as _dirname, join as _join } from "node:path";
+import { fileURLToPath as _fileURLToPath } from "node:url";
+import { parse as _parseYaml } from "yaml";
+import { RuntimeSchema as _RuntimeSchema } from "./schema.js";
+
+function loadPiSeed(): Runtime {
+  const here = _dirname(_fileURLToPath(import.meta.url));
+  const seed = _join(here, "..", "..", "seeds", "runtimes", "pi-apikey.yml");
+  return _RuntimeSchema.parse(_parseYaml(_readFileSync(seed, "utf8")));
+}
+
+// Find the index of the runtime command in the assembled docker args (it follows
+// the image name).
+function argsAfterImage(args: string[], image: string): string[] {
+  const i = args.indexOf(image);
+  return i >= 0 ? args.slice(i + 1) : [];
+}
+
+test("#261: buildDockerArgs runs pi with -p --mode json and substitutes prompt + model", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test-key"; // auth.mode=apikey requires it
+  const rt = loadPiSeed();
+  const { args, stdin } = buildDockerArgs(rt, {
+    ...BASE_CTX,
+    SYSTEM_PROMPT: "SYS-PROMPT",
+    TASK_PACKAGE_MARKDOWN: "PKG-MD",
+  });
+  const cmd = argsAfterImage(args, "agent-dev-worker:latest");
+  assert.equal(cmd[0], "pi", "command is pi");
+  assert.ok(cmd.includes("-p"), "non-interactive -p");
+  assert.deepEqual(cmd.slice(cmd.indexOf("--mode"), cmd.indexOf("--mode") + 2), ["--mode", "json"]);
+  assert.ok(cmd.includes("--no-context-files"));
+  assert.deepEqual(cmd.slice(cmd.indexOf("--provider"), cmd.indexOf("--provider") + 2), ["--provider", "anthropic"]);
+  assert.deepEqual(cmd.slice(cmd.indexOf("--model"), cmd.indexOf("--model") + 2), ["--model", "claude-sonnet-4-6"]);
+  // system prompt via flag; task package as the trailing positional message.
+  assert.deepEqual(cmd.slice(cmd.indexOf("--append-system-prompt"), cmd.indexOf("--append-system-prompt") + 2), ["--append-system-prompt", "SYS-PROMPT"]);
+  assert.equal(cmd[cmd.length - 1], "PKG-MD", "task package is the positional message arg");
+  assert.equal(stdin, undefined, "pi reads the prompt from args, not stdin");
+});
+
+test("#261: pi-apikey injects ANTHROPIC_API_KEY and FORGE_NO_BROWSER", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test-key";
+  const { args } = buildDockerArgs(loadPiSeed(), BASE_CTX);
+  const env = pickEnv(args);
+  assert.equal(env.ANTHROPIC_API_KEY, "sk-test-key");
+  assert.equal(env.FORGE_NO_BROWSER, "1", "skip Chromium startup — pi has no browser-tools");
+});
+
+test("#261: pi-apikey fails fast when ANTHROPIC_API_KEY is unset", () => {
+  delete process.env.ANTHROPIC_API_KEY;
+  assert.throws(() => buildDockerArgs(loadPiSeed(), BASE_CTX), /ANTHROPIC_API_KEY/);
+});
