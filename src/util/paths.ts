@@ -14,6 +14,9 @@ export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
 // by default.
 export const WORKFLOWS_DIR = join(FORGE_HOME, "workflows");
 export const ROUTING_POLICY_PATH = join(FORGE_HOME, "routing-policy.yml");
+// Append-only JSONL audit trail of orchestrator-mediated RACI changes (#279).
+// One line per `forge raci apply --confirm`; host-global, outside any repo.
+export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
 // FORGE_DB_PATH overrides the default; pass `:memory:` in tests for an in-memory SQLite.
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 

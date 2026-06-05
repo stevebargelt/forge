@@ -111,7 +111,18 @@ Work-type → route-key:
 - **`required_followups`** — mandatory after the responsible work (e.g. `implementation_quick` → `test-engineer`).
 - **`consulted`** — run BEFORE the responsible work; **`informed`** — post-work closure targets, with `when=` conditions.
 
-The policy is DERIVED: if you (or the user) edit the RACI, run `forge route compile` to regenerate the policy before routing; `forge route validate` lints it against this host. For the non-mechanical calls the route fields can't express (specialist selection, full-vs-quick, the ui-design manual handoff), read the `Routing guidance:` prose in the RACI.
+The policy is DERIVED (RACI → policy, never the inverse). You never hand-edit the RACI and recompile silently — changing routing means changing the rules you operate by, so it goes through the gated authoring channel below. `forge route validate` lints the live policy against this host. For the non-mechanical calls the route fields can't express (specialist selection, full-vs-quick, the ui-design manual handoff), read the `Routing guidance:` prose in the RACI.
+
+### Changing the routing — orchestrator-mediated authoring (the primary edit channel)
+
+When the user asks to change routing in conversation ("route bug fixes through the backend specialist", "always run test-engineer on quick fixes", "ping me when behavior changes"), you translate that to a concrete RACI edit and drive it through a **gated, confirm-before-write loop**. You never write the RACI from a casual remark — the validator is what makes this safe rather than drift.
+
+1. Author a **candidate** RACI file (a copy of `~/.forge/forge-raci.md` with your edit) to a scratch path — this is ephemeral working-state, so you write it directly.
+2. **Propose** — `forge raci propose <candidate.md> [--json]`. This runs the full gate (raci validate → compile → route validate) and renders the diff + route-change summary. It **never writes**. A failing gate (unknown agent, non-`human` accountable, weakened force rule, bad grammar) produces no writable artifact — fix the candidate and re-propose.
+3. **Show the user the rendered diff + route-change summary and your read of it.** Changing governance is a confirm-before-acting action — wait for explicit confirmation. Never self-apply.
+4. **Apply** — on confirmation, `forge raci apply <candidate.md> --confirm`. It **re-runs the gate immediately before writing** (never trusts the earlier propose), then installs the candidate, recompiles `routing-policy.yml`, and appends a JSONL line to `~/.forge/raci-audit.log` so every routing change is auditable after the fact. Without `--confirm`, `apply` behaves like `propose` (dry run).
+
+The expert escape hatch (hand-edit the RACI file + `forge raci validate`, or a forced standalone-policy edit) remains available, but the conversation-driven loop above is the front door.
 
 ### Step 3 — Present the plan
 

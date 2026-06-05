@@ -3,12 +3,28 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateRaciFile, renderHuman } from "./raci.js";
+import { validateRaciFile, renderHuman, applyRaciChange, type ApplyTargets } from "./raci.js";
+import type { HostEnv } from "../../raci/route-validate.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SEED_PATH = join(HERE, "..", "..", "..", "seeds", "forge-raci.md");
+
+const all: HostEnv = { agentInstalled: () => true, workflowKnown: () => true };
+const seed = () => readFileSync(SEED_PATH, "utf8");
+const IQ_ANCHOR = "responsible: engineer\naccountable: human\npath: invoke_chain";
+
+function tmpTargets(): ApplyTargets {
+  const dir = mkdtempSync(join(tmpdir(), "raci-apply-"));
+  return {
+    raciPath: join(dir, "forge-raci.md"),
+    policyPath: join(dir, "routing-policy.yml"),
+    auditLogPath: join(dir, "raci-audit.log"),
+  };
+}
 
 test("validateRaciFile lints the real seed clean", () => {
   const v = validateRaciFile(SEED_PATH);
@@ -32,4 +48,81 @@ test("renderHuman: clean vs findings", () => {
   });
   assert.match(bad, /informed_unknown/);
   assert.match(bad, /route: bug_fix/);
+});
+
+// ── confirm-gate (#279) ──────────────────────────────────────────────────────
+
+test("apply without --confirm never writes, even when the gate passes", () => {
+  const targets = tmpTargets();
+  const candidate = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+  const r = applyRaciChange(seed(), candidate, { confirm: false, candidateLabel: "cand.md", host: all, targets });
+
+  assert.equal(r.proposal.ok, true, JSON.stringify(r.proposal.validation));
+  assert.equal(r.written, false);
+  assert.equal(r.reason, "not_confirmed");
+  assert.equal(existsSync(targets.raciPath), false, "must not write the RACI");
+  assert.equal(existsSync(targets.policyPath), false, "must not write the policy");
+  assert.equal(existsSync(targets.auditLogPath), false, "must not write an audit entry");
+});
+
+test("apply --confirm on a valid candidate writes RACI + policy + a JSONL audit line", () => {
+  const targets = tmpTargets();
+  const candidate = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+  const r = applyRaciChange(seed(), candidate, {
+    confirm: true,
+    candidateLabel: "cand.md",
+    host: all,
+    targets,
+    now: () => new Date("2026-06-04T12:00:00.000Z"),
+  });
+
+  assert.equal(r.written, true);
+  assert.equal(readFileSync(targets.raciPath, "utf8"), candidate, "installed RACI must equal the candidate");
+  assert.ok(existsSync(targets.policyPath), "policy must be recompiled");
+  assert.match(readFileSync(targets.policyPath, "utf8"), /frontend-specialist/);
+
+  const lines = readFileSync(targets.auditLogPath, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  const entry = JSON.parse(lines[0]!);
+  assert.equal(entry.action, "apply");
+  assert.equal(entry.timestamp, "2026-06-04T12:00:00.000Z");
+  assert.deepEqual(entry.routes_modified, ["implementation_quick"]);
+  assert.deepEqual(entry.validation, { raci: true, route: true });
+});
+
+test("apply --confirm on an INVALID candidate writes nothing and reports the failure", () => {
+  const targets = tmpTargets();
+  const candidate = seed().replace(
+    "informed: user_summary, backlog:when=ticketed, docs_impact:when=operator_behavior_changed",
+    "informed: not_a_real_target",
+  );
+  const r = applyRaciChange(seed(), candidate, { confirm: true, candidateLabel: "cand.md", host: all, targets });
+
+  assert.equal(r.written, false);
+  assert.equal(r.reason, "validation_failed");
+  assert.equal(existsSync(targets.raciPath), false);
+  assert.equal(existsSync(targets.policyPath), false);
+  assert.equal(existsSync(targets.auditLogPath), false);
+});
+
+test("apply --confirm appends — a second change adds a second audit line", () => {
+  const targets = tmpTargets();
+  // Seed the audit log + installed RACI with a first applied change.
+  const first = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+  applyRaciChange(seed(), first, { confirm: true, candidateLabel: "first.md", host: all, targets });
+  // A second change, current = the now-installed first candidate.
+  const second = first.replace(
+    "responsible: frontend-specialist\naccountable: human\npath: invoke_chain",
+    "responsible: backend-specialist\naccountable: human\npath: invoke_chain",
+  );
+  const r = applyRaciChange(readFileSync(targets.raciPath, "utf8"), second, {
+    confirm: true,
+    candidateLabel: "second.md",
+    host: all,
+    targets,
+  });
+
+  assert.equal(r.written, true);
+  const lines = readFileSync(targets.auditLogPath, "utf8").trim().split("\n");
+  assert.equal(lines.length, 2);
 });
