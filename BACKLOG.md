@@ -769,32 +769,6 @@ Pi is the forcing function because one headless CLI (`pi -p --mode json`) can fr
 **Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
 
 
-### #292 — Runtime metadata seam: separate runtime kind, log format, prompt strategy, auth strategy
-**Phase:** Crawl foundation. Part of #258 and #291.
-
-**Why:** The Pi PRD's architectural correction cannot wait until after Pi is wired. Today Forge still leans on provider/profile names to infer execution behavior: model policy resolves `provider + auth -> runtime`, usage parsing is selected by provider in the runner path, and runtime YAML does not explicitly declare the log format, prompt injection strategy, or auth wiring strategy. If #260/#261 add Pi before this seam exists, Forge will be tempted to encode "provider = pi" or add another one-off branch, which is exactly the confusion the PRD rejects.
-
-**Scope:**
-- Extend the runtime YAML schema/loader with explicit metadata:
-  - `runtime_kind`: `claude-code | codex | pi` (or equivalent open string if the implementation strongly prefers it).
-  - `log_format`: `claude-stream-json | codex-jsonl | pi-jsonl`.
-  - `prompt_strategy`: e.g. `claude-stdin-package | stdin-prepend | runtime-context-file`.
-  - `auth_strategy`: e.g. `oauth-volume | codex-auth | env-provider-api-key | pi-auth-json | local-endpoint`.
-- Backfill existing Claude/Codex runtime seeds with metadata, preserving current behavior.
-- Thread the resolved runtime metadata into spawn/run task execution and task/run diagnostics so later code can choose parsers and prompt/auth behavior from runtime metadata instead of upstream provider names.
-- Convert comments/diagnostic wording in the execution path from "provider selects parser/runtime behavior" to "runtime/log_format selects parser/runtime behavior; upstream provider/model are model-selection facts."
-- Keep behavior unchanged for existing Claude Code and Codex runs.
-
-**Acceptance:**
-- Existing Claude Code and Codex runtime seeds validate with the new metadata and still resolve to the same command/auth behavior.
-- A unit test proves usage-parser selection can be made from `log_format` independent of upstream provider.
-- A unit test or resolver fixture proves a Pi-shaped runtime can declare `runtime_kind: pi`, `log_format: pi-jsonl`, `prompt_strategy: stdin-prepend`, and `auth_strategy: env-provider-api-key` without requiring a Pi binary yet.
-- Task/run diagnostic output exposes both runtime metadata and upstream provider/model distinctly enough for `forge show --json` or equivalent orchestrator-facing JSON to tell them apart.
-- No Pi Docker/image install is required in this story; #260 owns the binary.
-
-**Relations:** #258, #260, #261, #262, #263, #265, #253, `docs/prds/provider-agnostic-runtime-pi.md`.
-
-
 ### #260 — pi: add pi to the agent-dev-worker Docker image
 **Phase:** Crawl. Part of #258.
 Install pi in `docker/agent-dev-worker.Dockerfile` (`npm i -g --ignore-scripts @earendil-works/pi-coding-agent`, or `pi.dev/install.sh`).
@@ -952,7 +926,81 @@ Acceptance:
 Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
 
 
+### #293 — Explore export of forge workflows to n8n format
+**Spike / exploration.** Evaluate exporting forge workflows (and/or completed run DAGs) to n8n's workflow JSON format. Decide whether it's worth building, and if so, which direction.
+
+**Why:** n8n's value is its visual canvas + connector catalog. A read-only export could give a familiar graph view and an interop seam without adopting n8n as a runtime.
+
+**Format notes (n8n):** JSON with `nodes[]` (each: `name`, `type`, `typeVersion`, `position [x,y]`, `parameters{}`, optional `credentials{}`) and `connections{}` (adjacency keyed by source node name → `{ main: [[ { node, type, index } ]] }`), rooted at a trigger node. Execution is item-based: data flows along edges via expressions; branching is explicit IF/Switch/Merge nodes.
+
+**Impedance mismatch to resolve in the spike (why this is explore, not just build):**
+- Edge-passed data vs blackboard — n8n threads payloads node→node; forge uses SQLite as the blackboard (tasks read prior result.json + shared state, not edge payloads). Deepest mismatch.
+- Arbitrary DAG vs phased pipeline + structured red fan-out + gates — n8n has no first-class gate (auto/human) or red verdict aggregation; those would become untyped node convention, which fights forge's Zod-validated schema.
+- Node weight — a forge node is an agent role in a container under RACI routing; an n8n node is a typed integration call.
+
+**Options ranked by fit (from session discussion):**
+1. Interop at the boundary (forge triggered by / emitting to n8n webhooks) — best fit, but that's a different ticket than *export*.
+2. Export forge run DAG → n8n JSON purely for visualization in n8n's canvas. The actual scope of THIS ticket. Earns its keep only if n8n's canvas is wanted over the existing dashboard.
+3. n8n as forge's authoring/runtime format — poor fit; out of scope, do not pursue without a forcing reason.
+
+**Deliverable of the spike:** a go/no-go on option 2 with a sketch of the node/connection mapping (forge phase/task → n8n node; dependency edges → connections; gates/reds → ??? — the open question) and an honest read on whether the lossy mapping is useful enough to maintain.
+
+Relations: forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), #253 (provider adapter surfaces), dashboard run views.
+
+
+### #294 — Explore export of forge run DAG to Excalidraw format
+**Spike / exploration.** Export a forge run's task DAG (and/or a workflow definition) to Excalidraw's `.excalidraw` scene JSON for a sketchable, shareable diagram.
+
+**Why this is a better-fit target than n8n (#293):** Excalidraw is purely presentational — a whiteboard scene, not an execution engine. So forge's gates, red fan-out, and phases map to *shapes and labels* with NO semantic loss; there's no blackboard-vs-edge-data or gate/verdict impedance mismatch to resolve. The only real work is layout.
+
+**Format notes (Excalidraw):** JSON `{ type: "excalidraw", version, source, elements[], appState, files }`. Each element has `id`, `type` (`rectangle` / `diamond` / `text` / `arrow` / `ellipse`), `x`, `y`, `width`, `height`, `angle`, stroke/fill styling, and a `seed`. Arrows carry `points[]` plus `startBinding`/`endBinding` referencing element ids (with `focus`/`gap`) so connectors stay attached. Text can be a standalone element or bound to a container via `containerId` + the container's `boundElements`.
+
+**Sketch of the mapping:**
+- phase/task → rounded `rectangle` (or `diamond` for gate steps), labeled with role + status via bound text.
+- dependency / next-phase edge → bound `arrow` between element ids.
+- red children → smaller nodes fanned off the task they audit; verdict as label/color.
+- color by status (complete / failed / running / reconcile_candidate) reusing the dashboard palette.
+- layout: simple layered/topological left→right or top→down; assign x/y by phase depth.
+
+**Open questions for the spike:**
+- Layout quality — auto-layout a layered DAG well enough to be readable without manual nudging (acceptable since Excalidraw is editable after export).
+- Static snapshot vs live — one-shot export of a finished run is the easy win; "live updating" is out of scope.
+- Where it surfaces — a `forge export <run-id> --format excalidraw` CLI? a dashboard download button? (decide in spike).
+
+**Deliverable:** go/no-go + a minimal proof export of one real run DAG opened in Excalidraw.
+
+Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), dashboard run views, reconcile_candidate status color (#290).
+
+
 ## Done (recent)
+
+### #292 — Runtime metadata seam: separate runtime kind, log format, prompt strategy, auth strategy
+**Closed:** 2026-06-05.
+
+**Phase:** Crawl foundation. Part of #258 and #291.
+
+**Why:** The Pi PRD's architectural correction cannot wait until after Pi is wired. Today Forge still leans on provider/profile names to infer execution behavior: model policy resolves `provider + auth -> runtime`, usage parsing is selected by provider in the runner path, and runtime YAML does not explicitly declare the log format, prompt injection strategy, or auth wiring strategy. If #260/#261 add Pi before this seam exists, Forge will be tempted to encode "provider = pi" or add another one-off branch, which is exactly the confusion the PRD rejects.
+
+**Scope:**
+- Extend the runtime YAML schema/loader with explicit metadata:
+  - `runtime_kind`: `claude-code | codex | pi` (or equivalent open string if the implementation strongly prefers it).
+  - `log_format`: `claude-stream-json | codex-jsonl | pi-jsonl`.
+  - `prompt_strategy`: e.g. `claude-stdin-package | stdin-prepend | runtime-context-file`.
+  - `auth_strategy`: e.g. `oauth-volume | codex-auth | env-provider-api-key | pi-auth-json | local-endpoint`.
+- Backfill existing Claude/Codex runtime seeds with metadata, preserving current behavior.
+- Thread the resolved runtime metadata into spawn/run task execution and task/run diagnostics so later code can choose parsers and prompt/auth behavior from runtime metadata instead of upstream provider names.
+- Convert comments/diagnostic wording in the execution path from "provider selects parser/runtime behavior" to "runtime/log_format selects parser/runtime behavior; upstream provider/model are model-selection facts."
+- Keep behavior unchanged for existing Claude Code and Codex runs.
+
+**Acceptance:**
+- Existing Claude Code and Codex runtime seeds validate with the new metadata and still resolve to the same command/auth behavior.
+- A unit test proves usage-parser selection can be made from `log_format` independent of upstream provider.
+- A unit test or resolver fixture proves a Pi-shaped runtime can declare `runtime_kind: pi`, `log_format: pi-jsonl`, `prompt_strategy: stdin-prepend`, and `auth_strategy: env-provider-api-key` without requiring a Pi binary yet.
+- Task/run diagnostic output exposes both runtime metadata and upstream provider/model distinctly enough for `forge show --json` or equivalent orchestrator-facing JSON to tell them apart.
+- No Pi Docker/image install is required in this story; #260 owns the binary.
+
+**Relations:** #258, #260, #261, #262, #263, #265, #253, `docs/prds/provider-agnostic-runtime-pi.md`.
+
 
 ### #290 — Dashboard/Ops: surface reconcile candidates instead of ordinary stale running
 **Closed:** 2026-06-05.
