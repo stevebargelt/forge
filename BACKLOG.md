@@ -5,37 +5,37 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-04.**
+**Last session ended 2026-06-05.**
 
-**Where we left off:** Built the entire RACI-to-routing-policy MVP in one session — design (PRD revision + epic #273 reconciliation) through all 6 MVP stories (#274 format/parser, #275 schema, #276 compiler, #277 raci validate, #278 route validate, #284 compile+explain+consumption). All closed. The system is operational (proof-of-life verified: edit RACI → compile → route explain changes → orchestrator routes differently), but NOT yet live on this host (see External state). Last act: closed #284, ran handoff.
+**Where we left off:** Drove the RACI/routing-policy epic (#273) hard — shipped the authoring channel, project overrides, the governance view + dashboard panel, auto-compile on init/upgrade, and two Pixtron-surfaced routing/docs fixes. All session tickets closed, and at end-of-session everything (incl. handoff notes + a stale CLAUDE.md re-render) was committed and pushed to origin/main.
 
 **Picked up next:**
-1. **Activate on this host — NON-TICKET thread (host mutation, needs Steve's go).** The build is in the seeds + code but not installed: run `forge upgrade` (re-renders this repo's CLAUDE.md from the updated orchestrator-template, which now routes via `forge route explain`), ensure the new `seeds/forge-raci.md` installs to `~/.forge/forge-raci.md`, then `forge route compile` to write `~/.forge/routing-policy.yml`. Until then THIS orchestrator block is still old-prose and `route explain` has no policy to read.
-2. **#279 — orchestrator-mediated authoring** (next post-MVP story, natural follow-on): conversation-driven RACI edits gated by `raci validate` → compile → `route validate` → human-confirm diff → commit. The primary authoring channel.
-3. **Standing post-MVP:** #280 (project overrides — ALSO owns the override force-rule-protection check that was explicitly moved off #278), #281 (effective governance view / diff preview), #282 (dedicated edit tool — deferred convenience), #283 (provider-adapter generation / #253 seam).
+1. **Activate this session's work on the host — NON-TICKET thread (host mutation, needs Steve's go).** All committed + pushed but NOT live: run `forge upgrade` (auto-recompiles `~/.forge/routing-policy.yml` per #286, FORCE-refreshes seeds, and FULLY re-renders this repo's `CLAUDE.md` orchestrator block from the current template) to pick up #288 routing guidance, the #289 docs-impact lifecycle, and the new CLI (`raci propose/apply`, `route governance`, project overrides). NOTE: the `CLAUDE.md` committed this session is an OLDER partial re-render (compiled-policy routing flow only, ~#284 era) — it does NOT yet include #279/#288/#289; `forge upgrade` is what brings it current.
+2. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. The routing substrate it depends on is now complete (MVP + #279/#280/#281/#285/#286). Largest remaining RACI-epic lift.
+3. **#282 — dedicated RACI edit tool (deferred convenience).** CLI wizard/dashboard form that writes the RACI within guardrails. Lower priority — the orchestrator-mediated propose/apply channel (#279) already covers the non-technical authoring loop.
+4. **Project-RACI-authoring-through-the-gate — NON-TICKET follow-on (flagged during #280).** `raci propose/apply` operate on the HOST RACI only; not project-override-aware. Authoring a `<project>/.forge/forge-raci.md` through the gated channel is a clean follow-on; file a ticket if wanted.
 
 **External state to remember:**
-- **22 commits unpushed to origin/main** (direct-to-main, no PR flow). Steve was asked about pushing at handoff.
-- **Untracked `docs/prds/provider-agnostic-runtime-pi.md` is NOT from this session** — a pi-runtime PRD that appeared mid-session; left untouched (not ours).
-- Installed `~/.forge/forge-raci.md` is still OLD prose format; `forge raci validate` (no arg) correctly flags it `compile_error` (zero routes). `~/.forge/routing-policy.yml` doesn't exist yet. Both resolve when item #1 (activate) runs.
+- **origin/main is up to date** — all session commits + handoff + the CLAUDE.md re-render were pushed at end-of-session. Working tree clean except the untracked PRD below.
+- **Untracked `docs/prds/provider-agnostic-runtime-pi.md`** is NOT from this session (a pi-runtime PRD present since session start) — deliberately left unstaged/uncommitted.
+- This session's seed/template/CLI changes are pushed but **not live on the host** until item #1 (`forge upgrade`) runs.
 
 **Decisions worth not relitigating:**
-- RACI is the human-authored SOURCE; `routing-policy.yml` is DERIVED (RACI→policy, never inverse). The inversion was explicitly rejected — humans author the RACI through guarded channels, never raw YAML.
-- Format: one constrained record block per route (`### route: <key>`), NOT a pipe table, NOT frontmatter/embedded YAML. Brutal-grammar parser (`src/raci/parse.ts`): fixed lowercase fields, command iff path:cli, `none` the only empty-list sentinel, symbols `[a-z0-9_-]+`, prose outside blocks ignored.
-- `accountable` = policy-HEADER invariant (`governance.accountable: human`), never per-route in the typed policy; shown per-block in the RACI as a visible reminder, hoisted by the compiler.
-- `informed` = normalized `{name, when?}` objects in the policy; `none` is a RACI-SOURCE sentinel only (policy uses empty arrays).
-- Two validators, both needed: `raci validate` (host-INDEPENDENT authoring lint) vs `route validate` (host-resolvable + drift). RACI doesn't travel; the policy does. `route validate` NEVER generates the policy (missing = finding, not silent compile) — compile/validate/explain roles kept clean.
-- `force_rules`: `FORCE_RULES_BASELINE` in `src/raci/vocab.ts` is an EMPTY placeholder — resolution is DORMANT, validators must not pretend it exists. `CLI_ACTIONS` is a symbol→command map (validates BOTH symbol and literal command).
-- `route explain <key>` looks up by EXACT route key — no prompt classification by code (orchestrator classifies; explain looks up). `classification_hints` advisory only.
-- `research` route stays on `research-specialist`; repoint to a `research-synthesis` workflow when #251 lands.
+- **#288:** the full-vs-quick discriminator is architectural novelty + plan-certainty, NOT file count. Precedent-driven multi-file/cross-cutting work with a concrete plan is `implementation_quick` (test-engineer + docs_impact still mandatory); the full pipeline is for novelty/unclear-boundaries/missing-plan/new-integration/high-risk decomposition.
+- **#289:** `docs_impact` is a lifecycle (detect 6 categories → resolve as `updated | not_needed:<reason> | deferred:#ticket` → report a `Docs impact:` summary line); a deferral REQUIRES a filed ticket. It's a PROSE contract (orchestrator + seeds), deliberately NOT machine-enforced (ticket non-goal). A gate rejecting a `complete` implementation run that lacks a resolved `Docs impact:` line would be a separate enforcement story if Steve wants teeth.
+- **#286:** init/upgrade auto-compile the derived policy. A standalone policy (no host RACI) is left untouched; an existing host RACI is never overwritten by the compile step (that stays install-seeds FORCE=1's call).
+- **#281 governance** SURFACES drift (read-only) but does not enforce — enforcement stays `route validate`'s job. Clean split: validate enforces, governance shows.
+- **#280:** project override = full replacement; an uncompiled project override FAILS (never falls back to host); the force-rule-weakening check is structurally enforced but dormant (empty baseline).
+- **#279:** apply journals the audit entry write-ahead (WAL ordering) so a change is never applied-but-unaudited; audit = host-global JSONL log, not a git commit.
 
-**Shipped (for reference — git log is canonical, 22 commits this session):**
-- Design: PRD revision + epic #273 reconciliation (1b78051), format decision (568c1b3), schema/explain completeness (a5901d1, 5626a64).
-- #274 record-block parser + seed conversion + strict grammar (278c044, 3497dde, 5146afc, 5c3fa35).
-- #275 policy schema (165df5a, c05582a). #276 compiler (21884b3, 8ce84c0).
-- #277 raci validate core + CLI (83703fc, 9929b7d). #278 route validate core + CLI + fixes (63b934d, a01e9c3, db3a076, f9d3f45).
-- #284 route compile + explain + orchestrator-template wiring + --json fix (51ab569, dd9e0b1, ea6759b).
-- `src/raci/` subsystem (~75 tests) + CLIs: `forge raci validate`, `forge route validate|compile|explain`.
+**Shipped (for reference — git log is canonical):**
+- **#279** orchestrator-mediated RACI authoring: `forge raci propose/apply` gated propose→confirm→apply + JSONL audit (49b0e93; audit-first fix b1fb4e5).
+- **#280** project override support: `<project>/.forge/` full-replacement resolution, `--project` on explain/validate/compile, force-rule non-weakening check (64b56e5; uncompiled-override fix 1822658).
+- **#281** `forge route governance` read-only view + host-vs-project diff + drift surfacing (14ec5ce; drift fix c6c7d90).
+- **#285** dashboard read-only routing/governance panel, backed by the shared `governanceView` core (817ed89; test-script glob fix 83ac1d1).
+- **#286** init/upgrade auto-compile `routing-policy.yml` from the RACI seed (7f3b81b).
+- **#288** routing guidance: novelty-vs-precedent discriminator (20bd191).
+- **#289** explicit docs-impact lifecycle across orchestrator-template + implementer/test seeds (7999d11; RACI source alignment c04ef23).
 
 ## Active
 
@@ -640,6 +640,36 @@ spawn.ts is in CLAUDE.md's 'don't touch without a learnings entry' list (DEC-004
 **Reframe:** not an "Ops dashboard MVP" — an **Ops intelligence substrate**. One detection core off the SQLite blackboard, many consumers. Derived from two research lenses (run-ops-surface-lens-a-detection-surface-6fbb91 = detection surface: 15 surfaced / 24 latent-detectable / 7 schema-blocked; run-ops-surface-lens-b-operator-pain-e2645a = 8 ranked operator pains) + user direction 2026-06-02.
 
 **Why the reframe:** the consumer is the ORCHESTRATOR, not a human at a terminal. The user never issues CLI; the orchestrator runs every command and the user converses with it. So the first deliverable is an orchestrator-facing primitive, not a web board.
+
+### #290 — Dashboard/Ops: surface reconcile candidates instead of ordinary stale running
+**Caught:** 2026-06-05 during Pixtron NBA dogfood. `task-engineer-de709d` wrote a valid `result.json` at 07:36 PDT, but the DB row stayed `running` until 09:24 PDT, when `forge show task-engineer-de709d --json` triggered `reconcileRun` and emitted `task.reconciled` with `reason: "container_gone_result_present"`. The live dashboard was not rendering incorrectly; it was faithfully showing stale DB state because the dashboard is read-only and does not reconcile.
+
+**Why this matters:** a stale `running` task is operationally misleading in the exact surface meant to help the orchestrator understand live work. Forge already has a recovery primitive (`show/status/next` reconcile lifecycle state), but dashboard/ops currently cannot distinguish "actually running" from "DB says running, container is gone, result exists, needs reconciliation." That makes completed work look active for hours until some writable CLI lifecycle command happens to touch it.
+
+**Read-only detection predicate:**
+- DB task status is `running`.
+- Task has a `container.started` event or manifest container name, proving it was containerized.
+- Docker liveness probe for that container returns a clear "not found / no such container" result.
+- `~/.forge/runs/<runId>/<taskId>/result.json` exists and parses as JSON.
+
+**Required behavior:** dashboard and/or `forge ops check` should surface this as a reconcile candidate, not ordinary running. The dashboard must stay read-only: it should not call `reconcileRun` directly. The orchestrator can then run an authoritative lifecycle command (`forge show`, `forge status`, `forge next`, or a future explicit reconcile command) to perform the mutation.
+
+**Conservative liveness rules:**
+- Docker says running: keep showing ordinary running.
+- Docker says no such container/object: classify as `reconcile_candidate`.
+- Docker unavailable, daemon error, or ambiguous inspect failure: classify as `liveness_unknown`, not dead.
+- Container gone + valid result: `container_gone_result_present` candidate, likely complete.
+- Container gone + no valid result: `container_gone_no_result` candidate, likely orphan/failed.
+- Container alive + result present: surface as anomalous, not terminal.
+
+Acceptance:
+- A synthetic dashboard/ops fixture with DB `running`, `container.started`, container gone, and valid `result.json` reports a reconcile candidate rather than healthy running.
+- The Pixtron shape (`container_gone_result_present`) is encoded in the test name or fixture so this regression is recognizable.
+- Ambiguous Docker failures do not produce dead/reconcile candidates.
+- Detection is read-only: no task/run rows are mutated and no `task.reconciled` event is emitted by the dashboard/ops read path.
+- The surfaced metadata includes the reason and an orchestrator-facing recommended action.
+
+Relations: #214, #250, #285, `src/v2/reconcile.ts`, `dashboard/src/queries.ts`.
 
 ### #251 — Dual-research workflow: v2-native replacement for old investigation
 **Captured from user direction 2026-06-02.** We want the dual-research / synthesis shape as a v2-native replacement for the removed `investigation` pipeline. This is about the workflow semantics; the broader config/setup ergonomics are split to #252.
