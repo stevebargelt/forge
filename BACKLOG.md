@@ -7,35 +7,35 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 **Last session ended 2026-06-04.**
 
-**Where we left off:** Long session. Cleared the forge-site bug reports (Issues 1 & 3), did a full docs/ audit + cull, made docs a real pipeline phase, removed the container arch friction (native arm64), and scoped+spiked the pi (pi.dev) integration epic. Last concrete thread: just closed the #259 pi spike; offered to start #260 (add pi to the agent image) next — user has not yet said go on it.
+**Where we left off:** Built the entire RACI-to-routing-policy MVP in one session — design (PRD revision + epic #273 reconciliation) through all 6 MVP stories (#274 format/parser, #275 schema, #276 compiler, #277 raci validate, #278 route validate, #284 compile+explain+consumption). All closed. The system is operational (proof-of-life verified: edit RACI → compile → route explain changes → orchestrator routes differently), but NOT yet live on this host (see External state). Last act: closed #284, ran handoff.
 
 **Picked up next:**
-1. **pi epic #258 — Crawl phase.** Critical path: **#260** (add `@earendil-works/pi-coding-agent` to docker/agent-dev-worker.Dockerfile) → **#261** (pi runtime YAML + spawn invocation, mirrors codex) → **#262** (usage parser — also do the LIVE event-stream capture here to validate the schema) → **#263** (system-prompt/context injection — the hard one; likely wants an architecture-advisor consult, relates #253) → **#264** (first role end-to-end). The spike's schema findings are in `docs/prds/pi-258/spike-259-pi-json-event-schema.md` — read it before #262.
-2. **#245 corp-Mac validation — NON-TICKET hardware-verification thread (not a code task).** The shadow-volume fix is code-complete (02ca0b9, FORGE-DEC-019) and validated on the clean Mac (ext4 not grpcfuse, host modules hidden, agent writes, no leak). #245 stays OPEN until Steve confirms the silent SIGKILL is gone on the CyberArk-EDR Mac (run a code agent against a Node project there, then a `forge` cmd on the host — no exit 137). Then close #245.
-3. **Standing backlog:** #247 (`complete` ≠ CI-green — the validation sibling of the docs-phase work), #250 (ops detectors continuation), #251/#252 (research-synthesis workflow + collaborative config), #272 (small: implementer seeds should tell agents node_modules is now a fresh container-local volume — install before build; #245 companion).
+1. **Activate on this host — NON-TICKET thread (host mutation, needs Steve's go).** The build is in the seeds + code but not installed: run `forge upgrade` (re-renders this repo's CLAUDE.md from the updated orchestrator-template, which now routes via `forge route explain`), ensure the new `seeds/forge-raci.md` installs to `~/.forge/forge-raci.md`, then `forge route compile` to write `~/.forge/routing-policy.yml`. Until then THIS orchestrator block is still old-prose and `route explain` has no policy to read.
+2. **#279 — orchestrator-mediated authoring** (next post-MVP story, natural follow-on): conversation-driven RACI edits gated by `raci validate` → compile → `route validate` → human-confirm diff → commit. The primary authoring channel.
+3. **Standing post-MVP:** #280 (project overrides — ALSO owns the override force-rule-protection check that was explicitly moved off #278), #281 (effective governance view / diff preview), #282 (dedicated edit tool — deferred convenience), #283 (provider-adapter generation / #253 seam).
 
 **External state to remember:**
-- **The agent image was rebuilt this session** (native arm64; + `sudo` installed; + entrypoint chowns the #245 node_modules shadow volume). It's live as `agent-dev-worker` — every project's next agent run uses it. No rebuild needed unless the Dockerfile changes again (e.g. #260 adds pi → will need a rebuild).
-- forge-site repo (/Users/stevebargelt/code/forge-site) is a separate project forge runs against; its bug reports drove Issues 1 & 3 this session. There may be an "Issue 2" the user hasn't pasted yet.
+- **22 commits unpushed to origin/main** (direct-to-main, no PR flow). Steve was asked about pushing at handoff.
+- **Untracked `docs/prds/provider-agnostic-runtime-pi.md` is NOT from this session** — a pi-runtime PRD that appeared mid-session; left untouched (not ours).
+- Installed `~/.forge/forge-raci.md` is still OLD prose format; `forge raci validate` (no arg) correctly flags it `compile_error` (zero routes). `~/.forge/routing-policy.yml` doesn't exist yet. Both resolve when item #1 (activate) runs.
 
 **Decisions worth not relitigating:**
-- **Docs is now a guaranteed pipeline PHASE (#257), not a hard gate.** The #242/#243 docs-drift hard-gate approach was SUPERSEDED, not completed. #243 (L2 grep precision) is no longer on the enforcement critical path — reframe/downgrade it, don't pursue the grep-gated block. The docs-impact advisory (src/v2/docs-impact.ts) is now just a cheap pre-check + quick-chain backstop.
-- **#259 schema came from pi's published .d.ts (authoritative), not a live run** — better for the parser than one noisy capture. Key finding: pi pre-computes cost (`usage.cost.total`), so the pi usage parser records cost directly — NO forge price table needed for pi runs. Live capture deferred to #262 (credential-gated; no API keys in env, OAuth creds are in other tools' formats pi can't read).
-- **GPIO/Pixtron flawed-logic thread: resolved Pixtron-side, NO forge implication.** Closed — don't chase it.
-- **synthesizer seed is KEPT pending #251** (dormant-by-decision; don't auto-cull it in a seed sweep). qa-engineer WAS culled (#179).
-- **#245 volume strategy: anonymous (per-run), darwin+rw only.** Not named/persistent; escape hatch FORGE_NO_NM_SHADOW=1. Validation requires the corp Mac — do NOT close on clean-Mac testing.
-- **#187 build: native-only, no multi-arch buildx** (single Apple-Silicon Mac, no CI consumer). browser-tools repointed at Playwright's arm64 chromium.
-- **Found+fixed a latent bug:** the agent image configured NOPASSWD sudoers (DEC-009) but never installed `sudo` — now installed (in the #245 commit).
-- **Tooling gotcha:** don't put backticks in `forge invoke --task "..."` (zsh command-substitutes them, silently mangling the agent prompt); use a single-quoted heredoc. Saved to memory.
+- RACI is the human-authored SOURCE; `routing-policy.yml` is DERIVED (RACI→policy, never inverse). The inversion was explicitly rejected — humans author the RACI through guarded channels, never raw YAML.
+- Format: one constrained record block per route (`### route: <key>`), NOT a pipe table, NOT frontmatter/embedded YAML. Brutal-grammar parser (`src/raci/parse.ts`): fixed lowercase fields, command iff path:cli, `none` the only empty-list sentinel, symbols `[a-z0-9_-]+`, prose outside blocks ignored.
+- `accountable` = policy-HEADER invariant (`governance.accountable: human`), never per-route in the typed policy; shown per-block in the RACI as a visible reminder, hoisted by the compiler.
+- `informed` = normalized `{name, when?}` objects in the policy; `none` is a RACI-SOURCE sentinel only (policy uses empty arrays).
+- Two validators, both needed: `raci validate` (host-INDEPENDENT authoring lint) vs `route validate` (host-resolvable + drift). RACI doesn't travel; the policy does. `route validate` NEVER generates the policy (missing = finding, not silent compile) — compile/validate/explain roles kept clean.
+- `force_rules`: `FORCE_RULES_BASELINE` in `src/raci/vocab.ts` is an EMPTY placeholder — resolution is DORMANT, validators must not pretend it exists. `CLI_ACTIONS` is a symbol→command map (validates BOTH symbol and literal command).
+- `route explain <key>` looks up by EXACT route key — no prompt classification by code (orchestrator classifies; explain looks up). `classification_hints` advisory only.
+- `research` route stays on `research-specialist`; repoint to a `research-synthesis` workflow when #251 lands.
 
-**Shipped (for reference — git log is canonical, 18 commits ahead of origin, UNPUSHED):**
-- #257 docs as a pipeline phase (3d99ebe + operator-doc, template, CLAUDE.md re-render, docs-impact note commits)
-- #179 removed orphaned qa-engineer seed + fixed stale how-to docs (ebf919d, a64649a); plus the docs cull/relocate (4373585, af9c6cb, 6cafe6d)
-- #269 reds fed the artifact + failureModes + fanout reds dispatch (435a9e6); #271 frontend Playwright fallback (ef51999)
-- #187 native arm64 image (ad1126c) + FORGE-DEC-018 (4de51f0)
-- #245 node_modules shadow volume (02ca0b9) + FORGE-DEC-019 (28814ba) — code-complete, NOT closed
-- #259 pi spike findings (1e5e019)
-- Filed this session (active): epic #258 + pi sub-stories #260–#268, #270 (reds ## Spec section), #272 (seed node_modules guidance)
+**Shipped (for reference — git log is canonical, 22 commits this session):**
+- Design: PRD revision + epic #273 reconciliation (1b78051), format decision (568c1b3), schema/explain completeness (a5901d1, 5626a64).
+- #274 record-block parser + seed conversion + strict grammar (278c044, 3497dde, 5146afc, 5c3fa35).
+- #275 policy schema (165df5a, c05582a). #276 compiler (21884b3, 8ce84c0).
+- #277 raci validate core + CLI (83703fc, 9929b7d). #278 route validate core + CLI + fixes (63b934d, a01e9c3, db3a076, f9d3f45).
+- #284 route compile + explain + orchestrator-template wiring + --json fix (51ab569, dd9e0b1, ea6759b).
+- `src/raci/` subsystem (~75 tests) + CLIs: `forge raci validate`, `forge route validate|compile|explain`.
 
 ## Active
 
