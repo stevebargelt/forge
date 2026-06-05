@@ -1,11 +1,23 @@
 import type { Command } from "commander";
-import { join, resolve } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
-import { ROUTING_POLICY_PATH, RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR, ensureForgeDirs } from "../../util/paths.js";
-import { validateRoutePolicy, type HostEnv, type RouteValidation, type RouteFinding } from "../../raci/route-validate.js";
+import { ROUTING_POLICY_PATH, RACI_PATH, AGENTS_DIR, WORKFLOWS_DIR } from "../../util/paths.js";
+import {
+  validateRoutePolicy,
+  checkForceRuleWeakening,
+  type HostEnv,
+  type RouteValidation,
+  type RouteFinding,
+} from "../../raci/route-validate.js";
 import { compileRaciDocument } from "../../raci/compile.js";
-import { RoutingPolicySchema, type PolicyRoute } from "../../raci/policy-schema.js";
+import { RoutingPolicySchema, type PolicyRoute, type RoutingPolicy } from "../../raci/policy-schema.js";
+import {
+  resolvePolicyPath,
+  resolveRaciPath,
+  projectPolicyPath,
+  type RoutingSource,
+} from "../../raci/project.js";
 
 // `forge route validate [policyPath] [--raci path] [--json]` — operational-policy
 // lint of the DERIVED routing-policy.yml (#278). Resolves symbols against THIS
@@ -130,6 +142,65 @@ export function explainRouteFile(policyPath: string, routeKey: string): RouteExp
   return explainRoute(policyObj, routeKey);
 }
 
+/** Parse a policy file into a typed policy, or undefined if absent/invalid. Used
+ *  only for the project-override force-rule comparison — a malformed host or
+ *  project policy is surfaced by the normal validation path, not here. */
+function loadPolicy(path: string): RoutingPolicy | undefined {
+  if (!existsSync(path)) return undefined;
+  try {
+    const parsed = RoutingPolicySchema.safeParse(parseYaml(readFileSync(path, "utf8")));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export type ResolvedSource = RoutingSource | "explicit";
+export type ProjectRouteValidation = RouteValidation & { source: ResolvedSource; path: string };
+
+/** Resolve the effective policy (project override or host), validate it, and —
+ *  when it is a PROJECT override — additionally enforce that it does not weaken a
+ *  force rule the host policy mandates (#280). The drift RACI is the effective
+ *  RACI for the same context unless one is given explicitly. Host paths are
+ *  injectable so the override comparison is testable without real ~/.forge. */
+export function validateRoutingResolved(opts: {
+  projectDir?: string;
+  explicitPolicy?: string;
+  explicitRaci?: string;
+  host?: HostEnv;
+  hostPolicyPath?: string;
+}): ProjectRouteValidation {
+  const host = opts.host ?? realHost;
+  const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
+
+  const resolved: { source: ResolvedSource; path: string } = opts.explicitPolicy
+    ? { source: "explicit", path: resolve(opts.explicitPolicy) }
+    : resolvePolicyPath(opts.projectDir);
+
+  // Drift RACI: explicit wins; otherwise the effective RACI for this context, but
+  // only when it exists (an absent RACI means standalone, not an error).
+  let raciArg: string | undefined;
+  if (opts.explicitRaci !== undefined) {
+    raciArg = resolve(opts.explicitRaci);
+  } else {
+    const r = resolveRaciPath(opts.projectDir);
+    raciArg = r.exists ? r.path : undefined;
+  }
+
+  const base = validateRoutePolicyFile(resolved.path, { raciPath: raciArg, host });
+  let findings = base.findings;
+
+  if (resolved.source === "project" && resolved.path !== hostPolicyPath) {
+    const hostPolicy = loadPolicy(hostPolicyPath);
+    const projectPolicy = loadPolicy(resolved.path);
+    if (hostPolicy && projectPolicy) {
+      findings = [...findings, ...checkForceRuleWeakening(hostPolicy, projectPolicy)];
+    }
+  }
+
+  return { ok: findings.length === 0, mode: base.mode, findings, source: resolved.source, path: resolved.path };
+}
+
 function renderRoute(routeKey: string, r: PolicyRoute): string {
   const lines = [`route: ${routeKey}`];
   lines.push(`  responsible:        ${r.responsible}`);
@@ -150,19 +221,23 @@ export function registerRoute(program: Command): void {
 
   route
     .command("compile")
-    .argument("[raciPath]", "RACI source to compile (default: ~/.forge/forge-raci.md)")
-    .option("-o, --out <path>", "output path (default: ~/.forge/routing-policy.yml)")
+    .argument("[raciPath]", "explicit RACI source (default: project override under --project/.forge, else ~/.forge/forge-raci.md)")
+    .option("--project <dir>", "compile the project's RACI override under <dir>/.forge (default: cwd)")
+    .option("-o, --out <path>", "output path (default: the routing-policy.yml beside the resolved RACI source)")
     .option("--json", "emit the compiled policy as JSON to stdout instead of writing a file")
-    .description("Compile the RACI source into routing-policy.yml. Validates as it compiles.")
-    .action((raciArg: string | undefined, opts: { out?: string; json?: boolean }) => {
-      const raciPath = raciArg ? resolve(raciArg) : RACI_PATH;
-      if (!existsSync(raciPath)) {
-        process.stderr.write(`forge route compile: RACI source not found: ${raciPath}\n`);
+    .description("Compile the RACI source into routing-policy.yml. Validates as it compiles. Resolves the project override when present (full replacement).")
+    .action((raciArg: string | undefined, opts: { project?: string; out?: string; json?: boolean }) => {
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const resolved = raciArg
+        ? { source: "explicit" as const, path: resolve(raciArg) }
+        : resolveRaciPath(projectDir);
+      if (!existsSync(resolved.path)) {
+        process.stderr.write(`forge route compile: RACI source not found: ${resolved.path}\n`);
         process.exit(1);
       }
       let policy;
       try {
-        policy = compileRaciDocument(readFileSync(raciPath, "utf8"));
+        policy = compileRaciDocument(readFileSync(resolved.path, "utf8"));
       } catch (e) {
         process.stderr.write(`forge route compile: ${(e as Error).message}\n`);
         process.exit(1);
@@ -171,24 +246,33 @@ export function registerRoute(program: Command): void {
         console.log(JSON.stringify(policy, null, 2));
         return;
       }
-      const out = opts.out ? resolve(opts.out) : ROUTING_POLICY_PATH;
-      ensureForgeDirs();
+      const out = opts.out
+        ? resolve(opts.out)
+        : resolved.source === "project"
+          ? projectPolicyPath(projectDir)
+          : ROUTING_POLICY_PATH;
+      mkdirSync(dirname(out), { recursive: true });
       writeFileSync(out, yamlStringify(policy));
-      console.log(`Compiled ${Object.keys(policy.routes).length} routes -> ${out}`);
+      console.log(`Compiled ${Object.keys(policy.routes).length} routes (${resolved.source}) -> ${out}`);
     });
 
   route
     .command("explain")
     .argument("<routeKey>", "the route/work-type key to explain (exact match)")
-    .argument("[policyPath]", "policy to read (default: ~/.forge/routing-policy.yml)")
+    .argument("[policyPath]", "explicit policy to read (default: project override under --project/.forge, else host)")
+    .option("--project <dir>", "resolve the project override under <dir>/.forge (default: cwd)")
     .option("--json", "emit the full route as JSON")
-    .description("Explain a route from the compiled policy by exact key. Does NOT classify prompts.")
-    .action((routeKey: string, policyArg: string | undefined, opts: { json?: boolean }) => {
-      const path = policyArg ? resolve(policyArg) : ROUTING_POLICY_PATH;
-      const res = explainRouteFile(path, routeKey);
+    .description("Explain a route from the compiled policy by exact key. Resolves the project override when present. Does NOT classify prompts.")
+    .action((routeKey: string, policyArg: string | undefined, opts: { project?: string; json?: boolean }) => {
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const resolved = policyArg
+        ? { source: "explicit" as const, path: resolve(policyArg) }
+        : resolvePolicyPath(projectDir);
+      const res = explainRouteFile(resolved.path, routeKey);
       if (opts.json) {
-        console.log(JSON.stringify(res, null, 2));
+        console.log(JSON.stringify({ source: resolved.source, path: resolved.path, ...res }, null, 2));
       } else if (res.ok) {
+        console.log(`# source: ${resolved.source} (${resolved.path})`);
         console.log(renderRoute(routeKey, res.route));
       } else {
         process.stderr.write(`${res.findings.map((f) => `[${f.code}] ${f.message}`).join("\n")}\n`);
@@ -198,21 +282,26 @@ export function registerRoute(program: Command): void {
 
   route
     .command("validate")
-    .argument("[policyPath]", "routing-policy.yml to validate (default: ~/.forge/routing-policy.yml)")
-    .option("--raci <path>", "RACI source to check drift against (default: ~/.forge/forge-raci.md if present)")
-    .option("--json", "emit structured { ok, mode, path, findings } as JSON")
+    .argument("[policyPath]", "explicit policy to validate (default: project override under --project/.forge, else host)")
+    .option("--project <dir>", "resolve the project override under <dir>/.forge (default: cwd)")
+    .option("--raci <path>", "RACI source to check drift against (default: the effective RACI for the context)")
+    .option("--json", "emit structured { ok, mode, source, path, findings } as JSON")
     .description(
-      "Lint the derived routing policy against this host (agents/workflows/CLI actions/evidence) and, when a RACI source is present, check drift. Never generates the policy.",
+      "Lint the derived routing policy against this host (agents/workflows/CLI actions/evidence) and check drift. Resolves the project override and enforces that overrides don't weaken force rules. Never generates the policy.",
     )
-    .action((policyArg: string | undefined, opts: { raci?: string; json?: boolean }) => {
-      const path = policyArg ? resolve(policyArg) : ROUTING_POLICY_PATH;
-      const raciPath = opts.raci ? resolve(opts.raci) : undefined;
-      const v = validateRoutePolicyFile(path, { raciPath });
+    .action((policyArg: string | undefined, opts: { project?: string; raci?: string; json?: boolean }) => {
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const v = validateRoutingResolved({
+        projectDir,
+        explicitPolicy: policyArg ? resolve(policyArg) : undefined,
+        explicitRaci: opts.raci ? resolve(opts.raci) : undefined,
+      });
 
       if (opts.json) {
-        console.log(JSON.stringify({ ok: v.ok, mode: v.mode, path, findings: v.findings }, null, 2));
+        console.log(JSON.stringify({ ok: v.ok, mode: v.mode, source: v.source, path: v.path, findings: v.findings }, null, 2));
       } else {
-        console.log(renderHuman(path, v));
+        console.log(`# source: ${v.source} (${v.path})`);
+        console.log(renderHuman(v.path, v));
       }
       if (!v.ok) process.exit(1);
     });

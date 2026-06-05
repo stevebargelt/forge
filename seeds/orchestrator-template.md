@@ -92,7 +92,7 @@ If the prompt spans multiple work types, **split and sequence** — decompose in
 
 ### Step 2 — Resolve the route from the compiled policy
 
-The RACI (`~/.forge/forge-raci.md`) is the human-readable SOURCE; the **compiled routing policy** (`~/.forge/routing-policy.yml`) is what you operationally route from. Map the classified work type to a concrete **route key** and look it up — don't route from memory:
+The RACI (`~/.forge/forge-raci.md`) is the human-readable SOURCE; the **compiled routing policy** (`~/.forge/routing-policy.yml`) is what you operationally route from. A project can specialize routing without touching the host default: if `<project>/.forge/routing-policy.yml` exists it **fully replaces** the host policy for that project (its RACI source is `<project>/.forge/forge-raci.md`). `route explain` / `route validate` / `route compile` resolve this automatically — they default to the cwd project and report `source: host | project`, so just run them from the project dir. A project override may add or specialize routes but cannot weaken a force rule the host mandates (the validator refuses it). Map the classified work type to a concrete **route key** and look it up — don't route from memory:
 
 ```bash
 forge route explain <route-key> --json

@@ -3,12 +3,12 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved } from "./route.js";
 import { compileRaciDocument } from "../../raci/compile.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
@@ -129,4 +129,61 @@ test("renderHuman shows mode + findings", () => {
     findings: [{ code: "policy_drift", route: "r", message: "differs" }],
   });
   assert.match(bad, /policy_drift/);
+});
+
+// ── project override resolution + validation (#280) ──────────────────────────
+
+/** A temp project dir carrying both override files compiled from `raci`. */
+function projectFrom(raci: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-proj-"));
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "forge-raci.md"), raci);
+  writeFileSync(join(dir, ".forge", "routing-policy.yml"), yamlStringify(compileRaciDocument(raci)));
+  return dir;
+}
+
+test("validateRoutingResolved: a valid project override validates clean with source=project", () => {
+  const proj = projectFrom(readFileSync(SEED_PATH, "utf8"));
+  const v = validateRoutingResolved({ projectDir: proj, host: all, hostPolicyPath: policyPath });
+  assert.equal(v.source, "project");
+  assert.equal(v.ok, true, JSON.stringify(v.findings));
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("validateRoutingResolved: an invalid project override surfaces findings (source=project)", () => {
+  const mutated = readFileSync(SEED_PATH, "utf8").replace(
+    "responsible: engineer\naccountable: human\npath: invoke_chain",
+    "responsible: ghost-agent\naccountable: human\npath: invoke_chain",
+  );
+  const proj = projectFrom(mutated);
+  // Everything resolves except the made-up agent.
+  const allButGhost: HostEnv = { agentInstalled: (r) => r !== "ghost-agent", workflowKnown: () => true };
+  const v = validateRoutingResolved({ projectDir: proj, host: allButGhost, hostPolicyPath: policyPath });
+  assert.equal(v.source, "project");
+  assert.ok(v.findings.some((f) => f.code === "responsible_unresolved" && f.route === "implementation_quick"));
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("validateRoutingResolved: a project override that drops a host force rule is refused", () => {
+  const forcedRoute = (rules: string) =>
+    `### route: shared\nclassification_hints: y\nresponsible: orchestrator\naccountable: human\npath: in_session\nconsulted: none\nrequired_followups: none\ninformed: user_summary\nforce_rules: ${rules}`;
+  // Host policy carries a force rule on the shared route; the project drops it.
+  const hostDir = mkdtempSync(join(tmpdir(), "forge-host-"));
+  const hostPolicyPath = join(hostDir, "routing-policy.yml");
+  writeFileSync(hostPolicyPath, yamlStringify(compileRaciDocument(forcedRoute("protect_attribution"))));
+  const proj = projectFrom(forcedRoute("none"));
+
+  const v = validateRoutingResolved({ projectDir: proj, host: all, hostPolicyPath });
+  assert.equal(v.source, "project");
+  assert.ok(v.findings.some((f) => f.code === "force_rule_weakened" && f.route === "shared"));
+  assert.equal(v.ok, false);
+
+  rmSync(hostDir, { recursive: true, force: true });
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("validateRoutingResolved: an explicit policy path is the escape hatch (source=explicit, no override check)", () => {
+  const v = validateRoutingResolved({ explicitPolicy: policyPath, host: all });
+  assert.equal(v.source, "explicit");
+  assert.equal(v.ok, true, JSON.stringify(v.findings));
 });

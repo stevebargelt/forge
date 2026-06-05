@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateRoutePolicy, type HostEnv } from "./route-validate.js";
+import { validateRoutePolicy, checkForceRuleWeakening, type HostEnv } from "./route-validate.js";
 import { compileRaciDocument } from "./compile.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -129,4 +129,41 @@ test("with-raci mode: a route missing from the policy is drift", () => {
   assert.ok(
     v.findings.some((f) => f.code === "policy_drift" && f.route === "research" && /missing from the policy/.test(f.message)),
   );
+});
+
+// ── project override: force-rule non-weakening (#280) ────────────────────────
+
+// A route carrying a synthetic force rule. force_rules resolution is dormant
+// (empty baseline), so these compile and validate without complaint — letting us
+// prove the structural weakening check works ahead of any real baseline.
+const forced = (rules: string) =>
+  compileRaciDocument(
+    `### route: shared\nclassification_hints: y\nresponsible: orchestrator\naccountable: human\npath: in_session\nconsulted: none\nrequired_followups: none\ninformed: user_summary\nforce_rules: ${rules}`,
+  );
+
+test("checkForceRuleWeakening: dormant — the seed carries no force rules, no findings", () => {
+  assert.deepEqual(checkForceRuleWeakening(seedPolicy(), seedPolicy()), []);
+});
+
+test("checkForceRuleWeakening: a project dropping a host force rule is flagged", () => {
+  const f = checkForceRuleWeakening(forced("protect_attribution"), forced("none"));
+  assert.equal(f.length, 1);
+  assert.equal(f[0]!.code, "force_rule_weakened");
+  assert.equal(f[0]!.route, "shared");
+  assert.match(f[0]!.message, /protect_attribution/);
+});
+
+test("checkForceRuleWeakening: keeping or strengthening the force rule is fine", () => {
+  assert.deepEqual(checkForceRuleWeakening(forced("protect_attribution"), forced("protect_attribution")), []);
+  assert.deepEqual(
+    checkForceRuleWeakening(forced("protect_attribution"), forced("protect_attribution, extra_rule")),
+    [],
+  );
+});
+
+test("checkForceRuleWeakening: omitting the route entirely is not weakening a shared rule", () => {
+  const project = compileRaciDocument(
+    `### route: other\nclassification_hints: y\nresponsible: orchestrator\naccountable: human\npath: in_session\nconsulted: none\nrequired_followups: none\ninformed: user_summary\nforce_rules: none`,
+  );
+  assert.deepEqual(checkForceRuleWeakening(forced("protect_attribution"), project), []);
 });

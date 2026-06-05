@@ -144,6 +144,33 @@ function resolveResponsible(routeKey: string, route: PolicyRoute, host: HostEnv,
   }
 }
 
+/** Project overrides (#280) may ADD or specialize routes but must NOT weaken
+ *  force-level rules relative to the host: for any route the project shares with
+ *  the host, the project's `force_rules` must be a SUPERSET of the host's.
+ *  Omitting a route entirely is not weakening a shared rule, so it's allowed.
+ *
+ *  DORMANT today — no route carries force_rules (FORCE_RULES_BASELINE is empty),
+ *  so the fast-path skips every route — but the guarantee is enforced
+ *  structurally, so it holds the moment a baseline lands. */
+export function checkForceRuleWeakening(host: RoutingPolicy, project: RoutingPolicy): RouteFinding[] {
+  const findings: RouteFinding[] = [];
+  for (const [key, hostRoute] of Object.entries(host.routes)) {
+    if (hostRoute.force_rules.length === 0) continue; // dormant fast-path
+    const projectRoute = project.routes[key];
+    if (projectRoute === undefined) continue; // omitting a route is not weakening
+    const projectRules = new Set(projectRoute.force_rules);
+    const dropped = hostRoute.force_rules.filter((r) => !projectRules.has(r));
+    if (dropped.length > 0) {
+      findings.push({
+        code: "force_rule_weakened",
+        route: key,
+        message: `project override drops host force rule(s) [${dropped.join(", ")}] from route "${key}"`,
+      });
+    }
+  }
+  return findings;
+}
+
 function driftFindings(compiled: RoutingPolicy, actual: RoutingPolicy, findings: RouteFinding[]): void {
   if (compiled.version !== actual.version || !isDeepStrictEqual(compiled.governance, actual.governance)) {
     findings.push({ code: "policy_drift", message: "policy header (version/governance) differs from the compiled RACI" });
