@@ -422,3 +422,33 @@ test("#261: pi-apikey fails fast when ANTHROPIC_API_KEY is unset", () => {
   delete process.env.ANTHROPIC_API_KEY;
   assert.throws(() => buildDockerArgs(loadPiSeed(), BASE_CTX), /ANTHROPIC_API_KEY/);
 });
+
+// ── #263: pi prompt strategy delivers forge context exactly once ─────────────
+// Forge-side guarantee at the docker-command level (the pi-side behavioral proof
+// — that --no-context-files actually suppresses project CLAUDE.md loading — is
+// scripts/pi-context-proof.sh, which inspects pi's real outbound request).
+
+test("#263: pi command delivers the system prompt and task package exactly once each", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test-key";
+  const { args, stdin } = buildDockerArgs(loadPiSeed(), {
+    ...BASE_CTX,
+    SYSTEM_PROMPT: "SEED-AND-CONSTRAINTS",
+    TASK_PACKAGE_MARKDOWN: "TASK-PACKAGE",
+  });
+  const cmd = argsAfterImage(args, "agent-dev-worker:latest");
+  // seed+constraints: exactly one --append-system-prompt, carrying it once.
+  assert.equal(cmd.filter((a) => a === "--append-system-prompt").length, 1);
+  assert.equal(cmd.filter((a) => a === "SEED-AND-CONSTRAINTS").length, 1);
+  // task package: exactly one occurrence (the positional message).
+  assert.equal(cmd.filter((a) => a === "TASK-PACKAGE").length, 1);
+  // --no-context-files present so pi doesn't ALSO auto-load /project context.
+  assert.ok(cmd.includes("--no-context-files"));
+  // single delivery channel: nothing on stdin to duplicate it.
+  assert.equal(stdin, undefined);
+});
+
+test("#263: red read-only project mount is still enforced for the pi runtime", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-test-key";
+  const { args } = buildDockerArgs(loadPiSeed(), { ...BASE_CTX, PROJECT_MODE: "ro" });
+  assert.equal(pickMount(args, "/project"), `${BASE_CTX.PROJECT_DIR}:/project:ro`);
+});
