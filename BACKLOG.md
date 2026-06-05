@@ -957,7 +957,11 @@ Guidance now requires `forge route explain` before `forge invoke` / `forge new` 
 Relations: #287 (adherence slice, closed), #273 (RACI epic), #280 (project overrides), `seeds/orchestrator-template.md`, `src/cli/commands/invoke.ts`, `src/cli/commands/route.ts`.
 
 
+## Done (recent)
+
 ### #298 — Make forge show read-only by default; reconcile must be explicit
+**Closed:** 2026-06-05.
+
 **Caught:** Pixtron dogfood, 2026-06-05. `task-engineer-b26b0f` showed `running` in the dashboard, but `forge show task-engineer-b26b0f --json` reconciled it to `complete` at the exact inspection timestamp (events 2049–2052 show `task.reconciled` firing precisely when `show` ran). **Second time today a diagnostic/read action changed task state** (the first: `forge usage` triggering the #295 migration on the live DB).
 
 **Problem:** `forge show` calls `reconcileRun` before rendering, so an operator cannot inspect stale-`running` state without mutating it. A read command with a write side effect is surprising and unsafe, and it directly undermines #290's read-only reconcile-candidate surface — the whole point of #290 is to SEE a reconcile candidate without acting on it, but `forge show` reconciles it out from under you on inspection.
@@ -976,8 +980,6 @@ Relations: #287 (adherence slice, closed), #273 (RACI epic), #280 (project overr
 
 Relations: #290, #295, #250, `src/cli/commands/show.ts`, `src/v2/reconcile.ts`, `src/ops/reconcile-candidate.ts`.
 
-
-## Done (recent)
 
 ### #287 — Orchestrator must resolve routing policy before dispatch
 **Closed:** 2026-06-05.
