@@ -778,14 +778,6 @@ Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's fiel
 **Depends on:** spike, runtime story.
 
 
-### #263 — pi: system-prompt / context injection mapping
-**Phase:** Crawl (the novel design work). Part of #258.
-Map `composeSystemPrompt` + constraints into pi. pi loads context from `.pi/SYSTEM.md` / `AGENTS.md` / `CLAUDE.md` (cwd + parents). Decide the injection path: write the composed system prompt to `.pi/SYSTEM.md` in the container vs prepend to the `-p` prompt; use `--no-context-files` so pi does not double-load the project's CLAUDE.md.
-**Acceptance:** a pi agent receives forge's seed + constraints exactly once; red read-only project mount still enforced.
-**Note:** likely needs an architecture-advisor consult; relates to #253 (provider adapter surfaces — SYSTEM.md/AGENTS.md as a generated adapter).
-**Depends on:** runtime story.
-
-
 ### #264 — pi: first role end-to-end through pi (Crawl exit)
 **Phase:** Crawl exit criterion. Part of #258.
 Route one role (e.g. a red on a cheap provider like Groq/Cerebras, or engineer on a chosen model) through the pi runtime and complete a real task end-to-end: dispatch -> pi -> result.json -> usage captured -> gate.
@@ -961,6 +953,16 @@ Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow 
 
 
 ## Done (recent)
+
+### #263 — pi: system-prompt / context injection mapping
+**Closed:** 2026-06-05.
+
+**Phase:** Crawl (the novel design work). Part of #258.
+Map `composeSystemPrompt` + constraints into pi. pi loads context from `.pi/SYSTEM.md` / `AGENTS.md` / `CLAUDE.md` (cwd + parents). Decide the injection path: write the composed system prompt to `.pi/SYSTEM.md` in the container vs prepend to the `-p` prompt; use `--no-context-files` so pi does not double-load the project's CLAUDE.md.
+**Acceptance:** a pi agent receives forge's seed + constraints exactly once; red read-only project mount still enforced.
+**Note:** likely needs an architecture-advisor consult; relates to #253 (provider adapter surfaces — SYSTEM.md/AGENTS.md as a generated adapter).
+**Depends on:** runtime story.
+
 
 ### #261 — pi: runtime YAML + spawn invocation (env-var API-key mode)
 **Closed:** 2026-06-05.
