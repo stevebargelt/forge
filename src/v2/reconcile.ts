@@ -1,10 +1,14 @@
 // AWN-1: lifecycle recovery. Make active/running state trustworthy after host
 // crashes, Docker races, and interrupted forge commands.
 //
-// Runs on lifecycle-touching commands (status/show/next). It NEVER silently
-// rewrites state: every change emits a task.reconciled / run.reconciled event
-// alongside the normal terminal event, so the forge show timeline explains what
-// changed and why. Idempotent — a second pass finds terminal state and no-ops.
+// Runs on lifecycle-touching commands: `forge next`, `forge status`, and
+// `forge show --reconcile` (#298 made plain `forge show` read-only — a diagnostic
+// must not mutate; it surfaces a reconcile candidate via the #290 read-only
+// classifier and leaves the explicit reconcile to --reconcile / the lifecycle
+// commands). It NEVER silently rewrites state: every change emits a
+// task.reconciled / run.reconciled event alongside the normal terminal event, so
+// the forge show timeline explains what changed and why. Idempotent — a second
+// pass finds terminal state and no-ops.
 //
 // Conservative by design: a container whose liveness we cannot determine (docker
 // daemon down, docker missing) is assumed alive, so we never reconcile real work

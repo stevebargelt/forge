@@ -11,7 +11,8 @@ import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
-import { reconcileRun } from "../../v2/reconcile.js";
+import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
+import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
 import { docsImpactSuggestion, loadOperatorSurfaces, type TaskContract } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 
@@ -30,6 +31,31 @@ export function performShow(id: string): ShowResult {
     return { kind: "run", run, events: eventsForRun(id), tasks: tasksForRun(id) };
   }
   return { kind: "not-found", id };
+}
+
+// #298: the read-vs-reconcile decision for `forge show`, split out from rendering
+// so it's testable with an injected liveness probe. Plain show is READ-ONLY: it
+// never calls reconcileRun and only surfaces a reconcile-candidate reason (#290)
+// for a running target. `--reconcile` is the explicit mutating path (the lifecycle
+// commands next/status/gate are the other intentional reconcilers). Deps are
+// injectable for tests; production uses the real docker probe.
+export function showReconcileStep(
+  id: string,
+  opts: { reconcile?: boolean },
+  deps: { containerAlive?: ContainerAlive; probe?: LivenessProbe; resultPresent?: ResultProbe } = {},
+): { reconciled: boolean; candidateReason: ReconcileReason | null } {
+  const targetTask = getTask(id);
+  if (opts.reconcile) {
+    reconcileRun(targetTask ? targetTask.runId : id, deps.containerAlive);
+    return { reconciled: true, candidateReason: null };
+  }
+  if (!targetTask || targetTask.status !== "running") {
+    return { reconciled: false, candidateReason: null };
+  }
+  const db = getDb({ readOnly: true });
+  const reason = findReconcileCandidates(db, { taskId: targetTask.id }, deps.probe, deps.resultPresent)
+    .find((c) => c.classification === "reconcile_candidate")?.reason ?? null;
+  return { reconciled: false, candidateReason: reason };
 }
 
 // ─── Pure helpers, exported for testing ─────────────────────────────────────
@@ -375,12 +401,15 @@ export function registerShow(program: Command): void {
     .argument("<id>", "task or run identifier")
     .description("Show full details of a task or run: package, result, verdicts, timeline")
     .option("--json", "emit JSON instead of human-readable output")
-    .action((id: string, opts: { json?: boolean }) => {
+    .option("--reconcile", "reconcile the target against reality before showing — the ONLY mutating path (may emit task.reconciled / run.reconciled and finalize stale state). Default show is read-only.")
+    .action((id: string, opts: { json?: boolean; reconcile?: boolean }) => {
       ensureForgeDirs();
-      // AWN-1: reconcile the target run against reality (writable) BEFORE the
-      // read-only show, so the timeline reflects any crash/Docker recovery.
-      const targetTask = getTask(id);
-      reconcileRun(targetTask ? targetTask.runId : id);
+      // #298: forge show is READ-ONLY by default. A diagnostic that mutated state
+      // (reconcileRun, formerly run unconditionally here) is exactly the incident
+      // this fixes — inspecting a stale-running task silently reconciled it. The
+      // mutating path is now opt-in via --reconcile (alongside the lifecycle
+      // commands that intentionally reconcile: next / status / gate).
+      const { candidateReason } = showReconcileStep(id, opts);
 
       getDb({ readOnly: true });
       const result = performShow(id);
@@ -414,6 +443,9 @@ export function registerShow(program: Command): void {
         const idleCountdown = task.status === "running"
           ? computeIdleCountdown(stdoutMtime, idleTimeoutMs, Date.now(), task.startedAt ? new Date(task.startedAt).getTime() : undefined)
           : undefined;
+        // #298/#290: reconcile-candidate reason from the read-only step above —
+        // a running task whose container is gone is surfaced, never reconciled.
+        const reconcileReason: ReconcileReason | null = candidateReason;
 
         if (opts.json) {
           console.log(
@@ -424,6 +456,7 @@ export function registerShow(program: Command): void {
                 diagnostic: {
                   containerName: `forge-${task.id}`,
                   runtime: runtimeMeta ?? null,
+                  reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   elapsed,
                   lastOutputAgo,
@@ -465,6 +498,10 @@ export function registerShow(program: Command): void {
           );
         }
         console.log(`  status:    ${task.status}`);
+        // #298: surface a reconcile candidate read-only — never silently mutate.
+        if (reconcileReason) {
+          console.log(`  reconcile: CANDIDATE (${reconcileReason}) — DB says running but the container is gone; run \`forge show --reconcile ${task.id}\` to finalize`);
+        }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
         if (contract) {
           console.log(`  contract:  ${contract.objective}${contract.risk ? `  [risk: ${contract.risk}]` : ""}`);

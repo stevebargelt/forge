@@ -26,7 +26,10 @@ import {
   deriveNextCommandForRun,
   groupFailedByKind,
   getBlockerTasks,
+  showReconcileStep,
 } from "./show.js";
+import { getTask } from "../../store/tasks.js";
+import { eventsForTask } from "../../store/events.js";
 import type { Run, Task } from "../../types/index.js";
 
 let db: DatabaseInstance;
@@ -653,4 +656,61 @@ test("getBlockerTasks: returns awaiting_gate, awaiting_human_input, blocked_by_r
 
 test("getBlockerTasks: empty when no blockers", () => {
   assert.deepEqual(getBlockerTasks([makeTask("t1", { status: "running" })]), []);
+});
+
+// ── #298: forge show is read-only by default; reconcile must be explicit ──────
+// Regression: in Pixtron, `forge show task-engineer-b26b0f --json` reconciled the
+// task to complete at the inspection timestamp — a read action mutated state.
+
+function setupStaleRunning(taskId: string, withResult: boolean): void {
+  insertTask(makeTask(taskId, { status: "running", startedAt: "2026-05-29T10:00:00Z" }));
+  logEvent("container.started", { runId: RUN.id, taskId }); // proves it was containerized
+  if (withResult) {
+    const dir = taskDir(RUN.id, taskId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+  }
+}
+
+test("#298: plain forge show is read-only — surfaces the candidate, emits no task.reconciled (Pixtron regression)", () => {
+  setupStaleRunning("task-engineer-b26b0f", true); // the actual incident id
+  const { reconciled, candidateReason } = showReconcileStep("task-engineer-b26b0f", {}, { probe: () => "gone" });
+  assert.equal(reconciled, false);
+  assert.equal(candidateReason, "container_gone_result_present");
+  // No mutation: still running, no reconcile event written by the read path.
+  assert.equal(getTask("task-engineer-b26b0f")!.status, "running");
+  assert.equal(eventsForTask("task-engineer-b26b0f").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("#298: plain show surfaces container_gone_no_result when no result.json exists", () => {
+  setupStaleRunning("task-orphan-298", false);
+  const { candidateReason } = showReconcileStep("task-orphan-298", {}, { probe: () => "gone" });
+  assert.equal(candidateReason, "container_gone_no_result");
+  assert.equal(getTask("task-orphan-298")!.status, "running");
+});
+
+test("#298: --reconcile is the explicit mutating path — finalizes + emits task.reconciled", () => {
+  setupStaleRunning("task-reconcile-298", true);
+  const { reconciled } = showReconcileStep("task-reconcile-298", { reconcile: true }, { containerAlive: () => false });
+  assert.equal(reconciled, true);
+  assert.equal(getTask("task-reconcile-298")!.status, "complete");
+  assert.equal(eventsForTask("task-reconcile-298").filter((e) => e.eventType === "task.reconciled").length, 1);
+});
+
+test("#298: a healthy running task (container alive) is not a candidate and is not mutated", () => {
+  setupStaleRunning("task-live-298", true);
+  const { reconciled, candidateReason } = showReconcileStep("task-live-298", {}, { probe: () => "alive" });
+  assert.equal(reconciled, false);
+  assert.equal(candidateReason, null);
+  assert.equal(getTask("task-live-298")!.status, "running");
+  assert.equal(eventsForTask("task-live-298").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("#298: a completed task is never probed or reconciled by plain show", () => {
+  insertTask(makeTask("task-done-298", { status: "complete", completedAt: "2026-05-29T11:00:00Z" }));
+  let probed = false;
+  const { reconciled, candidateReason } = showReconcileStep("task-done-298", {}, { probe: () => { probed = true; return "gone"; } });
+  assert.equal(reconciled, false);
+  assert.equal(candidateReason, null);
+  assert.equal(probed, false, "a non-running task must not be docker-probed");
 });
