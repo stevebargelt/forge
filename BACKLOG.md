@@ -841,7 +841,25 @@ Acceptance:
 Relations: #273.
 
 
+### #283 — RACI policy Story 10: provider adapter generation (#253 seam)
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+After the routing policy is stable, use it as input to provider adapter GENERATION per #253 — rendering adapter surfaces FROM the policy. Distinct from #284 (Story 5b), which proves ONE surface consumes the policy by hand; this is the full generated-adapter lift. Downstream consumer; does NOT block the routing-policy MVP.
+
+Acceptance:
+- Define how Claude Code adapter surfaces (`CLAUDE.md`, `.claude/commands/*`, hooks) RENDER from routing policy.
+- Define equivalent or fallback behavior for Codex / generic adapters (these may have only the compiled policy, no RACI — see Story 5 standalone validation).
+- Adapter generation fails or warns when the routing policy is invalid.
+- Shared behavior lives in provider-neutral primitives/policy, not duplicated per adapter.
+
+Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
+
+
+## Done (recent)
+
 ### #285 — Dashboard: read-only routing/governance panel
+**Closed:** 2026-06-05.
+
 **Epic:** #273. **Depends on:** #281.
 
 Surface the active RACI-derived routing policy in the dashboard as observability, not control. The dashboard is currently an information-only surface and should stay that way for the near future; routing/governance visibility should show how Forge will route work for the current project without introducing a second RACI edit path.
@@ -868,22 +886,6 @@ Acceptance:
 
 Relations: #273, #281, #280, #279, #284.
 
-
-### #283 — RACI policy Story 10: provider adapter generation (#253 seam)
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-After the routing policy is stable, use it as input to provider adapter GENERATION per #253 — rendering adapter surfaces FROM the policy. Distinct from #284 (Story 5b), which proves ONE surface consumes the policy by hand; this is the full generated-adapter lift. Downstream consumer; does NOT block the routing-policy MVP.
-
-Acceptance:
-- Define how Claude Code adapter surfaces (`CLAUDE.md`, `.claude/commands/*`, hooks) RENDER from routing policy.
-- Define equivalent or fallback behavior for Codex / generic adapters (these may have only the compiled policy, no RACI — see Story 5 standalone validation).
-- Adapter generation fails or warns when the routing policy is invalid.
-- Shared behavior lives in provider-neutral primitives/policy, not duplicated per adapter.
-
-Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
-
-
-## Done (recent)
 
 ### #281 — RACI policy Story 8: effective governance view / diff preview
 **Closed:** 2026-06-05.
