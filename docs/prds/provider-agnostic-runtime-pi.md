@@ -2,8 +2,8 @@
 
 **Status:** accepted for backlog planning; implementation not started
 **Captured:** 2026-06-04
-**Backlog reconciled:** 2026-06-05 (#258, #262, #265, #291)
-**Related backlog:** #258, #260-#268, #291, #253, #252, #225, #220, #224, #226, #228
+**Backlog reconciled:** 2026-06-05 (#258, #262, #265, #291, #292)
+**Related backlog:** #258, #260-#268, #291, #292, #253, #252, #225, #220, #224, #226, #228
 **Primary spike:** `docs/prds/pi-258/spike-259-pi-json-event-schema.md`
 
 ## Objective
@@ -561,6 +561,9 @@ Applied 2026-06-05:
 
 - Renamed #258 to "Provider-agnostic runtime architecture, with Pi as the
   pilot/default candidate."
+- Added #292 as the pre-Pi runtime-metadata seam: runtime kind, log format,
+  prompt strategy, and auth strategy must be explicit before Pi is wired as a
+  binary/runtime.
 - Amended #262 to dispatch usage parsing by `log_format`, not provider.
 - Amended #262 acceptance to require one live Pi JSONL capture before parser
   lands.
@@ -571,8 +574,6 @@ Applied 2026-06-05:
 
 Still open:
 
-- Add a new story before #261 if implementation needs a separately scoped
-  "runtime metadata: log_format / prompt_strategy / auth_strategy" slice.
 - Keep #260, #261, #263, #264, #266, #267, and #268 mostly intact unless the
   first implementation pass proves they should be split.
 

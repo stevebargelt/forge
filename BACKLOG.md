@@ -7,18 +7,19 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 **Last session ended 2026-06-05.**
 
-**Where we left off:** Drove the RACI/routing-policy epic (#273) hard — shipped the authoring channel, project overrides, the governance view + dashboard panel, auto-compile on init/upgrade, and two Pixtron-surfaced routing/docs fixes. All session tickets closed, and at end-of-session everything (incl. handoff notes + a stale CLAUDE.md re-render) was committed and pushed to origin/main.
+**Where we left off:** The RACI/routing-policy MVP and post-MVP visibility slices are shipped; #290 closed the Pixtron-surfaced stale-running dashboard gap; and the Pi runtime PRD is accepted/reconciled into the stable-baseline epic (#291). The next meaningful move is to start the Pi/provider-agnostic runtime architecture with the runtime-metadata seam (#292), not to add Pi as an ad hoc Docker/runtime special case.
 
 **Picked up next:**
-1. **Activate this session's work on the host — NON-TICKET thread (host mutation, needs Steve's go).** All committed + pushed but NOT live: run `forge upgrade` (auto-recompiles `~/.forge/routing-policy.yml` per #286, FORCE-refreshes seeds, and FULLY re-renders this repo's `CLAUDE.md` orchestrator block from the current template) to pick up #288 routing guidance, the #289 docs-impact lifecycle, and the new CLI (`raci propose/apply`, `route governance`, project overrides). NOTE: the `CLAUDE.md` committed this session is an OLDER partial re-render (compiled-policy routing flow only, ~#284 era) — it does NOT yet include #279/#288/#289; `forge upgrade` is what brings it current.
-2. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. The routing substrate it depends on is now complete (MVP + #279/#280/#281/#285/#286). Largest remaining RACI-epic lift.
-3. **#282 — dedicated RACI edit tool (deferred convenience).** CLI wizard/dashboard form that writes the RACI within guardrails. Lower priority — the orchestrator-mediated propose/apply channel (#279) already covers the non-technical authoring loop.
-4. **Project-RACI-authoring-through-the-gate — NON-TICKET follow-on (flagged during #280).** `raci propose/apply` operate on the HOST RACI only; not project-override-aware. Authoring a `<project>/.forge/forge-raci.md` through the gated channel is a clean follow-on; file a ticket if wanted.
+1. **#292 — runtime metadata seam for provider-agnostic execution.** Add `runtime_kind`/`log_format`/`prompt_strategy`/`auth_strategy` to runtime loading and task/run metadata before #260/#261, so Pi lands into an explicit architecture rather than as `provider = pi`.
+2. **#260/#261/#262/#263/#264 — Pi Crawl.** After #292, add Pi to the image, add the API-key runtime, parse Pi JSONL by `log_format`, prove prompt injection exactly once, and complete one real role end to end.
+3. **#287 — route-before-dispatch adherence.** Still useful if the orchestrator keeps bypassing `forge route explain`; consider a CLI-dispatch affordance after the prose/template check.
+4. **#252 — collaborative setup/new-machine readiness.** Broad product spine: init/upgrade/doctor should generate and validate config rather than asking humans to hand-write YAML.
+5. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. This becomes more important once Pi/Codex surfaces matter again.
 
 **External state to remember:**
-- **origin/main was up to date at prior handoff** — current working tree now has new backlog/PRD planning edits that still need commit.
-- **`docs/prds/provider-agnostic-runtime-pi.md` is now accepted for backlog planning** — reconciled into #258/#262/#265 and included in #291's stable-baseline commitment set. Still uncommitted until the working tree is committed.
-- This session's seed/template/CLI changes are pushed but **not live on the host** until item #1 (`forge upgrade`) runs.
+- **`docs/prds/provider-agnostic-runtime-pi.md` is accepted for backlog planning** — reconciled into #258/#262/#265 and included in #291's stable-baseline commitment set.
+- **#290 is closed** — dashboard/Ops now surface read-only reconcile candidates instead of stale DB-running tasks as ordinary running.
+- Host adapter activation is still a host mutation: run `forge upgrade` when Steve wants the latest seeds/templates installed and `~/.forge/routing-policy.yml` auto-recompiled.
 
 **Decisions worth not relitigating:**
 - **#288:** the full-vs-quick discriminator is architectural novelty + plan-certainty, NOT file count. Precedent-driven multi-file/cross-cutting work with a concrete plan is `implementation_quick` (test-engineer + docs_impact still mandatory); the full pipeline is for novelty/unclear-boundaries/missing-plan/new-integration/high-risk decomposition.
@@ -36,6 +37,7 @@ When you start a session, read this file. When you finish, update it: move close
 - **#286** init/upgrade auto-compile `routing-policy.yml` from the RACI seed (7f3b81b).
 - **#288** routing guidance: novelty-vs-precedent discriminator (20bd191).
 - **#289** explicit docs-impact lifecycle across orchestrator-template + implementer/test seeds (7999d11; RACI source alignment c04ef23).
+- **#290** dashboard/Ops reconcile-candidate detection (281d060; backlog closeout 09ab063).
 
 ## Active
 
@@ -767,17 +769,44 @@ Pi is the forcing function because one headless CLI (`pi -p --mode json`) can fr
 **Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
 
 
+### #292 — Runtime metadata seam: separate runtime kind, log format, prompt strategy, auth strategy
+**Phase:** Crawl foundation. Part of #258 and #291.
+
+**Why:** The Pi PRD's architectural correction cannot wait until after Pi is wired. Today Forge still leans on provider/profile names to infer execution behavior: model policy resolves `provider + auth -> runtime`, usage parsing is selected by provider in the runner path, and runtime YAML does not explicitly declare the log format, prompt injection strategy, or auth wiring strategy. If #260/#261 add Pi before this seam exists, Forge will be tempted to encode "provider = pi" or add another one-off branch, which is exactly the confusion the PRD rejects.
+
+**Scope:**
+- Extend the runtime YAML schema/loader with explicit metadata:
+  - `runtime_kind`: `claude-code | codex | pi` (or equivalent open string if the implementation strongly prefers it).
+  - `log_format`: `claude-stream-json | codex-jsonl | pi-jsonl`.
+  - `prompt_strategy`: e.g. `claude-stdin-package | stdin-prepend | runtime-context-file`.
+  - `auth_strategy`: e.g. `oauth-volume | codex-auth | env-provider-api-key | pi-auth-json | local-endpoint`.
+- Backfill existing Claude/Codex runtime seeds with metadata, preserving current behavior.
+- Thread the resolved runtime metadata into spawn/run task execution and task/run diagnostics so later code can choose parsers and prompt/auth behavior from runtime metadata instead of upstream provider names.
+- Convert comments/diagnostic wording in the execution path from "provider selects parser/runtime behavior" to "runtime/log_format selects parser/runtime behavior; upstream provider/model are model-selection facts."
+- Keep behavior unchanged for existing Claude Code and Codex runs.
+
+**Acceptance:**
+- Existing Claude Code and Codex runtime seeds validate with the new metadata and still resolve to the same command/auth behavior.
+- A unit test proves usage-parser selection can be made from `log_format` independent of upstream provider.
+- A unit test or resolver fixture proves a Pi-shaped runtime can declare `runtime_kind: pi`, `log_format: pi-jsonl`, `prompt_strategy: stdin-prepend`, and `auth_strategy: env-provider-api-key` without requiring a Pi binary yet.
+- Task/run diagnostic output exposes both runtime metadata and upstream provider/model distinctly enough for `forge show --json` or equivalent orchestrator-facing JSON to tell them apart.
+- No Pi Docker/image install is required in this story; #260 owns the binary.
+
+**Relations:** #258, #260, #261, #262, #263, #265, #253, `docs/prds/provider-agnostic-runtime-pi.md`.
+
+
 ### #260 — pi: add pi to the agent-dev-worker Docker image
 **Phase:** Crawl. Part of #258.
 Install pi in `docker/agent-dev-worker.Dockerfile` (`npm i -g --ignore-scripts @earendil-works/pi-coding-agent`, or `pi.dev/install.sh`).
 **Acceptance:** image builds; `pi --version` runs as the agent UID (1000); image-size delta noted. Flag that `forge upgrade` does not auto-rebuild the image (#229), so rollout needs a manual rebuild.
+**Depends on:** #292 for runtime metadata shape.
 
 
 ### #261 — pi: runtime YAML + spawn invocation (env-var API-key mode)
 **Phase:** Crawl. Part of #258.
 Add `seeds/runtimes/pi-apikey.yml` mirroring `codex-subscription.yml`; wire spawn to run `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y` and capture stdout JSONL. Auth: pass the provider API key as an env var into the container.
 **Acceptance:** a `forge invoke` bound to the pi runtime dispatches a container that runs pi and returns captured output.
-**Depends on:** Docker-image story.
+**Depends on:** #292 runtime metadata shape, Docker-image story.
 
 
 ### #262 — pi: usage-parser hook (parse JSONL events)
