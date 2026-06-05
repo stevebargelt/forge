@@ -8,7 +8,9 @@ import { SCHEMA_SQL } from "./schema.js";
 // in schema.ts. New DBs get the column from CREATE TABLE; existing DBs get it
 // here. Each migration is guarded by PRAGMA table_info so the second run is a
 // noop. Add a new entry here whenever you add a column to an existing table.
-function applyMigrations(db: DatabaseInstance): void {
+// Exported as a test seam so migration behavior (e.g. #295 legacy-column drop)
+// can be exercised against a hand-shaped DB.
+export function applyMigrations(db: DatabaseInstance): void {
   const runsCols = db.prepare(`PRAGMA table_info(runs)`).all() as { name: string }[];
   const haveRuns = new Set(runsCols.map((r) => r.name));
   if (!haveRuns.has("project_dir")) {
@@ -77,6 +79,16 @@ function applyMigrations(db: DatabaseInstance): void {
   }
   if (!haveModelCalls.has("cache_creation_tokens")) {
     db.exec(`ALTER TABLE model_calls ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0`);
+  }
+  // #295: drop the 0.1.x legacy columns (prompt_tokens/completion_tokens/cost).
+  // They are NOT NULL with no DEFAULT and are write-only dead weight (nothing
+  // reads them). A fresh DB is created from the current SCHEMA_SQL WITHOUT them,
+  // so insertUsageRows — which no longer writes them — must find the same shape on
+  // both fresh and migrated DBs. Dropping converges the two: without this, a
+  // migrated DB still has the NOT NULL columns and an insert omitting them fails.
+  // Guarded by the pre-ADD snapshot → idempotent (skipped once already dropped).
+  for (const col of ["prompt_tokens", "completion_tokens", "cost"]) {
+    if (haveModelCalls.has(col)) db.exec(`ALTER TABLE model_calls DROP COLUMN ${col}`);
   }
   // Created indexes (created_at index too — used by --since time filters).
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);

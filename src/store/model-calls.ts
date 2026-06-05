@@ -349,9 +349,13 @@ export function insertUsageRows(rows: UsageRow[]): number {
   if (rows.length === 0) return 0;
   const db = getDb();
   const del = db.prepare(`DELETE FROM model_calls WHERE task_id = ? AND request_id = ?`);
+  // #295: do NOT write the 0.1.x legacy columns (prompt_tokens/completion_tokens/
+  // cost). They don't exist on a fresh schema, and a migration now drops them from
+  // older DBs — writing them made usage capture throw (silently swallowed) on every
+  // fresh install. The column list here matches the current SCHEMA_SQL exactly.
   const ins = db.prepare(`
-    INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at, prompt_tokens, completion_tokens, cost)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)
+    INSERT INTO model_calls (task_id, request_id, model, alias, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const tx = db.transaction((batch: UsageRow[]) => {
     for (const r of batch) {
