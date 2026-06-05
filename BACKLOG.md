@@ -7,18 +7,20 @@ When you start a session, read this file. When you finish, update it: move close
 ## Notes for next session
 **Last session ended 2026-06-05.**
 
-**Where we left off:** The RACI/routing-policy MVP and post-MVP visibility slices are shipped; #290 closed the Pixtron-surfaced stale-running dashboard gap; and the Pi runtime PRD is accepted/reconciled into the stable-baseline epic (#291). The next meaningful move is to start the Pi/provider-agnostic runtime architecture with the runtime-metadata seam (#292), not to add Pi as an ad hoc Docker/runtime special case.
+**Where we left off:** The RACI/routing-policy MVP and post-MVP visibility slices are shipped; #290 closed the Pixtron-surfaced stale-running dashboard gap; and the Pi runtime PRD is accepted/reconciled into the stable-baseline epic (#291). Pi Crawl is underway: #292 created the runtime metadata seam, #260 installed pi in the agent image, #261 added `pi-apikey` and proved spawn can invoke pi. The remaining Crawl work is prompt injection (#263), usage parsing (#262), then the first end-to-end role (#264).
 
 **Picked up next:**
-1. **#292 — runtime metadata seam for provider-agnostic execution.** Add `runtime_kind`/`log_format`/`prompt_strategy`/`auth_strategy` to runtime loading and task/run metadata before #260/#261, so Pi lands into an explicit architecture rather than as `provider = pi`.
-2. **#260/#261/#262/#263/#264 — Pi Crawl.** After #292, add Pi to the image, add the API-key runtime, parse Pi JSONL by `log_format`, prove prompt injection exactly once, and complete one real role end to end.
-3. **#287 — route-before-dispatch adherence.** Still useful if the orchestrator keeps bypassing `forge route explain`; consider a CLI-dispatch affordance after the prose/template check.
-4. **#252 — collaborative setup/new-machine readiness.** Broad product spine: init/upgrade/doctor should generate and validate config rather than asking humans to hand-write YAML.
-5. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. This becomes more important once Pi/Codex surfaces matter again.
+1. **#263 — pi: system-prompt / context injection mapping.** Settle and test "Forge context exactly once" for pi. `pi-apikey` currently uses `prompt_strategy: message-arg` (`--append-system-prompt` + positional task package); #263 should prove that this is correct, not just plausible.
+2. **#262 — pi: usage-parser hook.** Add the real `pi-jsonl` parser using a live stream fixture. The #292/#261 state intentionally fails loud for `pi-jsonl` until this lands.
+3. **#264 — pi: first role end-to-end through pi.** Close Crawl only after dispatch -> pi -> result.json -> usage captured -> gate works with output-schema parity.
+4. **#287 — route-before-dispatch adherence.** Still useful if the orchestrator keeps bypassing `forge route explain`; consider a CLI-dispatch affordance after the prose/template check.
+5. **#252 — collaborative setup/new-machine readiness.** Broad product spine: init/upgrade/doctor should generate and validate config rather than asking humans to hand-write YAML.
+6. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. This becomes more important once Pi/Codex surfaces matter again.
 
 **External state to remember:**
 - **`docs/prds/provider-agnostic-runtime-pi.md` is accepted for backlog planning** — reconciled into #258/#262/#265 and included in #291's stable-baseline commitment set.
 - **#290 is closed** — dashboard/Ops now surface read-only reconcile candidates instead of stale DB-running tasks as ordinary running.
+- **#260/#261 are closed** — pi is installed in the agent image and `pi-apikey` can dispatch/capture stdout. Remaining gaps are expected: `pi-jsonl` parser is #262; result.json/schema parity is #264.
 - Host adapter activation is still a host mutation: run `forge upgrade` when Steve wants the latest seeds/templates installed and `~/.forge/routing-policy.yml` auto-recompiled.
 
 **Decisions worth not relitigating:**
