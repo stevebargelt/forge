@@ -248,8 +248,23 @@ test("#292: log_format=claude-stream-json selects the claude parser even when pr
   assert.equal(selectUsageParser({ logFormat: "claude-stream-json", provider: "openai" }), "claude");
 });
 
-test("#292: an unknown/other log_format falls to the claude parser", () => {
-  assert.equal(selectUsageParser({ logFormat: "pi-jsonl" }), "claude", "pi-jsonl has no dedicated parser yet (#262) → claude default, not codex");
+test("#292: pi-jsonl is UNSUPPORTED (not silently parsed as claude) until #262", () => {
+  // The shortcut #292 exists to kill: a recognized-but-unimplemented format must
+  // fail loud, not fall through to the claude parser and record zero usage.
+  assert.equal(selectUsageParser({ logFormat: "pi-jsonl" }), "unsupported");
+  // even with provider set — log_format is authoritative, it doesn't fall back.
+  assert.equal(selectUsageParser({ logFormat: "pi-jsonl", provider: "openai" }), "unsupported");
+});
+
+test("#292: any unmapped explicit log_format is unsupported (forces a parser decision)", () => {
+  assert.equal(selectUsageParser({ logFormat: "some-future-format" }), "unsupported");
+});
+
+test("#292: captureUsageForTask reports an unsupported log_format as an error, does not parse", () => {
+  const path = writeLog("unsup.jsonl", [{ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 5 } }]);
+  const r = captureUsageForTask(path, { taskId: "t-unsup", logFormat: "pi-jsonl" });
+  assert.equal(r.rowCount, 0);
+  assert.match(r.error ?? "", /no parser for log_format='pi-jsonl'/);
 });
 
 test("#292: legacy fallback — no log_format → selection keys off provider", () => {

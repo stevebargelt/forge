@@ -219,28 +219,47 @@ export function extractUsageFromCodexLog(
 // alter task semantics. Call site is right after docker exec returns, in both
 // invoke.ts and runNext.ts spawn paths.
 //
-// #292: the parser is chosen from the runtime's `log_format` (an EXECUTION fact),
-// NOT the upstream provider (a model-SELECTION fact). `codex-jsonl` → codex JSONL;
-// every other log format → claude stream-json. `provider` is retained only as a
-// legacy fallback for the pre-#292 path where no log_format is threaded through
-// (the openai → codex mapping AWN-7 originally used); once every spawn site
-// passes log_format this fallback is dead. A `pi-jsonl` parser arrives with #262.
 // #292: the parser choice, isolated as a pure decision so it can be unit-tested
-// independent of the DB insert. Returns the parser to run. log_format (an
-// EXECUTION fact) is authoritative; provider is only the legacy fallback for the
-// pre-#292 path where no log_format is threaded through. `pi-jsonl` joins here
-// with #262.
-export function selectUsageParser(opts: { logFormat?: string; provider?: string }): "codex" | "claude" {
-  if (opts.logFormat !== undefined) return opts.logFormat === "codex-jsonl" ? "codex" : "claude";
+// independent of the DB insert. `log_format` (an EXECUTION fact) is authoritative;
+// every supported format is mapped EXPLICITLY. A recognized-but-unimplemented
+// format (today: `pi-jsonl`, whose parser lands with #262) returns "unsupported"
+// rather than silently falling through to the claude parser — that silent
+// fallthrough is exactly the provider-name shortcut #292 exists to kill (it would
+// record zero usage and look like success). Any unmapped explicit format is
+// likewise "unsupported", so adding a log_format to the schema FORCES a parser
+// decision here. `provider` is only the legacy fallback for the pre-#292 path
+// where no log_format is threaded through (the openai → codex mapping AWN-7 used).
+export function selectUsageParser(opts: { logFormat?: string; provider?: string }): "codex" | "claude" | "unsupported" {
+  if (opts.logFormat !== undefined) {
+    switch (opts.logFormat) {
+      case "claude-stream-json": return "claude";
+      case "codex-jsonl": return "codex";
+      default: return "unsupported"; // pi-jsonl (until #262) + any unmapped format
+    }
+  }
   return opts.provider === "openai" ? "codex" : "claude"; // legacy fallback
 }
 
+// Capture usage from a just-completed task's stdout log into model_calls.
+// Best-effort: swallows transient parse/insert errors so a telemetry failure can
+// never block or alter task semantics. Call site is right after docker exec
+// returns, in both invoke.ts and runNext.ts spawn paths.
 export function captureUsageForTask(
   stdoutPath: string,
   opts: { taskId: string; alias?: string; logFormat?: string; provider?: string; model?: string },
 ): { rowCount: number; error?: string } {
+  const parser = selectUsageParser(opts);
+  if (parser === "unsupported") {
+    // FAIL LOUD — not swallowed like a transient error. This is a deterministic
+    // sequencing gap (a runtime declares a log_format whose parser doesn't exist
+    // yet), and misattributing it to the claude parser would hide it behind a
+    // zero-usage "success". Surfaced so it can't pass silently until #262.
+    const error = `usage capture: no parser for log_format='${opts.logFormat}' — unsupported until its parser lands (pi-jsonl: #262)`;
+    console.error(`forge: ${error} [task ${opts.taskId}]`);
+    return { rowCount: 0, error };
+  }
   try {
-    const rows = selectUsageParser(opts) === "codex"
+    const rows = parser === "codex"
       ? extractUsageFromCodexLog(stdoutPath, opts)
       : extractUsageFromStdoutLog(stdoutPath, opts);
     if (rows.length === 0) return { rowCount: 0 };
