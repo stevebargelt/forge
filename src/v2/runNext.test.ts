@@ -1389,3 +1389,82 @@ test("runNext: reds receive force-level anti-prompts as failureModes (forge-site
     rmSync(cfile, { force: true });
   }
 });
+
+// ── #264: pi attribution on the WORKFLOW/runNext path (mirrors invoke.test.ts) ─
+const PI_ATTR_WORKFLOW: Workflow = {
+  name: "test-pi-attr",
+  description: "single pi step",
+  inputs: [{ name: "brief", required: true, type: "text" }],
+  steps: [
+    { id: "pi-step", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
+  ],
+};
+
+function ensurePiRuntime(): void {
+  const p = join(process.env.FORGE_HOME!, "runtimes", "pi-stub.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `name: pi-stub
+description: test stub pi runtime
+runtime_kind: pi
+log_format: pi-jsonl
+prompt_strategy: message-arg
+auth_strategy: env-provider-api-key
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: pi
+  args: ["-p"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+// Exec that writes pi JSONL to stdout but NO result.json (pi exits 0 on error).
+function makePiNoResultExec(stdoutJsonl: string, exitCode = 0): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, stdoutJsonl);
+    writeFileSync(stderrPath, "");
+    return exitCode;
+  };
+}
+
+test("runNext: #264 pi step with no result.json fails with an attributed error, not no_result_json", async () => {
+  ensurePiRuntime();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  try {
+    const { runId } = startRun({
+      workflow: PI_ATTR_WORKFLOW,
+      title: "pi attribution test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+    const stdout =
+      JSON.stringify({ type: "agent_start" }) + "\n" +
+      JSON.stringify({ type: "agent_end", messages: [
+        { role: "assistant", stopReason: "error", errorMessage: "401 authentication_error: invalid x-api-key" },
+      ] }) + "\n";
+
+    const wave = await runNext({ runId, workflow: PI_ATTR_WORKFLOW, dockerExec: makePiNoResultExec(stdout) });
+    assert.deepEqual(wave.failedSteps, ["pi-step"]);
+
+    const task = tasksForRun(runId).find((t) => t.phase === "pi-step")!;
+    assert.equal(task.status, "failed");
+    assert.match(task.error ?? "", /pi run failed:/);
+    assert.match(task.error ?? "", /authentication_error/);
+    assert.doesNotMatch(task.error ?? "", /^no_result_json$/);
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
