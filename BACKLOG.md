@@ -778,13 +778,6 @@ Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's fiel
 **Depends on:** spike, runtime story.
 
 
-### #264 — pi: first role end-to-end through pi (Crawl exit)
-**Phase:** Crawl exit criterion. Part of #258.
-Route one role (e.g. a red on a cheap provider like Groq/Cerebras, or engineer on a chosen model) through the pi runtime and complete a real task end-to-end: dispatch -> pi -> result.json -> usage captured -> gate.
-**Acceptance:** a full forge task completes via pi with correct status + usage and output-schema parity with claude/codex tasks.
-**Depends on:** Docker image, runtime, usage parser, system-prompt mapping.
-
-
 ### #265 — pi: model-policy integration + alias mapping
 **Phase:** Walk. Part of #258.
 Wire Pi into `model-policy.yml` resolution by separating runtime selection from upstream provider/model selection. Model policy should resolve capability/profile -> runtime (`pi-*`) + upstream provider (`groq`, `anthropic`, `ollama`, etc.) + concrete model, with alias translation where Pi provider/model names differ from Forge capability aliases.
@@ -952,7 +945,38 @@ Relations: forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), #253 (
 Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), dashboard run views, reconcile_candidate status color (#290).
 
 
+### #296 — pi: true end-to-end Crawl exit — one real pi task with status + usage + gate
+**Crawl exit (the live half of the original #264).** #264 landed the deterministic result/completion contract (status + attributed failures) WITHOUT a live provider call. This ticket is the remaining end-to-end proof: route one real role through the pi runtime against a live credential and confirm a full forge task lifecycle.
+
+**Why separate:** #264 was scoped to result-contract parity (deterministic, no live call). The "usage captured" + "gate" half needs (a) the pi-jsonl usage parser (#262) and (b) a real provider API key — neither available when #264 landed.
+
+**Depends on:**
+- #262 — pi-jsonl usage parser (so usage is captured, not failing loud as unsupported).
+- a live provider credential for the pi runtime (a cheap provider — Groq/Cerebras/Gemini — or anthropic via ANTHROPIC_API_KEY).
+
+**Acceptance:**
+- A real `forge invoke --runtime pi-apikey <role> --task ...` (or a policy-bound pi profile once #265 lands) completes a genuine task end-to-end:
+  - status `complete` with a real agent-written `result.json` (output-schema parity with claude/codex).
+  - usage captured in `model_calls` (rows with input/output/cache tokens; pi pre-computes cost).
+  - if the role is gated, the gate advances on the real result.
+- Captured as a documented run (run id + result.json + `forge usage` showing the pi rows).
+- Confirms the #264 attribution paths don't fire on a healthy run (no false "agent did not honor the contract").
+
+**Already done (don't redo):** dispatch (#261), prompt-injection exactly-once (#263), result-contract + attributed failures (#264). This is purely the live e2e + usage capture wiring proof.
+
+Relations: #258 (Pi epic), #262, #265, #261, #263, #264, seeds/runtimes/pi-apikey.yml.
+
+
 ## Done (recent)
+
+### #264 — pi: first role end-to-end through pi (Crawl exit)
+**Closed:** 2026-06-05.
+
+**Phase:** Crawl exit criterion. Part of #258.
+Route one role (e.g. a red on a cheap provider like Groq/Cerebras, or engineer on a chosen model) through the pi runtime and complete a real task end-to-end: dispatch -> pi -> result.json -> usage captured -> gate.
+**Acceptance:** a full forge task completes via pi with correct status + usage and output-schema parity with claude/codex tasks.
+**Depends on:** Docker image, runtime, usage parser, system-prompt mapping.
+
 
 ### #263 — pi: system-prompt / context injection mapping
 **Closed:** 2026-06-05.
