@@ -120,10 +120,12 @@ export function applyRaciChange(
   if (!proposal.ok) return { proposal, written: false, reason: "validation_failed" };
   if (!opts.confirm) return { proposal, written: false, reason: "not_confirmed" };
 
-  // Gate passed + confirmed: write the source, recompile the policy, audit.
-  writeFileSync(targets.raciPath, candidate);
-  writeFileSync(targets.policyPath, yamlStringify(compileRaciDocument(candidate)));
-
+  // Gate passed + confirmed. Precompute everything that can fail BEFORE touching
+  // any file, then journal the audit entry FIRST (write-ahead). The audit log is
+  // #279's substitute for a git commit, so an applied-but-unaudited change is a
+  // correctness bug, not a cosmetic gap. The gate already proved the candidate
+  // compiles, so this recompile cannot fail.
+  const policyYaml = yamlStringify(compileRaciDocument(candidate));
   const audit: RaciAuditEntry = {
     timestamp: now().toISOString(),
     action: "apply",
@@ -134,7 +136,12 @@ export function applyRaciChange(
     routes_modified: proposal.routeChanges.modified.map((m) => m.route),
     validation: { raci: proposal.validation.raci.ok, route: proposal.validation.route.ok },
   };
+
+  // Audit-first: an unwritable audit target throws HERE, before the source or
+  // policy is written — apply never lands a change it cannot record.
   appendFileSync(targets.auditLogPath, JSON.stringify(audit) + "\n");
+  writeFileSync(targets.raciPath, candidate);
+  writeFileSync(targets.policyPath, policyYaml);
 
   return { proposal, written: true, audit };
 }
@@ -242,7 +249,13 @@ export function registerRaci(program: Command): void {
       const candidate = readFileSync(candidatePath, "utf8");
       const current = readCurrentRaci(RACI_PATH);
       ensureForgeDirs();
-      const result = applyRaciChange(current, candidate, { confirm: opts.confirm ?? false, candidateLabel: candidatePath });
+      let result: ApplyResult;
+      try {
+        result = applyRaciChange(current, candidate, { confirm: opts.confirm ?? false, candidateLabel: candidatePath });
+      } catch (e) {
+        process.stderr.write(`forge raci apply: failed to write change (nothing applied): ${(e as Error).message}\n`);
+        process.exit(1);
+      }
 
       if (opts.json) {
         console.log(JSON.stringify({ candidate: candidatePath, ...result }, null, 2));

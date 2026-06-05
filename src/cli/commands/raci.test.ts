@@ -105,6 +105,24 @@ test("apply --confirm on an INVALID candidate writes nothing and reports the fai
   assert.equal(existsSync(targets.auditLogPath), false);
 });
 
+test("apply --confirm with an unwritable audit target writes neither RACI nor policy", () => {
+  const base = mkdtempSync(join(tmpdir(), "raci-apply-"));
+  const targets: ApplyTargets = {
+    raciPath: join(base, "forge-raci.md"),
+    policyPath: join(base, "routing-policy.yml"),
+    // Parent dir does not exist -> appendFileSync throws ENOENT.
+    auditLogPath: join(base, "no", "such", "dir", "raci-audit.log"),
+  };
+  const candidate = seed().replace(IQ_ANCHOR, "responsible: frontend-specialist\naccountable: human\npath: invoke_chain");
+
+  // Audit-first ordering means the unwritable audit aborts BEFORE any governance write.
+  assert.throws(() =>
+    applyRaciChange(seed(), candidate, { confirm: true, candidateLabel: "cand.md", host: all, targets }),
+  );
+  assert.equal(existsSync(targets.raciPath), false, "RACI must not be written when the audit cannot be journaled");
+  assert.equal(existsSync(targets.policyPath), false, "policy must not be written when the audit cannot be journaled");
+});
+
 test("apply --confirm appends — a second change adds a second audit line", () => {
   const targets = tmpTargets();
   // Seed the audit log + installed RACI with a first applied change.
