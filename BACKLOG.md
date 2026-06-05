@@ -855,6 +855,8 @@ Acceptance:
 Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
 
 
+### #286 — Forge init/upgrade compile derived routing policy
+
 ## Done (recent)
 
 ### #285 — Dashboard: read-only routing/governance panel
