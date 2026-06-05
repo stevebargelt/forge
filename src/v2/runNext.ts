@@ -21,6 +21,7 @@ import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
+import { attributePiNoResult } from "./pi-result.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
@@ -1191,7 +1192,11 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
   if (!result) {
-    const msg = "no_result_json";
+    // #264: pi exits 0 even on a provider error — attribute a missing result from
+    // pi's structured stdout instead of the ambiguous bare "no_result_json".
+    const msg = runtimeMeta.runtimeKind === "pi"
+      ? attributePiNoResult(existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "")
+      : "no_result_json";
     failTask(args.taskId, { runId: args.runId, kind: classify({ resultState: "missing" }), error: msg });
     return { kind: "failed", error: msg };
   }

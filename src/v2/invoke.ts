@@ -23,6 +23,7 @@ import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
+import { attributePiNoResult } from "./pi-result.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -388,7 +389,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     return { runId, taskId, status: "failed", error };
   }
   if (!result) {
-    const error = "no_result_json";
+    // #264: pi exits 0 even on a provider error, so a missing result.json here is
+    // ambiguous. For pi runtimes, attribute the cause from pi's structured stdout
+    // instead of the bare, silent "no_result_json".
+    const error = runtimeMeta.runtimeKind === "pi"
+      ? attributePiNoResult(existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "")
+      : "no_result_json";
     failTask(taskId, { runId, kind: classify({ resultState: "missing" }), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };

@@ -62,7 +62,8 @@ present, no stdin). The red read-only `/project` mount is unchanged (OS-level,
 
 - Usage parsing of pi's JSONL (#262) — `log_format: pi-jsonl` still fails loud as
   unsupported until then.
-- End-to-end parity / pi honoring forge's `result.json` contract (#264).
+- Result/completion contract parity (#264) — now decided, see
+  [pi result contract](./2026-06-05_pi-result-contract.md).
 - Generalizing provider/key beyond the anthropic-bound Crawl proof (#265),
   OAuth (#266), `models.json` local models (#268).
 - `.pi/SYSTEM.md` as a generated provider adapter surface (#253) — a future

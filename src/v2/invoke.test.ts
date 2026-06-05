@@ -989,3 +989,103 @@ test("invoke: manifest auth block is booleans-only — no token, no hostPath, no
     assert.ok(typeof v !== "string" || !v.includes("/"), `auth value must not be a path: ${String(v)}`);
   }
 });
+
+// ── #264: pi result-contract parity ──────────────────────────────────────────
+// A pi runtime stub (runtime_kind: pi) so runtimeMeta resolves to pi. auth.mode
+// apikey → ANTHROPIC_API_KEY must be set in these tests.
+function setupPiRuntimeStub(): void {
+  const fhome = process.env.FORGE_HOME!;
+  const p = join(fhome, "runtimes", "pi-stub.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `
+name: pi-stub
+description: test stub
+runtime_kind: pi
+log_format: pi-jsonl
+prompt_strategy: message-arg
+auth_strategy: env-provider-api-key
+image: test-image:latest
+models:
+  default: runtime-default-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: pi
+  args: ["-p"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+// Exec that writes pi-style JSONL to stdout but does NOT write result.json,
+// mimicking pi exiting 0 without the agent honoring the output contract.
+function makePiNoResultExec(stdoutJsonl: string, exitCode = 0): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const d = dirname(stdoutPath);
+    if (!existsSync(d)) mkdirSync(d, { recursive: true });
+    writeFileSync(stdoutPath, stdoutJsonl);
+    writeFileSync(stderrPath, "");
+    return exitCode; // pi exits 0 even on a provider error
+  };
+}
+
+test("#264: a successful pi run (agent wrote result.json) completes — parity with other runtimes", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-pi-ok-"));
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do pi work",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makeStubExec({ status: "complete", note: "pi wrote this" }),
+  });
+  assert.equal(r.status, "complete");
+  const dir = taskDir(r.runId, r.taskId);
+  assert.equal((JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as { status: string }).status, "complete");
+});
+
+test("#264: a pi run with a provider error and no result.json fails with an attributed error (not no_result_json)", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-pi-err-"));
+  const stdout =
+    JSON.stringify({ type: "agent_start" }) + "\n" +
+    JSON.stringify({ type: "agent_end", messages: [
+      { role: "assistant", stopReason: "error", errorMessage: "401 authentication_error: invalid x-api-key" },
+    ] }) + "\n";
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do pi work",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(stdout),
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /pi run failed:/);
+  assert.match(r.error ?? "", /authentication_error/);
+  assert.doesNotMatch(r.error ?? "", /^no_result_json$/);
+});
+
+test("#264: a pi run that completes but writes no result.json blames the agent contract", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-pi-noresult-"));
+  const stdout =
+    JSON.stringify({ type: "agent_start" }) + "\n" +
+    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn" }] }) + "\n";
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do pi work",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(stdout),
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /completed but wrote no .*result\.json/);
+});
