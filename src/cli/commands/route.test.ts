@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile, validateRoutingResolved, governanceView } from "./route.js";
 import { compileRaciDocument } from "../../raci/compile.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
@@ -199,4 +199,61 @@ test("validateRoutingResolved: an explicit policy path is the escape hatch (sour
   const v = validateRoutingResolved({ explicitPolicy: policyPath, host: all });
   assert.equal(v.source, "explicit");
   assert.equal(v.ok, true, JSON.stringify(v.findings));
+});
+
+// ── governance view (#281) ───────────────────────────────────────────────────
+
+/** A temp host policy compiled from `raci`, returned with its path. */
+function hostPolicyFrom(raci: string): string {
+  const hostDir = mkdtempSync(join(tmpdir(), "forge-host-"));
+  const path = join(hostDir, "routing-policy.yml");
+  writeFileSync(path, yamlStringify(compileRaciDocument(raci)));
+  return path;
+}
+
+test("governanceView: a project override shows source=project, executable routes, and a host-vs-project diff", () => {
+  const seed = readFileSync(SEED_PATH, "utf8");
+  const hostPolicyPath = hostPolicyFrom(seed);
+  const mutated = seed.replace(
+    "responsible: engineer\naccountable: human\npath: invoke_chain",
+    "responsible: backend-specialist\naccountable: human\npath: invoke_chain",
+  );
+  const proj = projectFrom(mutated);
+
+  const g = governanceView({ projectDir: proj, hostPolicyPath });
+  assert.ok(g.ok);
+  assert.equal(g.source, "project");
+  assert.equal(g.routes.implementation_quick!.responsible, "backend-specialist");
+  assert.ok(g.diff, "a project override must carry a host-vs-project diff");
+  const mod = g.diff!.modified.find((m) => m.route === "implementation_quick");
+  assert.ok(mod);
+  assert.ok(mod!.fields.some((f) => f.field === "responsible" && f.before === "engineer" && f.after === "backend-specialist"));
+
+  rmSync(dirname(hostPolicyPath), { recursive: true, force: true });
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("governanceView: a project override identical to host has an empty diff", () => {
+  const seed = readFileSync(SEED_PATH, "utf8");
+  const hostPolicyPath = hostPolicyFrom(seed);
+  const proj = projectFrom(seed);
+
+  const g = governanceView({ projectDir: proj, hostPolicyPath });
+  assert.ok(g.ok);
+  assert.deepEqual(g.diff, { added: [], removed: [], modified: [] });
+
+  rmSync(dirname(hostPolicyPath), { recursive: true, force: true });
+  rmSync(proj, { recursive: true, force: true });
+});
+
+test("governanceView: an uncompiled project override fails with override_not_compiled", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-proj-"));
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "forge-raci.md"), readFileSync(SEED_PATH, "utf8"));
+
+  const g = governanceView({ projectDir: dir, hostPolicyPath: policyPath });
+  assert.equal(g.ok, false);
+  assert.ok(!g.ok && g.findings.some((f) => f.code === "override_not_compiled"));
+
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -111,7 +111,7 @@ Work-type → route-key:
 - **`required_followups`** — mandatory after the responsible work (e.g. `implementation_quick` → `test-engineer`).
 - **`consulted`** — run BEFORE the responsible work; **`informed`** — post-work closure targets, with `when=` conditions.
 
-The policy is DERIVED (RACI → policy, never the inverse). You never hand-edit the RACI and recompile silently — changing routing means changing the rules you operate by, so it goes through the gated authoring channel below. `forge route validate` lints the live policy against this host. For the non-mechanical calls the route fields can't express (specialist selection, full-vs-quick, the ui-design manual handoff), read the `Routing guidance:` prose in the RACI.
+The policy is DERIVED (RACI → policy, never the inverse). You never hand-edit the RACI and recompile silently — changing routing means changing the rules you operate by, so it goes through the gated authoring channel below. `forge route validate` lints the live policy against this host. To inspect what's actually in force without routing a single prompt, `forge route governance [--project <dir>] [--json]` prints every route's executable fields and, for a project override, the host-vs-project diff — read-only, useful when you (or the user) want to see the effective policy before changing it. For the non-mechanical calls the route fields can't express (specialist selection, full-vs-quick, the ui-design manual handoff), read the `Routing guidance:` prose in the RACI.
 
 ### Changing the routing — orchestrator-mediated authoring (the primary edit channel)
 

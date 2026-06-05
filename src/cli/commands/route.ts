@@ -11,6 +11,7 @@ import {
   type RouteFinding,
 } from "../../raci/route-validate.js";
 import { compileRaciDocument } from "../../raci/compile.js";
+import { summarizeRouteChanges, type RouteChangeSummary } from "../../raci/propose.js";
 import { RoutingPolicySchema, type PolicyRoute, type RoutingPolicy } from "../../raci/policy-schema.js";
 import {
   resolvePolicyPath,
@@ -224,6 +225,85 @@ export function validateRoutingResolved(opts: {
   return { ok: findings.length === 0, mode: base.mode, findings, source: resolved.source, path: resolved.path };
 }
 
+export type GovernanceView =
+  | {
+      ok: true;
+      source: ResolvedSource;
+      path: string;
+      accountable: string;
+      routes: Record<string, PolicyRoute>;
+      /** Host-vs-project route diff; present only for a project override. */
+      diff?: RouteChangeSummary;
+    }
+  | { ok: false; source: ResolvedSource; path: string; findings: RouteFinding[] };
+
+/** READ-ONLY effective-governance view (#281): the routes the resolved policy
+ *  compiles to, plus a host-vs-project diff when the source is a project override.
+ *  Never writes, never validates, never merges — it only shows what's in force.
+ *  Host policy path is injectable so the diff is testable without real ~/.forge. */
+export function governanceView(opts: { projectDir?: string; hostPolicyPath?: string }): GovernanceView {
+  const hostPolicyPath = opts.hostPolicyPath ?? ROUTING_POLICY_PATH;
+  const resolved = resolvePolicyPath(opts.projectDir);
+
+  if (resolved.source === "project" && resolved.uncompiledOverride && opts.projectDir !== undefined) {
+    return { ok: false, source: "project", path: resolved.path, findings: [overrideNotCompiledFinding(opts.projectDir)] };
+  }
+
+  const policy = loadPolicy(resolved.path);
+  if (!policy) {
+    const suffix = resolved.source === "project" && opts.projectDir ? ` --project ${opts.projectDir}` : "";
+    return {
+      ok: false,
+      source: resolved.source,
+      path: resolved.path,
+      findings: [{ code: "policy_not_found", message: `routing policy not found or invalid: ${resolved.path} (run: forge route compile${suffix})` }],
+    };
+  }
+
+  let diff: RouteChangeSummary | undefined;
+  if (resolved.source === "project") {
+    const hostPolicy = loadPolicy(hostPolicyPath);
+    if (hostPolicy) diff = summarizeRouteChanges(hostPolicy, policy);
+  }
+
+  return {
+    ok: true,
+    source: resolved.source,
+    path: resolved.path,
+    accountable: policy.governance.accountable,
+    routes: policy.routes,
+    ...(diff ? { diff } : {}),
+  };
+}
+
+function renderGovernance(view: Extract<GovernanceView, { ok: true }>): string {
+  const lines: string[] = [];
+  lines.push(`# effective governance — source: ${view.source} (${view.path})`);
+  lines.push(`# accountable: ${view.accountable} (header invariant — always human)`);
+  lines.push("");
+  for (const [key, route] of Object.entries(view.routes)) {
+    lines.push(renderRoute(key, route));
+    lines.push("");
+  }
+  if (view.diff) {
+    lines.push("# host -> project override diff:");
+    const { added, removed, modified } = view.diff;
+    if (added.length === 0 && removed.length === 0 && modified.length === 0) {
+      lines.push("  (project routing is identical to host)");
+    } else {
+      if (added.length) lines.push(`  added (project-only):  ${added.join(", ")}`);
+      if (removed.length) lines.push(`  removed (host-only):   ${removed.join(", ")}`);
+      for (const m of modified) {
+        lines.push(`  modified: ${m.route}`);
+        for (const f of m.fields) {
+          lines.push(`              ${f.field}: ${JSON.stringify(f.before)} (host) -> ${JSON.stringify(f.after)} (project)`);
+        }
+      }
+    }
+  }
+  return lines.join("\n").trimEnd();
+}
+
 function renderRoute(routeKey: string, r: PolicyRoute): string {
   const lines = [`route: ${routeKey}`];
   lines.push(`  responsible:        ${r.responsible}`);
@@ -314,6 +394,26 @@ export function registerRoute(program: Command): void {
         process.stderr.write(`${res.findings.map((f) => `[${f.code}] ${f.message}`).join("\n")}\n`);
       }
       if (!res.ok) process.exit(1);
+    });
+
+  route
+    .command("governance")
+    .option("--project <dir>", "resolve the project override under <dir>/.forge (default: cwd)")
+    .option("--json", "emit the structured governance view as JSON")
+    .description(
+      "Read-only effective-governance view: the routes the resolved policy compiles to (executable fields), plus a host-vs-project diff for an override. Never writes, validates, or merges.",
+    )
+    .action((opts: { project?: string; json?: boolean }) => {
+      const projectDir = resolve(opts.project ?? process.cwd());
+      const view = governanceView({ projectDir });
+      if (opts.json) {
+        console.log(JSON.stringify(view, null, 2));
+      } else if (view.ok) {
+        console.log(renderGovernance(view));
+      } else {
+        process.stderr.write(`${view.findings.map((f) => `[${f.code}] ${f.message}`).join("\n")}\n`);
+      }
+      if (!view.ok) process.exit(1);
     });
 
   route

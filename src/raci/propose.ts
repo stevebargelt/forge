@@ -97,7 +97,10 @@ function compileQuietly(source: string): RoutingPolicy | undefined {
   }
 }
 
-function summarizeRouteChanges(
+/** Summarize how the compiled routes change from `before` to `after`: added,
+ *  removed, and per-route modified (changed executable fields only). Reused by the
+ *  read-only governance view (#281) to diff host vs project. */
+export function summarizeRouteChanges(
   before: RoutingPolicy | undefined,
   after: RoutingPolicy | undefined,
 ): RouteChangeSummary {
