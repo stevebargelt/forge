@@ -827,40 +827,6 @@ Build a provider-neutral routing policy system from Forge's human-readable RACI,
 **Relations:** #253 (provider adapter surfaces — downstream consumer), #252 (collaborative setup), #225 (provider/profile choice), #250 (provider-neutral ops primitive), #174 (backlog edit-body verb — needed to maintain these), `seeds/forge-raci.md`, `seeds/orchestrator-template.md`.
 
 
-### #277 — RACI policy Story 4: add forge raci validate (authoring-view lint)
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Add `forge raci validate` — a host-INDEPENDENT lint of the human-authored RACI document. Makes no claim about what is installed on any host. (The host-resolvable half is `forge route validate`, Story 5.)
-
-Acceptance:
-- Reports parse failures against the Story 1 constrained format.
-- Verifies `accountable` is `human` everywhere.
-- Verifies `informed` values are from the fixed controlled vocabulary.
-- Verifies `responsible` / `consulted` are well-formed SYMBOLIC names of the right kind (agent / workflow / CLI-action / evidence-source) — shape only; existence-on-a-host is route validate's job.
-- Reports any force-level rule weakened by the file, checked against the static force-rule baseline shipped with Forge (built-in policy constraints + `seeds/constraints/`), NOT against host state.
-- Supports JSON output.
-- Tests cover clean RACI, parse error, bad accountable, off-vocab informed, malformed symbolic name, and force-rule weakening.
-
-Relations: #273.
-
-
-### #278 — RACI policy Story 5: add forge route validate (operational-policy lint)
-**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
-
-Add `forge route validate` — validates the DERIVED policy as an executable policy in an environment. Runs at compile/deploy/resolve time and needs the host. Complements the host-independent `forge raci validate` (Story 4).
-
-Acceptance:
-- Reports schema errors against the Story 2 schema.
-- Resolves against THIS host: the agent/workflow/CLI-action symbols raci validate shape-checked actually exist (responsible/consulted point at installed agents, known workflows, real CLI commands). Evidence-source consulted values (e.g. `affected_code`, `existing_tests`) resolve against the fixed evidence-source set, NOT host install state.
-- (Project-override force-rule protection is NOT in this slice — route validate here takes one policy + optional RACI source, with no override input. That check is delivered with project override support, #280.)
-- Drift check: when a RACI source is present, the policy still agrees with it.
-- Runs STANDALONE where no RACI exists (e.g. a provider host shipped only the compiled policy — the #253 adapter case).
-- Supports JSON output for orchestrator/provider-adapter use.
-- Tests cover clean policy, schema-invalid, unresolved host name, override force-rule weakening, RACI/policy drift, and standalone (no-RACI) cases.
-
-Relations: #273, #253.
-
-
 ### #279 — RACI policy Story 6: orchestrator-mediated authoring (primary edit channel)
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
@@ -933,7 +899,30 @@ Acceptance:
 Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
 
 
+## Done (recent)
+
+### #277 — RACI policy Story 4: add forge raci validate (authoring-view lint)
+**Closed:** 2026-06-05.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add `forge raci validate` — a host-INDEPENDENT lint of the human-authored RACI document. Makes no claim about what is installed on any host. (The host-resolvable half is `forge route validate`, Story 5.)
+
+Acceptance:
+- Reports parse failures against the Story 1 constrained format.
+- Verifies `accountable` is `human` everywhere.
+- Verifies `informed` values are from the fixed controlled vocabulary.
+- Verifies `responsible` / `consulted` are well-formed SYMBOLIC names of the right kind (agent / workflow / CLI-action / evidence-source) — shape only; existence-on-a-host is route validate's job.
+- Reports any force-level rule weakened by the file, checked against the static force-rule baseline shipped with Forge (built-in policy constraints + `seeds/constraints/`), NOT against host state.
+- Supports JSON output.
+- Tests cover clean RACI, parse error, bad accountable, off-vocab informed, malformed symbolic name, and force-rule weakening.
+
+Relations: #273.
+
+
 ### #284 — RACI policy Story 5b: consumption proof — orchestrator routes from generated policy (MVP proving gate)
+**Closed:** 2026-06-05.
+
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
 The gate that CLOSES the inert-artifact risk — sequenced right after Story 5 (#278), part of the MVP, NOT deferred. A validated, compiled policy that no surface reads is still inert, just checkable; the MVP is not done until one surface routes from the generated policy.
@@ -949,7 +938,24 @@ Acceptance:
 Relations: #273, #278 (depends on route validate), #283 (the full-generation successor), `seeds/orchestrator-template.md`.
 
 
-## Done (recent)
+### #278 — RACI policy Story 5: add forge route validate (operational-policy lint)
+**Closed:** 2026-06-04.
+
+**Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
+
+Add `forge route validate` — validates the DERIVED policy as an executable policy in an environment. Runs at compile/deploy/resolve time and needs the host. Complements the host-independent `forge raci validate` (Story 4).
+
+Acceptance:
+- Reports schema errors against the Story 2 schema.
+- Resolves against THIS host: the agent/workflow/CLI-action symbols raci validate shape-checked actually exist (responsible/consulted point at installed agents, known workflows, real CLI commands). Evidence-source consulted values (e.g. `affected_code`, `existing_tests`) resolve against the fixed evidence-source set, NOT host install state.
+- (Project-override force-rule protection is NOT in this slice — route validate here takes one policy + optional RACI source, with no override input. That check is delivered with project override support, #280.)
+- Drift check: when a RACI source is present, the policy still agrees with it.
+- Runs STANDALONE where no RACI exists (e.g. a provider host shipped only the compiled policy — the #253 adapter case).
+- Supports JSON output for orchestrator/provider-adapter use.
+- Tests cover clean policy, schema-invalid, unresolved host name, override force-rule weakening, RACI/policy drift, and standalone (no-RACI) cases.
+
+Relations: #273, #253.
+
 
 ### #276 — RACI policy Story 3: compile RACI to routing policy
 **Closed:** 2026-06-04.
