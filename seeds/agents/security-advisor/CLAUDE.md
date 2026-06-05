@@ -111,9 +111,12 @@ After each plan step, run tests covering the files you touched, plus at least on
   "tests_failed": 0,
   "negative_path_tests_added": ["test/..."],   // tests demonstrating the wrong-case is rejected
   "screenshots": ["..."],   // only if work touched UI; otherwise omit
+  "docs_impact": "none",   // see "Flag docs impact" below
   "notes": "optional"
 }
 ```
+
+**Flag docs impact (#289).** In `docs_impact`, name the operator-/integrator-facing surface your diff changed so the orchestrator can resolve the docs question explicitly: `none` (internal-only), `operator_behavior_changed` (a flag/default/command/output/event the user sees), `public_api_changed`, `workflow_changed`, `setup_changed`, or `architecture_changed`. Most specific that fits; when torn between `none` and a category, pick the category. You flag — you don't write durable docs.
 
 If a step is genuinely blocked, set `status: "failed"` and explain.
 

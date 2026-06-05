@@ -127,9 +127,12 @@ No host/container native-module mismatch for Go — run directly from `/project`
   "tests_passed": 12,
   "tests_failed": 0,
   "screenshots": ["/path/to/screenshot.png", ...],   // REQUIRED for visual changes
+  "docs_impact": "none",   // see "Flag docs impact" below
   "notes": "optional — anything notable: a11y decisions, browser-compat choices, deviations from project patterns and why"
 }
 ```
+
+**Flag docs impact (#289).** In `docs_impact`, name the operator-/integrator-facing surface your diff changed so the orchestrator can resolve the docs question explicitly: `none` (internal-only), `operator_behavior_changed` (a flag/default/command/output/event the user sees), `public_api_changed`, `workflow_changed`, `setup_changed`, or `architecture_changed`. Most specific that fits; when torn between `none` and a category, pick the category. You flag — you don't write durable docs.
 
 If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped visual validation entirely (no browser-tools AND no Playwright/E2E fallback available), that's also `status: "failed"` — never `complete`.
 

@@ -143,8 +143,11 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
   "tests_failed": 0,
   "screenshots": ["/path/to/screenshot.png", ...],
   "coverage_summary": "what user flows / integration paths are now covered",
+  "docs_impact_check": "plausible: <category> | implausible: <why> | not_flagged",
   "notes": "optional — test infrastructure decisions, framework choices, gaps you noticed but couldn't cover"
 }
 ```
 
 If blocked, set `status: "failed"` and explain. Never `status: "complete"` with failing tests.
+
+**Cross-check docs impact (#289).** The implementer reported a `docs_impact` category. In `docs_impact_check`, say whether it's plausible against the diff you just exercised: if the change clearly alters operator-visible behavior / a public API / setup / a workflow but the implementer claimed `none` (or didn't flag it), call that out as `implausible: <what the user will now see that the docs don't>`. You don't write docs or resolve the impact — that's the orchestrator's call — but a verify phase that watched the behavior change is the right place to catch a missed flag before the run is called complete.

@@ -93,9 +93,12 @@ Cross-cutting work means cross-cutting validation. You touched multiple layers; 
   "tests_failed": 0,
   "screenshots": ["..."],   // required if files_modified touched UI
   "migrations_verified": ["migrations/..."],   // required if you added migrations
+  "docs_impact": "none",   // see "Flag docs impact" below
   "notes": "optional — anything notable about cross-layer concerns, ordering, or what you deliberately did NOT do"
 }
 ```
+
+**Flag docs impact (#289).** In `docs_impact`, name the operator-/integrator-facing surface your diff changed so the orchestrator can resolve the docs question explicitly: `none` (internal-only), `operator_behavior_changed` (a flag/default/command/output/event the user sees), `public_api_changed`, `workflow_changed`, `setup_changed`, or `architecture_changed`. Most specific that fits; when torn between `none` and a category, pick the category. You flag — you don't write durable docs.
 
 The `discipline: "platform"` field is load-bearing — it tells the runner you completed work routed to the platform specialist (vs frontend / backend / security / general). Match the v2 routing convention.
 

@@ -101,8 +101,11 @@ Tests always run in the container's native arch (amd64) — that's fine for corr
   "tests_passed": 12,
   "tests_failed": 0,
   "screenshots": ["/path/to/screenshot.png", ...],   // required if files_modified touched UI
+  "docs_impact": "none",   // see "Flag docs impact" below
   "notes": "optional"
 }
 ```
 
 If a step is genuinely blocked, set `status: "failed"` and explain. If you skipped validation for a stated reason, that's also `status: "failed"` — never `complete`.
+
+**Flag docs impact.** In `docs_impact`, name the kind of operator-/integrator-facing surface your diff changed so the orchestrator can resolve the docs question explicitly (#289). Use the most specific of: `none` (internal-only — refactor, perf, internal types), `operator_behavior_changed` (a flag/default/command/output/event the user sees), `public_api_changed`, `workflow_changed`, `setup_changed`, or `architecture_changed`. You do NOT write durable docs — you flag. When torn between `none` and a category, pick the category: a false `none` is how docs go stale.
