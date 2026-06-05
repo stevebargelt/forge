@@ -43,39 +43,49 @@ JS
 
 cat > "$H/harness.sh" <<'SH'
 set -e
-SYS=SENTINEL_SYS_MARKER_42; TASK=SENTINEL_TASK_MARKER_99; CTX=SENTINEL_CTXFILE_MARKER_7
+SYS=SENTINEL_SYS_MARKER_42; TASK=SENTINEL_TASK_MARKER_99
+# pi's resource-loader recognizes BOTH AGENTS.md and CLAUDE.md (per directory it
+# loads the first candidate). Each gets its own sentinel so the proof catches a
+# regression where pi keeps suppressing one but starts loading the other.
+CLA=SENTINEL_CLAUDE_MARKER_7; AGE=SENTINEL_AGENTS_MARKER_8
 mkdir -p ~/.pi/agent ~/proj
 # Custom provider pointing pi at the local mock (the #268 models.json mechanism,
 # used here only as a test seam — NOT forge's runtime path).
 cat > ~/.pi/agent/models.json <<JSON
 {"providers":{"mock":{"baseUrl":"http://127.0.0.1:8899","apiKey":"dummy","api":"anthropic-messages","models":[{"id":"mock-model"}]}}}
 JSON
-printf 'PROJECT CONTEXT\n%s\n' "$CTX" > ~/proj/CLAUDE.md
 cd ~/proj
 node /h/mock.js & sleep 1
 
+# Reset the project's context files to exactly the named set (claude / agents).
+seed_files(){ rm -f ~/proj/CLAUDE.md ~/proj/AGENTS.md
+  for f in "$@"; do case $f in
+    claude) printf 'PROJECT CLAUDE\n%s\n' "$CLA" > ~/proj/CLAUDE.md;;
+    agents) printf 'PROJECT AGENTS\n%s\n' "$AGE" > ~/proj/AGENTS.md;;
+  esac; done; }
 run_pi(){ pi -p --mode json --no-session --provider mock --model mock-model \
   "$@" --append-system-prompt "$SYS" "$TASK" >/dev/null 2>&1 || true; }
 n(){ grep -oh "$1" /tmp/reqs.log 2>/dev/null | wc -l | tr -d ' '; }
 
-# Forge's real flags.
-: > /tmp/reqs.log
-run_pi --no-context-files
-A_SYS=$(n "$SYS"); A_TASK=$(n "$TASK"); A_CTX=$(n "$CTX")
-echo "with --no-context-files: sys=$A_SYS task=$A_TASK ctxfile=$A_CTX"
+# Treatment: BOTH context files present + forge's flag → both must be suppressed.
+seed_files claude agents; : > /tmp/reqs.log; run_pi --no-context-files
+T_SYS=$(n "$SYS"); T_TASK=$(n "$TASK"); T_CLA=$(n "$CLA"); T_AGE=$(n "$AGE")
+echo "with --no-context-files (both files present): sys=$T_SYS task=$T_TASK claude=$T_CLA agents=$T_AGE"
 
-# Control: drop the flag; the project CLAUDE.md should now leak in.
-: > /tmp/reqs.log
-run_pi
-B_CTX=$(n "$CTX")
-echo "without --no-context-files (control): ctxfile=$B_CTX"
+# Controls: each file ALONE, no flag → it must load (isolated because pi loads
+# only the first context candidate per directory).
+seed_files claude; : > /tmp/reqs.log; run_pi; C_CLA=$(n "$CLA")
+seed_files agents; : > /tmp/reqs.log; run_pi; C_AGE=$(n "$AGE")
+echo "without --no-context-files (controls): claude=$C_CLA agents=$C_AGE"
 
 fail=0
-[ "$A_SYS" = "1" ]  || { echo "FAIL: seed+constraints not delivered exactly once (got $A_SYS)"; fail=1; }
-[ "$A_TASK" = "1" ] || { echo "FAIL: task package not delivered exactly once (got $A_TASK)"; fail=1; }
-[ "$A_CTX" = "0" ]  || { echo "FAIL: project context file leaked despite --no-context-files (got $A_CTX)"; fail=1; }
-[ "$B_CTX" -ge "1" ] || { echo "FAIL: control did not load the project file — flag proof inconclusive (got $B_CTX)"; fail=1; }
-[ "$fail" = "0" ] && echo "PASS: forge context delivered exactly once; --no-context-files is load-bearing." || exit 1
+[ "$T_SYS" = "1" ]   || { echo "FAIL: seed+constraints not delivered exactly once (got $T_SYS)"; fail=1; }
+[ "$T_TASK" = "1" ]  || { echo "FAIL: task package not delivered exactly once (got $T_TASK)"; fail=1; }
+[ "$T_CLA" = "0" ]   || { echo "FAIL: project CLAUDE.md leaked despite --no-context-files (got $T_CLA)"; fail=1; }
+[ "$T_AGE" = "0" ]   || { echo "FAIL: project AGENTS.md leaked despite --no-context-files (got $T_AGE)"; fail=1; }
+[ "$C_CLA" -ge "1" ] || { echo "FAIL: control did not load CLAUDE.md — flag proof inconclusive (got $C_CLA)"; fail=1; }
+[ "$C_AGE" -ge "1" ] || { echo "FAIL: control did not load AGENTS.md — flag proof inconclusive (got $C_AGE)"; fail=1; }
+[ "$fail" = "0" ] && echo "PASS: forge context delivered exactly once; --no-context-files suppresses both CLAUDE.md and AGENTS.md." || exit 1
 SH
 
 docker run --rm --user 1000 -e FORGE_NO_BROWSER=1 -v "$H:/h:ro" --entrypoint bash "$IMAGE" /h/harness.sh

@@ -38,18 +38,20 @@ This is the `prompt_strategy: message-arg` value in the #292 runtime metadata.
 
 pi was pointed at a local mock endpoint (a custom `models.json` provider — the
 #268 mechanism used purely as a test seam) so the harness inspects pi's REAL
-outbound request body. With sentinel markers in the system prompt, the task, and
-a project `CLAUDE.md`:
+outbound request body. Distinct sentinels mark the system prompt, the task, and
+BOTH project context files pi recognizes (`CLAUDE.md` and `AGENTS.md`):
 
-| flag set | seed+constraints | task package | project CLAUDE.md |
-|----------|:---:|:---:|:---:|
-| `--no-context-files` (forge) | **1** | **1** | **0** |
-| _control_ (no flag) | 1 | 1 | **1** |
+| flag set | seed+constraints | task package | project CLAUDE.md | project AGENTS.md |
+|----------|:---:|:---:|:---:|:---:|
+| `--no-context-files` (forge), both files present | **1** | **1** | **0** | **0** |
+| _control_ (no flag), each file alone | — | — | **1** | **1** |
 
 So forge's seed+constraints and the task package each reach pi exactly once, and
-`--no-context-files` is **load-bearing** — without it pi additionally loads the
-project's `CLAUDE.md` (the control's 1). Re-run the harness after bumping
-`PI_CLI_VERSION` to confirm the flag's semantics still hold.
+`--no-context-files` is **load-bearing** — without it pi loads the project's
+`CLAUDE.md`/`AGENTS.md` (the controls' 1s). Both files are asserted separately so a
+pi regression that suppressed one but not the other is caught. (pi loads only the
+first context candidate per directory, so each control isolates one file.) Re-run
+the harness after bumping `PI_CLI_VERSION` to confirm the flag's semantics hold.
 
 Forge-side, the docker command is guarded by unit tests in `src/v2/spawn.test.ts`
 (exactly one `--append-system-prompt`, one positional package, `--no-context-files`
