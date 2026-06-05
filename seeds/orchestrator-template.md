@@ -99,7 +99,7 @@ forge route explain <route-key> --json
 ```
 
 Work-type → route-key:
-- `implementation` → `implementation_full` (pipeline-worthy) or `implementation_quick` (small change)
+- `implementation` → `implementation_full` (architectural novelty / unclear plan / high-risk decomposition) or `implementation_quick` (small OR precedent-driven change with a concrete plan — multi-file is fine). The discriminator is novelty + plan-certainty, not file count; see the RACI `Routing guidance:` for the full test.
 - `testing` → `testing_automation` or `testing_exploratory`
 - `documentation` → `documentation_durable` or `documentation_ephemeral`
 - `review` → one or more of `review_wide` / `review_narrow` / `review_frontend` / `review_backend` / `review_security`
@@ -157,7 +157,7 @@ For **Consulted** agents, run them first, read each result, fold into the brief 
 
 **For `implementation` (quick) — invoke chain:**
 
-For small changes (bug fixes, UI tweaks, targeted refactors), skip the pipeline and chain invokes:
+For small changes (bug fixes, UI tweaks, targeted refactors) — and precedent-driven multi-file changes that already have a concrete plan — skip the pipeline and chain invokes:
 
 ```bash
 forge invoke engineer --task "<what to build>" --run-title "<title>"

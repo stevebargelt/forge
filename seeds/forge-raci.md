@@ -84,7 +84,7 @@ force_rules: none
 
 ### route: implementation_full
 
-classification_hints: build feature, multi-file change, architectural implications, cross-cutting
+classification_hints: architectural novelty, unclear boundaries, missing implementation plan, new integration shape, high-risk decomposition
 responsible: feature
 accountable: human
 path: workflow
@@ -95,7 +95,7 @@ force_rules: none
 
 ### route: implementation_quick
 
-classification_hints: bug fix, small feature, ui tweak, targeted refactor
+classification_hints: bug fix, small feature, ui tweak, targeted refactor, precedent-based multi-file change, existing implementation plan, clear bounded change
 responsible: engineer
 accountable: human
 path: invoke_chain
@@ -286,7 +286,8 @@ the pipeline's own first step — the orchestrator does NOT pre-consult
 architecture-advisor (hence `consulted: none` on `implementation_full`).
 
 **Routing guidance: `implementation_quick` — invoke chain.** Bug fixes, small
-features, UI tweaks, and targeted refactors skip the pipeline. The engineer
+features, UI tweaks, targeted refactors, and precedent-driven multi-file changes
+that already have a concrete plan skip the pipeline. The engineer
 builds and self-validates; then the **test-engineer is NOT optional** —
 `required_followups: test-engineer` is mandatory. Skipping it is how "simple UI
 updates" break the app. manual-qa is optional at the orchestrator's judgment for
@@ -294,10 +295,20 @@ user-facing/visual/high-risk changes. No reds run in the quick path. The enginee
 specialist is picked the same way as the pipeline's (frontend-specialist,
 backend-specialist, etc.).
 
-Routing guidance: Full vs quick — full pipeline for new/multi-file/architectural
-or cross-cutting work that needs an architect's risk assessment; quick chain for
-a single-module bug fix, a one-or-two-file feature, a UI/styling/copy tweak, or a
-targeted refactor within clear boundaries. When in doubt, ask the user.
+Routing guidance: Full vs quick — the discriminator is architectural novelty and
+plan-certainty, NOT file count. Use the full pipeline (`implementation_full`)
+when the work is architecturally novel, has unclear boundaries, lacks a concrete
+implementation plan, introduces a new integration shape, or carries risk that
+needs an architect + tech-lead to decompose. Use the quick chain
+(`implementation_quick`) for precedent-driven work — INCLUDING multi-file,
+cross-cutting changes — when the pattern is already established in the codebase,
+the implementation plan is concrete (a written plan doc, or a clear existing
+precedent to mirror), and the change is bounded. Multi-file or cross-cutting
+alone does NOT force the full pipeline; ceremony without risk reduction is waste.
+The mandatory `test-engineer` followup and `docs_impact` handling apply to the
+quick chain exactly as in any quick implementation — quick never means unverified
+or undocumented. When you genuinely can't tell whether the boundaries or risk
+need an architect, ask the user.
 
 **Routing guidance: subject-matter specialist consults** (for
 `documentation_durable` and `architecture`). The specific specialist is chosen at
