@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stringify as yamlStringify } from "yaml";
-import { validateRoutePolicyFile, renderHuman, explainRoute } from "./route.js";
+import { validateRoutePolicyFile, renderHuman, explainRoute, explainRouteFile } from "./route.js";
 import { compileRaciDocument } from "../../raci/compile.js";
 import type { HostEnv } from "../../raci/route-validate.js";
 
@@ -99,6 +99,26 @@ test("proof of life: editing the RACI changes the explained route", () => {
   assert.ok(after.ok);
   assert.equal(after.route.responsible, "deep-researcher");
   assert.notEqual(before.route.responsible, after.route.responsible);
+});
+
+test("explainRouteFile: missing policy is a structured policy_not_found", () => {
+  const res = explainRouteFile(join(dir, "nope.yml"), "research");
+  assert.equal(res.ok, false);
+  assert.ok(!res.ok && res.findings[0]!.code === "policy_not_found");
+});
+
+test("explainRouteFile: corrupt YAML is a structured policy_parse_error (not a crash)", () => {
+  const bad = join(dir, "bad.yml");
+  writeFileSync(bad, "routes: [1, 2"); // unterminated flow — yaml.parse throws
+  const res = explainRouteFile(bad, "research");
+  assert.equal(res.ok, false);
+  assert.ok(!res.ok && res.findings[0]!.code === "policy_parse_error");
+});
+
+test("explainRouteFile: explains a valid policy file by key", () => {
+  const res = explainRouteFile(policyPath, "research");
+  assert.ok(res.ok);
+  assert.equal(res.route.responsible, "research-specialist");
 });
 
 test("renderHuman shows mode + findings", () => {

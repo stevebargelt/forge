@@ -108,6 +108,28 @@ export function explainRoute(policyInput: unknown, routeKey: string): RouteExpla
   return { ok: true, route };
 }
 
+/** Read a policy file and explain a route. A missing OR corrupt policy is a
+ *  STRUCTURED result, never a thrown/printed error — so `--json` stays
+ *  machine-readable for the orchestrator across every failure mode. */
+export function explainRouteFile(policyPath: string, routeKey: string): RouteExplanation {
+  if (!existsSync(policyPath)) {
+    return {
+      ok: false,
+      findings: [{ code: "policy_not_found", message: `routing policy not found: ${policyPath} (run: forge route compile)` }],
+    };
+  }
+  let policyObj: unknown;
+  try {
+    policyObj = parseYaml(readFileSync(policyPath, "utf8"));
+  } catch (e) {
+    return {
+      ok: false,
+      findings: [{ code: "policy_parse_error", message: `cannot parse ${policyPath}: ${(e as Error).message}` }],
+    };
+  }
+  return explainRoute(policyObj, routeKey);
+}
+
 function renderRoute(routeKey: string, r: PolicyRoute): string {
   const lines = [`route: ${routeKey}`];
   lines.push(`  responsible:        ${r.responsible}`);
@@ -163,28 +185,13 @@ export function registerRoute(program: Command): void {
     .description("Explain a route from the compiled policy by exact key. Does NOT classify prompts.")
     .action((routeKey: string, policyArg: string | undefined, opts: { json?: boolean }) => {
       const path = policyArg ? resolve(policyArg) : ROUTING_POLICY_PATH;
-      if (!existsSync(path)) {
-        if (opts.json) {
-          console.log(JSON.stringify({ ok: false, findings: [{ code: "policy_not_found", message: `routing policy not found: ${path} (run: forge route compile)` }] }, null, 2));
-        } else {
-          process.stderr.write(`forge route explain: routing policy not found: ${path}\n  Run: forge route compile\n`);
-        }
-        process.exit(1);
-      }
-      let policyObj: unknown;
-      try {
-        policyObj = parseYaml(readFileSync(path, "utf8"));
-      } catch (e) {
-        process.stderr.write(`forge route explain: cannot parse ${path}: ${(e as Error).message}\n`);
-        process.exit(1);
-      }
-      const res = explainRoute(policyObj, routeKey);
+      const res = explainRouteFile(path, routeKey);
       if (opts.json) {
         console.log(JSON.stringify(res, null, 2));
       } else if (res.ok) {
         console.log(renderRoute(routeKey, res.route));
       } else {
-        console.log(res.findings.map((f) => `[${f.code}] ${f.message}`).join("\n"));
+        process.stderr.write(`${res.findings.map((f) => `[${f.code}] ${f.message}`).join("\n")}\n`);
       }
       if (!res.ok) process.exit(1);
     });
