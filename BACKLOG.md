@@ -16,8 +16,8 @@ When you start a session, read this file. When you finish, update it: move close
 4. **Project-RACI-authoring-through-the-gate — NON-TICKET follow-on (flagged during #280).** `raci propose/apply` operate on the HOST RACI only; not project-override-aware. Authoring a `<project>/.forge/forge-raci.md` through the gated channel is a clean follow-on; file a ticket if wanted.
 
 **External state to remember:**
-- **origin/main is up to date** — all session commits + handoff + the CLAUDE.md re-render were pushed at end-of-session. Working tree clean except the untracked PRD below.
-- **Untracked `docs/prds/provider-agnostic-runtime-pi.md`** is NOT from this session (a pi-runtime PRD present since session start) — deliberately left unstaged/uncommitted.
+- **origin/main was up to date at prior handoff** — current working tree now has new backlog/PRD planning edits that still need commit.
+- **`docs/prds/provider-agnostic-runtime-pi.md` is now accepted for backlog planning** — reconciled into #258/#262/#265 and included in #291's stable-baseline commitment set. Still uncommitted until the working tree is committed.
 - This session's seed/template/CLI changes are pushed but **not live on the host** until item #1 (`forge upgrade`) runs.
 
 **Decisions worth not relitigating:**
@@ -671,6 +671,36 @@ Acceptance:
 
 Relations: #214, #250, #285, `src/v2/reconcile.ts`, `dashboard/src/queries.ts`.
 
+### #291 — [EPIC] Stable, feature-rich Forge baseline
+**Captured:** 2026-06-05. This is the commitment set for getting Forge from "powerful internal tool" to a stable, feature-rich baseline worth relying on across real projects and machines.
+
+**Definition:** stable does not mean feature-frozen. It means the core loop is trustworthy, provider-agnostic enough to survive runtime/provider changes, easy to set up on a new machine, and documented well enough that both technical and less-technical stakeholders can understand what Forge is doing.
+
+**Commit first:**
+1. **Provider-agnostic runtime architecture / Pi PRD lands.** Accept `docs/prds/provider-agnostic-runtime-pi.md`, reconcile #258/#260-#268 to its framing, and pilot Pi as runtime + upstream-provider separation, not merely a third provider.
+2. **Ops/dashboard truthfulness.** Close #290 so stale DB `running` is not shown as ordinary running when filesystem/Docker reality says "reconcile candidate."
+3. **Routing control plane hardening.** Finish the RACI/routing follow-through: #287 route-before-dispatch adherence, #285 governance visibility, project overrides dogfooded, and provider adapters kept thin/generated per #253.
+4. **Collaborative setup and new-machine readiness.** Advance #252 so `forge init`/`forge upgrade`/doctor flows generate and validate project config instead of asking humans to hand-write YAML.
+5. **Docs impact becomes hard to forget.** Build on #289 with enough enforcement or structured checking that operator-facing behavior changes cannot silently ship with unresolved docs impact.
+6. **One showcase workflow.** Advance #251 research-synthesis as the feature-rich demonstration: parallel researchers, synthesis, provider/model diversity, auditability, and dashboard visibility.
+
+**Why these first:** they cover the reliability spine (truthful state, routing adherence), the provider future (Pi/runtime split), the onboarding spine (setup/doctor), the maintenance spine (docs impact), and one high-value feature that proves Forge's multi-agent value beyond direct coding.
+
+**Acceptance for the baseline:**
+- Pi PRD is tracked and #258's backlog language no longer contradicts it.
+- Dashboard/Ops has a tested read-only reconcile-candidate signal.
+- Orchestrator dispatch has evidence that routing policy is resolved before work starts, including project override dogfood.
+- A new-machine/project setup path validates seeds, runtime image/tool availability, provider auth, model policy, docs surfaces, routing policy, and adapters.
+- Implementation runs carry a resolved docs-impact outcome or a filed deferral ticket when operator-facing behavior changes.
+- Research-synthesis can run as a coherent Forge workflow or explicitly chosen orchestrator-mediated equivalent with durable task/audit visibility.
+
+Non-goals:
+- Dropping Claude Code or Codex immediately.
+- Building every future dashboard feature before stabilizing the core loop.
+- Treating "feature-rich" as unbounded scope. This epic is about the first baseline, not the whole product roadmap.
+
+Relations: #258, #290, #273, #287, #252, #289, #251, #253, #285.
+
 ### #251 — Dual-research workflow: v2-native replacement for old investigation
 **Captured from user direction 2026-06-02.** We want the dual-research / synthesis shape as a v2-native replacement for the removed `investigation` pipeline. This is about the workflow semantics; the broader config/setup ergonomics are split to #252.
 
@@ -732,19 +762,30 @@ Relations: #214, #250, #285, `src/v2/reconcile.ts`, `dashboard/src/queries.ts`.
 **Relations:** #252 (collaborative setup / generated config), #250 (`forge ops check --json` is the right kind of provider-neutral primitive), #248 (`/orient` + `/handoff` reconciliation lives today in Claude slash-command prose), #225 (bounded provider/profile choice), provider-agnostic model work / AWN-7.
 
 
-### #258 — [EPIC] Integrate pi (pi.dev) as a third agent runtime — multi-provider + local models
-**Goal:** Add pi (pi.dev, npm `@earendil-works/pi-coding-agent`) as a third agent runtime alongside claude and codex. pi is a container CLI that runs headless (`pi -p --mode json`) emitting JSONL events — codex-shaped — so it slots into forge's existing provider/runtime seam (AWN-7, #220/#224). One integration unlocks pi's 15+ providers (Google, Mistral, Groq, Cerebras, xAI, …) plus local models (Ollama/LM Studio/vLLM via `~/.pi/agent/models.json`) without a native CLI per provider.
+### #258 — [EPIC] Provider-agnostic runtime architecture, with Pi as the pilot/default candidate
+**PRD:** `docs/prds/provider-agnostic-runtime-pi.md`.
 
-**Why:** Multi-provider + local-model access in one integration; cheap/fast reds & triage (Groq/Cerebras/Ollama) fitting the cost-conscious pre-launch stance; reuses the pi-skills forge already mounts.
+**Goal:** Build Forge's provider-agnostic runtime architecture, using pi (pi.dev, npm `@earendil-works/pi-coding-agent`) as the pilot and possible default runtime where it proves reliable. This is not merely "add Pi as a third runtime." The architecture must separate the runtime Forge launches (`pi`, `claude-code`, `codex`) from the upstream provider/model the runtime uses (`anthropic`, `openai`, `groq`, `ollama`, etc.).
 
-**Integration surface:**
+Pi is the forcing function because one headless CLI (`pi -p --mode json`) can front many upstream providers and local models. If Forge models that as "provider = pi," the provider seam stays confused. If Forge models it as "runtime = pi, upstream_provider = X, model = Y, log_format = pi-jsonl," the same shape makes Claude Code and Codex compatibility runtimes instead of architectural centers.
+
+**Why:** Multi-provider + local-model access in one integration; cheap/fast reds & triage (Groq/Cerebras/Ollama) fitting the cost-conscious pre-launch stance; reuses Pi-ecosystem browser-tools/skills; makes provider agnosticism real instead of adapter-shaped prose.
+
+**Required architecture corrections:**
+- Runtime policy names the executable/runtime mechanics.
+- Model policy resolves capability/profile plus upstream provider/model.
+- Usage parsing dispatches by `log_format`, not upstream provider.
+- Prompt/context injection is explicit and testable: Forge context exactly once.
+- Auth strategy separates runtime auth mechanics from upstream provider credentials.
+
+**Pilot integration surface:**
 - Docker image: `npm i -g --ignore-scripts @earendil-works/pi-coding-agent` in `agent-dev-worker.Dockerfile`.
-- Runtime YAML: `seeds/runtimes/pi-*.yml` mirroring `codex-subscription.yml`.
+- Runtime YAML: `seeds/runtimes/pi-*.yml` carrying runtime/log-format/prompt/auth metadata.
 - Invocation: `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y`.
 - Auth: env-var API keys per provider (ANTHROPIC_API_KEY, GEMINI_API_KEY, GROQ_API_KEY…); OAuth via pre-seeded `~/.pi/agent/auth.json` (like the forge-claude-oauth volume).
-- Usage parser: parse JSONL; `agent_end` = completion; token-usage fields are UNDOCUMENTED (see the spike).
-- Model mapping: model-policy resolves (provider, model) then passes pi `--provider/--model`; needs an alias-translation layer.
-- System prompt: `composeSystemPrompt` -> pi `SYSTEM.md`/prompt (the novel mapping; relates to #253 adapter surfaces).
+- Usage parser: parse `pi-jsonl`; `agent_end` = completion; usage fields mapped in #259 and confirmed by a required live capture before parser acceptance.
+- Model mapping: model-policy resolves runtime + upstream provider + model, then passes Pi `--provider/--model`; needs alias translation.
+- System prompt: `composeSystemPrompt` -> Pi prompt/context path (the novel mapping; relates to #253 adapter surfaces).
 - Errors: pi `auto_retry`/`errorMessage` events -> `model_error` (#228).
 
 **Phasing:** Spike (de-risk usage fields) -> Crawl (minimal pi-apikey runtime, one role end-to-end) -> Walk (model-policy, OAuth, error classification) -> Run (local models).
@@ -771,8 +812,8 @@ Add `seeds/runtimes/pi-apikey.yml` mirroring `codex-subscription.yml`; wire spaw
 
 ### #262 — pi: usage-parser hook (parse JSONL events)
 **Phase:** Crawl. Part of #258.
-Implement a provider-keyed usage parser for pi's JSONL (per the spike's field mapping), extracting tokens/model into forge's usage record — same pattern as the codex parser (#224).
-**Acceptance:** parser unit-tested against the spike's committed sample stream; a usage row is recorded for a pi task.
+Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's field mapping), extracting tokens/model/upstream-provider metadata into Forge's usage record. This is the architectural correction: Pi may run Anthropic, OpenAI, Groq, Ollama, etc., so upstream provider cannot select the parser.
+**Acceptance:** parser unit-tested against the spike's committed sample stream; at least one live Pi JSONL stream captured and folded into the fixture before acceptance; a usage row is recorded for a Pi task.
 **Depends on:** spike, runtime story.
 
 
@@ -793,8 +834,8 @@ Route one role (e.g. a red on a cheap provider like Groq/Cerebras, or engineer o
 
 ### #265 — pi: model-policy integration + alias mapping
 **Phase:** Walk. Part of #258.
-Wire pi into `model-policy.yml` resolution; build alias translation between forge aliases and pi provider/model names (`openai/gpt-4o`, `sonnet:high`, `--models` cycling).
-**Acceptance:** a profile resolving to a pi provider routes correctly; an unknown alias fails loud, not silently.
+Wire Pi into `model-policy.yml` resolution by separating runtime selection from upstream provider/model selection. Model policy should resolve capability/profile -> runtime (`pi-*`) + upstream provider (`groq`, `anthropic`, `ollama`, etc.) + concrete model, with alias translation where Pi provider/model names differ from Forge capability aliases.
+**Acceptance:** a profile resolving to a Pi runtime plus upstream provider routes correctly; an unknown runtime/provider/model alias fails loud, not silently.
 **Depends on:** end-to-end story.
 
 
