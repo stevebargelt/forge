@@ -841,6 +841,60 @@ Acceptance:
 Relations: #273.
 
 
+### #287 — Orchestrator must resolve routing policy before dispatch
+**Epic:** #273. **Caught:** 2026-06-05 during first real-project routing test on Pixtron.
+
+The RACI/routing substrate works, but the active orchestrator can still bypass it by habit: in the Pixtron test, the orchestrator initially jumped straight to `forge invoke engineer` from memory instead of resolving the work type through `forge route explain` first. That is a consumption/adherence bug, not a schema/compiler/dashboard bug.
+
+Why this matters: #284 proved that the template can consume `routing-policy.yml`, but a real run showed that prose discipline is still skippable. If the orchestrator can dispatch from memory, project overrides and future routing-policy changes may not affect actual work even though the governance dashboard and `route explain` are correct.
+
+Near-term scope:
+- Strengthen the orchestrator template so every `forge invoke` / `forge run` decision is preceded by `forge route explain <work-type> --json` for the classified work type.
+- Require the orchestrator to summarize the resolved route before dispatch: route key, path, responsible, required followups, and source (`host` or `project`).
+- Explicitly mark direct shortcuts like `forge invoke engineer` invalid unless the route was just resolved from the compiled policy.
+- Add a template/check test that the orchestrator block contains the routing-before-dispatch rule.
+
+Longer-term follow-up to consider:
+- Add a CLI affordance that makes the policy lookup and dispatch one path, e.g. `forge route invoke <work-type> ...` or `forge invoke --route <work-type> ...`, so the orchestrator is not asked to remember two separate commands forever.
+- If feasible, make raw role dispatch warn or fail when called from an orchestrator context without a recent route resolution.
+
+Acceptance:
+- A fresh orchestrator prompt path tells the orchestrator to resolve the route immediately before dispatch.
+- The resolved route is visible in the conversation before the task starts.
+- Project override tests/dogfood can prove a changed project route affects the actual selected responsible/path, not only `forge route explain`.
+- The direct-memory-dispatch failure seen in Pixtron is called out in the test or fixture as the regression case.
+- No change to RACI schema or compiler semantics.
+
+Relations: #273, #280, #284, #285, `seeds/orchestrator-template.md`.
+
+
+### #289 — Documentation impact must be explicitly resolved
+**Caught:** 2026-06-05 during Pixtron NBA routing test.
+
+Documentation keeps getting missed or left to memory, and then goes stale. The routing policy already has `docs_impact:when=operator_behavior_changed` as an informed signal, but an informed signal is too passive: it can be noticed and then silently dropped. We need a structured docs-impact lifecycle so implementation routes close the docs question explicitly.
+
+Proposed lifecycle:
+- Detect docs impact as one of: `none`, `operator_behavior_changed`, `public_api_changed`, `workflow_changed`, `setup_changed`, `architecture_changed`.
+- Resolve any non-`none` impact with exactly one outcome: `updated`, `not_needed_with_reason`, or `deferred_to_backlog`.
+- Route to `documentation-maintainer` when durable docs are needed; do not force docs work for every tiny operator-visible tweak, but never skip without a stated reason.
+- Verify during test/review that the claimed docs outcome matches the change.
+
+Acceptance:
+- Orchestrator guidance says `docs_impact` is not passive; it must be resolved before the run is called complete.
+- Final user summary includes `Docs impact: updated / not needed: <reason> / deferred: #ticket`.
+- If docs are deferred, a backlog ticket is required.
+- Implementer seeds tell agents to flag docs-affecting changes in their result.
+- Test/review guidance can call out missing or implausible docs-impact resolution.
+- Pixtron NBA-style operator-visible changes either get a documentation-maintainer followup or an explicit "not needed" reason based on existing docs coverage.
+
+Non-goals:
+- No dashboard mutation/editing.
+- No mandatory documentation-maintainer invoke for every implementation task.
+- No schema change unless the implementation later needs durable tracking beyond prompts/backlog.
+
+Relations: #273, #288, `seeds/orchestrator-template.md`, implementer seeds, reviewer/test seeds.
+
+
 ### #283 — RACI policy Story 10: provider adapter generation (#253 seam)
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.
 
@@ -856,6 +910,30 @@ Relations: #253, #273, #252, #284, `seeds/orchestrator-template.md`.
 
 
 ## Done (recent)
+
+### #288 — RACI routing: distinguish architectural novelty from precedent-driven multi-file implementation
+**Closed:** 2026-06-05.
+
+**Epic:** #273. **Caught:** 2026-06-05 during Pixtron NBA routing test.
+
+The global RACI currently nudges `implementation_full` for "multi-file" / "cross-cutting" work and `implementation_quick` for "small" / "targeted" work. Pixtron exposed a better discriminator: a task can be multi-file and cross-cutting, yet still not need architect + tech-lead if it is a direct precedent application with an existing concrete plan. The NBA work spans Go, migrations, and web-admin, but mirrors existing WNBA/MLB patterns and already has `NBA-PLAN.md`; forcing the full feature pipeline would add ceremony without reducing risk.
+
+Decision to encode: full pipeline is for architectural novelty, unclear boundaries, missing implementation plan, new integration shape, or risk that needs architect/tech-lead decomposition. Quick chain can handle precedent-driven multi-file work when the pattern is established, the implementation plan is concrete, and mandatory test-engineer followup remains in force. Documentation followup still applies when operator behavior changes.
+
+Scope:
+- Update `seeds/forge-raci.md` routing guidance for `implementation_full` vs `implementation_quick` so "multi-file" alone does not force the full workflow.
+- Refine `classification_hints` if useful: `implementation_full` should emphasize architectural novelty / unclear plan / high-risk decomposition; `implementation_quick` should include precedent-based implementation / existing plan / clear bounded change.
+- Keep the compiled policy shape unchanged unless hint wording changes require recompile; this is primarily global routing guidance.
+- Add or update a test/fixture if the orchestrator-template route examples encode full-vs-quick language.
+
+Acceptance:
+- A real-project case like Pixtron NBA (multi-file, precedent-based, existing plan) routes to `implementation_quick` unless the human explicitly wants the full pipeline.
+- Full pipeline still clearly handles genuinely novel, ambiguous, high-risk, or architecture-affecting implementation.
+- The guidance preserves mandatory `test-engineer` followup on quick implementation.
+- Operator-visible changes still trigger `docs_impact` informed handling; quick does not mean "no docs."
+
+Relations: #273, #287, `seeds/forge-raci.md`.
+
 
 ### #286 — Forge init/upgrade compile derived routing policy
 **Closed:** 2026-06-05.
