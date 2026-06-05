@@ -128,6 +128,7 @@ The expert escape hatch (hand-edit the RACI file + `forge raci validate`, or a f
 ### Step 3 — Present the plan
 
 For any non-trivial routing (anything that spawns a container), tell the user concretely:
+- The **resolved route** from Step 2 — route key · `path` · `responsible` · `required_followups` · `source` (`host`/`project`). This makes the routing basis visible *before* anything spawns; if you can't state it, you skipped Step 2 — go back.
 - Which agent(s) will run
 - The brief / task description you'd pass
 - What "done" looks like
@@ -137,6 +138,8 @@ Wait for explicit confirmation. The user can revise; you re-present until they s
 **Skip this step for in-session work types** (`orientation`, `meta`, `ticketing`, `strategy` / `planning` without consults). Just do them and report.
 
 ### Step 4 — Execute the route
+
+**Hard precondition — resolve the route first (#287). This gates every dispatch below.** Before any `forge invoke` or `forge new`, you MUST have run `forge route explain <route-key> --json` for the classified work type **in this same turn** (Step 2) and presented the resolved route (Step 3). Dispatching a role from memory — jumping straight to `forge invoke engineer` because it "obviously" fits — is a **defect, not a shortcut**: it silently bypasses project routing overrides and any routing-policy change, so the governance dashboard and `route explain` can be correct while the actual work ignores them (this is the Pixtron regression #287 was filed for). A direct `forge invoke <role>` is **invalid unless the route was just resolved from the compiled policy.** If you are about to invoke without a just-resolved route, STOP and run Step 2. (`in-session` work types — `orientation` / `meta` / `ticketing` — are exempt: they spawn no container and have no route to resolve.)
 
 **For `in-session` work:** do it directly in the conversation. Use `forge backlog file/close/move` for ticket changes; edit ephemeral working-state (session notes, briefs, scratch) directly. Durable docs route to the `documentation-maintainer` (see the allowlist split above) — not edited inline here. Answer the question. No container, no run row.
 
@@ -383,6 +386,7 @@ forge notify milestone --run "$RID" --kind batch_complete \
 - **Don't poll with `Bash`.** Use `forge watch` or wait. Polling burns context tokens.
 - **Don't make the user click "Run Next" in the dashboard.** That's your job — call `forge next` after each gate decision.
 - **Don't speculate about what a step will produce.** Wait for the actual output, read it, then advise.
+- **Don't dispatch from memory.** Every `forge invoke` / `forge new` for routed work must be preceded by a `forge route explain <route-key> --json` resolution in the same turn (Step 2), with the route summary presented (Step 3). Routing from habit silently bypasses project overrides and routing-policy changes — the #287 Pixtron regression. A direct `forge invoke <role>` with no just-resolved route is a defect.
 - **Don't run agent containers manually via `docker run`.** Always go through `forge invoke` or `forge new`.
 - **Don't reach for the pipeline when a single invoke would do.** Most non-implementation work is one or two invokes, not a feature run.
 - **Don't mention Claude or Anthropic in commits, PRs, issues, or any github-bound message.** No `Co-Authored-By: Claude` trailer. No "🤖 Generated with Claude Code" signature. No mentioning "Claude", "Anthropic", or "Claude Code" in commit messages, PR titles, PR bodies, issue bodies, or issue comments. Write as a human author would. AI tooling is implementation detail, not public record. See the `no-ai-attribution` force-level constraint for the full rule.
