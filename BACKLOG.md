@@ -769,20 +769,6 @@ Pi is the forcing function because one headless CLI (`pi -p --mode json`) can fr
 **Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
 
 
-### #260 — pi: add pi to the agent-dev-worker Docker image
-**Phase:** Crawl. Part of #258.
-Install pi in `docker/agent-dev-worker.Dockerfile` (`npm i -g --ignore-scripts @earendil-works/pi-coding-agent`, or `pi.dev/install.sh`).
-**Acceptance:** image builds; `pi --version` runs as the agent UID (1000); image-size delta noted. Flag that `forge upgrade` does not auto-rebuild the image (#229), so rollout needs a manual rebuild.
-**Depends on:** #292 for runtime metadata shape.
-
-
-### #261 — pi: runtime YAML + spawn invocation (env-var API-key mode)
-**Phase:** Crawl. Part of #258.
-Add `seeds/runtimes/pi-apikey.yml` mirroring `codex-subscription.yml`; wire spawn to run `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y` and capture stdout JSONL. Auth: pass the provider API key as an env var into the container.
-**Acceptance:** a `forge invoke` bound to the pi runtime dispatches a container that runs pi and returns captured output.
-**Depends on:** #292 runtime metadata shape, Docker-image story.
-
-
 ### #262 — pi: usage-parser hook (parse JSONL events)
 **Phase:** Crawl. Part of #258.
 Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's field mapping), extracting tokens/model/upstream-provider metadata into Forge's usage record. This is the architectural correction: Pi may run Anthropic, OpenAI, Groq, Ollama, etc., so upstream provider cannot select the parser.
@@ -972,7 +958,29 @@ Relations: forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), #253 (
 Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), dashboard run views, reconcile_candidate status color (#290).
 
 
+## Done (recent)
+
+### #261 — pi: runtime YAML + spawn invocation (env-var API-key mode)
+**Closed:** 2026-06-05.
+
+**Phase:** Crawl. Part of #258.
+Add `seeds/runtimes/pi-apikey.yml` mirroring `codex-subscription.yml`; wire spawn to run `pi -p "<prompt>" --mode json --no-context-files --provider X --model Y` and capture stdout JSONL. Auth: pass the provider API key as an env var into the container.
+**Acceptance:** a `forge invoke` bound to the pi runtime dispatches a container that runs pi and returns captured output.
+**Depends on:** #292 runtime metadata shape, Docker-image story.
+
+
+### #260 — pi: add pi to the agent-dev-worker Docker image
+**Closed:** 2026-06-05.
+
+**Phase:** Crawl. Part of #258.
+Install pi in `docker/agent-dev-worker.Dockerfile` (`npm i -g --ignore-scripts @earendil-works/pi-coding-agent`, or `pi.dev/install.sh`).
+**Acceptance:** image builds; `pi --version` runs as the agent UID (1000); image-size delta noted. Flag that `forge upgrade` does not auto-rebuild the image (#229), so rollout needs a manual rebuild.
+**Depends on:** #292 for runtime metadata shape.
+
+
 ### #295 — Usage capture silently fails on fresh installs — insertUsageRows writes dropped legacy columns
+**Closed:** 2026-06-05.
+
 **Correctness bug, external-user-facing.** On a forge DB created fresh today, `model_calls` usage capture silently records nothing. Steve's host is unaffected only because his DB was migrated up from 0.1.x and still carries the legacy columns.
 
 **Root cause:** `insertUsageRows` (src/store/model-calls.ts ~328) INSERTs into `prompt_tokens, completion_tokens, cost` (writing 0,0,0):
@@ -1004,8 +1012,6 @@ Verify against BOTH a fresh DB and a legacy-migrated DB (legacy columns are NOT 
 
 Relations: #141, #155, src/store/model-calls.ts, src/store/db.ts, src/store/schema.ts.
 
-
-## Done (recent)
 
 ### #292 — Runtime metadata seam: separate runtime kind, log format, prompt strategy, auth strategy
 **Closed:** 2026-06-05.
