@@ -17,6 +17,8 @@ import {
   planGitignoreEntries,
   warnSkippedClaudeCommands,
 } from "./init.js";
+import { compilePolicyFile } from "../../raci/host-policy.js";
+import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -154,6 +156,22 @@ export function registerUpgrade(program: Command): void {
           }
         } catch (e) {
           console.log(`[3/4] install-seeds.sh: FAILED — ${(e as Error).message}`);
+        }
+      }
+
+      // Step 3 (cont.): recompile the DERIVED routing policy from the refreshed
+      // RACI seed (#286). routing-policy.yml is generated, never hand-maintained,
+      // so a normal upgrade must not leave it stale — otherwise `route validate`
+      // and the dashboard governance panel would flag drift the instant upgrade
+      // succeeds. Runs whenever a host RACI exists (independent of whether
+      // install-seeds ran), and surfaces a compile failure loudly.
+      {
+        const res = compilePolicyFile(RACI_PATH, ROUTING_POLICY_PATH, { write: !dryRun });
+        if (res.ok) {
+          console.log(`        → routing-policy.yml: ${dryRun ? "would recompile" : "recompiled"} (${res.routes} routes)`);
+        } else {
+          console.warn(`        ⚠ routing-policy.yml NOT recompiled — ${res.error}`);
+          console.warn(`          fix ~/.forge/forge-raci.md, then run: forge route compile`);
         }
       }
 

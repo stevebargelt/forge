@@ -3,6 +3,8 @@ import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkS
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { skeletonBacklogContent } from "../../backlog/skeleton.js";
+import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
+import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 
 // #153: Claude Code session lifecycle hooks (SessionStart / Stop / SessionEnd)
 // write heartbeat files into ~/.forge/orchestrators/<session-id>.json so forge
@@ -109,6 +111,8 @@ export function registerInit(program: Command): void {
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
         console.log(`  .gitignore:       ${describeGitignorePlan(gitignorePlan)}`);
+        const hostPolicyDry = ensureHostRoutingPolicy({ raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, seedRaciPath: seedRaciPath(), dryRun: true });
+        console.log(`  routing policy:   ${hostPolicyDry.status}`);
         if (blockResult.action === "needs-markers") console.warn(`  ⚠ orchestrator block: ${blockResult.message}`);
         return;
       }
@@ -136,6 +140,11 @@ export function registerInit(program: Command): void {
       console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(`  slash commands:   ${slashCommandsResult}`);
       console.log(`  .gitignore:       ${gitignoreResult}`);
+      // #286: keep the derived host routing policy compiled from the RACI seed so
+      // a fresh project is immediately routable without a separate compile step.
+      const hostPolicy = ensureHostRoutingPolicy({ raciPath: RACI_PATH, policyPath: ROUTING_POLICY_PATH, seedRaciPath: seedRaciPath() });
+      console.log(`  routing policy:   ${hostPolicy.status}`);
+      if (!hostPolicy.ok) console.warn(`        ⚠ routing policy not generated — ${hostPolicy.status}`);
       if (installHooks) warnSkippedClaudeCommands(slashCommandsPlan);
       console.log(``);
       console.log(`Note: .claude/settings.local.json and .claude/commands/ are per-developer.`);
@@ -227,6 +236,18 @@ export function createBacklogSkeleton(backlogMdPath: string): "created" | "exist
   if (existsSync(backlogMdPath)) return "exists";
   writeFileSync(backlogMdPath, skeletonBacklogContent());
   return "created";
+}
+
+// The RACI seed bundled with forge, resolved relative to this source file the
+// same way readTemplate() finds the orchestrator template (works under tsx and
+// the built dist). Undefined if not found.
+function seedRaciPath(): string | undefined {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", "..", "..", "seeds", "forge-raci.md"),
+    join(here, "..", "..", "..", "..", "seeds", "forge-raci.md"),
+  ];
+  return candidates.find((c) => existsSync(c));
 }
 
 function readTemplate(): string {
