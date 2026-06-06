@@ -243,6 +243,20 @@ export function codexAuthFile(): string {
   return join(dir, "auth.json");
 }
 
+// #266: pi OAuth credential. Unlike codex (run on the host via `codex login`), pi
+// is NOT installed on the host — so forge OWNS this location: `forge pi login`
+// runs pi's interactive `/login` in a container with this dir as the agent dir,
+// persisting the OAuth token here. Task containers RO-mount just this file; the
+// entrypoint copies it into a writable PI_CODING_AGENT_DIR for in-container token
+// refresh (dies with the container; this host copy is the source of truth).
+// FORGE_PI_DIR overrides the parent dir (tests).
+export function piAgentDir(): string {
+  return process.env.FORGE_PI_DIR ?? join(homedir(), ".forge", "pi-agent");
+}
+export function piAuthFile(): string {
+  return join(piAgentDir(), "auth.json");
+}
+
 // -------- OAuth identity hint (#97 follow-up: oauth detail) --------
 //
 // Anthropic OAuth credentials live inside the forge-claude-oauth Docker

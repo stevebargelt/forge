@@ -14,7 +14,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, "..", "..");
 const SEEDS_RUNTIMES_DIR = join(REPO_ROOT, "seeds", "runtimes");
 
-const RUNTIMES = ["claude-bedrock", "claude-oauth", "claude-apikey", "codex-subscription", "pi-apikey"];
+const RUNTIMES = ["claude-bedrock", "claude-oauth", "claude-apikey", "codex-subscription", "pi-apikey", "pi-oauth"];
 
 for (const name of RUNTIMES) {
   test(`runtime seed '${name}.yml' parses + Zod-validates`, () => {
@@ -39,6 +39,7 @@ const EXPECTED_METADATA: Record<string, ReturnType<typeof resolveRuntimeMetadata
   "claude-apikey": { runtimeKind: "claude-code", logFormat: "claude-stream-json", promptStrategy: "claude-stdin-package", authStrategy: "env-provider-api-key" },
   "codex-subscription": { runtimeKind: "codex", logFormat: "codex-jsonl", promptStrategy: "stdin-prepend", authStrategy: "codex-auth" },
   "pi-apikey": { runtimeKind: "pi", logFormat: "pi-jsonl", promptStrategy: "message-arg", authStrategy: "env-provider-api-key" },
+  "pi-oauth": { runtimeKind: "pi", logFormat: "pi-jsonl", promptStrategy: "message-arg", authStrategy: "pi-auth-json" },
 };
 
 for (const [name, expected] of Object.entries(EXPECTED_METADATA)) {

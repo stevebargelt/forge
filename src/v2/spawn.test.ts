@@ -63,6 +63,7 @@ beforeEach(() => {
     FORGE_AUTH_MODE: process.env.FORGE_AUTH_MODE,
     FORGE_AWS_CREDS_FOR_TEST: process.env.FORGE_AWS_CREDS_FOR_TEST,
     FORGE_CODEX_DIR: process.env.FORGE_CODEX_DIR,
+    FORGE_PI_DIR: process.env.FORGE_PI_DIR,
   };
   for (const k of Object.keys(envSnap)) delete process.env[k];
 });
@@ -451,4 +452,38 @@ test("#263: red read-only project mount is still enforced for the pi runtime", (
   process.env.ANTHROPIC_API_KEY = "sk-test-key";
   const { args } = buildDockerArgs(loadPiSeed(), { ...BASE_CTX, PROJECT_MODE: "ro" });
   assert.equal(pickMount(args, "/project"), `${BASE_CTX.PROJECT_DIR}:/project:ro`);
+});
+
+// ── #266: pi-oauth runtime — pi-auth credential mount ────────────────────────
+function loadPiOauthSeed(): Runtime {
+  const here = _dirname(_fileURLToPath(import.meta.url));
+  const seed = _join(here, "..", "..", "seeds", "runtimes", "pi-oauth.yml");
+  return _RuntimeSchema.parse(_parseYaml(_readFileSync(seed, "utf8")));
+}
+
+test("#266: pi-auth RO-mounts the host pi auth.json and sets PI_CODING_AGENT_DIR", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "forge-pi-"));
+  writeFileSync(join(piDir, "auth.json"), '{"providers":{}}');
+  process.env.FORGE_PI_DIR = piDir;
+  const { args } = buildDockerArgs(loadPiOauthSeed(), BASE_CTX);
+  // the credential is mounted read-only at the fixed container path
+  const mount = pickMount(args, "/forge-pi-auth/auth.json");
+  assert.equal(mount, `${join(piDir, "auth.json")}:/forge-pi-auth/auth.json:ro`);
+  // pi reads/refreshes its token from PI_CODING_AGENT_DIR (entrypoint copies there)
+  assert.equal(pickEnv(args).PI_CODING_AGENT_DIR, "/tmp/pi-agent");
+});
+
+test("#266: pi-auth fails loud when the host credential is missing (run forge pi login)", () => {
+  process.env.FORGE_PI_DIR = mkdtempSync(join(tmpdir(), "forge-pi-empty-")); // no auth.json
+  assert.throws(() => buildDockerArgs(loadPiOauthSeed(), BASE_CTX), /auth\.mode=pi-auth.*missing.*forge pi login/s);
+});
+
+test("#266: pi-oauth invocation carries no --api-key (auth comes from auth.json)", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "forge-pi-nokey-"));
+  writeFileSync(join(piDir, "auth.json"), '{"providers":{}}');
+  process.env.FORGE_PI_DIR = piDir;
+  const { args } = buildDockerArgs(loadPiOauthSeed(), BASE_CTX);
+  const cmd = argsAfterImage(args, "agent-dev-worker:latest");
+  assert.equal(cmd[0], "pi");
+  assert.ok(!cmd.includes("--api-key"), "OAuth runtime must not pass --api-key");
 });

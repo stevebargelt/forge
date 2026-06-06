@@ -276,7 +276,9 @@ const DetectDefSchema = z.object({
 const AuthDefSchema = z.object({
   // codex-auth (AWN-7 Walk): RO-mount the host Codex subscription credential
   // (~/.codex/auth.json); the entrypoint copies it into a writable CODEX_HOME.
-  mode: z.enum(["env-snapshot", "mount", "apikey", "oauth-volume", "codex-auth"]),
+  // pi-auth (#266): same pattern for pi's OAuth credential (~/.forge/pi-agent/
+  // auth.json, minted by `forge pi login`); entrypoint copies into PI_CODING_AGENT_DIR.
+  mode: z.enum(["env-snapshot", "mount", "apikey", "oauth-volume", "codex-auth", "pi-auth"]),
 });
 
 // #292 — runtime metadata seam. These declare a runtime's EXECUTION BEHAVIOR
@@ -388,6 +390,7 @@ const AUTH_MODE_TO_STRATEGY: Record<Auth["mode"], AuthStrategy> = {
   "oauth-volume": "oauth-volume",
   "codex-auth": "codex-auth",
   apikey: "env-provider-api-key",
+  "pi-auth": "pi-auth-json",
   "env-snapshot": "aws-bedrock",
   mount: "aws-bedrock",
 };

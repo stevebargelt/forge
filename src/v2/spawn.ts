@@ -25,6 +25,7 @@ import {
   awsConfigDir,
   resolveAwsProfile,
   codexAuthFile,
+  piAuthFile,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
 
@@ -55,6 +56,7 @@ const AUTH_STATE_CONTAINER_PATH = "/forge-auth/state.json";
 // entrypoint detects this file and copies it into a writable CODEX_HOME. A
 // top-level path (not under /home/agent) keeps it off the oauth-volume mount.
 const CODEX_AUTH_CONTAINER_PATH = "/forge-codex-auth/auth.json";
+const PI_AUTH_CONTAINER_PATH = "/forge-pi-auth/auth.json";
 
 export type BuildArgsResult = {
   args: string[];
@@ -111,6 +113,20 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
         );
       }
       args.push("-v", `${authFile}:${CODEX_AUTH_CONTAINER_PATH}:ro`);
+      break;
+    }
+    case "pi-auth": {
+      // #266: RO-mount ONLY pi's OAuth credential (forge-managed, minted by
+      // `forge pi login`). Fail loud if absent — a missing bind source would make
+      // docker create a phantom dir. The entrypoint copies it into a writable
+      // PI_CODING_AGENT_DIR so in-container token refresh works.
+      const authFile = piAuthFile();
+      if (!existsSync(authFile)) {
+        throw new Error(
+          `auth.mode=pi-auth but ${authFile} is missing — run \`forge pi login\` once to authenticate pi (OAuth).`,
+        );
+      }
+      args.push("-v", `${authFile}:${PI_AUTH_CONTAINER_PATH}:ro`);
       break;
     }
   }

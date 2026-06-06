@@ -40,6 +40,20 @@ if [ -f /forge-codex-auth/auth.json ]; then
   export CODEX_HOME
 fi
 
+# pi (#266): same pattern for pi's OAuth credential. Copy the RO-mounted auth.json
+# into a writable PI_CODING_AGENT_DIR (pi reads + refreshes its token there). The
+# refreshed copy dies with the container; the host source of truth is never
+# written from here. No-op for non-pi runtimes. PI_CODING_AGENT_DIR defaults here
+# if the runtime didn't set it.
+if [ -f /forge-pi-auth/auth.json ]; then
+  PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR:-/tmp/pi-agent}"
+  mkdir -p "$PI_CODING_AGENT_DIR"
+  chmod 700 "$PI_CODING_AGENT_DIR"
+  cp /forge-pi-auth/auth.json "$PI_CODING_AGENT_DIR/auth.json"
+  chmod 600 "$PI_CODING_AGENT_DIR/auth.json"
+  export PI_CODING_AGENT_DIR
+fi
+
 # #245: when forge mounts a container-local node_modules shadow volume (set via
 # spawn.ts), Docker creates it root-owned. The agent runs as UID 1000 and must
 # be able to `npm install` into it, so chown it to agent. Only touches the

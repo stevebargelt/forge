@@ -1,0 +1,88 @@
+# forge v2 — pi-oauth runtime (#258 Walk / #266)
+#
+# pi (pi.dev) coding agent authenticated via a pre-seeded OAuth credential — your
+# Anthropic Claude Pro/Max subscription (or ChatGPT / Copilot), NOT an API key.
+# `forge pi login` mints ~/.forge/pi-agent/auth.json once (pi's interactive
+# `/login`, OAuth via claude.ai); this runtime RO-mounts that file and the
+# entrypoint copies it into a writable PI_CODING_AGENT_DIR for in-container token
+# refresh (the host copy is the source of truth, never written from the container).
+#
+# Selected EXPLICITLY with `forge invoke --runtime pi-oauth`; not auto-detected,
+# not yet in the model-policy provider binding (#265).
+#
+# Installed at ~/.forge/runtimes/pi-oauth.yml by install-seeds.sh.
+
+name: pi-oauth
+description: |
+  pi (pi.dev) via a pre-seeded OAuth credential (Claude subscription). Run
+  `forge pi login` once, then: forge invoke --runtime pi-oauth.
+
+# #292 runtime EXECUTION metadata.
+runtime_kind: pi
+log_format: pi-jsonl
+prompt_strategy: message-arg
+auth_strategy: pi-auth-json
+
+detect:
+  # Not auto-detected — selected only via `forge invoke --runtime pi-oauth`.
+  env: []
+  files: []
+
+image: agent-dev-worker:latest
+
+models:
+  # Legacy-mode default model handed to pi as ${MODEL}; provider pinned below.
+  # Must be a model your authenticated subscription can serve.
+  default: claude-sonnet-4-6
+
+auth:
+  mode: pi-auth   # RO-mount ~/.forge/pi-agent/auth.json; entrypoint copies it to
+  # PI_CODING_AGENT_DIR. Minted by `forge pi login`. Fail-loud if absent.
+
+env:
+  # pi reads + refreshes its OAuth token from PI_CODING_AGENT_DIR/auth.json.
+  PI_CODING_AGENT_DIR: /tmp/pi-agent
+  # pi needs no headless browser; skip the entrypoint's Chromium startup.
+  FORGE_NO_BROWSER: "1"
+
+mounts:
+  - host: "${TASK_DIR}"
+    container: /task
+    mode: rw
+
+  - host: "${PROJECT_DIR}"
+    container: /project
+    mode: "${PROJECT_MODE:-rw}"      # 'ro' for red agents; runner sets per-step
+
+  - host: "${DESIGN_DIR}"
+    container: /design
+    mode: ro
+    optional: true
+
+invocation:
+  command: pi
+  args:
+    - -p                              # --print: non-interactive, process prompt and exit
+    - --mode
+    - json                            # JSONL events on stdout (pi usage parser, #262)
+    - --no-context-files              # don't auto-load /project AGENTS.md/CLAUDE.md
+    - --no-session                    # ephemeral; don't persist a session file
+    - --provider
+    - anthropic                       # the OAuth-authenticated provider (Claude subscription)
+    - --model
+    - "${MODEL}"
+    - --append-system-prompt
+    - "${SYSTEM_PROMPT}"
+    - "${TASK_PACKAGE_MARKDOWN}"      # task package as the positional message
+  # No --api-key: auth comes from PI_CODING_AGENT_DIR/auth.json (OAuth).
+  # No `stdin:` — pi reads the prompt from args (message-arg).
+
+container:
+  name: "forge-${TASK_ID}"
+  remove_on_exit: true
+  idle_timeout_seconds: 600
+
+result:
+  file: /task/result.json
+  stdout_log: container.stdout.log
+  stderr_log: container.stderr.log
