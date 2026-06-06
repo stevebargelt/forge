@@ -29,13 +29,14 @@ export function registerNew(program: Command): void {
     .option("--unrouted", "#297: acknowledge an intentionally unrouted run (suppress the route-preflight warning)")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
-      validateCredsForNewRun();
       ensureForgeDirs();
 
       const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
       const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
 
-      // #297: route-resolution preflight before creating the run / spawning.
+      // #297: route-resolution preflight FIRST — before any credential/Docker work.
+      // validateCredsForNewRun() can run an OAuth Docker probe, so a bogus --route
+      // (or FORGE_ROUTE_PREFLIGHT=error) must surface here, not after auth work.
       applyRoutePreflight({
         command: "forge new",
         route: (options as { route?: string }).route,
@@ -43,6 +44,8 @@ export function registerNew(program: Command): void {
         projectDir,
         enforce: preflightEnforceFromEnv(),
       });
+
+      validateCredsForNewRun();
 
       // Load YAML (workspace default with project override).
       const workflow = loadWorkflow(workflowName, { projectDir });
