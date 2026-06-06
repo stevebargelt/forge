@@ -109,43 +109,11 @@ export function registerUsage(program: Command): void {
         console.log(`No runs dir at ${runsDir}. Nothing to backfill.`);
         return;
       }
-      const tasks = collectTaskLogs(runsDir);
-      const ordered = tasks.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      const slice = opts.limit ? ordered.slice(0, opts.limit) : ordered;
-      console.log(`Found ${slice.length}${opts.limit && tasks.length > opts.limit ? ` of ${tasks.length}` : ""} task log(s) to scan.`);
-      // Build the task_id → agent_alias index once so backfilled rows carry
-      // the alias they ran under (otherwise rollup `--by alias` shows "(no
-      // alias)" for everything historical).
-      const aliasIdx = buildAliasIndex();
-      let totalRows = 0;
-      let scanned = 0;
-      let withData = 0;
-      let withErrors = 0;
-      let withAlias = 0;
-      for (const t of slice) {
-        scanned += 1;
-        const alias = aliasIdx.get(t.taskId);
-        if (alias) withAlias += 1;
-        // #262: select the parser from the manifest's runtime log_format, so
-        // pi/codex historical logs backfill through the right parser (not the
-        // claude default, which would record zero rows).
-        const logFormat = manifestLogFormat(t.logPath);
-        const captureOpts = { taskId: t.taskId, ...(alias ? { alias } : {}), ...(logFormat ? { logFormat } : {}) };
-        if (opts.dryRun) {
-          // Parse-only; no writes. Same parser selection as the write path.
-          try {
-            const rows = extractUsageByLogFormat(t.logPath, captureOpts);
-            if (rows.length > 0) { withData += 1; totalRows += rows.length; }
-          } catch { withErrors += 1; }
-          continue;
-        }
-        const result = captureUsageForTask(t.logPath, captureOpts);
-        if (result.error) { withErrors += 1; continue; }
-        if (result.rowCount > 0) { withData += 1; totalRows += result.rowCount; }
-      }
+      const s = performBackfill(runsDir, opts);
+      console.log(`Found ${s.scanned}${opts.limit && s.total > s.scanned ? ` of ${s.total}` : ""} task log(s) to scan.`);
       const verb = opts.dryRun ? "would insert" : "inserted";
-      console.log(`Scanned ${scanned} task(s); ${withData} had usable data; ${verb} ${totalRows} model_call row(s); ${withAlias} tagged with alias.`);
-      if (withErrors > 0) console.log(`(${withErrors} task(s) had parse errors — likely incomplete logs)`);
+      console.log(`Scanned ${s.scanned} task(s); ${s.withData} had usable data; ${verb} ${s.totalRows} model_call row(s); ${s.withAlias} tagged with alias.`);
+      if (s.withErrors > 0) console.log(`(${s.withErrors} task(s) had parse errors — likely incomplete logs)`);
     });
 }
 
@@ -294,6 +262,49 @@ function fmtTokens(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return (n / 1000).toFixed(1) + "K";
   return (n / 1_000_000).toFixed(2) + "M";
+}
+
+export type BackfillStats = {
+  total: number;     // task logs found on disk
+  scanned: number;   // processed (after --limit)
+  withData: number;  // logs that yielded ≥1 usage row
+  withErrors: number;
+  totalRows: number;
+  withAlias: number;
+};
+
+// The backfill core, separated from the CLI action so the command path is
+// testable (#262): walk the runs dir, and for each historical task log select the
+// usage parser from the manifest's runtime.logFormat — NOT a hardcoded claude
+// parser, which would record zero rows for pi/codex logs. dry-run parses without
+// writing; otherwise inserts via captureUsageForTask.
+export function performBackfill(runsDir: string, opts: { dryRun?: boolean; limit?: number }): BackfillStats {
+  const tasks = collectTaskLogs(runsDir);
+  const ordered = tasks.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const slice = opts.limit ? ordered.slice(0, opts.limit) : ordered;
+  // task_id → agent_alias so backfilled rows carry the alias they ran under.
+  const aliasIdx = buildAliasIndex();
+  const s: BackfillStats = { total: tasks.length, scanned: 0, withData: 0, withErrors: 0, totalRows: 0, withAlias: 0 };
+  for (const t of slice) {
+    s.scanned += 1;
+    const alias = aliasIdx.get(t.taskId);
+    if (alias) s.withAlias += 1;
+    // #262: parser from the manifest's runtime log_format (pi/codex/claude), so
+    // historical pi/codex logs don't silently backfill zero via the claude default.
+    const logFormat = manifestLogFormat(t.logPath);
+    const captureOpts = { taskId: t.taskId, ...(alias ? { alias } : {}), ...(logFormat ? { logFormat } : {}) };
+    if (opts.dryRun) {
+      try {
+        const rows = extractUsageByLogFormat(t.logPath, captureOpts); // same selection as the write path
+        if (rows.length > 0) { s.withData += 1; s.totalRows += rows.length; }
+      } catch { s.withErrors += 1; }
+      continue;
+    }
+    const result = captureUsageForTask(t.logPath, captureOpts);
+    if (result.error) { s.withErrors += 1; continue; }
+    if (result.rowCount > 0) { s.withData += 1; s.totalRows += result.rowCount; }
+  }
+  return s;
 }
 
 // Walk runs dir to find every task log on disk. Returns task_id + log path +
