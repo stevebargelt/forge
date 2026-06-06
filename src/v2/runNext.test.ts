@@ -1472,3 +1472,82 @@ test("runNext: #264 pi step with no result.json fails with an attributed error, 
     else process.env.ANTHROPIC_API_KEY = prevKey;
   }
 });
+
+// #265: full-path integration — a pi profile must thread the resolved UPSTREAM
+// provider all the way through runNext -> SpawnContext -> buildDockerArgs into
+// pi's `--provider` arg (the spawn unit test builds SpawnContext by hand; this
+// proves runNext actually wires resolution.provider into it).
+const PI_UPSTREAM_WORKFLOW: Workflow = {
+  name: "test-pi-upstream",
+  description: "single pi step resolved via model-policy",
+  inputs: [{ name: "brief", required: true, type: "text" }],
+  steps: [
+    { id: "pi-step", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
+  ],
+};
+
+test("runNext: a pi profile threads the resolved upstream provider into pi's --provider (#265)", async () => {
+  const policyPath = join(process.env.FORGE_HOME!, "model-policy.yml");
+  const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "pi-upstream-stub.yml");
+  // provider=groq: probeAuth returns "unknown" (no probe yet) → availability ok,
+  // no live credential needed. runtime auth.mode=oauth-volume → no env required.
+  writeFileSync(policyPath, `
+on_unavailable: fail
+model_profiles:
+  pi-groq:
+    provider: groq
+    auth: api
+    runtime: pi-upstream-stub
+    map:
+      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }
+defaults:
+  profile: pi-groq
+  activity: {}
+allowed_profiles: [pi-groq]
+`);
+  mkdirSync(dirname(runtimePath), { recursive: true });
+  writeFileSync(runtimePath, `name: pi-upstream-stub
+description: test stub pi runtime with --provider threading
+runtime_kind: pi
+log_format: pi-jsonl
+prompt_strategy: message-arg
+auth_strategy: env-provider-api-key
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: oauth-volume
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: pi
+  args: ["-p", "--provider", "\${UPSTREAM_PROVIDER:-anthropic}", "--model", "\${MODEL}"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+
+  try {
+    const { runId } = startRun({
+      workflow: PI_UPSTREAM_WORKFLOW,
+      title: "pi upstream threading",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    let captured: string[] | undefined;
+    const capturingExec: DockerExecFn = async ({ args }) => { captured = args; return 0; };
+    await runNext({ runId, workflow: PI_UPSTREAM_WORKFLOW, dockerExec: capturingExec });
+
+    assert.ok(captured, "dockerExec should have been invoked");
+    const provIdx = captured!.indexOf("--provider");
+    assert.ok(provIdx >= 0, "docker args must contain --provider");
+    assert.equal(captured![provIdx + 1], "groq"); // resolved upstream, not the :- fallback
+    const modelIdx = captured!.indexOf("--model");
+    assert.equal(captured![modelIdx + 1], "llama-3.3-70b-versatile");
+  } finally {
+    rmSync(policyPath, { force: true });
+    rmSync(runtimePath, { force: true });
+  }
+});
