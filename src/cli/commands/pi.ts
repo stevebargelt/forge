@@ -7,7 +7,7 @@
 
 import type { Command } from "commander";
 import { spawn as cpSpawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { piAgentDir, piAuthFile } from "../../util/creds.js";
 
 function runInteractive(cmd: string, args: string[]): Promise<number> {
@@ -18,6 +18,25 @@ function runInteractive(cmd: string, args: string[]): Promise<number> {
   });
 }
 
+// The host pi-agent dir holds a long-lived OAuth credential — keep it private
+// (0700). mkdir mode is umask-masked, so chmod explicitly. Idempotent.
+export function ensureSecurePiAgentDir(): string {
+  const dir = piAgentDir();
+  mkdirSync(dir, { recursive: true });
+  try { chmodSync(dir, 0o700); } catch { /* best-effort; warn handled by caller flow */ }
+  return dir;
+}
+
+// Tighten the saved credential to 0600 — pi writes it via the container bind
+// mount, so we don't control the mode it lands with. Returns whether the file
+// exists (the login success signal). No-op + false when absent.
+export function securePiAuthFile(): boolean {
+  const f = piAuthFile();
+  if (!existsSync(f)) return false;
+  try { chmodSync(f, 0o600); } catch { /* best-effort */ }
+  return true;
+}
+
 export function registerPi(program: Command): void {
   const pi = program.command("pi").description("pi runtime auth (#266).");
 
@@ -26,8 +45,7 @@ export function registerPi(program: Command): void {
     .option("--image <name>", "agent image to use", "agent-dev-worker")
     .description("Run pi interactively in a container so its OAuth credential lands in ~/.forge/pi-agent/auth.json")
     .action(async (opts: { image: string }) => {
-      const dir = piAgentDir();
-      mkdirSync(dir, { recursive: true });
+      const dir = ensureSecurePiAgentDir();
       console.log(`Logging pi in. Credential will persist at ${piAuthFile()}.`);
       console.log("When pi's prompt appears, type:  /login   (bare), then SELECT a provider from the menu —");
       console.log("  e.g. 'Claude Pro/Max' for a subscription (OAuth), or an API-key provider.");
@@ -51,12 +69,14 @@ export function registerPi(program: Command): void {
         opts.image,
       ]);
 
-      if (!existsSync(piAuthFile())) {
+      // securePiAuthFile both tightens the saved credential to 0600 AND reports
+      // whether it exists (the login success signal).
+      if (!securePiAuthFile()) {
         console.log(`\n⚠ No credential at ${piAuthFile()} (pi exited ${code}).`);
         console.log("  Did `/login` (then provider select) complete? Re-run `forge pi login` to retry.");
         return;
       }
-      console.log(`\n✓ pi OAuth credential saved at ${piAuthFile()}.`);
+      console.log(`\n✓ pi OAuth credential saved at ${piAuthFile()} (dir 0700, file 0600).`);
       console.log("  Use it with:  forge invoke --runtime pi-oauth --route <key> --task \"…\"");
     });
 }
