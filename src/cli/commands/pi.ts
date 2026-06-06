@@ -31,9 +31,13 @@ export function registerPi(program: Command): void {
       console.log(`Logging pi in. Credential will persist at ${piAuthFile()}.`);
       console.log("When pi's prompt appears, type:  /login   (bare), then SELECT a provider from the menu —");
       console.log("  e.g. 'Claude Pro/Max' for a subscription (OAuth), or an API-key provider.");
-      console.log("Follow the OAuth URL it prints (open in a browser, paste the code back). Type /exit when done.");
-      console.log("NOTE: subscription usage via a third-party harness is billed per-token as 'extra usage'");
-      console.log("      (claude.ai/settings/usage), NOT against your flat plan limits.\n");
+      console.log("Open the OAuth URL it prints, authorize, then:");
+      console.log("  → the browser WILL fail to load the localhost callback — that is EXPECTED (pi's callback");
+      console.log("    server is inside this container). Copy the FULL failed URL from the address bar and");
+      console.log("    paste it into pi's 'Paste the authorization code or full redirect URL' prompt.");
+      console.log("Type /exit when done.");
+      console.log("NOTE: subscription usage via a third-party harness is billed per-token as 'extra usage',");
+      console.log("      NOT against your flat plan limits.\n");
 
       // Bind-mount the host agent dir at the container's PI_CODING_AGENT_DIR so
       // pi writes auth.json straight to the host. --entrypoint pi runs the TUI
