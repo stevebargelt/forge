@@ -60,7 +60,12 @@ model choice through an **upstream provider/profile**.
 
 Example policy vocabulary:
 
+> **Draft vocabulary — not implemented as shown.** This block is a conceptual sketch that combines runtime-execution fields and model-selection fields into a unified shape that was never implemented literally. What shipped:
+> - **Runtime execution metadata (#292)** lives on the runtime YAML as: `runtime_kind`, `log_format`, `prompt_strategy`, `auth_strategy`. Note: the shipped Pi values differ from this draft — `prompt_strategy` is `message-arg` (not `stdin-prepend`) and `auth_strategy` is `env-provider-api-key` (not `provider_env`).
+> - **Upstream provider + model selection (#265)** lives on the model-policy profile as `provider:` (the upstream vendor) + optional `runtime:` (explicit runtime YAML name) + the capability `map:`. There is no literal `upstream_provider:` field on the runtime YAML, and `model:` is not a runtime YAML field for provider selection.
+
 ```yaml
+# draft vocabulary — see note above
 runtime: pi
 log_format: pi-jsonl
 prompt_strategy: stdin-prepend
@@ -72,6 +77,7 @@ model: llama-3.3-70b-versatile
 Existing runtimes become instances of the same shape:
 
 ```yaml
+# draft vocabulary — see note above
 runtime: claude-code
 log_format: claude-stream-json
 prompt_strategy: claude-stdin-package
@@ -81,6 +87,7 @@ model: claude-sonnet-4-6
 ```
 
 ```yaml
+# draft vocabulary — see note above
 runtime: codex
 log_format: codex-jsonl
 prompt_strategy: stdin-prepend
