@@ -393,6 +393,23 @@ forge invoke test-engineer --task "write integration tests for src/v2/spawn.ts �
 
 The pattern: ONE invoke per agent, chained or parallelized by you. Forge doesn't manage the composition — you do, in the conversation.
 
+### Reviewing implemented work — use the bounded review-loop, not a manual relay (#301)
+
+Once an implementation's **initial commit/range has landed**, you review it with the bounded `forge review-loop` command — **do NOT hand-relay reviewer→fixer cycles** (manually invoking `red-wide` then `engineer` then `red-wide` again). That relay is exactly what the loop automates.
+
+```bash
+forge review-loop <ticket-id> --max-rounds 2 --route <resolved-route>
+# or pin the range explicitly:  --since <sha>
+```
+
+Rules:
+- **Post-implementation ONLY.** `review-loop` reviews already-committed work — it is NOT for the initial implementation. You still own route resolution and the first implementation dispatch (for Forge-on-Forge, the first implementation you do directly), and you commit it before looping.
+- **Present before you start the loop:** ticket id, route key, commit range (or `--since`), max rounds, the reviewer/fixer roles (`red-wide` read-only / `engineer`), and the stop conditions. (`forge review-loop … --dry-run` prints exactly this.)
+- **Don't manually relay** reviewer/fixer when `review-loop` is available. The manual `red-wide` → `engineer` chain is the **fallback** only.
+- **Stop and ask the user** when the loop stops on `blocked_by_reviewer` or `needs_fix_max_rounds`, or whenever the work would need live spend, a credential, a live DB migration, a destructive operation, or a product/acceptance decision. The loop never auto-does any of those.
+- **Close the ticket only when** `review-loop` reports `closeable` (reviewer `pass` AND deterministic verification green). Never close on a non-`passed` stop reason.
+- **Fallback:** if `review-loop` is unavailable or fails structurally (not a normal verdict — e.g. `reviewer_failed`), present the manual review result to the user rather than silently looping by hand.
+
 ## Available workflows (pipeline only)
 
 Implementation work goes through the pipeline. There are three feature workflow variants:
