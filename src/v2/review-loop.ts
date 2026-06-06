@@ -49,7 +49,9 @@ export function resolveCommitRange(
 
   const num = ticketId.replace(/^#/, "").trim();
   // Commits whose subject/body references the ticket, e.g. "(#301)" or "#301".
-  const matched = git(["log", "--format=%H", `--grep=#${num}\\b`, "--extended-regexp"])
+  // POSIX ERE (git --extended-regexp) has no `\b`; match #<num> not followed by a
+  // digit (so #301 doesn't also catch #3010) — `([^0-9]|$)`.
+  const matched = git(["log", "--format=%H", `--grep=#${num}([^0-9]|$)`, "--extended-regexp"])
     .split("\n").map((s) => s.trim()).filter(Boolean);
   if (matched.length === 0) return { mode: "none", diffRange: "", shas: [], spansUnmatched: false };
 
@@ -184,10 +186,15 @@ export type ReviewLoopOutcome = {
   rounds: RoundRecord[];
 };
 
+type Awaitable<T> = T | Promise<T>;
+
+// Deps are Awaitable so the real wiring (slice 6) can use async invoke() while the
+// pure unit tests keep returning plain values. The loop control flow is unchanged
+// from the reviewed sync version — only `await`ed.
 export type ReviewLoopDeps = {
-  verify: () => VerificationResult;
-  review: (verification: VerificationResult) => ReviewDispatch;
-  fix: (findings: Finding[]) => FixDispatch;
+  verify: () => Awaitable<VerificationResult>;
+  review: (verification: VerificationResult) => Awaitable<ReviewDispatch>;
+  fix: (findings: Finding[]) => Awaitable<FixDispatch>;
 };
 
 /** Run the bounded review/fix loop. Each round: run deterministic verification;
@@ -196,12 +203,12 @@ export type ReviewLoopDeps = {
  *  passes, review; on needs_fix (and rounds remain) → fix → next round. Stops on
  *  pass, blocked, max rounds, or verification/fixer/reviewer failure. Pure: all
  *  effects via `deps`. */
-export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps): ReviewLoopOutcome {
+export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps): Promise<ReviewLoopOutcome> {
   const maxRounds = Math.max(1, opts.maxRounds ?? 2);
   const rounds: RoundRecord[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
-    const verification = deps.verify();
+    const verification = await deps.verify();
 
     // Verification first. If it fails, do NOT review — the failure is the work.
     if (!verification.ok) {
@@ -211,7 +218,7 @@ export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps
         rounds.push(rec);
         return { stopReason: "verification_failed", closeable: false, rounds };
       }
-      const fix = deps.fix(findings);
+      const fix = await deps.fix(findings);
       rec.fixAttempted = true;
       if (!fix.ok) {
         rec.fixError = fix.error;
@@ -223,7 +230,7 @@ export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps
     }
 
     // Verification green → review.
-    const review = deps.review(verification);
+    const review = await deps.review(verification);
     if (!review.ok) {
       rounds.push({ round, verification, findings: [], fixAttempted: false });
       return { stopReason: "reviewer_failed", closeable: false, rounds };
@@ -246,7 +253,7 @@ export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps
       rounds.push(rec);
       return { stopReason: "needs_fix_max_rounds", closeable: false, rounds };
     }
-    const fix = deps.fix(review.findings);
+    const fix = await deps.fix(review.findings);
     rec.fixAttempted = true;
     if (!fix.ok) {
       rec.fixError = fix.error;
@@ -258,4 +265,44 @@ export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps
 
   /* istanbul ignore next — maxRounds>=1 always returns inside the loop */
   return { stopReason: "needs_fix_max_rounds", closeable: false, rounds };
+}
+
+// ── Slice 5: durable run-note ────────────────────────────────────────────────
+
+export type ReviewLoopNoteMeta = {
+  ticketId: string;
+  route?: string;
+  maxRounds: number;
+  range: CommitRange;
+};
+
+/** Render the loop's outcome as a durable markdown artifact: commit range,
+ *  per-round verdicts/verification/findings/fixes, and the stop reason. Pure. */
+export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLoopOutcome): string {
+  const L: string[] = [];
+  L.push(`# review-loop — ticket #${meta.ticketId.replace(/^#/, "")}`, "");
+  L.push(`- **stop reason:** ${outcome.stopReason}`);
+  L.push(`- **closeable:** ${outcome.closeable ? "yes — reviewer pass AND verification green" : "no"}`);
+  L.push(`- **route:** ${meta.route ?? "(none — unrouted)"}`);
+  L.push(`- **max rounds:** ${meta.maxRounds}`);
+  const span = meta.range.spansUnmatched ? " — span includes unrelated commits; reviewed the specific shas" : "";
+  L.push(`- **commit range:** \`${meta.range.diffRange || "(none)"}\` (${meta.range.mode}${span})`);
+  L.push(`- **commits:** ${meta.range.shas.join(", ") || "(none)"}`, "");
+
+  for (const r of outcome.rounds) {
+    L.push(`## Round ${r.round}`);
+    const checks = r.verification.steps.map((s) => `${s.name}=${s.ok ? "ok" : "FAIL"}`).join(", ") || "(no checks)";
+    L.push(`- verification: ${r.verification.ok ? "ok" : "FAILED"} (${checks})`);
+    L.push(r.verdict ? `- reviewer verdict: ${r.verdict}` : `- reviewer: skipped (verification failed)`);
+    if (r.findings.length > 0) {
+      L.push(`- findings:`);
+      for (const f of r.findings) {
+        const where = f.unanchored ? "[unanchored]" : `${f.file}:${f.line}`;
+        L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
+      }
+    }
+    if (r.fixAttempted) L.push(`- fix: ${r.fixError ? `FAILED — ${r.fixError}` : "applied"}`);
+    L.push("");
+  }
+  return L.join("\n");
 }

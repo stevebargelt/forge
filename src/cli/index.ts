@@ -31,6 +31,7 @@ import { registerProviders } from "./commands/providers.js";
 import { registerOps } from "./commands/ops.js";
 import { registerRaci } from "./commands/raci.js";
 import { registerPi } from "./commands/pi.js";
+import { registerReviewLoop } from "./commands/review-loop.js";
 import { registerRoute } from "./commands/route.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
@@ -81,6 +82,7 @@ registerProviders(program);
 registerOps(program);
 registerRaci(program);
 registerPi(program);
+registerReviewLoop(program);
 registerRoute(program);
 
 program.parseAsync(process.argv).catch((err) => {
