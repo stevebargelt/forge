@@ -933,7 +933,11 @@ Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow 
 Relations: #258 (Pi epic), #262, #265, #261, #263, #264, seeds/runtimes/pi-apikey.yml.
 
 
+## Done (recent)
+
 ### #297 — Route resolution preflight for dispatch commands
+**Closed:** 2026-06-06.
+
 Guidance now requires `forge route explain` before `forge invoke` / `forge new` (#287), but the CLI still allows raw dispatch from memory. Add a mechanical guard or explicit route-bound dispatch path so orchestrators cannot silently bypass the compiled routing policy. This is the mechanical-enforcement half deliberately left out of #287 (which closed as the adherence/guidance slice).
 
 **Acceptance:**
@@ -949,8 +953,6 @@ Guidance now requires `forge route explain` before `forge invoke` / `forge new` 
 
 Relations: #287 (adherence slice, closed), #273 (RACI epic), #280 (project overrides), `seeds/orchestrator-template.md`, `src/cli/commands/invoke.ts`, `src/cli/commands/route.ts`.
 
-
-## Done (recent)
 
 ### #262 — pi: usage-parser hook (parse JSONL events)
 **Closed:** 2026-06-06.
