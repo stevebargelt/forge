@@ -771,13 +771,6 @@ Pi is the forcing function because one headless CLI (`pi -p --mode json`) can fr
 **Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
 
 
-### #262 — pi: usage-parser hook (parse JSONL events)
-**Phase:** Crawl. Part of #258.
-Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's field mapping), extracting tokens/model/upstream-provider metadata into Forge's usage record. This is the architectural correction: Pi may run Anthropic, OpenAI, Groq, Ollama, etc., so upstream provider cannot select the parser.
-**Acceptance:** parser unit-tested against the spike's committed sample stream; at least one live Pi JSONL stream captured and folded into the fixture before acceptance; a usage row is recorded for a Pi task.
-**Depends on:** spike, runtime story.
-
-
 ### #265 — pi: model-policy integration + alias mapping
 **Phase:** Walk. Part of #258.
 Wire Pi into `model-policy.yml` resolution by separating runtime selection from upstream provider/model selection. Model policy should resolve capability/profile -> runtime (`pi-*`) + upstream provider (`groq`, `anthropic`, `ollama`, etc.) + concrete model, with alias translation where Pi provider/model names differ from Forge capability aliases.
@@ -958,6 +951,15 @@ Relations: #287 (adherence slice, closed), #273 (RACI epic), #280 (project overr
 
 
 ## Done (recent)
+
+### #262 — pi: usage-parser hook (parse JSONL events)
+**Closed:** 2026-06-06.
+
+**Phase:** Crawl. Part of #258.
+Implement a `log_format`-keyed usage parser for Pi's JSONL (per the spike's field mapping), extracting tokens/model/upstream-provider metadata into Forge's usage record. This is the architectural correction: Pi may run Anthropic, OpenAI, Groq, Ollama, etc., so upstream provider cannot select the parser.
+**Acceptance:** parser unit-tested against the spike's committed sample stream; at least one live Pi JSONL stream captured and folded into the fixture before acceptance; a usage row is recorded for a Pi task.
+**Depends on:** spike, runtime story.
+
 
 ### #299 — forge-test in agent image must have tsx/test runner dependencies available
 **Closed:** 2026-06-06.
