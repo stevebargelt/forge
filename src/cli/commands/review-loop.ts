@@ -79,7 +79,7 @@ export function buildReviewLoopDeps(
   };
 
   const deps: ReviewLoopDeps = {
-    verify: () => runVerification(ctx.scripts),
+    verify: () => runVerification(ctx.scripts, { cwd: ctx.projectDir }),
     review: async (verification) => {
       preflight();
       const res = await invokeFn({
@@ -155,7 +155,8 @@ export function registerReviewLoop(program: Command): void {
       const ticket = findTicket(readBacklog(projectDir), parseInt(num, 10));
       if (!ticket) throw new Error(`no ticket #${num} in ${join(projectDir, "BACKLOG.md")}`);
 
-      const range = resolveCommitRange(num, { since: opts.since });
+      // Infer commits from the PROJECT repo, not Forge's launch dir.
+      const range = resolveCommitRange(num, { since: opts.since, git: (gitArgs) => git(gitArgs, projectDir) });
       if (range.mode === "none") {
         throw new Error(`no commits reference #${num} (and no --since). Pass --since <sha> to set the range.`);
       }

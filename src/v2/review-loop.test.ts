@@ -273,3 +273,14 @@ test("#301 note: a skipped review (verification failed) is shown", () => {
   assert.match(note, /reviewer: skipped \(verification failed\)/);
   assert.match(note, /typecheck=FAIL/);
 });
+
+test("#301 loop: verification ok:false with NO failed steps (no checks) → verification_failed, fixer NOT called", async () => {
+  let fixed = false;
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    verify: () => ({ ok: false, steps: [] }), // e.g. no discoverable typecheck/test scripts
+    fix: () => { fixed = true; return { ok: true }; },
+  }));
+  assert.equal(r.stopReason, "verification_failed");
+  assert.equal(fixed, false, "no empty fix dispatched when there are no actionable findings");
+  assert.equal(r.rounds.length, 1, "stops on round 1 — nothing to fix");
+});

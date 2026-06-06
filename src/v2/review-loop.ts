@@ -118,24 +118,27 @@ export type VerificationStep = { name: string; ok: boolean; output: string };
 export type VerificationResult = { ok: boolean; steps: VerificationStep[] };
 
 export type CommandRunner = (cmd: string, args: string[]) => { ok: boolean; output: string };
-const defaultRunner: CommandRunner = (cmd, args) => {
-  try {
-    const output = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    return { ok: true, output };
-  } catch (e) {
-    const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
-    return { ok: false, output: `${err.stdout ?? ""}${err.stderr ?? ""}` || (e as Error).message };
-  }
-};
+function makeDefaultRunner(cwd?: string): CommandRunner {
+  return (cmd, args) => {
+    try {
+      const output = execFileSync(cmd, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd });
+      return { ok: true, output };
+    } catch (e) {
+      const err = e as { stdout?: Buffer | string; stderr?: Buffer | string };
+      return { ok: false, output: `${err.stdout ?? ""}${err.stderr ?? ""}` || (e as Error).message };
+    }
+  };
+}
 
-/** Run the project's discoverable deterministic checks (host). `scripts` are the
- *  package.json scripts present; we run typecheck then test when each exists.
- *  Runner injectable for tests. `ok` is true only if every run step passed. */
+/** Run the project's discoverable deterministic checks. `scripts` are the
+ *  package.json scripts present; we run typecheck then test when each exists, IN
+ *  `cwd` (the project dir — not the launch dir). Runner injectable for tests.
+ *  `ok` is true only if every run step passed. */
 export function runVerification(
   scripts: Record<string, unknown>,
-  opts: { run?: CommandRunner } = {},
+  opts: { run?: CommandRunner; cwd?: string } = {},
 ): VerificationResult {
-  const run = opts.run ?? defaultRunner;
+  const run = opts.run ?? makeDefaultRunner(opts.cwd);
   const steps: VerificationStep[] = [];
   for (const name of ["typecheck", "test"]) {
     if (typeof scripts[name] !== "string") continue;
@@ -214,7 +217,10 @@ export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLo
     if (!verification.ok) {
       const findings = verificationFindings(verification);
       const rec: RoundRecord = { round, verification, findings, fixAttempted: false };
-      if (round === maxRounds) {
+      // Nothing actionable to fix — e.g. no discoverable checks (ok:false, no
+      // steps), so verificationFindings is empty. Don't dispatch an empty fix;
+      // stop. (Also stops at max rounds when checks keep failing.)
+      if (findings.length === 0 || round === maxRounds) {
         rounds.push(rec);
         return { stopReason: "verification_failed", closeable: false, rounds };
       }
