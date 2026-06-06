@@ -31,6 +31,15 @@ test("#301 deps.review: dispatches red-wide read-only", async () => {
   assert.match(seen!.task, /REVIEWER/);
 });
 
+test("reviewer brief carries the hardening rubric (docs-vs-impl, per-path semantics, coverage gaps)", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({ result: { verdict: "pass" } }); });
+  await deps.review({ ok: true, steps: [] });
+  assert.match(seen!.task, /behavioral claim/i);        // docs/ADRs verified against impl
+  assert.match(seen!.task, /multiple execution paths/i); // each path asserts the semantic
+  assert.match(seen!.task, /lacks direct test coverage/i); // coverage-gap callout
+});
+
 test("#301 deps.review: invoke status failed → ok false", async () => {
   const { deps } = buildReviewLoopDeps(ctx(), async () => RESULT({ status: "failed", error: "boom" }));
   const r = await deps.review({ ok: true, steps: [] });
