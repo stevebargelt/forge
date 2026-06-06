@@ -6,6 +6,7 @@ import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
+import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 
 // v2: workflow names are arbitrary YAML files in ~/.forge/workflows/.
 // We don't enforce a fixed list; the loader raises if the YAML is missing.
@@ -24,6 +25,8 @@ export function registerNew(program: Command): void {
     .option("--meta <json>", "extra run metadata as JSON")
     .option("--auth-profile <name>", "inject a captured auth profile (#176) into browser-verify steps so they test the app authenticated")
     .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
+    .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
+    .option("--unrouted", "#297: acknowledge an intentionally unrouted run (suppress the route-preflight warning)")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       validateCredsForNewRun();
@@ -31,6 +34,15 @@ export function registerNew(program: Command): void {
 
       const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
       const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
+
+      // #297: route-resolution preflight before creating the run / spawning.
+      applyRoutePreflight({
+        command: "forge new",
+        route: (options as { route?: string }).route,
+        unrouted: (options as { unrouted?: boolean }).unrouted,
+        projectDir,
+        enforce: preflightEnforceFromEnv(),
+      });
 
       // Load YAML (workspace default with project override).
       const workflow = loadWorkflow(workflowName, { projectDir });

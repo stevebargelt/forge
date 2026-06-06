@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { invoke } from "../../v2/invoke.js";
 import { parseContractFile } from "../../v2/contract.js";
+import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 
 export function registerInvoke(program: Command): void {
   program
@@ -23,6 +24,8 @@ export function registerInvoke(program: Command): void {
     .option("--run <run-id>", "attach this invocation as a task in an existing run; otherwise a new one is created")
     .option("--run-title <text>", "title for the new run when --run is not provided")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
+    .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
+    .option("--unrouted", "#297: acknowledge an intentionally unrouted dispatch (suppress the route-preflight warning)")
     .option("--json", "emit the result.json verbatim to stdout instead of a human-readable summary")
     .action(async (agentRole: string, opts: {
       task?: string;
@@ -38,6 +41,8 @@ export function registerInvoke(program: Command): void {
       run?: string;
       runTitle?: string;
       workspace?: string;
+      route?: string;
+      unrouted?: boolean;
       json?: boolean;
     }) => {
       ensureForgeDirs();
@@ -52,6 +57,17 @@ export function registerInvoke(program: Command): void {
       if (!existsSync(projectDir)) {
         throw new Error(`project dir does not exist: ${projectDir}`);
       }
+
+      // #297: route-resolution preflight BEFORE spawning. Errors (bogus --route,
+      // or unrouted under FORGE_ROUTE_PREFLIGHT=error) exit here; a warning prints
+      // and proceeds. Routed (--route valid) / --unrouted proceed silently.
+      applyRoutePreflight({
+        command: "forge invoke",
+        route: opts.route,
+        unrouted: opts.unrouted,
+        projectDir,
+        enforce: preflightEnforceFromEnv(),
+      });
       const workspace = resolve(opts.workspace ?? process.cwd());
       // AWN-4: optional explicit task contract (YAML/JSON file).
       const contract = opts.contract ? parseContractFile(resolve(opts.contract)) : undefined;
