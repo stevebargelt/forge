@@ -904,7 +904,21 @@ Relations: forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), #253 (
 Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), dashboard run views, reconcile_candidate status color (#290).
 
 
+### #300 — pi: confirm a COMPLETING run records a usage row (gated on credit/free-tier)
+**The thin residual of #296.** #296 proved the Pi Crawl chain live EXCEPT a successfully-completing model call: `forge invoke --runtime pi-oauth` authenticated via the Claude subscription OAuth seam (#266), reached api.anthropic.com, and was refused with a real 400 "out of extra usage" (account pay-as-you-go balance was $0). So dispatch + auth + #264 error-attribution are all proven live; what's NOT yet observed end-to-end is: status `complete` + a real `result.json` + a non-zero `model_calls` row from a live pi run.
+
+**Why it's small:** the pi usage parser (#262) is unit-tested AND fed a live-captured non-zero pi stream (`src/store/__fixtures__/pi-usage-stream.jsonl`, via a streaming mock); the result contract (#264) and dispatch (#261) are tested. This ticket is purely the "one real completing run writes a usage row" confirmation.
+
+**To close:** when extra-usage credit is added at claude.ai/settings/usage (then re-run the exact #296 invoke on `pi-oauth`), OR with a free-tier provider key (Gemini/Groq/Cerebras) on a pi-apikey-style runtime. Capture: run id, result.json status complete, and `forge usage` showing the pi row.
+
+Relations: #296 (closed), #266, #262, #264, #261, seeds/runtimes/pi-oauth.yml.
+
+
+## Done (recent)
+
 ### #296 — pi: true end-to-end Crawl exit — one real pi task with status + usage + gate
+**Closed:** 2026-06-06.
+
 **Crawl exit (the live half of the original #264).** #264 landed the deterministic result/completion contract (status + attributed failures) WITHOUT a live provider call. This ticket is the remaining end-to-end proof: route one real role through the pi runtime against a live credential and confirm a full forge task lifecycle.
 
 **Why separate:** #264 was scoped to result-contract parity (deterministic, no live call). The "usage captured" + "gate" half needs (a) the pi-jsonl usage parser (#262) and (b) a real provider API key — neither available when #264 landed.
@@ -925,8 +939,6 @@ Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow 
 
 Relations: #258 (Pi epic), #262, #265, #261, #263, #264, seeds/runtimes/pi-apikey.yml.
 
-
-## Done (recent)
 
 ### #266 — pi: OAuth auth mode (pre-seeded ~/.pi/agent/auth.json) + auth seam
 **Closed:** 2026-06-06.

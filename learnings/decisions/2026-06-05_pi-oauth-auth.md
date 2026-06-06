@@ -2,7 +2,15 @@
 
 **Date:** 2026-06-05
 **Tickets:** #266 (pi OAuth auth seam), #258 (Pi epic). Enables #296 (live Crawl exit).
-**Status:** implemented + tested (seam); the live OAuth run is #296 after `forge pi login`.
+**Status:** implemented + tested + VALIDATED LIVE. `forge pi login` (bare `/login`
+→ select Claude Pro/Max → paste the failed localhost-callback URL into pi's manual
+prompt) minted a real subscription credential, and a `forge invoke --runtime
+pi-oauth` dispatch authenticated and reached `api.anthropic.com` on the
+subscription. The call was refused with a 400 "out of extra usage" (the account's
+pay-as-you-go balance was $0) — proving the auth chain end-to-end; only a
+completing run + usage row is gated on extra-usage credit (#296 residual). The
+#264 attribution surfaced the 400 cleanly (`pi run failed: 400 … out of extra
+usage`), not a bare `no_result_json`.
 
 ## Why
 
