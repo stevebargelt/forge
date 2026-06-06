@@ -24,8 +24,11 @@ test("#299: forge-test drives the tsx CLI, not `node --import tsx` (unresolvable
   assert.doesNotMatch(wrapper, /exec node --import tsx/, "must NOT exec `node --import tsx` — global tsx isn't on node's import path");
 });
 
-test("#299: forge-test loads forge's test-setup only when present (generic tsx projects too)", () => {
-  assert.match(wrapper, /-f \.\/src\/test-setup\.ts/, "test-setup.ts load must be conditional on its existence");
+test("#299: forge-test loads forge's test-setup only in the forge repo, not any project with that file", () => {
+  assert.match(wrapper, /-f \.\/src\/test-setup\.ts/, "test-setup.ts load must check the file exists");
+  // src/test-setup.ts is a common filename — gate on BEING the forge repo too,
+  // not file-existence alone, so a stranger's setup is never preloaded.
+  assert.match(wrapper, /"name".*forge/, "test-setup load must be gated on package.json name == forge");
 });
 
 test("#299: forge-test fails loud with a useful diagnostic when the runner is absent", () => {

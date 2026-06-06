@@ -69,9 +69,14 @@ fi
 
 # forge's OWN suite needs src/test-setup.ts loaded (points FORGE_HOME at a temp
 # dir to isolate the real ~/.forge/forge.db, and clears FORGE_NOTIFY so the suite
-# never fires real notifications — #199). It's forge-specific: load it only when
-# present, so generic tsx projects (which have no such file) still run (#299).
-if [[ -f ./src/test-setup.ts ]]; then
+# never fires real notifications — #199). Gate this on BEING THE FORGE REPO
+# (package.json name == "forge") AND the file existing — src/test-setup.ts is a
+# common project-local filename, so file-existence alone would wrongly preload a
+# stranger's setup file and could alter its env or fail before the target test
+# runs. A generic tsx project (or one with its own src/test-setup.ts) runs plain.
+if [[ -f ./package.json ]] \
+  && grep -Eq '"name"[[:space:]]*:[[:space:]]*"forge"[[:space:]]*,?' package.json \
+  && [[ -f ./src/test-setup.ts ]]; then
   exec tsx --import ./src/test-setup.ts --test "$@"
 else
   exec tsx --test "$@"

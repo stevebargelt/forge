@@ -60,4 +60,40 @@ else
     || { echo "FAIL: missing useful diagnostic"; echo "$out"; fail=1; }
 fi
 
+echo "=== Case 4: a NON-forge project with its own src/test-setup.ts is NOT preloaded ==="
+# src/test-setup.ts is a common filename; forge-test must only preload it in the
+# forge repo (package.json name == forge), never a stranger's.
+FIX2="$(mktemp -d)"; trap 'rm -rf "$FIX" "$FIX2"' EXIT
+mkdir -p "$FIX2/src"
+echo '{ "name": "stranger-app", "version": "1.0.0", "private": true, "type": "module" }' > "$FIX2/package.json"
+echo 'console.error("STRANGER-SETUP-LOADED");' > "$FIX2/src/test-setup.ts"
+cat > "$FIX2/app.test.ts" <<'TS'
+import { test } from "node:test";
+import assert from "node:assert/strict";
+test("ok", () => { assert.equal(1, 1); });
+TS
+out=$(docker run --rm --user 1000 -e FORGE_NO_BROWSER=1 -v "$FIX2:/project:rw" --entrypoint forge-test "$IMAGE" app.test.ts 2>&1 || true)
+if echo "$out" | grep -qE "# pass 1" && ! echo "$out" | grep -q "STRANGER-SETUP-LOADED"; then
+  echo "PASS: stranger's src/test-setup.ts was NOT preloaded"
+else
+  echo "FAIL: a non-forge src/test-setup.ts leaked into the run (or the test didn't run)"; echo "$out"; fail=1
+fi
+
+echo "=== Case 5: the forge repo (package.json name == forge) DOES preload src/test-setup.ts ==="
+FIX3="$(mktemp -d)"; trap 'rm -rf "$FIX" "$FIX2" "$FIX3"' EXIT
+mkdir -p "$FIX3/src"
+echo '{ "name": "forge", "version": "0.1.0", "private": true, "type": "module" }' > "$FIX3/package.json"
+echo 'console.error("FORGE-SETUP-LOADED");' > "$FIX3/src/test-setup.ts"
+cat > "$FIX3/app.test.ts" <<'TS'
+import { test } from "node:test";
+import assert from "node:assert/strict";
+test("ok", () => { assert.equal(1, 1); });
+TS
+out=$(docker run --rm --user 1000 -e FORGE_NO_BROWSER=1 -v "$FIX3:/project:rw" --entrypoint forge-test "$IMAGE" app.test.ts 2>&1 || true)
+if echo "$out" | grep -qE "# pass 1" && echo "$out" | grep -q "FORGE-SETUP-LOADED"; then
+  echo "PASS: forge repo's src/test-setup.ts was preloaded (gate matches the forge repo)"
+else
+  echo "FAIL: forge repo's src/test-setup.ts was NOT preloaded"; echo "$out"; fail=1
+fi
+
 [ "$fail" = "0" ] && echo "ALL PASS: forge-test serves tsx projects without ad hoc globals (#299)." || { echo "SMOKE FAILED"; exit 1; }
