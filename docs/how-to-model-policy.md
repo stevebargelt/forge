@@ -112,6 +112,45 @@ host `~/.codex/auth.json` (`codex login` first — `forge providers doctor` show
 > The runtime seed `codex-subscription.yml` must be installed (`install-seeds.sh`)
 > into `~/.forge/runtimes/` for an openai profile to dispatch.
 
+## Pi and multi-provider runtimes — the `runtime:` profile field
+
+Some runtimes front **many upstream providers** (groq, ollama, anthropic, …) so
+the standard `(provider, auth) → runtime` binding table cannot uniquely select
+them. Set the optional `runtime:` field on a profile to pin the runtime YAML
+**directly**, then use `provider:` to name the upstream model vendor that
+runtime should forward to:
+
+```yaml
+model_profiles:
+  pi-groq:
+    provider: groq          # upstream vendor — threaded to the runtime as ${UPSTREAM_PROVIDER}
+    runtime: pi-apikey      # explicit runtime YAML; skips the (provider, auth) binding table
+    auth: api               # pi-apikey injects ANTHROPIC_API_KEY; cross-provider key injection is a Walk item
+    map:
+      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
+```
+
+When `runtime:` is set on a profile:
+
+- The resolver uses that runtime YAML **directly**, bypassing the
+  `(provider, auth) → runtime` binding table.
+- `provider:` becomes the **upstream vendor** — passed to the container as the
+  `${UPSTREAM_PROVIDER}` template variable (e.g. pi receives `--provider groq`).
+- Profiles **without** `runtime:` behave exactly as before — `(provider,
+  effective auth)` selects the runtime from the binding table; `provider:` is
+  the forge-level provider name used for binding, not an upstream hint.
+
+The pi runtime seeds (`pi-apikey`, `pi-oauth`) fall back to `--provider
+anthropic` when `${UPSTREAM_PROVIDER}` is empty — so a direct `forge invoke
+--runtime pi-apikey` with no policy active keeps the existing anthropic-bound
+behavior unchanged.
+
+> **Provider names are not validated beyond presence.** Forge does not maintain
+> a registry of valid upstream provider strings; an unknown or misspelled
+> `provider:` value fails at runtime invocation, not at policy load. The
+> `runtime:` name fails loud at dispatch time if the runtime YAML is not
+> installed in `~/.forge/runtimes/`.
+
 ## Still future — Run (#225)
 
 Bounded orchestrator *choice*: `allowed_profiles` as a ceiling + cost-tier
