@@ -38,6 +38,9 @@ test("reviewer brief carries the hardening rubric (docs-vs-impl, per-path semant
   assert.match(seen!.task, /behavioral claim/i);        // docs/ADRs verified against impl
   assert.match(seen!.task, /multiple execution paths/i); // each path asserts the semantic
   assert.match(seen!.task, /lacks direct test coverage/i); // coverage-gap callout
+  assert.match(seen!.task, /full operator path/i);      // config->resolver->dispatch->auth->doctor
+  assert.match(seen!.task, /runnable contract/i);       // example config traced end-to-end
+  assert.match(seen!.task, /accepted PRDs/i);           // reconcile design records, not just how-tos
 });
 
 test("#301 deps.review: invoke status failed → ok false", async () => {
