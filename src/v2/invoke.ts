@@ -303,6 +303,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolution.model,
+    UPSTREAM_PROVIDER: resolution.provider ?? "",
     SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task, args.contract),
     DESIGN_DIR: args.designDir,

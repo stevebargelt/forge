@@ -1117,6 +1117,7 @@ async function runContainer(args: {
     PROJECT_DIR: args.projectDir,
     PROJECT_MODE: args.projectMode,
     MODEL: args.resolution.model,
+    UPSTREAM_PROVIDER: args.resolution.provider ?? "",
     SYSTEM_PROMPT: args.taskPackage.composedSystemPrompt,
     TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,

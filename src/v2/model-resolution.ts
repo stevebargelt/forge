@@ -198,7 +198,12 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     );
   }
 
-  const runtime = bindRuntime(profile.provider, auth);
+  // #265: an explicit profile.runtime wins (a pi runtime fronts many upstream
+  // providers, so the (provider, auth) binding table can't select it). provider
+  // then denotes the UPSTREAM vendor passed through as ${UPSTREAM_PROVIDER}.
+  // Absent → today's (provider, effective auth) binding, unchanged. An unknown
+  // runtime name fails loud downstream at loadRuntime (dispatch time).
+  const runtime = profile.runtime ?? bindRuntime(profile.provider, auth);
 
   return {
     alias: capability,

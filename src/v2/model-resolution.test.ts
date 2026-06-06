@@ -297,6 +297,58 @@ defaults:
   assert.equal(r.model, "gpt-5-codex");
 });
 
+// ---- #265: explicit runtime (pi) + upstream provider selection ----
+
+const PI_POLICY = `
+on_unavailable: fail
+model_profiles:
+  pi-groq-cheap-reds:
+    provider: groq
+    auth: api
+    runtime: pi-apikey
+    map:
+      review:  { model: llama-3.3-70b-versatile, cost_tier: cheap }
+      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }
+defaults:
+  profile: pi-groq-cheap-reds
+  activity: {}
+`;
+
+test("#265: a pi profile selects the explicit runtime + upstream provider + model", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), PI_POLICY);
+  const r = resolveModel({ agentRole: "red-wide", stepAlias: "review", cliProfile: "pi-groq-cheap-reds" });
+  assert.equal(r.runtime, "pi-apikey");   // explicit runtime, NOT a (provider,auth) binding
+  assert.equal(r.provider, "groq");        // upstream vendor — not a fake provider=pi
+  assert.equal(r.model, "llama-3.3-70b-versatile");
+  assert.equal(r.auth, "api");
+});
+
+test("#265: an upstream provider with no explicit runtime fails loud (no binding for groq)", () => {
+  // Same profile minus `runtime:` — groq has no (provider,auth)->runtime row, so
+  // the binding table is the fail-loud. An explicit `runtime:` is the escape.
+  writeFileSync(join(homeDir, "model-policy.yml"), PI_POLICY.replace("    runtime: pi-apikey\n", ""));
+  assert.throws(
+    () => resolveModel({ agentRole: "red-wide", stepAlias: "review", cliProfile: "pi-groq-cheap-reds" }),
+    /no runtime bound for provider='groq'/
+  );
+});
+
+test("#265: explicit runtime is passed through verbatim (loadRuntime is the fail-loud for an unknown name)", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), PI_POLICY.replace("pi-apikey", "pi-does-not-exist"));
+  const r = resolveModel({ agentRole: "red-wide", stepAlias: "review", cliProfile: "pi-groq-cheap-reds" });
+  assert.equal(r.runtime, "pi-does-not-exist"); // resolver doesn't load it; dispatch's loadRuntime throws
+});
+
+test("#265: an unmapped capability on a pi profile fails loud (no fake fallback)", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), PI_POLICY.replace(
+    "      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }\n", ""
+  ));
+  assert.throws(
+    () => resolveModel({ agentRole: "architecture-advisor", stepAlias: "reasoning", cliProfile: "pi-groq-cheap-reds" }),
+    /no mapping for capability 'reasoning'/
+  );
+});
+
 // ---- Project policy replaces workspace policy (file-level, not merge) ----
 
 test("policy: project model-policy.yml replaces workspace", () => {

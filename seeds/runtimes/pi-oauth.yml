@@ -68,7 +68,12 @@ invocation:
     - --no-context-files              # don't auto-load /project AGENTS.md/CLAUDE.md
     - --no-session                    # ephemeral; don't persist a session file
     - --provider
-    - anthropic                       # the OAuth-authenticated provider (Claude subscription)
+    # #265: upstream vendor resolved by model-policy, threaded as
+    # ${UPSTREAM_PROVIDER}. Must match the provider the seeded OAuth credential
+    # authenticates (Claude subscription → anthropic; ChatGPT → openai). Legacy /
+    # no-policy invokes leave it empty → :-anthropic keeps the Claude-subscription
+    # binding.
+    - "${UPSTREAM_PROVIDER:-anthropic}"
     - --model
     - "${MODEL}"
     - --append-system-prompt

@@ -487,3 +487,40 @@ test("#266: pi-oauth invocation carries no --api-key (auth comes from auth.json)
   assert.equal(cmd[0], "pi");
   assert.ok(!cmd.includes("--api-key"), "OAuth runtime must not pass --api-key");
 });
+
+// ── #265: pi runtime receives the resolved upstream provider via ${UPSTREAM_PROVIDER} ──
+
+const PI_RUNTIME: Runtime = {
+  name: "pi-apikey",
+  description: "test pi",
+  image: "agent-dev-worker:latest",
+  runtime_kind: "pi",
+  log_format: "pi-jsonl",
+  models: { default: "claude-sonnet-4-6" },
+  auth: { mode: "oauth-volume" },
+  env: {},
+  mounts: [{ host: "${TASK_DIR}", container: "/task", mode: "rw", optional: false }],
+  invocation: {
+    command: "pi",
+    args: ["-p", "--provider", "${UPSTREAM_PROVIDER:-anthropic}", "--model", "${MODEL}"],
+  },
+  container: { name: "forge-${TASK_ID}", remove_on_exit: true, idle_timeout_seconds: 300 },
+  result: { file: "/task/result.json", stdout_log: "container.stdout.log", stderr_log: "container.stderr.log" },
+};
+
+function pickProvider(args: string[]): string | undefined {
+  const i = args.indexOf("--provider");
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+test("#265: resolved upstream provider is substituted into pi's --provider", () => {
+  const { args } = buildDockerArgs(PI_RUNTIME, { ...BASE_CTX, UPSTREAM_PROVIDER: "groq" });
+  assert.equal(pickProvider(args), "groq");
+});
+
+test("#265: empty/legacy UPSTREAM_PROVIDER falls back to anthropic (no #261 regression)", () => {
+  const emptyArgs = buildDockerArgs(PI_RUNTIME, { ...BASE_CTX, UPSTREAM_PROVIDER: "" }).args;
+  assert.equal(pickProvider(emptyArgs), "anthropic");
+  const unsetArgs = buildDockerArgs(PI_RUNTIME, BASE_CTX).args; // field absent entirely
+  assert.equal(pickProvider(unsetArgs), "anthropic");
+});

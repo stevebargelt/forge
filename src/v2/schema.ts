@@ -451,8 +451,18 @@ const ModelProfileSchema = z
     // provider is intentionally an open string, NOT an enum: a new provider
     // (openai) should not require a schema bump. The (provider, effective_auth)
     // -> runtime binding table is where an unknown provider fails loud.
+    //
+    // When `runtime` (below) is set, provider denotes the UPSTREAM model vendor
+    // (e.g. groq, anthropic, ollama) that the explicit runtime fronts — it is
+    // passed through to the runtime as ${UPSTREAM_PROVIDER}, not used for binding.
     provider: z.string().min(1),
     auth: AuthModeSchema,
+    // #265: explicit runtime YAML name. A runtime like `pi` fronts MANY upstream
+    // providers, so (provider, auth) -> runtime can't pick it. When set, the
+    // resolver uses this runtime directly (skipping the binding table) and treats
+    // `provider` as the upstream vendor. Absent = legacy (provider, auth) binding,
+    // unchanged. An unknown runtime name fails loud at loadRuntime (dispatch time).
+    runtime: z.string().min(1).optional(),
     // capability alias -> { model, cost_tier }. At least one alias required.
     map: z.record(z.string(), CapabilityEntrySchema),
     // Profile-scoped override of the policy-level on_unavailable default. Lets a

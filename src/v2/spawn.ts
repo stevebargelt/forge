@@ -35,6 +35,11 @@ export type SpawnContext = SubstContext & {
   PROJECT_DIR: string;
   PROJECT_MODE: "rw" | "ro";
   MODEL: string;
+  // #265: the resolved UPSTREAM model vendor (e.g. groq, anthropic, ollama) a
+  // multi-provider runtime fronts. Substituted into pi's `--provider` arg. Empty
+  // in legacy mode (no policy) → the pi YAML's `${UPSTREAM_PROVIDER:-anthropic}`
+  // fallback preserves the anthropic-bound Crawl behavior.
+  UPSTREAM_PROVIDER?: string;
   SYSTEM_PROMPT: string;
   // Rendered task-package markdown; piped to the container as stdin per the
   // runtime YAML's `invocation.stdin` field. Mirrors v1 spine's behavior.
