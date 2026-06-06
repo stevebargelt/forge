@@ -32,12 +32,14 @@ stdout (`src/v2/pi-result.ts`, `analyzePiFailure(stdout) → { modelError, error
 
 1. an `assistant` message carries `errorMessage` → `pi run failed: <errorMessage>`
    (the provider/model error, truncated).
-2. no `agent_end` terminal event → `pi produced no completion event … truncated or
+2. `auto_retry_*` events in the stream → `pi run failed: provider error (auto-retried,
+   no final message captured)`.
+3. no `agent_end` terminal event → `pi produced no completion event … truncated or
    the container crashed mid-run`.
-3. clean `agent_end`, no error, still no file → `pi completed but wrote no
+4. clean `agent_end`, no error, still no file → `pi completed but wrote no
    /task/result.json (the agent did not honor the output contract)`.
 
-Cases 1 and 2 set `modelError: true`; case 3 sets it `false`. `attributePiNoResult`
+`errorMessage` and `auto_retry_*` set `modelError: true`; the truncated (no `agent_end`) and clean-but-no-result cases set it `false`. `attributePiNoResult`
 is retained as a back-compat thin wrapper over `analyzePiFailure` (returns `.error`
 only) for #264 call-sites.
 

@@ -16,6 +16,7 @@ import { tasksForRun, getTask } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
+import { failureKindForTask } from "./failure-kind.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
@@ -1463,6 +1464,9 @@ test("runNext: #264 pi step with no result.json fails with an attributed error, 
     assert.match(task.error ?? "", /pi run failed:/);
     assert.match(task.error ?? "", /authentication_error/);
     assert.doesNotMatch(task.error ?? "", /^no_result_json$/);
+    // #267: the workflow path classifies a pi provider error as model_error too
+    // (parity with the direct invoke path — guards against drift).
+    assert.equal(failureKindForTask(task.id), "model_error");
   } finally {
     if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = prevKey;
