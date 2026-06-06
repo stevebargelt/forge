@@ -771,13 +771,6 @@ Pi is the forcing function because one headless CLI (`pi -p --mode json`) can fr
 **Sources:** pi.dev; github.com/badlogic/pi-mono packages/coding-agent (README, docs/providers.md, docs/json.md).
 
 
-### #265 — pi: model-policy integration + alias mapping
-**Phase:** Walk. Part of #258.
-Wire Pi into `model-policy.yml` resolution by separating runtime selection from upstream provider/model selection. Model policy should resolve capability/profile -> runtime (`pi-*`) + upstream provider (`groq`, `anthropic`, `ollama`, etc.) + concrete model, with alias translation where Pi provider/model names differ from Forge capability aliases.
-**Acceptance:** a profile resolving to a Pi runtime plus upstream provider routes correctly; an unknown runtime/provider/model alias fails loud, not silently.
-**Depends on:** end-to-end story.
-
-
 ### #268 — pi: local models via models.json (Ollama/LM Studio/vLLM)
 **Phase:** Run. Part of #258.
 Enable local/custom models through `~/.pi/agent/models.json` (any OpenAI/Anthropic/Google-compatible endpoint). Target cheap/free reds and triage on local hardware.
@@ -948,6 +941,15 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 
 
 ## Done (recent)
+
+### #265 — pi: model-policy integration + alias mapping
+**Closed:** 2026-06-06.
+
+**Phase:** Walk. Part of #258.
+Wire Pi into `model-policy.yml` resolution by separating runtime selection from upstream provider/model selection. Model policy should resolve capability/profile -> runtime (`pi-*`) + upstream provider (`groq`, `anthropic`, `ollama`, etc.) + concrete model, with alias translation where Pi provider/model names differ from Forge capability aliases.
+**Acceptance:** a profile resolving to a Pi runtime plus upstream provider routes correctly; an unknown runtime/provider/model alias fails loud, not silently.
+**Depends on:** end-to-end story.
+
 
 ### #267 — pi: error-event classification -> model_error
 **Closed:** 2026-06-06.
