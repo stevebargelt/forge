@@ -778,13 +778,6 @@ Wire Pi into `model-policy.yml` resolution by separating runtime selection from 
 **Depends on:** end-to-end story.
 
 
-### #266 — pi: OAuth auth mode (pre-seeded ~/.pi/agent/auth.json) + auth seam
-**Phase:** Walk. Part of #258.
-Support pi OAuth providers (Claude Pro / ChatGPT / Copilot) via a pre-seeded `~/.pi/agent/auth.json` mounted into the container (mirror the forge-claude-oauth volume); integrate with the provider-availability/auth seam (#226).
-**Acceptance:** a pi run authenticates via mounted auth.json without interactive login; expiry/refresh behavior documented.
-**Depends on:** runtime story.
-
-
 ### #267 — pi: error-event classification -> model_error
 **Phase:** Walk. Part of #258.
 Map pi `auto_retry_*` / `errorMessage` events and provider errors to forge's `model_error` classification with the cause surfaced — extends #228.
@@ -934,6 +927,15 @@ Relations: #258 (Pi epic), #262, #265, #261, #263, #264, seeds/runtimes/pi-apike
 
 
 ## Done (recent)
+
+### #266 — pi: OAuth auth mode (pre-seeded ~/.pi/agent/auth.json) + auth seam
+**Closed:** 2026-06-06.
+
+**Phase:** Walk. Part of #258.
+Support pi OAuth providers (Claude Pro / ChatGPT / Copilot) via a pre-seeded `~/.pi/agent/auth.json` mounted into the container (mirror the forge-claude-oauth volume); integrate with the provider-availability/auth seam (#226).
+**Acceptance:** a pi run authenticates via mounted auth.json without interactive login; expiry/refresh behavior documented.
+**Depends on:** runtime story.
+
 
 ### #297 — Route resolution preflight for dispatch commands
 **Closed:** 2026-06-06.
