@@ -778,13 +778,6 @@ Wire Pi into `model-policy.yml` resolution by separating runtime selection from 
 **Depends on:** end-to-end story.
 
 
-### #267 — pi: error-event classification -> model_error
-**Phase:** Walk. Part of #258.
-Map pi `auto_retry_*` / `errorMessage` events and provider errors to forge's `model_error` classification with the cause surfaced — extends #228.
-**Acceptance:** a forced provider error on a pi task is classified `model_error` (not generic container_crash) with the cause string.
-**Depends on:** usage-parser story.
-
-
 ### #268 — pi: local models via models.json (Ollama/LM Studio/vLLM)
 **Phase:** Run. Part of #258.
 Enable local/custom models through `~/.pi/agent/models.json` (any OpenAI/Anthropic/Google-compatible endpoint). Target cheap/free reds and triage on local hardware.
@@ -955,6 +948,15 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 
 
 ## Done (recent)
+
+### #267 — pi: error-event classification -> model_error
+**Closed:** 2026-06-06.
+
+**Phase:** Walk. Part of #258.
+Map pi `auto_retry_*` / `errorMessage` events and provider errors to forge's `model_error` classification with the cause surfaced — extends #228.
+**Acceptance:** a forced provider error on a pi task is classified `model_error` (not generic container_crash) with the cause string.
+**Depends on:** usage-parser story.
+
 
 ### #302 — Orchestrator adoption of review-loop (#301 follow-up)
 **Closed:** 2026-06-06.
