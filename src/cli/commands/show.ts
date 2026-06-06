@@ -39,23 +39,33 @@ export function performShow(id: string): ShowResult {
 // for a running target. `--reconcile` is the explicit mutating path (the lifecycle
 // commands next/status/gate are the other intentional reconcilers). Deps are
 // injectable for tests; production uses the real docker probe.
+export type RunReconcileCandidate = { taskId: string; reason: ReconcileReason };
+
 export function showReconcileStep(
   id: string,
   opts: { reconcile?: boolean },
   deps: { containerAlive?: ContainerAlive; probe?: LivenessProbe; resultPresent?: ResultProbe } = {},
-): { reconciled: boolean; candidateReason: ReconcileReason | null } {
+): { reconciled: boolean; candidateReason: ReconcileReason | null; runCandidates: RunReconcileCandidate[] } {
   const targetTask = getTask(id);
   if (opts.reconcile) {
     reconcileRun(targetTask ? targetTask.runId : id, deps.containerAlive);
-    return { reconciled: true, candidateReason: null };
-  }
-  if (!targetTask || targetTask.status !== "running") {
-    return { reconciled: false, candidateReason: null };
+    return { reconciled: true, candidateReason: null, runCandidates: [] };
   }
   const db = getDb({ readOnly: true });
-  const reason = findReconcileCandidates(db, { taskId: targetTask.id }, deps.probe, deps.resultPresent)
-    .find((c) => c.classification === "reconcile_candidate")?.reason ?? null;
-  return { reconciled: false, candidateReason: reason };
+  if (targetTask) {
+    // Task target: surface the candidate reason for a running task.
+    const reason = targetTask.status === "running"
+      ? (findReconcileCandidates(db, { taskId: targetTask.id }, deps.probe, deps.resultPresent)
+          .find((c) => c.classification === "reconcile_candidate")?.reason ?? null)
+      : null;
+    return { reconciled: false, candidateReason: reason, runCandidates: [] };
+  }
+  // Run target (#298 run-path): surface candidates across the run's running
+  // tasks — so `forge show <runId>` doesn't list a stale task as ordinary running.
+  const runCandidates = findReconcileCandidates(db, { runId: id }, deps.probe, deps.resultPresent)
+    .filter((c) => c.classification === "reconcile_candidate")
+    .map((c) => ({ taskId: c.taskId, reason: c.reason }));
+  return { reconciled: false, candidateReason: null, runCandidates };
 }
 
 // ─── Pure helpers, exported for testing ─────────────────────────────────────
@@ -409,7 +419,7 @@ export function registerShow(program: Command): void {
       // this fixes — inspecting a stale-running task silently reconciled it. The
       // mutating path is now opt-in via --reconcile (alongside the lifecycle
       // commands that intentionally reconcile: next / status / gate).
-      const { candidateReason } = showReconcileStep(id, opts);
+      const { candidateReason, runCandidates } = showReconcileStep(id, opts);
 
       getDb({ readOnly: true });
       const result = performShow(id);
@@ -610,6 +620,7 @@ export function registerShow(program: Command): void {
                 })),
                 failedByKind,
                 runningWithLastOutput,
+                reconcileCandidates: runCandidates, // #298: running tasks whose container is gone
                 nextCommand,
                 reviewSummary,
               },
@@ -665,11 +676,25 @@ export function registerShow(program: Command): void {
         console.log("");
         console.log("Running tasks:");
         const now = Date.now();
+        const candidateReasonById = new Map(runCandidates.map((c) => [c.taskId, c.reason]));
         for (const t of runningTasks) {
           const logPath = join(taskDir(t.runId, t.id), "container.stdout.log");
           const mtime = getLastOutputMtime(logPath);
           const ago = mtime !== undefined ? formatTimeAgo(mtime, now) : "—";
-          console.log(`  ${t.id}  ${t.phase}/${t.agentRole}  last output: ${ago}`);
+          // #298: a running task whose container is gone is a reconcile candidate,
+          // not ordinary live work — flag it inline rather than listing it plainly.
+          const reason = candidateReasonById.get(t.id);
+          const flag = reason ? `  ⟶ reconcile candidate (${reason})` : "";
+          console.log(`  ${t.id}  ${t.phase}/${t.agentRole}  last output: ${ago}${flag}`);
+        }
+      }
+      // #298: an explicit, read-only callout so the operator sees the reconcile
+      // path without forge show having mutated anything.
+      if (runCandidates.length > 0) {
+        console.log("");
+        console.log("Reconcile candidates (DB says running, container gone — read-only; nothing was changed):");
+        for (const c of runCandidates) {
+          console.log(`  ${c.taskId}  ${c.reason}  →  forge show --reconcile ${c.taskId}`);
         }
       }
 

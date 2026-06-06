@@ -663,7 +663,9 @@ test("getBlockerTasks: empty when no blockers", () => {
 // task to complete at the inspection timestamp — a read action mutated state.
 
 function setupStaleRunning(taskId: string, withResult: boolean): void {
-  insertTask(makeTask(taskId, { status: "running", startedAt: "2026-05-29T10:00:00Z" }));
+  // Distinct phase per task so reconcileRun's orphaned-duplicate-primary sweep
+  // (same-phase primaries) doesn't cross-talk between fixtures.
+  insertTask(makeTask(taskId, { status: "running", phase: taskId, startedAt: "2026-05-29T10:00:00Z" }));
   logEvent("container.started", { runId: RUN.id, taskId }); // proves it was containerized
   if (withResult) {
     const dir = taskDir(RUN.id, taskId);
@@ -713,4 +715,34 @@ test("#298: a completed task is never probed or reconciled by plain show", () =>
   assert.equal(reconciled, false);
   assert.equal(candidateReason, null);
   assert.equal(probed, false, "a non-running task must not be docker-probed");
+});
+
+// #298 run-path: forge show <runId> must surface candidates for the run's running
+// tasks, not list them as ordinary "Running tasks".
+test("#298: forge show <run> surfaces reconcile candidates for the run's running tasks (read-only)", () => {
+  setupStaleRunning("task-run-stale-1", true);
+  const { reconciled, candidateReason, runCandidates } = showReconcileStep(RUN.id, {}, { probe: () => "gone" });
+  assert.equal(reconciled, false);
+  assert.equal(candidateReason, null, "run target has no single task-level reason");
+  assert.deepEqual(runCandidates, [{ taskId: "task-run-stale-1", reason: "container_gone_result_present" }]);
+  // no mutation on the read path
+  assert.equal(getTask("task-run-stale-1")!.status, "running");
+  assert.equal(eventsForTask("task-run-stale-1").filter((e) => e.eventType === "task.reconciled").length, 0);
+});
+
+test("#298: forge show <run> excludes healthy running tasks from candidates", () => {
+  setupStaleRunning("task-run-gone", true);
+  setupStaleRunning("task-run-alive", true);
+  // Probe: only task-run-gone's container is gone.
+  const probe = (name: string): "alive" | "gone" => (name === "forge-task-run-gone" ? "gone" : "alive");
+  const { runCandidates } = showReconcileStep(RUN.id, {}, { probe });
+  assert.deepEqual(runCandidates, [{ taskId: "task-run-gone", reason: "container_gone_result_present" }]);
+});
+
+test("#298: forge show <run> --reconcile finalizes the run's stale tasks", () => {
+  setupStaleRunning("task-run-stale-2", true);
+  const { reconciled } = showReconcileStep(RUN.id, { reconcile: true }, { containerAlive: () => false });
+  assert.equal(reconciled, true);
+  assert.equal(getTask("task-run-stale-2")!.status, "complete");
+  assert.equal(eventsForTask("task-run-stale-2").filter((e) => e.eventType === "task.reconciled").length, 1);
 });
