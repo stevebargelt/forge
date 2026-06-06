@@ -1,16 +1,21 @@
 # Decision: pi OAuth auth mode — `forge pi login` + pre-seeded auth.json
 
 **Date:** 2026-06-05
-**Tickets:** #266 (pi OAuth auth seam), #258 (Pi epic). Enables #296 (live Crawl exit).
-**Status:** implemented + tested + VALIDATED LIVE. `forge pi login` (bare `/login`
-→ select Claude Pro/Max → paste the failed localhost-callback URL into pi's manual
-prompt) minted a real subscription credential, and a `forge invoke --runtime
-pi-oauth` dispatch authenticated and reached `api.anthropic.com` on the
-subscription. The call was refused with a 400 "out of extra usage" (the account's
-pay-as-you-go balance was $0) — proving the auth chain end-to-end; only a
-completing run + usage row is gated on extra-usage credit (#296 residual). The
-#264 attribution surfaced the 400 cleanly (`pi run failed: 400 … out of extra
-usage`), not a bare `no_result_json`.
+**Tickets:** #266 (pi OAuth auth seam), #258 (Pi epic). Auth proven by #296; the
+TRUE completing-run proof is #300 (deferred).
+**Status:** implemented + tested. **AUTH chain VALIDATED LIVE** (#296): `forge pi
+login` (bare `/login` → select Claude Pro/Max → paste the failed localhost-callback
+URL into pi's manual prompt) minted a real subscription credential, and a `forge
+invoke --runtime pi-oauth` dispatch authenticated and reached `api.anthropic.com`
+on the subscription. The #264 attribution surfaced the provider's response cleanly
+(`pi run failed: 400 … out of extra usage`), not a bare `no_result_json`.
+
+This is **not** an end-to-end "Crawl exit": the call was refused pre-generation
+(the account's pay-as-you-go balance was $0), so **no task completed and no usage
+row was written**. A real completing run + usage row is intentionally unfunded for
+now and tracked as **#300 (deferred — needs paid extra credits or a free
+provider)**. Do not describe the Pi Crawl as having a proven completing run until
+#300 is satisfied.
 
 ## Why
 

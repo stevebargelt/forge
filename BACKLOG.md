@@ -904,22 +904,29 @@ Relations: forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), #253 (
 Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow model (`seeds/workflows/`, `src/v2/loader.ts`), dashboard run views, reconcile_candidate status color (#290).
 
 
-### #300 — pi: confirm a COMPLETING run records a usage row (gated on credit/free-tier)
-**The thin residual of #296.** #296 proved the Pi Crawl chain live EXCEPT a successfully-completing model call: `forge invoke --runtime pi-oauth` authenticated via the Claude subscription OAuth seam (#266), reached api.anthropic.com, and was refused with a real 400 "out of extra usage" (account pay-as-you-go balance was $0). So dispatch + auth + #264 error-attribution are all proven live; what's NOT yet observed end-to-end is: status `complete` + a real `result.json` + a non-zero `model_calls` row from a live pi run.
+### #300 — [DEFERRED] pi: TRUE completing-run proof — status complete + usage row from a live pi task
+**Status: DEFERRED — requires paid extra credits or an alternate free provider. Not scheduled.** This is the real end-to-end Crawl exit that #296 did NOT achieve. Until this is satisfied, do not describe the Pi Crawl as having a proven completing run.
 
-**Why it's small:** the pi usage parser (#262) is unit-tested AND fed a live-captured non-zero pi stream (`src/store/__fixtures__/pi-usage-stream.jsonl`, via a streaming mock); the result contract (#264) and dispatch (#261) are tested. This ticket is purely the "one real completing run writes a usage row" confirmation.
+**What's already proven (so this is narrow):** subscription OAuth auth, dispatch, and #264 provider-refusal attribution are all live (#296). The pi usage parser (#262) is unit-tested AND fed a live-captured non-zero pi stream (`src/store/__fixtures__/pi-usage-stream.jsonl`, via a streaming mock); result contract (#264) and dispatch (#261) are tested. The ONLY unobserved thing is a successfully-completing live pi call.
 
-**To close:** when extra-usage credit is added at claude.ai/settings/usage (then re-run the exact #296 invoke on `pi-oauth`), OR with a free-tier provider key (Gemini/Groq/Cerebras) on a pi-apikey-style runtime. Capture: run id, result.json status complete, and `forge usage` showing the pi row.
+**What's still unobserved end-to-end:** status `complete` + a real agent-written `result.json` + a non-zero `model_calls` row from a live pi run, and that #264's attribution does NOT misfire on a healthy run.
 
-Relations: #296 (closed), #266, #262, #264, #261, seeds/runtimes/pi-oauth.yml.
+**To satisfy (a no-cost path is preferred):**
+- a free-tier provider key (Gemini / Groq / Cerebras) on a pi-apikey-style runtime — no spend; OR
+- paid extra-usage credit at claude.ai/settings/usage, then re-run the #296 invoke on `pi-oauth`.
+- Capture: run id, `result.json` status complete, and `forge usage` showing the pi row.
+
+Relations: #296 (closed — auth/attribution only), #266, #262, #264, #261, seeds/runtimes/pi-oauth.yml.
 
 
 ## Done (recent)
 
-### #296 — pi: true end-to-end Crawl exit — one real pi task with status + usage + gate
+### #296 — pi: subscription OAuth live auth + provider-refusal attribution (NOT the completing-run exit)
 **Closed:** 2026-06-06.
 
-**Crawl exit (the live half of the original #264).** #264 landed the deterministic result/completion contract (status + attributed failures) WITHOUT a live provider call. This ticket is the remaining end-to-end proof: route one real role through the pi runtime against a live credential and confirm a full forge task lifecycle.
+**Correction — do NOT call this "the Crawl exit."** What actually landed and is proven LIVE: `forge invoke --runtime pi-oauth` authenticated via the subscription OAuth seam (#266), dispatched, reached the provider (api.anthropic.com), and the #264 failure attribution correctly surfaced a real `400 "out of extra usage"` (account pay-as-you-go balance was $0) — not a bare `no_result_json`. That is valuable and real. But the ORIGINAL acceptance below (a COMPLETING run: status `complete` + `result.json` + a usage row) was **NOT met** — the call was refused pre-generation, so nothing completed and no usage row was written. Renamed/reframed to match what shipped; the true completing-run proof is **deferred to #300** and intentionally unfunded for now.
+
+**Original framing (the live half of #264 — superseded by the correction above).** #264 landed the deterministic result/completion contract (status + attributed failures) WITHOUT a live provider call. This ticket was the remaining end-to-end proof: route one real role through the pi runtime against a live credential and confirm a full forge task lifecycle.
 
 **Why separate:** #264 was scoped to result-contract parity (deterministic, no live call). The "usage captured" + "gate" half needs (a) the pi-jsonl usage parser (#262) and (b) a real provider API key — neither available when #264 landed.
 
