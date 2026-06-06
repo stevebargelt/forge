@@ -60,3 +60,35 @@ test("#264: corrupt JSONL lines are tolerated; error still surfaces", () => {
   ].join("\n");
   assert.match(attributePiNoResult(stdout), /pi run failed: rate_limit_exceeded/);
 });
+
+// ── #267: analyzePiFailure — provider error → modelError ─────────────────────
+import { analyzePiFailure } from "./pi-result.js";
+
+test("#267: a provider errorMessage → modelError true, cause surfaced", () => {
+  const stdout = jsonl(
+    { type: "agent_end", messages: [
+      { role: "assistant", stopReason: "error", errorMessage: '400 {"error":{"message":"out of extra usage"}}' },
+    ] },
+  );
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.modelError, true);
+  assert.match(a.error, /^pi run failed:/);
+  assert.match(a.error, /out of extra usage/);
+});
+
+test("#267: auto_retry_* events → modelError true even without a final errorMessage", () => {
+  const stdout = jsonl({ type: "agent_start" }, { type: "auto_retry_attempt", attempt: 1 });
+  assert.equal(analyzePiFailure(stdout).modelError, true);
+});
+
+test("#267: contract failure (clean completion, no result) is NOT a model error", () => {
+  const stdout = jsonl({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn" }] });
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.modelError, false);
+  assert.match(a.error, /wrote no .*result\.json/);
+});
+
+test("#267: truncated output (no agent_end) is NOT a model error", () => {
+  assert.equal(analyzePiFailure(jsonl({ type: "agent_start" })).modelError, false);
+  assert.equal(analyzePiFailure("").modelError, false);
+});

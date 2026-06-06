@@ -25,17 +25,24 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** Given pi's stdout (read when no usable /task/result.json was produced), return
- *  a loud, attributable failure reason — never the bare "no_result_json". The
- *  three distinguishable causes, in priority order:
- *   1. pi surfaced a provider/model error  → "pi run failed: <errorMessage>"
- *   2. no `agent_end` terminal event       → truncated / crashed mid-run
+/** #267: analysis of a failed pi run from its stdout. `modelError` is true when
+ *  the failure is a PROVIDER/model error (pi surfaced an assistant `errorMessage`,
+ *  or `auto_retry_*` events) — the caller maps that to forge's `model_error`
+ *  failure_kind with the cause surfaced, instead of a generic result_missing /
+ *  container_crash. Kept decoupled from failure-kind.ts (just a boolean). */
+export type PiFailureAnalysis = { modelError: boolean; error: string };
+
+/** Analyze pi's stdout (read when no usable /task/result.json was produced) into
+ *  an attributable failure, in priority order:
+ *   1. provider/model error (assistant `errorMessage`, or `auto_retry_*`) → modelError
+ *   2. no `agent_end` terminal event → truncated / crashed mid-run
  *   3. clean completion but no result.json → the agent ignored the contract */
-export function attributePiNoResult(stdoutRaw: string): string {
+export function analyzePiFailure(stdoutRaw: string): PiFailureAnalysis {
   const lines = stdoutRaw.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return "pi produced no output (no JSONL on stdout)";
+  if (lines.length === 0) return { modelError: false, error: "pi produced no output (no JSONL on stdout)" };
 
   let sawAgentEnd = false;
+  let sawAutoRetry = false;
   let lastError: string | undefined;
 
   const noteAssistant = (m: unknown): void => {
@@ -49,6 +56,7 @@ export function attributePiNoResult(stdoutRaw: string): string {
     try { ev = JSON.parse(line); } catch { continue; }
     if (!isObj(ev)) continue;
     const type = ev["type"];
+    if (typeof type === "string" && type.startsWith("auto_retry")) sawAutoRetry = true;
     if (type === "agent_end") {
       sawAgentEnd = true;
       const msgs = ev["messages"];
@@ -58,9 +66,15 @@ export function attributePiNoResult(stdoutRaw: string): string {
     }
   }
 
-  if (lastError) return `pi run failed: ${truncate(lastError)}`;
+  if (lastError) return { modelError: true, error: `pi run failed: ${truncate(lastError)}` };
+  if (sawAutoRetry) return { modelError: true, error: "pi run failed: provider error (auto-retried, no final message captured)" };
   if (!sawAgentEnd) {
-    return "pi produced no completion event (agent_end) — output truncated or the container crashed mid-run";
+    return { modelError: false, error: "pi produced no completion event (agent_end) — output truncated or the container crashed mid-run" };
   }
-  return "pi completed but wrote no /task/result.json (the agent did not honor the output contract)";
+  return { modelError: false, error: "pi completed but wrote no /task/result.json (the agent did not honor the output contract)" };
+}
+
+/** Back-compat (#264): the attributed failure string only. */
+export function attributePiNoResult(stdoutRaw: string): string {
+  return analyzePiFailure(stdoutRaw).error;
 }

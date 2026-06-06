@@ -10,6 +10,7 @@ import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
+import { failureKindForTask } from "./failure-kind.js";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
@@ -1070,6 +1071,8 @@ test("#264: a pi run with a provider error and no result.json fails with an attr
   assert.match(r.error ?? "", /pi run failed:/);
   assert.match(r.error ?? "", /authentication_error/);
   assert.doesNotMatch(r.error ?? "", /^no_result_json$/);
+  // #267: a provider error is classified model_error (with the cause), not generic.
+  assert.equal(failureKindForTask(r.taskId), "model_error");
 });
 
 test("#264: a pi run that completes but writes no result.json blames the agent contract", async () => {
@@ -1088,4 +1091,6 @@ test("#264: a pi run that completes but writes no result.json blames the agent c
   });
   assert.equal(r.status, "failed");
   assert.match(r.error ?? "", /completed but wrote no .*result\.json/);
+  // #267: a contract failure is NOT a model error — it stays a generic result_missing kind.
+  assert.notEqual(failureKindForTask(r.taskId), "model_error");
 });
