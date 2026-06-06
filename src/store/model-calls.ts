@@ -307,6 +307,23 @@ export function selectUsageParser(opts: { logFormat?: string; provider?: string 
   return opts.provider === "openai" ? "codex" : "claude"; // legacy fallback
 }
 
+// Parse-only usage extraction, dispatched by the SAME log_format decision as
+// captureUsageForTask. Shared so every consumer (live capture + `forge usage
+// backfill`, incl. its dry-run) selects the right parser instead of hardcoding
+// the claude one. Returns [] for an unsupported/unknown format (the loud-error
+// treatment of that case lives in captureUsageForTask).
+export function extractUsageByLogFormat(
+  logPath: string,
+  opts: { taskId?: string; alias?: string; logFormat?: string; provider?: string; model?: string },
+): UsageRow[] {
+  switch (selectUsageParser(opts)) {
+    case "codex": return extractUsageFromCodexLog(logPath, opts);
+    case "pi": return extractUsageFromPiLog(logPath, opts);
+    case "claude": return extractUsageFromStdoutLog(logPath, opts);
+    case "unsupported": return [];
+  }
+}
+
 // Capture usage from a just-completed task's stdout log into model_calls.
 // Best-effort: swallows transient parse/insert errors so a telemetry failure can
 // never block or alter task semantics. Call site is right after docker exec
@@ -315,22 +332,16 @@ export function captureUsageForTask(
   stdoutPath: string,
   opts: { taskId: string; alias?: string; logFormat?: string; provider?: string; model?: string },
 ): { rowCount: number; error?: string } {
-  const parser = selectUsageParser(opts);
-  if (parser === "unsupported") {
-    // FAIL LOUD — not swallowed like a transient error. This is a deterministic
-    // sequencing gap (a runtime declares a log_format whose parser doesn't exist
-    // yet), and misattributing it to the claude parser would hide it behind a
-    // zero-usage "success". Surfaced so it can't pass silently until #262.
+  if (selectUsageParser(opts) === "unsupported") {
+    // FAIL LOUD — not swallowed like a transient error. A runtime declared a
+    // log_format whose parser doesn't exist; misattributing it to the claude
+    // parser would hide it behind a zero-usage "success".
     const error = `usage capture: no parser for log_format='${opts.logFormat}' — unsupported (no usage parser for this runtime's log format yet)`;
     console.error(`forge: ${error} [task ${opts.taskId}]`);
     return { rowCount: 0, error };
   }
   try {
-    const rows = parser === "codex"
-      ? extractUsageFromCodexLog(stdoutPath, opts)
-      : parser === "pi"
-      ? extractUsageFromPiLog(stdoutPath, opts)
-      : extractUsageFromStdoutLog(stdoutPath, opts);
+    const rows = extractUsageByLogFormat(stdoutPath, opts);
     if (rows.length === 0) return { rowCount: 0 };
     insertUsageRows(rows);
     return { rowCount: rows.length };

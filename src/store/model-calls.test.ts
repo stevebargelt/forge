@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractUsageFromStdoutLog, extractUsageFromCodexLog, extractUsageFromPiLog } from "./model-calls.js";
+import { extractUsageFromStdoutLog, extractUsageFromCodexLog, extractUsageFromPiLog, extractUsageByLogFormat } from "./model-calls.js";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "forge-usage-test-")); });
@@ -406,4 +406,31 @@ test("#262: captureUsageForTask records a pi usage row from log_format pi-jsonl"
   } finally {
     if (prev) setDbForTest(prev);
   }
+});
+
+// #262: extractUsageByLogFormat — the shared parser dispatch used by both live
+// capture and `forge usage backfill` (so backfill no longer hardcodes claude).
+test("#262: extractUsageByLogFormat routes pi-jsonl to the pi parser", () => {
+  const rows = extractUsageByLogFormat(PI_FIXTURE, { logFormat: "pi-jsonl", provider: "anthropic" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.inputTokens, 1234); // pi parser, not claude (which would find nothing)
+});
+
+test("#262: extractUsageByLogFormat routes codex-jsonl to the codex parser", () => {
+  const path = writeLog("by-codex.jsonl", [
+    { type: "thread.started", thread_id: "th" },
+    { type: "turn.completed", usage: { input_tokens: 30, cached_input_tokens: 0, output_tokens: 4 } },
+  ]);
+  const rows = extractUsageByLogFormat(path, { logFormat: "codex-jsonl" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.inputTokens, 30);
+});
+
+test("#262: extractUsageByLogFormat defaults to claude and returns [] for unknown formats", () => {
+  // legacy fallback: no logFormat + non-openai provider → claude
+  const claudeLog = writeLog("by-claude.log", [
+    { type: "assistant", message: { model: "claude-x", usage: { input_tokens: 8, output_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }, session_id: "s", request_id: "r1" },
+  ]);
+  assert.equal(extractUsageByLogFormat(claudeLog, {}).length, 1);
+  assert.deepEqual(extractUsageByLogFormat(PI_FIXTURE, { logFormat: "made-up-format" }), []);
 });

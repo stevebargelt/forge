@@ -18,12 +18,25 @@
 //                         drift)
 
 import type { Command } from "commander";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getDb } from "../../store/db.js";
-import { captureUsageForTask, extractUsageFromStdoutLog } from "../../store/model-calls.js";
+import { captureUsageForTask, extractUsageByLogFormat } from "../../store/model-calls.js";
+
+// #262: read the runtime log_format recorded in the task's manifest (written
+// since #292) so backfill selects the right usage parser instead of defaulting to
+// claude — otherwise pi/codex logs silently backfill zero rows. Undefined for
+// pre-#292 manifests (or none), which correctly falls back to the claude parser.
+function manifestLogFormat(stdoutLogPath: string): string | undefined {
+  try {
+    const m = JSON.parse(readFileSync(join(dirname(stdoutLogPath), "manifest.json"), "utf8")) as { runtime?: { logFormat?: unknown } };
+    return typeof m.runtime?.logFormat === "string" ? m.runtime.logFormat : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Cached lookup: task_id → agent_alias. Built once per backfill so we don't
 // hammer the DB inside the per-task loop. Tasks not in the table (orphaned
@@ -113,13 +126,15 @@ export function registerUsage(program: Command): void {
         scanned += 1;
         const alias = aliasIdx.get(t.taskId);
         if (alias) withAlias += 1;
-        const captureOpts = { taskId: t.taskId, ...(alias ? { alias } : {}) };
+        // #262: select the parser from the manifest's runtime log_format, so
+        // pi/codex historical logs backfill through the right parser (not the
+        // claude default, which would record zero rows).
+        const logFormat = manifestLogFormat(t.logPath);
+        const captureOpts = { taskId: t.taskId, ...(alias ? { alias } : {}), ...(logFormat ? { logFormat } : {}) };
         if (opts.dryRun) {
-          // Parse-only; no writes. captureUsageForTask wraps parse+insert and
-          // doesn't expose a parse-only mode, so we use extractUsageFromStdoutLog
-          // directly here.
+          // Parse-only; no writes. Same parser selection as the write path.
           try {
-            const rows = extractUsageFromStdoutLog(t.logPath, captureOpts);
+            const rows = extractUsageByLogFormat(t.logPath, captureOpts);
             if (rows.length > 0) { withData += 1; totalRows += rows.length; }
           } catch { withErrors += 1; }
           continue;

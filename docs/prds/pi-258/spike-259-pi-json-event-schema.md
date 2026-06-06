@@ -92,11 +92,10 @@ Notes:
 
 ## Open
 
-- **Live capture (the one thing a credential gates):** no provider API keys are in
-  the environment, and the available OAuth creds (Codex `~/.codex/auth.json`,
-  `forge-claude-oauth-v2` volume) are in other tools' formats pi cannot read. To
-  capture a real stream and confirm this fixture: set an API key (e.g.
-  `ANTHROPIC_API_KEY`, `GROQ_API_KEY`) **or** run `pi /login` once, then
-  `pi -p "say hi" --mode json --no-context-files`. Fold this validation into #262.
-- **StopReason enum values** — not enumerated here; capture the real set from the
-  live run when available.
+- **Live capture** — DONE in #262 (see the header). No provider credential was
+  needed in the end: pi was pointed at a local streaming-mock endpoint (Anthropic
+  SSE) via a custom `models.json` provider, which produced a real non-zero
+  `--mode json` stream committed as `src/store/__fixtures__/pi-usage-stream.jsonl`.
+  A genuine credentialed end-to-end run is the separate #296 Crawl exit.
+- **StopReason enum values** — still not exhaustively enumerated; the fixture shows
+  `"stop"`. Capture the full set from a real credentialed run (#296) if needed.
