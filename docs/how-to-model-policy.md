@@ -118,14 +118,28 @@ Some runtimes front **many upstream providers** (groq, ollama, anthropic, …) s
 the standard `(provider, auth) → runtime` binding table cannot uniquely select
 them. Set the optional `runtime:` field on a profile to pin the runtime YAML
 **directly**, then use `provider:` to name the upstream model vendor that
-runtime should forward to:
+runtime should forward to.
+
+> **Non-anthropic upstream providers are NOT runnable today.** The example
+> below (`provider: groq`) is **illustrative** — do not use it in a real policy
+> file. Two pieces are missing and both are tracked in **#303**:
+> 1. `forge providers doctor` has no probe for non-anthropic/openai providers,
+>    so it cannot verify or report a GROQ_API_KEY (or any third-party key).
+> 2. The pi-apikey runtime injects only `ANTHROPIC_API_KEY`; there is no
+>    per-provider key-injection path yet.
+> Until #303 lands, pi runs must use an anthropic upstream: `pi-apikey`
+> (ANTHROPIC_API_KEY) or `pi-oauth` (Claude subscription). The `runtime:` field
+> and `provider:` vocabulary described here **did ship in #265** and work
+> correctly for anthropic; the gap is key injection + doctor visibility for other
+> vendors.
 
 ```yaml
 model_profiles:
+  # ILLUSTRATIVE — not runnable until #303. See caveat above.
   pi-groq:
     provider: groq          # upstream vendor — threaded to the runtime as ${UPSTREAM_PROVIDER}
     runtime: pi-apikey      # explicit runtime YAML; skips the (provider, auth) binding table
-    auth: api               # pi-apikey injects ANTHROPIC_API_KEY; cross-provider key injection is a Walk item
+    auth: api               # pi-apikey injects ANTHROPIC_API_KEY only; groq key injection is #303
     map:
       default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
 ```

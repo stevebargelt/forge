@@ -69,21 +69,21 @@ model_profiles:
       review:    { model: gpt-5.5, cost_tier: standard }
       default:   { model: gpt-5.5, cost_tier: standard }
 
-  # pi (pi.dev) via provider API key, routing to an upstream model vendor.
-  # `runtime: pi-apikey` selects the pi runtime directly instead of deriving
-  # it from the (provider, auth) binding table. `provider:` then names the
-  # UPSTREAM vendor threaded to pi as --provider ${UPSTREAM_PROVIDER}. Provider
-  # names are an open string — not validated at policy load; a typo fails at
-  # dispatch when pi rejects the unknown --provider value.
-  # Note: auth.mode=apikey injects ANTHROPIC_API_KEY from the host env; wiring
-  # a different API key (e.g. GROQ_API_KEY) for non-anthropic providers is a
-  # Walk item not yet implemented. For Claude-subscription pi runs, use pi-oauth.
-  pi-groq:
-    provider: groq
-    runtime: pi-apikey
-    auth: api
-    map:
-      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
+  # ILLUSTRATIVE — NOT RUNNABLE YET. Do not add pi-groq to allowed_profiles or
+  # defaults. Selecting a non-anthropic upstream (e.g. groq) requires:
+  #   1. provider-doctor probe for the upstream provider's API key, and
+  #   2. per-provider API-key injection in the pi runtime.
+  # Both are tracked in #303. Until then pi runs are anthropic-bound:
+  # use pi-apikey (ANTHROPIC_API_KEY) or pi-oauth (Claude subscription).
+  # forge providers doctor cannot yet verify a GROQ_API_KEY, so a dispatch
+  # with this profile would fail silently with no key injected.
+  #
+  # pi-groq:
+  #   provider: groq
+  #   runtime: pi-apikey
+  #   auth: api
+  #   map:
+  #     default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
 
 defaults:
   # Ultimate fallback when no activity/agent override matches.

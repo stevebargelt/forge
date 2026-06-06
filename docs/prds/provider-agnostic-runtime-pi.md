@@ -224,11 +224,14 @@ upstream provider/model selected for the task.
 
 Illustrative shape:
 
+> **#265 shipped vocabulary:** the profile field is `provider:` + optional `runtime:`, not `upstream_provider:`.
+> `upstream_provider:` was the PRD draft name and was never implemented.
+
 ```yaml
 model_profiles:
   pi-groq-cheap-reds:
     runtime: pi-apikey
-    upstream_provider: groq
+    provider: groq
     auth: api
     map:
       review:  { model: llama-3.3-70b-versatile, cost_tier: cheap }
@@ -237,7 +240,7 @@ model_profiles:
 
   pi-ollama-local:
     runtime: pi-local
-    upstream_provider: ollama
+    provider: ollama
     auth: local
     map:
       review:  { model: qwen2.5-coder:32b, cost_tier: free }
@@ -245,7 +248,7 @@ model_profiles:
 
   claude-subscription:
     runtime: claude-oauth
-    upstream_provider: anthropic
+    provider: anthropic
     auth: subscription
     map:
       reasoning: { model: claude-opus-4-8, cost_tier: premium }

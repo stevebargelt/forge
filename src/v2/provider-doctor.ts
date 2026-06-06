@@ -31,8 +31,11 @@ const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
 // Provider-aware availability probe. The auth vocabulary (subscription/api/
 // bedrock) is shared, but what makes a mode "available" is provider-specific —
 // `api` means ANTHROPIC_API_KEY for anthropic, OPENAI_API_KEY for openai (Walk).
-// An unprobeable provider returns "unknown" (never blocks); today only anthropic
-// resolves at all (unknown providers fail loud earlier at bindRuntime).
+// An unprobeable provider returns "unknown" (never blocks). NOTE (#303): since
+// #265 an explicit-runtime profile (e.g. pi-apikey + provider: groq) SKIPS the
+// bindRuntime table, so an unprobeable upstream provider no longer fails loud
+// there — it resolves silently with no probe and no key injection. Adding probe
+// rows + cross-provider key injection so doctor can surface this is #303.
 export function probeAuth(provider: string | undefined, mode: EffectiveAuth): AuthProbe {
   if (provider === "anthropic") return { provider, ...probeAnthropic(mode) };
   if (provider === "openai") return { provider, ...probeOpenai(mode) };
