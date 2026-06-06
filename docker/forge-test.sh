@@ -44,15 +44,35 @@ else
   cd "$WORK_DIR"
 fi
 
-# Forward all arguments to the test runner. Default to `npm test` when
-# called with no args; otherwise run the given files directly. EITHER path
-# MUST load src/test-setup.ts via --import: it points FORGE_HOME at a temp
-# dir (isolating the real ~/.forge/forge.db) and clears FORGE_NOTIFY (so the
-# suite never fires real notifications). Omitting it on the file-args path
-# both produced false SQLITE_ERRORs (schema never set up) AND let test runs
-# write to the live DB / fire real pings (#199).
+# Forward all arguments to the test runner. Default to `npm test` when called
+# with no args (the project's own script, which finds tsx on PATH — global, #299
+# — when it's not in node_modules/.bin); otherwise run the given files directly.
+#
+# #299: the file-args path uses the `tsx` CLI binary, NOT `node --import tsx` — a
+# GLOBAL tsx install is not resolvable by `node --import tsx` (global modules
+# aren't on node's import path), whereas the `tsx` CLI is self-contained on PATH.
+# Fail loud with a useful diagnostic if the runner genuinely isn't present.
 if [[ $# -eq 0 ]]; then
+  if ! grep -q '"test"' package.json 2>/dev/null; then
+    echo "forge-test: no \"test\" script in $WORK_DIR/package.json — this project has no test runner to invoke." >&2
+    echo "forge-test: add a test script, or call \`forge-test <file.test.ts>\` to run files directly with tsx." >&2
+    exit 2
+  fi
   exec npm test
+fi
+
+if ! command -v tsx >/dev/null 2>&1; then
+  echo "forge-test: the 'tsx' runner is not available in this container." >&2
+  echo "forge-test: rebuild the agent image (./docker/build.sh) — tsx ships in it as of #299. Do NOT 'npm i -g tsx' ad hoc." >&2
+  exit 127
+fi
+
+# forge's OWN suite needs src/test-setup.ts loaded (points FORGE_HOME at a temp
+# dir to isolate the real ~/.forge/forge.db, and clears FORGE_NOTIFY so the suite
+# never fires real notifications — #199). It's forge-specific: load it only when
+# present, so generic tsx projects (which have no such file) still run (#299).
+if [[ -f ./src/test-setup.ts ]]; then
+  exec tsx --import ./src/test-setup.ts --test "$@"
 else
-  exec node --import tsx --import ./src/test-setup.ts --test "$@"
+  exec tsx --test "$@"
 fi

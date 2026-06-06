@@ -57,6 +57,18 @@ RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_CLI_VER
 # and conflicts more than it helps. Add later if a project actually needs it.
 RUN npm install -g pnpm@10 yarn
 
+# tsx (#299): the TypeScript test/exec runner that node:test-based projects (and
+# forge-test) use. Without it in the image, agents hit "Cannot find package 'tsx'"
+# and improvise with ad hoc `npm i -g tsx`, reintroducing the host/container
+# native-module mismatch forge-test exists to avoid. Installed GLOBALLY so the
+# `tsx` CLI is on PATH for forge-test and as a fallback for a project's own
+# `tsx`-based `npm test` script. (Note: a global `node --import tsx` does NOT
+# resolve — global installs aren't on node's module path — so forge-test invokes
+# the `tsx` CLI binary, not `node --import tsx`.) Build-time smoke: fail the image
+# build if tsx is missing or broken.
+ARG TSX_VERSION=4.22.4
+RUN npm install -g tsx@${TSX_VERSION} && tsx --version
+
 # System libraries for headless Chromium (browser-tools skill, #128). The
 # chromium BINARY is Playwright's baked, arm64-capable build (#180 block below),
 # symlinked to /usr/local/bin/chromium right after that install. #187 dropped the
