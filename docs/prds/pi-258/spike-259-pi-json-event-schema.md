@@ -1,7 +1,12 @@
 # Spike #259 — pi `--mode json` event schema + usage-field mapping
 
 **Status:** schema discovered from pi's published TypeScript types (authoritative).
-**Live capture:** deferred — needs a provider credential (see "Open" below).
+**Live capture:** DONE in #262 — a real pi 0.74.2 `--mode json` stream (non-zero
+usage) was captured via a streaming mock endpoint and committed as the parser
+fixture (`src/store/__fixtures__/pi-usage-stream.jsonl`). One correction to the
+mapping below: pi's `usage.input` is FRESH (cache excluded; `totalTokens = input +
+output + cacheRead + cacheWrite`), so it maps directly to `input_tokens` with NO
+subtraction (unlike codex's total `input_tokens`).
 **Feeds:** #262 (pi usage-parser hook), #261 (runtime invocation), #267 (error classification).
 
 ## How this was discovered

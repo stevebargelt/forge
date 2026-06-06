@@ -39,9 +39,10 @@ stdout (`src/v2/pi-result.ts`, `attributePiNoResult`), in priority order:
 
 The mapping is deterministic: the same pi stdout yields the same forge outcome,
 independent of any live provider call. It is **completion/error attribution only**
-— pi's token usage lives in the same JSONL but is parsed by #262 (still
-`log_format: pi-jsonl` → "unsupported", fails loud), and this code never touches
-`model_calls`. Provider-error → `model_error` event reclassification is #267.
+— pi's token usage lives in the same JSONL but is parsed separately by #262 (the
+pi usage parser, keyed off `log_format: pi-jsonl`); this completion-attribution
+code never touches `model_calls`. Provider-error → `model_error` event
+reclassification is #267.
 
 ## Why not synthesize a "complete" when the agent writes nothing?
 
@@ -52,6 +53,6 @@ lower the bar for success.
 
 ## Out of scope (unchanged by this)
 
-- pi-jsonl usage parser (#262); provider/profile binding (#265); OAuth (#266);
+- provider/profile binding (#265); OAuth (#266);
   error→`model_error` classification (#267); `models.json` local models (#268);
   provider-adapter generation (#283).

@@ -60,8 +60,8 @@ present, no stdin). The red read-only `/project` mount is unchanged (OS-level,
 
 ## Out of scope (deliberately not closed here)
 
-- Usage parsing of pi's JSONL (#262) — `log_format: pi-jsonl` still fails loud as
-  unsupported until then.
+- Usage parsing of pi's JSONL — now done (#262): `log_format: pi-jsonl` selects
+  pi's usage parser.
 - Result/completion contract parity (#264) — now decided, see
   [pi result contract](./2026-06-05_pi-result-contract.md).
 - Generalizing provider/key beyond the anthropic-bound Crawl proof (#265),

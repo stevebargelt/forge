@@ -214,6 +214,72 @@ export function extractUsageFromCodexLog(
   return rows;
 }
 
+// #262: pi (`pi --mode json`) usage parser. pi emits JSONL; each turn's
+// AssistantMessage carries normalized usage { input, output, cacheRead,
+// cacheWrite, totalTokens, cost }. The run's `agent_end` event holds every
+// message — we read its assistant messages (the complete, authoritative set) and
+// emit one row per assistant turn, falling back to `turn_end` events if the run
+// was cut off before agent_end. Verified against a live stream captured from pi
+// 0.74.2: src/store/__fixtures__/pi-usage-stream.jsonl.
+//
+// Mapping (pi → model_calls): input → input_tokens — FRESH, no subtraction: pi
+// reports cache separately and totalTokens = input+output+cacheRead+cacheWrite,
+// so `input` already excludes cache (unlike codex's total input_tokens). output →
+// output_tokens, cacheRead → cache_read, cacheWrite → cache_creation. pi
+// pre-computes cost, but model_calls is token-only (#295), so cost is dropped.
+//
+// THE PARSER IS SELECTED BY log_format (pi-jsonl), NEVER the upstream provider:
+// pi may run anthropic / openai / groq / ollama, so provider can't pick it (#262).
+// request_id = the message's responseId when present, else `${sessionId}#${index}`
+// (one row per assistant turn, matching the claude/codex one-row-per-request model).
+export function extractUsageFromPiLog(
+  logPath: string,
+  opts?: { taskId?: string; alias?: string; model?: string },
+): UsageRow[] {
+  let raw: string;
+  try { raw = readFileSync(logPath, "utf8"); }
+  catch { return []; }
+
+  let sessionId: string | undefined;
+  let agentEndAssistants: Record<string, unknown>[] | undefined;
+  const turnAssistants: Record<string, unknown>[] = [];
+
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let ev: unknown;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (!isObject(ev)) continue;
+
+    if (ev["type"] === "session" && typeof ev["id"] === "string") {
+      sessionId = ev["id"];
+    } else if (ev["type"] === "agent_end" && Array.isArray(ev["messages"])) {
+      agentEndAssistants = ev["messages"].filter(
+        (m): m is Record<string, unknown> => isObject(m) && m["role"] === "assistant",
+      );
+    } else if (ev["type"] === "turn_end" && isObject(ev["message"]) && ev["message"]["role"] === "assistant") {
+      turnAssistants.push(ev["message"]); // crash fallback when no agent_end
+    }
+  }
+
+  // agent_end is authoritative + complete; turn_end is the partial-log fallback.
+  const assistants = agentEndAssistants ?? turnAssistants;
+  return assistants.map((m, i) => {
+    const usage = isObject(m["usage"]) ? m["usage"] : {};
+    const responseId = m["responseId"];
+    return {
+      taskId: opts?.taskId ?? null,
+      requestId: typeof responseId === "string" && responseId.length > 0 ? responseId : `${sessionId ?? "pi"}#${i}`,
+      model: typeof m["model"] === "string" ? m["model"] : (opts?.model ?? "pi"),
+      alias: opts?.alias ?? null,
+      inputTokens: numField(usage, "input"),
+      outputTokens: numField(usage, "output"),
+      cacheReadTokens: numField(usage, "cacheRead"),
+      cacheCreationTokens: numField(usage, "cacheWrite"),
+      createdAt: typeof m["timestamp"] === "number" ? new Date(m["timestamp"]).toISOString() : new Date().toISOString(),
+    };
+  });
+}
+
 // Capture usage from a just-completed task's stdout log into model_calls.
 // Best-effort: swallows all errors so a telemetry failure can never block or
 // alter task semantics. Call site is right after docker exec returns, in both
@@ -229,12 +295,13 @@ export function extractUsageFromCodexLog(
 // likewise "unsupported", so adding a log_format to the schema FORCES a parser
 // decision here. `provider` is only the legacy fallback for the pre-#292 path
 // where no log_format is threaded through (the openai → codex mapping AWN-7 used).
-export function selectUsageParser(opts: { logFormat?: string; provider?: string }): "codex" | "claude" | "unsupported" {
+export function selectUsageParser(opts: { logFormat?: string; provider?: string }): "codex" | "claude" | "pi" | "unsupported" {
   if (opts.logFormat !== undefined) {
     switch (opts.logFormat) {
       case "claude-stream-json": return "claude";
       case "codex-jsonl": return "codex";
-      default: return "unsupported"; // pi-jsonl (until #262) + any unmapped format
+      case "pi-jsonl": return "pi"; // #262
+      default: return "unsupported"; // any unmapped format
     }
   }
   return opts.provider === "openai" ? "codex" : "claude"; // legacy fallback
@@ -254,13 +321,15 @@ export function captureUsageForTask(
     // sequencing gap (a runtime declares a log_format whose parser doesn't exist
     // yet), and misattributing it to the claude parser would hide it behind a
     // zero-usage "success". Surfaced so it can't pass silently until #262.
-    const error = `usage capture: no parser for log_format='${opts.logFormat}' — unsupported until its parser lands (pi-jsonl: #262)`;
+    const error = `usage capture: no parser for log_format='${opts.logFormat}' — unsupported (no usage parser for this runtime's log format yet)`;
     console.error(`forge: ${error} [task ${opts.taskId}]`);
     return { rowCount: 0, error };
   }
   try {
     const rows = parser === "codex"
       ? extractUsageFromCodexLog(stdoutPath, opts)
+      : parser === "pi"
+      ? extractUsageFromPiLog(stdoutPath, opts)
       : extractUsageFromStdoutLog(stdoutPath, opts);
     if (rows.length === 0) return { rowCount: 0 };
     insertUsageRows(rows);

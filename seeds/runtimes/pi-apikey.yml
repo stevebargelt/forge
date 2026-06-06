@@ -19,8 +19,8 @@ description: |
   Run with: forge invoke --runtime pi-apikey.
 
 # #292 runtime EXECUTION metadata — declared explicitly so usage parsing and
-# prompt handling key off these, not the provider name. log_format: pi-jsonl has
-# no usage parser yet (#262) — captureUsageForTask fails loud on it until then.
+# prompt handling key off these, not the provider name. log_format: pi-jsonl
+# selects pi's usage parser (#262), independent of the upstream provider.
 # prompt_strategy: message-arg — system prompt via --append-system-prompt, task
 # package as a positional message (the injection mapping itself is #263).
 runtime_kind: pi
@@ -68,7 +68,7 @@ invocation:
   args:
     - -p                              # --print: non-interactive, process prompt and exit
     - --mode
-    - json                            # JSONL events on stdout (usage parser: #262)
+    - json                            # JSONL events on stdout (parsed by the pi usage parser, #262)
     - --no-context-files              # don't auto-load /project AGENTS.md/CLAUDE.md
     - --no-session                    # ephemeral; don't persist a session file
     - --provider
