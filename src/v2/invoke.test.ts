@@ -186,6 +186,54 @@ defaults:
   }
 });
 
+// #303: end-to-end fail-loud for a pi explicit-runtime profile — a pi-groq
+// profile must fail before dispatch when GROQ_API_KEY is absent (doctor probe
+// → availability gate), so a user never gets a container with --provider groq
+// and no credential.
+test("invoke: a pi-groq profile fails loud before dispatch when GROQ_API_KEY is absent (#303)", async () => {
+  setupPiRuntimeStub();
+  const savedGroq = process.env.GROQ_API_KEY;
+  delete process.env.GROQ_API_KEY;
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-pi-groq-unavail-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".forge", "model-policy.yml"),
+    `
+on_unavailable: fail
+model_profiles:
+  pi-groq:
+    provider: groq
+    runtime: pi-stub
+    auth: api
+    map:
+      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }
+defaults:
+  profile: pi-groq
+  activity: {}
+`
+  );
+
+  let dockerCalled = false;
+  const spyExec: DockerExecFn = async (a) => {
+    dockerCalled = true;
+    return makeStubExec({ status: "complete" })(a);
+  };
+
+  try {
+    const r = await invoke({ agentRole: "engineer", task: "should not run", projectDir, dockerExec: spyExec });
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /provider 'groq'.*unavailable.*GROQ_API_KEY not set/s);
+    assert.equal(dockerCalled, false, "container must not spawn when the groq key is unavailable");
+    const events = eventsForTask(r.taskId).map((e) => e.eventType);
+    assert.ok(events.includes("model.profile_unavailable"));
+    assert.ok(!events.includes("container.started"));
+  } finally {
+    if (savedGroq === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = savedGroq;
+  }
+});
+
 test("invoke: creates a new run when --run-id is absent, with synthetic 'invoke' workflow", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";

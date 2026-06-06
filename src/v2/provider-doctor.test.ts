@@ -31,6 +31,7 @@ beforeEach(() => {
   snap = {
     CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
     AWS_PROFILE: process.env.AWS_PROFILE,
     FORGE_CODEX_DIR: process.env.FORGE_CODEX_DIR,
   };
@@ -90,12 +91,39 @@ test("probeAuth: undefined provider → unknown (defensive)", () => {
   assert.equal(p.status, "unknown");
 });
 
-test("doctorReport: anthropic modes + openai/subscription, each tagged with provider", () => {
+test("doctorReport: anthropic modes + openai/subscription + groq/api, each tagged with provider", () => {
   const report = doctorReport();
   assert.deepEqual(
     report.map((r) => `${r.provider}/${r.mode}`),
-    ["anthropic/subscription", "anthropic/api", "anthropic/bedrock", "openai/subscription"],
+    ["anthropic/subscription", "anthropic/api", "anthropic/bedrock", "openai/subscription", "groq/api"],
   );
+});
+
+// #303: groq is a pi upstream whose only credential is an API key. doctor must
+// surface its availability so a pi-groq profile isn't a silent footgun.
+test("probeAuth(groq, api): available iff GROQ_API_KEY set, never borrows ANTHROPIC_API_KEY", () => {
+  process.env.ANTHROPIC_API_KEY = "sk-anthropic"; // must NOT make groq available
+  const absent = probeAuth("groq", "api");
+  assert.equal(absent.status, "unavailable");
+  assert.equal(absent.provider, "groq");
+  assert.match(absent.detail, /GROQ_API_KEY not set/);
+  process.env.GROQ_API_KEY = "gsk-x";
+  const present = probeAuth("groq", "api");
+  assert.equal(present.status, "available");
+  assert.match(present.detail, /GROQ_API_KEY set/);
+});
+
+test("checkResolvedAvailability: a pi-groq profile fails loud at dispatch when GROQ_API_KEY is absent (#303)", () => {
+  const piGroq: ModelResolution = {
+    alias: "review", model: "llama-3.3-70b-versatile", profile: "pi-groq",
+    provider: "groq", auth: "api", costTier: "cheap",
+    resolvedBy: "defaults.profile", runtime: "pi-apikey", onUnavailable: "fail",
+  };
+  const r = checkResolvedAvailability(piGroq);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /provider 'groq'.*unavailable.*GROQ_API_KEY not set/s);
+  process.env.GROQ_API_KEY = "gsk-x";
+  assert.deepEqual(checkResolvedAvailability(piGroq), { ok: true }); // key present → proceeds
 });
 
 // Walk: openai/subscription (Codex) availability = host ~/.codex/auth.json present.

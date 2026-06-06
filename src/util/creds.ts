@@ -858,3 +858,22 @@ export function probeAwsChain(profile: string): AwsChainProbe {
     return { ok: false, error: firstLine.trim() };
   }
 }
+
+// #303: provider -> the API-key env var the runtime reads for that UPSTREAM
+// vendor. Single source of truth shared by the provider-doctor probe and the
+// container key injection in spawn.ts, so "doctor reports available" and "the
+// key is actually injected into the container" can never diverge. Providers
+// whose only credential is an API key (groq) live here; anthropic/openai also
+// support other auth modes (oauth/bedrock) handled elsewhere, but their api
+// mode reads these same vars. Add a row to extend cross-provider pi support.
+const API_KEY_ENV_BY_PROVIDER: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  groq: "GROQ_API_KEY",
+};
+
+/** The API-key env var name for an upstream provider, or undefined if forge has
+ *  no api-key binding for it (the caller fails loud). */
+export function apiKeyEnvForProvider(provider: string): string | undefined {
+  return API_KEY_ENV_BY_PROVIDER[provider];
+}

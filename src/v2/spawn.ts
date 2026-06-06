@@ -26,6 +26,7 @@ import {
   resolveAwsProfile,
   codexAuthFile,
   piAuthFile,
+  apiKeyEnvForProvider,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
 
@@ -97,9 +98,22 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
       break;
     }
     case "apikey": {
-      const key = process.env.ANTHROPIC_API_KEY;
-      if (!key) throw new Error("auth.mode=apikey but ANTHROPIC_API_KEY env is unset");
-      args.push("-e", `ANTHROPIC_API_KEY=${key}`);
+      // #303: inject the RESOLVED upstream provider's API key, not always
+      // ANTHROPIC_API_KEY. Empty UPSTREAM_PROVIDER (legacy / no-policy invoke)
+      // → anthropic, so existing pi-apikey and claude-apikey behavior is
+      // unchanged. The env-var map is shared with provider-doctor so a key the
+      // doctor reports available is the same one injected here.
+      const provider = ctx.UPSTREAM_PROVIDER || "anthropic";
+      const envVar = apiKeyEnvForProvider(provider);
+      if (!envVar) {
+        throw new Error(
+          `auth.mode=apikey: no API-key binding for upstream provider '${provider}' ` +
+            `(known: anthropic, openai, groq)`,
+        );
+      }
+      const key = process.env[envVar];
+      if (!key) throw new Error(`auth.mode=apikey but ${envVar} env is unset (upstream provider '${provider}')`);
+      args.push("-e", `${envVar}=${key}`);
       break;
     }
     case "oauth-volume": {

@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { hasAwsSsoConfigured, readOauthHint, codexAuthFile } from "../util/creds.js";
+import { hasAwsSsoConfigured, readOauthHint, codexAuthFile, apiKeyEnvForProvider } from "../util/creds.js";
 import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
 
 export type ProbeStatus = "available" | "unavailable" | "unknown";
@@ -26,19 +26,29 @@ export type AuthProbe = {
 const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
   anthropic: ["subscription", "api", "bedrock"],
   openai: ["subscription"], // Codex; api (codex-apikey) is the deferred second mode
+  groq: ["api"], // #303: pi upstream — api-key only (GROQ_API_KEY)
 };
 
 // Provider-aware availability probe. The auth vocabulary (subscription/api/
 // bedrock) is shared, but what makes a mode "available" is provider-specific —
 // `api` means ANTHROPIC_API_KEY for anthropic, OPENAI_API_KEY for openai (Walk).
-// An unprobeable provider returns "unknown" (never blocks). NOTE (#303): since
-// #265 an explicit-runtime profile (e.g. pi-apikey + provider: groq) SKIPS the
-// bindRuntime table, so an unprobeable upstream provider no longer fails loud
-// there — it resolves silently with no probe and no key injection. Adding probe
-// rows + cross-provider key injection so doctor can surface this is #303.
+// An unprobeable provider returns "unknown" (never blocks). #303: an upstream
+// provider whose only credential is an API key (groq, and future pi upstreams)
+// is probed generically by env-var presence via apiKeyEnvForProvider — the SAME
+// map spawn.ts uses to inject the key, so doctor visibility and actual injection
+// can't diverge. A pi explicit-runtime profile (e.g. pi-apikey + provider: groq)
+// thus fails loud at dispatch (checkResolvedAvailability) when its key is absent.
 export function probeAuth(provider: string | undefined, mode: EffectiveAuth): AuthProbe {
   if (provider === "anthropic") return { provider, ...probeAnthropic(mode) };
   if (provider === "openai") return { provider, ...probeOpenai(mode) };
+  if (provider !== undefined && mode === "api") {
+    const envVar = apiKeyEnvForProvider(provider);
+    if (envVar) {
+      return process.env[envVar]
+        ? { provider, mode, status: "available", detail: `${envVar} set` }
+        : { provider, mode, status: "unavailable", detail: `${envVar} not set` };
+    }
+  }
   return {
     provider: provider ?? "(none)",
     mode,

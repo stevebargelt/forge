@@ -54,6 +54,7 @@ beforeEach(() => {
   envSnap = {
     CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
     AWS_PROFILE: process.env.AWS_PROFILE,
     AWS_REGION: process.env.AWS_REGION,
     AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
@@ -256,6 +257,30 @@ test("buildDockerArgs: apikey auth mode passes ANTHROPIC_API_KEY", () => {
 test("buildDockerArgs: apikey auth mode throws when ANTHROPIC_API_KEY is unset", () => {
   const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
   assert.throws(() => buildDockerArgs(rt, BASE_CTX), /ANTHROPIC_API_KEY/);
+});
+
+// #303: apikey mode injects the RESOLVED upstream provider's key, not always
+// anthropic, so pi --provider groq actually receives a Groq credential.
+test("buildDockerArgs: apikey injects the upstream provider's key (groq → GROQ_API_KEY)", () => {
+  process.env.GROQ_API_KEY = "gsk-test";
+  process.env.ANTHROPIC_API_KEY = "sk-anthropic"; // must NOT be the one injected
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
+  const env = pickEnv(buildDockerArgs(rt, { ...BASE_CTX, UPSTREAM_PROVIDER: "groq" }).args);
+  assert.equal(env.GROQ_API_KEY, "gsk-test");
+  assert.equal(env.ANTHROPIC_API_KEY, undefined); // the wrong key is not leaked in
+});
+
+test("buildDockerArgs: apikey + groq throws when GROQ_API_KEY is unset (fail loud, names the var)", () => {
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
+  assert.throws(() => buildDockerArgs(rt, { ...BASE_CTX, UPSTREAM_PROVIDER: "groq" }), /GROQ_API_KEY/);
+});
+
+test("buildDockerArgs: apikey with an unknown upstream provider fails loud", () => {
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
+  assert.throws(
+    () => buildDockerArgs(rt, { ...BASE_CTX, UPSTREAM_PROVIDER: "nope-vendor" }),
+    /no API-key binding for upstream provider 'nope-vendor'/,
+  );
 });
 
 test("buildDockerArgs: codex-auth RO-mounts only ~/.codex/auth.json (not the dir)", () => {

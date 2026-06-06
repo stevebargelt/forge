@@ -1489,8 +1489,11 @@ const PI_UPSTREAM_WORKFLOW: Workflow = {
 test("runNext: a pi profile threads the resolved upstream provider into pi's --provider (#265)", async () => {
   const policyPath = join(process.env.FORGE_HOME!, "model-policy.yml");
   const runtimePath = join(process.env.FORGE_HOME!, "runtimes", "pi-upstream-stub.yml");
-  // provider=groq: probeAuth returns "unknown" (no probe yet) → availability ok,
-  // no live credential needed. runtime auth.mode=oauth-volume → no env required.
+  // #303: groq/api is now probeable, so the availability gate requires a key —
+  // set GROQ_API_KEY so the run reaches dispatch (this test asserts --provider
+  // threading, not the key gate, which is covered in provider-doctor/invoke tests).
+  const savedGroq = process.env.GROQ_API_KEY;
+  process.env.GROQ_API_KEY = "gsk-test";
   writeFileSync(policyPath, `
 on_unavailable: fail
 model_profiles:
@@ -1549,5 +1552,7 @@ result:
   } finally {
     rmSync(policyPath, { force: true });
     rmSync(runtimePath, { force: true });
+    if (savedGroq === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = savedGroq;
   }
 });
