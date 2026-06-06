@@ -24,15 +24,16 @@ export function registerPi(program: Command): void {
   pi
     .command("login")
     .option("--image <name>", "agent image to use", "agent-dev-worker")
-    .option("--provider <name>", "OAuth provider to log into (anthropic | openai | …)", "anthropic")
     .description("Run pi interactively in a container so its OAuth credential lands in ~/.forge/pi-agent/auth.json")
-    .action(async (opts: { image: string; provider: string }) => {
+    .action(async (opts: { image: string }) => {
       const dir = piAgentDir();
       mkdirSync(dir, { recursive: true });
       console.log(`Logging pi in. Credential will persist at ${piAuthFile()}.`);
-      console.log(`When pi's prompt appears, run:  /login ${opts.provider}`);
-      console.log("Follow the OAuth URL it prints (open in a browser, paste the code back).");
-      console.log("Type /exit when finished.\n");
+      console.log("When pi's prompt appears, type:  /login   (bare), then SELECT a provider from the menu —");
+      console.log("  e.g. 'Claude Pro/Max' for a subscription (OAuth), or an API-key provider.");
+      console.log("Follow the OAuth URL it prints (open in a browser, paste the code back). Type /exit when done.");
+      console.log("NOTE: subscription usage via a third-party harness is billed per-token as 'extra usage'");
+      console.log("      (claude.ai/settings/usage), NOT against your flat plan limits.\n");
 
       // Bind-mount the host agent dir at the container's PI_CODING_AGENT_DIR so
       // pi writes auth.json straight to the host. --entrypoint pi runs the TUI
@@ -48,7 +49,7 @@ export function registerPi(program: Command): void {
 
       if (!existsSync(piAuthFile())) {
         console.log(`\n⚠ No credential at ${piAuthFile()} (pi exited ${code}).`);
-        console.log(`  Did \`/login ${opts.provider}\` complete? Re-run \`forge pi login\` to retry.`);
+        console.log("  Did `/login` (then provider select) complete? Re-run `forge pi login` to retry.");
         return;
       }
       console.log(`\n✓ pi OAuth credential saved at ${piAuthFile()}.`);
