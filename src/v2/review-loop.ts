@@ -18,10 +18,17 @@ const defaultGit: GitRunner = (args) => execFileSync("git", args, { encoding: "u
 export type CommitRange = {
   /** how the range was determined */
   mode: "since" | "inferred" | "none";
-  /** a `git diff`-able range, or "" when mode === "none" */
+  /** a `git diff`-able range, or "" when mode === "none". For inferred mode this
+   *  is the oldest^..newest SPAN, which may include unrelated commits — see
+   *  `spansUnmatched`; `shas` is the precise set. */
   diffRange: string;
-  /** the commit SHAs in scope (newest first) */
+  /** the matching commit SHAs in scope (newest first) — the PRECISE set */
   shas: string[];
+  /** inferred mode only: true when the diffRange span contains commits that do
+   *  NOT reference the ticket (non-contiguous ticket commits). When true, the
+   *  caller (slice 6) must diff the specific `shas`, not `diffRange`, to avoid
+   *  reviewing unrelated changes. */
+  spansUnmatched: boolean;
 };
 
 /** Resolve the commits under review for a ticket: an explicit `--since <sha>`
@@ -37,34 +44,42 @@ export function resolveCommitRange(
 
   if (opts.since) {
     const diffRange = `${opts.since}..HEAD`;
-    return { mode: "since", diffRange, shas: shasOf(diffRange) };
+    return { mode: "since", diffRange, shas: shasOf(diffRange), spansUnmatched: false };
   }
 
   const num = ticketId.replace(/^#/, "").trim();
   // Commits whose subject/body references the ticket, e.g. "(#301)" or "#301".
   const matched = git(["log", "--format=%H", `--grep=#${num}\\b`, "--extended-regexp"])
     .split("\n").map((s) => s.trim()).filter(Boolean);
-  if (matched.length === 0) return { mode: "none", diffRange: "", shas: [] };
+  if (matched.length === 0) return { mode: "none", diffRange: "", shas: [], spansUnmatched: false };
 
-  // git log is newest-first: newest = matched[0], oldest = matched[last].
+  // git log is newest-first: newest = matched[0], oldest = matched[last]. The
+  // span may include UNRELATED commits between two ticket commits — detect that
+  // by comparing the span's commit count to the matched set, so the caller knows
+  // to diff `shas` precisely rather than the span.
   const newest = matched[0]!;
   const oldest = matched[matched.length - 1]!;
-  return { mode: "inferred", diffRange: `${oldest}^..${newest}`, shas: matched };
+  const diffRange = `${oldest}^..${newest}`;
+  const spanCount = shasOf(diffRange).length;
+  return { mode: "inferred", diffRange, shas: matched, spansUnmatched: spanCount !== matched.length };
 }
 
 // ── Slice 2: reviewer verdict contract ───────────────────────────────────────
 
 export type ReviewerVerdict = "pass" | "needs_fix" | "blocked";
 
-// A finding must be file/line ANCHORED, or explicitly flagged unanchored.
+// A finding must be ANCHORED (BOTH file AND line — so the fixer handoff points at
+// an exact spot) or explicitly flagged `unanchored: true`. A bare `file` with no
+// `line` is rejected: either give the line or mark it unanchored.
 const FindingSchema = z.object({
   summary: z.string().min(1),
   file: z.string().min(1).optional(),
   line: z.number().int().positive().optional(),
   unanchored: z.boolean().optional(),
 }).superRefine((f, ctx) => {
-  if (!f.file && f.unanchored !== true) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "finding must have a `file` (anchored) or `unanchored: true`" });
+  const anchored = f.file !== undefined && f.line !== undefined;
+  if (!anchored && f.unanchored !== true) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "finding must be anchored (both `file` and `line`) or `unanchored: true`" });
   }
 });
 
@@ -137,21 +152,30 @@ export type FixDispatch = { ok: boolean; error?: string };
 
 /** Explicit terminal states — the only ways the loop stops. */
 export type StopReason =
-  | "passed"                // reviewer pass AND deterministic verification ok → closeable
+  | "passed"                // verification ok AND reviewer pass → closeable
   | "blocked_by_reviewer"   // reviewer returned blocked
-  | "needs_fix_max_rounds"  // still needs_fix after max rounds
-  | "verification_failed"   // reviewer passed but verification did NOT (never auto-close)
+  | "needs_fix_max_rounds"  // reviewer still needs_fix after max rounds
+  | "verification_failed"   // deterministic verification still failing at max rounds
   | "fixer_failed"          // the fixer dispatch failed
   | "reviewer_failed";      // the reviewer dispatch failed or returned an invalid verdict
 
 export type RoundRecord = {
   round: number;
   verification: VerificationResult;
+  /** undefined when verification failed — the reviewer is short-circuited that round */
   verdict?: ReviewerVerdict;
   findings: Finding[];
   fixAttempted: boolean;
   fixError?: string;
 };
+
+/** Turn failed verification steps into fixer findings (unanchored — typecheck/test
+ *  output isn't generically file/line addressable; the fixer reads the output). */
+function verificationFindings(v: VerificationResult): Finding[] {
+  return v.steps
+    .filter((s) => !s.ok)
+    .map((s) => ({ summary: `deterministic verification step '${s.name}' failed:\n${s.output.slice(0, 2000)}`, unanchored: true }));
+}
 
 export type ReviewLoopOutcome = {
   stopReason: StopReason;
@@ -166,17 +190,40 @@ export type ReviewLoopDeps = {
   fix: (findings: Finding[]) => FixDispatch;
 };
 
-/** Run the bounded review/fix loop. Each round: verify → review; on needs_fix
- *  (and rounds remain) → fix → next round. Stops on pass, blocked, max rounds,
- *  verification/fixer/reviewer failure. Pure: all effects via `deps`. */
+/** Run the bounded review/fix loop. Each round: run deterministic verification;
+ *  if it FAILS, short-circuit the reviewer and send the failure straight to the
+ *  fixer (no point spending a review on code that doesn't typecheck/test). If it
+ *  passes, review; on needs_fix (and rounds remain) → fix → next round. Stops on
+ *  pass, blocked, max rounds, or verification/fixer/reviewer failure. Pure: all
+ *  effects via `deps`. */
 export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps): ReviewLoopOutcome {
   const maxRounds = Math.max(1, opts.maxRounds ?? 2);
   const rounds: RoundRecord[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
     const verification = deps.verify();
-    const review = deps.review(verification);
 
+    // Verification first. If it fails, do NOT review — the failure is the work.
+    if (!verification.ok) {
+      const findings = verificationFindings(verification);
+      const rec: RoundRecord = { round, verification, findings, fixAttempted: false };
+      if (round === maxRounds) {
+        rounds.push(rec);
+        return { stopReason: "verification_failed", closeable: false, rounds };
+      }
+      const fix = deps.fix(findings);
+      rec.fixAttempted = true;
+      if (!fix.ok) {
+        rec.fixError = fix.error;
+        rounds.push(rec);
+        return { stopReason: "fixer_failed", closeable: false, rounds };
+      }
+      rounds.push(rec); // fixed; next round re-verifies
+      continue;
+    }
+
+    // Verification green → review.
+    const review = deps.review(verification);
     if (!review.ok) {
       rounds.push({ round, verification, findings: [], fixAttempted: false });
       return { stopReason: "reviewer_failed", closeable: false, rounds };
@@ -185,14 +232,10 @@ export function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps
     const rec: RoundRecord = { round, verification, verdict: review.verdict, findings: review.findings, fixAttempted: false };
 
     if (review.verdict === "pass") {
+      // verification.ok is guaranteed here, so pass ⟹ closeable.
       rounds.push(rec);
-      // Close guardrail: a reviewer pass alone is not enough — verification must
-      // also pass, else surface verification_failed and refuse to auto-close.
-      return verification.ok
-        ? { stopReason: "passed", closeable: true, rounds }
-        : { stopReason: "verification_failed", closeable: false, rounds };
+      return { stopReason: "passed", closeable: true, rounds };
     }
-
     if (review.verdict === "blocked") {
       rounds.push(rec);
       return { stopReason: "blocked_by_reviewer", closeable: false, rounds };

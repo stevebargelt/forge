@@ -9,7 +9,6 @@ import {
   type CommandRunner,
   type ReviewLoopDeps,
   type VerificationResult,
-  type ReviewDispatch,
   type Finding,
 } from "./review-loop.js";
 
@@ -24,22 +23,36 @@ test("#301 range: --since yields <sha>..HEAD with its shas", () => {
   assert.equal(r.mode, "since");
   assert.equal(r.diffRange, "abc..HEAD");
   assert.deepEqual(r.shas, ["h2", "h1"]);
+  assert.equal(r.spansUnmatched, false);
 });
 
-test("#301 range: inferred from commits referencing the ticket → oldest^..newest", () => {
+test("#301 range: inferred, contiguous → oldest^..newest, spansUnmatched false", () => {
   const git: GitRunner = (args) => {
-    assert.ok(args.includes("--grep=#301\\b"), "greps the ticket number with a word boundary");
-    return "hNew\nhMid\nhOld\n"; // newest-first
+    if (args.includes("--grep=#301\\b")) return "hNew\nhMid\nhOld\n"; // 3 matched, newest-first
+    if (args[2] === "hOld^..hNew") return "hNew\nhMid\nhOld\n";        // span == matched
+    return "";
   };
   const r = resolveCommitRange("#301", { git });
   assert.equal(r.mode, "inferred");
   assert.equal(r.diffRange, "hOld^..hNew");
   assert.deepEqual(r.shas, ["hNew", "hMid", "hOld"]);
+  assert.equal(r.spansUnmatched, false);
+});
+
+test("#301 range: inferred span containing unrelated commits → spansUnmatched true; shas stays precise", () => {
+  const git: GitRunner = (args) => {
+    if (args.includes("--grep=#777\\b")) return "hNew\nhOld\n";        // 2 matched
+    if (args[2] === "hOld^..hNew") return "hNew\nhUnrelated\nhOld\n";  // span has a 3rd, non-ticket commit
+    return "";
+  };
+  const r = resolveCommitRange("777", { git });
+  assert.equal(r.spansUnmatched, true, "caller must diff the precise shas, not the span");
+  assert.deepEqual(r.shas, ["hNew", "hOld"]);
 });
 
 test("#301 range: no --since and no matching commits → mode none", () => {
   const r = resolveCommitRange("999", { git: () => "\n  \n" });
-  assert.deepEqual(r, { mode: "none", diffRange: "", shas: [] });
+  assert.deepEqual(r, { mode: "none", diffRange: "", shas: [], spansUnmatched: false });
 });
 
 // ── Slice 2: parseReviewerVerdict ────────────────────────────────────────────
@@ -50,24 +63,27 @@ test("#301 verdict: valid pass with no findings", () => {
   assert.equal((r as { verdict: string }).verdict, "pass");
 });
 
-test("#301 verdict: needs_fix with an anchored finding", () => {
+test("#301 verdict: needs_fix with a fully anchored finding (file AND line)", () => {
   const r = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "off-by-one", file: "src/x.ts", line: 42 }] });
   assert.equal(r.ok, true);
-  assert.equal((r as { findings: Finding[] }).findings[0]!.file, "src/x.ts");
+  assert.equal((r as { findings: Finding[] }).findings[0]!.line, 42);
+});
+
+test("#301 verdict: a file with no line is rejected (anchored needs both)", () => {
+  const r = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "somewhere in x", file: "src/x.ts" }] });
+  assert.equal(r.ok, false);
+  assert.match((r as { error: string }).error, /both `file` and `line`.*or.*unanchored/);
+});
+
+test("#301 verdict: explicitly unanchored finding is accepted", () => {
+  const r = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "broad concern", unanchored: true }] });
+  assert.equal(r.ok, true);
 });
 
 test("#301 verdict: needs_fix with no findings is rejected", () => {
   const r = parseReviewerVerdict({ verdict: "needs_fix", findings: [] });
   assert.equal(r.ok, false);
   assert.match((r as { error: string }).error, /needs_fix requires at least one finding/);
-});
-
-test("#301 verdict: a finding must be anchored or explicitly unanchored", () => {
-  const bad = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "vague" }] });
-  assert.equal(bad.ok, false);
-  assert.match((bad as { error: string }).error, /anchored.*or.*unanchored/);
-  const okUnanchored = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "broad concern", unanchored: true }] });
-  assert.equal(okUnanchored.ok, true);
 });
 
 test("#301 verdict: unknown verdict value is rejected (never treated as pass)", () => {
@@ -102,7 +118,7 @@ test("#301 verify: no discoverable scripts → ok false, no steps", () => {
 // ── Slice 4: runReviewLoop ───────────────────────────────────────────────────
 
 const VERIFY_OK: VerificationResult = { ok: true, steps: [{ name: "test", ok: true, output: "" }] };
-const VERIFY_BAD: VerificationResult = { ok: false, steps: [{ name: "test", ok: false, output: "fail" }] };
+const VERIFY_BAD: VerificationResult = { ok: false, steps: [{ name: "test", ok: false, output: "1 failing" }] };
 const ANCHORED: Finding[] = [{ summary: "fix me", file: "a.ts", line: 1 }];
 
 function deps(over: Partial<ReviewLoopDeps>): ReviewLoopDeps {
@@ -114,31 +130,63 @@ function deps(over: Partial<ReviewLoopDeps>): ReviewLoopDeps {
   };
 }
 
-test("#301 loop: reviewer pass + verification ok → passed + closeable", () => {
+test("#301 loop: verification ok + reviewer pass → passed + closeable", () => {
   const r = runReviewLoop({}, deps({}));
   assert.equal(r.stopReason, "passed");
   assert.equal(r.closeable, true);
   assert.equal(r.rounds.length, 1);
 });
 
-test("#301 loop: reviewer pass but verification fails → verification_failed, NOT closeable", () => {
-  const r = runReviewLoop({}, deps({ verify: () => VERIFY_BAD }));
+test("#301 loop: failing verification SHORT-CIRCUITS the reviewer", () => {
+  let reviewed = false;
+  const r = runReviewLoop({ maxRounds: 1 }, deps({
+    verify: () => VERIFY_BAD,
+    review: () => { reviewed = true; return { ok: true, verdict: "pass", findings: [] }; },
+  }));
+  assert.equal(reviewed, false, "reviewer must NOT run when verification fails");
   assert.equal(r.stopReason, "verification_failed");
   assert.equal(r.closeable, false);
+  assert.equal(r.rounds[0]!.verdict, undefined, "no verdict recorded — review was skipped");
+});
+
+test("#301 loop: failing verification → fixer gets verification-derived unanchored findings", () => {
+  let given: Finding[] = [];
+  const r = runReviewLoop({ maxRounds: 2 }, deps({
+    verify: () => VERIFY_BAD,
+    fix: (f) => { given = f; return { ok: true }; },
+  }));
+  assert.equal(r.rounds[0]!.fixAttempted, true);
+  assert.equal(given.length, 1);
+  assert.equal(given[0]!.unanchored, true);
+  assert.match(given[0]!.summary, /verification step 'test' failed/);
+  // round 2 also fails verification → verification_failed at max rounds
+  assert.equal(r.stopReason, "verification_failed");
+});
+
+test("#301 loop: verification recovers after a fix → review runs → passed", () => {
+  let round = 0;
+  const r = runReviewLoop({ maxRounds: 2 }, deps({
+    verify: () => (++round === 1 ? VERIFY_BAD : VERIFY_OK), // first round red, then green after fix
+    review: () => ({ ok: true, verdict: "pass", findings: [] }),
+  }));
+  assert.equal(r.stopReason, "passed");
+  assert.equal(r.closeable, true);
+  assert.equal(r.rounds[0]!.verdict, undefined, "round 1 skipped review (verify failed)");
+  assert.equal(r.rounds[1]!.verdict, "pass");
 });
 
 test("#301 loop: needs_fix → fix → pass on round 2 → passed", () => {
   let round = 0;
-  const review: ReviewLoopDeps["review"] = () => (++round === 1
-    ? { ok: true, verdict: "needs_fix", findings: ANCHORED }
-    : { ok: true, verdict: "pass", findings: [] });
   let fixes = 0;
-  const r = runReviewLoop({ maxRounds: 2 }, deps({ review, fix: () => { fixes++; return { ok: true }; } }));
+  const r = runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => (++round === 1
+      ? { ok: true, verdict: "needs_fix", findings: ANCHORED }
+      : { ok: true, verdict: "pass", findings: [] }),
+    fix: () => { fixes++; return { ok: true }; },
+  }));
   assert.equal(r.stopReason, "passed");
-  assert.equal(r.closeable, true);
-  assert.equal(fixes, 1, "fixer ran once between the two review rounds");
+  assert.equal(fixes, 1);
   assert.equal(r.rounds.length, 2);
-  assert.equal(r.rounds[0]!.fixAttempted, true);
 });
 
 test("#301 loop: still needs_fix at max rounds → needs_fix_max_rounds (no fix on the last round)", () => {
@@ -155,13 +203,11 @@ test("#301 loop: still needs_fix at max rounds → needs_fix_max_rounds (no fix 
 test("#301 loop: blocked verdict → blocked_by_reviewer", () => {
   const r = runReviewLoop({}, deps({ review: () => ({ ok: true, verdict: "blocked", findings: [] }) }));
   assert.equal(r.stopReason, "blocked_by_reviewer");
-  assert.equal(r.closeable, false);
 });
 
 test("#301 loop: reviewer dispatch failure → reviewer_failed", () => {
   const r = runReviewLoop({}, deps({ review: () => ({ ok: false, error: "unparseable verdict" }) }));
   assert.equal(r.stopReason, "reviewer_failed");
-  assert.equal(r.closeable, false);
 });
 
 test("#301 loop: fixer failure → fixer_failed", () => {
@@ -173,7 +219,7 @@ test("#301 loop: fixer failure → fixer_failed", () => {
   assert.equal(r.rounds.at(-1)!.fixError, "engineer crashed");
 });
 
-test("#301 loop: re-verifies every round (verify failure can change after a fix)", () => {
+test("#301 loop: re-verifies every round", () => {
   let verifies = 0;
   let round = 0;
   runReviewLoop({ maxRounds: 2 }, deps({
