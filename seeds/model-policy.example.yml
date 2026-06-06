@@ -69,21 +69,15 @@ model_profiles:
       review:    { model: gpt-5.5, cost_tier: standard }
       default:   { model: gpt-5.5, cost_tier: standard }
 
-  # ILLUSTRATIVE — NOT RUNNABLE YET. Do not add pi-groq to allowed_profiles or
-  # defaults. Selecting a non-anthropic upstream (e.g. groq) requires:
-  #   1. provider-doctor probe for the upstream provider's API key, and
-  #   2. per-provider API-key injection in the pi runtime.
-  # Both are tracked in #303. Until then pi runs are anthropic-bound:
-  # use pi-apikey (ANTHROPIC_API_KEY) or pi-oauth (Claude subscription).
-  # forge providers doctor cannot yet verify a GROQ_API_KEY, so a dispatch
-  # with this profile would fail silently with no key injected.
-  #
-  # pi-groq:
-  #   provider: groq
-  #   runtime: pi-apikey
-  #   auth: api
-  #   map:
-  #     default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
+  # pi via Groq API key. Requires GROQ_API_KEY in the host env; `forge providers
+  # doctor` reports groq/api availability. A dispatch fails loud before running if
+  # the key is absent. Add to allowed_profiles and defaults to enable.
+  pi-groq:
+    provider: groq
+    runtime: pi-apikey
+    auth: api
+    map:
+      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
 
 defaults:
   # Ultimate fallback when no activity/agent override matches.

@@ -41,8 +41,9 @@ models:
   default: claude-sonnet-4-6
 
 auth:
-  mode: apikey   # injects ANTHROPIC_API_KEY=<host value> as -e; pi reads it for
-  # the anthropic provider. No mount, no volume. Spawn-time fresh.
+  mode: apikey   # injects the resolved upstream provider's API key as -e
+  # (ANTHROPIC_API_KEY when upstream is anthropic/default, GROQ_API_KEY when
+  # provider: groq, etc.). No mount, no volume. Spawn-time fresh.
 
 env:
   # pi needs no headless browser; skip the entrypoint's Chromium startup.

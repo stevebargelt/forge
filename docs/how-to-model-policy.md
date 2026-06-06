@@ -120,26 +120,20 @@ them. Set the optional `runtime:` field on a profile to pin the runtime YAML
 **directly**, then use `provider:` to name the upstream model vendor that
 runtime should forward to.
 
-> **Non-anthropic upstream providers are NOT runnable today.** The example
-> below (`provider: groq`) is **illustrative** — do not use it in a real policy
-> file. Two pieces are missing and both are tracked in **#303**:
-> 1. `forge providers doctor` has no probe for non-anthropic/openai providers,
->    so it cannot verify or report a GROQ_API_KEY (or any third-party key).
-> 2. The pi-apikey runtime injects only `ANTHROPIC_API_KEY`; there is no
->    per-provider key-injection path yet.
-> Until #303 lands, pi runs must use an anthropic upstream: `pi-apikey`
-> (ANTHROPIC_API_KEY) or `pi-oauth` (Claude subscription). The `runtime:` field
-> and `provider:` vocabulary described here **did ship in #265** and work
-> correctly for anthropic; the gap is key injection + doctor visibility for other
-> vendors.
+> **#303 landed** — groq/api is now runnable. Set `GROQ_API_KEY` in the host env;
+> `forge providers doctor` reports availability under the `groq/api` row; a
+> dispatch fails loud before the container starts if the key is absent.
+> Only providers in the API-key map (currently **anthropic**, **openai**,
+> **groq**) are wired for `auth.mode=apikey` injection — other vendors need a new
+> row in `src/util/creds.ts:API_KEY_ENV_BY_PROVIDER` before they can dispatch.
 
 ```yaml
 model_profiles:
-  # ILLUSTRATIVE — not runnable until #303. See caveat above.
+  # Requires GROQ_API_KEY in host env; `forge providers doctor` shows groq/api.
   pi-groq:
     provider: groq          # upstream vendor — threaded to the runtime as ${UPSTREAM_PROVIDER}
     runtime: pi-apikey      # explicit runtime YAML; skips the (provider, auth) binding table
-    auth: api               # pi-apikey injects ANTHROPIC_API_KEY only; groq key injection is #303
+    auth: api               # injects GROQ_API_KEY (resolved via the upstream provider)
     map:
       default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
 ```
