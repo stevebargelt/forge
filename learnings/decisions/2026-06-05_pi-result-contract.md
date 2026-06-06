@@ -1,7 +1,7 @@
 # Decision: pi result / completion contract — agent writes result.json; forge attributes a missing one
 
 **Date:** 2026-06-05
-**Tickets:** #264 (Crawl exit — result-contract parity), #258 (Pi epic)
+**Tickets:** #264 (Crawl exit — result-contract parity), #258 (Pi epic), #267 (model_error classification)
 **Status:** decided + tested. Sibling to [pi prompt injection](./2026-06-05_pi-prompt-injection.md).
 
 ## The boundary: how pi output becomes forge `result.json`
@@ -28,7 +28,7 @@ Because pi exits 0, a pi run that produced no usable `result.json` would otherwi
 fall into forge's generic, silent `no_result_json` — ambiguous between "provider
 errored", "container crashed mid-stream", and "agent ignored the contract". For
 `runtime_kind: pi`, forge now derives an attributable reason from pi's structured
-stdout (`src/v2/pi-result.ts`, `attributePiNoResult`), in priority order:
+stdout (`src/v2/pi-result.ts`, `analyzePiFailure(stdout) → { modelError, error }`), in priority order:
 
 1. an `assistant` message carries `errorMessage` → `pi run failed: <errorMessage>`
    (the provider/model error, truncated).
@@ -37,12 +37,18 @@ stdout (`src/v2/pi-result.ts`, `attributePiNoResult`), in priority order:
 3. clean `agent_end`, no error, still no file → `pi completed but wrote no
    /task/result.json (the agent did not honor the output contract)`.
 
+Cases 1 and 2 set `modelError: true`; case 3 sets it `false`. `attributePiNoResult`
+is retained as a back-compat thin wrapper over `analyzePiFailure` (returns `.error`
+only) for #264 call-sites.
+
 The mapping is deterministic: the same pi stdout yields the same forge outcome,
 independent of any live provider call. It is **completion/error attribution only**
 — pi's token usage lives in the same JSONL but is parsed separately by #262 (the
 pi usage parser, keyed off `log_format: pi-jsonl`); this completion-attribution
-code never touches `model_calls`. Provider-error → `model_error` event
-reclassification is #267.
+code never touches `model_calls`. When `modelError` is true, the dispatch sites
+(`invoke.ts`, `runNext.ts`) map the failure to forge's `model_error` failure_kind
+with the cause string surfaced; truncated output and clean-but-no-result use the
+generic `result_missing` path (#267).
 
 ## Why not synthesize a "complete" when the agent writes nothing?
 
@@ -54,5 +60,4 @@ lower the bar for success.
 ## Out of scope (unchanged by this)
 
 - provider/profile binding (#265); OAuth (#266);
-  error→`model_error` classification (#267); `models.json` local models (#268);
-  provider-adapter generation (#283).
+  `models.json` local models (#268); provider-adapter generation (#283).
