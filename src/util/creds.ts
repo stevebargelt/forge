@@ -862,13 +862,17 @@ export function probeAwsChain(profile: string): AwsChainProbe {
 // #303: provider -> the API-key env var the runtime reads for that UPSTREAM
 // vendor. Single source of truth shared by the provider-doctor probe and the
 // container key injection in spawn.ts, so "doctor reports available" and "the
-// key is actually injected into the container" can never diverge. Providers
-// whose only credential is an API key (groq) live here; anthropic/openai also
-// support other auth modes (oauth/bedrock) handled elsewhere, but their api
-// mode reads these same vars. Add a row to extend cross-provider pi support.
+// key is actually injected into the container" can never diverge.
+//
+// INVARIANT: only providers whose `api` mode is probeable AND injectable belong
+// here. anthropic's api mode is probed by probeAnthropic; groq by the generic
+// env-var probe in provider-doctor. openai is deliberately ABSENT: its api mode
+// (codex-apikey) is the deferred second auth mode (probeOpenai returns "unknown"
+// for api), so adding it here would make an openai-api pi profile injectable but
+// doctor-invisible — the exact divergence this map exists to prevent. Add a row
+// only once both the probe and the injection are wired for that provider.
 const API_KEY_ENV_BY_PROVIDER: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
   groq: "GROQ_API_KEY",
 };
 
@@ -876,4 +880,10 @@ const API_KEY_ENV_BY_PROVIDER: Record<string, string> = {
  *  no api-key binding for it (the caller fails loud). */
 export function apiKeyEnvForProvider(provider: string): string | undefined {
   return API_KEY_ENV_BY_PROVIDER[provider];
+}
+
+/** Providers with a wired api-key binding, for fail-loud diagnostics. Derived
+ *  from the map so the message can't drift from what's actually supported. */
+export function knownApiKeyProviders(): string[] {
+  return Object.keys(API_KEY_ENV_BY_PROVIDER);
 }

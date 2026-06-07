@@ -123,9 +123,11 @@ runtime should forward to.
 > **#303 landed** — groq/api is now runnable. Set `GROQ_API_KEY` in the host env;
 > `forge providers doctor` reports availability under the `groq/api` row; a
 > dispatch fails loud before the container starts if the key is absent.
-> Only providers in the API-key map (currently **anthropic**, **openai**,
-> **groq**) are wired for `auth.mode=apikey` injection — other vendors need a new
-> row in `src/util/creds.ts:API_KEY_ENV_BY_PROVIDER` before they can dispatch.
+> Only providers in the API-key map (currently **anthropic** and **groq**) are
+> wired for `auth.mode=apikey` injection — other vendors need a new row in
+> `src/util/creds.ts:API_KEY_ENV_BY_PROVIDER` before they can dispatch. OpenAI
+> api-key (`codex-apikey`) is intentionally absent from the map: its api probe
+> returns `unknown`, so it would be injectable but doctor-invisible.
 
 ```yaml
 model_profiles:

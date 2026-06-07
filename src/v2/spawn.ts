@@ -27,6 +27,7 @@ import {
   codexAuthFile,
   piAuthFile,
   apiKeyEnvForProvider,
+  knownApiKeyProviders,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
 
@@ -108,7 +109,7 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
       if (!envVar) {
         throw new Error(
           `auth.mode=apikey: no API-key binding for upstream provider '${provider}' ` +
-            `(known: anthropic, openai, groq)`,
+            `(known: ${knownApiKeyProviders().join(", ")})`,
         );
       }
       const key = process.env[envVar];

@@ -55,6 +55,7 @@ beforeEach(() => {
     CLAUDE_CODE_USE_BEDROCK: process.env.CLAUDE_CODE_USE_BEDROCK,
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
     GROQ_API_KEY: process.env.GROQ_API_KEY,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     AWS_PROFILE: process.env.AWS_PROFILE,
     AWS_REGION: process.env.AWS_REGION,
     AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
@@ -280,6 +281,18 @@ test("buildDockerArgs: apikey with an unknown upstream provider fails loud", () 
   assert.throws(
     () => buildDockerArgs(rt, { ...BASE_CTX, UPSTREAM_PROVIDER: "nope-vendor" }),
     /no API-key binding for upstream provider 'nope-vendor'/,
+  );
+});
+
+// #303 invariant: openai api-key (codex-apikey) is the deferred mode and is NOT
+// in the api-key map, so apikey injection must fail loud rather than inject a
+// key the provider-doctor can't probe (doctor-invisible + injectable divergence).
+test("buildDockerArgs: apikey with openai fails loud — codex-apikey is deferred, not in the shared map", () => {
+  process.env.OPENAI_API_KEY = "sk-openai"; // present, but still must not inject
+  const rt: Runtime = { ...BASE_RUNTIME, auth: { mode: "apikey" } };
+  assert.throws(
+    () => buildDockerArgs(rt, { ...BASE_CTX, UPSTREAM_PROVIDER: "openai" }),
+    /no API-key binding for upstream provider 'openai'/,
   );
 });
 
