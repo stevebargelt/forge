@@ -11,7 +11,7 @@ import { existsSync, statSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { FORGE_HOME, ROUTING_POLICY_PATH } from "../../util/paths.js";
-import { loadRuntime, loadModelPolicy } from "../../v2/loader.js";
+import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.js";
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
@@ -132,10 +132,10 @@ function gatherClis(image: ImageInputs): CliInputs[] {
   }));
 }
 
-function gatherProfileAuth(): AuthInputs[] {
+function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
   let policy;
   try {
-    policy = loadModelPolicy();
+    policy = loadModelPolicy(ctx);
   } catch {
     return []; // invalid policy is reported by the policy check; skip auth probing
   }
@@ -158,10 +158,12 @@ function gatherProfileAuth(): AuthInputs[] {
   return rows;
 }
 
-function gatherPolicy(): ReleaseInputs["policy"] {
-  if (!existsSync(MODEL_POLICY_PATH)) return { present: false, valid: false };
+function gatherPolicy(ctx: LoadContext = {}): ReleaseInputs["policy"] {
+  const projectPath = ctx.projectDir ? join(ctx.projectDir, ".forge", "model-policy.yml") : undefined;
+  const present = (projectPath !== undefined && existsSync(projectPath)) || existsSync(MODEL_POLICY_PATH);
+  if (!present) return { present: false, valid: false };
   try {
-    loadModelPolicy();
+    loadModelPolicy(ctx);
     return { present: true, valid: true };
   } catch (e) {
     return { present: true, valid: false, error: (e as Error).message };
@@ -178,13 +180,13 @@ function gatherRouting(): ReleaseInputs["routing"] {
   };
 }
 
-export function gatherReleaseInputs(imageName = DEFAULT_IMAGE): ReleaseInputs {
+export function gatherReleaseInputs(imageName = DEFAULT_IMAGE, ctx: LoadContext = {}): ReleaseInputs {
   const image = inspectImage(imageName);
   return {
     image,
     clis: gatherClis(image),
-    policy: gatherPolicy(),
-    profileAuth: gatherProfileAuth(),
+    policy: gatherPolicy(ctx),
+    profileAuth: gatherProfileAuth(ctx),
     routing: gatherRouting(),
   };
 }
@@ -195,7 +197,7 @@ export function registerDoctor(program: Command): void {
     .description("Read-only release-readiness check: agent image, in-image runtime CLIs, provider auth, model/routing policy")
     .option("--json", "emit JSON instead of a human summary")
     .action((opts: { json?: boolean }) => {
-      const report = buildReleaseReport(gatherReleaseInputs());
+      const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
       if (opts.json) {
         console.log(JSON.stringify(report, null, 2));
       } else {

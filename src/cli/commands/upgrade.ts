@@ -265,7 +265,7 @@ export function registerUpgrade(program: Command): void {
       // mutates; skipped on a dry run.
       if (!dryRun) {
         try {
-          const report = buildReleaseReport(gatherReleaseInputs());
+          const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd }));
           const problems = summarizeProblems(report);
           console.log("");
           if (problems.length === 0) {

@@ -18,9 +18,9 @@ This runs four steps in sequence:
 3. **`FORCE=1 ./scripts/install-seeds.sh`** to refresh `~/.forge/agents/`, `constraints/`, `workflows/`, `runtimes/`, and `forge-raci.md` from the new seeds — then **recompile the derived `~/.forge/routing-policy.yml`** from the refreshed RACI. The routing policy is generated, never hand-maintained, so upgrade regenerates it in lockstep; you never run `forge route compile` by hand after an upgrade. A compile failure is reported loudly with the exact reason (the rest of the upgrade still runs).
 4. **Provision the current project** (when the cwd's `CLAUDE.md` looks like a forge project — a fence marker *or* a `# forge orchestrator` heading). This **always** installs/refreshes the per-machine pieces — slash commands (`/orient`, `/handoff`), Claude session hooks, `.gitignore` entries — because those are machine-local and not committed, so every new machine needs them even when `CLAUDE.md` is committed. It then refreshes the orchestrator **block**: replaced in place when fenced (head/tail preserved); **repaired** when only the end marker is present (start re-inserted before the heading); and for an unfenced legacy block or a lone start marker it leaves the block untouched and prints exactly which markers to add (the end can't be inferred without risking your project-specific tail). `forge init` is for genuinely new projects; `forge upgrade` is the path for existing ones (#231).
 
-Output is compact — one line per step plus any orphan-warnings from the seeds install.
+Output is compact — one line per step plus any orphan-warnings from the seeds install. After the steps complete, a read-only release check runs automatically — it verifies the agent image, in-image runtime CLIs, auth credentials, and policies, surfacing any problems before the next dispatch. Run `forge doctor` for the full report.
 
-> `forge upgrade` does **not** rebuild the agent Docker image or run provider login. After pulling Dockerfile changes (e.g. the Codex CLI), run `bash docker/build.sh`; and `codex login` / `forge auth login` are per-machine (#229).
+> `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after pulling Dockerfile changes (e.g. a new Codex CLI), add `--rebuild-image`. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
 
 ## Useful flags
 
@@ -30,6 +30,7 @@ forge upgrade --skip-git        # local-only changes; don't pull
 forge upgrade --skip-npm        # deps haven't changed; faster loop
 forge upgrade --skip-project    # don't touch this project's CLAUDE.md
 forge upgrade --forge-repo <dir># forge source is somewhere other than ~/code/forge
+forge upgrade --rebuild-image   # also rebuild the agent Docker image (runs docker/build.sh)
 ```
 
 `--dry-run` is the right thing to try first if you're unsure what an upgrade will do — it prints the four-step plan with what each would do, then exits.
@@ -84,7 +85,7 @@ That's exactly what `forge upgrade` does — knowing the manual flow makes the C
 
 ## What the upgrade does NOT do
 
-- **Does not rebuild the agent Docker image.** If `docker/agent-dev-worker.Dockerfile` changed, you need `./docker/build.sh` separately. Forge will keep using the old image until you rebuild — usually fine, but watch for breakage if the image picked up something load-bearing (e.g. a new tool in PATH).
+- **Does not rebuild the agent Docker image by default.** If `docker/agent-dev-worker.Dockerfile` changed, pass `--rebuild-image` to handle it in the same command (`forge upgrade --rebuild-image`), or run `./docker/build.sh` separately. Forge will keep using the old image until you rebuild — usually fine, but watch for breakage if the image picked up something load-bearing (e.g. a new tool in PATH).
 - **Does not touch the SQLite DB.** Schema migrations (rare) happen at next forge invocation when the DB opens. No upgrade-time action needed.
 - **Does not refresh other projects' CLAUDE.md.** Only the cwd's, and only if the block exists. See "Updating multiple projects" above.
 - **Does not restart any running orchestrator sessions.** If a Claude Code session has the orchestrator block loaded, it stays on the old template until restart. Restart the session to pick up new orchestrator behavior.
