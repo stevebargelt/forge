@@ -503,16 +503,6 @@ Provenance: forge red panel + independent external review + in-use refresh-token
 
 ### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
 
-### #198 — NO_NOTIFY kill-switch so forge's own test suite doesn't fire real notifications
-A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the top of the notify dispatch path (src/notify/trigger.ts isAnyProviderEnabled / dispatch) that short-circuits ALL providers (ntfy + Twilio) regardless of FORGE_NOTIFY / NTFY_URL config.
-
-**The ONLY problem this solves:** when forge runs its OWN test suite, tests transition runs to complete/failed -> updateRunStatus -> notifyOnRunTransition -> real push. #175 already fixed this narrowly by CLEARING FORGE_NOTIFY in src/test-setup.ts, but that's implicit (you have to know clearing the provider list disables notifications) and provider-specific. NO_NOTIFY=true is an explicit, provider-agnostic 'this context is not real work, stay silent' lever. test-setup.ts then just sets NO_NOTIFY=true.
-
-**Explicitly NOT in scope — do not suppress real run notifications.** Real forge invoke / forge new runs completing are exactly what notifications are FOR: the human is away and the ping is their signal that agent work finished. An earlier version of this ticket (closed #192) wrongly framed orchestrator-internal invoke completions as 'noise' to suppress — that was a mistaken read. Per-run completion notifications for legit runs are the feature working correctly. This ticket is ONLY about silencing forge's automated test suite (and any other explicitly-flagged non-production context), never real work.
-
-Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred — not urgent.
-
-
 ### #200 — forge show: stdout/stderr tail dumps raw stream-json blobs — extract text deltas instead
 #196's forge show task view tails the last ~5 lines of container.stdout.log. For Claude agent containers the log is stream-json — each 'line' is a huge JSON object, so the 'Last stdout' block renders 5 giant unreadable blobs instead of useful recent activity.
 
@@ -943,6 +933,18 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 
 
 ## Done (recent)
+
+### #198 — NO_NOTIFY kill-switch so forge's own test suite doesn't fire real notifications
+**Closed:** 2026-06-07.
+
+A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the top of the notify dispatch path (src/notify/trigger.ts isAnyProviderEnabled / dispatch) that short-circuits ALL providers (ntfy + Twilio) regardless of FORGE_NOTIFY / NTFY_URL config.
+
+**The ONLY problem this solves:** when forge runs its OWN test suite, tests transition runs to complete/failed -> updateRunStatus -> notifyOnRunTransition -> real push. #175 already fixed this narrowly by CLEARING FORGE_NOTIFY in src/test-setup.ts, but that's implicit (you have to know clearing the provider list disables notifications) and provider-specific. NO_NOTIFY=true is an explicit, provider-agnostic 'this context is not real work, stay silent' lever. test-setup.ts then just sets NO_NOTIFY=true.
+
+**Explicitly NOT in scope — do not suppress real run notifications.** Real forge invoke / forge new runs completing are exactly what notifications are FOR: the human is away and the ping is their signal that agent work finished. An earlier version of this ticket (closed #192) wrongly framed orchestrator-internal invoke completions as 'noise' to suppress — that was a mistaken read. Per-run completion notifications for legit runs are the feature working correctly. This ticket is ONLY about silencing forge's automated test suite (and any other explicitly-flagged non-production context), never real work.
+
+Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred — not urgent.
+
 
 ### #304 — proof: codex-subscription runtime green end-to-end on this host
 **Closed:** 2026-06-07.
