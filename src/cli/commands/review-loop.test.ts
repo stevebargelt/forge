@@ -43,6 +43,31 @@ test("reviewer brief carries the hardening rubric (docs-vs-impl, per-path semant
   assert.match(seen!.task, /accepted PRDs/i);           // reconcile design records, not just how-tos
 });
 
+test("#305 reviewer brief carries the adjacent-surface regression matrix", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({ result: { verdict: "pass" } }); });
+  await deps.review({ ok: true, steps: [] });
+  const t = seen!.task;
+  // 1. stale closeout status language
+  assert.match(t, /stale closeout/i);
+  assert.match(t, /Deferred/);
+  // 2. all supported log_format / runtime_kind, not just the named one
+  assert.match(t, /every currently supported log_format/i);
+  assert.match(t, /runtime_kind/i);
+  // 3. recently-activated paths + the active codex path named
+  assert.match(t, /recently-activated paths/i);
+  assert.match(t, /codex-jsonl/i);
+  // 4. stale non-prose: comments, seed text, fixtures, ADR/backlog
+  assert.match(t, /fixtures/i);
+  assert.match(t, /seed text/i);
+  // 5. name the matrix + 6. explicit out-of-scope
+  assert.match(t, /name the .*matrix/i);
+  assert.match(t, /runtime kinds/i);
+  assert.match(t, /auth modes/i);
+  assert.match(t, /CLI modes/i);
+  assert.match(t, /out of scope/i);
+});
+
 test("#301 deps.review: invoke status failed → ok false", async () => {
   const { deps } = buildReviewLoopDeps(ctx(), async () => RESULT({ status: "failed", error: "boom" }));
   const r = await deps.review({ ok: true, steps: [] });
