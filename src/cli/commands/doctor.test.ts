@@ -114,6 +114,44 @@ test("#229 upgrade-tail path: project profile cred present → that check passes
   assert.equal(report.checks.find((c) => c.name.includes("image"))!.status, "ok");
 });
 
+// Minimal valid runtime YAML (all RuntimeSchema required fields).
+const MINIMAL_PI_RUNTIME = `
+name: pi-apikey
+description: test pi runtime
+image: agent-dev-worker:latest
+models:
+  default: some-model
+auth:
+  mode: apikey
+mounts: []
+invocation:
+  command: pi
+  args: []
+container:
+  name: forge-test
+  remove_on_exit: true
+  idle_timeout_seconds: 300
+result:
+  file: /task/result.json
+`;
+
+test("#229 project-local runtime CLI is probed: policy profile.runtime drives the in-image check", () => {
+  writeProjectPolicy();
+  mkdirSync(join(projectDir, ".forge", "runtimes"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "runtimes", "pi-apikey.yml"), MINIMAL_PI_RUNTIME);
+
+  const probedCommands: string[] = [];
+  const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
+    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, dockerfileMtimeMs: 1000 }),
+    probeClisInImage: (_image, commands) => { probedCommands.push(...commands); return {}; },
+  });
+
+  assert.ok(probedCommands.includes("pi"), "project-local pi runtime command must be probed in-image");
+  const piCli = inputs.clis.find((c) => c.command === "pi");
+  assert.ok(piCli !== undefined, "pi CLI entry must appear in clis");
+  assert.ok(piCli!.neededBy.includes("pi-apikey"), "pi-apikey must appear in neededBy for pi");
+});
+
 test("#229 gatherReleaseInputs: injected docker probe controls the image check (no real docker)", () => {
   writeProjectPolicy();
   process.env.GROQ_API_KEY = "gsk-test";

@@ -74,26 +74,48 @@ function inspectImage(name: string): ImageInputs {
   return { name, present, createdMs, dockerfileMtimeMs, ...(dockerError ? { dockerError } : {}) };
 }
 
-// command -> runtime names that need it, from the SEEDED runtimes installed at
-// ~/.forge/runtimes/. "where configured/seeded" per the ticket.
-function expectedClis(): Map<string, string[]> {
+// command -> runtime names that need it. Collects from workspace seeds
+// (~/.forge/runtimes/), project-local overrides (<projectDir>/.forge/runtimes/),
+// and runtimes explicitly named via profile.runtime in the active model-policy.
+function expectedClis(ctx: LoadContext = {}): Map<string, string[]> {
   const byCommand = new Map<string, string[]>();
-  let files: string[] = [];
+  const names = new Set<string>();
+
   try {
-    files = readdirSync(join(FORGE_HOME, "runtimes")).filter((f) => f.endsWith(".yml"));
-  } catch {
-    return byCommand;
-  }
-  for (const file of files) {
-    const name = file.replace(/\.yml$/, "");
+    for (const f of readdirSync(join(FORGE_HOME, "runtimes")).filter((f) => f.endsWith(".yml"))) {
+      names.add(f.replace(/\.yml$/, ""));
+    }
+  } catch { /* no workspace runtimes dir */ }
+
+  if (ctx.projectDir) {
     try {
-      const rt = loadRuntime(name);
+      for (const f of readdirSync(join(ctx.projectDir, ".forge", "runtimes")).filter((f) => f.endsWith(".yml"))) {
+        names.add(f.replace(/\.yml$/, ""));
+      }
+    } catch { /* no project runtimes dir */ }
+
+    // Model-policy profiles may name a runtime explicitly (profile.runtime).
+    // That name drives dispatch regardless of whether a .yml file appears in
+    // either runtimes dir scan above, so include it to avoid a silent gap.
+    try {
+      const policy = loadModelPolicy(ctx);
+      if (policy) {
+        for (const profile of Object.values(policy.model_profiles)) {
+          if (profile.runtime) names.add(profile.runtime);
+        }
+      }
+    } catch { /* invalid policy is reported by the policy check; skip here */ }
+  }
+
+  for (const name of names) {
+    try {
+      const rt = loadRuntime(name, ctx);
       const cmd = rt.invocation.command;
       const list = byCommand.get(cmd) ?? [];
       list.push(name);
       byCommand.set(cmd, list);
     } catch {
-      // a malformed seed shouldn't crash the doctor
+      // a malformed or missing runtime shouldn't crash the doctor
     }
   }
   return byCommand;
@@ -123,8 +145,8 @@ function probeClisInImage(image: string, commands: string[], imagePresent: boole
 
 type CliProbe = (image: string, commands: string[], imagePresent: boolean) => Record<string, boolean | null>;
 
-function gatherClis(image: ImageInputs, probe: CliProbe = probeClisInImage): CliInputs[] {
-  const byCommand = expectedClis();
+function gatherClis(image: ImageInputs, probe: CliProbe = probeClisInImage, ctx: LoadContext = {}): CliInputs[] {
+  const byCommand = expectedClis(ctx);
   const commands = [...byCommand.keys()];
   const present = probe(image.name, commands, image.present);
   return commands.map((command) => ({
@@ -197,7 +219,7 @@ export function gatherReleaseInputs(
   const image = (probes.inspectImage ?? inspectImage)(imageName);
   return {
     image,
-    clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage),
+    clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx),
     policy: gatherPolicy(ctx),
     profileAuth: gatherProfileAuth(ctx),
     routing: gatherRouting(),
