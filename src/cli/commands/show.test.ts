@@ -17,6 +17,7 @@ import {
   computeElapsed,
   formatTimeAgo,
   tailLines,
+  humanizeLogTail,
   getManifestIdleTimeoutMs,
   computeIdleCountdown,
   formatIdleCountdown,
@@ -512,6 +513,74 @@ test("tailLines: returns the correct last N lines from a file larger than the re
   );
   // Every returned line is whole — no truncated leading fragment leaks through.
   assert.ok(tail.every((l) => l.endsWith(filler)), "no partial line in the tail");
+});
+
+// ─── humanizeLogTail (#200) ──────────────────────────────────────────────────
+
+// A realistic claude --output-format stream-json tail: system, an assistant
+// text block, a tool_use (no readable text), then the final result event.
+const STREAM_JSON_TAIL = [
+  JSON.stringify({ type: "system", subtype: "init", session_id: "s1", tools: ["Read", "Edit"] }),
+  JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Looking at the failing test now." }] } }),
+  JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "tu_1", name: "Read", input: { file_path: "/x" } }] } }),
+  JSON.stringify({ type: "result", subtype: "success", result: "Fixed the off-by-one in tailLines.", total_cost_usd: 0.01 }),
+];
+
+test("#200 humanizeLogTail: extracts readable text from a claude stream-json tail (no raw blobs)", () => {
+  const out = humanizeLogTail(STREAM_JSON_TAIL);
+  assert.deepEqual(out, ["Looking at the failing test now.", "Fixed the off-by-one in tailLines."]);
+  // No giant JSON blob leaks through.
+  assert.ok(out.every((l) => !l.includes("\"type\":")), "must not render raw JSON");
+});
+
+test("#200 humanizeLogTail: text deltas are extracted too", () => {
+  const lines = [
+    JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "Hello " } }),
+    JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "world" } }),
+  ];
+  assert.deepEqual(humanizeLogTail(lines), ["Hello", "world"]);
+});
+
+test("#200 humanizeLogTail: plain CLI/test output is returned unchanged (last N verbatim)", () => {
+  const plain = ["npm test", "# tests 42", "# pass 42", "# fail 0", "done", "extra"];
+  // Identical to the pre-#200 raw tail: last 5 lines, verbatim.
+  assert.deepEqual(humanizeLogTail(plain), plain.slice(-5));
+  // Fewer-than-N plain lines are all returned, untouched.
+  assert.deepEqual(humanizeLogTail(["only", "two"]), ["only", "two"]);
+});
+
+test("#200 humanizeLogTail: malformed / mixed JSONL falls back to raw (majority test fails)", () => {
+  const mixed = [
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } }),
+    "not json at all",
+    "}{ broken",
+    "plain line",
+  ];
+  // Only 1 of 4 lines is type-tagged JSON → not stream-json → verbatim tail.
+  assert.deepEqual(humanizeLogTail(mixed), mixed.slice(-5));
+});
+
+test("#200 humanizeLogTail: stream-json with no readable text falls back to raw (never blank)", () => {
+  const toolOnly = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: "Bash", input: {} }] } }),
+  ];
+  assert.deepEqual(humanizeLogTail(toolOnly), toolOnly.slice(-5));
+});
+
+test("#200 humanizeLogTail: extracted text is capped to maxLines and maxWidth", () => {
+  const many = Array.from({ length: 10 }, (_, i) =>
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: `line ${i} ` + "z".repeat(500) }] } }),
+  );
+  const out = humanizeLogTail(many, 3, 40);
+  assert.equal(out.length, 3, "capped to maxLines");
+  assert.ok(out.every((l) => l.length <= 40), "each line capped to maxWidth");
+  assert.ok(out.every((l) => l.endsWith("…")), "over-width lines are ellipsized");
+  assert.equal(out[2], `line 9 ${"z".repeat(40 - "line 9 ".length - 1)}…`);
+});
+
+test("#200 humanizeLogTail: empty input → []", () => {
+  assert.deepEqual(humanizeLogTail([]), []);
 });
 
 // ─── deriveNextCommandForTask ────────────────────────────────────────────────

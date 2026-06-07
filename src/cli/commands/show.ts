@@ -217,6 +217,87 @@ export function tailLines(filePath: string, n: number): string[] {
   }
 }
 
+// #200: a claude-stream-json container log is JSONL where each line is a large
+// JSON event — tailing it raw dumps unreadable blobs in `forge show`. When the
+// tail looks like stream-json (JSONL where a majority of lines are JSON objects
+// with a `type` field), extract the human-readable text — assistant text blocks,
+// text deltas, and the final result string — and show THAT. Falls back to the
+// raw tail (verbatim) for plain logs, malformed JSONL, or stream-json that
+// carries no extractable text. Pure + unit-tested.
+const TAIL_SCAN_LINES = 60;   // window the extractor scans (still bounded by TAIL_MAX_BYTES)
+const TAIL_RENDER_LINES = 5;  // lines actually shown — preserves the pre-#200 raw cap
+const TAIL_MAX_WIDTH = 200;   // per-line width cap for EXTRACTED text (raw fallback is verbatim)
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// Readable text from one stream-json event; [] for events with no human text
+// (system / tool_use / tool_result / etc.). Handles both the batched assistant
+// shape (message.content[].text) and incremental text deltas.
+function textFromStreamJsonEvent(ev: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const type = ev["type"];
+  if (type === "assistant" && isPlainObject(ev["message"])) {
+    const content = (ev["message"]["content"]);
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (isPlainObject(block) && block["type"] === "text" && typeof block["text"] === "string") {
+          out.push(block["text"]);
+        }
+      }
+    }
+  } else if (type === "result" && typeof ev["result"] === "string") {
+    out.push(ev["result"]);
+  } else if (type === "content_block_delta" && isPlainObject(ev["delta"])) {
+    const d = ev["delta"];
+    if (d["type"] === "text_delta" && typeof d["text"] === "string") out.push(d["text"]);
+  }
+  return out;
+}
+
+export function humanizeLogTail(
+  rawLines: string[],
+  maxLines = TAIL_RENDER_LINES,
+  maxWidth = TAIL_MAX_WIDTH,
+): string[] {
+  if (rawLines.length === 0) return [];
+  // Detect stream-json: parse each line; it's stream-json if a majority are JSON
+  // objects carrying a string `type`. Non-JSON lines keep their slot (as {}) so a
+  // mixed/malformed log fails the majority test and falls back to raw.
+  const events: Record<string, unknown>[] = [];
+  let typed = 0;
+  for (const line of rawLines) {
+    try {
+      const o: unknown = JSON.parse(line);
+      if (isPlainObject(o)) {
+        events.push(o);
+        if (typeof o["type"] === "string") typed++;
+      } else {
+        events.push({});
+      }
+    } catch {
+      events.push({});
+    }
+  }
+  const looksStreamJson = typed >= Math.ceil(rawLines.length / 2);
+  if (!looksStreamJson) return rawLines.slice(-maxLines); // raw fallback, verbatim
+
+  const fragments: string[] = [];
+  for (const ev of events) {
+    for (const text of textFromStreamJsonEvent(ev)) {
+      for (const piece of text.split("\n")) {
+        const s = piece.trim();
+        if (s.length === 0) continue;
+        fragments.push(s.length > maxWidth ? `${s.slice(0, maxWidth - 1)}…` : s);
+      }
+    }
+  }
+  // stream-json but nothing readable (e.g. only tool_use) → raw rather than blank.
+  if (fragments.length === 0) return rawLines.slice(-maxLines);
+  return fragments.slice(-maxLines);
+}
+
 // The idle timeout the task actually ran under, recorded in its manifest at
 // dispatch. Falls back to undefined for pre-#202 manifests (or none), so the
 // caller can substitute the current default — but a recorded value is exact
@@ -447,8 +528,11 @@ export function registerShow(program: Command): void {
         const resultStatus = classifyResultFile(resultJson);
         const artifacts = listPresentArtifacts(tDir);
         const nextCommand = deriveNextCommandForTask(task.status, failureKind, task.id);
-        const stdoutTail = tailLines(stdoutLog, 5);
-        const stderrTail = tailLines(stderrLog, 5);
+        // #200: extract readable text from stream-json logs; raw fallback for
+        // plain output. Scan a wider window than we render so the extractor has
+        // events to pull text from; humanizeLogTail caps the rendered lines.
+        const stdoutTail = humanizeLogTail(tailLines(stdoutLog, TAIL_SCAN_LINES));
+        const stderrTail = humanizeLogTail(tailLines(stderrLog, TAIL_SCAN_LINES));
         // WALK-1: live idle countdown only makes sense while the task is running.
         const idleCountdown = task.status === "running"
           ? computeIdleCountdown(stdoutMtime, idleTimeoutMs, Date.now(), task.startedAt ? new Date(task.startedAt).getTime() : undefined)
