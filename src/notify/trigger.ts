@@ -57,11 +57,27 @@ function computeDurationMs(run: Run): number | undefined {
   return Math.max(0, end - start);
 }
 
+// #198: explicit, provider-agnostic kill switch. NO_NOTIFY=true|1|yes silences
+// ALL notification dispatch — ntfy AND twilio — regardless of FORGE_NOTIFY /
+// NTFY_URL / TWILIO_* config. Its ONLY purpose is non-production contexts (forge's
+// own test suite sets it in test-setup.ts); it is NOT for real runs, where a
+// completing forge invoke/new IS the signal the human wants. An unset/empty/
+// false/0 value does not suppress, so a real run never goes silent by accident.
+export function isNotifySuppressed(): boolean {
+  const v = process.env["NO_NOTIFY"]?.trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
+
 export function isAnyProviderEnabled(): boolean {
+  if (isNotifySuppressed()) return false;
   return isTwilioEnabled() || isNtfyEnabled();
 }
 
 export async function dispatch(body: string, title?: string): Promise<void> {
+  // Belt-and-suspenders: every caller gates on isAnyProviderEnabled() (already
+  // false under NO_NOTIFY), but guard the sender too so a direct dispatch can
+  // never reach a provider while suppressed.
+  if (isNotifySuppressed()) return;
   if (isTwilioEnabled()) {
     const result = await notifyTwilio(body);
     if (!result.ok) console.error(`forge notify: SMS failed — ${result.error}`);

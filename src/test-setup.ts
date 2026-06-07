@@ -5,12 +5,14 @@ import { join } from "node:path";
 const tempHome = mkdtempSync(join(tmpdir(), "forge-test-"));
 process.env["FORGE_HOME"] = tempHome;
 
-// Neutralize notification providers for the whole suite. Both ntfy and twilio
-// gate on FORGE_NOTIFY containing their name (notify/ntfy.ts, notify/twilio.ts),
-// so clearing it makes isAnyProviderEnabled() false. Without this, every test
-// that transitions a run to complete/failed fires a REAL push to whoever's
-// FORGE_NOTIFY/NTFY_URL is set in the shell running the tests. #170 isolated
-// the test DB; this isolates the notification side-effect.
+// #198: silence notifications for the whole suite via the explicit, provider-
+// agnostic kill switch. NO_NOTIFY=true short-circuits isAnyProviderEnabled() and
+// dispatch() regardless of FORGE_NOTIFY / NTFY_URL / TWILIO_* — so even a test
+// that sets a provider env won't fire a REAL push. This is the explicit
+// successor to #175's implicit "clear FORGE_NOTIFY" trick (kept below as
+// defense-in-depth). #170 isolated the test DB; this isolates the notification
+// side-effect.
+process.env["NO_NOTIFY"] = "true";
 process.env["FORGE_NOTIFY"] = "";
 
 process.on("exit", () => {

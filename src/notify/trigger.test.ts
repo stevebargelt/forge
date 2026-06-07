@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { notifyOnRunTransition, notifyOnTaskBlockedByRed, failureDetailForRun } from "./trigger.js";
+import { notifyOnRunTransition, notifyOnTaskBlockedByRed, failureDetailForRun, isAnyProviderEnabled, isNotifySuppressed } from "./trigger.js";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
@@ -26,7 +26,14 @@ const RUN: Run = {
 
 // Snapshot + restore env per test to keep them isolated.
 let savedEnv: Record<string, string | undefined>;
-const KEYS = ["FORGE_NOTIFY", "FORGE_NOTIFY_ON", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM", "TWILIO_TO"];
+const KEYS = ["FORGE_NOTIFY", "FORGE_NOTIFY_ON", "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM", "TWILIO_TO", "NTFY_URL", "NO_NOTIFY"];
+
+// #198: a provider IS configured (ntfy) in all these tests — the question is
+// whether NO_NOTIFY overrides it. Sets the minimal ntfy-enabling env.
+function enableNtfy(): void {
+  process.env["FORGE_NOTIFY"] = "ntfy";
+  process.env["NTFY_URL"] = "https://ntfy.example.invalid/forge-test";
+}
 
 beforeEach(() => {
   savedEnv = {};
@@ -132,4 +139,52 @@ test("notifyOnTaskBlockedByRed: respects FORGE_NOTIFY_ON exclusion", async () =>
   process.env["FORGE_NOTIFY_ON"] = "complete";  // explicitly NOT blocked_by_red
   await notifyOnTaskBlockedByRed(RUN);
   assert.ok(true);
+});
+
+// ── #198: NO_NOTIFY kill-switch ──────────────────────────────────────────────
+
+test("#198 normal-provider-enabled: a configured ntfy provider is enabled when NO_NOTIFY is unset", () => {
+  enableNtfy();
+  delete process.env["NO_NOTIFY"]; // explicit: real-work context
+  assert.equal(isNotifySuppressed(), false);
+  assert.equal(isAnyProviderEnabled(), true, "a configured provider must stay enabled for real runs");
+});
+
+test("#198 provider-enabled-but-NO_NOTIFY: NO_NOTIFY overrides a configured provider", () => {
+  enableNtfy();                       // provider fully configured...
+  process.env["NO_NOTIFY"] = "true";  // ...but suppressed
+  assert.equal(isNotifySuppressed(), true);
+  assert.equal(isAnyProviderEnabled(), false, "NO_NOTIFY must win over a configured provider");
+});
+
+test("#198 NO_NOTIFY ignores FORGE_NOTIFY / NTFY_URL / TWILIO_* (provider-agnostic)", () => {
+  // Both providers fully configured; NO_NOTIFY must still silence everything.
+  enableNtfy();
+  process.env["FORGE_NOTIFY"] = "ntfy,twilio";
+  process.env["TWILIO_ACCOUNT_SID"] = "AC_x";
+  process.env["TWILIO_AUTH_TOKEN"] = "tok";
+  process.env["TWILIO_FROM"] = "+15551234567";
+  process.env["TWILIO_TO"] = "+15559876543";
+  process.env["NO_NOTIFY"] = "1";
+  assert.equal(isAnyProviderEnabled(), false);
+});
+
+test("#198 a full transition path stays silent under NO_NOTIFY with a provider configured (no send, no throw)", async () => {
+  enableNtfy();                       // if not suppressed, dispatch would POST to NTFY_URL
+  process.env["NO_NOTIFY"] = "true";
+  await notifyOnRunTransition(RUN, "complete", "active"); // short-circuits at isAnyProviderEnabled
+  assert.ok(true);
+});
+
+test("#198 isNotifySuppressed parses true/1/yes (case-insensitive); not false/0/empty/unset", () => {
+  for (const v of ["true", "TRUE", " true ", "1", "yes", "YES"]) {
+    process.env["NO_NOTIFY"] = v;
+    assert.equal(isNotifySuppressed(), true, `'${v}' should suppress`);
+  }
+  for (const v of ["false", "0", "no", "", "  "]) {
+    process.env["NO_NOTIFY"] = v;
+    assert.equal(isNotifySuppressed(), false, `'${v}' should NOT suppress`);
+  }
+  delete process.env["NO_NOTIFY"];
+  assert.equal(isNotifySuppressed(), false, "unset should NOT suppress");
 });
