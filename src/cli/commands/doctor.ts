@@ -121,10 +121,12 @@ function probeClisInImage(image: string, commands: string[], imagePresent: boole
   return out;
 }
 
-function gatherClis(image: ImageInputs): CliInputs[] {
+type CliProbe = (image: string, commands: string[], imagePresent: boolean) => Record<string, boolean | null>;
+
+function gatherClis(image: ImageInputs, probe: CliProbe = probeClisInImage): CliInputs[] {
   const byCommand = expectedClis();
   const commands = [...byCommand.keys()];
-  const present = probeClisInImage(image.name, commands, image.present);
+  const present = probe(image.name, commands, image.present);
   return commands.map((command) => ({
     command,
     present: present[command] ?? null,
@@ -132,7 +134,7 @@ function gatherClis(image: ImageInputs): CliInputs[] {
   }));
 }
 
-function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
+export function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
   let policy;
   try {
     policy = loadModelPolicy(ctx);
@@ -158,7 +160,7 @@ function gatherProfileAuth(ctx: LoadContext = {}): AuthInputs[] {
   return rows;
 }
 
-function gatherPolicy(ctx: LoadContext = {}): ReleaseInputs["policy"] {
+export function gatherPolicy(ctx: LoadContext = {}): ReleaseInputs["policy"] {
   const projectPath = ctx.projectDir ? join(ctx.projectDir, ".forge", "model-policy.yml") : undefined;
   const present = (projectPath !== undefined && existsSync(projectPath)) || existsSync(MODEL_POLICY_PATH);
   if (!present) return { present: false, valid: false };
@@ -180,11 +182,22 @@ function gatherRouting(): ReleaseInputs["routing"] {
   };
 }
 
-export function gatherReleaseInputs(imageName = DEFAULT_IMAGE, ctx: LoadContext = {}): ReleaseInputs {
-  const image = inspectImage(imageName);
+// Docker-probing seams are injectable so the CLI/upgrade wiring is testable
+// without docker (the policy/auth/routing reads are file/env-based and run real).
+export type DoctorProbes = {
+  inspectImage?: (name: string) => ImageInputs;
+  probeClisInImage?: CliProbe;
+};
+
+export function gatherReleaseInputs(
+  imageName = DEFAULT_IMAGE,
+  ctx: LoadContext = {},
+  probes: DoctorProbes = {},
+): ReleaseInputs {
+  const image = (probes.inspectImage ?? inspectImage)(imageName);
   return {
     image,
-    clis: gatherClis(image),
+    clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage),
     policy: gatherPolicy(ctx),
     profileAuth: gatherProfileAuth(ctx),
     routing: gatherRouting(),
