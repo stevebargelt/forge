@@ -93,3 +93,21 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 - **Don't hand-edit `routing-policy.yml`** — it is generated from the RACI. Edit the RACI and let `forge setup` or `forge upgrade` recompile it.
 - **Don't commit `~/.forge/*`** — this directory is host-local. Each machine gets its own policy and credentials.
 - **Don't skip `forge setup` on a new machine** and jump straight to `forge new feature` — the model policy won't exist and dispatch will fail or run in legacy mode.
+
+---
+
+## Final release check
+
+Run these to confirm the host is a clean, portable forge-on-forge release candidate. All commands are **read-only** — no agent dispatch, no DB mutation, no live provider spend.
+
+```bash
+npm run typecheck            # types clean
+NO_NOTIFY=true npm test      # full suite green (no real notifications fire)
+forge setup --dry-run        # readiness: image, runtime CLIs, per-profile auth, model+routing policy, Codex review-loop path — no writes, no agent run
+forge doctor                 # same release check, also usable outside a setup context
+git status --short           # expect a clean working tree
+```
+
+- `forge setup --dry-run` and `forge doctor` both run the release check introduced in #229.
+- Opt-in providers (Bedrock, Pi-Groq, Anthropic-API) reporting as warnings is **expected and not a blocker** — only hard fails block a release.
+- All five commands must pass before tagging a release on this host.
