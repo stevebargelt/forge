@@ -590,6 +590,41 @@ test("#200 humanizeLogTail: stream_event-wrapped text deltas are extracted (real
   assert.ok(out.every((l) => !l.includes("\"type\":")), "must not render raw JSON");
 });
 
+// Real codex-jsonl shape (captured from a codex exec --json run): top-level
+// {type:"item.completed", item:{type, text|aggregated_output, ...}}; item.started
+// carries empty text/output and must be ignored.
+const CODEX_JSONL_TAIL = [
+  JSON.stringify({ type: "thread.started", thread_id: "t1" }),
+  JSON.stringify({ type: "turn.started" }),
+  JSON.stringify({ type: "item.completed", item: { id: "i0", type: "agent_message", text: "Checking project context first." } }),
+  JSON.stringify({ type: "item.started", item: { id: "i1", type: "command_execution", command: "ls", aggregated_output: "", status: "in_progress" } }),
+  JSON.stringify({ type: "item.completed", item: { id: "i1", type: "command_execution", command: "ls", aggregated_output: "result.json\npackage.md", exit_code: 0, status: "completed" } }),
+  JSON.stringify({ type: "item.completed", item: { id: "i2", type: "agent_message", text: "Done. Wrote /task/result.json." } }),
+  JSON.stringify({ type: "turn.completed" }),
+];
+
+test("#200 humanizeLogTail: extracts codex-jsonl agent_message text + command output (the reviewer path)", () => {
+  const out = humanizeLogTail(CODEX_JSONL_TAIL);
+  // agent_message narration + the completed command's aggregated_output (split on
+  // newlines), in order; item.started (empty) contributes nothing.
+  assert.deepEqual(out, [
+    "Checking project context first.",
+    "result.json",
+    "package.md",
+    "Done. Wrote /task/result.json.",
+  ]);
+  assert.ok(out.every((l) => !l.includes("\"type\":")), "must not render raw codex JSON");
+});
+
+test("#200 humanizeLogTail: codex item.started (in-progress, empty) is ignored", () => {
+  const startedOnly = [
+    JSON.stringify({ type: "item.started", item: { type: "agent_message", text: "" } }),
+    JSON.stringify({ type: "item.started", item: { type: "command_execution", aggregated_output: "", status: "in_progress" } }),
+  ];
+  // No extractable text → raw fallback (never blank).
+  assert.deepEqual(humanizeLogTail(startedOnly), startedOnly.slice(-5));
+});
+
 test("#200 humanizeLogTail: empty input → []", () => {
   assert.deepEqual(humanizeLogTail([]), []);
 });

@@ -217,12 +217,13 @@ export function tailLines(filePath: string, n: number): string[] {
   }
 }
 
-// #200: a claude-stream-json container log is JSONL where each line is a large
-// JSON event — tailing it raw dumps unreadable blobs in `forge show`. When the
-// tail looks like stream-json (JSONL where a majority of lines are JSON objects
-// with a `type` field), extract the human-readable text — assistant text blocks,
-// text deltas, and the final result string — and show THAT. Falls back to the
-// raw tail (verbatim) for plain logs, malformed JSONL, or stream-json that
+// #200: an agent container log is JSONL where each line is a large JSON event —
+// tailing it raw dumps unreadable blobs in `forge show`. Both runtimes forge runs
+// emit such logs (claude-stream-json and codex-jsonl), and the humanizer is
+// applied to every runtime's tail, so it covers both. When the tail looks like an
+// agent log (a majority of lines are JSON objects with a `type` field), extract
+// the human-readable text (see textFromAgentLogEvent) and show THAT. Falls back to
+// the raw tail (verbatim) for plain logs, malformed JSONL, or an agent log that
 // carries no extractable text. Pure + unit-tested.
 const TAIL_SCAN_LINES = 60;   // window the extractor scans (still bounded by TAIL_MAX_BYTES)
 const TAIL_RENDER_LINES = 5;  // lines actually shown — preserves the pre-#200 raw cap
@@ -232,10 +233,16 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-// Readable text from one stream-json event; [] for events with no human text
-// (system / tool_use / tool_result / etc.). Handles both the batched assistant
-// shape (message.content[].text) and incremental text deltas.
-function textFromStreamJsonEvent(ev: Record<string, unknown>): string[] {
+// Readable text from one agent-log JSONL event; [] for events with no human text
+// (system / tool_use / in-progress items / etc.). Covers BOTH agent log formats
+// forge runs — the humanizer is applied to every runtime's log, so it must.
+//   claude-stream-json: assistant message.content[].text, the final result
+//     string, and text deltas (which forge wraps under stream_event.event).
+//   codex-jsonl: {type:"item.completed", item:{...}} where item.type is
+//     "agent_message" (item.text — the narration) or "command_execution"
+//     (item.aggregated_output — the command's output). Gated on item.completed:
+//     item.started carries empty text/output.
+function textFromAgentLogEvent(ev: Record<string, unknown>): string[] {
   const out: string[] = [];
   const type = ev["type"];
   if (type === "assistant" && isPlainObject(ev["message"])) {
@@ -253,7 +260,18 @@ function textFromStreamJsonEvent(ev: Record<string, unknown>): string[] {
     const d = ev["delta"];
     if (d["type"] === "text_delta" && typeof d["text"] === "string") out.push(d["text"]);
   } else if (type === "stream_event" && isPlainObject(ev["event"])) {
-    out.push(...textFromStreamJsonEvent(ev["event"]));
+    out.push(...textFromAgentLogEvent(ev["event"]));
+  } else if (type === "item.completed" && isPlainObject(ev["item"])) {
+    const item = ev["item"];
+    if (item["type"] === "agent_message" && typeof item["text"] === "string") {
+      out.push(item["text"]);
+    } else if (
+      item["type"] === "command_execution" &&
+      typeof item["aggregated_output"] === "string" &&
+      item["aggregated_output"].trim().length > 0
+    ) {
+      out.push(item["aggregated_output"]);
+    }
   }
   return out;
 }
@@ -287,7 +305,7 @@ export function humanizeLogTail(
 
   const fragments: string[] = [];
   for (const ev of events) {
-    for (const text of textFromStreamJsonEvent(ev)) {
+    for (const text of textFromAgentLogEvent(ev)) {
       for (const piece of text.split("\n")) {
         const s = piece.trim();
         if (s.length === 0) continue;
