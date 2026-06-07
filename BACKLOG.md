@@ -503,12 +503,6 @@ Provenance: forge red panel + independent external review + in-use refresh-token
 
 ### #191 — runNext.test.ts test 1 has a broken fixture — path.join(undefined) at line 91
 
-### #200 — forge show: stdout/stderr tail dumps raw stream-json blobs — extract text deltas instead
-#196's forge show task view tails the last ~5 lines of container.stdout.log. For Claude agent containers the log is stream-json — each 'line' is a huge JSON object, so the 'Last stdout' block renders 5 giant unreadable blobs instead of useful recent activity.
-
-Polish: when the log looks like Claude stream-json (JSONL with type fields), extract the human-readable text — the assistant text deltas / the final result.result string — and show that as the tail, capped to a sane width/line count. Fall back to raw tail for non-JSON logs (plain CLI/test output). Keep it in show.ts's tailLines/last-output rendering. Pure-function-friendly so it stays unit-testable like the other #196 helpers. Low priority — cosmetic, not blocking.
-
-
 ### #203 — Orchestrator-done notifications: ping when forge-on-forge work finishes
 
 ### #222 — Session/orchestrator tasks stuck 'running' need a heartbeat-based reaper (not container-based)
@@ -933,6 +927,14 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 
 
 ## Done (recent)
+
+### #200 — forge show: stdout/stderr tail dumps raw stream-json blobs — extract text deltas instead
+**Closed:** 2026-06-07.
+
+#196's forge show task view tails the last ~5 lines of container.stdout.log. For Claude agent containers the log is stream-json — each 'line' is a huge JSON object, so the 'Last stdout' block renders 5 giant unreadable blobs instead of useful recent activity.
+
+Polish: when the log looks like Claude stream-json (JSONL with type fields), extract the human-readable text — the assistant text deltas / the final result.result string — and show that as the tail, capped to a sane width/line count. Fall back to raw tail for non-JSON logs (plain CLI/test output). Keep it in show.ts's tailLines/last-output rendering. Pure-function-friendly so it stays unit-testable like the other #196 helpers. Low priority — cosmetic, not blocking.
+
 
 ### #198 — NO_NOTIFY kill-switch so forge's own test suite doesn't fire real notifications
 **Closed:** 2026-06-07.
