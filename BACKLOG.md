@@ -545,19 +545,6 @@ Proposal:
 Ties to #200 (forge show should extract text from stream-json blobs rather than dump them) — same "surface the meaning, not the raw stream" theme. Small, isolated, improves failure diagnostics for all providers.
 
 
-### #229 — forge upgrade doesn't rebuild the agent image or check provider auth — Codex upgrades silently incomplete
-Surfaced while documenting the AWN-7 Walk upgrade path. `forge upgrade` does: git pull, npm install, FORCE=1 install-seeds, re-init CLAUDE.md. It does NOT rebuild the agent-dev-worker image or check provider auth.
-
-The bite: install-seeds now ships seeds/runtimes/codex-subscription.yml, so after `forge upgrade` an openai/subscription profile RESOLVES fine — but the agent image still lacks the `codex` CLI until `docker/build.sh` runs. The container then fails at exec (codex: not found) with no hint that the image is stale. Same class of gap the first pipeline smoke hit (runtime seed present, but not wired).
-
-Proposals (any subset):
-- `forge upgrade` detects image staleness (e.g. compare a Dockerfile hash / label against the installed image) and warns, or runs docker/build.sh behind a --rebuild-image flag.
-- `forge providers doctor` (or a new `forge doctor`) checks that each runtime referenced by RUNTIME_BINDING has its CLI present in the image, not just that host auth exists.
-- Document the image-rebuild + `codex login` steps in how-to-upgrade.md (currently silent on both).
-
-Low-risk, operability-only. Tie-in: AWN-7 Walk (#224, codex runtime), how-to-upgrade.md.
-
-
 ### #232 — forge invoke retry orphans the task when the failed attempt already auto-closed the run
 Hit during the AWN-7 Pixtron regression Test 1. Sequence:
 1. `forge invoke engineer` — attempt 1 idle_timeout'd (task failed).
@@ -926,7 +913,34 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 - Allow low-risk routes to auto-start loops by policy.
 
 
+### #306 — doctor/upgrade follow-ups: quick-start docs + RUNTIME_BINDING CLI-expectation row (#229)
+**Type:** Follow-ups from #229's review-loop (adjacent polish, not release blockers). Low priority.
+
+1. **docs/quick-start.md (~line 171)** still presents plain `forge upgrade` as the complete one-step refresh. Update it to mention the automatic read-only release check that now runs at the end of `forge upgrade`, and the optional `--rebuild-image` flag — mirroring the how-to-upgrade.md changes from #229.
+
+2. **RUNTIME_BINDING-reachable runtimes with a missing/malformed seed YAML.** `forge doctor`'s in-image CLI expectations are derived from installed runtime YAMLs (workspace + project) plus explicit `profile.runtime`, NOT from the (provider, auth) -> runtime binding table. So a policy that resolves to e.g. `codex-subscription` via the table while its seed YAML is absent/malformed would emit no `cli codex` row — the gap goes undiagnosed. Only matters for a broken install (the codex-subscription seed exists in normal setups, so it's covered today). Consider deriving an explicit CLI-expectation/diagnostic row for binding-table-reachable runtimes too. Low priority.
+
+
 ## Done (recent)
+
+### #229 — forge upgrade doesn't rebuild the agent image or check provider auth — Codex upgrades silently incomplete
+**Closed:** 2026-06-07.
+
+**Shipped (commits 8ba7c8b, 7c3e318, 96b7605, b613fe8, 018d407, 3c40661):** `forge doctor` — read-only release-readiness check (agent image present/stale/missing, in-image runtime CLIs claude/codex/pi from workspace+project+policy-named runtimes, per-profile host auth, model-policy + routing-policy validity) backed by a pure, fixture-tested `buildReleaseReport`. `forge upgrade` gains `--rebuild-image` (runs `bash docker/build.sh`) and an automatic read-only release-check tail. Docker-flake handling (transient inspect retry; daemon-unreachable → skip, not a false missing-image fail); default-reachable profiles block on missing creds, opt-in profiles warn; project-local `.forge/model-policy.yml` respected. 28 tests; full suite green; verified live (this host reports OK with image+CLIs+codex auth green).
+
+**Closed by explicit human override of the review-loop's non-closeable verdict.** All acceptance criteria are met and tested, the full suite is green, and the loop's remaining findings are adjacent polish, not release blockers — the Codex reviewer (with the #305 adjacent-surface rubric) surfaced one new adjacent finding per round and never converged within the bound. Residual items filed as **#306** (quick-start.md docs + RUNTIME_BINDING CLI-expectation row).
+
+Surfaced while documenting the AWN-7 Walk upgrade path. `forge upgrade` does: git pull, npm install, FORCE=1 install-seeds, re-init CLAUDE.md. It does NOT rebuild the agent-dev-worker image or check provider auth.
+
+The bite: install-seeds now ships seeds/runtimes/codex-subscription.yml, so after `forge upgrade` an openai/subscription profile RESOLVES fine — but the agent image still lacks the `codex` CLI until `docker/build.sh` runs. The container then fails at exec (codex: not found) with no hint that the image is stale. Same class of gap the first pipeline smoke hit (runtime seed present, but not wired).
+
+Proposals (any subset):
+- `forge upgrade` detects image staleness (e.g. compare a Dockerfile hash / label against the installed image) and warns, or runs docker/build.sh behind a --rebuild-image flag.
+- `forge providers doctor` (or a new `forge doctor`) checks that each runtime referenced by RUNTIME_BINDING has its CLI present in the image, not just that host auth exists.
+- Document the image-rebuild + `codex login` steps in how-to-upgrade.md (currently silent on both).
+
+Low-risk, operability-only. Tie-in: AWN-7 Walk (#224, codex runtime), how-to-upgrade.md.
+
 
 ### #305 — review-loop: reviewer rubric must check adjacent surfaces (stale closeout text, all log_formats, activated paths)
 **Closed:** 2026-06-07.
