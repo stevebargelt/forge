@@ -19,6 +19,8 @@ import {
 } from "./init.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
+import { buildReleaseReport, summarizeProblems } from "../../v2/release-doctor.js";
+import { gatherReleaseInputs } from "./doctor.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
 // shared seeds at ~/.forge/, optionally re-init the current project's
@@ -48,12 +50,14 @@ export function registerUpgrade(program: Command): void {
     .option("--skip-npm", "skip the npm install step (useful when deps haven't changed and you want a fast loop)")
     .option("--skip-project", "skip re-initing the current project's CLAUDE.md")
     .option("--forge-repo <dir>", "path to the forge source repo (default: $FORGE_REPO_DIR or ~/code/forge)")
+    .option("--rebuild-image", "rebuild the agent image (runs docker/build.sh) — the one mutating extra step (#229)")
     .action((options: {
       dryRun?: boolean;
       skipGit?: boolean;
       skipNpm?: boolean;
       skipProject?: boolean;
       forgeRepo?: string;
+      rebuildImage?: boolean;
     }) => {
       const forgeRepoDir = resolveForgeRepo(options.forgeRepo);
       if (!existsSync(forgeRepoDir)) {
@@ -241,8 +245,40 @@ export function registerUpgrade(program: Command): void {
         }
       }
 
+      // #229: rebuild the agent image only when explicitly asked (the one
+      // mutating extra step), so a stale image can be fixed in the same command.
+      if (options.rebuildImage && !dryRun) {
+        console.log("");
+        console.log("[image] rebuilding agent image (docker/build.sh)…");
+        try {
+          execSync("sh ./build.sh", { cwd: join(forgeRepoDir, "docker"), stdio: "inherit" });
+        } catch {
+          console.error("forge upgrade: image rebuild failed — see output above.");
+        }
+      }
+
       console.log("");
       console.log(dryRun ? "Dry run complete. Re-run without --dry-run to apply." : "Upgrade complete.");
+
+      // #229: read-only release check so a stale image / missing runtime CLI /
+      // missing credential is surfaced NOW, not at the next dispatch. Never
+      // mutates; skipped on a dry run.
+      if (!dryRun) {
+        try {
+          const report = buildReleaseReport(gatherReleaseInputs());
+          const problems = summarizeProblems(report);
+          console.log("");
+          if (problems.length === 0) {
+            console.log("Release check: ✓ image, runtime CLIs, auth, and policies look ready.");
+          } else {
+            console.log("Release check — action needed before agents run cleanly:");
+            for (const p of problems) console.log(`  ${p}`);
+            console.log("  (run `forge doctor` for the full report)");
+          }
+        } catch (e) {
+          console.error(`Release check skipped: ${(e as Error).message}`);
+        }
+      }
     });
 }
 
