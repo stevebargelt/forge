@@ -16,6 +16,8 @@ npm link                    # puts `forge` on $PATH
 
 Verify: `which forge` should print a path; `forge --help` should list the commands.
 
+After installing, run `forge setup` to create the active model policy from the seed and get a full readiness report before dispatching any agents. Full new-machine checklist: `docs/work-laptop-setup.md`.
+
 ## 2. Set up credentials (once per machine)
 
 Three modes (FORGE-DEC-007). Forge auto-selects based on environment:
@@ -172,9 +174,14 @@ When new forge commits arrive (new agents, workflows, CLI behavior), run `forge 
 
 ```bash
 cd ~/code/my-app
-forge upgrade           # pulls forge, runs npm install, refreshes ~/.forge/, re-inits this project's CLAUDE.md
-forge upgrade --dry-run # see what would change without doing it
+forge upgrade                  # pulls forge, npm install, refreshes ~/.forge/, re-inits project; runs release check
+forge upgrade --rebuild-image  # also rebuilds the agent Docker image (run when the Dockerfile changed)
+forge upgrade --dry-run        # see what would change without doing it
 ```
+
+After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, and policies — and surfaces any problems before the next dispatch. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
+
+New machine? See `docs/work-laptop-setup.md` for the full setup checklist.
 
 Full doc: `docs/how-to-upgrade.md` (flags, multi-project loop, manual recipe).
 
