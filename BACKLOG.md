@@ -5,43 +5,49 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-05.**
+**Last session ended 2026-06-07.** Release-0.x triage + work-laptop readiness closeout.
 
-**Where we left off:** The RACI/routing-policy MVP and post-MVP visibility slices are shipped; #290 closed the Pixtron-surfaced stale-running dashboard gap; and the Pi runtime PRD is accepted/reconciled into the stable-baseline epic (#291). Pi Crawl is underway: #292 created the runtime metadata seam, #260 installed pi in the agent image, #261 added `pi-apikey` and proved spawn can invoke pi. The remaining Crawl work is prompt injection (#263), usage parsing (#262), then the first end-to-end role (#264).
+**Release track: portable forge-on-forge 0.x (Steve's work laptop).** The Pi Walk + Codex provider + new-machine readiness all landed; this session triaged the backlog into release-ready / blocking / deferred.
 
-**Picked up next:**
-1. **#263 — pi: system-prompt / context injection mapping.** Settle and test "Forge context exactly once" for pi. `pi-apikey` currently uses `prompt_strategy: message-arg` (`--append-system-prompt` + positional task package); #263 should prove that this is correct, not just plausible.
-2. **#262 — pi: usage-parser hook.** Add the real `pi-jsonl` parser using a live stream fixture. The #292/#261 state intentionally fails loud for `pi-jsonl` until this lands.
-3. **#264 — pi: first role end-to-end through pi.** Close Crawl only after dispatch -> pi -> result.json -> usage captured -> gate works with output-schema parity.
-4. **#287 — route-before-dispatch adherence.** Still useful if the orchestrator keeps bypassing `forge route explain`; consider a CLI-dispatch affordance after the prose/template check.
-5. **#252 — collaborative setup/new-machine readiness.** Broad product spine: init/upgrade/doctor should generate and validate config rather than asking humans to hand-write YAML.
-6. **#283 — provider adapter generation (#253 seam).** Render `CLAUDE.md` / `.claude/commands/*` / hooks / Codex equivalents FROM the routing policy. This becomes more important once Pi/Codex surfaces matter again.
+**Release blockers: NONE.** typecheck clean, full suite 1328/0, `forge setup` reports Ready on this host (image + claude/codex/pi CLIs + Claude-subscription + Codex-subscription auth all green; opt-in profiles warn, don't block).
 
-**External state to remember:**
-- **`docs/prds/provider-agnostic-runtime-pi.md` is accepted for backlog planning** — reconciled into #258/#262/#265 and included in #291's stable-baseline commitment set.
-- **#290 is closed** — dashboard/Ops now surface read-only reconcile candidates instead of stale DB-running tasks as ordinary running.
-- **#260/#261 are closed** — pi is installed in the agent image and `pi-apikey` can dispatch/capture stdout. Remaining gaps are expected: `pi-jsonl` parser is #262; result.json/schema parity is #264.
-- Host adapter activation is still a host mutation: run `forge upgrade` when Steve wants the latest seeds/templates installed and `~/.forge/routing-policy.yml` auto-recompiled.
+**Release-ready (shipped + verified this cycle):**
+- Pi Crawl+Walk: #260/#261/#262/#263/#264/#266/#267/#292 + #265 (model-policy runtime+upstream-provider selection). Pi runs through model policy; provider errors classify as model_error.
+- Codex provider: codex-subscription runtime green end-to-end, proven live (#304). Usable as the review-loop reviewer via `--review-profile codex-subscription`.
+- Review-loop: #301 (command) + #302 (orchestrator adoption) + #305 (adjacent-surface reviewer rubric) — the standard post-implementation review path.
+- Setup/readiness: #229 (`forge doctor` + `forge upgrade --rebuild-image` + release-check tail) and #252 (`forge setup` host model-policy guided-create + routing ensure + static Codex review-loop readiness; `docs/work-laptop-setup.md`).
+- Plumbing: #198 (NO_NOTIFY test-suite kill-switch), #200 (forge show humanizes stream-json + codex-jsonl tails).
+
+**Deferred known gaps (NOT blockers):**
+- #300 — true completing pi run + usage row (gated on pi free-tier credit / paid spend).
+- #268 — pi local models via models.json (Run stage).
+- #228 — provider-AGNOSTIC error→model_error classification: pi done (#267); codex/claude provider-error → model_error NOT wired. Failure-diagnostics polish.
+- #283 — provider adapter generation (#253 seam): render CLAUDE.md/.claude/commands/codex equivalents FROM routing policy. Bigger; not needed for 0.x.
+- #306 — doctor/upgrade follow-ups (README one-liner; RUNTIME_BINDING-reachable runtime missing-seed CLI row). Low.
+- #307 — host Claude SessionEnd hook path leaks into agent containers (cosmetic stderr noise; task still completes).
+- #308 — forge setup PROJECT-local config provisioning (.forge/model-policy.yml + docs-surfaces.yml) + forge new first-run advisory. The #252 fixer attempted this autonomously via a structurally-failed loop; discarded + re-filed clean. Re-do through a proper review-loop.
+
+**Bedrock:** diagnosed (AWS-config presence) by `forge doctor`/`forge setup`; opt-in profile, warns when no AWS creds. Full Bedrock model-entitlement verification is not done (known gap, not a 0.x blocker — not Steve's default path).
+
+**Final local release check (read-only):**
+```
+npm run typecheck
+NO_NOTIFY=true npm test
+forge setup --dry-run        # or: forge doctor  (image, CLIs, auth, policies, review-loop path)
+git status --short           # expect clean
+```
+Full new-machine checklist: docs/work-laptop-setup.md.
+
+**Picked up next (post-release polish, your pick):** #308 (project-local config, the clean re-do) · #228 (codex/claude error classification) · #307 (SessionEnd hook) · #268/#300 (pi Run-stage, credit-gated).
+
+**Process note:** the bounded review-loop is excellent at catching adjacent gaps but on broad cross-surface tickets it does not converge in 2-3 rounds and its fixer can run past the reviewed boundary (#252 fixer broke its own verification + expanded scope). Working pattern: land only reviewed-by-construction core, re-file the rest as scoped tickets, close acceptance-met by explicit override when all stated criteria pass + suite green. A loop guardrail (fixer scope/diff-size cap, or findings-only mode) is worth a ticket if this recurs.
 
 **Decisions worth not relitigating:**
-- **#288:** the full-vs-quick discriminator is architectural novelty + plan-certainty, NOT file count. Precedent-driven multi-file/cross-cutting work with a concrete plan is `implementation_quick` (test-engineer + docs_impact still mandatory); the full pipeline is for novelty/unclear-boundaries/missing-plan/new-integration/high-risk decomposition.
-- **#289:** `docs_impact` is a lifecycle (detect 6 categories → resolve as `updated | not_needed:<reason> | deferred:#ticket` → report a `Docs impact:` summary line); a deferral REQUIRES a filed ticket. It's a PROSE contract (orchestrator + seeds), deliberately NOT machine-enforced (ticket non-goal). A gate rejecting a `complete` implementation run that lacks a resolved `Docs impact:` line would be a separate enforcement story if Steve wants teeth.
-- **#286:** init/upgrade auto-compile the derived policy. A standalone policy (no host RACI) is left untouched; an existing host RACI is never overwritten by the compile step (that stays install-seeds FORCE=1's call).
-- **#281 governance** SURFACES drift (read-only) but does not enforce — enforcement stays `route validate`'s job. Clean split: validate enforces, governance shows.
-- **#280:** project override = full replacement; an uncompiled project override FAILS (never falls back to host); the force-rule-weakening check is structurally enforced but dormant (empty baseline).
-- **#279:** apply journals the audit entry write-ahead (WAL ordering) so a change is never applied-but-unaudited; audit = host-global JSONL log, not a git commit.
-
-**Shipped (for reference — git log is canonical):**
-- **#279** orchestrator-mediated RACI authoring: `forge raci propose/apply` gated propose→confirm→apply + JSONL audit (49b0e93; audit-first fix b1fb4e5).
-- **#280** project override support: `<project>/.forge/` full-replacement resolution, `--project` on explain/validate/compile, force-rule non-weakening check (64b56e5; uncompiled-override fix 1822658).
-- **#281** `forge route governance` read-only view + host-vs-project diff + drift surfacing (14ec5ce; drift fix c6c7d90).
-- **#285** dashboard read-only routing/governance panel, backed by the shared `governanceView` core (817ed89; test-script glob fix 83ac1d1).
-- **#286** init/upgrade auto-compile `routing-policy.yml` from the RACI seed (7f3b81b).
-- **#288** routing guidance: novelty-vs-precedent discriminator (20bd191).
-- **#289** explicit docs-impact lifecycle across orchestrator-template + implementer/test seeds (7999d11; RACI source alignment c04ef23).
-- **#290** dashboard/Ops reconcile-candidate detection (281d060; backlog closeout 09ab063).
-
-Verified 2026-06-06: codex-subscription runtime green end-to-end on this host (live smoke, run-invoke-engineer-9840d7) — image has codex-cli 0.135.0, ~/.codex/auth.json works, result.json + codex-jsonl usage row recorded, no repo mutation. #229 not blocking here. Recorded as closed proof #304.
+- **#288:** full-vs-quick = architectural novelty + plan-certainty, NOT file count. Precedent-driven multi-file with a concrete plan is `implementation_quick`.
+- **#289:** `docs_impact` is a prose lifecycle (detect → updated|not_needed:<reason>|deferred:#ticket → report a Docs impact line); deferral REQUIRES a ticket. Not machine-enforced.
+- **#286:** init/upgrade auto-compile the derived routing policy; a standalone policy (no host RACI) is left untouched; an existing host RACI is never overwritten by compile.
+- **#281/#280/#279:** governance SURFACES drift (read-only), `route validate` enforces; project override = full replacement (uncompiled override fails, never falls back); raci apply journals the audit write-ahead.
+- **forge-on-forge:** implement directly; review/fix via review-loop (red-wide read-only + #245 shadow volume make it corruption-safe). Commit hook rejects bare "anthropic"/"Claude" in commit prose (lowercase "claude" ok).
 
 ## Active
 
@@ -877,7 +883,36 @@ Relations: #293 (n8n export — sibling exploration, worse fit), forge workflow 
 Relations: #296 (closed — auth/attribution only), #266, #262, #264, #261, seeds/runtimes/pi-oauth.yml.
 
 
+### #306 — doctor/upgrade follow-ups: quick-start docs + RUNTIME_BINDING CLI-expectation row (#229)
+**Type:** Follow-ups from #229's review-loop (adjacent polish, not release blockers). Low priority.
+
+1. ~~docs/quick-start.md still presents plain `forge upgrade` as the complete one-step refresh.~~ **DONE in #252** — quick-start now surfaces the automatic release check, `--rebuild-image`, and `forge setup`/`forge doctor` as the new-host path.
+
+2. **README.md (~line 80)** — the `forge upgrade` one-liner omits the automatic read-only release check and `--rebuild-image`. Low priority: the line already points to docs/how-to-upgrade.md where both are documented.
+
+3. **RUNTIME_BINDING-reachable runtimes with a missing/malformed seed YAML.** `forge doctor`'s in-image CLI expectations are derived from installed runtime YAMLs (workspace + project) plus explicit `profile.runtime`, NOT from the (provider, auth) -> runtime binding table. So a policy that resolves to e.g. `codex-subscription` via the table while its seed YAML is absent/malformed would emit no `cli codex` row — the gap goes undiagnosed. Only matters for a broken install (the codex-subscription seed exists in normal setups, so it's covered today). Consider deriving an explicit CLI-expectation/diagnostic row for binding-table-reachable runtimes too. Low priority.
+
+
+### #308 — forge setup: project-local config provisioning (.forge/model-policy.yml + docs-surfaces.yml) + forge new first-run advisory
+**Type:** Follow-up / enhancement from #252's review-loop. The #252 review-loop fixer attempted this autonomously but it landed through a structurally-failed loop (reviewer_failed; round-2 verification broke), so the unreviewed WIP was discarded. Re-do cleanly.
+
+#252 shipped HOST-level readiness: `forge setup` guided-creates `~/.forge/model-policy.yml` from seed, ensures routing-policy, runs the release check + Codex review-loop readiness. The #252 ticket CONTEXT also calls for PROJECT-local collaborative config. Scope here:
+- `forge setup` (or `forge init`) also guided-creates `<project>/.forge/model-policy.yml` and `<project>/.forge/docs-surfaces.yml` from seeds when absent (never overwrite; host/project local; never committed).
+- Install a `docs-surfaces.example.yml` seed via install-seeds (parallel to model-policy.example.yml).
+- `forge new`: a non-blocking first-run advisory when project-local config is missing, pointing at `forge setup`.
+- Extend the release/doctor report with project-surface readiness (docs-surfaces, project hooks/slash commands, workflow-specific config) — pure-function + injected-deps tested.
+- Run it through the review-loop to a clean pass (or acceptance-met close), not a failed-loop landing.
+
+Relations: #252 (host-level shipped), #246 (docs-surfaces project config pattern), #229 (release-doctor surfaces).
+
+
+## Done (recent)
+
 ### #301 — Bounded review-loop command
+**Closed:** 2026-06-07.
+
+**Shipped + in active use.** The full MVP + guardrails landed (`forge review-loop <ticket> --max-rounds <n> [--since <sha>] [--review-profile <name>]`: deterministic verification-first, reviewer→fixer rounds, structured pass/needs_fix/blocked verdict, durable run note, never auto-closes unless reviewer pass + verification green, route preflight per dispatch). Adopted as the standard post-implementation review path (#302) with the adjacent-surface reviewer rubric (#305), and exercised across #265/#267/#198/#200/#229/#252 — including live Codex-reviewer runs via `--review-profile codex-subscription`. Closed during the release-0.x triage (it was shipped but left open).
+
 Build a bounded review/fix loop so the user is not the relay between implementer and reviewer.
 
 **MVP:**
@@ -911,31 +946,6 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 - Promote observed defaults into policy after several real uses.
 - Allow low-risk routes to auto-start loops by policy.
 
-
-### #306 — doctor/upgrade follow-ups: quick-start docs + RUNTIME_BINDING CLI-expectation row (#229)
-**Type:** Follow-ups from #229's review-loop (adjacent polish, not release blockers). Low priority.
-
-1. ~~docs/quick-start.md still presents plain `forge upgrade` as the complete one-step refresh.~~ **DONE in #252** — quick-start now surfaces the automatic release check, `--rebuild-image`, and `forge setup`/`forge doctor` as the new-host path.
-
-2. **README.md (~line 80)** — the `forge upgrade` one-liner omits the automatic read-only release check and `--rebuild-image`. Low priority: the line already points to docs/how-to-upgrade.md where both are documented.
-
-3. **RUNTIME_BINDING-reachable runtimes with a missing/malformed seed YAML.** `forge doctor`'s in-image CLI expectations are derived from installed runtime YAMLs (workspace + project) plus explicit `profile.runtime`, NOT from the (provider, auth) -> runtime binding table. So a policy that resolves to e.g. `codex-subscription` via the table while its seed YAML is absent/malformed would emit no `cli codex` row — the gap goes undiagnosed. Only matters for a broken install (the codex-subscription seed exists in normal setups, so it's covered today). Consider deriving an explicit CLI-expectation/diagnostic row for binding-table-reachable runtimes too. Low priority.
-
-
-### #308 — forge setup: project-local config provisioning (.forge/model-policy.yml + docs-surfaces.yml) + forge new first-run advisory
-**Type:** Follow-up / enhancement from #252's review-loop. The #252 review-loop fixer attempted this autonomously but it landed through a structurally-failed loop (reviewer_failed; round-2 verification broke), so the unreviewed WIP was discarded. Re-do cleanly.
-
-#252 shipped HOST-level readiness: `forge setup` guided-creates `~/.forge/model-policy.yml` from seed, ensures routing-policy, runs the release check + Codex review-loop readiness. The #252 ticket CONTEXT also calls for PROJECT-local collaborative config. Scope here:
-- `forge setup` (or `forge init`) also guided-creates `<project>/.forge/model-policy.yml` and `<project>/.forge/docs-surfaces.yml` from seeds when absent (never overwrite; host/project local; never committed).
-- Install a `docs-surfaces.example.yml` seed via install-seeds (parallel to model-policy.example.yml).
-- `forge new`: a non-blocking first-run advisory when project-local config is missing, pointing at `forge setup`.
-- Extend the release/doctor report with project-surface readiness (docs-surfaces, project hooks/slash commands, workflow-specific config) — pure-function + injected-deps tested.
-- Run it through the review-loop to a clean pass (or acceptance-met close), not a failed-loop landing.
-
-Relations: #252 (host-level shipped), #246 (docs-surfaces project config pattern), #229 (release-doctor surfaces).
-
-
-## Done (recent)
 
 ### #252 — Collaborative project config setup — stop making humans hand-write Forge YAML
 **Closed:** 2026-06-07.
