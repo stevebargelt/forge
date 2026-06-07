@@ -35,6 +35,8 @@ function forgeHome(): string {
 export type LoadContext = {
   /** Absolute path to the project dir. Used to look up the project's override. */
   projectDir?: string;
+  /** Absolute path to the forge source repo. Forwarded to image inspection for Dockerfile mtime comparison. */
+  forgeRepoDir?: string;
 };
 
 export function loadWorkflow(name: string, ctx: LoadContext = {}): Workflow {

@@ -31,7 +31,7 @@ function forgeRepoDir(): string {
   return process.env.FORGE_REPO_DIR ? resolve(process.env.FORGE_REPO_DIR) : join(homedir(), "code", "forge");
 }
 
-function inspectImage(name: string): ImageInputs {
+function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir: string) => number | undefined): ImageInputs {
   let createdMs: number | undefined;
   let present = false;
   let dockerError: string | undefined;
@@ -67,7 +67,10 @@ function inspectImage(name: string): ImageInputs {
 
   let dockerfileMtimeMs: number | undefined;
   try {
-    dockerfileMtimeMs = statSync(join(forgeRepoDir(), "docker", "agent-dev-worker.Dockerfile")).mtimeMs;
+    const repoDir = repoDirOverride ?? forgeRepoDir();
+    dockerfileMtimeMs = mtimeProbe
+      ? mtimeProbe(repoDir)
+      : statSync(join(repoDir, "docker", "agent-dev-worker.Dockerfile")).mtimeMs;
   } catch {
     dockerfileMtimeMs = undefined;
   }
@@ -209,6 +212,8 @@ function gatherRouting(): ReleaseInputs["routing"] {
 export type DoctorProbes = {
   inspectImage?: (name: string) => ImageInputs;
   probeClisInImage?: CliProbe;
+  /** Override Dockerfile mtime lookup — lets tests verify the repo dir is forwarded correctly without needing a real Dockerfile. */
+  dockerfileMtime?: (repoDir: string) => number | undefined;
 };
 
 export function gatherReleaseInputs(
@@ -216,7 +221,9 @@ export function gatherReleaseInputs(
   ctx: LoadContext = {},
   probes: DoctorProbes = {},
 ): ReleaseInputs {
-  const image = (probes.inspectImage ?? inspectImage)(imageName);
+  const image = probes.inspectImage
+    ? probes.inspectImage(imageName)
+    : inspectImage(imageName, ctx.forgeRepoDir, probes.dockerfileMtime);
   return {
     image,
     clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx),

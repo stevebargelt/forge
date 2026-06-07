@@ -164,3 +164,14 @@ test("#229 gatherReleaseInputs: injected docker probe controls the image check (
   assert.equal(report.checks.find((c) => c.name.includes("image"))!.status, "fail");
   assert.equal(report.ok, false);
 });
+
+test("#229 gatherReleaseInputs: ctx.forgeRepoDir is forwarded to the Dockerfile mtime check", () => {
+  // Use the dockerfileMtime sub-probe to verify the repo dir is forwarded correctly
+  // (avoids real docker + real filesystem — both can vary across environments).
+  let capturedDir: string | undefined;
+  gatherReleaseInputs("nonexistent-image-for-test-xyz", { projectDir, forgeRepoDir: "/custom/forge-repo" }, {
+    probeClisInImage: () => ({}),
+    dockerfileMtime: (dir) => { capturedDir = dir; return 9999; },
+  });
+  assert.equal(capturedDir, "/custom/forge-repo");
+});

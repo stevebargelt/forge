@@ -259,7 +259,7 @@ export function registerUpgrade(program: Command): void {
       // mutates; skipped on a dry run.
       if (!dryRun) {
         try {
-          const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd }));
+          const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd, forgeRepoDir }));
           console.log("");
           for (const line of renderReleaseCheckLines(report)) console.log(line);
         } catch (e) {
@@ -281,7 +281,7 @@ export function maybeRebuildImage(
   if (!options.rebuildImage || options.dryRun) return { ran: false, lines: [] };
   const lines = ["", "[image] rebuilding agent image (docker/build.sh)…"];
   try {
-    exec("sh ./build.sh", { cwd: join(forgeRepoDir, "docker"), stdio: "inherit" });
+    exec("bash ./build.sh", { cwd: join(forgeRepoDir, "docker"), stdio: "inherit" });
     return { ran: true, lines };
   } catch {
     return { ran: true, lines, error: "forge upgrade: image rebuild failed — see output above." };

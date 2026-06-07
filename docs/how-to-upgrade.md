@@ -77,7 +77,7 @@ cd ~/code/forge
 git pull --ff-only
 npm install
 FORCE=1 ./scripts/install-seeds.sh
-sh docker/build.sh                  # rebuild the agent image (only if the Dockerfile changed)
+bash docker/build.sh                # rebuild the agent image (only if the Dockerfile changed)
 cd ~/code/<your-project>
 forge init                          # only if this project has the orchestrator block
 forge doctor                        # release check: image, runtime CLIs, auth, policies
