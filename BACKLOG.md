@@ -943,7 +943,9 @@ A single explicit global env kill-switch, e.g. NO_NOTIFY=true, checked at the to
 
 **Explicitly NOT in scope — do not suppress real run notifications.** Real forge invoke / forge new runs completing are exactly what notifications are FOR: the human is away and the ping is their signal that agent work finished. An earlier version of this ticket (closed #192) wrongly framed orchestrator-internal invoke completions as 'noise' to suppress — that was a mistaken read. Per-run completion notifications for legit runs are the feature working correctly. This ticket is ONLY about silencing forge's automated test suite (and any other explicitly-flagged non-production context), never real work.
 
-Relates to #175 (the narrow test-setup.ts precedent this generalizes). Deferred — not urgent.
+Relates to #175 (the narrow test-setup.ts precedent this generalizes).
+
+**Shipped (commit 90e9a81):** `isNotifySuppressed()` (NO_NOTIFY=true|1|yes) guards both chokepoints — `isAnyProviderEnabled()` (every transition/gate/red/milestone path) and `dispatch()` — provider-agnostic, ignores FORGE_NOTIFY/NTFY_URL/TWILIO_*. test-setup.ts sets NO_NOTIFY=true suite-wide (FORGE_NOTIFY="" kept as defense-in-depth). Real runs untouched (unset/empty/false/0 never suppress). 5 focused tests; full suite green. Reviewed via `forge review-loop 198 --review-profile codex-subscription` — Codex (provider openai, gpt-5.5) returned pass round 1, verification green.
 
 
 ### #304 — proof: codex-subscription runtime green end-to-end on this host
