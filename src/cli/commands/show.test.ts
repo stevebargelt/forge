@@ -579,6 +579,17 @@ test("#200 humanizeLogTail: extracted text is capped to maxLines and maxWidth", 
   assert.equal(out[2], `line 9 ${"z".repeat(40 - "line 9 ".length - 1)}…`);
 });
 
+test("#200 humanizeLogTail: stream_event-wrapped text deltas are extracted (real log format)", () => {
+  const lines = [
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Hello " } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "world" } } }),
+    JSON.stringify({ type: "stream_event", event: { type: "message_delta", usage: { output_tokens: 5 } } }),
+  ];
+  const out = humanizeLogTail(lines);
+  assert.deepEqual(out, ["Hello", "world"]);
+  assert.ok(out.every((l) => !l.includes("\"type\":")), "must not render raw JSON");
+});
+
 test("#200 humanizeLogTail: empty input → []", () => {
   assert.deepEqual(humanizeLogTail([]), []);
 });

@@ -252,6 +252,8 @@ function textFromStreamJsonEvent(ev: Record<string, unknown>): string[] {
   } else if (type === "content_block_delta" && isPlainObject(ev["delta"])) {
     const d = ev["delta"];
     if (d["type"] === "text_delta" && typeof d["text"] === "string") out.push(d["text"]);
+  } else if (type === "stream_event" && isPlainObject(ev["event"])) {
+    out.push(...textFromStreamJsonEvent(ev["event"]));
   }
   return out;
 }
