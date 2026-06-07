@@ -77,11 +77,13 @@ cd ~/code/forge
 git pull --ff-only
 npm install
 FORCE=1 ./scripts/install-seeds.sh
+sh docker/build.sh                  # rebuild the agent image (only if the Dockerfile changed)
 cd ~/code/<your-project>
 forge init                          # only if this project has the orchestrator block
+forge doctor                        # release check: image, runtime CLIs, auth, policies
 ```
 
-That's exactly what `forge upgrade` does — knowing the manual flow makes the CLI command unnecessary if you ever need to debug something.
+This mirrors `forge upgrade` step-for-step, plus the two things the command makes optional/automatic: the image rebuild (`forge upgrade --rebuild-image`) and the release check that runs automatically at the end of `forge upgrade` (here run by hand as `forge doctor`). Knowing the manual flow makes the CLI command unnecessary if you ever need to debug something.
 
 ## What the upgrade does NOT do
 

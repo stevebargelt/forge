@@ -19,7 +19,7 @@ import {
 } from "./init.js";
 import { compilePolicyFile } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
-import { buildReleaseReport, summarizeProblems } from "../../v2/release-doctor.js";
+import { buildReleaseReport, summarizeProblems, type ReleaseReport } from "../../v2/release-doctor.js";
 import { gatherReleaseInputs } from "./doctor.js";
 
 // Wraps the manual upgrade dance: git pull on forge's own repo, refresh
@@ -247,15 +247,9 @@ export function registerUpgrade(program: Command): void {
 
       // #229: rebuild the agent image only when explicitly asked (the one
       // mutating extra step), so a stale image can be fixed in the same command.
-      if (options.rebuildImage && !dryRun) {
-        console.log("");
-        console.log("[image] rebuilding agent image (docker/build.sh)…");
-        try {
-          execSync("sh ./build.sh", { cwd: join(forgeRepoDir, "docker"), stdio: "inherit" });
-        } catch {
-          console.error("forge upgrade: image rebuild failed — see output above.");
-        }
-      }
+      const rebuild = maybeRebuildImage(options, forgeRepoDir);
+      for (const line of rebuild.lines) console.log(line);
+      if (rebuild.error) console.error(rebuild.error);
 
       console.log("");
       console.log(dryRun ? "Dry run complete. Re-run without --dry-run to apply." : "Upgrade complete.");
@@ -266,20 +260,44 @@ export function registerUpgrade(program: Command): void {
       if (!dryRun) {
         try {
           const report = buildReleaseReport(gatherReleaseInputs(undefined, { projectDir: cwd }));
-          const problems = summarizeProblems(report);
           console.log("");
-          if (problems.length === 0) {
-            console.log("Release check: ✓ image, runtime CLIs, auth, and policies look ready.");
-          } else {
-            console.log("Release check — action needed before agents run cleanly:");
-            for (const p of problems) console.log(`  ${p}`);
-            console.log("  (run `forge doctor` for the full report)");
-          }
+          for (const line of renderReleaseCheckLines(report)) console.log(line);
         } catch (e) {
           console.error(`Release check skipped: ${(e as Error).message}`);
         }
       }
     });
+}
+
+// #229: the operator-facing upgrade-tail pieces, extracted so they're testable
+// without driving the whole git/npm/seed action. The exec seam is injectable.
+export type ImageRebuildExec = (cmd: string, opts: { cwd: string; stdio: "inherit" }) => void;
+
+export function maybeRebuildImage(
+  options: { rebuildImage?: boolean; dryRun?: boolean },
+  forgeRepoDir: string,
+  exec: ImageRebuildExec = (cmd, opts) => { execSync(cmd, opts); },
+): { ran: boolean; lines: string[]; error?: string } {
+  if (!options.rebuildImage || options.dryRun) return { ran: false, lines: [] };
+  const lines = ["", "[image] rebuilding agent image (docker/build.sh)…"];
+  try {
+    exec("sh ./build.sh", { cwd: join(forgeRepoDir, "docker"), stdio: "inherit" });
+    return { ran: true, lines };
+  } catch {
+    return { ran: true, lines, error: "forge upgrade: image rebuild failed — see output above." };
+  }
+}
+
+export function renderReleaseCheckLines(report: ReleaseReport): string[] {
+  const problems = summarizeProblems(report);
+  if (problems.length === 0) {
+    return ["Release check: ✓ image, runtime CLIs, auth, and policies look ready."];
+  }
+  return [
+    "Release check — action needed before agents run cleanly:",
+    ...problems.map((p) => `  ${p}`),
+    "  (run `forge doctor` for the full report)",
+  ];
 }
 
 function resolveForgeRepo(explicit: string | undefined): string {
