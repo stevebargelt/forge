@@ -21,8 +21,10 @@ export type AuthProbe = {
   detail: string;
 };
 
-// Which (provider, auth) pairs forge can probe today. Walk adds an `openai` row
-// (OPENAI_API_KEY for api; codex subscription) when the Codex provider lands.
+// Which (provider, auth) pairs forge can probe today. openai exposes only its
+// subscription (Codex) row — openai/api (codex-apikey) is the deferred second
+// mode and stays unprobeable on purpose (#303), so it is NOT listed here and is
+// absent from the api-key map in creds.ts.
 const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
   anthropic: ["subscription", "api", "bedrock"],
   openai: ["subscription"], // Codex; api (codex-apikey) is the deferred second mode
@@ -31,7 +33,8 @@ const PROBEABLE_AUTH_BY_PROVIDER: Record<string, readonly EffectiveAuth[]> = {
 
 // Provider-aware availability probe. The auth vocabulary (subscription/api/
 // bedrock) is shared, but what makes a mode "available" is provider-specific —
-// `api` means ANTHROPIC_API_KEY for anthropic, OPENAI_API_KEY for openai (Walk).
+// `api` means ANTHROPIC_API_KEY for anthropic and GROQ_API_KEY for groq; openai's
+// api mode (codex-apikey) is deferred and deliberately returns "unknown".
 // An unprobeable provider returns "unknown" (never blocks). #303: an upstream
 // provider whose only credential is an API key (groq, and future pi upstreams)
 // is probed generically by env-var presence via apiKeyEnvForProvider — the SAME
