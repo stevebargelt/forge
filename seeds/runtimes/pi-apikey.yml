@@ -6,10 +6,10 @@
 # `forge invoke --runtime pi-apikey`; it is NOT auto-detected and NOT yet in the
 # model-policy provider binding (that's #265).
 #
-# Scope note (#261): this Crawl runtime is anthropic-bound for the proof —
-# auth.mode: apikey injects ANTHROPIC_API_KEY and the invocation pins
-# `--provider anthropic`. Generalizing provider/key selection and policy binding
-# is #265; OAuth (~/.pi/agent/auth.json) is #266; local models are #268.
+# Scope note (#261): this Crawl runtime was anthropic-bound for the proof —
+# auth.mode: apikey injects the upstream provider's API key and the invocation
+# pins `--provider anthropic` (or the resolved provider via #265). OAuth
+# (~/.pi/agent/auth.json) is #266; local models are #268.
 #
 # Installed at ~/.forge/runtimes/pi-apikey.yml by install-seeds.sh.
 
@@ -76,8 +76,7 @@ invocation:
     # #265: upstream vendor resolved by model-policy (groq/anthropic/ollama),
     # threaded as ${UPSTREAM_PROVIDER}. Legacy `forge invoke --runtime pi-apikey`
     # (no policy) leaves it empty → the :-anthropic fallback keeps the Crawl
-    # anthropic binding. (API-key injection for non-anthropic providers is the
-    # provider-doctor/auth-seam Walk item, not wired here.)
+    # anthropic binding. Cross-provider API-key injection wired in spawn.ts (#303).
     - "${UPSTREAM_PROVIDER:-anthropic}"
     - --model
     - "${MODEL}"
