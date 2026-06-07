@@ -35,35 +35,48 @@ function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir:
   let createdMs: number | undefined;
   let present = false;
   let dockerError: string | undefined;
-  // Docker Desktop occasionally returns a transient error on inspect even when
-  // the image exists; retry a few times. A genuine "No such image" is definitive
-  // and breaks out immediately (no retry) — that's a real absence, not a flake.
+  // Presence is probed with `docker image ls <name>`, NOT `docker image inspect
+  // <name>`: on Docker Desktop's containerd image store, inspect-by-name is
+  // unreliable (returns empty / "No such image" for an image that `docker images`
+  // clearly lists), while `image ls` is consistent. ls exits 0 with empty output
+  // for a genuine absence, and errors only when the daemon is unreachable. Retry
+  // the daemon-error case (transient); empty output is a real absence.
+  let imageId = "";
   let lastErr = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const out = execFileSync("docker", ["image", "inspect", name, "--format", "{{.Created}}"], {
+      const out = execFileSync("docker", ["image", "ls", name, "--format", "{{.ID}}"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
       }).trim();
-      present = true;
-      const ms = Date.parse(out);
-      if (!Number.isNaN(ms)) createdMs = ms;
+      imageId = out.split("\n")[0]?.trim() ?? "";
+      present = imageId.length > 0;
       lastErr = "";
       break;
     } catch (e) {
       const err = e as Error & { stderr?: Buffer | string };
       lastErr = `${typeof err.stderr === "string" ? err.stderr : err.stderr?.toString() ?? ""}\n${err.message ?? ""}`;
-      if (/No such image/i.test(lastErr)) {
-        present = false; // definitive absence — stop retrying
-        lastErr = "";
-        break;
-      }
-      // otherwise transient/daemon error → retry
+      // retry transient daemon errors
     }
   }
-  // Non-"No such image" failure that survived retries → docker is unreachable;
-  // report it as un-probeable (skip), not as a missing image (fail+rebuild).
-  if (lastErr) dockerError = (lastErr.split("\n").find((l) => l.trim().length > 0) ?? "docker unavailable").trim();
+  // ls errored across retries → docker unreachable → skip (not a false rebuild).
+  if (!present && lastErr) {
+    dockerError = (lastErr.split("\n").find((l) => l.trim().length > 0) ?? "docker unavailable").trim();
+  }
+  // Created date (best-effort) by ID — inspect-by-ID is reliable even when
+  // inspect-by-name is not. A failure here just drops the staleness comparison.
+  if (present && imageId) {
+    try {
+      const created = execFileSync("docker", ["image", "inspect", imageId, "--format", "{{.Created}}"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      const ms = Date.parse(created);
+      if (!Number.isNaN(ms)) createdMs = ms;
+    } catch {
+      createdMs = undefined;
+    }
+  }
 
   let dockerfileMtimeMs: number | undefined;
   try {
