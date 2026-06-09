@@ -19,6 +19,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
+import { resolveRuntimeMetadata } from "./schema.js";
 import {
   exportAwsCreds,
   oauthVolumeName,
@@ -272,6 +273,18 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   args.push(substitute(runtime.invocation.command, ctx));
   for (const arg of runtime.invocation.args) {
     args.push(substitute(arg, ctx));
+  }
+
+  // Agent-container isolation: claude-code auto-discovers settings from cwd
+  // (`<cwd>/.claude/settings*.json`). Since cwd is the project bind mount, the
+  // orchestrator's own host-side project settings would otherwise leak into
+  // the agent — its `env.CLAUDE_CODE_USE_BEDROCK`, `model`, and `hooks` blocks
+  // can flip auth, swap models, and crash on host-only hook paths. Suppress
+  // all on-disk discovery (user + project + local) so agents are driven only
+  // by what forge passes explicitly via env + --model + --append-system-prompt.
+  // Gated on claude-code runtimes — codex/pi CLIs would reject the flag.
+  if (resolveRuntimeMetadata(runtime).runtimeKind === "claude-code") {
+    args.push("--setting-sources", "");
   }
 
   const stdin = runtime.invocation.stdin

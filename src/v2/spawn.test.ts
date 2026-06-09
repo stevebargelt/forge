@@ -562,3 +562,28 @@ test("#265: empty/legacy UPSTREAM_PROVIDER falls back to anthropic (no #261 regr
   const unsetArgs = buildDockerArgs(PI_RUNTIME, BASE_CTX).args; // field absent entirely
   assert.equal(pickProvider(unsetArgs), "anthropic");
 });
+
+// ── regression: agent containers isolate from host project settings via --setting-sources ──
+// spawn.ts appends `--setting-sources ""` for claude-code runtimes so that the
+// agent container does NOT auto-discover <cwd>/.claude/settings*.json from the
+// bind-mounted project dir. Without this, the orchestrator's own
+// settings.local.json would flip CLAUDE_CODE_USE_BEDROCK=0, swap the model to a
+// non-Bedrock id, and crash on host-only hook paths inside the agent.
+// The flag is gated on runtimeKind==="claude-code" — codex/pi CLIs reject it.
+
+test("regression: agent containers isolate from host project settings via --setting-sources", () => {
+  // Part A: claude-code runtime (BASE_RUNTIME defaults to claude-code via invocation.command="claude")
+  // must include --setting-sources immediately followed by "" (empty string).
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const { args: claudeArgs } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+  const ssIdx = claudeArgs.indexOf("--setting-sources");
+  assert.notEqual(ssIdx, -1, "claude-code runtime must have --setting-sources in args");
+  assert.equal(claudeArgs[ssIdx + 1], "", `--setting-sources must be followed by "" (empty string), got: ${JSON.stringify(claudeArgs[ssIdx + 1])}`);
+
+  // Part B: non-claude-code runtime (PI_RUNTIME, runtime_kind="pi") must NOT
+  // have --setting-sources — pi CLI does not accept it.
+  const { args: piArgs } = buildDockerArgs(PI_RUNTIME, BASE_CTX);
+  assert.equal(piArgs.indexOf("--setting-sources"), -1, "non-claude-code runtime (pi) must not have --setting-sources");
+});
