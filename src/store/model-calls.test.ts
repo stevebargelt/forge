@@ -117,10 +117,52 @@ test("extractUsageFromStdoutLog: ignores events without request_id", () => {
   const path = writeLog("no-reqs.log", [
     { type: "system", subtype: "init", session_id: "s1" },
     { type: "rate_limit_event", rate_limit_info: {}, session_id: "s1" },
-    { type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 5, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }, session_id: "s1" }, // no request_id
+    { type: "assistant", message: { model: "claude-opus-4-7", usage: { input_tokens: 5, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }, session_id: "s1" }, // no request_id, no message.id
   ]);
   const rows = extractUsageFromStdoutLog(path);
   assert.equal(rows.length, 0);
+});
+
+// #309: real claude-code stream-json shape has no top-level request_id; the id
+// lives inside message.id (e.g. "msg_bdrk_01..."). Without this fallback, reqId
+// is always undefined, sessionToActiveRequest is never populated, and the
+// message_delta branch has nothing to attribute usage to — model_calls stays empty.
+test("#309: extractUsageFromStdoutLog: falls back to message.id when no top-level request_id", () => {
+  const path = writeLog("real-shape.log", [
+    {
+      type: "assistant",
+      message: { id: "msg_bdrk_01abc", model: "claude-sonnet-4-6", usage: { input_tokens: 1000, output_tokens: 150, cache_read_input_tokens: 800, cache_creation_input_tokens: 0 } },
+      session_id: "sess-real",
+      // NO top-level request_id — this is the real claude-code stream-json shape
+    },
+  ]);
+  const rows = extractUsageFromStdoutLog(path, { taskId: "t-309" });
+  assert.equal(rows.length, 1, "should extract one row using message.id as requestId");
+  assert.equal(rows[0]!.requestId, "msg_bdrk_01abc");
+  assert.equal(rows[0]!.inputTokens, 1000);
+  assert.equal(rows[0]!.outputTokens, 150);
+  assert.equal(rows[0]!.cacheReadTokens, 800);
+  assert.equal(rows[0]!.model, "claude-sonnet-4-6");
+});
+
+test("#309: message_delta is correctly attributed via session when id comes from message.id", () => {
+  const path = writeLog("real-shape-delta.log", [
+    {
+      type: "assistant",
+      message: { id: "msg_bdrk_01xyz", model: "claude-sonnet-4-6", usage: { input_tokens: 500, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      session_id: "sess-delta",
+      // NO top-level request_id
+    },
+    {
+      type: "stream_event",
+      event: { type: "message_delta", delta: {}, usage: { input_tokens: 500, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      session_id: "sess-delta",
+    },
+  ]);
+  const rows = extractUsageFromStdoutLog(path);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.requestId, "msg_bdrk_01xyz");
+  assert.equal(rows[0]!.outputTokens, 300, "message_delta output_tokens should win via session attribution");
 });
 
 test("extractUsageFromStdoutLog: message_delta without a preceding assistant event is dropped", () => {
@@ -433,4 +475,21 @@ test("#262: extractUsageByLogFormat defaults to claude and returns [] for unknow
   ]);
   assert.equal(extractUsageByLogFormat(claudeLog, {}).length, 1);
   assert.deepEqual(extractUsageByLogFormat(PI_FIXTURE, { logFormat: "made-up-format" }), []);
+});
+
+// ---- regression #309: real stream-json log (message.id, no request_id) ----
+// Fixture: a real container.stdout.log from a claude-code Bedrock run captured
+// during this very test run. Events have message.id="msg_bdrk_..." with NO
+// top-level request_id — the exact shape the #309 fix targets.
+
+const CLAUDE_STREAM_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "__fixtures__", "real-claude-stream.jsonl");
+
+test("regression #309: real stream-json log produces usage rows (request_id absent, message.id present)", () => {
+  const rows = extractUsageFromStdoutLog(CLAUDE_STREAM_FIXTURE, { taskId: "t-309-regression" });
+  assert.ok(rows.length >= 1, `expected at least 1 UsageRow, got ${rows.length}`);
+  const row = rows[0]!;
+  assert.ok(row.requestId.startsWith("msg_"), `requestId must start with "msg_", got: ${row.requestId}`);
+  assert.ok(row.inputTokens > 0, `inputTokens must be > 0, got: ${row.inputTokens}`);
+  assert.ok(row.outputTokens > 0, `outputTokens must be > 0, got: ${row.outputTokens}`);
+  assert.ok(row.model.length > 0, `model must be non-empty, got: ${JSON.stringify(row.model)}`);
 });

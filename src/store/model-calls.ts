@@ -75,7 +75,10 @@ export function extractUsageFromStdoutLog(
     // message_delta events to the right request) BEFORE any continue.
     if (event["type"] === "assistant" && isObject(event["message"])) {
       const msg = event["message"];
-      const reqId = typeof event["request_id"] === "string" ? event["request_id"] : undefined;
+      const reqId =
+        typeof event["request_id"] === "string" ? event["request_id"] :
+        typeof msg["id"] === "string" ? msg["id"] :
+        undefined;
       const sessionId = typeof event["session_id"] === "string" ? event["session_id"] : undefined;
       if (reqId && sessionId) sessionToActiveRequest.set(sessionId, reqId);
       const model = typeof msg["model"] === "string" ? msg["model"] : lastSeenModel;

@@ -906,6 +906,48 @@ Relations: #296 (closed — auth/attribution only), #266, #262, #264, #261, seed
 Relations: #252 (host-level shipped), #246 (docs-surfaces project config pattern), #229 (release-doctor surfaces).
 
 
+### #309 — fix usage parser: assistant event has message.id, not top-level request_id
+## Symptom
+
+Dashboard Usage page (`http://127.0.0.1:8024/#usage`) shows no data.
+`model_calls` table is empty (0 rows) despite 163 completed tasks and 4940 assistant events on disk under `~/.forge/runs/*/*/container.stdout.log`.
+
+## Root cause
+
+`src/store/model-calls.ts:78` reads `event["request_id"]` on the outer `{"type":"assistant", ...}` event. The actual stream-json format claude-code emits places the id INSIDE the message object as `message.id` (e.g. `"msg_bdrk_01..."`) and has NO top-level `request_id`.
+
+Tally across all current runs:
+
+- total assistant events: 4940
+- with top-level `request_id` (what parser expects): **0**
+- with `message.id` (msg_*): **4930**
+
+Because `reqId` is always `undefined`, the guard at line 80 (`if (reqId && sessionId)`) fails, `sessionToActiveRequest` is never populated, and the downstream `message_delta` branch at lines 95-106 has nothing to attribute usage to either. Net effect: zero rows written.
+
+## Fix shape
+
+`src/store/model-calls.ts:78` — fall back to `message.id` when no top-level `request_id` is present:
+
+```ts
+const reqId =
+  typeof event["request_id"] === "string" ? event["request_id"] :
+  typeof msg["id"] === "string" ? msg["id"] :
+  undefined;
+```
+
+The `message_delta` branch already threads the id via `sessionToActiveRequest`, so it will work as soon as the assistant branch populates the map.
+
+## Acceptance
+
+- Real stream-log fixture committed under `tests/` (or wherever parser tests live) drawn from `~/.forge/runs/*/*/container.stdout.log` — not synthetic. Regression-protect the field-name dependency.
+- `extractUsageFromClaudeStreamJsonLog` returns ≥1 UsageRow for that fixture.
+- Dashboard `/api/usage` returns non-empty after a fresh task completes.
+
+## Out of scope (file as follow-up)
+
+Backfilling historical usage from existing `~/.forge/runs/*` logs. The fix only repairs going-forward capture; historical replay is its own ticket.
+
+
 ## Done (recent)
 
 ### #301 — Bounded review-loop command
