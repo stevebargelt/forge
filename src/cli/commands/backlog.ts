@@ -16,11 +16,20 @@
 // Callers never need to know.
 
 import type { Command } from "commander";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { readBacklogConfig } from "../../backlog/config.js";
 import { readBacklog, writeBacklog } from "../../backlog/io.js";
 import { addTicket, appendNotes, closeTicket, findTicket, listTickets, maxTicketId, moveTicket, setNotes } from "../../backlog/ops.js";
 import { type SectionName, SECTION_ORDER, type Ticket } from "../../backlog/types.js";
+
+export type BacklogFormat = "legacy" | "structured";
+
+export function detectBacklogFormat(projectDir: string): BacklogFormat {
+  if (existsSync(join(projectDir, "backlog"))) return "structured";
+  if (existsSync(join(projectDir, "BACKLOG.md"))) return "legacy";
+  throw new Error(`No backlog found in ${projectDir}. Expected a backlog/ directory or BACKLOG.md.`);
+}
 
 export function registerBacklog(program: Command): void {
   const backlog = program
@@ -152,6 +161,20 @@ export function registerBacklog(program: Command): void {
       const next = moveTicket(b, id, section);
       writeBacklog(dir, next);
       console.log(`Moved #${id} → ${section}`);
+    });
+
+  // ----- config -----
+  backlog
+    .command("config")
+    .description("Show backlog configuration")
+    .option("--show", "print current prefix and format")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .action((opts: { show?: boolean; project?: string }) => {
+      const dir = resolve(opts.project ?? process.cwd());
+      const config = readBacklogConfig(dir);
+      const format = detectBacklogFormat(dir);
+      console.log(`format: ${format}`);
+      console.log(`prefix: ${config.prefix ?? "(none)"}`);
     });
 
   // ----- notes -----
