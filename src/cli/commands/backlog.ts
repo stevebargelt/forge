@@ -16,12 +16,22 @@
 // Callers never need to know.
 
 import type { Command } from "commander";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readBacklogConfig } from "../../backlog/config.js";
 import { readBacklog, writeBacklog } from "../../backlog/io.js";
 import { addTicket, appendNotes, closeTicket, findTicket, listTickets, maxTicketId, moveTicket, setNotes } from "../../backlog/ops.js";
 import { type SectionName, SECTION_ORDER, type Ticket } from "../../backlog/types.js";
+import {
+  generateSlug,
+  listTickets as listStructuredTickets,
+  moveTicket as moveStructuredTicket,
+  readTicket,
+  writeTicket,
+  type TicketType,
+  type TicketStatus,
+  type StructuredTicket,
+} from "../../backlog/structured.js";
 
 export type BacklogFormat = "legacy" | "structured";
 
@@ -40,12 +50,37 @@ export function registerBacklog(program: Command): void {
   backlog
     .command("list")
     .description("List tickets, optionally filtered by status or search text")
-    .option("--status <s>", "active | done | Active | 'In progress' | 'Done (recent)' | 'Done (archived)'")
+    .option("--status <s>", "active | done | blocked | deferred | Active | 'In progress' | 'Done (recent)' | 'Done (archived)'")
+    .option("--type <t>", "(structured) idea | epic | story")
     .option("--search <text>", "case-insensitive substring match against title + body")
     .option("--json", "emit JSON instead of human-readable summary")
     .option("--project <dir>", "project directory (default: cwd)")
-    .action((opts: { status?: string; search?: string; json?: boolean; project?: string }) => {
+    .action((opts: { status?: string; type?: string; search?: string; json?: boolean; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+
+      if (format === "structured") {
+        const tickets = listStructuredTickets(dir, {
+          ...(opts.type ? { type: opts.type as TicketType } : {}),
+          ...(opts.status ? { status: opts.status as TicketStatus } : {}),
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(
+            tickets.map((t) => ({ id: t.id, type: t.type, status: t.status, title: t.title })),
+            null, 2,
+          ));
+          return;
+        }
+        if (tickets.length === 0) {
+          console.log("(no matching tickets)");
+          return;
+        }
+        for (const t of tickets) {
+          console.log(`  ${t.id}  [${t.type}/${t.status}]  ${t.title}`);
+        }
+        return;
+      }
+
       const b = readBacklog(dir);
       const tickets = listTickets(b, {
         status: normalizeStatus(opts.status),
@@ -85,12 +120,27 @@ export function registerBacklog(program: Command): void {
   // ----- show -----
   backlog
     .command("show")
-    .argument("<id>", "sticky ticket id (with or without # prefix)")
+    .argument("<id>", "sticky ticket id (with or without # prefix, or FG-NNN)")
     .description("Print one ticket: heading + body")
     .option("--json", "emit JSON {id, title, section, body}")
     .option("--project <dir>", "project directory (default: cwd)")
     .action((idArg: string, opts: { json?: boolean; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+
+      if (format === "structured") {
+        const ticket = readTicket(dir, idArg);
+        if (opts.json) {
+          console.log(JSON.stringify(ticket, null, 2));
+          return;
+        }
+        console.log(`### ${ticket.id} — ${ticket.title}`);
+        console.log(`(${ticket.type}/${ticket.status})`);
+        console.log("");
+        console.log(ticket.body.trimEnd());
+        return;
+      }
+
       const id = parseTicketId(idArg);
       const b = readBacklog(dir);
       const ticket = findTicket(b, id);
@@ -113,9 +163,36 @@ export function registerBacklog(program: Command): void {
     .description("Create a new ticket in Active (or --section). Body via --body <text> or --body - (stdin).")
     .option("--body <text>", "ticket body markdown — use '-' to read from stdin")
     .option("--section <name>", "target section (default: Active)", "Active")
+    .option("--type <t>", "(structured) idea | epic | story (default: story)", "story")
     .option("--project <dir>", "project directory (default: cwd)")
-    .action((title: string, opts: { body?: string; section?: string; project?: string }) => {
+    .action((title: string, opts: { body?: string; section?: string; type?: string; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+
+      if (format === "structured") {
+        const config = readBacklogConfig(dir);
+        const prefix = config.prefix ?? "FG";
+        const existing = listStructuredTickets(dir);
+        const nextNum = existing.reduce((max, t) => {
+          const m = t.id.match(/^[A-Z]+-(\d+)$/);
+          const n = m ? parseInt(m[1]!, 10) : 0;
+          return Math.max(max, n);
+        }, 0) + 1;
+        const id = `${prefix}-${nextNum}`;
+        const bodyRaw = readBodyArg(opts.body);
+        const ticket: StructuredTicket = {
+          id,
+          type: (opts.type as TicketType) ?? "story",
+          status: "active",
+          title,
+          body: bodyRaw,
+          created: new Date().toISOString().slice(0, 10),
+        };
+        writeTicket(dir, ticket);
+        console.log(`Created ${id} in stories/${generateSlug(title)}: ${title}`);
+        return;
+      }
+
       const section = validateSection(opts.section ?? "Active");
       const bodyRaw = readBodyArg(opts.body);
       const body = bodyRaw.length > 0 ? ensureBodyTrailingBlank(bodyRaw) : "";
@@ -132,12 +209,34 @@ export function registerBacklog(program: Command): void {
   // ----- close -----
   backlog
     .command("close")
-    .argument("<id>", "sticky ticket id")
+    .argument("<id>", "sticky ticket id (or FG-NNN for structured)")
     .description("Move a ticket to Done (recent) and prepend a Closed line")
     .option("--commit <sha>", "commit hash recorded in the Closed line")
     .option("--project <dir>", "project directory (default: cwd)")
     .action((idArg: string, opts: { commit?: string; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+
+      if (format === "structured") {
+        const ticket = readTicket(dir, idArg);
+        const updated: StructuredTicket = {
+          ...ticket,
+          status: "done",
+          closed: new Date().toISOString().slice(0, 10),
+        };
+        writeTicket(dir, updated);
+        // Remove original active file (it may be in a type subdir)
+        for (const sub of ["stories", "epics", "ideas"]) {
+          const d = join(dir, "backlog", sub);
+          if (!existsSync(d)) continue;
+          for (const f of readdirSync(d)) {
+            if (f.startsWith(`${idArg}-`)) unlinkSync(join(d, f));
+          }
+        }
+        console.log(`Closed ${idArg}`);
+        return;
+      }
+
       const id = parseTicketId(idArg);
       const b = readBacklog(dir);
       if (!findTicket(b, id)) throw new Error(`Ticket #${id} not found`);
@@ -149,12 +248,20 @@ export function registerBacklog(program: Command): void {
   // ----- move -----
   backlog
     .command("move")
-    .argument("<id>", "sticky ticket id")
-    .argument("<section>", "target section: Active | 'In progress' | 'Done (recent)' | 'Done (archived)'")
-    .description("Relocate a ticket to a different section")
+    .argument("<id>", "sticky ticket id (or FG-NNN for structured)")
+    .argument("<section>", "legacy: Active | 'In progress' | 'Done (recent)' | 'Done (archived)'; structured: idea | epic | story")
+    .description("Relocate a ticket to a different section (legacy) or type directory (structured)")
     .option("--project <dir>", "project directory (default: cwd)")
     .action((idArg: string, sectionArg: string, opts: { project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+
+      if (format === "structured") {
+        moveStructuredTicket(dir, idArg, sectionArg as TicketType);
+        console.log(`Moved ${idArg} → ${sectionArg}`);
+        return;
+      }
+
       const id = parseTicketId(idArg);
       const section = validateSection(sectionArg);
       const b = readBacklog(dir);
