@@ -45,6 +45,7 @@ import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { renderContract, type TaskContract } from "./contract.js";
 import { compressPrompt } from "./compression.js";
+import { maybeOrchestratorCompress } from "./compression-verification.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -426,6 +427,19 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       closeRunIfIdle(false);
       return { runId, taskId, status: "failed", error };
     }
+  }
+
+  // FG-317: orchestrator compression safety net — if the result exceeds 20KB and
+  // the agent didn't compress, compress large fields post-hoc and log a warning.
+  const { result: compressedResult, verification } = await maybeOrchestratorCompress({
+    result,
+    resultRawSize: Buffer.byteLength(resultRaw, "utf8"),
+    resultPath,
+    taskId,
+  });
+  result = compressedResult;
+  if (verification) {
+    logEvent("compression.verification", { runId, taskId, payload: verification });
   }
 
   // AWN-2 task-level race: a concurrent `forge cancel` may have already marked
