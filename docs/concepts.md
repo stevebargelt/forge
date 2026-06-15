@@ -25,7 +25,7 @@ Custom Claude Code commands forge installs into each project's `.claude/commands
 - **`/orient`** — start-of-session orientation. Runs `forge backlog notes show` + `forge backlog list --status active` + git state + `forge projects show <project>` in parallel, reports a compact state-of-play, ends with "What's the priority?" Never re-states the orchestrator role (the CLAUDE.md block already does); performing the start-of-session protocol IS the demonstration.
 - **`/handoff`** — end-of-session ritual. Drafts the backlog notes block in the forward-looking shape (where-we-left-off / picked-up-next / external state / decisions worth not relitigating / shipped-for-reference), applies via `forge backlog notes replace` without a review pause, and reports unpushed-commit count.
 
-Both commands hard-code "use the `forge backlog` CLI, do NOT Read BACKLOG.md whole." BACKLOG.md is ~200KB / 2000 lines; the CLI is the bounded interface that protects orchestrator context cost.
+Both commands hard-code "use the `forge backlog` CLI, do NOT read backlog files directly." The CLI is the bounded interface that protects orchestrator context cost; structured-format projects store notes at `backlog/notes.md` and tickets under `backlog/stories/`, while legacy projects use a single `BACKLOG.md`.
 
 Installed by `forge init` as symlinks into the local forge clone (so `forge upgrade` propagates template edits to all projects without per-project re-copy). `--no-install-hooks` bypasses installation. Project-local overrides (a regular file at `.claude/commands/<name>.md`) are detected as `exists-other` and left alone. Stale forge symlinks pointing at a different/old forge clone path are detected and replaced in place on upgrade.
 

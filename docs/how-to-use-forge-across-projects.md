@@ -124,7 +124,7 @@ When workspace and project diverge — e.g. running an orchestrator in `~/code/a
 
 ## Running forge on the forge repo itself
 
-Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/forge && forge init`) to install the orchestrator block into forge's own `CLAUDE.md`, then use `forge invoke engineer`, `forge new feature`, etc. to evolve forge through the same pipeline it provides to other projects. The forge repo's `BACKLOG.md` is the canonical task list; `forge backlog list --status active` works from `~/code/forge` like it does from any other project.
+Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/forge && forge init`) to install the orchestrator block into forge's own `CLAUDE.md`, then use `forge invoke engineer`, `forge new feature`, etc. to evolve forge through the same pipeline it provides to other projects. The forge repo uses the structured backlog format (tickets under `backlog/`, notes at `backlog/notes.md`); `forge backlog list --status active` works from `~/code/forge` like it does from any other project.
 
 Two caveats specific to the meta case:
 

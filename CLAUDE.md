@@ -16,9 +16,9 @@ Write as a human author would. AI tooling is implementation detail, not public r
 
 A TypeScript CLI for orchestrating multi-agent workflows. Forge runs on the host. Each agent runs as an ephemeral Docker container (`agent-dev-worker` image). SQLite is the blackboard. The full design lives in the spine sketch at `~/OneDrive - Southern Glazer's Wine & Spirits/obsidian/stevieb-sgws/Harness Spine Sketch.md`.
 
-## Session start: use `forge backlog`, don't read BACKLOG.md whole
+## Session start: use `forge backlog`, don't read backlog files whole
 
-`BACKLOG.md` at the repo root is the canonical task list. It is large (~170KB). **Use the `forge backlog` CLI** instead of reading the file directly — same data, ~30x less context.
+This repo uses the structured backlog format: tickets live under `backlog/stories/`, `backlog/done/`, etc.; session-handoff notes live at `backlog/notes.md`. **Use the `forge backlog` CLI** instead of reading these files directly — same data, ~30x less context.
 
 Standard session-start sequence:
 ```
@@ -27,11 +27,11 @@ forge backlog list --status active          # open tickets (titles only)
 forge backlog show <id>                     # full body when you need one
 ```
 
-`forge backlog --help` lists the rest (`file`, `close`, `move`, `notes add`, `notes replace`). Only read BACKLOG.md whole if you genuinely need to scan across many ticket bodies at once — typically you don't.
+`forge backlog --help` lists the rest (`file`, `close`, `move`, `notes add`, `notes replace`). Only read the backlog directory whole if you genuinely need to scan across many ticket bodies at once — typically you don't.
 
 Sticky numbers (e.g. `#33`, `#41`) are stable across sessions and referenced from commit messages and ADRs. New tasks land via `forge backlog file "<title>"` (auto-assigns the next sticky); never renumber.
 
-The TaskCreate harness tool is for ephemeral within-session working state. The durable record is BACKLOG.md (via `forge backlog`).
+The TaskCreate harness tool is for ephemeral within-session working state. The durable record is the structured backlog (via `forge backlog`).
 
 ## Conventions
 
@@ -115,7 +115,7 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 **The principle that resolves anything not listed: ephemeral working-state → you edit it directly; durable operator-/engineer-facing prose → route to the documentation-maintainer.**
 
 **Stays orchestrator-direct** (ephemeral working-state):
-- `BACKLOG.md` (via `forge backlog` CLI, not Edit/Write)
+- Backlog state — `backlog/` dir (structured) or `BACKLOG.md` (legacy) — via `forge backlog` CLI, not Edit/Write
 - Session handoff notes and very small status notes
 - Routing instructions / task briefs (the prompts you author *for* agents)
 - Temporary scratch notes and drafts you create as session artifacts
@@ -156,7 +156,7 @@ Do NOT invoke manual-qa for refactors, CLI-only changes, or backend-only work �
 
 ## Session start
 
-If this project has a BACKLOG.md, orient with the `forge backlog` CLI — it's ~30x cheaper than reading the file whole:
+Orient with the `forge backlog` CLI — it's ~30x cheaper than reading backlog files directly:
 
 ```
 forge backlog notes show               # narrative handoff from last session
@@ -164,7 +164,7 @@ forge backlog list --status active     # open tickets (titles only)
 forge backlog show <id>                # full body when you need one
 ```
 
-Only read BACKLOG.md whole if you genuinely need cross-ticket scanning. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
+Notes are stored at `backlog/notes.md` (structured format) or in the `BACKLOG.md` notes block (legacy). The CLI handles both automatically. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
 
 ## How to handle every request
 

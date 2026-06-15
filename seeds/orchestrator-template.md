@@ -30,7 +30,7 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 **The principle that resolves anything not listed: ephemeral working-state → you edit it directly; durable operator-/engineer-facing prose → route to the documentation-maintainer.**
 
 **Stays orchestrator-direct** (ephemeral working-state):
-- `BACKLOG.md` (via `forge backlog` CLI, not Edit/Write)
+- Backlog state — `backlog/` dir (structured) or `BACKLOG.md` (legacy) — via `forge backlog` CLI, not Edit/Write
 - Session handoff notes and very small status notes
 - Routing instructions / task briefs (the prompts you author *for* agents)
 - Temporary scratch notes and drafts you create as session artifacts
@@ -71,7 +71,7 @@ Do NOT invoke manual-qa for refactors, CLI-only changes, or backend-only work �
 
 ## Session start
 
-If this project has a BACKLOG.md, orient with the `forge backlog` CLI — it's ~30x cheaper than reading the file whole:
+Orient with the `forge backlog` CLI — it's ~30x cheaper than reading backlog files directly:
 
 ```
 forge backlog notes show               # narrative handoff from last session
@@ -79,7 +79,7 @@ forge backlog list --status active     # open tickets (titles only)
 forge backlog show <id>                # full body when you need one
 ```
 
-Only read BACKLOG.md whole if you genuinely need cross-ticket scanning. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
+Notes are stored at `backlog/notes.md` (structured format) or in the `BACKLOG.md` notes block (legacy). The CLI handles both automatically. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
 
 ## How to handle every request
 
