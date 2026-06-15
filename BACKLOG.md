@@ -28,6 +28,12 @@ Each story has full spec (goal, context, acceptance, dependencies). Ready to imp
 
 **Next in FG-313 epic:** FG-322 (UI panels) → FG-323 (per-task detail).
 
+**FG-322 complete (dashboard compression UI panels).** New 'compression' nav tab with time window filter (7d/30d/90d/all). Shows empty state when no data. Four sub-components ready to render when compression events exist: health panel, timeseries chart, breakdown table, methods distribution. 20 new tests (80 total pass). Manually verified: tab renders, empty state displays correctly. Committed: 6ae22b0.
+
+**Docs impact:** resolved → updated (dashboard/README.md navigation list).
+
+**Next in FG-313 epic:** FG-323 (per-task compression detail in timeline).
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -1011,56 +1017,6 @@ The dashboard currently doesn't show any of this. Users can't see token savings 
 - What's the compression overhead (latency) per request?
 - Does cross-agent memory conflict with forge's per-run SQLite isolation?
 
-### #322 — Dashboard compression stats UI panels (FG-313 Phase 2)
-
-**Goal:** Add compression stats visualization to the forge dashboard web UI.
-
-**Context:** Phase 1 (FG-321) adds API endpoints. This phase surfaces them in the UI. The dashboard is a single-page app (no build step) — client JS (`client/main.js`, `client/renderers.js`) fetches from API endpoints and renders cards.
-
-**What to add:**
-
-1. **Compression health panel** (new top-level card in the main feed)
-   - "Tokens saved (last 30d): 2.4M (~$12 avoided at $0.005/1K)"
-   - "Average compression ratio: 82%"
-   - "Tasks compressed: 347 / 520 total (67%)"
-   - "Agents not compressing: [red-narrow, manual-qa]" (when orchestrator_compressed=true for >50% of their tasks)
-   - Fetches from `/api/compression/summary`
-
-2. **Compression timeseries chart** (under the health panel, or in a "Compression" nav tab)
-   - Line chart: bytes saved over time (last 30 days, grouped by day)
-   - Fetches from `/api/compression/timeseries`
-   - Use a lightweight inline SVG renderer (no chart library dependency) OR link to an external chart tool
-
-3. **Compression breakdown table** (below the chart)
-   - Rows: agent role, tasks compressed, bytes saved, avg ratio
-   - Sortable by bytes saved (default) or ratio
-   - Fetches from `/api/compression/by-role`
-
-4. **Compression method distribution** (pie chart or bar chart)
-   - Shows SmartCrusher / CodeCompressor / Kompress-base split
-   - Fetches from `/api/compression/methods`
-
-**Implementation:**
-- Add client-side rendering functions in `client/renderers.js`: `renderCompressionHealth()`, `renderCompressionTimeseries()`, `renderCompressionBreakdown()`, `renderCompressionMethods()`
-- Wire into `client/main.js` poll loop (or add a "Compression" nav tab that lazy-loads these on click)
-- Server-side HTML shell (`dashboard/src/shell.ts`) needs no changes (it already serves the client JS)
-
-**UI/UX notes:**
-- Default to last 30 days; add a "since" dropdown (7d / 30d / 90d / all)
-- Respect the existing `?projectDir` filter (when project-scoped, show only that project's compression stats)
-- If no compression events exist yet, show a gentle empty state: "No compression data yet. Agents will report compression stats as they run."
-
-**Acceptance criteria:**
-- Compression health panel renders in the main feed
-- Charts/tables render correctly when data is present
-- Empty state renders when no compression events exist
-- Project filter works (respects `?projectDir` query param)
-- No build errors; dashboard still starts with `forge dashboard start`
-
-**Dependencies:** FG-321 (API endpoints must exist first)
-
-**Related:** FG-313 (parent epic), FG-323 (per-task detail phase)
-
 ### #323 — Per-task compression detail in timeline (FG-313 Phase 3)
 
 **Goal:** Show compression stats inline in the task timeline detail view.
@@ -1110,6 +1066,58 @@ In the task detail view (`/api/task/:id` → rendered by `client/renderers.js`),
 **Related:** FG-313 (parent epic), FG-317 (compression verification that logs the events)
 
 ## Done (recent)
+
+### #322 — Dashboard compression stats UI panels (FG-313 Phase 2)
+**Closed:** 2026-06-15.
+
+
+**Goal:** Add compression stats visualization to the forge dashboard web UI.
+
+**Context:** Phase 1 (FG-321) adds API endpoints. This phase surfaces them in the UI. The dashboard is a single-page app (no build step) — client JS (`client/main.js`, `client/renderers.js`) fetches from API endpoints and renders cards.
+
+**What to add:**
+
+1. **Compression health panel** (new top-level card in the main feed)
+   - "Tokens saved (last 30d): 2.4M (~$12 avoided at $0.005/1K)"
+   - "Average compression ratio: 82%"
+   - "Tasks compressed: 347 / 520 total (67%)"
+   - "Agents not compressing: [red-narrow, manual-qa]" (when orchestrator_compressed=true for >50% of their tasks)
+   - Fetches from `/api/compression/summary`
+
+2. **Compression timeseries chart** (under the health panel, or in a "Compression" nav tab)
+   - Line chart: bytes saved over time (last 30 days, grouped by day)
+   - Fetches from `/api/compression/timeseries`
+   - Use a lightweight inline SVG renderer (no chart library dependency) OR link to an external chart tool
+
+3. **Compression breakdown table** (below the chart)
+   - Rows: agent role, tasks compressed, bytes saved, avg ratio
+   - Sortable by bytes saved (default) or ratio
+   - Fetches from `/api/compression/by-role`
+
+4. **Compression method distribution** (pie chart or bar chart)
+   - Shows SmartCrusher / CodeCompressor / Kompress-base split
+   - Fetches from `/api/compression/methods`
+
+**Implementation:**
+- Add client-side rendering functions in `client/renderers.js`: `renderCompressionHealth()`, `renderCompressionTimeseries()`, `renderCompressionBreakdown()`, `renderCompressionMethods()`
+- Wire into `client/main.js` poll loop (or add a "Compression" nav tab that lazy-loads these on click)
+- Server-side HTML shell (`dashboard/src/shell.ts`) needs no changes (it already serves the client JS)
+
+**UI/UX notes:**
+- Default to last 30 days; add a "since" dropdown (7d / 30d / 90d / all)
+- Respect the existing `?projectDir` filter (when project-scoped, show only that project's compression stats)
+- If no compression events exist yet, show a gentle empty state: "No compression data yet. Agents will report compression stats as they run."
+
+**Acceptance criteria:**
+- Compression health panel renders in the main feed
+- Charts/tables render correctly when data is present
+- Empty state renders when no compression events exist
+- Project filter works (respects `?projectDir` query param)
+- No build errors; dashboard still starts with `forge dashboard start`
+
+**Dependencies:** FG-321 (API endpoints must exist first)
+
+**Related:** FG-313 (parent epic), FG-323 (per-task detail phase)
 
 ### #321 — Dashboard compression stats API endpoints (FG-313 Phase 1)
 **Closed:** 2026-06-15.
