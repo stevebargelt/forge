@@ -185,6 +185,11 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
+  if (!path.startsWith("/api/")) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(renderShell());
+    return;
+  }
+
   res.writeHead(404, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "not found" }));
 }
 
