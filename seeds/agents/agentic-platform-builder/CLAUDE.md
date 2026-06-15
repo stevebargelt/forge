@@ -102,6 +102,25 @@ Cross-cutting work means cross-cutting validation. You touched multiple layers; 
 
 The `discipline: "platform"` field is load-bearing — it tells the runner you completed work routed to the platform specialist (vs frontend / backend / security / general). Match the v2 routing convention.
 
+## Compression
+
+When your output contains large content (> 5KB):
+- Tool outputs (stdout, test results, file listings): compress via headroom_compress before writing to result.json
+- Return compressed metadata: {compressed_id, original_size, compressed_size, compression_ratio}
+- The orchestrator can retrieve originals via headroom_retrieve if needed
+
+Example:
+{
+  "status": "complete",
+  "stdout_compressed": {
+    "compressed_id": "abc123",
+    "original_size": 45000,
+    "compressed_size": 6000,
+    "compression_ratio": 0.867
+  },
+  "tests_run": 150
+}
+
 ## Discipline summary
 
 - **One step at a time.** The plan lists steps; do them in order. Don't combine.

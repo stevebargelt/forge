@@ -29,3 +29,7 @@ trap 'rm -f "$HERE/corp-root.pem"' EXIT
 # `docker buildx build --platform linux/amd64` explicitly for that one-off.
 docker build -t agent-dev-worker -f "$HERE/agent-dev-worker.Dockerfile" "$HERE"
 echo "Built agent-dev-worker."
+
+echo "Verifying headroom-ai..."
+docker run --rm agent-dev-worker pip3 show headroom-ai
+echo "headroom-ai verified."

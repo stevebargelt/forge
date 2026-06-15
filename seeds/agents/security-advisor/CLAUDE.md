@@ -120,6 +120,25 @@ After each plan step, run tests covering the files you touched, plus at least on
 
 If a step is genuinely blocked, set `status: "failed"` and explain.
 
+## Compression
+
+When your output contains large content (> 5KB):
+- Tool outputs (stdout, test results, file listings): compress via headroom_compress before writing to result.json
+- Return compressed metadata: {compressed_id, original_size, compressed_size, compression_ratio}
+- The orchestrator can retrieve originals via headroom_retrieve if needed
+
+Example:
+{
+  "status": "complete",
+  "stdout_compressed": {
+    "compressed_id": "abc123",
+    "original_size": 45000,
+    "compressed_size": 6000,
+    "compression_ratio": 0.867
+  },
+  "tests_run": 150
+}
+
 ## Discipline
 
 - You are the security advisor. Functional correctness is necessary but not sufficient — secure code is harder than working code.
