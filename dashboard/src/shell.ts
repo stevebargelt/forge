@@ -531,6 +531,10 @@ section.compression-view { margin-top: 20px; }
 }
 .compression-table tr:last-child td { border-bottom: none; }
 
+/* FG-323: per-task compression badges in the task detail view. */
+.badge.compression-badge-agent { background: rgba(74, 222, 128, 0.15); color: var(--ok); }
+.badge.compression-badge-orch  { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
+
 /* #285: routing / governance panel (read-only). */
 .gov-view { display: flex; flex-direction: column; }
 .gov-header { margin-bottom: 16px; }

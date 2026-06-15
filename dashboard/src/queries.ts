@@ -209,6 +209,18 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
   });
 }
 
+// FG-323: per-task compression data sourced from compression.verification events.
+export type CompressionEventData = {
+  agentCompressed: boolean;
+  orchestratorCompressed: boolean;
+  fieldsCompressed: string[];
+  originalSizeBytes: number | null;
+  compressedSizeBytes: number | null;
+  compressionRatio: number | null;
+  method: string | null;
+  ccrId: string | null;
+};
+
 /** Full task detail including container log tails + verdicts + gates. */
 export type TaskDetail = {
   task: ActivityEntry;
@@ -221,6 +233,8 @@ export type TaskDetail = {
   events: TaskEventEntry[];   // WALK-5: lifecycle timeline
   failureKind: string | null; // WALK-5: machine-readable failure kind, if failed
   idle: IdleInfo | null;      // WALK-5: live activity, running tasks only
+  compressionEvent: CompressionEventData | null; // FG-323: null if no compression.verification event
+  resultSizeBytes: number | null; // FG-323: raw result JSON byte length; null if no result
 };
 
 // The dashboard polls running-task detail every 3s; reading whole multi-MB
@@ -409,6 +423,32 @@ export function taskDetail(taskId: string): TaskDetail | null {
   const failureKind = deriveFailureKind(events);
   const idle = computeIdle(taskRow.run_id, taskId, taskRow.status, taskRow.started_at);
 
+  // FG-323: look up the single compression.verification event for this task.
+  const compressionRow = db().prepare(`
+    SELECT payload FROM events
+    WHERE task_id = ? AND event_type = 'compression.verification'
+    ORDER BY created_at DESC LIMIT 1
+  `).get(taskId) as { payload: string | null } | undefined;
+
+  let compressionEvent: CompressionEventData | null = null;
+  if (compressionRow?.payload) {
+    try {
+      const p = JSON.parse(compressionRow.payload) as Record<string, unknown>;
+      compressionEvent = {
+        agentCompressed: p["agent_compressed"] === true,
+        orchestratorCompressed: p["orchestrator_compressed"] === true,
+        fieldsCompressed: Array.isArray(p["fields_compressed"]) ? (p["fields_compressed"] as unknown[]).filter((f): f is string => typeof f === "string") : [],
+        originalSizeBytes: typeof p["original_size_bytes"] === "number" ? p["original_size_bytes"] : null,
+        compressedSizeBytes: typeof p["compressed_size_bytes"] === "number" ? p["compressed_size_bytes"] : null,
+        compressionRatio: typeof p["compression_ratio"] === "number" ? p["compression_ratio"] : null,
+        method: typeof p["method"] === "string" ? p["method"] : null,
+        ccrId: typeof p["ccr_id"] === "string" ? p["ccr_id"] : null,
+      };
+    } catch { /* malformed payload — treat as no compression event */ }
+  }
+
+  const resultSizeBytes = taskRow.result ? Buffer.byteLength(taskRow.result, "utf8") : null;
+
   return {
     task,
     stdoutLog: stdout.text,
@@ -436,6 +476,8 @@ export function taskDetail(taskId: string): TaskDetail | null {
     events,
     failureKind,
     idle,
+    compressionEvent,
+    resultSizeBytes,
   };
 }
 

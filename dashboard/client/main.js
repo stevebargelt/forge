@@ -3,7 +3,7 @@
 import { h, render } from "https://esm.sh/preact@10.24.0";
 import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
-import { renderResultByAgent, md } from "./renderers.js";
+import { renderResultByAgent, md, renderCompressionBadge, renderCompressionDetail } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
 import { CompressionView } from "./compression.js";
@@ -569,6 +569,7 @@ function TaskDetail({ taskId, onClose }) {
           · ${detail.task.phase} · ${detail.task.status}
           ${detail.failureKind ? html`<span class="badge status-failed" style="margin-left: 6px;">${detail.failureKind}</span>` : null}
         </div>
+        <div style="margin-bottom: 12px;">${renderCompressionBadge(detail.compressionEvent ?? null, detail.resultSizeBytes ?? null)}</div>
 
         ${detail.idle ? html`
           <div class="subcard" style="margin-bottom: 16px;">
@@ -584,6 +585,7 @@ function TaskDetail({ taskId, onClose }) {
 
         <h3>Result</h3>
         ${rendered ?? html`<pre>${JSON.stringify(detail.task.result, null, 2)}</pre>`}
+        ${renderCompressionDetail(detail.compressionEvent ?? null)}
 
         ${detail.verdicts.length > 0 ? html`
           <h3>Verdicts (${detail.verdicts.length})</h3>
