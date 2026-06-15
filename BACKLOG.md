@@ -521,23 +521,6 @@ Scope: a heartbeat-staleness reconcile pass for session/manual (non-containerize
 Note: 5 such tasks were briefly mis-orphaned by an early AWN-1 build and restored from backup (forge.db.bak-20260530-084522-reconcile-restore); they remain legitimately stale and this ticket cleans them up properly.
 
 
-### #307 — Host Claude SessionEnd hook leaks into agent containers
-**Bug.** Hit live 2026-06-06 during #252 review-loop fixer task `task-engineer-605e97`. (Renumbered from #306 — concurrent filing collided with the doctor/upgrade follow-ups #306.) The task itself completed successfully, but dashboard stderr showed:
-
-`SessionEnd hook [/Users/stevebargelt/code/forge/scripts/claude-hooks/orchestrator-heartbeat end] failed: /bin/sh: 1: /Users/stevebargelt/code/forge/scripts/claude-hooks/orchestrator-heartbeat: not found`
-
-**Root cause shape:** containerized Claude Code appears to inherit the host Claude hook configuration. The configured `SessionEnd` hook points at a host absolute path under `/Users/...`, which exists on the host but not inside the agent container, so the hook logs a failure at session end. This is NOT the ntfy/Twilio notification path; it is the orchestrator-heartbeat hook used for host-side orchestrator/session liveness.
-
-**Why it matters:** the task can be complete while the dashboard bottom stderr looks like a task failure. For a portable work-laptop setup this is confusing noise, and it suggests host-local Claude settings are leaking into agent runtime environments.
-
-**Acceptance:**
-- Containerized Forge agent runs do not attempt to execute host-only Claude hooks, OR the hook command reliably no-ops when the host path is absent.
-- The fix preserves host-side orchestrator heartbeat behavior.
-- A regression test covers a container/agent-style environment with a host-absolute `SessionEnd` hook and asserts the task/session does not emit a misleading hook failure.
-
-Relations: #222 (orchestrator heartbeat/reaper), #252 (portable forge-on-forge setup), #301 (review-loop agent sessions).
-
-
 ### #223 — AWN-4 phase 2: contract enforcement — record satisfied checks, workflow-YAML contracts, orchestrator prefers contracts
 Follow-up to AWN-4 phase 1 (#217, which landed the TaskContract schema + manifest carry + forge show + forge invoke --contract). Phase 2 closes the doc's remaining §4 acceptance:
 
@@ -906,49 +889,209 @@ Relations: #296 (closed — auth/attribution only), #266, #262, #264, #261, seed
 Relations: #252 (host-level shipped), #246 (docs-surfaces project config pattern), #229 (release-doctor surfaces).
 
 
-### #309 — fix usage parser: assistant event has message.id, not top-level request_id
-## Symptom
+### #310 — docs: document agent-container isolation from host project settings (post-6fe5cb8)
 
-Dashboard Usage page (`http://127.0.0.1:8024/#usage`) shows no data.
-`model_calls` table is empty (0 rows) despite 163 completed tasks and 4940 assistant events on disk under `~/.forge/runs/*/*/container.stdout.log`.
+### #311 — forge ops reconcile command — bulk cleanup of orphaned tasks
 
-## Root cause
+### #312 — Restructure BACKLOG.md into separate files — epics, stories, ideas
 
-`src/store/model-calls.ts:78` reads `event["request_id"]` on the outer `{"type":"assistant", ...}` event. The actual stream-json format claude-code emits places the id INSIDE the message object as `message.id` (e.g. `"msg_bdrk_01..."`) and has NO top-level `request_id`.
+**Goal:** Split the monolithic BACKLOG.md (~170KB, growing) into separate files organized by type (ideas, epics, stories, done) with project-prefixed IDs.
 
-Tally across all current runs:
-
-- total assistant events: 4940
-- with top-level `request_id` (what parser expects): **0**
-- with `message.id` (msg_*): **4930**
-
-Because `reqId` is always `undefined`, the guard at line 80 (`if (reqId && sessionId)`) fails, `sessionToActiveRequest` is never populated, and the downstream `message_delta` branch at lines 95-106 has nothing to attribute usage to either. Net effect: zero rows written.
-
-## Fix shape
-
-`src/store/model-calls.ts:78` — fall back to `message.id` when no top-level `request_id` is present:
-
-```ts
-const reqId =
-  typeof event["request_id"] === "string" ? event["request_id"] :
-  typeof msg["id"] === "string" ? msg["id"] :
-  undefined;
+**Proposed structure:**
+```
+backlog/
+├── ideas/           # Unrefined thoughts, not yet epics
+│   ├── FG-001-foo.md
+│   └── FG-002-bar.md
+├── epics/           # Multi-story initiatives
+│   ├── FG-258-provider-agnostic.md
+│   ├── FG-273-raci-routing.md
+│   └── FG-291-stable-baseline.md
+├── stories/         # Concrete work units
+│   ├── FG-130-bedrock-starvation.md
+│   ├── FG-228-error-classification.md
+│   └── FG-311-ops-reconcile.md
+├── done/            # Recently completed
+│   ├── FG-301-review-loop.md
+│   └── FG-307-sessionend-hook.md
+└── index.md         # Backlog view (generated or hand-curated)
 ```
 
-The `message_delta` branch already threads the id via `sessionToActiveRequest`, so it will work as soon as the assistant branch populates the map.
+**ID format:** Each project gets a 2-3 letter prefix (FG for forge). Existing sticky numbers are preserved but gain the prefix — `#130` becomes `FG-130`, `#312` becomes `FG-312`. References in commit messages work either way (`fixes #130` or `fixes FG-130`).
 
-## Acceptance
+**Benefits:**
+- Scales past 170KB
+- Epics naturally group their stories
+- Ideas have a landing zone before promotion to epic/story
+- Git diffs are per-ticket, not one mega-file
+- The `##` parser issue (#174) goes away
+- Multi-project forge installs can distinguish FG-130 from PX-130
 
-- Real stream-log fixture committed under `tests/` (or wherever parser tests live) drawn from `~/.forge/runs/*/*/container.stdout.log` — not synthetic. Regression-protect the field-name dependency.
-- `extractUsageFromClaudeStreamJsonLog` returns ≥1 UsageRow for that fixture.
-- Dashboard `/api/usage` returns non-empty after a fresh task completes.
+**Open questions:**
+- Migrate existing tickets all at once, or incrementally?
+- Does `forge backlog` CLI need to understand the new layout first?
+- Frontmatter schema: `id`, `type` (idea/epic/story), `status`, `related`?
 
-## Out of scope (file as follow-up)
+**Upgrade path constraint:** Must have a smooth migration for existing projects using forge. The `forge backlog` CLI should support BOTH formats during transition:
+- **Read path**: detect whether `BACKLOG.md` exists (old format) or `backlog/index.md` exists (new format) and route accordingly
+- **Write path**: `forge backlog file/close/move` work seamlessly regardless of format
+- **Migration command**: `forge backlog migrate` converts existing BACKLOG.md → `backlog/` structure, preserving all ticket numbers and metadata
+- **Backward compat**: old `#NNN` references in commits/docs continue to resolve after migration (the prefix is additive, not breaking)
 
-Backfilling historical usage from existing `~/.forge/runs/*` logs. The fix only repairs going-forward capture; historical replay is its own ticket.
+This allows projects to upgrade forge itself without being forced to migrate their backlog immediately — migration happens when the project owner chooses to run `forge backlog migrate`.
 
+**Related:** #174 (backlog edit-body verb + `##` parser issue).
+
+### #313 — Integrate headroom compression dashboard into forge dashboard
+
+**Type:** idea (not yet scoped to epic/story)
+
+**Context:** Headroom (https://github.com/chopratejas/headroom) provides context compression (60-95% token savings) and ships with a dashboard showing compression stats, cache hit rates, token savings per run, and compression method breakdowns (SmartCrusher, CodeCompressor, Kompress-base).
+
+**Ideas:**
+
+1. **Link from forge dashboard** — simplest: add a "Compression Stats" nav link that opens headroom's dashboard in a new tab or iframe.
+
+2. **Embed headroom metrics in forge dashboard** — surface key stats directly:
+   - Per-run compression ratio (original tokens → compressed tokens)
+   - Total tokens saved across all runs
+   - Compression method breakdown (which compressor was used for what content type)
+   - Cache hit rate (CCR retrievals vs fresh compressions)
+   - Compression time overhead per run
+
+3. **Inline per-task compression details** — in the timeline/task detail view:
+   - Show "Task package: 45KB → 6KB (87% compression, SmartCrusher)" next to task.created events
+   - Show "Result: 120KB → 15KB (88% compression, CodeCompressor + CCR ID: abc123)" next to task.completed
+   - Link CCR IDs to retrieval action (decompress on demand)
+
+4. **Compression health dashboard panel** — top-level metrics:
+   - "Tokens saved this week: 2.4M (est. $12 cost avoided)"
+   - "Average compression ratio: 82%"
+   - "Agents not compressing: [red-narrow, manual-qa]" (if hybrid MCP+orchestrator mode)
+
+**Integration surface:**
+- Headroom exposes `/stats` HTTP endpoint (if running proxy mode) or `headroom_stats` MCP tool
+- Could also query headroom's SQLite store directly (if using library mode)
+- Dashboard backend fetches headroom stats, joins with forge run data
+
+**Dependencies:**
+- Headroom integration (FG-314 or similar)
+- Dashboard backend API for fetching/joining compression stats
+
+**Open questions:**
+- Does headroom's dashboard have an embeddable mode / API?
+- Do we want real-time compression metrics or post-run summaries?
+- Should compression stats be per-project or host-global?
+
+**Related:** FG-314 (headroom integration epic).
+
+### #314 — [EPIC] Integrate headroom context compression into forge
+
+**Goal:** Integrate headroom (https://github.com/chopratejas/headroom) context compression into forge to reduce token usage by 60-95% across agent runs.
+
+**What headroom provides:**
+- Content-aware compression: SmartCrusher (JSON), CodeCompressor (AST), Kompress-base (text/ML)
+- Reversible compression (CCR) — originals cached, LLM can retrieve on demand
+- Multiple integration modes: library (TypeScript/Python), proxy, MCP server, SDK wrappers
+- Cross-agent memory with auto-dedup
+- `headroom learn` — mines failed sessions, writes corrections to agent config files
+
+**Integration strategy (hybrid approach):**
+
+**Phase 1: Library compression (orchestrator-side)**
+- Install `headroom-ai` npm package
+- Add `compress()` calls in `src/v2/spawn.ts` to compress task packages before sending to agents
+- Compress large system prompts (agent CLAUDE.md, constraints)
+- Measure token savings per run
+
+**Phase 2: MCP server (agent-side)**
+- Add headroom MCP server to agent Docker image
+- Update implementer seeds: "Use `headroom_compress` for tool outputs > 5KB"
+- Orchestrator verifies compression metadata in `result.json`
+- Safety net: if result > 20KB and no compression metadata, orchestrator compresses post-hoc + logs finding
+
+**Phase 3: Proxy fallback**
+- Add `compression_mode: proxy` config option for agent roles
+- For agents that consistently fail to compress, spawn with headroom proxy sidecar
+- Route API calls through proxy for transparent compression
+
+**Phase 4: Cross-agent memory & learning**
+- Evaluate headroom's cross-agent memory (potential collision with forge's SQLite state)
+- Integrate `headroom learn` to mine failed forge runs and auto-update agent seeds
+
+**Acceptance criteria:**
+- Token usage reduced by ≥60% on large tool outputs (test runs, file reads, git logs)
+- Agents can retrieve original context via CCR when needed
+- No accuracy regression on agent tasks (compression preserves semantics)
+- Dashboard shows compression stats per run
+
+**Stories to file:**
+- FG-315: Install headroom + orchestrator-side library compression (Phase 1)
+- FG-316: Add headroom MCP to agent containers + seed instructions (Phase 2)
+- FG-317: Orchestrator compression safety net + verification (Phase 2)
+- FG-318: Proxy mode for non-compliant agents (Phase 3)
+- FG-319: Evaluate cross-agent memory integration (Phase 4)
+- FG-320: Integrate `headroom learn` with agent seed updates (Phase 4)
+
+**Related:**
+- FG-313 (dashboard integration idea)
+- Headroom docs: https://headroom-docs.vercel.app/docs
+- Headroom repo: https://github.com/chopratejas/headroom
+
+**Open questions:**
+- Does headroom's TypeScript library have feature parity with Python? (README suggests Python is more mature)
+- How does CCR retrieval work in library mode vs MCP mode?
+- What's the compression overhead (latency) per request?
+- Does cross-agent memory conflict with forge's per-run SQLite isolation?
 
 ## Done (recent)
+
+### #320 — Integrate headroom learn with agent seed updates (FG-314 Phase 4)
+**Closed:** 2026-06-15.
+
+
+### #319 — Evaluate cross-agent memory integration (FG-314 Phase 4)
+**Closed:** 2026-06-15.
+
+
+### #318 — Proxy mode for non-compliant agents (FG-314 Phase 3)
+**Closed:** 2026-06-15.
+
+
+### #317 — Orchestrator compression safety net + verification (FG-314 Phase 2)
+**Closed:** 2026-06-15.
+
+
+### #316 — Add headroom MCP to agent containers + seed instructions (FG-314 Phase 2)
+**Closed:** 2026-06-15.
+
+
+### #315 — Install headroom + orchestrator-side library compression (FG-314 Phase 1)
+**Closed:** 2026-06-15.
+
+
+### #307 — Host Claude SessionEnd hook leaks into agent containers
+**Closed:** 2026-06-09. Commit `6fe5cb8`.
+
+**Bug.** Hit live 2026-06-06 during #252 review-loop fixer task `task-engineer-605e97`. (Renumbered from #306 — concurrent filing collided with the doctor/upgrade follow-ups #306.) The task itself completed successfully, but dashboard stderr showed:
+
+`SessionEnd hook [/Users/stevebargelt/code/forge/scripts/claude-hooks/orchestrator-heartbeat end] failed: /bin/sh: 1: /Users/stevebargelt/code/forge/scripts/claude-hooks/orchestrator-heartbeat: not found`
+
+**Root cause shape:** containerized Claude Code appears to inherit the host Claude hook configuration. The configured `SessionEnd` hook points at a host absolute path under `/Users/...`, which exists on the host but not inside the agent container, so the hook logs a failure at session end. This is NOT the ntfy/Twilio notification path; it is the orchestrator-heartbeat hook used for host-side orchestrator/session liveness.
+
+**Why it matters:** the task can be complete while the dashboard bottom stderr looks like a task failure. For a portable work-laptop setup this is confusing noise, and it suggests host-local Claude settings are leaking into agent runtime environments.
+
+**Acceptance:**
+- Containerized Forge agent runs do not attempt to execute host-only Claude hooks, OR the hook command reliably no-ops when the host path is absent.
+- The fix preserves host-side orchestrator heartbeat behavior.
+- A regression test covers a container/agent-style environment with a host-absolute `SessionEnd` hook and asserts the task/session does not emit a misleading hook failure.
+
+Relations: #222 (orchestrator heartbeat/reaper), #252 (portable forge-on-forge setup), #301 (review-loop agent sessions).
+
+
+### #309 — fix usage parser: assistant event has message.id, not top-level request_id
+**Closed:** 2026-06-09. Commit `f05b324`.
+
 
 ### #301 — Bounded review-loop command
 **Closed:** 2026-06-07.

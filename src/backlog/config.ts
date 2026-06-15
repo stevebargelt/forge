@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 
 const BacklogConfigSchema = z.object({
@@ -12,6 +12,22 @@ const ForgeConfigSchema = z.object({
 });
 
 export type BacklogConfig = z.infer<typeof BacklogConfigSchema>;
+
+export function writeBacklogConfig(projectDir: string, config: BacklogConfig): void {
+  const configPath = join(projectDir, ".forge", "config.yml");
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(configPath)) {
+    try {
+      existing = (parseYaml(readFileSync(configPath, "utf8")) as Record<string, unknown>) ?? {};
+    } catch {
+      // malformed — overwrite cleanly
+    }
+  }
+  existing["backlog"] = { ...(existing["backlog"] as Record<string, unknown> ?? {}), prefix: config.prefix };
+  writeFileSync(configPath, stringifyYaml(existing));
+}
 
 export function readBacklogConfig(projectDir: string): BacklogConfig {
   const configPath = join(projectDir, ".forge", "config.yml");
