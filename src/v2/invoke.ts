@@ -44,6 +44,7 @@ import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthErro
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { renderContract, type TaskContract } from "./contract.js";
+import { compressPrompt } from "./compression.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -297,6 +298,14 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     ...(resolution.model ? { model: resolution.model } : {}),
   };
 
+  const { content: systemPrompt, meta: compressionMeta } = await compressPrompt(taskPackage.composedSystemPrompt);
+  if (compressionMeta.method !== "none") {
+    console.log(
+      `forge: compression taskId=${taskId} original=${compressionMeta.original_size}B ` +
+        `compressed=${compressionMeta.compressed_size}B ratio=${compressionMeta.compression_ratio.toFixed(3)} method=${compressionMeta.method}`,
+    );
+  }
+
   const ctx: SpawnContext = {
     TASK_ID: taskId,
     TASK_DIR: dir,
@@ -304,7 +313,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     PROJECT_MODE: args.readOnlyProject ? "ro" : "rw",
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",
-    SYSTEM_PROMPT: taskPackage.composedSystemPrompt,
+    SYSTEM_PROMPT: systemPrompt,
     TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task, args.contract),
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,

@@ -17,6 +17,7 @@
     "better-sqlite3": "^11.10.0",
     "commander": "^12.1.0",
     "gray-matter": "^4.0.3",
+    "headroom-ai": "^0.22.4",
     "ws": "^8.21.0",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
