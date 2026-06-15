@@ -5,27 +5,31 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**FG-313 epic complete: Dashboard compression stats integration.** All three phases shipped:
-- FG-321: API endpoints (summary, timeseries, by-role, methods) — 4 GET endpoints, 60 tests
-- FG-322: UI panels (compression nav tab, health card, charts, breakdown table) — 80 tests total
-- FG-323: Per-task detail (badges + expandable accordion in timeline) — 118 tests total
+**#324 complete + full headroom integration verified end-to-end!**
 
-Compression metrics are now fully surfaced in the forge dashboard:
-- Host-global compression view via /compression tab (empty state when no data)
-- Per-task inline detail in timeline (badge + expandable section)
-- API endpoints for querying compression stats programmatically
+Compression events now capture full metrics (original_size_bytes, compressed_size_bytes, compression_ratio, method). Dashboard shows real data:
+- 58B bytes saved across 4 compression events
+- 99.8% avg compression ratio (test data: repeated 'x' chars)
+- Method distribution: 1 headroom event, 3 legacy (unknown) events
+- Per-agent breakdown working
 
-All phases: typecheck clean, docs updated (SCHEMA-CONTRACT.md + dashboard/README.md), manually verified.
+**Testing verified:**
+1. Created test task with 25KB result → orchestrator compressed post-hoc
+2. Compression event logged with all 7 fields
+3. Dashboard API `/api/compression/summary` returns non-null aggregates
+4. Dashboard UI shows health panel, timeseries chart, role breakdown, method distribution
+5. All metrics flowing through correctly
 
-**Headroom integration (FG-314) + dashboard (FG-313) both complete.** Token savings are measurable and visible.
+**Full epic complete: headroom integration (FG-314) + dashboard (FG-313) + metrics capture (#324).**
 
-**Commits from this session:**
-- cdab09b: forge learn command (FG-320)
-- 3fdabf8: dashboard compression API (FG-321)
-- 6ae22b0: dashboard compression UI (FG-322)
-- 4bf956c: per-task compression detail (FG-323)
+**Session commits:**
+- cdab09b: forge learn (FG-320)
+- 3fdabf8: dashboard API (FG-321)
+- 6ae22b0: dashboard UI (FG-322)  
+- 4bf956c: per-task detail (FG-323)
+- 5db8b0d: compression metrics (#324)
 
-**Next:** 17 unpushed commits total. Push? Or continue with other backlog work?
+18 commits total on main. All pushed.
 
 ## Active
 
@@ -979,7 +983,11 @@ This allows projects to upgrade forge itself without being forced to migrate the
 - What's the compression overhead (latency) per request?
 - Does cross-agent memory conflict with forge's per-run SQLite isolation?
 
+## Done (recent)
+
 ### #324 — FG-317 follow-up: capture size/ratio/method in compression events
+**Closed:** 2026-06-15.
+
 
 **Goal:** Enhance FG-317 compression verification to capture and log compression metrics (original size, compressed size, ratio, method) in the event payload.
 
@@ -1021,8 +1029,6 @@ Without these fields, dashboard queries return null for bytes_saved, avg_compres
 - Tests pass, typecheck clean
 
 **Related:** FG-317 (compression safety net), FG-321 (dashboard API), FG-322 (dashboard UI), FG-323 (per-task detail)
-
-## Done (recent)
 
 ### #313 — [EPIC] Integrate headroom compression dashboard into forge dashboard
 **Closed:** 2026-06-15.
