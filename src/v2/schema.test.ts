@@ -385,6 +385,32 @@ test("#292: rejects an unknown log_format", () => {
 });
 
 // ------------------------------------------------------------------
+// FG-318: compression_mode field
+// ------------------------------------------------------------------
+
+test("FG-318: compression_mode defaults to 'mcp' when omitted", () => {
+  const r = RuntimeSchema.parse(minimalRuntime);
+  assert.equal(r.compression_mode, "mcp");
+});
+
+test("FG-318: compression_mode accepts 'proxy'", () => {
+  const r = RuntimeSchema.safeParse({ ...minimalRuntime, compression_mode: "proxy" });
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error!.issues, null, 2));
+  assert.equal(r.data!.compression_mode, "proxy");
+});
+
+test("FG-318: compression_mode accepts 'none'", () => {
+  const r = RuntimeSchema.safeParse({ ...minimalRuntime, compression_mode: "none" });
+  assert.ok(r.success, r.success ? "" : JSON.stringify(r.error!.issues, null, 2));
+  assert.equal(r.data!.compression_mode, "none");
+});
+
+test("FG-318: compression_mode rejects unknown values", () => {
+  const r = RuntimeSchema.safeParse({ ...minimalRuntime, compression_mode: "turbo" });
+  assert.ok(!r.success);
+});
+
+// ------------------------------------------------------------------
 // ModelPolicy (AWN-7) — opt-in policy YAML
 // ------------------------------------------------------------------
 

@@ -63,4 +63,14 @@ if [ -n "${FORGE_NM_SHADOW:-}" ] && [ -d "${FORGE_NM_SHADOW}" ]; then
   sudo chown agent:agent "${FORGE_NM_SHADOW}" 2>/dev/null || true
 fi
 
+# FG-318: proxy mode — start headroom proxy sidecar when requested.
+# ANTHROPIC_BASE_URL / OPENAI_BASE_URL are already set by spawn.ts to
+# http://localhost:8787. The proxy intercepts API calls and compresses
+# transparently. Killed on container exit via shell EXIT trap.
+if [ "${FORGE_HEADROOM_PROXY:-0}" = "1" ] && command -v headroom >/dev/null 2>&1; then
+  headroom proxy --port 8787 >/tmp/headroom-proxy.log 2>&1 &
+  HEADROOM_PID=$!
+  trap 'kill "$HEADROOM_PID" 2>/dev/null || true' EXIT
+fi
+
 exec "$@"

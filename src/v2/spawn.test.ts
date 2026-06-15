@@ -18,6 +18,7 @@ const BT_DIR_NO_INJECTOR = mkdtempSync(join(tmpdir(), "forge-bt-old-"));
 const BASE_RUNTIME: Runtime = {
   name: "claude-bedrock",
   description: "test",
+  compression_mode: "mcp",
   image: "agent-dev-worker:latest",
   models: { default: "claude-sonnet-4-6", "spec-writer": "claude-sonnet-4-6" },
   auth: { mode: "env-snapshot" },
@@ -531,6 +532,7 @@ test("#266: pi-oauth invocation carries no --api-key (auth comes from auth.json)
 const PI_RUNTIME: Runtime = {
   name: "pi-apikey",
   description: "test pi",
+  compression_mode: "mcp",
   image: "agent-dev-worker:latest",
   runtime_kind: "pi",
   log_format: "pi-jsonl",
@@ -561,6 +563,57 @@ test("#265: empty/legacy UPSTREAM_PROVIDER falls back to anthropic (no #261 regr
   assert.equal(pickProvider(emptyArgs), "anthropic");
   const unsetArgs = buildDockerArgs(PI_RUNTIME, BASE_CTX).args; // field absent entirely
   assert.equal(pickProvider(unsetArgs), "anthropic");
+});
+
+// ── FG-318: proxy compression mode ───────────────────────────────────────────
+// When compression_mode: proxy, spawn.ts sets FORGE_HEADROOM_PROXY=1 and
+// points ANTHROPIC_BASE_URL / OPENAI_BASE_URL at the in-container sidecar.
+
+test("FG-318: compression_mode=proxy sets FORGE_HEADROOM_PROXY and proxy base URLs", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const rt: Runtime = { ...BASE_RUNTIME, compression_mode: "proxy" };
+  const { args } = buildDockerArgs(rt, BASE_CTX);
+  const env = pickEnv(args);
+  assert.equal(env.FORGE_HEADROOM_PROXY, "1");
+  assert.equal(env.ANTHROPIC_BASE_URL, "http://localhost:8787");
+  assert.equal(env.OPENAI_BASE_URL, "http://localhost:8787");
+});
+
+test("FG-318: compression_mode=mcp (default) does not set proxy env vars", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const rt: Runtime = { ...BASE_RUNTIME, compression_mode: "mcp" };
+  const { args } = buildDockerArgs(rt, BASE_CTX);
+  const env = pickEnv(args);
+  assert.equal(env.FORGE_HEADROOM_PROXY, undefined);
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+});
+
+test("FG-318: compression_mode=none does not set proxy env vars", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const rt: Runtime = { ...BASE_RUNTIME, compression_mode: "none" };
+  const { args } = buildDockerArgs(rt, BASE_CTX);
+  const env = pickEnv(args);
+  assert.equal(env.FORGE_HEADROOM_PROXY, undefined);
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+});
+
+test("FG-318: runtime without compression_mode defaults to mcp (no proxy env)", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  // BASE_RUNTIME has no compression_mode set — schema default is 'mcp'
+  const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+  const env = pickEnv(args);
+  assert.equal(env.FORGE_HEADROOM_PROXY, undefined);
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
 });
 
 // ── regression: agent containers isolate from host project settings via --setting-sources ──

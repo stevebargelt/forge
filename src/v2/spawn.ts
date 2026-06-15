@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
+import { PROXY_BASE_URL } from "./compression-modes.js";
 import {
   exportAwsCreds,
   oauthVolumeName,
@@ -155,6 +156,14 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // Static env from runtime.env, with substitution.
   for (const [k, v] of Object.entries(runtime.env)) {
     args.push("-e", `${k}=${substitute(v, ctx)}`);
+  }
+
+  // FG-318: proxy mode — point agent API calls through headroom proxy sidecar.
+  // The proxy is started inside the container by the entrypoint (via FORGE_HEADROOM_PROXY=1).
+  if (runtime.compression_mode === "proxy") {
+    args.push("-e", "FORGE_HEADROOM_PROXY=1");
+    args.push("-e", `ANTHROPIC_BASE_URL=${PROXY_BASE_URL}`);
+    args.push("-e", `OPENAI_BASE_URL=${PROXY_BASE_URL}`);
   }
 
   // Mounts.
