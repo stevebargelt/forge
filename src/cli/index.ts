@@ -35,6 +35,7 @@ import { registerRaci } from "./commands/raci.js";
 import { registerPi } from "./commands/pi.js";
 import { registerReviewLoop } from "./commands/review-loop.js";
 import { registerRoute } from "./commands/route.js";
+import { registerLearn } from "./commands/learn.js";
 import { loadNotifyEnv } from "../notify/load-env.js";
 
 // Populate process.env from ~/.forge/notify.env before any command runs. Shell
@@ -88,6 +89,7 @@ registerRaci(program);
 registerPi(program);
 registerReviewLoop(program);
 registerRoute(program);
+registerLearn(program);
 
 program.parseAsync(process.argv).catch((err) => {
   console.error(`forge: ${(err as Error).message}`);
