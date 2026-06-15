@@ -10,6 +10,8 @@
     "test": "tsx --test $(find src -name '*.test.ts' -type f)"
   },
   "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.1",
     "marked": "^14.1.4"
   }
 }

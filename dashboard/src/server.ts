@@ -13,7 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance } from "./queries.js";
+import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance, compressionSummary, compressionTimeSeries, compressionByRole, compressionMethods } from "./queries.js";
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 
@@ -142,6 +142,35 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
     const data = usageModelMix(raw as GroupBy, since, projectDir);
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+    return;
+  }
+
+  if (path === "/api/compression/summary") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(compressionSummary(since, projectDir)));
+    return;
+  }
+
+  if (path === "/api/compression/timeseries") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(compressionTimeSeries(since, projectDir)));
+    return;
+  }
+
+  if (path === "/api/compression/by-role") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 200);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(compressionByRole(since, projectDir, limit)));
+    return;
+  }
+
+  if (path === "/api/compression/methods") {
+    const since = url.searchParams.get("since") ?? "30d";
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(compressionMethods(since, projectDir)));
     return;
   }
 

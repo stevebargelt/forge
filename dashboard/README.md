@@ -18,6 +18,16 @@ Primary surfaces:
 - **In-flight strip** — what's running right now, live-polled.
 - **Click a card** — see the full result.json + container stdout + related verdicts/gates.
 
+## HTTP API
+
+The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. All `GET`. Notable surfaces:
+
+- **`/api/feed`**, **`/api/in-flight`**, **`/api/projects`**, **`/api/task/:id`** — core activity data
+- **`/api/usage`**, **`/api/usage/timeseries`**, **`/api/usage/model-mix`** — token usage metrics
+- **`/api/compression/summary`**, **`/api/compression/timeseries`**, **`/api/compression/by-role`**, **`/api/compression/methods`** — compression metrics derived from `compression.verification` events
+
+All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
+
 ## Design
 
 `design/dashboard.pen` is the source of truth. Edit in Pencil. PNGs under `design/designs/` are exports of canonical screens.
