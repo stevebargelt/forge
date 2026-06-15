@@ -299,6 +299,16 @@ export function registerBacklog(program: Command): void {
     .option("--project <dir>", "project directory (default: cwd)")
     .action((opts: { project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+      if (format === "structured") {
+        const notesPath = join(dir, "backlog", "notes.md");
+        if (!existsSync(notesPath)) {
+          process.stdout.write("(no notes)\n");
+          return;
+        }
+        process.stdout.write(readFileSync(notesPath, "utf8"));
+        return;
+      }
       const b = readBacklog(dir);
       process.stdout.write(b.notes);
     });
@@ -312,6 +322,15 @@ export function registerBacklog(program: Command): void {
       const dir = resolve(opts.project ?? process.cwd());
       const text = !textArg || textArg === "-" ? readFileSync(0, "utf8") : textArg;
       if (text.trim().length === 0) throw new Error("notes add: empty input");
+      const format = detectBacklogFormat(dir);
+      if (format === "structured") {
+        const notesPath = join(dir, "backlog", "notes.md");
+        const existing = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
+        const separator = existing.length > 0 && !existing.endsWith("\n\n") ? "\n" : "";
+        writeFileSync(notesPath, existing + separator + text.trim() + "\n");
+        console.log("Notes updated.");
+        return;
+      }
       const b = readBacklog(dir);
       const next = appendNotes(b, text.trim());
       writeBacklog(dir, next);
@@ -327,6 +346,13 @@ export function registerBacklog(program: Command): void {
       const dir = resolve(opts.project ?? process.cwd());
       const text = !textArg || textArg === "-" ? readFileSync(0, "utf8") : textArg;
       if (text.trim().length === 0) throw new Error("notes replace: empty input");
+      const format = detectBacklogFormat(dir);
+      if (format === "structured") {
+        const notesPath = join(dir, "backlog", "notes.md");
+        writeFileSync(notesPath, text.endsWith("\n") ? text : text + "\n");
+        console.log("Notes replaced.");
+        return;
+      }
       const b = readBacklog(dir);
       const next = setNotes(b, text.endsWith("\n") ? text : text + "\n");
       writeBacklog(dir, next);
