@@ -112,6 +112,13 @@ function replaceTicket(b: Backlog, id: number, updated: Ticket): Backlog {
   return { ...b, sections: nextSections };
 }
 
+/** Replace a ticket's body in-place. Returns a new Backlog. */
+export function updateTicketBody(b: Backlog, id: number, body: string): Backlog {
+  const ticket = findTicket(b, id);
+  if (!ticket) throw new Error(`Ticket #${id} not found`);
+  return replaceTicket(b, id, { ...ticket, body });
+}
+
 /** Replace the Notes block. Returns a new Backlog. */
 export function setNotes(b: Backlog, notes: string): Backlog {
   return { ...b, notes };

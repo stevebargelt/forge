@@ -22,7 +22,7 @@ import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
 import { readBacklogConfig, writeBacklogConfig } from "../../backlog/config.js";
 import { readBacklog, writeBacklog } from "../../backlog/io.js";
-import { addTicket, appendNotes, closeTicket, findTicket, listTickets, maxTicketId, moveTicket, setNotes } from "../../backlog/ops.js";
+import { addTicket, appendNotes, closeTicket, findTicket, listTickets, maxTicketId, moveTicket, setNotes, updateTicketBody } from "../../backlog/ops.js";
 import { type SectionName, SECTION_ORDER, type Ticket } from "../../backlog/types.js";
 import {
   generateSlug,
@@ -247,6 +247,33 @@ export function registerBacklog(program: Command): void {
       const next = closeTicket(b, id, opts.commit ? { commitSha: opts.commit } : {});
       writeBacklog(dir, next);
       console.log(`Closed #${id}${opts.commit ? ` (${opts.commit})` : ""}`);
+    });
+
+  // ----- edit -----
+  backlog
+    .command("edit")
+    .argument("<id>", "sticky ticket id (or FG-NNN for structured)")
+    .description("Edit an existing ticket's body (preserves heading and sticky number)")
+    .option("--body <text>", "replacement body — use '-' to read from stdin")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .action((idArg: string, opts: { body?: string; project?: string }) => {
+      const dir = resolve(opts.project ?? process.cwd());
+      const format = detectBacklogFormat(dir);
+      const bodyRaw = readBodyArg(opts.body);
+
+      if (format === "structured") {
+        const ticket = readTicket(dir, idArg);
+        const updated = { ...ticket, body: bodyRaw };
+        writeTicket(dir, updated);
+        console.log(`Updated body of ${idArg}`);
+        return;
+      }
+
+      const id = parseTicketId(idArg);
+      const b = readBacklog(dir);
+      const next = updateTicketBody(b, id, bodyRaw.length > 0 ? ensureBodyTrailingBlank(bodyRaw) : "");
+      writeBacklog(dir, next);
+      console.log(`Updated body of #${id}`);
     });
 
   // ----- move -----
