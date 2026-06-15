@@ -49,6 +49,16 @@ Full new-machine checklist: docs/work-laptop-setup.md.
 - **#281/#280/#279:** governance SURFACES drift (read-only), `route validate` enforces; project override = full replacement (uncompiled override fails, never falls back); raci apply journals the audit write-ahead.
 - **forge-on-forge:** implement directly; review/fix via review-loop (red-wide read-only + #245 shadow volume make it corruption-safe). Commit hook rejects bare "anthropic"/"Claude" in commit prose (lowercase "claude" ok).
 
+**Headroom integration complete (FG-314).** All phases shipped:
+- Phase 1 (FG-315): orchestrator-side library compression
+- Phase 2 (FG-316, FG-317): MCP server in containers + safety net
+- Phase 3 (FG-318): proxy fallback mode
+- Phase 4 (FG-319, FG-320): cross-agent memory eval + `forge learn` command
+
+`forge learn` mines failed runs from SQLite, runs `headroom learn --project <dir>` to extract patterns, proposes seed corrections (dry-run by default; `--apply` writes). Filters by agent role, time window, project. Documented at docs/headroom-learn.md.
+
+Token savings are measurable but not yet surfaced in the dashboard — FG-313 (dashboard integration) remains an idea ticket, not scoped.
+
 ## Active
 
 ### #130 — Bedrock concurrent-request starvation silently kills a parallel red
@@ -942,48 +952,36 @@ This allows projects to upgrade forge itself without being forced to migrate the
 
 **Related:** #174 (backlog edit-body verb + `##` parser issue).
 
-### #313 — Integrate headroom compression dashboard into forge dashboard
+### #313 — [EPIC] Integrate headroom compression dashboard into forge dashboard
 
-**Type:** idea (not yet scoped to epic/story)
+**Status:** Scoped into FG-321, FG-322, FG-323.
 
-**Context:** Headroom (https://github.com/chopratejas/headroom) provides context compression (60-95% token savings) and ships with a dashboard showing compression stats, cache hit rates, token savings per run, and compression method breakdowns (SmartCrusher, CodeCompressor, Kompress-base).
+**Goal:** Surface compression metrics in the forge dashboard — show token savings, compression ratios, and per-task compression details.
 
-**Ideas:**
+**Context:** Forge tracks compression via `compression.verification` events (FG-317). Each event logs:
+- Who compressed: agent vs orchestrator
+- Original size, compressed size, compression ratio
+- Compression method (SmartCrusher / CodeCompressor / Kompress-base)
+- Fields compressed
 
-1. **Link from forge dashboard** — simplest: add a "Compression Stats" nav link that opens headroom's dashboard in a new tab or iframe.
+The dashboard currently doesn't show any of this. Users can't see token savings or identify agents that aren't compressing.
 
-2. **Embed headroom metrics in forge dashboard** — surface key stats directly:
-   - Per-run compression ratio (original tokens → compressed tokens)
-   - Total tokens saved across all runs
-   - Compression method breakdown (which compressor was used for what content type)
-   - Cache hit rate (CCR retrievals vs fresh compressions)
-   - Compression time overhead per run
+**Approach:** Three-phase build-out:
+1. **FG-321** — API endpoints: `/api/compression/summary`, `/timeseries`, `/by-role`, `/methods`
+2. **FG-322** — UI panels: compression health card, timeseries chart, breakdown table, method distribution
+3. **FG-323** — Per-task compression detail: inline badges + expandable detail in task timeline
 
-3. **Inline per-task compression details** — in the timeline/task detail view:
-   - Show "Task package: 45KB → 6KB (87% compression, SmartCrusher)" next to task.created events
-   - Show "Result: 120KB → 15KB (88% compression, CodeCompressor + CCR ID: abc123)" next to task.completed
-   - Link CCR IDs to retrieval action (decompress on demand)
+**Implementation stories:**
+- FG-321: Dashboard compression stats API endpoints (Phase 1)
+- FG-322: Dashboard compression stats UI panels (Phase 2)
+- FG-323: Per-task compression detail in timeline (Phase 3)
 
-4. **Compression health dashboard panel** — top-level metrics:
-   - "Tokens saved this week: 2.4M (est. $12 cost avoided)"
-   - "Average compression ratio: 82%"
-   - "Agents not compressing: [red-narrow, manual-qa]" (if hybrid MCP+orchestrator mode)
+**Out of scope for this epic:**
+- Linking to headroom's external dashboard (if it has one)
+- Querying headroom's SQLite store directly (we read from forge's `events` table)
+- Real-time compression streaming (we show post-run summaries)
 
-**Integration surface:**
-- Headroom exposes `/stats` HTTP endpoint (if running proxy mode) or `headroom_stats` MCP tool
-- Could also query headroom's SQLite store directly (if using library mode)
-- Dashboard backend fetches headroom stats, joins with forge run data
-
-**Dependencies:**
-- Headroom integration (FG-314 or similar)
-- Dashboard backend API for fetching/joining compression stats
-
-**Open questions:**
-- Does headroom's dashboard have an embeddable mode / API?
-- Do we want real-time compression metrics or post-run summaries?
-- Should compression stats be per-project or host-global?
-
-**Related:** FG-314 (headroom integration epic).
+**Related:** FG-314 (headroom integration parent epic), FG-317 (compression verification that logs the events)
 
 ### #314 — [EPIC] Integrate headroom context compression into forge
 
@@ -1043,6 +1041,146 @@ This allows projects to upgrade forge itself without being forced to migrate the
 - How does CCR retrieval work in library mode vs MCP mode?
 - What's the compression overhead (latency) per request?
 - Does cross-agent memory conflict with forge's per-run SQLite isolation?
+
+### #321 — Dashboard compression stats API endpoints (FG-313 Phase 1)
+
+**Goal:** Add read-only HTTP API endpoints to the dashboard server for querying compression metrics from forge's SQLite store.
+
+**Context:** Forge tracks compression via:
+- `compression.verification` events in the `events` table (one per task when result > 20KB)
+- Event payload carries `{ agent_compressed, orchestrator_compressed, fields_compressed, original_size_bytes, compressed_size_bytes, compression_ratio, method }`
+
+Dashboard server (`dashboard/src/server.ts`) currently has no compression routes. We need:
+
+1. **GET /api/compression/summary**
+   - Query params: `?since=30d&projectDir=/path`
+   - Returns aggregate stats: total tasks compressed, total bytes saved, average compression ratio, breakdown by who compressed (agent vs orchestrator)
+   
+2. **GET /api/compression/timeseries**
+   - Query params: `?since=30d&projectDir=/path&interval=day`
+   - Returns time-series data: `[{ date, tasks_compressed, bytes_saved, avg_compression_ratio }]`
+
+3. **GET /api/compression/by-role**
+   - Query params: `?since=30d&projectDir=/path&limit=50`
+   - Returns per-agent-role breakdown: `[{ agent_role, tasks_compressed, bytes_saved, avg_ratio }]`
+
+4. **GET /api/compression/methods**
+   - Query params: `?since=30d&projectDir=/path`
+   - Returns compression method distribution: `[{ method: "SmartCrusher" | "CodeCompressor" | "Kompress-base" | "none", count, bytes_saved }]`
+
+**Implementation:**
+- Add query functions to `dashboard/src/queries.ts`: `compressionSummary()`, `compressionTimeSeries()`, `compressionByRole()`, `compressionMethods()`
+- Wire routes in `dashboard/src/server.ts` (GET handlers only, read-only DB)
+- Tests in `dashboard/src/queries-compression.test.ts`
+
+**Acceptance criteria:**
+- All four endpoints return valid JSON
+- `?projectDir` filter works (host-global when omitted)
+- `?since` parses "7d", "30d", ISO dates
+- Returns empty arrays / zero counts when no compression events exist
+- Typecheck + tests pass
+
+**Dependencies:** None (compression events are already logged by FG-317)
+
+**Related:** FG-313 (parent epic), FG-317 (compression verification), FG-322 (UI phase)
+
+### #322 — Dashboard compression stats UI panels (FG-313 Phase 2)
+
+**Goal:** Add compression stats visualization to the forge dashboard web UI.
+
+**Context:** Phase 1 (FG-321) adds API endpoints. This phase surfaces them in the UI. The dashboard is a single-page app (no build step) — client JS (`client/main.js`, `client/renderers.js`) fetches from API endpoints and renders cards.
+
+**What to add:**
+
+1. **Compression health panel** (new top-level card in the main feed)
+   - "Tokens saved (last 30d): 2.4M (~$12 avoided at $0.005/1K)"
+   - "Average compression ratio: 82%"
+   - "Tasks compressed: 347 / 520 total (67%)"
+   - "Agents not compressing: [red-narrow, manual-qa]" (when orchestrator_compressed=true for >50% of their tasks)
+   - Fetches from `/api/compression/summary`
+
+2. **Compression timeseries chart** (under the health panel, or in a "Compression" nav tab)
+   - Line chart: bytes saved over time (last 30 days, grouped by day)
+   - Fetches from `/api/compression/timeseries`
+   - Use a lightweight inline SVG renderer (no chart library dependency) OR link to an external chart tool
+
+3. **Compression breakdown table** (below the chart)
+   - Rows: agent role, tasks compressed, bytes saved, avg ratio
+   - Sortable by bytes saved (default) or ratio
+   - Fetches from `/api/compression/by-role`
+
+4. **Compression method distribution** (pie chart or bar chart)
+   - Shows SmartCrusher / CodeCompressor / Kompress-base split
+   - Fetches from `/api/compression/methods`
+
+**Implementation:**
+- Add client-side rendering functions in `client/renderers.js`: `renderCompressionHealth()`, `renderCompressionTimeseries()`, `renderCompressionBreakdown()`, `renderCompressionMethods()`
+- Wire into `client/main.js` poll loop (or add a "Compression" nav tab that lazy-loads these on click)
+- Server-side HTML shell (`dashboard/src/shell.ts`) needs no changes (it already serves the client JS)
+
+**UI/UX notes:**
+- Default to last 30 days; add a "since" dropdown (7d / 30d / 90d / all)
+- Respect the existing `?projectDir` filter (when project-scoped, show only that project's compression stats)
+- If no compression events exist yet, show a gentle empty state: "No compression data yet. Agents will report compression stats as they run."
+
+**Acceptance criteria:**
+- Compression health panel renders in the main feed
+- Charts/tables render correctly when data is present
+- Empty state renders when no compression events exist
+- Project filter works (respects `?projectDir` query param)
+- No build errors; dashboard still starts with `forge dashboard start`
+
+**Dependencies:** FG-321 (API endpoints must exist first)
+
+**Related:** FG-313 (parent epic), FG-323 (per-task detail phase)
+
+### #323 — Per-task compression detail in timeline (FG-313 Phase 3)
+
+**Goal:** Show compression stats inline in the task timeline detail view.
+
+**Context:** When you click a task in the dashboard, you see its full detail card with stdout/stderr logs, verdicts, gates. Currently there's no compression info. This phase adds it.
+
+**What to add:**
+
+In the task detail view (`/api/task/:id` → rendered by `client/renderers.js`), when a `compression.verification` event exists for the task:
+
+1. **Compression badge** next to the task completion timestamp
+   - "✓ Compressed: 120KB → 15KB (88%)" (when agent compressed)
+   - "⚠ Orchestrator compressed: 45KB → 6KB (87%)" (when orchestrator had to compress because agent didn't)
+   - Badge color: green for agent_compressed=true, amber for orchestrator_compressed=true
+
+2. **Compression detail section** (expandable accordion under the task summary)
+   - Method: SmartCrusher / CodeCompressor / Kompress-base / none
+   - Fields compressed: `["notes", "stdout"]` (from event payload `fields_compressed`)
+   - Original size: 120KB
+   - Compressed size: 15KB
+   - Compression ratio: 88%
+   - CCR ID: `abc123` (if available from event payload — link to retrieval action in future iteration)
+
+3. **No compression note** (when task result < 20KB)
+   - Small grey text: "Result size: 3KB (below compression threshold)"
+
+**Implementation:**
+- Extend `taskDetail()` query in `dashboard/src/queries.ts` to join `compression.verification` events for the task
+- Add rendering logic in `client/renderers.js`: `renderCompressionBadge()`, `renderCompressionDetail()`
+- Wire into the existing task detail card renderer
+
+**UI/UX notes:**
+- Only show compression detail when the event exists (most tasks won't have one)
+- Make the detail section collapsed by default; expand on click
+- Link "Fields compressed" to the actual fields in the result.json view (if we add result.json preview in a future iteration)
+
+**Acceptance criteria:**
+- Compression badge appears for tasks with compression.verification events
+- Badge correctly distinguishes agent vs orchestrator compression
+- Detail section shows accurate metrics from the event payload
+- No badge/section for tasks without compression events
+- No badge/section for tasks with result < 20KB
+- Dashboard still renders cleanly for old tasks (pre-FG-317) with no compression events
+
+**Dependencies:** FG-321 (compression events must be queryable)
+
+**Related:** FG-313 (parent epic), FG-317 (compression verification that logs the events)
 
 ## Done (recent)
 
