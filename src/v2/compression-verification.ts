@@ -7,6 +7,10 @@ export type CompressionVerification = {
   agent_compressed: boolean;
   orchestrator_compressed: boolean;
   fields_compressed: string[];
+  original_size_bytes?: number;
+  compressed_size_bytes?: number;
+  compression_ratio?: number;
+  method?: string;
 };
 
 /** True if the result carries any agent-written *_compressed metadata field. */
@@ -72,6 +76,8 @@ export async function maybeOrchestratorCompress(args: {
 
   const fieldsCompressed: string[] = [];
   const out: Record<string, unknown> = { ...r };
+  let totalCompressedSize = 0;
+  let compressionMethod: string | undefined;
   for (const field of largeFields) {
     const value = out[field];
     if (typeof value !== "string") continue;
@@ -79,13 +85,20 @@ export async function maybeOrchestratorCompress(args: {
     if (meta.method !== "none") {
       out[field] = content;
       fieldsCompressed.push(field);
+      totalCompressedSize += meta.compressed_size;
+      compressionMethod = meta.method;
     }
   }
 
+  const orchestratorCompressed = fieldsCompressed.length > 0;
   const verification: CompressionVerification = {
     agent_compressed: false,
-    orchestrator_compressed: fieldsCompressed.length > 0,
+    orchestrator_compressed: orchestratorCompressed,
     fields_compressed: fieldsCompressed,
+    original_size_bytes: args.resultRawSize,
+    compressed_size_bytes: orchestratorCompressed ? totalCompressedSize : undefined,
+    compression_ratio: orchestratorCompressed ? totalCompressedSize / args.resultRawSize : undefined,
+    method: orchestratorCompressed ? compressionMethod : undefined,
   };
 
   const withVerification: Record<string, unknown> = { ...out, compressionVerification: verification };

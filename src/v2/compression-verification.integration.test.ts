@@ -162,6 +162,15 @@ test("FG-317/invoke: compression.verification event is logged for large uncompre
   if (payload["orchestrator_compressed"] === true) {
     assert.ok((payload["fields_compressed"] as string[]).includes("notes"));
   }
+
+  // FG-324: verify size/ratio/method metrics are present in the event payload.
+  assert.equal(typeof payload["original_size_bytes"], "number", "original_size_bytes must be a number");
+  assert.ok((payload["original_size_bytes"] as number) > 0, "original_size_bytes must be positive");
+  if (payload["orchestrator_compressed"] === true) {
+    assert.equal(typeof payload["compressed_size_bytes"], "number", "compressed_size_bytes must be a number when compressed");
+    assert.equal(typeof payload["compression_ratio"], "number", "compression_ratio must be a number when compressed");
+    assert.equal(typeof payload["method"], "string", "method must be a string when compressed");
+  }
 });
 
 test("FG-317/invoke: compressed result can be read back (round-trip via result.json on disk)", async () => {
