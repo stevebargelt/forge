@@ -5,50 +5,6 @@ Canonical task list for forge. Numbers are sticky across sessions and referenced
 When you start a session, read this file. When you finish, update it: move closed tasks from "Active" / "In progress" to "Done (recent)" with their commit hash; rewrite "Notes for next session" with whatever the next session needs to know.
 
 ## Notes for next session
-**Last session ended 2026-06-07.** Release-0.x triage + work-laptop readiness closeout.
-
-**Release track: portable forge-on-forge 0.x (Steve's work laptop).** The Pi Walk + Codex provider + new-machine readiness all landed; this session triaged the backlog into release-ready / blocking / deferred.
-
-**Release blockers: NONE.** typecheck clean, full suite 1328/0, `forge setup` reports Ready on this host (image + claude/codex/pi CLIs + Claude-subscription + Codex-subscription auth all green; opt-in profiles warn, don't block).
-
-**Release-ready (shipped + verified this cycle):**
-- Pi Crawl+Walk: #260/#261/#262/#263/#264/#266/#267/#292 + #265 (model-policy runtime+upstream-provider selection). Pi runs through model policy; provider errors classify as model_error.
-- Codex provider: codex-subscription runtime green end-to-end, proven live (#304). Usable as the review-loop reviewer via `--review-profile codex-subscription`.
-- Review-loop: #301 (command) + #302 (orchestrator adoption) + #305 (adjacent-surface reviewer rubric) — the standard post-implementation review path.
-- Setup/readiness: #229 (`forge doctor` + `forge upgrade --rebuild-image` + release-check tail) and #252 (`forge setup` host model-policy guided-create + routing ensure + static Codex review-loop readiness; `docs/work-laptop-setup.md`).
-- Plumbing: #198 (NO_NOTIFY test-suite kill-switch), #200 (forge show humanizes stream-json + codex-jsonl tails).
-
-**Deferred known gaps (NOT blockers):**
-- #300 — true completing pi run + usage row (gated on pi free-tier credit / paid spend).
-- #268 — pi local models via models.json (Run stage).
-- #228 — provider-AGNOSTIC error→model_error classification: pi done (#267); codex/claude provider-error → model_error NOT wired. Failure-diagnostics polish.
-- #283 — provider adapter generation (#253 seam): render CLAUDE.md/.claude/commands/codex equivalents FROM routing policy. Bigger; not needed for 0.x.
-- #306 — doctor/upgrade follow-ups (README one-liner; RUNTIME_BINDING-reachable runtime missing-seed CLI row). Low.
-- #307 — host Claude SessionEnd hook path leaks into agent containers (cosmetic stderr noise; task still completes).
-- #308 — forge setup PROJECT-local config provisioning (.forge/model-policy.yml + docs-surfaces.yml) + forge new first-run advisory. The #252 fixer attempted this autonomously via a structurally-failed loop; discarded + re-filed clean. Re-do through a proper review-loop.
-
-**Bedrock:** diagnosed (AWS-config presence) by `forge doctor`/`forge setup`; opt-in profile, warns when no AWS creds. Full Bedrock model-entitlement verification is not done (known gap, not a 0.x blocker — not Steve's default path).
-
-**Final local release check (read-only):**
-```
-npm run typecheck
-NO_NOTIFY=true npm test
-forge setup --dry-run        # or: forge doctor  (image, CLIs, auth, policies, review-loop path)
-git status --short           # expect clean
-```
-Full new-machine checklist: docs/work-laptop-setup.md.
-
-**Picked up next (post-release polish, your pick):** #308 (project-local config, the clean re-do) · #228 (codex/claude error classification) · #307 (SessionEnd hook) · #268/#300 (pi Run-stage, credit-gated).
-
-**Process note:** the bounded review-loop is excellent at catching adjacent gaps but on broad cross-surface tickets it does not converge in 2-3 rounds and its fixer can run past the reviewed boundary (#252 fixer broke its own verification + expanded scope). Working pattern: land only reviewed-by-construction core, re-file the rest as scoped tickets, close acceptance-met by explicit override when all stated criteria pass + suite green. A loop guardrail (fixer scope/diff-size cap, or findings-only mode) is worth a ticket if this recurs.
-
-**Decisions worth not relitigating:**
-- **#288:** full-vs-quick = architectural novelty + plan-certainty, NOT file count. Precedent-driven multi-file with a concrete plan is `implementation_quick`.
-- **#289:** `docs_impact` is a prose lifecycle (detect → updated|not_needed:<reason>|deferred:#ticket → report a Docs impact line); deferral REQUIRES a ticket. Not machine-enforced.
-- **#286:** init/upgrade auto-compile the derived routing policy; a standalone policy (no host RACI) is left untouched; an existing host RACI is never overwritten by compile.
-- **#281/#280/#279:** governance SURFACES drift (read-only), `route validate` enforces; project override = full replacement (uncompiled override fails, never falls back); raci apply journals the audit write-ahead.
-- **forge-on-forge:** implement directly; review/fix via review-loop (red-wide read-only + #245 shadow volume make it corruption-safe). Commit hook rejects bare "anthropic"/"Claude" in commit prose (lowercase "claude" ok).
-
 **Headroom integration complete (FG-314).** All phases shipped:
 - Phase 1 (FG-315): orchestrator-side library compression
 - Phase 2 (FG-316, FG-317): MCP server in containers + safety net
@@ -57,7 +13,14 @@ Full new-machine checklist: docs/work-laptop-setup.md.
 
 `forge learn` mines failed runs from SQLite, runs `headroom learn --project <dir>` to extract patterns, proposes seed corrections (dry-run by default; `--apply` writes). Filters by agent role, time window, project. Documented at docs/headroom-learn.md.
 
-Token savings are measurable but not yet surfaced in the dashboard — FG-313 (dashboard integration) remains an idea ticket, not scoped.
+**Dashboard compression stats (FG-313) scoped into three stories:**
+- FG-321: API endpoints (summary, timeseries, by-role, methods)
+- FG-322: UI panels (health card, charts, breakdown table)  
+- FG-323: Per-task detail (badges + expandable accordion)
+
+Each story has full spec (goal, context, acceptance, dependencies). Ready to implement.
+
+**Picked up next:** FG-321 (dashboard compression API endpoints) or your pick from the backlog.
 
 ## Active
 
