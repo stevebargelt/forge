@@ -499,6 +499,38 @@ section.usage-section { margin-top: 20px; }
 }
 .usage-timeseries svg { display: block; width: 100%; height: auto; }
 
+/* FG-322: compression stats view. */
+section.compression-view { margin-top: 20px; }
+.card.stat { cursor: default; }
+.stat-num {
+  font-size: 2rem;
+  font-weight: 700;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--fg);
+  line-height: 1.1;
+  margin-bottom: 4px;
+}
+.compression-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.compression-table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+  padding: 4px 10px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.compression-table td {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.compression-table tr:last-child td { border-bottom: none; }
+
 /* #285: routing / governance panel (read-only). */
 .gov-view { display: flex; flex-direction: column; }
 .gov-header { margin-bottom: 16px; }

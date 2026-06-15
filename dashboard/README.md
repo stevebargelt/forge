@@ -12,11 +12,16 @@ Reads `~/.forge/forge.db` directly (read-only) and shells out to `forge` for mut
 
 Under the v2 / RACI-driven model, forge sessions are mostly agent-driven — the orchestrator (Claude Code in your terminal) calls `forge invoke` repeatedly, occasionally `forge new feature` for implementation work. The dashboard is not where you take action; it's where you **read what the agents wrote** and watch live runs land.
 
-Primary surfaces:
+Navigation tabs:
 
-- **Activity feed** — chronological agent outputs across every project on the host, rendered as markdown cards (not raw JSON).
-- **In-flight strip** — what's running right now, live-polled.
-- **Click a card** — see the full result.json + container stdout + related verdicts/gates.
+- **activity** — chronological agent outputs across every project on the host, rendered as markdown cards (not raw JSON). In-flight runs appear at the top via live poll.
+- **projects** — per-project summary; click a project to filter the activity feed to that project.
+- **usage** — token usage rollup and time-series, grouped by role / workflow / project / model.
+- **ops** — operational metrics rollup.
+- **governance** — effective routing policy, host-vs-project diff, recent audit.
+- **compression** — compression stats derived from `compression.verification` events. Shows a time-window filter (7d / 30d / 90d / all), plus health summary, daily time-series, per-role breakdown, and method distribution when data is present. Displays "No compression data yet. Agents will report compression stats as they run." when no events exist.
+
+Click any activity card to see the full result.json + container stdout + related verdicts/gates.
 
 ## HTTP API
 

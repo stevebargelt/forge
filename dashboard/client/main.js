@@ -6,6 +6,7 @@ import htm from "https://esm.sh/htm@3.1.1";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
+import { CompressionView } from "./compression.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -33,6 +34,11 @@ function App() {
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
   const [governance, setGovernance] = useState(null);
+  const [compressionSummary, setCompressionSummary] = useState(null);
+  const [compressionTimeSeries, setCompressionTimeSeries] = useState([]);
+  const [compressionByRole, setCompressionByRole] = useState([]);
+  const [compressionMethods, setCompressionMethods] = useState([]);
+  const [compressionSince, setCompressionSince] = useState("30d");
 
   const poll = useCallback(async () => {
     try {
@@ -114,6 +120,30 @@ function App() {
     return () => clearInterval(id);
   }, [pollGovernance, view]);
 
+  const pollCompression = useCallback(async () => {
+    try {
+      const pq = projectFilter ? `&projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
+      const [sumRes, tsRes, roleRes, methRes] = await Promise.all([
+        fetch(`/api/compression/summary?since=${compressionSince}${pq}`),
+        fetch(`/api/compression/timeseries?since=${compressionSince}${pq}`),
+        fetch(`/api/compression/by-role?since=${compressionSince}${pq}`),
+        fetch(`/api/compression/methods?since=${compressionSince}${pq}`),
+      ]);
+      if (sumRes.ok) setCompressionSummary(await sumRes.json());
+      if (tsRes.ok) setCompressionTimeSeries(await tsRes.json());
+      if (roleRes.ok) setCompressionByRole(await roleRes.json());
+      if (methRes.ok) setCompressionMethods(await methRes.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [compressionSince, projectFilter]);
+
+  useEffect(() => {
+    if (view !== "compression") return;
+    pollCompression();
+    const id = setInterval(pollCompression, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollCompression, view]);
+
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -141,6 +171,7 @@ function App() {
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>governance</button>
+            <button class=${"tab " + (view === "compression" ? "tab-active" : "")} onClick=${() => switchView("compression")}>compression</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -163,6 +194,15 @@ function App() {
             onGroupByChange=${setUsageGroupBy}
             since=${usageSince}
             onSinceChange=${setUsageSince}
+          />`
+        : view === "compression"
+        ? html`<${CompressionView}
+            summary=${compressionSummary}
+            timeSeries=${compressionTimeSeries}
+            byRole=${compressionByRole}
+            methods=${compressionMethods}
+            since=${compressionSince}
+            onSinceChange=${setCompressionSince}
           />`
         : html`
           ${projectFilter ? html`
@@ -199,6 +239,7 @@ function initialView() {
   if (h === "usage") return "usage";
   if (h === "ops") return "ops";
   if (h === "governance") return "governance";
+  if (h === "compression") return "compression";
   return "activity";
 }
 
