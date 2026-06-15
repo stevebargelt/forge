@@ -1,25 +1,25 @@
-**#324 complete + full headroom integration verified end-to-end!**
+**Last session ended 2026-06-15.**
 
-Compression events now capture full metrics (original_size_bytes, compressed_size_bytes, compression_ratio, method). Dashboard shows real data:
-- 58B bytes saved across 4 compression events
-- 99.8% avg compression ratio (test data: repeated 'x' chars)
-- Method distribution: 1 headroom event, 3 legacy (unknown) events
-- Per-agent breakdown working
+**Where we left off:** Completed headroom integration (FG-314), dashboard compression stats (FG-313), and backlog restructuring (FG-312). User asked to use handoff skill to prepare for next session.
 
-**Testing verified:**
-1. Created test task with 25KB result → orchestrator compressed post-hoc
-2. Compression event logged with all 7 fields
-3. Dashboard API `/api/compression/summary` returns non-null aggregates
-4. Dashboard UI shows health panel, timeseries chart, role breakdown, method distribution
-5. All metrics flowing through correctly
+**Picked up next:**
+- FG-314 epic is complete but still shows as active — may need explicit closure or re-classification as done
+- 3 active epics remain: FG-258 (provider-agnostic runtime), FG-291 (stable baseline), FG-314 (headroom — verify status)
+- 50+ active stories available — no specific priority established for next session
+- Backlog now in structured format: use `forge backlog show FG-NNN` for any ticket body
 
-**Full epic complete: headroom integration (FG-314) + dashboard (FG-313) + metrics capture (#324).**
+**Decisions worth not relitigating:**
+- Backlog format: migrated to structured `backlog/` directory with FG- prefixes. Migration is done and working; don't re-debate the format choice.
+- Compression dashboard: full integration verified working end-to-end. Dashboard shows real metrics (58B saved, 99.8% ratio). Don't re-test unless new compression events are needed.
+- FG-312 phases 1-3: config/detection (69bd6bd), reader/writer (de9980c), migration (446bb2b) all landed. The migration command is production-ready for other projects.
 
-**Session commits:**
-- cdab09b: forge learn (FG-320)
-- 3fdabf8: dashboard API (FG-321)
-- 6ae22b0: dashboard UI (FG-322)  
-- 4bf956c: per-task detail (FG-323)
-- 5db8b0d: compression metrics (#324)
+**Shipped (for reference):**
+- FG-320: `forge learn` command for mining failed runs
+- FG-321: Dashboard compression API endpoints (4 GET routes)
+- FG-322: Dashboard compression UI panels (compression nav tab)
+- FG-323: Per-task compression detail (badges + expandable accordion)
+- #324: Compression event metrics (size/ratio/method capture)
+- FG-313: EPIC closed — dashboard compression integration complete
+- FG-312: Backlog restructuring complete — 277 tickets migrated to `backlog/` directory
 
-18 commits total on main. All pushed.
+23 commits pushed. Working tree clean, branch up to date with origin/main.
