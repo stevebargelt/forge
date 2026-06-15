@@ -347,7 +347,7 @@ export const RuntimeSchema = z.object({
   log_format: LogFormatSchema.optional(),
   prompt_strategy: PromptStrategySchema.optional(),
   auth_strategy: AuthStrategySchema.optional(),
-  compression_mode: CompressionModeSchema.optional().default("mcp"),
+  compression_mode: CompressionModeSchema.optional().default("proxy"),
   detect: DetectDefSchema.optional(),
   image: z.string().min(1),
   // Model aliases: at least 'default' must be present so unspecified-model
