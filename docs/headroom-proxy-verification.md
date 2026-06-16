@@ -174,6 +174,89 @@ Common issues:
 - Python dependencies missing (re-run `scripts/install-headroom.sh install`)
 - Port 8787 already in use (change `HEADROOM_PORT` env var)
 
+## Bedrock Verification (Rust Proxy)
+
+The Rust headroom-proxy binary includes native AWS Bedrock InvokeModel support with SigV4 request signing, replacing the Python proxy for Bedrock traffic.
+
+### Prerequisites
+
+Install the Rust binary (one-time):
+
+```bash
+bash scripts/install-headroom.sh install-rust-proxy
+```
+
+Ensure AWS credentials are available in the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` if using assumed role, or an IAM role via instance metadata).
+
+### 1. Verify Rust Binary is Running
+
+```bash
+bash scripts/install-headroom.sh start
+bash scripts/install-headroom.sh status
+# Expected: "Proxy running" and health check returns healthy
+
+# Confirm it's the Rust binary (not Python fallback)
+grep -m1 "Starting Rust proxy\|falling back to Python" ~/.forge/logs/headroom-proxy.log
+# Expected: "[headroom] Starting Rust proxy ..."
+```
+
+### 2. Verify Bedrock Native Mode is Active
+
+```bash
+curl -s http://localhost:8787/health | jq '{status, bedrock_enabled: .config.bedrock_native}'
+# Expected: {"status":"healthy","bedrock_enabled":true}
+```
+
+### 3. Send a Test Bedrock Request Through the Proxy
+
+The proxy intercepts Bedrock InvokeModel calls on `POST /model/{model-id}/invoke`. With `ANTHROPIC_BASE_URL` pointing at the proxy, forge will route Bedrock traffic through it:
+
+```bash
+ANTHROPIC_BASE_URL=http://localhost:8787 forge invoke architecture-advisor \
+  --task "List 2 benefits of SigV4 signing" \
+  --project "$(pwd)" \
+  --run-title "Bedrock proxy test"
+```
+
+Check that the proxy handled the Bedrock request:
+
+```bash
+curl -s http://localhost:8787/stats | jq '.requests.by_provider'
+# Expected: {"bedrock": <N>} where N > 0
+```
+
+### 4. Verify SigV4 Signing in Logs
+
+```bash
+grep -i "sigv4\|bedrock\|InvokeModel" ~/.forge/logs/headroom-proxy.log | tail -20
+# Expected: lines showing SigV4-signed Bedrock requests being proxied
+```
+
+### Troubleshooting Bedrock
+
+**Proxy falls back to Python instead of using Rust binary**
+
+```bash
+ls -la ~/.forge/bin/headroom-proxy
+# If missing: bash scripts/install-headroom.sh install-rust-proxy
+```
+
+**AWS credentials errors in proxy logs**
+
+```bash
+grep -i "credential\|auth\|403\|Forbidden" ~/.forge/logs/headroom-proxy.log
+```
+
+Ensure the credentials in the environment have `bedrock:InvokeModel` permission for the target model ARN.
+
+**Region mismatch**
+
+The proxy defaults to `us-east-1`. To override:
+
+```bash
+BEDROCK_REGION=us-west-2 bash scripts/install-headroom.sh start
+```
+
 ## Success Criteria
 
 ✅ Proxy health check returns `{"status":"healthy"}`  
@@ -184,5 +267,11 @@ Common issues:
 ✅ Dashboard "Headroom Proxy Live" banner appears  
 ✅ Dashboard metrics update with non-zero values  
 ✅ Proxy logs show CacheAligner, ContentRouter, CCR activity  
+
+**Rust/Bedrock additional criteria:**  
+✅ Proxy log shows "Starting Rust proxy" (not Python fallback)  
+✅ `/health` reports `bedrock_native: true`  
+✅ Bedrock requests appear in `stats.requests.by_provider.bedrock`  
+✅ Proxy logs show SigV4-signed Bedrock InvokeModel calls  
 
 When all criteria are met, the integration is working correctly!

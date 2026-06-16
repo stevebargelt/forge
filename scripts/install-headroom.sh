@@ -4,26 +4,69 @@
 # Multi-command script for managing the headroom compression proxy.
 #
 # Commands:
-#   install   — Install headroom-ai in a Python venv (one-time setup)
-#   start     — Start the proxy in the background
-#   stop      — Stop the running proxy
-#   restart   — Stop then start
-#   status    — Check if proxy is running and healthy
+#   install            — Install headroom-ai in a Python venv (one-time setup)
+#   install-rust-proxy — Build and install the Rust headroom-proxy binary
+#   start              — Start the proxy in the background
+#   stop               — Stop the running proxy
+#   restart            — Stop then start
+#   status             — Check if proxy is running and healthy
 #
 # Env vars:
-#   HEADROOM_VENV  — Path to Python venv (default: ~/.forge/headroom-env)
-#   HEADROOM_PORT  — Port to listen on (default: 8787)
+#   HEADROOM_VENV     — Path to Python venv (default: ~/.forge/headroom-env)
+#   HEADROOM_PORT     — Port to listen on (default: 8787)
+#   HEADROOM_BIN_DIR  — Directory for Rust binary (default: ~/.forge/bin)
 
 set -e
 
 HEADROOM_VENV="${HEADROOM_VENV:-$HOME/.forge/headroom-env}"
 HEADROOM_PORT="${HEADROOM_PORT:-8787}"
+HEADROOM_BIN_DIR="${HEADROOM_BIN_DIR:-$HOME/.forge/bin}"
 PID_FILE="${TMPDIR:-/tmp}/headroom-proxy.pid"
 LOG_FILE="${HEADROOM_LOG_FILE:-$HOME/.forge/logs/headroom-proxy.log}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SCRIPT="$SCRIPT_DIR/run-headroom-proxy.sh"
 
 # ── Commands ──────────────────────────────────────────────────────────────────
+
+cmd_install_rust_proxy() {
+  echo "Installing Rust headroom-proxy binary..."
+  echo "  Target: $HEADROOM_BIN_DIR/headroom-proxy"
+
+  # Ensure Rust toolchain is available
+  if ! command -v cargo &>/dev/null; then
+    echo "Installing Rust toolchain..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+    rustup default stable
+  fi
+
+  local repo_dir="${HEADROOM_RUST_REPO:-/tmp/headroom}"
+
+  if [[ ! -d "$repo_dir" ]]; then
+    echo "ERROR: headroom repo not found at $repo_dir" >&2
+    echo "Clone or set HEADROOM_RUST_REPO to the repo path." >&2
+    exit 1
+  fi
+
+  echo "Building headroom-proxy (cargo build --release)..."
+  (cd "$repo_dir" && cargo build --release -p headroom-proxy)
+
+  local binary="$repo_dir/target/release/headroom-proxy"
+  if [[ ! -f "$binary" ]]; then
+    echo "ERROR: build succeeded but binary not found at $binary" >&2
+    exit 1
+  fi
+
+  mkdir -p "$HEADROOM_BIN_DIR"
+  cp "$binary" "$HEADROOM_BIN_DIR/headroom-proxy"
+  chmod +x "$HEADROOM_BIN_DIR/headroom-proxy"
+
+  echo ""
+  echo "✓ headroom-proxy installed to $HEADROOM_BIN_DIR/headroom-proxy"
+  echo ""
+  echo "Start the proxy:"
+  echo "  $0 start"
+}
 
 cmd_install() {
   echo "Installing headroom proxy..."
@@ -177,6 +220,9 @@ cmd_status() {
 CMD="${1:-}"
 
 case "$CMD" in
+  install-rust-proxy)
+    cmd_install_rust_proxy
+    ;;
   install)
     cmd_install
     ;;
@@ -198,21 +244,25 @@ case "$CMD" in
 Usage: $0 <command>
 
 Commands:
-  install   Install headroom-ai in Python venv (one-time setup)
-  start     Start the proxy in background
-  stop      Stop the running proxy
-  restart   Stop then start
-  status    Check if proxy is running and healthy
+  install            Install headroom-ai in Python venv (one-time setup)
+  install-rust-proxy Build and install the Rust headroom-proxy binary
+  start              Start the proxy in background
+  stop               Stop the running proxy
+  restart            Stop then start
+  status             Check if proxy is running and healthy
 
 Environment:
-  HEADROOM_VENV   Python venv path (default: ~/.forge/headroom-env)
-  HEADROOM_PORT   Port to listen on (default: 8787)
+  HEADROOM_VENV       Python venv path (default: ~/.forge/headroom-env)
+  HEADROOM_PORT       Port to listen on (default: 8787)
+  HEADROOM_BIN_DIR    Rust binary install dir (default: ~/.forge/bin)
+  HEADROOM_RUST_REPO  Path to headroom repo for Rust build (default: /tmp/headroom)
 
 Examples:
-  $0 install     # First time: install headroom
-  $0 start       # Start proxy
-  $0 status      # Check if running
-  $0 stop        # Stop proxy
+  $0 install-rust-proxy  # Build + install Rust binary (preferred)
+  $0 install             # Fallback: install Python proxy
+  $0 start               # Start proxy
+  $0 status              # Check if running
+  $0 stop                # Stop proxy
 EOF
     exit 1
     ;;
