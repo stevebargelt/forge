@@ -73,3 +73,34 @@ BUT these env vars may not be supported by the Claude CLI's AWS SDK version, or 
 4. **Ask Anthropic**: Does Claude Code 2.1.153 support custom Bedrock endpoints?
 
 **Next action:** Try HTTP_PROXY approach as it's the most standard way to intercept AWS SDK requests.
+
+## BREAKTHROUGH: FG-331 Solution Exists! (2026-06-16)
+
+**Found active PR that solves our exact problem:**
+- PR #720: https://github.com/chopratejas/headroom/pull/720
+- Author: rongabbay (same use case as us - uses `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`)
+- Status: OPEN (not yet merged)
+- Real proof: 52,095 → 3,979 tokens (92.4%) compression working with CLI
+
+**What the PR adds:**
+`--bedrock-api-url` flag to headroom proxy that registers routes at:
+- POST /model/{id}/invoke
+- POST /model/{id}/invoke-with-response-stream
+
+When CLI sets `AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8787`, requests should hit these routes.
+
+**Why our test failed:**
+The current headroom-proxy binary (Rust) doesn't have this feature yet. PR #720 is for the Python proxy. We need to either:
+1. Wait for PR merge + release
+2. Build from PR branch (chopratejas/headroom#720)
+3. Check if Rust proxy has equivalent (issue #953 suggests Rust needs adapters too)
+
+**Critical caveat from PR:**
+Rewriting body invalidates SigV4 signature. Needs downstream gateway that re-signs. For direct AWS: use `--backend bedrock` (different mode).
+
+**Related issues:**
+- #510: Provider-agnostic proxy mode (umbrella issue)
+- #953: Bedrock vendor adapter registry for Rust proxy
+- #734: Original feature request for Bedrock passthrough
+
+**Next step:** Verify which proxy we're running (Python vs Rust) and determine path forward.
