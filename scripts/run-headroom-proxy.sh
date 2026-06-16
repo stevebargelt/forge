@@ -48,20 +48,16 @@ fi
 source "$HEADROOM_VENV/bin/activate"
 
 # Verify headroom is installed
-if ! python -c "import headroom_ai" 2>/dev/null; then
-    echo "[headroom] ERROR: headroom-ai not installed in venv" >&2
-    echo "[headroom] Run: bash scripts/install-headroom.sh" >&2
+if ! python -c "import headroom" 2>/dev/null; then
+    echo "[headroom] ERROR: headroom not installed in venv" >&2
+    echo "[headroom] Run: bash scripts/install-headroom.sh install" >&2
     exit 1
 fi
 
-# Start proxy with all features enabled
-# The Python module provides a CLI: python -m headroom_ai.proxy
+# Start proxy with optimization enabled
+# headroom proxy starts with cache, code-aware compression, and rate limiting by default
 echo "[headroom] Starting proxy on localhost:${HEADROOM_PORT}..."
-exec python -m headroom_ai.proxy \
+exec headroom proxy \
     --port "$HEADROOM_PORT" \
     --host 127.0.0.1 \
-    --enable-cache-aligner \
-    --enable-content-router \
-    --enable-smart-crusher \
-    --enable-ccr \
     >> "$LOG_FILE" 2>&1
