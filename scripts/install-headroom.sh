@@ -40,16 +40,26 @@ cmd_install_rust_proxy() {
     rustup default stable
   fi
 
+  # Ensure ONNX Runtime is available (required dependency)
+  if ! brew list onnxruntime &>/dev/null; then
+    echo "Installing ONNX Runtime via Homebrew..."
+    brew install onnxruntime
+  fi
+
   local repo_dir="${HEADROOM_RUST_REPO:-/tmp/headroom}"
 
   if [[ ! -d "$repo_dir" ]]; then
-    echo "ERROR: headroom repo not found at $repo_dir" >&2
-    echo "Clone or set HEADROOM_RUST_REPO to the repo path." >&2
-    exit 1
+    echo "Cloning headroom repository..."
+    git clone --depth 1 https://github.com/chopratejas/headroom.git "$repo_dir"
   fi
 
   echo "Building headroom-proxy (cargo build --release)..."
-  (cd "$repo_dir" && cargo build --release -p headroom-proxy)
+  echo "  This may take 5-10 minutes on first build..."
+  (cd "$repo_dir" && \
+   ORT_STRATEGY=system \
+   ORT_LIB_LOCATION=/opt/homebrew/lib \
+   ORT_PREFER_DYNAMIC_LINK=1 \
+   cargo build --release -p headroom-proxy)
 
   local binary="$repo_dir/target/release/headroom-proxy"
   if [[ ! -f "$binary" ]]; then
