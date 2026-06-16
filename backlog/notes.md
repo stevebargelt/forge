@@ -50,3 +50,26 @@ The AWS SDK's global AWS_ENDPOINT_URL env var doesn't work for all services. Bed
 1. Check if Claude CLI supports custom Bedrock endpoints (may need Anthropic to add support)
 2. Alternative: proxy at network level (HTTP_PROXY/HTTPS_PROXY) instead of AWS endpoint override
 3. Or: patch the SDK client initialization in the agent container entrypoint
+
+## FG-331 Deep Dive (2026-06-16)
+
+**Headroom proxy Bedrock support IS correctly implemented:**
+- Proxy has native Bedrock handler at POST /model/{model_id}/invoke
+- Takes Anthropic-shaped bodies, compresses, re-signs with SigV4
+- Forwards to bedrock-runtime.{region}.amazonaws.com
+- Verified with --help: --enable-bedrock-native=true (default), --bedrock-region, etc.
+
+**The gap: AWS SDK endpoint configuration**
+spawn.ts correctly sets:
+- AWS_ENDPOINT_URL=http://localhost:8787
+- AWS_ENDPOINT_URL_BEDROCK_RUNTIME=http://localhost:8787
+
+BUT these env vars may not be supported by the Claude CLI's AWS SDK version, or Bedrock service specifically ignores them.
+
+**Possible solutions:**
+1. **HTTP_PROXY approach**: Set HTTP_PROXY/HTTPS_PROXY env vars - AWS SDK respects standard proxy vars
+2. **Check Claude CLI AWS SDK version**: May need SDK upgrade to support endpoint env vars
+3. **SDK client config**: CLI may need explicit endpoint configuration in code, not just env vars
+4. **Ask Anthropic**: Does Claude Code 2.1.153 support custom Bedrock endpoints?
+
+**Next action:** Try HTTP_PROXY approach as it's the most standard way to intercept AWS SDK requests.
