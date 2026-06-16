@@ -164,6 +164,11 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     args.push("-e", "FORGE_HEADROOM_PROXY=1");
     args.push("-e", `ANTHROPIC_BASE_URL=${PROXY_BASE_URL}`);
     args.push("-e", `OPENAI_BASE_URL=${PROXY_BASE_URL}`);
+    // FG-328: Route Bedrock requests through the Rust headroom-proxy's native Bedrock handler.
+    // The proxy accepts Bedrock API requests at POST /model/{model}/invoke, compresses them,
+    // signs with SigV4, and forwards to bedrock-runtime.{region}.amazonaws.com.
+    args.push("-e", `AWS_ENDPOINT_URL=${PROXY_BASE_URL}`);
+    args.push("-e", `AWS_ENDPOINT_URL_BEDROCK_RUNTIME=${PROXY_BASE_URL}`);
   }
 
   // Mounts.

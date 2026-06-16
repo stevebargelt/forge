@@ -44,7 +44,7 @@ if [[ -x "$RUST_BINARY" ]]; then
 
   exec "$RUST_BINARY" \
       --listen "127.0.0.1:${HEADROOM_PORT}" \
-      --upstream "http://unused" \
+      --upstream "http://127.0.0.1:8788" \
       --bedrock-region "$BEDROCK_REGION" \
       --enable-bedrock-native=true \
       >> "$LOG_FILE" 2>&1
