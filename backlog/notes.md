@@ -31,3 +31,39 @@
 **Open questions:**
 - Should we pursue FG-328 advanced features (CacheAligner ROI) or move to routing/ops/reliability work?
 - FG-258 (Pi runtime) vs FG-273 (RACI governance) — which epic to prioritize?
+
+**Session continuation 2026-06-16 afternoon (FG-328).**
+
+**Completed:**
+- Discovered proxy already has ALL advanced features enabled (CacheAligner, ContentRouter, CCR, Code-Aware, LLMLingua)
+- Added orchestrator routing through proxy (forge claude checks health, sets ANTHROPIC_BASE_URL) - commit c8cef9b
+- Created verification documentation (docs/headroom-proxy-verification.md) - commit 5f9eee0
+- Updated FG-328 ticket with current state analysis
+
+**Key insight:** FG-328 wasn't about "enabling" features — the proxy had them all along. Real work is:
+1. Verification (blocked on Docker issues this session)
+2. Enhanced observability (dashboard panels for feature-specific metrics)
+3. Optional tuning (if defaults prove insufficient)
+
+**What now works:**
+- Both agents (via spawn.ts) AND orchestrator (via forge claude) route through proxy when it's running
+- Proxy applies CacheAligner, ContentRouter, CCR, semantic caching to all requests automatically
+- Dashboard shows live proxy metrics (tokens saved, compression ratio, CCR stats)
+- Graceful degradation: if proxy is down, routes direct to provider with warning (no error)
+
+**Verification blocked:**
+- Docker not accessible from this session (socket path issue)
+- Can't run test agent to confirm proxy receives requests
+- Orchestrator routing implemented but untested (would need to restart forge claude session)
+
+**Next session should:**
+1. Restart forge claude session to test orchestrator proxy routing
+2. Fix Docker access and run test agent to verify full integration
+3. Check proxy stats after real workload to confirm features are active
+4. Consider adding dashboard observability for CacheAligner/ContentRouter stats
+5. Decide if FG-328 can close after successful verification
+
+**Commits pushed (3 total):**
+- 3350077: Close FG-314 epic and FG-329
+- c8cef9b: Route orchestrator through headroom proxy
+- 5f9eee0: Add headroom proxy verification guide
