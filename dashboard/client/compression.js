@@ -38,11 +38,14 @@ function shortDay(iso) {
   return p.length === 3 ? `${+p[1]}/${+p[2]}` : String(iso);
 }
 
-export function CompressionView({ summary, timeSeries, byRole, methods, since, onSinceChange }) {
+export function CompressionView({ summary, timeSeries, byRole, methods, since, onSinceChange, proxyStats, proxyTelemetry }) {
   const isEmpty = !summary || summary.totalEvents === 0;
+  const hasProxyData = proxyStats && proxyStats.requests;
 
   return html`
     <section class="compression-view">
+      ${hasProxyData ? html`<${ProxyHealthBanner} stats=${proxyStats} telemetry=${proxyTelemetry} />` : null}
+
       <div class="row" style="gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;">
         <span class="muted" style="font-size: 12px;">window:</span>
         ${PERIODS.map(p => html`
@@ -246,6 +249,52 @@ function CompressionMethods({ data }) {
           <span class="muted" style="min-width: 60px; text-align: right; font-size: 12px;">${row.count} (${total > 0 ? ((row.count / total) * 100).toFixed(0) : 0}%)</span>
         </div>
       `)}
+    </div>
+  `;
+}
+
+function ProxyHealthBanner({ stats, telemetry }) {
+  if (!stats || !stats.requests) return null;
+
+  const tokensSaved = stats.tokens?.saved || 0;
+  const savingsPercent = stats.tokens?.savings_percent || 0;
+  const ccrEntries = stats.compression?.ccr_entries || 0;
+  const ccrRetrievals = stats.compression?.ccr_retrievals || 0;
+  const totalCompressions = telemetry?.total_compressions || 0;
+  const avgRatio = telemetry?.avg_compression_ratio || 0;
+
+  return html`
+    <div class="card" style="cursor: default; margin-bottom: 16px; background: var(--bg-elev-2); border-left: 3px solid var(--ok);">
+      <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 8px;">
+        <span style="font-weight: 600; font-size: 13px;">🚀 Headroom Proxy Live</span>
+        <span class="muted" style="font-size: 11px;">localhost:8787</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px;">
+        <div>
+          <div class="muted" style="font-size: 11px;">Tokens Saved</div>
+          <div style="font-size: 16px; font-family: ui-monospace, 'SF Mono', Menlo, monospace;">${tokensSaved.toLocaleString()}</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size: 11px;">Savings</div>
+          <div style="font-size: 16px;">${savingsPercent.toFixed(1)}%</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size: 11px;">Compressions</div>
+          <div style="font-size: 16px;">${totalCompressions}</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size: 11px;">Avg Ratio</div>
+          <div style="font-size: 16px;">${avgRatio > 0 ? (avgRatio * 100).toFixed(1) + "%" : "—"}</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size: 11px;">CCR Entries</div>
+          <div style="font-size: 16px;">${ccrEntries}</div>
+        </div>
+        <div>
+          <div class="muted" style="font-size: 11px;">CCR Retrievals</div>
+          <div style="font-size: 16px;">${ccrRetrievals}</div>
+        </div>
+      </div>
     </div>
   `;
 }

@@ -39,6 +39,8 @@ function App() {
   const [compressionByRole, setCompressionByRole] = useState([]);
   const [compressionMethods, setCompressionMethods] = useState([]);
   const [compressionSince, setCompressionSince] = useState("30d");
+  const [proxyStats, setProxyStats] = useState(null);
+  const [proxyTelemetry, setProxyTelemetry] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -123,16 +125,20 @@ function App() {
   const pollCompression = useCallback(async () => {
     try {
       const pq = projectFilter ? `&projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
-      const [sumRes, tsRes, roleRes, methRes] = await Promise.all([
+      const [sumRes, tsRes, roleRes, methRes, proxyStatsRes, proxyTelRes] = await Promise.all([
         fetch(`/api/compression/summary?since=${compressionSince}${pq}`),
         fetch(`/api/compression/timeseries?since=${compressionSince}${pq}`),
         fetch(`/api/compression/by-role?since=${compressionSince}${pq}`),
         fetch(`/api/compression/methods?since=${compressionSince}${pq}`),
+        fetch(`/api/compression/proxy/stats`),
+        fetch(`/api/compression/proxy/telemetry`),
       ]);
       if (sumRes.ok) setCompressionSummary(await sumRes.json());
       if (tsRes.ok) setCompressionTimeSeries(await tsRes.json());
       if (roleRes.ok) setCompressionByRole(await roleRes.json());
       if (methRes.ok) setCompressionMethods(await methRes.json());
+      if (proxyStatsRes.ok) setProxyStats(await proxyStatsRes.json());
+      if (proxyTelRes.ok) setProxyTelemetry(await proxyTelRes.json());
       setNow(Date.now());
     } catch (e) { setError(String(e)); }
   }, [compressionSince, projectFilter]);
@@ -203,6 +209,8 @@ function App() {
             methods=${compressionMethods}
             since=${compressionSince}
             onSinceChange=${setCompressionSince}
+            proxyStats=${proxyStats}
+            proxyTelemetry=${proxyTelemetry}
           />`
         : html`
           ${projectFilter ? html`

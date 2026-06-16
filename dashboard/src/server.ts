@@ -174,6 +174,31 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
+  // FG-329: Proxy headroom stats endpoints to dashboard
+  if (path === "/api/compression/proxy/stats") {
+    fetch("http://localhost:8787/stats")
+      .then(r => r.json())
+      .then(data => {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+      })
+      .catch(e => {
+        res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Headroom proxy unavailable", details: e.message }));
+      });
+    return;
+  }
+
+  if (path === "/api/compression/proxy/telemetry") {
+    fetch("http://localhost:8787/v1/telemetry")
+      .then(r => r.json())
+      .then(data => {
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+      })
+      .catch(e => {
+        res.writeHead(503, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "Headroom proxy unavailable", details: e.message }));
+      });
+    return;
+  }
+
   const taskMatch = path.match(/^\/api\/task\/(.+)$/);
   if (taskMatch) {
     const detail = taskDetail(taskMatch[1]!);
