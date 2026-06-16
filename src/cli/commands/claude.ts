@@ -32,6 +32,8 @@ import { insertRun, updateRunStatus } from "../../store/runs.js";
 import { insertTask, markTaskComplete } from "../../store/tasks.js";
 import { extractUsageFromTranscript, insertUsageRows } from "../../store/model-calls.js";
 import { newRunId, newTaskId, nowIso } from "../../util/ids.js";
+import { checkProxyHealth } from "../../v2/check-proxy.js";
+import { PROXY_BASE_URL } from "../../v2/compression-modes.js";
 
 const ORCHESTRATOR_MARKER = "<!-- forge:orchestrator-start -->";
 
@@ -101,23 +103,38 @@ export function registerClaude(program: Command): void {
       const passthrough = stripNameFromArgs(args);
       const finalArgs: string[] = ["-n", resolvedName, ...passthrough];
 
-      // 7. Exec claude with stdio inherited so the user gets a real interactive
-      //    session. Child inherits the parent's env (FORGE_REPO_DIR, AWS_*,
-      //    CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_API_KEY, etc. — nothing special
-      //    happens here; #158 will revisit for the bedrock auto-arm case).
-      const child = spawn("claude", finalArgs, {
-        cwd: projectRoot,
-        stdio: "inherit",
-        env: process.env,
-      });
-      child.on("exit", (code, signal) => {
-        captureOrchestratorUsage(projectRoot, taskId, runId);
-        if (signal) process.exit(128);
-        process.exit(code ?? 0);
-      });
-      child.on("error", (err) => {
-        console.error(`forge claude: failed to spawn claude — ${err.message}`);
-        console.error(`  Is the \`claude\` binary in your PATH?`);
+      // 7. Check if headroom proxy is running and route orchestrator through it.
+      //    This gives the orchestrator the same compression benefits agents get:
+      //    CacheAligner, ContentRouter, CCR, semantic caching.
+      checkProxyHealth().then((health) => {
+        const env = { ...process.env };
+        if (health.healthy) {
+          env.ANTHROPIC_BASE_URL = PROXY_BASE_URL;
+          console.log(`forge claude: routing through headroom proxy (v${health.version ?? "unknown"})`);
+        } else {
+          console.log(`forge claude: headroom proxy not available (${health.error}) — routing direct to provider`);
+        }
+
+        // 8. Exec claude with stdio inherited so the user gets a real interactive
+        //    session. Child inherits the parent's env (FORGE_REPO_DIR, AWS_*,
+        //    CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_API_KEY, etc.).
+        const child = spawn("claude", finalArgs, {
+          cwd: projectRoot,
+          stdio: "inherit",
+          env,
+        });
+        child.on("exit", (code, signal) => {
+          captureOrchestratorUsage(projectRoot, taskId, runId);
+          if (signal) process.exit(128);
+          process.exit(code ?? 0);
+        });
+        child.on("error", (err) => {
+          console.error(`forge claude: failed to spawn claude — ${err.message}`);
+          console.error(`  Is the \`claude\` binary in your PATH?`);
+          process.exit(1);
+        });
+      }).catch((err) => {
+        console.error(`forge claude: proxy health check failed — ${err.message}`);
         process.exit(1);
       });
     });
