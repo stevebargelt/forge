@@ -1,9 +1,10 @@
 ---
 id: FG-330
 type: story
-status: active
+status: done
 title: "FG-328 Bedrock proxy routing: runtime YAML compression_mode not being applied"
 created: 2026-06-16
+closed: 2026-06-16
 ---
 
 **Context:** FG-328 implemented Rust headroom-proxy with native Bedrock support. The proxy is built, installed, and running successfully. One line of code added to spawn.ts to set AWS_ENDPOINT_URL for Bedrock routing.

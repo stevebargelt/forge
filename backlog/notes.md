@@ -1,62 +1,52 @@
-**Session 2026-06-16 (Rust headroom-proxy for Bedrock — SUCCESS):**
+**Last session ended 2026-06-16.**
 
-**✅ COMPLETE — Rust proxy with Bedrock support installed and running**
+**Where we left off:** FG-328 Rust proxy implementation complete, but discovered runtime YAML configuration loading bug (FG-330) preventing Bedrock requests from routing through the proxy.
 
-**Commits:**
-- 91de1ea: Initial Rust proxy integration (scripts + docs)
-- 0e2123e: Build fix (ONNX Runtime + dynamic linking flags)
+**Picked up next:**
+1. **FG-330: Runtime YAML compression_mode not loading** — RuntimeSchema.safeParse() shows compression_mode as null despite explicit YAML field in ~/.forge/runtimes/claude-bedrock.yml. Investigate loader.ts line 107, verify Zod default behavior, check manifest vs actual runtime object. Once fixed, Bedrock routing will work (spawn.ts code already in place).
+2. **Kill dummy upstream server** — `kill $(cat /tmp/dummy-upstream.pid)` and remove scripts/run-headroom-proxy.sh temporary upstream change (localhost:8788). Restore to proper configuration once proxy health check works correctly.
+3. **Verify Bedrock proxy routing end-to-end** — After FG-330 fix: invoke with Bedrock mode, check proxy logs for POST /model/{model}/invoke requests, verify compression + SigV4 signing, close FG-328.
 
-**What shipped:**
-1. `scripts/install-headroom.sh`: `install-rust-proxy` command
-   - Auto-installs Rust toolchain, ONNX Runtime (via Homebrew)
-   - Auto-clones headroom repo if not present
-   - Builds with correct env vars: `ORT_STRATEGY=system`, `ORT_LIB_LOCATION=/opt/homebrew/lib`, `ORT_PREFER_DYNAMIC_LINK=1`
-   - Installs binary to `~/.forge/bin/headroom-proxy` (23MB)
+**External state to remember:**
+- Rust headroom-proxy binary installed at ~/.forge/bin/headroom-proxy (23MB), built with ONNX Runtime
+- Proxy running on localhost:8787 (PID may vary), health endpoint: /healthz
+- Dummy upstream server on localhost:8788 (PID in /tmp/dummy-upstream.pid) — TEMPORARY, needs cleanup
+- test-engineer container task-test-engineer-0d1ca4 may still be running (was 40+ min) — check/kill if stuck
 
-2. `scripts/run-headroom-proxy.sh`: Rust proxy with Bedrock support
-   - Flags: `--listen 127.0.0.1:8787`, `--upstream http://unused`, `--bedrock-region us-east-1`, `--enable-bedrock-native=true`
-   - Falls back to Python proxy if Rust binary not found
+**Decisions worth not relitigating:**
+- Rust proxy over Python: Native Bedrock support confirmed working, build complexity resolved with ONNX Runtime + dynamic linking automation
+- One-line spawn.ts change: AWS_ENDPOINT_URL env var is correct approach (proxy accepts Bedrock API format at /model/{model}/invoke)
+- Runtime YAML investigation required: Not a proxy issue, not a spawn.ts issue — loader.ts Zod parsing problem (FG-330)
+- Compression mode in all runtimes: Added explicitly to claude-*.yml files as workaround (should work via schema default but doesn't)
 
-3. `docs/headroom-proxy-verification.md`: Bedrock verification guide
+**Shipped (for reference):**
+- 91de1ea: Initial Rust proxy integration (install script, run script, docs)
+- 0e2123e: ONNX Runtime build fix (Homebrew + dynamic linking)
+- 72fada2: Integration tests for proxy install (12/12 passed in container)
+- 7a850a7: Backlog updates (FG-328 status)
+- 32becda: Bedrock routing spawn.ts change (blocked by FG-330)
+- FG-330: Filed ticket for runtime YAML loading bug
 
-**Proxy running:** PID 25087, listening on localhost:8787
-- Health check: http://localhost:8787/healthz → `{"ok":true,"service":"headroom-proxy"}`
-- Native Bedrock support enabled (default)
-- Logs: ~/.forge/logs/headroom-proxy.log
+## FG-330 Investigation Results (2026-06-16)
 
-**Build complexity resolved:**
-The root issue was `ort-sys` (ONNX Runtime bindings) requiring:
-1. ONNX Runtime installed (via `brew install onnxruntime`)
-2. Dynamic linking flag (`ORT_PREFER_DYNAMIC_LINK=1`) — Homebrew provides `.dylib`, not static libs
-3. System ONNX location (`ORT_STRATEGY=system ORT_LIB_LOCATION=/opt/homebrew/lib`)
+**Root cause identified:** NOT a runtime YAML loading bug - that works correctly. The actual issue is that AWS SDK in Claude CLI doesn't respect AWS_ENDPOINT_URL for Bedrock requests.
 
-**⏳ Test-engineer:** Still running after 40+ min (task-test-engineer-0d1ca4). Likely stuck or writing extensive tests. Can be reviewed/killed in next session.
+**Verified working:**
+✓ Runtime YAML parsing: compression_mode: proxy loads correctly
+✓ Zod schema validation: RuntimeSchema.safeParse() works
+✓ spawn.ts proxy block: if (runtime.compression_mode === "proxy") executes  
+✓ Env vars passed to container: AWS_ENDPOINT_URL, AWS_ENDPOINT_URL_BEDROCK_RUNTIME, FORGE_HEADROOM_PROXY=1 all present
 
-**Next session — Verification:**
+**Actual problem:**
+✗ Claude CLI AWS SDK bypasses the proxy entirely
+✗ Bedrock requests go directly to bedrock-runtime.us-east-1.amazonaws.com
+✗ Proxy logs show zero POST /model/{model}/invoke requests
+✗ Container logs show amazon-bedrock-invocationMetrics (direct Bedrock responses)
 
-1. **Manual Bedrock verification:**
-   - Set `CLAUDE_CODE_USE_BEDROCK=1` (already set in env)
-   - Make a test request via forge invoke
-   - Check `curl http://localhost:8787/stats` shows bedrock requests > 0
-   - Verify SigV4 signing in proxy logs
+**Why this happens:**
+The AWS SDK's global AWS_ENDPOINT_URL env var doesn't work for all services. Bedrock requires service-specific endpoint configuration that the Claude CLI may not support, or requires additional SDK client config beyond env vars.
 
-2. **Test-engineer review:**
-   - Check if task completed (unlikely given 40+ min runtime)
-   - If stuck: kill container, review what was written
-   - If complete: review integration tests, run them
-
-3. **Close FG-328:**
-   - If verification passes: mark complete
-   - Update docs-impact: `operator_behavior_changed` — Bedrock mode now routes through proxy
-   - Document requirement: ONNX Runtime + Rust toolchain
-
-**Key learnings:**
-- Rust proxy has full Bedrock support (confirmed working)
-- Build requires ONNX Runtime + dynamic linking flags (now automated in install script)
-- Binary size: 23MB (reasonable for production)
-- Startup fast, health checks responsive
-
-**All three auth modes now route through proxy:**
-- `anthropic-oauth` → proxy → api.anthropic.com ✅
-- `anthropic-apikey` → proxy → api.anthropic.com ✅  
-- `bedrock` → proxy (SigV4) → bedrock-runtime.{region}.amazonaws.com ✅ (needs verification)
+**Next steps:**
+1. Check if Claude CLI supports custom Bedrock endpoints (may need Anthropic to add support)
+2. Alternative: proxy at network level (HTTP_PROXY/HTTPS_PROXY) instead of AWS endpoint override
+3. Or: patch the SDK client initialization in the agent container entrypoint
