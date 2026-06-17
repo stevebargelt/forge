@@ -61,6 +61,73 @@ test("parser preserves ticket bodies as raw markdown (no interpretation)", () =>
   assert.match(t116!.body, /YAML/);
 });
 
+test("## inside ticket body does not split the section", () => {
+  const input = [
+    "# forge — backlog",
+    "",
+    "Intro.",
+    "",
+    "## Notes for next session",
+    "",
+    "Notes here.",
+    "",
+    "## Active",
+    "",
+    "### #1 — ticket with subheading",
+    "**Why:** Body content.",
+    "",
+    "## Sub-heading",
+    "",
+    "More body under subheading.",
+    "",
+    "### #2 — next ticket",
+    "**Why:** Second body.",
+    "",
+  ].join("\n");
+
+  const b = parseBacklog(input);
+  const active = b.sections.get("Active")!;
+  assert.equal(active.length, 2);
+  assert.match(active[0]!.body, /## Sub-heading/);
+  assert.match(active[0]!.body, /More body under subheading/);
+  assert.equal(active[1]!.id, 2);
+
+  const round = serializeBacklog(b);
+  assert.equal(round, input);
+});
+
+test("## inside notes block is not treated as a section boundary", () => {
+  const input = [
+    "# forge — backlog",
+    "",
+    "Intro.",
+    "",
+    "## Notes for next session",
+    "",
+    "Some notes.",
+    "",
+    "## A random heading inside notes",
+    "",
+    "More notes content.",
+    "",
+    "## Active",
+    "",
+    "### #1 — ticket",
+    "**Why:** Body.",
+    "",
+  ].join("\n");
+
+  const b = parseBacklog(input);
+  assert.match(b.notes, /## A random heading inside notes/);
+  assert.match(b.notes, /More notes content/);
+
+  const active = b.sections.get("Active")!;
+  assert.equal(active.length, 1);
+
+  const round = serializeBacklog(b);
+  assert.equal(round, input);
+});
+
 test("parser throws when Notes heading is missing", () => {
   const bad = "# title\n\nsome stuff but no notes section\n\n## Active\n";
   assert.throws(() => parseBacklog(bad), /Notes for next session/);

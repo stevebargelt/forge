@@ -23,6 +23,13 @@ const NOTES_HEADING = "## Notes for next session";
 const TICKET_HEADING_RE = /^### #(\d+) — (.+)$/;
 const SECTION_HEADING_RE = /^## (.+)$/;
 
+const KNOWN_SECTION_NAMES = new Set<string>([...SECTION_ORDER, "Notes for next session"]);
+
+function isKnownSectionHeading(line: string): boolean {
+  const m = SECTION_HEADING_RE.exec(line);
+  return m !== null && KNOWN_SECTION_NAMES.has(m[1]!);
+}
+
 export function parseBacklog(content: string): Backlog {
   const lines = content.split("\n");
 
@@ -44,7 +51,7 @@ export function parseBacklog(content: string): Backlog {
   // 2. Find the first section heading after Notes (typically `## Active`).
   let firstSectionStart = -1;
   for (let i = notesStart + 1; i < lines.length; i++) {
-    if (SECTION_HEADING_RE.test(lines[i]!) && lines[i] !== NOTES_HEADING) {
+    if (isKnownSectionHeading(lines[i]!) && lines[i] !== NOTES_HEADING) {
       firstSectionStart = i;
       break;
     }
@@ -105,7 +112,7 @@ export function parseBacklog(content: string): Backlog {
 
 function findNextSection(lines: string[], from: number): number {
   for (let i = from; i < lines.length; i++) {
-    if (SECTION_HEADING_RE.test(lines[i]!)) return i;
+    if (isKnownSectionHeading(lines[i]!)) return i;
   }
   return -1;
 }
