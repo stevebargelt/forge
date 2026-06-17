@@ -104,3 +104,24 @@ Rewriting body invalidates SigV4 signature. Needs downstream gateway that re-sig
 - #734: Original feature request for Bedrock passthrough
 
 **Next step:** Verify which proxy we're running (Python vs Rust) and determine path forward.
+
+## FG-331 Further Investigation (2026-06-17)
+
+**Progress made:**
+- Fixed proxy upstream: now points to real API instead of dummy localhost:8788
+- Rebuilt headroom-proxy from source (main, commit 0dc2e1cb) - includes us./eu./global. prefix fix
+- Fixed proxy listen address: 0.0.0.0 so containers can reach it
+- Fixed spawn.ts: containers now use host.docker.internal:8787 not localhost:8787
+- Fixed check-proxy.ts: uses /healthz endpoint, correct response shape
+
+**New finding:**
+CLI does partially respect AWS_ENDPOINT_URL_BEDROCK_RUNTIME:
+- Startup discovery calls (/inference-profiles?type=SYSTEM_DEFINED) DO route through proxy
+- But actual model invocations (POST /model/{id}/invoke-with-response-stream) go DIRECTLY to AWS
+- This is NOT a forge configuration issue - the CLI splits behavior:
+  - Service discovery: honors endpoint override
+  - Model inference: uses native AWS SDK credential chain, ignores endpoint override
+
+**Conclusion:** CLI's inference calls bypass AWS_ENDPOINT_URL_BEDROCK_RUNTIME. This is a CLI behavior, not configurable from the forge side. Blocked by upstream.
+
+**State:** headroom-proxy binary rebuilt with vendor prefix fix. All forge-side changes correct. Blocked on CLI behavior for actual inference routing.
