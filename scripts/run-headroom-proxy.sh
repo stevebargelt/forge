@@ -42,9 +42,14 @@ if [[ -x "$RUST_BINARY" ]]; then
   echo "[headroom] Binary: $RUST_BINARY"
   echo "[headroom] Logs: $LOG_FILE"
 
+  # Note: --upstream is for non-Bedrock catch-all routes (e.g. /v1/messages for Anthropic API).
+  # For Bedrock requests, --enable-bedrock-native=true uses --bedrock-endpoint (defaults to AWS).
+  # Set ANTHROPIC_UPSTREAM if you need /v1/messages passthrough to an Anthropic-compatible upstream.
+  ANTHROPIC_UPSTREAM="${ANTHROPIC_UPSTREAM:-https://api.anthropic.com}"
+
   exec "$RUST_BINARY" \
       --listen "127.0.0.1:${HEADROOM_PORT}" \
-      --upstream "http://127.0.0.1:8788" \
+      --upstream "$ANTHROPIC_UPSTREAM" \
       --bedrock-region "$BEDROCK_REGION" \
       --enable-bedrock-native=true \
       >> "$LOG_FILE" 2>&1
