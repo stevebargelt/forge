@@ -15,6 +15,8 @@ import {
   planClaudeHooks,
   planCommitMsgHook,
   planGitignoreEntries,
+  provisionSeedFile,
+  scaffoldBacklogDirs,
 } from "./init.js";
 
 const TEMPLATE = `<!-- forge:orchestrator-start -->
@@ -640,4 +642,91 @@ test("executeClaudeCommandsPlan: replaces stale forge symlinks in place without 
     const linkTarget = readlinkSync(target);
     assert.ok(!linkTarget.startsWith("/old/forge"), `${name} should no longer point at /old/forge; got ${linkTarget}`);
   }
+});
+
+// ----- scaffoldBacklogDirs (FG-332: structured backlog layout) -----
+
+test("scaffoldBacklogDirs: creates all subdirs and notes.md in a fresh dir", () => {
+  const msg = scaffoldBacklogDirs(projectDir);
+  assert.match(msg, /created/);
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    assert.ok(existsSync(join(projectDir, "backlog", sub)), `backlog/${sub} should exist`);
+  }
+  assert.ok(existsSync(join(projectDir, "backlog", "notes.md")));
+});
+
+test("scaffoldBacklogDirs: idempotent — re-run when everything already exists is a no-op", () => {
+  scaffoldBacklogDirs(projectDir);
+  writeFileSync(join(projectDir, "backlog", "notes.md"), "# my real notes\nkeep me\n");
+  const msg = scaffoldBacklogDirs(projectDir);
+  assert.match(msg, /no-op/);
+  assert.equal(readFileSync(join(projectDir, "backlog", "notes.md"), "utf8"), "# my real notes\nkeep me\n", "notes.md must not be clobbered");
+});
+
+// ----- provisionSeedFile (model-policy + docs-surfaces) -----
+
+test("provisionSeedFile: creates model-policy.yml when absent", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  const result = provisionSeedFile(join(projectDir, ".forge"), "model-policy.yml", "model-policy.example.yml");
+  assert.equal(result, "created");
+  assert.ok(existsSync(join(projectDir, ".forge", "model-policy.yml")));
+  const content = readFileSync(join(projectDir, ".forge", "model-policy.yml"), "utf8");
+  assert.match(content, /model_profiles/);
+});
+
+test("provisionSeedFile: skips model-policy.yml when already present", () => {
+  const forgeDir = join(projectDir, ".forge");
+  mkdirSync(forgeDir, { recursive: true });
+  writeFileSync(join(forgeDir, "model-policy.yml"), "# custom\n");
+  const result = provisionSeedFile(forgeDir, "model-policy.yml", "model-policy.example.yml");
+  assert.match(result, /already exists/);
+  assert.equal(readFileSync(join(forgeDir, "model-policy.yml"), "utf8"), "# custom\n", "existing file must not be overwritten");
+});
+
+test("provisionSeedFile: creates docs-surfaces.yml when absent", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  const result = provisionSeedFile(join(projectDir, ".forge"), "docs-surfaces.yml", "docs-surfaces.example.yml");
+  assert.equal(result, "created");
+  assert.ok(existsSync(join(projectDir, ".forge", "docs-surfaces.yml")));
+  const content = readFileSync(join(projectDir, ".forge", "docs-surfaces.yml"), "utf8");
+  assert.match(content, /surfaces/);
+});
+
+test("provisionSeedFile: skips docs-surfaces.yml when already present", () => {
+  const forgeDir = join(projectDir, ".forge");
+  mkdirSync(forgeDir, { recursive: true });
+  writeFileSync(join(forgeDir, "docs-surfaces.yml"), "# my custom surfaces\n");
+  const result = provisionSeedFile(forgeDir, "docs-surfaces.yml", "docs-surfaces.example.yml");
+  assert.match(result, /already exists/);
+  assert.equal(readFileSync(join(forgeDir, "docs-surfaces.yml"), "utf8"), "# my custom surfaces\n", "existing file must not be overwritten");
+});
+
+// ----- forge init --prefix (FG-332: writes to .forge/config.yml) -----
+
+test("forge init --prefix: writes prefix into .forge/config.yml", () => {
+  // Use the CLI directly to verify the --prefix flag end-to-end.
+  execSync(`npm run forge -- init --project ${projectDir} --no-install-hooks --prefix FG`, {
+    cwd: process.cwd(),
+    stdio: "pipe",
+  });
+  const configPath = join(projectDir, ".forge", "config.yml");
+  assert.ok(existsSync(configPath), ".forge/config.yml should be created");
+  const content = readFileSync(configPath, "utf8");
+  assert.match(content, /prefix.*FG|FG.*prefix/, "config.yml should contain the prefix");
+});
+
+// ----- forge init --dry-run smoke (FG-332: reports all new items, writes nothing) -----
+
+test("forge init --dry-run: reports backlog scaffold, config, model-policy, docs-surfaces without writing", () => {
+  const out = execSync(`npm run forge -- init --project ${projectDir} --no-install-hooks --prefix TEST --dry-run`, {
+    cwd: process.cwd(),
+    stdio: "pipe",
+  }).toString();
+  assert.match(out, /backlog\//i, "dry-run should mention backlog/ scaffold");
+  assert.match(out, /prefix.*TEST|config\.yml/i, "dry-run should mention config.yml prefix");
+  assert.match(out, /model-policy\.yml/i, "dry-run should mention model-policy.yml");
+  assert.match(out, /docs-surfaces\.yml/i, "dry-run should mention docs-surfaces.yml");
+  // Nothing should have been written.
+  assert.ok(!existsSync(join(projectDir, ".forge")), ".forge/ should not be created in dry-run");
+  assert.ok(!existsSync(join(projectDir, "backlog")), "backlog/ should not be created in dry-run");
 });

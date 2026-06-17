@@ -1,0 +1,18 @@
+# forge — docs surfaces (EXAMPLE / opt-in)
+#
+# Copy this to <project>/.forge/docs-surfaces.yml to tell forge which
+# documentation surfaces exist in this project and where to find them.
+# Forge uses this when flagging docs_impact on completed tasks so the
+# orchestrator can route doc updates to the right place.
+#
+# Each entry names a surface, its kind, and its path (relative to the
+# project root). Add, remove, or rename entries to match your project.
+
+surfaces:
+  - name: readme
+    kind: user-facing
+    path: README.md
+
+  - name: api-reference
+    kind: public-api
+    path: docs/api.md

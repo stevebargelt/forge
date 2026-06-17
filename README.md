@@ -4,7 +4,7 @@
 
 A TypeScript CLI for orchestrating multi-agent AI workflows on a personal machine. Forge runs on the host; each agent runs as an ephemeral Docker container. SQLite is the blackboard. Core CLI: `init`, `new`, `next`, `gate`, `show`, `status`, `invoke`, `backlog`, plus `auth` for personal-Mac OAuth.
 
-Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md` and creates a `.forge/` directory for project-level workflow overrides.
+Forge is host-global: one install, one `~/.forge/forge.db`, used against any project on the machine. Each project gets a per-project setup (`forge init`) that wires the orchestrator block into its `CLAUDE.md`, creates a `.forge/` directory for project-level workflow overrides, and scaffolds a `backlog/` directory so `forge backlog` commands work immediately.
 
 The web view ships as a workspace package (`dashboard/`) — boot with `forge dashboard start`. It reads `~/.forge/forge.db` directly and renders agent outputs across all projects on the host.
 
@@ -29,7 +29,7 @@ After `npm link`, `which forge` should resolve. You won't need to be in `~/code/
 
 ```bash
 cd ~/code/my-app
-forge init                       # one-time per project; installs orchestrator block, creates .forge/
+forge init                       # one-time per project; installs orchestrator block, creates .forge/, scaffolds backlog/
 ```
 
 After `forge init`, you have two ways to drive forge in this project:

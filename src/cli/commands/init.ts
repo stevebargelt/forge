@@ -1,8 +1,9 @@
 import type { Command } from "commander";
-import { existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { skeletonBacklogContent } from "../../backlog/skeleton.js";
+import { writeBacklogConfig } from "../../backlog/config.js";
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
 
@@ -72,14 +73,14 @@ export function registerInit(program: Command): void {
     .option("--project <dir>", "project root to initialize (default: cwd)")
     .option("--dry-run", "show what would change without writing files")
     .option("--no-install-hooks", "skip installing the commit-msg git hook")
-    .action(async (options: { project?: string; dryRun?: boolean; installHooks?: boolean }) => {
+    .option("--prefix <string>", "backlog item prefix (e.g. FG) — written to .forge/config.yml")
+    .action(async (options: { project?: string; dryRun?: boolean; installHooks?: boolean; prefix?: string }) => {
       const projectDir = resolve(options.project ?? process.cwd());
       if (!existsSync(projectDir)) {
         throw new Error(`project directory does not exist: ${projectDir}`);
       }
       const claudeMdPath = join(projectDir, "CLAUDE.md");
       const forgeProjectDir = join(projectDir, ".forge");
-      const backlogMdPath = join(projectDir, "BACKLOG.md");
 
       const templateBody = readTemplate();
 
@@ -89,11 +90,6 @@ export function registerInit(program: Command): void {
 
       const willWrite = next !== existing;
       const willCreateForgeDir = !existsSync(forgeProjectDir);
-      // BACKLOG.md is project-committed scaffolding (like CLAUDE.md / .forge/),
-      // not per-developer config — so it's created regardless of
-      // --no-install-hooks. Only ever created, never overwritten: an existing
-      // backlog is the canonical task list and must not be clobbered.
-      const willCreateBacklog = !existsSync(backlogMdPath);
 
       // Hook install plans (--no-install-hooks bypasses all of them).
       const installHooks = options.installHooks !== false;
@@ -105,8 +101,11 @@ export function registerInit(program: Command): void {
       if (options.dryRun) {
         console.log(`forge init (dry-run) in ${projectDir}`);
         console.log(`  CLAUDE.md:        ${existing ? "exists" : "missing"} → ${blockStatus(blockResult.action, !!existing)}`);
-        console.log(`  BACKLOG.md:       ${willCreateBacklog ? "WOULD create skeleton" : "exists (left as-is)"}`);
         console.log(`  .forge/ dir:      ${willCreateForgeDir ? "WOULD create" : "exists"}`);
+        console.log(`  backlog/:         ${describeBacklogScaffoldPlan(projectDir)}`);
+        console.log(`  config.yml:       ${options.prefix ? `WOULD write prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
+        console.log(`  model-policy.yml: ${describeSeedProvisionPlan(forgeProjectDir, "model-policy.yml")}`);
+        console.log(`  docs-surfaces.yml:${describeSeedProvisionPlan(forgeProjectDir, "docs-surfaces.yml")}`);
         console.log(`  commit-msg hook:  ${describeHookPlan(hookPlan)}`);
         console.log(`  claude hooks:     ${describeClaudeHooksPlan(claudeHooksPlan)}`);
         console.log(`  slash commands:   ${describeClaudeCommandsPlan(slashCommandsPlan)}`);
@@ -123,9 +122,12 @@ export function registerInit(program: Command): void {
       if (willCreateForgeDir) {
         mkdirSync(forgeProjectDir, { recursive: true });
       }
-      if (willCreateBacklog) {
-        createBacklogSkeleton(backlogMdPath);
+      const backlogScaffoldResult = scaffoldBacklogDirs(projectDir);
+      if (options.prefix) {
+        writeBacklogConfig(projectDir, { prefix: options.prefix });
       }
+      const modelPolicyResult = provisionSeedFile(forgeProjectDir, "model-policy.yml", "model-policy.example.yml");
+      const docsSurfacesResult = provisionSeedFile(forgeProjectDir, "docs-surfaces.yml", "docs-surfaces.example.yml");
       const hookResult = installHooks ? executeHookPlan(hookPlan) : "skipped (--no-install-hooks)";
       const claudeHooksResult = installHooks ? executeClaudeHooksPlan(claudeHooksPlan) : "skipped (--no-install-hooks)";
       const slashCommandsResult = installHooks ? executeClaudeCommandsPlan(slashCommandsPlan) : "skipped (--no-install-hooks)";
@@ -134,8 +136,11 @@ export function registerInit(program: Command): void {
       console.log(`forge init complete in ${projectDir}`);
       console.log(`  CLAUDE.md:        ${blockStatus(blockResult.action, !!existing)}`);
       if (blockResult.action === "needs-markers") console.warn(`  ⚠ orchestrator block: ${blockResult.message}`);
-      console.log(`  BACKLOG.md:       ${willCreateBacklog ? "created skeleton" : "already exists (left as-is)"}`);
       console.log(`  .forge/:          ${willCreateForgeDir ? "created" : "already exists"}`);
+      console.log(`  backlog/:         ${backlogScaffoldResult}`);
+      console.log(`  config.yml:       ${options.prefix ? `wrote prefix = ${options.prefix}` : "skipped (no --prefix)"}`);
+      console.log(`  model-policy.yml: ${modelPolicyResult}`);
+      console.log(`  docs-surfaces.yml:${docsSurfacesResult}`);
       console.log(`  commit-msg hook:  ${hookResult}`);
       console.log(`  claude hooks:     ${claudeHooksResult}`);
       console.log(`  slash commands:   ${slashCommandsResult}`);
@@ -236,6 +241,62 @@ export function createBacklogSkeleton(backlogMdPath: string): "created" | "exist
   if (existsSync(backlogMdPath)) return "exists";
   writeFileSync(backlogMdPath, skeletonBacklogContent());
   return "created";
+}
+
+const BACKLOG_SUBDIRS = ["stories", "epics", "ideas", "done"] as const;
+
+// Scaffold the structured backlog layout under <projectDir>/backlog/. Idempotent
+// — skips any path that already exists. Returns a summary string.
+export function scaffoldBacklogDirs(projectDir: string): string {
+  const backlogDir = join(projectDir, "backlog");
+  const created: string[] = [];
+  for (const sub of BACKLOG_SUBDIRS) {
+    const p = join(backlogDir, sub);
+    if (!existsSync(p)) {
+      mkdirSync(p, { recursive: true });
+      created.push(sub + "/");
+    }
+  }
+  const notesPath = join(backlogDir, "notes.md");
+  if (!existsSync(notesPath)) {
+    writeFileSync(notesPath, "# Notes\n");
+    created.push("notes.md");
+  }
+  return created.length > 0 ? `created ${created.join(", ")}` : "already exists (no-op)";
+}
+
+function describeBacklogScaffoldPlan(projectDir: string): string {
+  const backlogDir = join(projectDir, "backlog");
+  const missing: string[] = [];
+  for (const sub of BACKLOG_SUBDIRS) {
+    if (!existsSync(join(backlogDir, sub))) missing.push(sub + "/");
+  }
+  if (!existsSync(join(backlogDir, "notes.md"))) missing.push("notes.md");
+  return missing.length > 0 ? `WOULD create ${missing.join(", ")}` : "already exists (no-op)";
+}
+
+// Copy a seed file into the .forge/ dir when the target doesn't exist yet.
+// Never overwrites. Returns a one-line status string.
+export function provisionSeedFile(forgeDir: string, targetName: string, seedName: string): string {
+  const targetPath = join(forgeDir, targetName);
+  if (existsSync(targetPath)) return "already exists (no-op)";
+  const seedPath = resolveSeedPath(seedName);
+  if (!seedPath) return `skipped (seed ${seedName} not found)`;
+  copyFileSync(seedPath, targetPath);
+  return "created";
+}
+
+function describeSeedProvisionPlan(forgeDir: string, targetName: string): string {
+  return existsSync(join(forgeDir, targetName)) ? "already exists" : "WOULD create";
+}
+
+function resolveSeedPath(seedName: string): string | undefined {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", "..", "..", "seeds", seedName),
+    join(here, "..", "..", "..", "..", "seeds", seedName),
+  ];
+  return candidates.find((c) => existsSync(c));
 }
 
 // The RACI seed bundled with forge, resolved relative to this source file the
