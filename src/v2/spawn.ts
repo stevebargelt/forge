@@ -20,7 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
-import { PROXY_BASE_URL } from "./compression-modes.js";
+import { PROXY_CONTAINER_URL } from "./compression-modes.js";
 import {
   exportAwsCreds,
   oauthVolumeName,
@@ -162,13 +162,13 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   // The proxy is started inside the container by the entrypoint (via FORGE_HEADROOM_PROXY=1).
   if (runtime.compression_mode === "proxy") {
     args.push("-e", "FORGE_HEADROOM_PROXY=1");
-    args.push("-e", `ANTHROPIC_BASE_URL=${PROXY_BASE_URL}`);
-    args.push("-e", `OPENAI_BASE_URL=${PROXY_BASE_URL}`);
+    args.push("-e", `ANTHROPIC_BASE_URL=${PROXY_CONTAINER_URL}`);
+    args.push("-e", `OPENAI_BASE_URL=${PROXY_CONTAINER_URL}`);
     // FG-328: Route Bedrock requests through the Rust headroom-proxy's native Bedrock handler.
     // The proxy accepts Bedrock API requests at POST /model/{model}/invoke, compresses them,
     // signs with SigV4, and forwards to bedrock-runtime.{region}.amazonaws.com.
-    args.push("-e", `AWS_ENDPOINT_URL=${PROXY_BASE_URL}`);
-    args.push("-e", `AWS_ENDPOINT_URL_BEDROCK_RUNTIME=${PROXY_BASE_URL}`);
+    args.push("-e", `AWS_ENDPOINT_URL=${PROXY_CONTAINER_URL}`);
+    args.push("-e", `AWS_ENDPOINT_URL_BEDROCK_RUNTIME=${PROXY_CONTAINER_URL}`);
   }
 
   // Mounts.

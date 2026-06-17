@@ -48,7 +48,7 @@ if [[ -x "$RUST_BINARY" ]]; then
   ANTHROPIC_UPSTREAM="${ANTHROPIC_UPSTREAM:-https://api.anthropic.com}"
 
   exec "$RUST_BINARY" \
-      --listen "127.0.0.1:${HEADROOM_PORT}" \
+      --listen "0.0.0.0:${HEADROOM_PORT}" \
       --upstream "$ANTHROPIC_UPSTREAM" \
       --bedrock-region "$BEDROCK_REGION" \
       --enable-bedrock-native=true \
