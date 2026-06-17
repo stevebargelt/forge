@@ -17,7 +17,7 @@ import { parse as parseYaml } from "yaml";
 import type { Runtime } from "./schema.js";
 import { RuntimeSchema } from "./schema.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { PROXY_PORT, PROXY_BASE_URL } from "./compression-modes.js";
+import { PROXY_PORT, PROXY_BASE_URL, PROXY_CONTAINER_URL } from "./compression-modes.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, "..", "..");
@@ -93,20 +93,24 @@ test("FG-318: compression_mode=proxy sets FORGE_HEADROOM_PROXY=1", () => {
 test("FG-318: compression_mode=proxy sets ANTHROPIC_BASE_URL to proxy sidecar address", () => {
   const rt: Runtime = { ...BASE_RUNTIME, compression_mode: "proxy" };
   const env = pickEnv(buildDockerArgs(rt, BASE_CTX).args);
-  assert.equal(env.ANTHROPIC_BASE_URL, PROXY_BASE_URL,
-    "ANTHROPIC_BASE_URL must point at the in-container sidecar so all Claude calls route through it");
+  assert.equal(env.ANTHROPIC_BASE_URL, PROXY_CONTAINER_URL,
+    "ANTHROPIC_BASE_URL must point at host.docker.internal so containers can reach the host-side proxy");
 });
 
 test("FG-318: compression_mode=proxy sets OPENAI_BASE_URL to proxy sidecar address", () => {
   const rt: Runtime = { ...BASE_RUNTIME, compression_mode: "proxy" };
   const env = pickEnv(buildDockerArgs(rt, BASE_CTX).args);
-  assert.equal(env.OPENAI_BASE_URL, PROXY_BASE_URL,
-    "OPENAI_BASE_URL must also point at the sidecar for codex-style clients");
+  assert.equal(env.OPENAI_BASE_URL, PROXY_CONTAINER_URL,
+    "OPENAI_BASE_URL must also point at host.docker.internal for codex-style clients");
 });
 
-test("FG-318: PROXY_BASE_URL is http://localhost:<PROXY_PORT>", () => {
+test("FG-318: PROXY_BASE_URL is http://localhost:<PROXY_PORT> (host-side)", () => {
   assert.equal(PROXY_BASE_URL, `http://localhost:${PROXY_PORT}`);
   assert.equal(PROXY_PORT, 8787);
+});
+
+test("FG-318: PROXY_CONTAINER_URL uses host.docker.internal (container-side)", () => {
+  assert.equal(PROXY_CONTAINER_URL, `http://host.docker.internal:${PROXY_PORT}`);
 });
 
 // ── 3. none mode skips all compression ───────────────────────────────────────
@@ -165,7 +169,7 @@ test("FG-318: buildDockerArgs on claude-with-proxy.example.yml injects proxy env
   // oauth-volume just adds a -v flag, no credential lookup at build time.
   const env = pickEnv(buildDockerArgs(rt, BASE_CTX).args);
   assert.equal(env.FORGE_HEADROOM_PROXY, "1");
-  assert.equal(env.ANTHROPIC_BASE_URL, "http://localhost:8787");
+  assert.equal(env.ANTHROPIC_BASE_URL, `http://host.docker.internal:8787`);
 });
 
 // ── 6. proxy cleanup — entrypoint EXIT trap ───────────────────────────────────

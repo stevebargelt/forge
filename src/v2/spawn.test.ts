@@ -577,8 +577,8 @@ test("FG-318: compression_mode=proxy sets FORGE_HEADROOM_PROXY and proxy base UR
   const { args } = buildDockerArgs(rt, BASE_CTX);
   const env = pickEnv(args);
   assert.equal(env.FORGE_HEADROOM_PROXY, "1");
-  assert.equal(env.ANTHROPIC_BASE_URL, "http://localhost:8787");
-  assert.equal(env.OPENAI_BASE_URL, "http://localhost:8787");
+  assert.equal(env.ANTHROPIC_BASE_URL, "http://host.docker.internal:8787");
+  assert.equal(env.OPENAI_BASE_URL, "http://host.docker.internal:8787");
 });
 
 test("FG-318: compression_mode=mcp (default) does not set proxy env vars", () => {

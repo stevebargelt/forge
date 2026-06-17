@@ -388,9 +388,9 @@ test("#292: rejects an unknown log_format", () => {
 // FG-318: compression_mode field
 // ------------------------------------------------------------------
 
-test("FG-318: compression_mode defaults to 'mcp' when omitted", () => {
+test("FG-318: compression_mode defaults to 'proxy' when omitted", () => {
   const r = RuntimeSchema.parse(minimalRuntime);
-  assert.equal(r.compression_mode, "mcp");
+  assert.equal(r.compression_mode, "proxy");
 });
 
 test("FG-318: compression_mode accepts 'proxy'", () => {
