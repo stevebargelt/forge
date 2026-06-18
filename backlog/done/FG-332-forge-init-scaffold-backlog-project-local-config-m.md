@@ -1,9 +1,10 @@
 ---
 id: FG-332
 type: story
-status: active
+status: done
 title: "forge init: scaffold backlog + project-local config (model-policy, docs-surfaces) — everything needed to start a new project"
 created: 2026-06-17
+closed: 2026-06-17
 ---
 
 forge init should be the single command anyone runs to set up forge in a new project folder. Currently it installs the CLAUDE.md orchestrator block, .forge/ dir, and git hooks — but stops short of everything needed.

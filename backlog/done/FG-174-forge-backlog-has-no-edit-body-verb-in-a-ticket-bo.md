@@ -1,8 +1,9 @@
 ---
 id: FG-174
 type: story
-status: active
+status: done
 title: "forge backlog has no edit-body verb; ## in a ticket body silently breaks the parser roundtrip"
+closed: 2026-06-17
 ---
 
 Two related rough edges, both hit 2026-05-29 while filing #173.
