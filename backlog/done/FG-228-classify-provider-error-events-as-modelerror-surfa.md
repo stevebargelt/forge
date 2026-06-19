@@ -1,8 +1,9 @@
 ---
 id: FG-228
 type: story
-status: active
+status: done
 title: Classify provider error events as model_error + surface the cause (not generic container_crash)
+closed: 2026-06-19
 ---
 
 Observed during AWN-7 Walk W4 (Codex failure-path validation). A Codex run with an invalid model exits 1 with no result.json, so classify() returns container_crash — correct (it IS in the taxonomy, #220 acceptance met), but lossy. The actual cause is right there in the stdout JSONL:
