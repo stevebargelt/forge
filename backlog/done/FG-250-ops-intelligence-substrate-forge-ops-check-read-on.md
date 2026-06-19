@@ -1,8 +1,9 @@
 ---
 id: FG-250
 type: story
-status: active
+status: done
 title: "Ops intelligence substrate — forge ops check: read-only incident detection with recommended-action metadata"
+closed: 2026-06-19
 ---
 
 **Reframe:** not an "Ops dashboard MVP" — an **Ops intelligence substrate**. One detection core off the SQLite blackboard, many consumers. Derived from two research lenses (run-ops-surface-lens-a-detection-surface-6fbb91 = detection surface: 15 surfaced / 24 latent-detectable / 7 schema-blocked; run-ops-surface-lens-b-operator-pain-e2645a = 8 ranked operator pains) + user direction 2026-06-02.

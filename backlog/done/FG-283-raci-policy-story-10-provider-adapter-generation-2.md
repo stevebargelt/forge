@@ -1,8 +1,9 @@
 ---
 id: FG-283
 type: story
-status: active
+status: done
 title: "RACI policy Story 10: provider adapter generation (#253 seam)"
+closed: 2026-06-19
 ---
 
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.

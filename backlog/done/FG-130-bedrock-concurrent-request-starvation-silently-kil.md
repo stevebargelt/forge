@@ -1,8 +1,9 @@
 ---
 id: FG-130
 type: story
-status: active
+status: done
 title: Bedrock concurrent-request starvation silently kills a parallel red
+closed: 2026-06-19
 ---
 
 **Why:** Caught 2026-05-13 during the #127 forge run's build phase. 5 reds dispatched in parallel (red-wide, red-narrow, red-frontend, red-backend, red-security) at 18:11. Four produced their first stdout within 30s of start. **red-security produced zero stdout for 5 full minutes**, hit forge's idle-watchdog kill at 18:16, container terminated. DB recorded the verdict as default-`inconclusive` (0.5 confidence, empty findings) because gate.ts handles "task failed without writing result.json" by inferring an inconclusive verdict.

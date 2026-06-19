@@ -1,8 +1,9 @@
 ---
 id: FG-88
 type: story
-status: active
+status: done
 title: "Corpus consistency: propagate new components into affected existing screens"
+closed: 2026-06-19
 ---
 
 **Why:** Caught 2026-05-08 reviewing phase-flow design output. The pill row (#71) is a new component that, once implemented, will appear above the task list in many existing dashboard screens — 02 (task-list), 03 (task-detail-generic), 05 (task-detail-gate), 08 (task-detail-blocked-by-red), 11, 17, 18, 19, 20, etc. The current design corpus shows those screens *without* pills (drawn pre-pill-row). After implementation: live dashboard shows pills everywhere, corpus shows pills in isolation only. Mismatch.

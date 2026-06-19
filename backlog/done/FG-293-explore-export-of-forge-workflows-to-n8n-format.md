@@ -1,8 +1,9 @@
 ---
 id: FG-293
 type: story
-status: active
+status: done
 title: Explore export of forge workflows to n8n format
+closed: 2026-06-19
 ---
 
 **Spike / exploration.** Evaluate exporting forge workflows (and/or completed run DAGs) to n8n's workflow JSON format. Decide whether it's worth building, and if so, which direction.

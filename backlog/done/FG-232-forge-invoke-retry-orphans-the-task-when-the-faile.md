@@ -1,8 +1,9 @@
 ---
 id: FG-232
 type: story
-status: active
+status: done
 title: forge invoke retry orphans the task when the failed attempt already auto-closed the run
+closed: 2026-06-19
 ---
 
 Hit during the AWN-7 Pixtron regression Test 1. Sequence:

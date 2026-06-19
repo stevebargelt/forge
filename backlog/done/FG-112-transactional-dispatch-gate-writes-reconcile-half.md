@@ -1,8 +1,9 @@
 ---
 id: FG-112
 type: story
-status: active
+status: done
 title: "Transactional dispatch + gate writes (reconcile-half landed as #109)"
+closed: 2026-06-19
 ---
 
 **Why:** Caught 2026-05-12 alongside #109. The reconcile-half of "wrap multi-write per-task sequences in a transaction" shipped on `951824e` (3 writes per task, fault-injection tests, full rollback semantics). The same shape exists in:

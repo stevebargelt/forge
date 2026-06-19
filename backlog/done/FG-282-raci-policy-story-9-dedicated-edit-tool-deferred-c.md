@@ -1,8 +1,9 @@
 ---
 id: FG-282
 type: story
-status: active
+status: done
 title: "RACI policy Story 9: dedicated edit tool (deferred convenience)"
+closed: 2026-06-19
 ---
 
 **Epic:** #273. **PRD:** `docs/prds/raci-routing-policy.md`.

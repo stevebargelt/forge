@@ -1,8 +1,9 @@
 ---
 id: FG-184
 type: story
-status: active
+status: done
 title: "Auth-profile polish (optional follow-ups from #176)"
+closed: 2026-06-19
 ---
 
 Optional refinements after the #176 auth-profile epic shipped (none blocking):

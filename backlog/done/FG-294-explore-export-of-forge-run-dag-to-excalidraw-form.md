@@ -1,8 +1,9 @@
 ---
 id: FG-294
 type: story
-status: active
+status: done
 title: Explore export of forge run DAG to Excalidraw format
+closed: 2026-06-19
 ---
 
 **Spike / exploration.** Export a forge run's task DAG (and/or a workflow definition) to Excalidraw's `.excalidraw` scene JSON for a sketchable, shareable diagram.

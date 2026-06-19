@@ -1,8 +1,9 @@
 ---
 id: FG-148
 type: story
-status: active
+status: done
 title: "red-narrow investigation: 6 of 7 verdicts are process-noise; rework or retire"
+closed: 2026-06-19
 ---
 
 Filed 2026-05-26 based on the same audit as #147.

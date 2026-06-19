@@ -1,8 +1,9 @@
 ---
 id: FG-61
 type: story
-status: active
+status: done
 title: Electron shell investigation (deferred)
+closed: 2026-06-19
 ---
 
 **Why:** The dashboard is becoming forge's primary UX (see #57 + FORGE-DEC-014). At some point it should be a native app, not a localhost browser tab. Native menus, native shortcuts, OS notifications, no "is this exposed to the network?" question, no CORS dance.

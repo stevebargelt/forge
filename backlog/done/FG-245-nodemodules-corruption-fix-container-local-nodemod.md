@@ -1,8 +1,9 @@
 ---
 id: FG-245
 type: story
-status: active
+status: done
 title: "node_modules corruption fix: container-local node_modules volume in spawn.ts (supersedes FORGE-DEC-011)"
+closed: 2026-06-19
 ---
 
 Root cause is grpcfuse xattr + CyberArk EDR (environmental, NOT arch — #187 does NOT fix it; orthogonal). Fix = container-local node_modules volume in spawn.ts (standard Docker shadow-volume pattern) so the container never writes native-module artifacts back through the grpcfuse project mount. Supersedes FORGE-DEC-011's 'no code fix yet' status.

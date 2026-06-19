@@ -1,8 +1,9 @@
 ---
 id: FG-73
 type: story
-status: active
+status: done
 title: "Reds-on-investigators: category mismatch; redirect parallel scrutiny to peer-investigation"
+closed: 2026-06-19
 ---
 
 **Why this is the wrong shape today, not a prompt-fix problem.** Caught 2026-05-08 mid-investigation run on `task-investigate-f6ed49`. Both red-wide and red-narrow returned `verdict: "fail"` with high-severity findings that *restated the investigator's own findings about the topaz codebase*, not critiques of the investigator's work. Initial diagnosis was "reds drifted out of scope; tighten their seed prompts." That's wrong — the deeper bug is in the verdict vocabulary itself.

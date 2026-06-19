@@ -1,8 +1,9 @@
 ---
 id: FG-173
 type: story
-status: active
+status: done
 title: "v2 has no idle-watchdog — hung agents run forever (re-files #74)"
+closed: 2026-06-19
 ---
 
 **v2-shaped re-file of #74**, which closed 2026-05-26 with "Re-file a fresh v2-shaped ticket if/when it bites." It bit on 2026-05-29.

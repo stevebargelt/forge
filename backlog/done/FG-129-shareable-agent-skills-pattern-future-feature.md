@@ -1,8 +1,9 @@
 ---
 id: FG-129
 type: story
-status: active
+status: done
 title: Shareable agent-skills pattern (future feature)
+closed: 2026-06-19
 ---
 
 **Why:** While doing #126 (pair-coding side) on 2026-05-13, the pattern surfaced as something with reach beyond forge. The combination of Mario's Skills-format choice + the symlink-on-host / bind-mount-in-container duality is generally useful — any tool the human and an agent both want (screenshot, eval, search, transcript, calendar) wants both surfaces. The natural product is something like "use Mario's tools from this repo, with a small install dance for both surfaces."

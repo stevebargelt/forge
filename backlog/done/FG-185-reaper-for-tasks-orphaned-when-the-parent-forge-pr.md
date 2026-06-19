@@ -1,8 +1,9 @@
 ---
 id: FG-185
 type: story
-status: active
+status: done
 title: Reaper for tasks orphaned when the parent forge process is killed (#173 Tier-2, hit live)
+closed: 2026-06-19
 ---
 
 **Hit live 2026-05-29** running a parallel red panel wrapped in `timeout 600 bash -c "forge invoke ... & ... & wait"`. The wall-clock timeout killed the parent forge processes mid-review. The `docker run --rm` containers were torn down (verified: no forge-* container running or exited afterward), but the killed task stayed `status=running` forever — the dashboard/`forge status` showed it "running for an hour" when nothing was actually running.
