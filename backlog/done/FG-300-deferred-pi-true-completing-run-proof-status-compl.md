@@ -1,8 +1,9 @@
 ---
 id: FG-300
 type: story
-status: active
+status: done
 title: "[DEFERRED] pi: TRUE completing-run proof — status complete + usage row from a live pi task"
+closed: 2026-06-19
 ---
 
 **Status: DEFERRED — requires paid extra credits or an alternate free provider. Not scheduled.** This is the real end-to-end Crawl exit that #296 did NOT achieve. Until this is satisfied, do not describe the Pi Crawl as having a proven completing run.

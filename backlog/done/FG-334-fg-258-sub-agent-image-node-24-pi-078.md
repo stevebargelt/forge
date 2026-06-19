@@ -1,9 +1,10 @@
 ---
 id: FG-334
 type: story
-status: active
+status: done
 title: "FG-258 sub: agent image -> Node 24, pi -> 0.78+"
 created: 2026-06-19
+closed: 2026-06-19
 ---
 
 **Why:** The `agent-dev-worker` Docker image is pinned to Node 20 (`setup_20.x`). That forces pi (`@earendil-works/pi-coding-agent`) onto the legacy 0.74.2 line — the Dockerfile comment states the 0.78+ line requires Node >=22 and can only be adopted "after the image moves to Node 22." pi is the FG-258 provider pilot, so this directly blocks moving FG-258 onto current pi.
