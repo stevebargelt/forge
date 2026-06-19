@@ -23,7 +23,7 @@ import { join } from "node:path";
 import type { Task, TaskPackage, Run } from "../types/index.js";
 import type { Workflow, Step, Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
-import { analyzePiFailure } from "./pi-result.js";
+import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -376,8 +376,21 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
   if (exitCode !== 0 && !resultRaw) {
-    const error = `container_crash (exit ${exitCode})`;
-    failTask(taskId, { runId, kind: classify({ exitCode, resultState: "missing" }), error });
+    // #228: before defaulting to a generic container_crash, attribute the cause
+    // from the runtime's structured stdout — a provider/model error (invalid
+    // model, quota, 4xx) is classified `model_error` with the cause surfaced.
+    let kind = classify({ exitCode, resultState: "missing" });
+    let error = `container_crash (exit ${exitCode})`;
+    const a = analyzeProviderFailure({
+      logFormat: runtimeMeta.logFormat,
+      runtimeKind: runtimeMeta.runtimeKind,
+      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+    });
+    if (a.modelError) {
+      kind = classify({ source: "model_error" });
+      if (a.error) error = a.error;
+    }
+    failTask(taskId, { runId, kind, error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -398,11 +411,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // not generic result_missing.
     let error = "no_result_json";
     let kind = classify({ resultState: "missing" });
-    if (runtimeMeta.runtimeKind === "pi") {
-      const a = analyzePiFailure(existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "");
-      error = a.error;
-      if (a.modelError) kind = classify({ source: "model_error" });
-    }
+    const a = analyzeProviderFailure({
+      logFormat: runtimeMeta.logFormat,
+      runtimeKind: runtimeMeta.runtimeKind,
+      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+    });
+    if (a.error) error = a.error;
+    if (a.modelError) kind = classify({ source: "model_error" });
     failTask(taskId, { runId, kind, error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };

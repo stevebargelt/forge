@@ -21,7 +21,7 @@ import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
-import { analyzePiFailure } from "./pi-result.js";
+import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
@@ -1180,8 +1180,20 @@ async function runContainer(args: {
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
   if (exitCode !== 0 && !resultRaw) {
-    const msg = `container_crash (exit ${exitCode})`;
-    failTask(args.taskId, { runId: args.runId, kind: classify({ exitCode, resultState: "missing" }), error: msg });
+    // #228: attribute a provider/model error from structured stdout before
+    // defaulting to a generic container_crash.
+    let kind = classify({ exitCode, resultState: "missing" });
+    let msg = `container_crash (exit ${exitCode})`;
+    const a = analyzeProviderFailure({
+      logFormat: runtimeMeta.logFormat,
+      runtimeKind: runtimeMeta.runtimeKind,
+      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+    });
+    if (a.modelError) {
+      kind = classify({ source: "model_error" });
+      if (a.error) msg = a.error;
+    }
+    failTask(args.taskId, { runId: args.runId, kind, error: msg });
     return { kind: "failed", error: msg };
   }
   let result: unknown;
@@ -1199,11 +1211,13 @@ async function runContainer(args: {
     // not generic result_missing.
     let msg = "no_result_json";
     let kind = classify({ resultState: "missing" });
-    if (runtimeMeta.runtimeKind === "pi") {
-      const a = analyzePiFailure(existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "");
-      msg = a.error;
-      if (a.modelError) kind = classify({ source: "model_error" });
-    }
+    const a = analyzeProviderFailure({
+      logFormat: runtimeMeta.logFormat,
+      runtimeKind: runtimeMeta.runtimeKind,
+      stdoutRaw: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+    });
+    if (a.error) msg = a.error;
+    if (a.modelError) kind = classify({ source: "model_error" });
     failTask(args.taskId, { runId: args.runId, kind, error: msg });
     return { kind: "failed", error: msg };
   }
