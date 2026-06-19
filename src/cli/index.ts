@@ -1,3 +1,4 @@
+import "./node-preflight.js"; // FG-336: must be FIRST — fail clean on too-old Node before better-sqlite3 loads
 import { Command } from "commander";
 import { version } from "../../package.json" with { type: "json" };
 import { registerNew } from "./commands/new.js";
