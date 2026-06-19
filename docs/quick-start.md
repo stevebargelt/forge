@@ -179,7 +179,7 @@ forge upgrade --rebuild-image  # also rebuilds the agent Docker image (run when 
 forge upgrade --dry-run        # see what would change without doing it
 ```
 
-After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, and policies — and surfaces any problems before the next dispatch. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
+After the upgrade steps complete, `forge upgrade` automatically runs a read-only release check — image, runtime CLIs, auth credentials, policies, and seed drift — and surfaces any problems before the next dispatch. Run `forge doctor` for the full report, or `forge setup` on a new machine to create the active model policy from the seed at the same time.
 
 New machine? See `docs/work-laptop-setup.md` for the full setup checklist.
 

@@ -18,7 +18,7 @@ This runs four steps in sequence:
 3. **`FORCE=1 ./scripts/install-seeds.sh`** to refresh `~/.forge/agents/`, `constraints/`, `workflows/`, `runtimes/`, and `forge-raci.md` from the new seeds — then **recompile the derived `~/.forge/routing-policy.yml`** from the refreshed RACI. The routing policy is generated, never hand-maintained, so upgrade regenerates it in lockstep; you never run `forge route compile` by hand after an upgrade. A compile failure is reported loudly with the exact reason (the rest of the upgrade still runs).
 4. **Provision the current project** (when the cwd's `CLAUDE.md` looks like a forge project — a fence marker *or* a `# forge orchestrator` heading). This **always** installs/refreshes the per-machine pieces — slash commands (`/orient`, `/handoff`), Claude session hooks, `.gitignore` entries — because those are machine-local and not committed, so every new machine needs them even when `CLAUDE.md` is committed. It then refreshes the orchestrator **block**: replaced in place when fenced (head/tail preserved); **repaired** when only the end marker is present (start re-inserted before the heading); and for an unfenced legacy block or a lone start marker it leaves the block untouched and prints exactly which markers to add (the end can't be inferred without risking your project-specific tail). `forge init` is for genuinely new projects; `forge upgrade` is the path for existing ones (#231).
 
-Output is compact — one line per step plus any orphan-warnings from the seeds install. After the steps complete, a read-only release check runs automatically — it verifies the agent image, in-image runtime CLIs, auth credentials, and policies, surfacing any problems before the next dispatch. Run `forge doctor` for the full report.
+Output is compact — one line per step plus any orphan-warnings from the seeds install. After the steps complete, a read-only release check runs automatically — it verifies the agent image, in-image runtime CLIs, auth credentials, policies, and seed drift (installed `~/.forge` seeds vs the running code), surfacing any problems before the next dispatch. Run `forge doctor` for the full report.
 
 > `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after pulling Dockerfile changes (e.g. a new Codex CLI), add `--rebuild-image`. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
 
@@ -80,7 +80,7 @@ FORCE=1 ./scripts/install-seeds.sh
 bash docker/build.sh                # rebuild the agent image (only if the Dockerfile changed)
 cd ~/code/<your-project>
 forge init                          # only if this project has the orchestrator block
-forge doctor                        # release check: image, runtime CLIs, auth, policies
+forge doctor                        # release check: image, runtime CLIs, auth, policies, seed drift
 ```
 
 This mirrors `forge upgrade` step-for-step, plus the two things the command makes optional/automatic: the image rebuild (`forge upgrade --rebuild-image`) and the release check that runs automatically at the end of `forge upgrade` (here run by hand as `forge doctor`). Knowing the manual flow makes the CLI command unnecessary if you ever need to debug something.
