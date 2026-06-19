@@ -53,10 +53,10 @@ Columns the dashboard reads:
 ### `events` table
 
 Columns the dashboard reads:
-- `event_type` — string; dashboard reads all event types for the lifecycle timeline; compression endpoints and task detail filter on `compression.verification`
-- `payload` — nullable JSON string; compression events carry `{ agent_compressed, orchestrator_compressed, fields_compressed, original_size_bytes?, compressed_size_bytes?, compression_ratio?, method?, ccr_id? }` — size/ratio/ccr_id fields are optional (older events may omit them)
+- `event_type` — string; dashboard reads all event types for the lifecycle timeline
+- `payload` — nullable JSON string; event-specific structured data
 - `task_id` — string, foreign key to tasks
-- `run_id` — string, foreign key to runs (used by aggregate compression endpoints)
+- `run_id` — string, foreign key to runs
 - `created_at` — ISO 8601 timestamp string
 
 ## Filesystem contract
@@ -148,7 +148,7 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/feed` | `since`, `limit` (1–500, default 100), `projectDir` | Recent agent outputs across all projects |
 | `GET /api/in-flight` | `projectDir` | Currently-running / awaiting-gate tasks |
 | `GET /api/projects` | — | Project registry: name, color, last activity, live sessions |
-| `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates + compression stats) |
+| `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates) |
 | `GET /api/governance` | `projectDir` | Effective routing policy, host-vs-project diff, recent audit |
 | `GET /api/ops` | `since` (default `30d`), `projectDir` | Ops metrics rollup |
 | `GET /api/usage` | `groupBy` (`role\|workflow\|project\|model\|alias`), `since` (default `30d`), `projectDir`, `limit` (1–200, default 50) | Token usage rollup by dimension |
@@ -168,105 +168,7 @@ Returns `404` if the task is not found. On success, returns a JSON object with t
 - `events` — array of `{ eventType, payload, createdAt }` from the `events` table, ordered ascending
 - `failureKind` — nullable string: `failure_kind` field from the most-recent `task.failed` event; `null` if the task didn't fail
 - `idle` — nullable idle-countdown object (non-null only for running tasks)
-- `compressionEvent` — nullable `CompressionEventData` object (FG-323): the most-recent `compression.verification` event for this task, or `null` if none exists
-- `resultSizeBytes` — nullable number (FG-323): UTF-8 byte length of the raw `tasks.result` JSON string; `null` if the task has no result
-
-#### `compressionEvent` shape
-
-When non-null, `compressionEvent` has the following fields (all camelCase):
-
-```json
-{
-  "agentCompressed": true,
-  "orchestratorCompressed": false,
-  "fieldsCompressed": ["result", "context"],
-  "originalSizeBytes": 204800,
-  "compressedSizeBytes": 51200,
-  "compressionRatio": 0.25,
-  "method": "zstd",
-  "ccrId": "ccr_abc123"
-}
-```
-
-- `agentCompressed` / `orchestratorCompressed` — boolean, always present
-- `fieldsCompressed` — string array, always present (may be empty)
-- `originalSizeBytes` / `compressedSizeBytes` / `compressionRatio` / `method` — nullable; older events may omit them (arrive as `null`)
-- `ccrId` — nullable string; the compression-candidate-review id if present in the event payload
-
-### Compression endpoints (FG-321)
-
-All four accept: `since` (default `30d`; supports `Nd` shorthand or ISO date; `all` for no cutoff), `projectDir` (filter to one project).
-
-Derived from `compression.verification` events in the `events` table.
-
-#### `GET /api/compression/summary`
-
-Aggregate stats across all compression events in the window.
-
-```json
-{
-  "totalEvents": 142,
-  "agentCompressed": 98,
-  "orchestratorCompressed": 44,
-  "totalOriginalBytes": 1048576,
-  "totalCompressedBytes": 786432,
-  "bytesSaved": 262144,
-  "avgCompressionRatio": 0.75
-}
-```
-
-`avgCompressionRatio` is `0` when no events carried a `compression_ratio` field.
-
-#### `GET /api/compression/timeseries`
-
-Daily time-series. One object per calendar day that had at least one event.
-
-```json
-[
-  {
-    "date": "2026-06-01",
-    "events": 12,
-    "agentCompressed": 8,
-    "orchestratorCompressed": 4,
-    "bytesSaved": 32768
-  }
-]
-```
-
-Sorted ascending by date.
-
-#### `GET /api/compression/by-role`
-
-Per-agent-role breakdown. Also accepts `limit` (1–200, default 50) — applied before grouping (limits raw event rows fetched, not the number of roles returned). Sorted descending by event count.
-
-```json
-[
-  {
-    "agentRole": "engineer",
-    "events": 60,
-    "agentCompressed": 42,
-    "orchestratorCompressed": 18,
-    "bytesSaved": 131072,
-    "avgCompressionRatio": 0.72
-  }
-]
-```
-
-`agentRole` is `"(unknown)"` when the task has no `agent_role` recorded.
-
-#### `GET /api/compression/methods`
-
-Compression method distribution. Sorted descending by count.
-
-```json
-[
-  { "method": "zstd", "count": 98 },
-  { "method": "gzip", "count": 40 },
-  { "method": "(unknown)", "count": 4 }
-]
-```
-
-`method` is `"(unknown)"` when the event payload omits the `method` field.
+- `resultSizeBytes` — nullable number: UTF-8 byte length of the raw `tasks.result` JSON string; `null` if the task has no result
 
 ## CLI surface (for mutations)
 

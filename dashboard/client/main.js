@@ -3,10 +3,9 @@
 import { h, render } from "https://esm.sh/preact@10.24.0";
 import { useState, useEffect, useCallback } from "https://esm.sh/preact@10.24.0/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
-import { renderResultByAgent, md, renderCompressionBadge, renderCompressionDetail } from "./renderers.js";
+import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
-import { CompressionView } from "./compression.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -34,13 +33,6 @@ function App() {
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
   const [governance, setGovernance] = useState(null);
-  const [compressionSummary, setCompressionSummary] = useState(null);
-  const [compressionTimeSeries, setCompressionTimeSeries] = useState([]);
-  const [compressionByRole, setCompressionByRole] = useState([]);
-  const [compressionMethods, setCompressionMethods] = useState([]);
-  const [compressionSince, setCompressionSince] = useState("30d");
-  const [proxyStats, setProxyStats] = useState(null);
-  const [proxyTelemetry, setProxyTelemetry] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -122,34 +114,6 @@ function App() {
     return () => clearInterval(id);
   }, [pollGovernance, view]);
 
-  const pollCompression = useCallback(async () => {
-    try {
-      const pq = projectFilter ? `&projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
-      const [sumRes, tsRes, roleRes, methRes, proxyStatsRes, proxyTelRes] = await Promise.all([
-        fetch(`/api/compression/summary?since=${compressionSince}${pq}`),
-        fetch(`/api/compression/timeseries?since=${compressionSince}${pq}`),
-        fetch(`/api/compression/by-role?since=${compressionSince}${pq}`),
-        fetch(`/api/compression/methods?since=${compressionSince}${pq}`),
-        fetch(`/api/compression/proxy/stats`),
-        fetch(`/api/compression/proxy/telemetry`),
-      ]);
-      if (sumRes.ok) setCompressionSummary(await sumRes.json());
-      if (tsRes.ok) setCompressionTimeSeries(await tsRes.json());
-      if (roleRes.ok) setCompressionByRole(await roleRes.json());
-      if (methRes.ok) setCompressionMethods(await methRes.json());
-      if (proxyStatsRes.ok) setProxyStats(await proxyStatsRes.json());
-      if (proxyTelRes.ok) setProxyTelemetry(await proxyTelRes.json());
-      setNow(Date.now());
-    } catch (e) { setError(String(e)); }
-  }, [compressionSince, projectFilter]);
-
-  useEffect(() => {
-    if (view !== "compression") return;
-    pollCompression();
-    const id = setInterval(pollCompression, USAGE_POLL_MS);
-    return () => clearInterval(id);
-  }, [pollCompression, view]);
-
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -177,7 +141,6 @@ function App() {
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>governance</button>
-            <button class=${"tab " + (view === "compression" ? "tab-active" : "")} onClick=${() => switchView("compression")}>compression</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -200,17 +163,6 @@ function App() {
             onGroupByChange=${setUsageGroupBy}
             since=${usageSince}
             onSinceChange=${setUsageSince}
-          />`
-        : view === "compression"
-        ? html`<${CompressionView}
-            summary=${compressionSummary}
-            timeSeries=${compressionTimeSeries}
-            byRole=${compressionByRole}
-            methods=${compressionMethods}
-            since=${compressionSince}
-            onSinceChange=${setCompressionSince}
-            proxyStats=${proxyStats}
-            proxyTelemetry=${proxyTelemetry}
           />`
         : html`
           ${projectFilter ? html`
@@ -247,7 +199,6 @@ function initialView() {
   if (h === "usage") return "usage";
   if (h === "ops") return "ops";
   if (h === "governance") return "governance";
-  if (h === "compression") return "compression";
   return "activity";
 }
 
@@ -577,7 +528,6 @@ function TaskDetail({ taskId, onClose }) {
           · ${detail.task.phase} · ${detail.task.status}
           ${detail.failureKind ? html`<span class="badge status-failed" style="margin-left: 6px;">${detail.failureKind}</span>` : null}
         </div>
-        <div style="margin-bottom: 12px;">${renderCompressionBadge(detail.compressionEvent ?? null, detail.resultSizeBytes ?? null)}</div>
 
         ${detail.idle ? html`
           <div class="subcard" style="margin-bottom: 16px;">
@@ -593,7 +543,6 @@ function TaskDetail({ taskId, onClose }) {
 
         <h3>Result</h3>
         ${rendered ?? html`<pre>${JSON.stringify(detail.task.result, null, 2)}</pre>`}
-        ${renderCompressionDetail(detail.compressionEvent ?? null)}
 
         ${detail.verdicts.length > 0 ? html`
           <h3>Verdicts (${detail.verdicts.length})</h3>

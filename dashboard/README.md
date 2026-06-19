@@ -19,7 +19,6 @@ Navigation tabs:
 - **usage** — token usage rollup and time-series, grouped by role / workflow / project / model.
 - **ops** — operational metrics rollup.
 - **governance** — effective routing policy, host-vs-project diff, recent audit.
-- **compression** — compression stats derived from `compression.verification` events. Shows a time-window filter (7d / 30d / 90d / all), plus health summary, daily time-series, per-role breakdown, and method distribution when data is present. Displays "No compression data yet. Agents will report compression stats as they run." when no events exist.
 
 Click any activity card to see the full result.json + container stdout + related verdicts/gates.
 
@@ -29,7 +28,6 @@ The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. 
 
 - **`/api/feed`**, **`/api/in-flight`**, **`/api/projects`**, **`/api/task/:id`** — core activity data
 - **`/api/usage`**, **`/api/usage/timeseries`**, **`/api/usage/model-mix`** — token usage metrics
-- **`/api/compression/summary`**, **`/api/compression/timeseries`**, **`/api/compression/by-role`**, **`/api/compression/methods`** — compression metrics derived from `compression.verification` events
 
 All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
 

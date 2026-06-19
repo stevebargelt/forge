@@ -3,7 +3,6 @@
 // + helpers on the module's exports.
 
 import { h } from "https://esm.sh/preact@10.24.0";
-import { useState } from "https://esm.sh/preact@10.24.0/hooks";
 import htm from "https://esm.sh/htm@3.1.1";
 import { marked } from "https://esm.sh/marked@14.1.4";
 
@@ -205,72 +204,6 @@ export function renderRed(r) {
       <h3>Notes</h3>
       <div class="muted"><${MD} source=${r.notes} /></div>
     ` : null}
-  `;
-}
-
-// ---- compression (FG-323) ----
-
-// Formats bytes as "120KB" or "1.2MB".
-function fmtBytes(n) {
-  if (n == null) return "?";
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)}KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-// Returns a badge element for a compression event, or a "below threshold" note.
-// compressionEvent: CompressionEventData | null
-// resultSizeBytes: number | null
-export function renderCompressionBadge(compressionEvent, resultSizeBytes) {
-  if (!compressionEvent) {
-    if (resultSizeBytes != null) {
-      return html`<span class="muted faint" style="font-size: 12px;">Result size: ${fmtBytes(resultSizeBytes)} (below compression threshold)</span>`;
-    }
-    return null;
-  }
-
-  const orig = fmtBytes(compressionEvent.originalSizeBytes);
-  const comp = fmtBytes(compressionEvent.compressedSizeBytes);
-  const pct = compressionEvent.compressionRatio != null
-    ? `${Math.round(compressionEvent.compressionRatio * 100)}%`
-    : null;
-
-  if (compressionEvent.agentCompressed) {
-    return html`<span class="badge compression-badge-agent">✓ Compressed: ${orig} → ${comp}${pct ? ` (${pct})` : ""}</span>`;
-  }
-  if (compressionEvent.orchestratorCompressed) {
-    return html`<span class="badge compression-badge-orch">⚠ Orchestrator compressed: ${orig} → ${comp}${pct ? ` (${pct})` : ""}</span>`;
-  }
-  return null;
-}
-
-// Returns an expandable accordion with compression details.
-export function renderCompressionDetail(compressionEvent) {
-  if (!compressionEvent) return null;
-  return html`<${CompressionDetail} ev=${compressionEvent} />`;
-}
-
-function CompressionDetail({ ev }) {
-  const [open, setOpen] = useState(false);
-  return html`
-    <div class="subcard" style="margin-top: 8px;">
-      <div class="row" style="cursor: pointer; user-select: none;" onClick=${() => setOpen((o) => !o)}>
-        <span class="orch-chevron ${open ? "open" : ""}">▸</span>
-        <span style="font-size: 12px; color: var(--fg-dim);">Compression detail</span>
-      </div>
-      ${open ? html`
-        <div style="margin-top: 10px; font-size: 12px; display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px;">
-          <span class="muted">Method</span><span>${ev.method ?? "none"}</span>
-          ${ev.fieldsCompressed && ev.fieldsCompressed.length > 0 ? html`
-            <span class="muted">Fields</span><span class="mono">[${ev.fieldsCompressed.join(", ")}]</span>
-          ` : null}
-          ${ev.originalSizeBytes != null ? html`<span class="muted">Original size</span><span>${fmtBytes(ev.originalSizeBytes)}</span>` : null}
-          ${ev.compressedSizeBytes != null ? html`<span class="muted">Compressed size</span><span>${fmtBytes(ev.compressedSizeBytes)}</span>` : null}
-          ${ev.compressionRatio != null ? html`<span class="muted">Compression ratio</span><span>${Math.round(ev.compressionRatio * 100)}%</span>` : null}
-          ${ev.ccrId ? html`<span class="muted">CCR ID</span><span class="mono">${ev.ccrId}</span>` : null}
-        </div>
-      ` : null}
-    </div>
   `;
 }
 

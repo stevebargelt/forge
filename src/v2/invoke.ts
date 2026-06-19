@@ -44,9 +44,6 @@ import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthErro
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { renderContract, type TaskContract } from "./contract.js";
-import { compressPrompt } from "./compression.js";
-import { maybeOrchestratorCompress } from "./compression-verification.js";
-import { checkProxyHealth } from "./check-proxy.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -300,35 +297,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     ...(resolution.model ? { model: resolution.model } : {}),
   };
 
-  // FG-329: When compression_mode=proxy, the headroom proxy handles compression
-  // automatically for all SDK calls. Check proxy health and skip manual compression.
-  // When compression_mode=mcp or none, compress the system prompt here.
-  if (runtime.compression_mode === "proxy") {
-    const proxyHealth = await checkProxyHealth();
-    if (!proxyHealth.healthy) {
-      console.warn(
-        `forge: headroom proxy unhealthy (${proxyHealth.error}) — ` +
-          `agent will fail if it tries to call the LLM. Start proxy: scripts/install-headroom.sh`,
-      );
-    } else if (proxyHealth.version) {
-      console.log(`forge: headroom proxy healthy (v${proxyHealth.version})`);
-    }
-  }
-
-  const systemPrompt =
-    runtime.compression_mode === "proxy"
-      ? taskPackage.composedSystemPrompt
-      : (await compressPrompt(taskPackage.composedSystemPrompt)).content;
-
-  if (runtime.compression_mode !== "proxy") {
-    const meta = (await compressPrompt(taskPackage.composedSystemPrompt)).meta;
-    if (meta.method !== "none") {
-      console.log(
-        `forge: compression taskId=${taskId} original=${meta.original_size}B ` +
-          `compressed=${meta.compressed_size}B ratio=${meta.compression_ratio.toFixed(3)} method=${meta.method}`,
-      );
-    }
-  }
+  const systemPrompt = taskPackage.composedSystemPrompt;
 
   const ctx: SpawnContext = {
     TASK_ID: taskId,
@@ -450,19 +419,6 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       closeRunIfIdle(false);
       return { runId, taskId, status: "failed", error };
     }
-  }
-
-  // FG-317: orchestrator compression safety net — if the result exceeds 20KB and
-  // the agent didn't compress, compress large fields post-hoc and log a warning.
-  const { result: compressedResult, verification } = await maybeOrchestratorCompress({
-    result,
-    resultRawSize: Buffer.byteLength(resultRaw, "utf8"),
-    resultPath,
-    taskId,
-  });
-  result = compressedResult;
-  if (verification) {
-    logEvent("compression.verification", { runId, taskId, payload: verification });
   }
 
   // AWN-2 task-level race: a concurrent `forge cancel` may have already marked

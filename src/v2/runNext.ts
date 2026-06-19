@@ -38,7 +38,6 @@ import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
-import { maybeOrchestratorCompress } from "./compression-verification.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
@@ -1209,19 +1208,7 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
 
-  // FG-317: orchestrator compression safety net — if the result exceeds 20KB and
-  // the agent didn't compress, compress large fields post-hoc and log a warning.
-  const { result: compressedResult, verification } = await maybeOrchestratorCompress({
-    result,
-    resultRawSize: Buffer.byteLength(resultRaw, "utf8"),
-    resultPath,
-    taskId: args.taskId,
-  });
-  if (verification) {
-    logEvent("compression.verification", { runId: args.runId, taskId: args.taskId, payload: verification });
-  }
-
-  return { kind: "ok", result: compressedResult };
+  return { kind: "ok", result };
 }
 
 function dispatchManualStep(runId: string, step: Step): string {

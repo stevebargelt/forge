@@ -69,10 +69,6 @@ RUN npm install -g pnpm@10 yarn
 ARG TSX_VERSION=4.22.4
 RUN npm install -g tsx@${TSX_VERSION} && tsx --version
 
-# headroom-ai MCP server (#316): context compression for agent containers.
-# Installs the headroom_compress / headroom_retrieve MCP tools used by agent seeds.
-RUN pip3 install headroom-ai[mcp]
-
 # System libraries for headless Chromium (browser-tools skill, #128). The
 # chromium BINARY is Playwright's baked, arm64-capable build (#180 block below),
 # symlinked to /usr/local/bin/chromium right after that install. #187 dropped the

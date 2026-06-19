@@ -40,10 +40,7 @@ export type EventType =
   // #202/#203: an orchestrator-declared checkpoint (forge notify milestone). The
   // orchestrator owns *meaning*; forge owns delivery/dedupe/policy. Always
   // recorded (audit trail) regardless of whether a push was sent.
-  | "orchestrator.milestone"
-  // FG-317: post-container result compression audit. Emitted once per task when
-  // a result exceeds 20KB; records whether the agent or orchestrator compressed.
-  | "compression.verification";
+  | "orchestrator.milestone";
 
 export type Event = {
   id: number;

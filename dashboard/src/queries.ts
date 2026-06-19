@@ -209,18 +209,6 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
   });
 }
 
-// FG-323: per-task compression data sourced from compression.verification events.
-export type CompressionEventData = {
-  agentCompressed: boolean;
-  orchestratorCompressed: boolean;
-  fieldsCompressed: string[];
-  originalSizeBytes: number | null;
-  compressedSizeBytes: number | null;
-  compressionRatio: number | null;
-  method: string | null;
-  ccrId: string | null;
-};
-
 /** Full task detail including container log tails + verdicts + gates. */
 export type TaskDetail = {
   task: ActivityEntry;
@@ -233,8 +221,7 @@ export type TaskDetail = {
   events: TaskEventEntry[];   // WALK-5: lifecycle timeline
   failureKind: string | null; // WALK-5: machine-readable failure kind, if failed
   idle: IdleInfo | null;      // WALK-5: live activity, running tasks only
-  compressionEvent: CompressionEventData | null; // FG-323: null if no compression.verification event
-  resultSizeBytes: number | null; // FG-323: raw result JSON byte length; null if no result
+  resultSizeBytes: number | null; // raw result JSON byte length; null if no result
 };
 
 // The dashboard polls running-task detail every 3s; reading whole multi-MB
@@ -423,30 +410,6 @@ export function taskDetail(taskId: string): TaskDetail | null {
   const failureKind = deriveFailureKind(events);
   const idle = computeIdle(taskRow.run_id, taskId, taskRow.status, taskRow.started_at);
 
-  // FG-323: look up the single compression.verification event for this task.
-  const compressionRow = db().prepare(`
-    SELECT payload FROM events
-    WHERE task_id = ? AND event_type = 'compression.verification'
-    ORDER BY created_at DESC LIMIT 1
-  `).get(taskId) as { payload: string | null } | undefined;
-
-  let compressionEvent: CompressionEventData | null = null;
-  if (compressionRow?.payload) {
-    try {
-      const p = JSON.parse(compressionRow.payload) as Record<string, unknown>;
-      compressionEvent = {
-        agentCompressed: p["agent_compressed"] === true,
-        orchestratorCompressed: p["orchestrator_compressed"] === true,
-        fieldsCompressed: Array.isArray(p["fields_compressed"]) ? (p["fields_compressed"] as unknown[]).filter((f): f is string => typeof f === "string") : [],
-        originalSizeBytes: typeof p["original_size_bytes"] === "number" ? p["original_size_bytes"] : null,
-        compressedSizeBytes: typeof p["compressed_size_bytes"] === "number" ? p["compressed_size_bytes"] : null,
-        compressionRatio: typeof p["compression_ratio"] === "number" ? p["compression_ratio"] : null,
-        method: typeof p["method"] === "string" ? p["method"] : null,
-        ccrId: typeof p["ccr_id"] === "string" ? p["ccr_id"] : null,
-      };
-    } catch { /* malformed payload — treat as no compression event */ }
-  }
-
   const resultSizeBytes = taskRow.result ? Buffer.byteLength(taskRow.result, "utf8") : null;
 
   return {
@@ -476,7 +439,6 @@ export function taskDetail(taskId: string): TaskDetail | null {
     events,
     failureKind,
     idle,
-    compressionEvent,
     resultSizeBytes,
   };
 }
@@ -802,223 +764,6 @@ export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: stri
     });
   }
   return [...map.values()];
-}
-
-// FG-321: compression metrics derived from compression.verification events.
-// Event payload: { agent_compressed, orchestrator_compressed, fields_compressed,
-//   original_size_bytes?, compressed_size_bytes?, compression_ratio?, method? }
-// Size/ratio fields are optional — older events lack them; queries use COALESCE.
-
-function compressionCutoff(since: string): string | null {
-  if (since === "all") return null;
-  // Try Nd shorthand first.
-  const m = since.match(/^(\d+)d$/);
-  if (m?.[1]) return new Date(Date.now() - parseInt(m[1], 10) * 86400_000).toISOString();
-  // Fall back to treating it as a raw ISO date string.
-  const d = new Date(since);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
-}
-
-export type CompressionSummary = {
-  totalEvents: number;
-  agentCompressed: number;
-  orchestratorCompressed: number;
-  totalOriginalBytes: number;
-  totalCompressedBytes: number;
-  bytesSaved: number;
-  avgCompressionRatio: number;
-};
-
-export function compressionSummary(since = "30d", projectDir?: string): CompressionSummary {
-  const cutoff = compressionCutoff(since);
-  const params: unknown[] = [];
-  let sinceClause = "";
-  if (cutoff) { sinceClause = "AND e.created_at >= ?"; params.push(cutoff); }
-  let projectClause = "";
-  if (projectDir) { projectClause = "AND r.project_dir = ?"; params.push(projectDir); }
-
-  const rows = db().prepare(`
-    SELECT e.payload
-    FROM events e
-    JOIN tasks t ON t.id = e.task_id
-    JOIN runs  r ON r.id = t.run_id
-    WHERE e.event_type = 'compression.verification'
-      ${sinceClause}
-      ${projectClause}
-  `).all(...params) as Array<{ payload: string | null }>;
-
-  let agentCompressed = 0;
-  let orchestratorCompressed = 0;
-  let totalOriginalBytes = 0;
-  let totalCompressedBytes = 0;
-  let ratioSum = 0;
-  let ratioCount = 0;
-
-  for (const row of rows) {
-    if (!row.payload) continue;
-    let p: Record<string, unknown>;
-    try { p = JSON.parse(row.payload) as Record<string, unknown>; } catch { continue; }
-    if (p["agent_compressed"] === true) agentCompressed++;
-    if (p["orchestrator_compressed"] === true) orchestratorCompressed++;
-    if (typeof p["original_size_bytes"] === "number") totalOriginalBytes += p["original_size_bytes"];
-    if (typeof p["compressed_size_bytes"] === "number") totalCompressedBytes += p["compressed_size_bytes"];
-    if (typeof p["compression_ratio"] === "number") { ratioSum += p["compression_ratio"]; ratioCount++; }
-  }
-
-  return {
-    totalEvents: rows.length,
-    agentCompressed,
-    orchestratorCompressed,
-    totalOriginalBytes,
-    totalCompressedBytes,
-    bytesSaved: totalOriginalBytes - totalCompressedBytes,
-    avgCompressionRatio: ratioCount > 0 ? ratioSum / ratioCount : 0,
-  };
-}
-
-export type CompressionTimeSeriesRow = {
-  date: string;
-  events: number;
-  agentCompressed: number;
-  orchestratorCompressed: number;
-  bytesSaved: number;
-};
-
-export function compressionTimeSeries(since = "30d", projectDir?: string): CompressionTimeSeriesRow[] {
-  const cutoff = compressionCutoff(since);
-  const params: unknown[] = [];
-  let sinceClause = "";
-  if (cutoff) { sinceClause = "AND e.created_at >= ?"; params.push(cutoff); }
-  let projectClause = "";
-  if (projectDir) { projectClause = "AND r.project_dir = ?"; params.push(projectDir); }
-
-  const rows = db().prepare(`
-    SELECT date(e.created_at) AS day, e.payload
-    FROM events e
-    JOIN tasks t ON t.id = e.task_id
-    JOIN runs  r ON r.id = t.run_id
-    WHERE e.event_type = 'compression.verification'
-      ${sinceClause}
-      ${projectClause}
-    ORDER BY day ASC
-  `).all(...params) as Array<{ day: string; payload: string | null }>;
-
-  const byDay = new Map<string, { events: number; agentCompressed: number; orchestratorCompressed: number; bytesSaved: number }>();
-  for (const row of rows) {
-    const entry = byDay.get(row.day) ?? { events: 0, agentCompressed: 0, orchestratorCompressed: 0, bytesSaved: 0 };
-    entry.events++;
-    if (row.payload) {
-      let p: Record<string, unknown>;
-      try { p = JSON.parse(row.payload) as Record<string, unknown>; } catch { byDay.set(row.day, entry); continue; }
-      if (p["agent_compressed"] === true) entry.agentCompressed++;
-      if (p["orchestrator_compressed"] === true) entry.orchestratorCompressed++;
-      const orig = typeof p["original_size_bytes"] === "number" ? p["original_size_bytes"] : 0;
-      const comp = typeof p["compressed_size_bytes"] === "number" ? p["compressed_size_bytes"] : 0;
-      entry.bytesSaved += orig - comp;
-    }
-    byDay.set(row.day, entry);
-  }
-
-  return [...byDay.entries()].map(([date, v]) => ({ date, ...v }));
-}
-
-export type CompressionByRoleRow = {
-  agentRole: string;
-  events: number;
-  agentCompressed: number;
-  orchestratorCompressed: number;
-  bytesSaved: number;
-  avgCompressionRatio: number;
-};
-
-export function compressionByRole(since = "30d", projectDir?: string, limit = 50): CompressionByRoleRow[] {
-  const cutoff = compressionCutoff(since);
-  const params: unknown[] = [];
-  let sinceClause = "";
-  if (cutoff) { sinceClause = "AND e.created_at >= ?"; params.push(cutoff); }
-  let projectClause = "";
-  if (projectDir) { projectClause = "AND r.project_dir = ?"; params.push(projectDir); }
-  params.push(limit);
-
-  const rows = db().prepare(`
-    SELECT COALESCE(t.agent_role, '(unknown)') AS agent_role, e.payload
-    FROM events e
-    JOIN tasks t ON t.id = e.task_id
-    JOIN runs  r ON r.id = t.run_id
-    WHERE e.event_type = 'compression.verification'
-      ${sinceClause}
-      ${projectClause}
-    ORDER BY e.created_at DESC
-    LIMIT ?
-  `).all(...params) as Array<{ agent_role: string; payload: string | null }>;
-
-  const byRole = new Map<string, { events: number; agentCompressed: number; orchestratorCompressed: number; bytesSaved: number; ratioSum: number; ratioCount: number }>();
-  for (const row of rows) {
-    const entry = byRole.get(row.agent_role) ?? { events: 0, agentCompressed: 0, orchestratorCompressed: 0, bytesSaved: 0, ratioSum: 0, ratioCount: 0 };
-    entry.events++;
-    if (row.payload) {
-      let p: Record<string, unknown>;
-      try { p = JSON.parse(row.payload) as Record<string, unknown>; } catch { byRole.set(row.agent_role, entry); continue; }
-      if (p["agent_compressed"] === true) entry.agentCompressed++;
-      if (p["orchestrator_compressed"] === true) entry.orchestratorCompressed++;
-      const orig = typeof p["original_size_bytes"] === "number" ? p["original_size_bytes"] : 0;
-      const comp = typeof p["compressed_size_bytes"] === "number" ? p["compressed_size_bytes"] : 0;
-      entry.bytesSaved += orig - comp;
-      if (typeof p["compression_ratio"] === "number") { entry.ratioSum += p["compression_ratio"]; entry.ratioCount++; }
-    }
-    byRole.set(row.agent_role, entry);
-  }
-
-  return [...byRole.entries()]
-    .map(([agentRole, v]) => ({
-      agentRole,
-      events: v.events,
-      agentCompressed: v.agentCompressed,
-      orchestratorCompressed: v.orchestratorCompressed,
-      bytesSaved: v.bytesSaved,
-      avgCompressionRatio: v.ratioCount > 0 ? v.ratioSum / v.ratioCount : 0,
-    }))
-    .sort((a, b) => b.events - a.events);
-}
-
-export type CompressionMethodRow = {
-  method: string;
-  count: number;
-};
-
-export function compressionMethods(since = "30d", projectDir?: string): CompressionMethodRow[] {
-  const cutoff = compressionCutoff(since);
-  const params: unknown[] = [];
-  let sinceClause = "";
-  if (cutoff) { sinceClause = "AND e.created_at >= ?"; params.push(cutoff); }
-  let projectClause = "";
-  if (projectDir) { projectClause = "AND r.project_dir = ?"; params.push(projectDir); }
-
-  const rows = db().prepare(`
-    SELECT e.payload
-    FROM events e
-    JOIN tasks t ON t.id = e.task_id
-    JOIN runs  r ON r.id = t.run_id
-    WHERE e.event_type = 'compression.verification'
-      ${sinceClause}
-      ${projectClause}
-  `).all(...params) as Array<{ payload: string | null }>;
-
-  const methodCounts = new Map<string, number>();
-  for (const row of rows) {
-    let method = "(unknown)";
-    if (row.payload) {
-      try {
-        const p = JSON.parse(row.payload) as Record<string, unknown>;
-        if (typeof p["method"] === "string") method = p["method"];
-      } catch { /* keep unknown */ }
-    }
-    methodCounts.set(method, (methodCounts.get(method) ?? 0) + 1);
-  }
-
-  return [...methodCounts.entries()]
-    .map(([method, count]) => ({ method, count }))
-    .sort((a, b) => b.count - a.count);
 }
 
 // #154: project registry for the dashboard Projects view.

@@ -336,8 +336,6 @@ const ResultDefSchema = z.object({
   stderr_log: z.string().default("container.stderr.log"),
 });
 
-const CompressionModeSchema = z.enum(["mcp", "proxy", "none"]);
-
 export const RuntimeSchema = z.object({
   name: NameSchema,
   description: z.string().min(1),
@@ -347,7 +345,6 @@ export const RuntimeSchema = z.object({
   log_format: LogFormatSchema.optional(),
   prompt_strategy: PromptStrategySchema.optional(),
   auth_strategy: AuthStrategySchema.optional(),
-  compression_mode: CompressionModeSchema.optional().default("proxy"),
   detect: DetectDefSchema.optional(),
   image: z.string().min(1),
   // Model aliases: at least 'default' must be present so unspecified-model
