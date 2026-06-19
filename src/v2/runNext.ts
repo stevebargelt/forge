@@ -461,6 +461,8 @@ async function dispatchReds(args: {
   dockerExec?: DockerExecFn;
 }): Promise<{ verdicts: Verdict[]; authoritativeFail: boolean }> {
   const artifact = JSON.stringify(args.primaryResult, null, 2);
+  const allTasks = tasksForRun(args.runId);
+  const spec = buildRedSpec(args.workflow, allTasks);
   const launches = args.step.reds.map((red) =>
     runOneRed({
       runId: args.runId,
@@ -469,6 +471,7 @@ async function dispatchReds(args: {
       red,
       primaryTaskId: args.primaryTaskId,
       artifact,
+      spec,
       projectDir: args.projectDir,
       designDir: args.designDir,
       runMetadata: args.runMetadata,
@@ -553,6 +556,7 @@ async function runOneRed(args: {
   red: RedDef;
   primaryTaskId: string;
   artifact: string;
+  spec?: string;
   projectDir: string;
   designDir?: string;
   runMetadata: Record<string, unknown>;
@@ -584,6 +588,7 @@ async function runOneRed(args: {
       step: args.step,
     }),
     artifact: args.artifact,
+    ...(args.spec ? { spec: args.spec } : {}),
   };
   const redResolution = resolveModel({
     agentRole: args.red.agent,
@@ -1259,6 +1264,26 @@ function dispatchManualStep(runId: string, step: Step): string {
 
 export type { DockerExecArgs, DockerExecFn };
 
+// Collect completed architect + tech-lead outputs from the run and compose them
+// into a spec string for reds. Returns undefined when no such tasks exist (e.g.
+// a bare forge invoke with no pipeline), so the caller can omit the section.
+function buildRedSpec(workflow: Workflow, allTasks: Task[]): string | undefined {
+  const parts: string[] = [];
+  for (const step of workflow.steps) {
+    const isArchitect = step.agent === "architecture-advisor";
+    const isTechLead = step.agent === "tech-lead";
+    if (!isArchitect && !isTechLead) continue;
+    const task = allTasks
+      .filter((t) => t.phase === step.id && t.parentId === undefined && t.status === "complete")
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .pop();
+    if (!task?.result) continue;
+    const label = isArchitect ? "Architect intent" : "Tech-lead plan";
+    parts.push(`### ${label}\n\n\`\`\`json\n${JSON.stringify(task.result, null, 2)}\n\`\`\``);
+  }
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 function homeForge(): string {
   return process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge");
 }
@@ -1289,6 +1314,9 @@ function renderTaskPackage(tp: TaskPackage): string {
     "```",
     ``,
   ];
+  if (typeof tp.spec === "string" && tp.spec.trim().length > 0) {
+    sections.push(`## Spec`, ``, tp.spec, ``);
+  }
   // Reds receive the upstream artifact (the primary's result.json) here. The red
   // seeds read it from `## Artifact under review` by name; without this section a
   // red sees only empty inputs and reports "no artifact provided" (forge-site bug).
