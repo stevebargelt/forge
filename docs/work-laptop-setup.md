@@ -2,7 +2,7 @@
 
 Use this when getting forge running on a new or fresh work machine. The goal is a host where `forge setup` reports no blocking failures for the profiles you actually use.
 
-**Prerequisites:** Docker running, Node 20+, Git.
+**Prerequisites:** Docker running, Node 22+ (Node 24 LTS recommended — see `.nvmrc`), Git.
 
 ---
 
