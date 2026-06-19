@@ -1,9 +1,10 @@
 ---
 id: FG-331
 type: story
-status: active
+status: done
 title: Claude CLI doesn't respect AWS_ENDPOINT_URL for Bedrock proxy routing
 created: 2026-06-16
+closed: 2026-06-19
 ---
 
 ## Conclusion

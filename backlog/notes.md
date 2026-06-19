@@ -1,32 +1,26 @@
-**Last session ended 2026-06-17.**
+**Last session ended 2026-06-19.**
 
-**Where we left off:** Verified that headroom changes don't negatively impact forge — all tests pass except 3 pre-existing BACKLOG parser failures. Fixed 5 FG-318 test regressions caused by the host.docker.internal URL change and a stale schema default assertion.
+**Where we left off:** Ripped out the entire headroom compression integration (committed `ae1bcc1`, 53 files, ~6700 deletions). Trigger was proving empirically that headroom is a no-op on the subscription (OAuth) path — the proxy passes /v1/messages through byte-equal by its own per-auth-mode policy; only the Bedrock-native (SigV4) route ever compressed. Full test suite green except the 3 long-standing BACKLOG-parser failures (tests 37-39).
 
 **Picked up next:**
-1. **FG-331: File upstream comment on headroom #510** — Post our findings: service-discovery calls (`/inference-profiles`) DO route through proxy via `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`, but inference calls (`invoke-with-response-stream`) bypass it. The gap vs rongabbay's working setup (PR #720) is that they use an internal re-signing gateway as upstream, not raw AWS. Ask whether their approach requires a gateway or whether there's a way to make it work direct-to-AWS.
-2. **FG-328: Reassess scope** — Bedrock compression is blocked upstream. Decide whether to park Bedrock compression and focus on the non-Bedrock gap list (CCR, CacheAligner, ContentRouter, hooks) or restructure the ticket.
-3. **Push 7 commits** — Clean tree, all tests green (minus 3 pre-existing BACKLOG parser failures). Ready to push when you are.
+1. **Push + commit backlog state** (non-ticket thread) — `ae1bcc1` is unpushed, and the FG-328/FG-331 close moves (stories/ → done/) plus this notes update are uncommitted. Commit the backlog changes and push when ready.
+2. **Normalize the dashboard better-sqlite3 ABI** (non-ticket loose end, no ID yet) — root pkg better-sqlite3 is built for Node 20; the `dashboard/` copy is 12.x and only works under Node 22, so dashboard tests must run under Node 22. Pre-existing, not caused by the headroom removal. File a ticket if worth fixing properly.
+3. Otherwise no forced direction — pick the next priority off `forge backlog list --status active` (56 open; e.g. FG-258 provider-agnostic runtime epic, FG-291 stable-baseline epic).
 
 **External state to remember:**
-- headroom-proxy binary at ~/.forge/bin/headroom-proxy — rebuilt from source (chopratejas/headroom main, commit 0dc2e1cb). Includes us./eu./global. prefix fix. Built with system ONNX Runtime via Homebrew.
-- headroom repo cloned at ~/code/headroom — available for future patches/rebuilds.
-- Proxy must be started with AWS STS creds in env (`eval $(aws configure export-credentials --profile adx-dev --format env-no-export | sed 's/^/export /')`). Rust binary missing SSO cargo feature; env-var creds are the workaround.
-- Proxy listens on 0.0.0.0:8787. Containers reach it via host.docker.internal:8787.
-- 3 pre-existing BACKLOG parser test failures (tests 37-39) — unrelated to headroom work, present before this session.
+- Commit `ae1bcc1` is unpushed; backlog ticket moves + notes are uncommitted (see Picked up next #1).
+- Host cleanup done: headroom-proxy binary, /tmp/headroom clone, logs all removed; `onnxruntime` (+abseil/protobuf/onnx/re2) uninstalled via brew. Rust toolchain KEPT (declined full uninstall — ~/.rustup pre-existed). `brew autoremove` collateral-removed `fzf`; it was reinstalled.
+- Node ABI split: forge CLI runs on Node 20 (root better-sqlite3 ABI 115, restored via `prebuild-install` at session start); dashboard needs Node 22. The agent docker image was rebuilt without headroom-ai.
+- Prior session's headroom external state (proxy binary, ~/code/headroom clone, AWS-creds-in-env startup) is all GONE/moot now.
 
 **Decisions worth not relitigating:**
-- FG-330 was a misdiagnosis — runtime YAML, Zod schema, spawn.ts all work correctly.
-- HTTP_PROXY/HTTPS_PROXY won't work — headroom proxy doesn't support CONNECT tunneling (501).
-- Unprefixed model IDs (anthropic.claude-sonnet-4-6) rejected by AWS — account requires inference profile IDs (us.anthropic.*).
-- CLAUDE.md trimmed 24% — no content loss.
-- headroom changes are safe: non-Bedrock agents unaffected; Bedrock falls through to direct AWS silently (same as before, cleaner URLs).
+- Headroom removed entirely and intentionally — do NOT re-add it. On subscription/OAuth it compresses nothing (headroom's own CompressionPolicy skips non-PAYG auth); the implemented compression is Bedrock-native only.
+- `forge learn` removed — it was a thin runtime wrapper around the external `headroom learn` binary, non-functional once headroom is gone.
+- Rust kept, onnxruntime removed (user call).
+- macOS from-source native builds fail on the stale Xcode-16 clang vs CLT SDK 26; fix is CLT clang 21 + SDKROOT (or prebuild-install). Saved to project memory as env_macos_native_build_toolchain.
 
 **Shipped (for reference):**
-- 86ebd2d: CLAUDE.md trim + FG-330 investigation
-- b7d81c0, 7e3ef29: FG-331 investigation docs
-- 690c641: Fixed proxy upstream (was dummy localhost:8788)
-- 41c1751: host.docker.internal + 0.0.0.0 + /healthz fixes
-- 560cda8: FG-331 final investigation notes
-- 8602e96: Fixed FG-318 test regressions + stale schema default assertion
-- FG-330: Closed (not a bug)
-- FG-331: Filed (CLI inference routing bypasses endpoint override)
+- ae1bcc1: remove headroom compression integration (core + dashboard + docker + scripts + seeds + docs + headroom-ai dep + forge learn)
+- FG-328 closed (headroom integration gaps — superseded by removal)
+- FG-331 closed (Bedrock proxy AWS_ENDPOINT_URL routing — superseded by removal)
+- Session-start (uncommitted, node_modules only): restored root better-sqlite3 Node-20 binding via prebuild-install so forge SQLite commands work again.
