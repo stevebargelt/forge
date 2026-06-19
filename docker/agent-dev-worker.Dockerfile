@@ -25,8 +25,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
 
-# Node.js 20 + Claude Code CLI
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Node.js 24 (LTS) + Claude Code CLI
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*
 
 # Tell node + npm to trust the corporate CA at runtime as well.
@@ -41,13 +41,12 @@ ARG CODEX_CLI_VERSION=0.135.0
 RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
 
 # pi coding agent (#258 Crawl / #260): third provider runtime. Provides the `pi`
-# bin (bin: dist/cli.js) used by seeds/runtimes/pi-apikey.yml.
-# IMPORTANT version constraint: pi's `latest` (0.78.x) declares engines node>=22,
-# but this image is on Node 20. We pin the `legacy-node20` line (0.74.2, engines
-# node>=20.6.0) so pi runs on this image. Bump PI_CLI_VERSION to a 0.78+ release
-# only after the image moves to Node 22. --ignore-scripts: pi is pure JS, no
-# native build step — skip any postinstall (matches the #260 install recipe).
-ARG PI_CLI_VERSION=0.74.2
+# bin (bin: dist/cli.js) used by seeds/runtimes/pi-apikey.yml. Now on the current
+# line (0.79.x, engines node>=22.19.0) — the image is on Node 24, so the old
+# legacy-node20 (0.74.2) pin is no longer needed (FG-334). --ignore-scripts: pi
+# is pure JS, no native build step — skip any postinstall (matches the #260
+# install recipe).
+ARG PI_CLI_VERSION=0.79.8
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_CLI_VERSION}
 
 # Alternate package managers commonly used by projects forge runs against (#146).
