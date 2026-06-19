@@ -15,6 +15,7 @@ import { loadRuntime, loadModelPolicy, type LoadContext } from "../../v2/loader.
 import { probeAuth } from "../../v2/provider-doctor.js";
 import { detectAuthMode, type EffectiveAuth } from "../../v2/model-resolution.js";
 import { validateRoutePolicyFile } from "./route.js";
+import { detectSeedDrift, renderSeedDrift } from "../../v2/seed-drift.js";
 import {
   buildReleaseReport,
   renderReleaseReport,
@@ -253,11 +254,14 @@ export function registerDoctor(program: Command): void {
     .option("--json", "emit JSON instead of a human summary")
     .action((opts: { json?: boolean }) => {
       const report = buildReleaseReport(gatherReleaseInputs(DEFAULT_IMAGE, { projectDir: process.cwd() }));
+      const drift = detectSeedDrift(); // FG-335: installed ~/.forge seeds vs running code
       if (opts.json) {
-        console.log(JSON.stringify(report, null, 2));
+        console.log(JSON.stringify({ ...report, seedDrift: drift }, null, 2));
       } else {
         console.log(renderReleaseReport(report));
+        const driftSection = renderSeedDrift(drift);
+        if (driftSection) console.log(`\n${driftSection}`);
       }
-      process.exitCode = report.ok ? 0 : 1;
+      process.exitCode = report.ok && drift.ok ? 0 : 1;
     });
 }
