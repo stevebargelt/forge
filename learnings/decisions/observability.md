@@ -206,7 +206,7 @@ Suggested mapping examples:
 - `AuthProfileError` missing profile -> `auth_missing`
 - `AuthProfileError` expired profile -> `auth_expired`
 - `IDLE_TIMEOUT_EXIT_CODE` -> `idle_timeout`
-- nonzero container exit with no result -> `container_crash`
+- nonzero container exit with no result -> `model_error` when the runtime's stdout carries a provider/model error (attributed by log_format, #228); else `container_crash`
 - empty `result.json` -> `result_missing`
 - malformed `result.json` -> `result_malformed`
 - gate reject/request-changes failure path -> `gate_rejected`
