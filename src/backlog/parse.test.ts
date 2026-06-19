@@ -1,9 +1,15 @@
 // Parse + serialize roundtrip tests.
 //
-// Acceptance bar: parsing the real BACKLOG.md and serializing it back
-// produces byte-identical output. If this test fails on a real-world edit,
-// either the file format drifted (intentional, update parser) or the parser
-// is wrong (unintentional, fix it).
+// Acceptance bar: parsing a representative legacy BACKLOG.md and serializing
+// it back produces byte-identical output. If this test fails, either the file
+// format drifted (intentional, update parser) or the parser is wrong
+// (unintentional, fix it).
+//
+// The fixture is a committed canonical document (__fixtures__/legacy-backlog.md)
+// rather than this repo's own BACKLOG.md — forge migrated to the structured
+// backlog/ format, so there is no longer a root BACKLOG.md to pin to. The
+// single-file parser is still live (forge backlog / review-loop read it for
+// projects on the legacy format), so the roundtrip guarantee still matters.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,7 +21,7 @@ import { serializeBacklog } from "./serialize.js";
 import { SECTION_ORDER } from "./types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const BACKLOG_PATH = join(HERE, "..", "..", "BACKLOG.md");
+const BACKLOG_PATH = join(HERE, "__fixtures__", "legacy-backlog.md");
 
 test("parse(BACKLOG.md) → serialize() roundtrips byte-for-byte", () => {
   const original = readFileSync(BACKLOG_PATH, "utf8");
