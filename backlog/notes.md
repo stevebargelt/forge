@@ -1,26 +1,26 @@
-**Last session ended 2026-06-19.**
+**Last session ended 2026-06-19** (second session that day).
 
-**Where we left off:** Ripped out the entire headroom compression integration (committed `ae1bcc1`, 53 files, ~6700 deletions). Trigger was proving empirically that headroom is a no-op on the subscription (OAuth) path — the proxy passes /v1/messages through byte-equal by its own per-auth-mode policy; only the Bedrock-native (SigV4) route ever compressed. Full test suite green except the 3 long-standing BACKLOG-parser failures (tests 37-39).
+**Where we left off:** Fixed the 3 long-standing BACKLOG-parser test failures, then did the Node/sqlite unification the prior notes flagged as loose-end #2 — and it cascaded further than expected. 5 commits, all pushed to origin/main (fdf6410..65c8a36). Three tickets closed: FG-333, FG-334, and (bonus) FG-300.
 
 **Picked up next:**
-1. **Push + commit backlog state** (non-ticket thread) — `ae1bcc1` is unpushed, and the FG-328/FG-331 close moves (stories/ → done/) plus this notes update are uncommitted. Commit the backlog changes and push when ready.
-2. **Normalize the dashboard better-sqlite3 ABI** (non-ticket loose end, no ID yet) — root pkg better-sqlite3 is built for Node 20; the `dashboard/` copy is 12.x and only works under Node 22, so dashboard tests must run under Node 22. Pre-existing, not caused by the headroom removal. File a ticket if worth fixing properly.
-3. Otherwise no forced direction — pick the next priority off `forge backlog list --status active` (56 open; e.g. FG-258 provider-agnostic runtime epic, FG-291 stable-baseline epic).
+1. No forced direction. The pi Crawl exit is now genuinely proven (FG-300 closed via a live completing run), so **FG-258** (provider-agnostic runtime epic) could advance to its Walk items if you want to push that thread.
+2. Housekeeping when confident: `docker image prune` to reclaim the old Node-20 agent image (untagged `66f741f50a15`), and reinstall/rebuild native modules in any OTHER host repo next time you work in it (nvm default is now Node 24).
+3. Otherwise pick from `forge backlog list --status active` (FG-291 baseline epic, etc.).
 
 **External state to remember:**
-- Commit `ae1bcc1` is unpushed; backlog ticket moves + notes are uncommitted (see Picked up next #1).
-- Host cleanup done: headroom-proxy binary, /tmp/headroom clone, logs all removed; `onnxruntime` (+abseil/protobuf/onnx/re2) uninstalled via brew. Rust toolchain KEPT (declined full uninstall — ~/.rustup pre-existed). `brew autoremove` collateral-removed `fzf`; it was reinstalled.
-- Node ABI split: forge CLI runs on Node 20 (root better-sqlite3 ABI 115, restored via `prebuild-install` at session start); dashboard needs Node 22. The agent docker image was rebuilt without headroom-ai.
-- Prior session's headroom external state (proxy binary, ~/code/headroom clone, AWS-creds-in-env startup) is all GONE/moot now.
+- **nvm default is now Node 24** (v24.17.0). The forge CLI REQUIRES Node 24 — better-sqlite3 is now v12 (binding NODE_MODULE_VERSION 137). Login/interactive shells resolve 24 correctly; but non-login/automation shells on this host may land on Node 20, which makes the binding fail to load (`NODE_MODULE_VERSION 137 vs 115`). In scripts, `nvm use 24` explicitly before any forge/node command.
+- Repo is now real npm workspaces (root + dashboard) with a SINGLE hoisted better-sqlite3@12.11.1. The old Node-20-CLI / Node-22-dashboard split is gone. `.nvmrc`=24, root `engines`>=22.
+- Live agent image `agent-dev-worker:latest` = Node 24 + pi 0.79.8 (+ codex 0.135.0, tsx 4.22.4, claude 2.1.183). Side tag `agent-dev-worker:fg334` is the same image. Old `66f741f50a15` is untagged rollback.
+- pi OAuth credential minted at `~/.forge/pi-agent/auth.json` (via `forge pi login`). pi-oauth runtime works end-to-end.
+- `docker/build.sh` now builds Node 24 + pi 0.79.8 to the live tag — a plain rebuild reproduces the current image.
 
 **Decisions worth not relitigating:**
-- Headroom removed entirely and intentionally — do NOT re-add it. On subscription/OAuth it compresses nothing (headroom's own CompressionPolicy skips non-PAYG auth); the implemented compression is Bedrock-native only.
-- `forge learn` removed — it was a thin runtime wrapper around the external `headroom learn` binary, non-functional once headroom is gone.
-- Rust kept, onnxruntime removed (user call).
-- macOS from-source native builds fail on the stale Xcode-16 clang vs CLT SDK 26; fix is CLT clang 21 + SDKROOT (or prebuild-install). Saved to project memory as env_macos_native_build_toolchain.
+- better-sqlite3 was unified UP to v12 (supports Node 20–26), NOT pinned down to v11. Reason: v12 ships no Node-20 prebuilt, so v12-on-Node-20 forces a from-source build that hits the macOS Xcode-clang/SDK gotcha; Node 24 HAS a v12 prebuilt, so moving forward was the clean path, not back.
+- Node target is 24 LTS — deliberately not the newer non-LTS lines (25/26-current). Revisit when 26 goes LTS (Oct 2026) if desired.
+- The legacy single-file BACKLOG.md parser is still LIVE (forge backlog / review-loop read it for legacy-format projects); its tests now use a committed fixture (`src/backlog/__fixtures__/legacy-backlog.md`) instead of this repo's deleted root BACKLOG.md.
 
 **Shipped (for reference):**
-- ae1bcc1: remove headroom compression integration (core + dashboard + docker + scripts + seeds + docs + headroom-ai dep + forge learn)
-- FG-328 closed (headroom integration gaps — superseded by removal)
-- FG-331 closed (Bedrock proxy AWS_ENDPOINT_URL routing — superseded by removal)
-- Session-start (uncommitted, node_modules only): restored root better-sqlite3 Node-20 binding via prebuild-install so forge SQLite commands work again.
+- 8c3b500: parser roundtrip tests → committed fixture (fixes the 3 ENOENT failures)
+- ab3f071: FG-333 — unify repo on Node 24 LTS + better-sqlite3 v12 (closed)
+- 37027ca: FG-334 — agent image → Node 24, pi → 0.79.8 (closed)
+- 65c8a36: close FG-334 + FG-300 — live pi 0.79.8 run verified (run-…-58c294 / task-engineer-3a8c1f: status complete, 7 non-zero model_calls rows, no #264 misfire)
