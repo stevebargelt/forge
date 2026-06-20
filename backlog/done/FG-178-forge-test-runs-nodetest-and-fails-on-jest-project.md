@@ -1,8 +1,9 @@
 ---
 id: FG-178
 type: story
-status: active
+status: done
 title: forge-test runs node:test and fails on Jest projects — agents must bypass with npx jest
+closed: 2026-06-20
 ---
 
 **Bug:** the `forge-test` wrapper (mandated by every implementer + test-engineer seed) invokes Node's native test runner (`node:test`). On a project that uses Jest (e.g. web-admin, jest ^30) it fails outright — the agent can't validate via the sanctioned path.
