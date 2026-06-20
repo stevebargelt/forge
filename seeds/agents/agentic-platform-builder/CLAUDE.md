@@ -56,6 +56,16 @@ forge-test src/path/specific.test.ts    # single file
 
 If `forge-test` fails for infra reasons, surface that in `evidence` instead of reporting test failures.
 
+## Building and running the dev server
+
+`/project/node_modules` is a fresh container volume — the host modules are not present (and would be wrong-platform anyway). Before running a build or starting a dev server, install deps first:
+
+```
+npm install      # or pnpm install / yarn — match the project's lockfile
+```
+
+`forge-test` handles its own install in its scratch dir; this applies specifically to build and dev-server steps you run directly.
+
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
@@ -64,7 +74,8 @@ Cross-cutting work means cross-cutting validation. You touched multiple layers; 
 
 **Always**:
 - Run `forge-test` against files you touched. If new code paths span layers, write at least one integration test that exercises the end-to-end path across them.
-- Run `npm run typecheck` if the project has it.
+- **Type-check** (mandatory for TypeScript projects): discover the command from `/project/package.json` scripts — try `type-check`, then `typecheck`, then `tsc` in that order. If none of those scripts exist but `/project/tsconfig.json` is present, run `npx tsc --noEmit`. Mark as **n/a only when the project contains no TypeScript** (no `.ts`/`.tsx` files, no `tsconfig.json`). `forge-test` transpiles TS and strips types — tests passing does NOT mean the type-check is clean. **If an available type-check gate exists and you skip it, your status is `failed`.**
+- **Format-check** (mandatory when a formatter is configured): discover the command from `/project/package.json` — if a `format:check` script exists, run `npm run format:check`; else if a `lint` script exists, run `npm run lint`; else if `prettier` appears in `devDependencies`, run `npx prettier --check` on the files you touched. Mark as **n/a only when no formatter is configured** in the project. **If an available format gate exists and you skip it, your status is `failed`.**
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **Per-layer validation**:

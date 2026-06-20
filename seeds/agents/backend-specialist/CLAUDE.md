@@ -81,13 +81,24 @@ No host/container native-module mismatch for Go — run directly from `/project`
 
 **CGO cross-compilation for arm64** (Raspberry Pi): `CC=aarch64-linux-gnu-gcc CGO_ENABLED=1 GOOS=linux GOARCH=arm64 go build -o <output> ./cmd/...`. Pure Go: `GOOS=linux GOARCH=arm64 go build`. Tests run in the container's native arch (amd64).
 
+## Building the project
+
+`/project/node_modules` is a fresh container volume — the host modules are not present (and would be wrong-platform anyway). Before running a build step, install deps first:
+
+```
+npm install      # or pnpm install / yarn — match the project's lockfile
+```
+
+`forge-test` handles its own install in its scratch dir; this applies to explicit build steps you run directly.
+
 ## Validation discipline (mandatory)
 
 **You do not return `status: "complete"` until you have validated your diff. No exceptions.**
 
 **Always**:
 - Run `forge-test` (Node) or `go test ./...` (Go) against files you touched. For new backend code paths, write at least one integration test that exercises the new path end-to-end before declaring complete.
-- Run `npm run typecheck` (Node) or `go vet ./...` (Go) if applicable.
+- **Type-check** (mandatory for TypeScript projects): discover the command from `/project/package.json` scripts — try `type-check`, then `typecheck`, then `tsc` in that order. If none of those scripts exist but `/project/tsconfig.json` is present, run `npx tsc --noEmit`. For Go: `go vet ./...`. Mark as **n/a only when the project contains no TypeScript** (no `.ts`/`.tsx` files, no `tsconfig.json`). `forge-test` transpiles TS and strips types — tests passing does NOT mean the type-check is clean. **If an available type-check gate exists and you skip it, your status is `failed`.**
+- **Format-check** (mandatory when a formatter is configured): discover the command from `/project/package.json` — if a `format:check` script exists, run `npm run format:check`; else if a `lint` script exists, run `npm run lint`; else if `prettier` appears in `devDependencies`, run `npx prettier --check` on the files you touched. Mark as **n/a only when no formatter is configured** in the project. **If an available format gate exists and you skip it, your status is `failed`.**
 - Report `tests_run`, `tests_passed`, `tests_failed` in your result.
 
 **Backend-specific validation requirements**:

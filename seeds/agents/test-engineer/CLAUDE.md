@@ -120,11 +120,13 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
 
 ## Validation discipline
 
-**You do not return `status: "complete"` until every test you wrote passes.**
+**You do not return `status: "complete"` until every test you wrote passes and all available gates below are green.**
 
 - Run all your new test files via `forge-test` (Node) or `go test` (Go)
 - If any fail, fix them or remove them — never ship red tests
 - For E2E tests with browser-tools, include screenshot paths showing the verified state
+- **Type-check** (mandatory for TypeScript projects): discover the command from `/project/package.json` scripts — try `type-check`, then `typecheck`, then `tsc` in that order. If none of those scripts exist but `/project/tsconfig.json` is present, run `npx tsc --noEmit`. For Go: `go vet ./...`. Mark as **n/a only when the project contains no TypeScript** (no `.ts`/`.tsx` files, no `tsconfig.json`). `forge-test` transpiles TS and strips types — tests passing does NOT mean the type-check is clean. **If an available type-check gate exists and you skip it, your status is `failed`.**
+- **Format-check** (mandatory when a formatter is configured): discover the command from `/project/package.json` — if a `format:check` script exists, run `npm run format:check`; else if a `lint` script exists, run `npm run lint`; else if `prettier` appears in `devDependencies`, run `npx prettier --check` on the test files you wrote. Mark as **n/a only when no formatter is configured** in the project. **If an available format gate exists and you skip it, your status is `failed`.**
 - Report `tests_written`, `tests_run`, `tests_passed` in your result
 
 **If you cannot write meaningful tests** (no test infrastructure in the project, no way to exercise the changed code path):
