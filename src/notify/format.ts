@@ -8,8 +8,7 @@ export type NotifyState =
   | "complete"
   | "failed"
   | "blocked_by_red"
-  | "awaiting_gate"
-  | "awaiting_human_input";
+  | "awaiting_gate";
 
 const MAX_SMS_LEN = 160;
 
@@ -63,7 +62,7 @@ export function formatGateNotification(
   phase: string,
   state: NotifyState = "awaiting_gate",
 ): string {
-  const label = state === "awaiting_human_input" ? "input needed" : "gate";
+  const label = "gate";
   const prefix = `forge: ${projectSegment(run)}${run.workflow} `;
   const suffix = ` — ${phase} ${label}: forge gate ${taskId}`;
   const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;

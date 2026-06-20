@@ -36,8 +36,9 @@ learnings/
 | FORGE-DEC-013 | 2026-05-06 | [Mount ~/.aws into bedrock containers + detached SSO watchdog](decisions/2026-05-06_profile-mount-and-detached-watchdog.md) |
 | FORGE-DEC-014 | 2026-05-07 | [Host-led human-driven design phase, with forge as the prompt-author](decisions/2026-05-07_host-led-pencil-design.md) |
 | FORGE-DEC-015 | 2026-05-07 | [Interactive dashboard: shell out to bin/forge, gate behind env flag, CSRF header](decisions/2026-05-07_interactive-dashboard.md) |
-| FORGE-DEC-016 | 2026-05-08 | [Manual phases and the awaiting_human_input task status](decisions/2026-05-08_manual-phase-and-awaiting-human-input.md) |
+| FORGE-DEC-016 | 2026-05-08 | [~~Manual phases and the awaiting_human_input task status~~](decisions/2026-05-08_manual-phase-and-awaiting-human-input.md) *(superseded by FORGE-DEC-020)* |
 | FORGE-DEC-017 | 2026-05-08 | [`awaiting_red` task status](decisions/2026-05-08_awaiting-red-status.md) |
+| FORGE-DEC-020 | 2026-06-20 | [Remove `awaiting_human_input` task status](decisions/2026-06-20_remove-awaiting-human-input-status.md) *(supersedes FORGE-DEC-016)* |
 
 ## Patterns index
 

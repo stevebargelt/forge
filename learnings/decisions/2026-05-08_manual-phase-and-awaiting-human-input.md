@@ -1,8 +1,10 @@
 # Decision: Manual phases and the `awaiting_human_input` task status
 
+> **Superseded by [FORGE-DEC-020](2026-06-20_remove-awaiting-human-input-status.md)** — `awaiting_human_input` has been removed from the state machine. The `forge submit` mechanism described here was never implemented; see FORGE-DEC-020 for the removal rationale.
+
 **ID**: FORGE-DEC-016
 **Date**: 2026-05-08
-**Status**: Decided
+**Status**: Superseded
 **Decided by**: Steven (planning #54 with Claude)
 **Supersedes**: N/A
 **Scope**: forge

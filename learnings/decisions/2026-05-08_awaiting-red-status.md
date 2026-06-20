@@ -46,7 +46,7 @@ Keep using `complete` for "blue done, reds running" AND for "fully resolved." Di
 **Cons**:
 - Lies in the vocabulary — `complete` means two things. Dashboard logic has to inspect gate history per-task to render correctly. Spillover bug surface.
 - The audit trail for runs is muddled: log/event readers can't tell "blue done" from "fully resolved" without joining gates.
-- Stays out of step with `awaiting_human_input` (FORGE-DEC-016) — that one chose to add a status for an analogous "in flight, not yet resolved" state. Same pattern, different decisions makes the state machine harder to reason about.
+- Stays out of step with `awaiting_human_input` (FORGE-DEC-016) — that one chose to add a status for an analogous "in flight, not yet resolved" state. Same pattern, different decisions makes the state machine harder to reason about. (Note: `awaiting_human_input` has since been removed — it was never wired up and nothing ever produced it. See FORGE-DEC-020.)
 
 ---
 
@@ -62,7 +62,7 @@ Add `awaiting_red` to the `TaskStatus` union. After spawn() returns successfully
 - Composes cleanly with smart-refresh (#72) — status changes drive render keys; no need for downstream cross-table queries.
 
 **Cons**:
-- One more status (8 total: pending, running, awaiting_gate, awaiting_human_input, awaiting_red, complete, failed, blocked_by_red). Every code path that switches on status gets one more case.
+- One more status (7 total after FORGE-DEC-020 removed `awaiting_human_input`: pending, running, awaiting_gate, awaiting_red, complete, failed, blocked_by_red). Every code path that switches on status gets one more case.
 - Requires placement decision: where does dispatch.ts set it? (See Implementation Notes.)
 
 ---

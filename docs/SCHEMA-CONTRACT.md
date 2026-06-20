@@ -27,7 +27,7 @@ Columns the dashboard reads:
 - `parent_id` — nullable string, foreign key to tasks (red children and retry chains)
 - `phase` — string, matches the workflow step id
 - `agent_role` — string (e.g. `architecture-advisor`, `engineer`, `red-wide`)
-- `status` — string, one of `pending | running | awaiting_gate | awaiting_human_input | awaiting_red | complete | failed | blocked_by_red`
+- `status` — string, one of `pending | running | awaiting_gate | awaiting_red | complete | failed | blocked_by_red`
 - `result` — nullable JSON string. Dashboard parses + dispatches to per-agent renderer based on `agent_role`
 - `created_at` / `started_at` / `completed_at` — nullable ISO 8601
 - `error` — nullable string

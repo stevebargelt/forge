@@ -433,7 +433,6 @@ export function deriveNextCommandForTask(
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;
   if (status === "blocked_by_red")
     return `forge show <redTaskId>  # review findings, then forge gate ${taskId} --advance | --reject`;
-  if (status === "awaiting_human_input") return `forge gate ${taskId} --advance`;
   return "—";
 }
 
@@ -441,7 +440,6 @@ export function getBlockerTasks(tasks: Task[]): Task[] {
   return tasks.filter(
     (t) =>
       t.status === "awaiting_gate" ||
-      t.status === "awaiting_human_input" ||
       t.status === "blocked_by_red",
   );
 }

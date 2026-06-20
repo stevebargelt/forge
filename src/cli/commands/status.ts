@@ -142,7 +142,6 @@ function statusIcon(s: string): string {
     case "complete": return "✓";
     case "running": return "⟳";
     case "awaiting_gate": return "⚠";
-    case "awaiting_human_input": return "▢";
     case "awaiting_red": return "⏵";
     case "blocked_by_red": return "✗";
     case "failed": return "☠";

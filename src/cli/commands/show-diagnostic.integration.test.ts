@@ -3,7 +3,7 @@
 // These complement show.integration.test.ts (timeline/event-round-trip tests)
 // and show.test.ts (unit tests for pure helpers). The new integration tests
 // exercise performShow end-to-end against a real seeded in-memory DB to verify:
-//   1. Blockers: awaiting_gate, awaiting_human_input, blocked_by_red all surface
+//   1. Blockers: awaiting_gate, blocked_by_red all surface
 //   2. failedByKind: tasks failed with different failure_kind group correctly
 //   3. Running tasks: appear with container.started events accessible
 //   4. Next-command derivation: blockers vs clean all-complete run
@@ -80,9 +80,8 @@ afterEach(() => {
 
 // ─── 1. Run view with blockers ───────────────────────────────────────────────
 
-test("integ show diagnostic: run with awaiting_gate + awaiting_human_input + blocked_by_red tasks surfaces all three as blockers", () => {
+test("integ show diagnostic: run with awaiting_gate + blocked_by_red tasks surfaces both as blockers", () => {
   insertTask(makeTask("td-gate-1", { status: "awaiting_gate", phase: "plan", agentRole: "tech-lead" }));
-  insertTask(makeTask("td-human-1", { status: "awaiting_human_input", phase: "review", agentRole: "manual-qa" }));
   insertTask(makeTask("td-red-1", { status: "blocked_by_red", phase: "engineer", agentRole: "engineer" }));
   insertTask(makeTask("td-running-1", { status: "running", phase: "engineer", agentRole: "engineer" }));
   insertTask(makeTask("td-complete-1", { status: "complete", phase: "engineer", agentRole: "engineer" }));
@@ -92,13 +91,12 @@ test("integ show diagnostic: run with awaiting_gate + awaiting_human_input + blo
   if (result.kind !== "run") return;
 
   const blockers = getBlockerTasks(result.tasks);
-  assert.equal(blockers.length, 3, "exactly 3 blockers must surface");
+  assert.equal(blockers.length, 2, "exactly 2 blockers must surface");
 
   const statuses = blockers.map((t) => t.status).sort();
-  assert.deepEqual(statuses, ["awaiting_gate", "awaiting_human_input", "blocked_by_red"]);
+  assert.deepEqual(statuses, ["awaiting_gate", "blocked_by_red"]);
 
   assert.ok(blockers.some((t) => t.id === "td-gate-1"), "awaiting_gate task must be a blocker");
-  assert.ok(blockers.some((t) => t.id === "td-human-1"), "awaiting_human_input task must be a blocker");
   assert.ok(blockers.some((t) => t.id === "td-red-1"), "blocked_by_red task must be a blocker");
 
   assert.ok(!blockers.some((t) => t.id === "td-running-1"), "running task must NOT be a blocker");

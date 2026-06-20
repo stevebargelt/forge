@@ -15,7 +15,6 @@ const DEFAULT_NOTIFY_ON = new Set<NotifyState>([
   "failed",
   "blocked_by_red",
   "awaiting_gate",
-  "awaiting_human_input",
 ]);
 
 // Maps the run.status / task.status value to the NotifyState used in the
@@ -25,7 +24,6 @@ function statusToNotifyState(status: string): NotifyState | null {
   if (status === "abandoned") return "failed";
   if (status === "blocked_by_red") return "blocked_by_red";
   if (status === "awaiting_gate") return "awaiting_gate";
-  if (status === "awaiting_human_input") return "awaiting_human_input";
   return null;
 }
 
@@ -37,7 +35,6 @@ function parseNotifyOn(): Set<NotifyState> {
     "failed",
     "blocked_by_red",
     "awaiting_gate",
-    "awaiting_human_input",
   ];
   const filter = new Set<NotifyState>();
   for (const part of raw.split(",")) {
@@ -137,8 +134,7 @@ export async function notifyOnTaskBlockedByRed(run: Run): Promise<void> {
 export async function notifyOnGateAwaiting(run: Run, task: Task): Promise<void> {
   if (!isAnyProviderEnabled()) return;
 
-  const state: NotifyState =
-    task.status === "awaiting_human_input" ? "awaiting_human_input" : "awaiting_gate";
+  const state: NotifyState = "awaiting_gate";
 
   const filter = parseNotifyOn();
   if (!filter.has(state)) return;

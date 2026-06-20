@@ -66,7 +66,6 @@ export type TaskStatus =
   | "pending"
   | "running"
   | "awaiting_gate"
-  | "awaiting_human_input"
   | "awaiting_red"
   | "complete"
   | "failed"

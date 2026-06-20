@@ -12,7 +12,6 @@ export type AdviceKind =
   | "abandoned"
   | "running"
   | "awaiting_gate"
-  | "awaiting_human_input"
   | "awaiting_red"
   | "blocked_by_red"
   | "crashed"
@@ -34,7 +33,6 @@ export type Advice = {
     pending: number;
     running: number;
     awaiting_gate: number;
-    awaiting_human_input: number;
     awaiting_red: number;
     blocked_by_red: number;
     failed: number;
@@ -47,7 +45,6 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
     pending: tasks.filter((t) => t.status === "pending").length,
     running: tasks.filter((t) => t.status === "running").length,
     awaiting_gate: tasks.filter((t) => t.status === "awaiting_gate").length,
-    awaiting_human_input: tasks.filter((t) => t.status === "awaiting_human_input").length,
     awaiting_red: tasks.filter((t) => t.status === "awaiting_red").length,
     blocked_by_red: tasks.filter((t) => t.status === "blocked_by_red").length,
     failed: tasks.filter((t) => t.status === "failed").length,
@@ -82,18 +79,6 @@ export function adviseRun(run: Run, tasks: Task[]): Advice {
       summary: `${counts.blocked_by_red} task(s) blocked by red verdict. Inspect first, then decide.`,
       command: `forge show ${t.id}`,
       alternativeCommand: `forge gate ${t.id} advance --force --rationale "..."`,
-      counts,
-    };
-  }
-
-  if (counts.awaiting_human_input > 0) {
-    const t = tasks.find((x) => x.status === "awaiting_human_input")!;
-    const noun = counts.awaiting_human_input === 1 ? "task" : "tasks";
-    return {
-      kind: "awaiting_human_input",
-      summary: `${counts.awaiting_human_input} ${noun} awaiting manual work. Inspect the task, then advance via forge gate.`,
-      command: `forge show ${t.id}`,
-      alternativeCommand: `forge gate ${t.id} advance --rationale "..."`,
       counts,
     };
   }

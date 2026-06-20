@@ -669,10 +669,6 @@ test("deriveNextCommandForTask: blocked_by_red → forge show red task + gate", 
   assert.match(cmd, /forge gate task-abc/);
 });
 
-test("deriveNextCommandForTask: awaiting_human_input → forge gate --advance", () => {
-  assert.match(deriveNextCommandForTask("awaiting_human_input", undefined, "task-abc"), /forge gate task-abc --advance/);
-});
-
 test("deriveNextCommandForTask: complete → —", () => {
   assert.equal(deriveNextCommandForTask("complete", undefined, "task-abc"), "—");
 });
@@ -756,17 +752,16 @@ test("groupFailedByKind: empty tasks → empty object", () => {
 
 // ─── getBlockerTasks ─────────────────────────────────────────────────────────
 
-test("getBlockerTasks: returns awaiting_gate, awaiting_human_input, blocked_by_red", () => {
+test("getBlockerTasks: returns awaiting_gate, blocked_by_red", () => {
   const tasks: Task[] = [
     makeTask("t1", { status: "awaiting_gate" }),
-    makeTask("t2", { status: "awaiting_human_input" }),
     makeTask("t3", { status: "blocked_by_red" }),
     makeTask("t4", { status: "running" }),
     makeTask("t5", { status: "failed" }),
     makeTask("t6", { status: "complete" }),
   ];
   const ids = getBlockerTasks(tasks).map((t) => t.id).sort();
-  assert.deepEqual(ids, ["t1", "t2", "t3"]);
+  assert.deepEqual(ids, ["t1", "t3"]);
 });
 
 test("getBlockerTasks: empty when no blockers", () => {

@@ -66,12 +66,6 @@ test("formatGateNotification: awaiting_gate carries the actionable forge gate co
   assert.match(out, /"add login"/);
 });
 
-test("formatGateNotification: awaiting_human_input uses the 'input needed' label", () => {
-  const out = formatGateNotification(RUN, "task-x-1", "build", "awaiting_human_input");
-  assert.match(out, /input needed/);
-  assert.match(out, /forge gate task-x-1/);
-});
-
 test("formatGateNotification: truncates a long title but keeps the command intact under 160 chars", () => {
   const longTitle = "x".repeat(300);
   const out = formatGateNotification({ ...RUN, title: longTitle }, "task-plan-ddc707", "plan");

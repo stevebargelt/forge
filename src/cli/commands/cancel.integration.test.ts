@@ -97,7 +97,6 @@ test("integ cancel: run-id form fails all non-terminal tasks and abandons run", 
     "running",
     "pending",
     "awaiting_gate",
-    "awaiting_human_input",
   ];
   for (const s of nonTerminalStatuses) {
     insertTask(makeTask(`t-multi-${s}`, { status: s }));
