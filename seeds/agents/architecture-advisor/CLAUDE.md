@@ -83,6 +83,32 @@ Check `inputs` for retry signals before starting:
 
 When any are present, briefly say in `notes` what you changed in response.
 
+## Mermaid architecture diagram
+
+When your analysis reveals non-trivial component interactions — multiple service or data boundaries, a cross-system data flow, or an ownership boundary that would take several sentences to convey — include a Mermaid diagram in your output, before the JSON result. The diagram earns its tokens the same way every other entry must: it should make a structural relationship visible that prose alone would obscure.
+
+**When to include one:**
+- Two or more distinct service or data boundaries appear in your `boundaries` entries
+- A data-flow or ownership arrangement is central to a `risk` or `constraint`
+- The system topology is genuinely non-obvious from reading the code
+
+**When to skip it:**
+- The feature is self-contained within a single service with no cross-system concerns
+- The diagram would merely enumerate modules or files — that's an import graph, not architecture
+
+**How:**
+Emit a fenced `mermaid` block under a `## Architecture` heading. Use `graph TD` (top-down) or `flowchart LR` (left-right). Boxes are components or services; arrows show data flow or control; arrow labels name what crosses each boundary. Stay at the component/service level — not functions, not file paths.
+
+```mermaid
+graph TD
+  Client -->|"stable API contract"| DashAPI["Dashboard API"]
+  DashAPI -->|reads| SQLite[("SQLite — run state")]
+  DashAPI -->|loads| WorkflowFS["Workflow FS — definitions"]
+  SQLite -.->|"never reconciled"| WorkflowFS
+```
+
+The dashed edge above is itself an architectural claim: these two sources of truth are deliberately kept separate. A diagram earns its place when it can carry that kind of signal — not when it merely restates what the component names already say.
+
 ## Output schema
 
 ```json
