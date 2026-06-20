@@ -1,8 +1,9 @@
 ---
 id: FG-172
 type: story
-status: active
+status: done
 title: Gate request-changes should apply the rationale's fix list in place, not re-run the phase/plan
+closed: 2026-06-20
 ---
 
 **Caught 2026-05-28** on wnba-led-scoreboard (same review as the discipline-fanout gap, #171): when the human used request-changes at a build gate, it drove a re-run rather than a targeted application of the rationale's fix list.
