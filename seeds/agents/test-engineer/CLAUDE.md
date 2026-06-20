@@ -49,21 +49,31 @@ Tests that exercise real interactions between components — not mocked boundari
 
 ### E2E tests (web apps only)
 
-For web applications, use `browser-tools` to write tests that exercise real user flows:
+#### Two-layer distinction — know which you're writing
 
-```
-browser-start.js                    # ensure Chrome is running
-browser-nav.js <url>                # navigate to the page under test
-browser-screenshot.js               # capture state
-browser-click.js <selector>         # interact with elements
-browser-type.js <selector> <text>   # fill inputs
-```
+**Project E2E suite (Playwright).** Durable, committed `*.spec.ts` files with real assertions — `expect(locator).toBeVisible()`, `page.getByRole(…)`, Playwright auto-wait. Lives in the repo under `e2e/` or `tests/e2e/`. Runs via `npx playwright test` or a `test:e2e` npm script; CI re-runs it on every push. *You author these.* The project owns and re-runs them indefinitely. This is the durable regression coverage the seed headline promises.
 
-Structure each E2E test as a scenario:
-1. Navigate to the starting state
-2. Perform the user's actions (click, type, navigate)
-3. Screenshot and verify the result matches expectations
-4. Document what you verified and what the screenshot shows
+**Agent verification (browser-tools).** Interactive, ephemeral CDP-based browser control (`browser-nav.js`, `browser-screenshot.js`, `browser-click.js`, port :9222). Used by the `engineer` and `manual-qa` agents for build-phase visual checks. Output is *evidence* — screenshots in `result.json` — not a committed repo artifact. This is NOT part of the test-engineer E2E path. Do not write browser-tools scenario scripts as E2E tests.
+
+#### Your E2E step
+
+1. **Detect the framework.** Check for `playwright.config.*`, `cypress.config.*`, or `e2e`/`cypress` entries in `package.json`. If found, use it.
+2. **If the project is a web app and has no E2E framework**, scaffold Playwright:
+   - `npx playwright install chromium --with-deps` (chromium is pre-installed in the agent-dev-worker image)
+   - Create `playwright.config.ts` (baseURL pointing at the dev server)
+   - Add `e2e/` directory
+   - Add `"test:e2e": "playwright test"` to `package.json` scripts
+3. **Write committed, assertion-bearing specs** — real locators, real expectations, Playwright auto-wait. No assertion-free navigation scripts.
+4. **Auth.** If the app requires a login, look for a `storageState` artifact (produced by the auth-capture profile). Pass it via `use: { storageState: 'path/to/auth.json' }` in the Playwright config or per-spec `test.use({ storageState: … })` — do not re-implement login in every spec.
+5. **Run** with `npx playwright test` (or `npm run test:e2e`) and confirm green.
+
+#### Anti-downgrade requirement
+
+On a web app, you must do ONE of:
+- Commit at least one `*.spec.ts` (or `*.spec.js`) E2E file with real assertions, OR
+- Return `e2e_skipped_reason` in your result explaining why (e.g. `"no dev-auth path documented"`, `"app requires third-party OAuth not available in-container"`, `"not a web app"`).
+
+Shipping only integration tests on a web app with no `e2e_skipped_reason` is a **hard failure** — it is the exact pattern this seed is designed to prevent.
 
 ### What NOT to write
 
@@ -77,8 +87,7 @@ Read the Stack section of `/project/CLAUDE.md` to determine your verification st
 
 **Web app** (Next.js, Vite, Express with views, dashboard):
 - Integration tests: test API routes with real requests, test components with real data
-- E2E tests: use `browser-tools` to exercise user flows through the running app
-- Start the dev server if needed (`npm run dev`, `npm start`, or whatever the project uses)
+- E2E tests: write committed Playwright specs (see E2E step above); start the dev server if needed (`npm run dev`, `npm start`, or whatever the project uses)
 
 **Mobile app** (React Native, Expo):
 - Integration tests: test API layers, state management, navigation logic
@@ -124,7 +133,7 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
 
 - Run all your new test files via `forge-test` (Node) or `go test` (Go)
 - If any fail, fix them or remove them — never ship red tests
-- For E2E tests with browser-tools, include screenshot paths showing the verified state
+- For Playwright E2E specs, run `npx playwright test` and confirm all pass
 - **Type-check** (mandatory for TypeScript projects): discover the command from `/project/package.json` scripts — try `type-check`, then `typecheck`, then `tsc` in that order. If none of those scripts exist but `/project/tsconfig.json` is present, run `npx tsc --noEmit`. For Go: `go vet ./...`. Mark as **n/a only when the project contains no TypeScript** (no `.ts`/`.tsx` files, no `tsconfig.json`). `forge-test` transpiles TS and strips types — tests passing does NOT mean the type-check is clean. **If an available type-check gate exists and you skip it, your status is `failed`.**
 - **Format-check** (mandatory when a formatter is configured): discover the command from `/project/package.json` — if a `format:check` script exists, run `npm run format:check`; else if a `lint` script exists, run `npm run lint`; else if `prettier` appears in `devDependencies`, run `npx prettier --check` on the test files you wrote. Mark as **n/a only when no formatter is configured** in the project. **If an available format gate exists and you skip it, your status is `failed`.**
 - Report `tests_written`, `tests_run`, `tests_passed` in your result
@@ -138,17 +147,19 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
 ```
 {
   "status": "complete" | "failed",
-  "test_files_written": ["test/integration/...", "test/e2e/..."],
+  "test_files_written": ["test/integration/...", "e2e/..."],
   "tests_written": 5,
   "tests_run": 5,
   "tests_passed": 5,
   "tests_failed": 0,
-  "screenshots": ["/path/to/screenshot.png", ...],
+  "e2e_skipped_reason": null,
   "coverage_summary": "what user flows / integration paths are now covered",
   "docs_impact_check": "plausible: <category> | implausible: <why> | not_flagged",
   "notes": "optional — test infrastructure decisions, framework choices, gaps you noticed but couldn't cover"
 }
 ```
+
+`e2e_skipped_reason` must be `null` when E2E specs were committed. On a web app where E2E was skipped, it must be a non-empty string explaining why — `null` or absent on a web app with no E2E specs is a hard reject at the gate.
 
 If blocked, set `status: "failed"` and explain. Never `status: "complete"` with failing tests.
 
