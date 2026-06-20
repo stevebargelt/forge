@@ -1,8 +1,9 @@
 ---
 id: FG-141
 type: story
-status: active
+status: done
 title: SQL schema single-source-of-truth (compile-time drift protection for dashboard + future readers)
+closed: 2026-06-20
 ---
 
 Filed 2026-05-24 during the dashboard un-split follow-up (#140). Honest follow-on to a scope caveat called out in docs/SCHEMA-CONTRACT.md.

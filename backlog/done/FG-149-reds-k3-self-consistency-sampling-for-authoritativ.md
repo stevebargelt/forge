@@ -1,8 +1,9 @@
 ---
 id: FG-149
 type: story
-status: active
+status: done
 title: "Reds: K=3 self-consistency sampling for authoritative verdicts"
+closed: 2026-06-20
 ---
 
 Filed 2026-05-26. Research technique #2 from /tmp/red-false-positives-research.md, deferred during #147 implementation.

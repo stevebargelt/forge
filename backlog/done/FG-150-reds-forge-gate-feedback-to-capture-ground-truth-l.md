@@ -1,8 +1,9 @@
 ---
 id: FG-150
 type: story
-status: active
+status: done
 title: "Reds: forge gate --feedback to capture ground-truth labels on findings"
+closed: 2026-06-20
 ---
 
 Filed 2026-05-26. Research technique #3 from /tmp/red-false-positives-research.md, deferred during #147 implementation.
