@@ -5,6 +5,8 @@ status: active
 title: Auth-profile review findings + expiry/refresh-token fix (consolidated)
 ---
 
+> **Item 1 (expiry/refresh-token) SHIPPED 2026-06-20 in 4904433.** profileExpiry now derives from the auth token only (1b), and profileStatus is three-way refreshable-aware (1a); the `forge auth-profile` status display surfaces the refreshable state. Full coverage added; host suite green (bar the unrelated FG-338 failures). **Remaining open scope: items 2–9 below** — correctness/cleanup (TOCTOU chmod, CDP timeout, wrong-tab capture, IPv6 `[::1]`, cookie domain/origin scoping, staged-file cleanup) + item 9 doc-honesty. All low-priority pre-launch per the zero-users stance; track, fix when convenient.
+
 Combined, code-verified findings from forge's red panel (red-security 0.78 / red-backend 0.88, both FAIL) + an independent external agent review of the #176 auth-profile code, PLUS the refresh-token expiry gap found in use. Verified against source 2026-05-29. Supersedes #189 (and #188).
 
 **Priority is CORRECTNESS / CLEANUP, not security-urgent.** Per product owner (2026-05-29): zero users, security hardening deprioritized pre-launch; track these, fix genuine correctness bugs, revisit hardening before real users. Reviewers CONFIRMED the load-bearing invariants are sound: reds never receive the credential (runOneRed passes no profile), sanitizeProfileName blocks path traversal.
