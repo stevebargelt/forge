@@ -1,0 +1,78 @@
+# forge v2 — `security-audit` workflow
+#
+# Primitives demonstrated (none of these appear in the feature workflows
+# in isolation, and none are exercised by the how-to's prior code-review
+# example):
+#
+#   gate: verdict     — reds panel decides the gate automatically; no human stop
+#   mixed-authority   — authoritative reds block on fail; specialist annotates only
+#   on_reject         — human reject returns to a named upstream step, not abort
+
+name: security-audit
+description: |
+  Point-in-time security audit. An investigator surfaces findings; a
+  mixed-authority red panel decides the gate — authoritative reds block on
+  any fail, specialist reds annotate without blocking. A human reject on
+  the audit step bounces back to investigation rather than aborting the run.
+
+inputs:
+  - name: scope
+    required: true
+    type: textarea
+    help: "What to audit — repo paths, surface areas, threat model constraints, compliance frame."
+
+steps:
+  # ----- investigate -----
+  # Broad survey. Gate is human: the human reviews coverage before committing
+  # to the deep audit. The specialist red annotates gaps; gate_on_verdict: false
+  # means it does not block advance even on a fail verdict.
+  - id: investigate
+    agent: security-advisor
+    activity: spec-writer
+    gate: human
+    workflow_additions: |
+      Survey the surfaces in inputs.scope. Document what you find as
+      {surfaces_reviewed, findings: [{id, area, description, cwe, severity}],
+      open_questions}. Classify, do not exploit.
+    reds:
+      - agent: red-security
+        activity: fast-orchestrator
+        authority: specialist
+        gate_on_verdict: false
+
+  # ----- audit -----
+  # Deep audit with a mixed-authority panel.
+  #
+  # gate: verdict — resolves from reds without a human stop. A fail from
+  # any authoritative red sets the task to blocked_by_red; the human can
+  # still force-advance with --force --rationale if they choose to accept
+  # the risk.
+  #
+  # on_reject: investigate — if the human rejects (sends work back rather
+  # than force-advancing), execution returns to the investigate step with
+  # the rejection rationale attached. Use this to tighten scope or add a
+  # surface the initial investigation missed, without starting a new run.
+  - id: audit
+    agent: security-advisor
+    activity: default
+    depends_on: [investigate]
+    gate: verdict
+    on_reject: investigate
+    workflow_additions: |
+      Given the investigation findings, produce a ranked audit report. For
+      each finding confirm the threat model impact and assign a severity
+      (critical / high / medium / low / informational). Output
+      {report: markdown, critical_count, high_count, pass: boolean}.
+    reds:
+      - agent: red-security
+        activity: fast-orchestrator
+        authority: authoritative   # fail blocks the verdict gate
+        gate_on_verdict: true
+      - agent: red-wide
+        activity: fast-orchestrator
+        authority: authoritative   # fail blocks the verdict gate
+        gate_on_verdict: true
+      - agent: red-narrow
+        activity: fast-orchestrator
+        authority: specialist      # findings annotate; never block
+        gate_on_verdict: false
