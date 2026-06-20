@@ -1,8 +1,9 @@
 ---
 id: FG-177
 type: story
-status: active
+status: done
 title: test-engineer E2E should be Playwright (project-owned), kept strictly separate from agent verification (browser-tools)
+closed: 2026-06-20
 ---
 
 **Decision (2026-05-29):** Playwright is the E2E stack for the *project's committed suite*. It must NOT be conflated with *agent testing* (forge's CDP browser-tools). Different layers, different owners, different lifecycles — the seed currently blurs them and that's the defect.
