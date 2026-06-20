@@ -1,8 +1,9 @@
 ---
 id: FG-234
 type: story
-status: active
+status: done
 title: "Orchestrator milestones — Walk: per-run notification policy (quiet|normal|verbose) + --notify-policy"
+closed: 2026-06-20
 ---
 
 Builds on the Crawl slice (forge notify milestone + orchestrator.milestone events + default per-kind policy + dedupe, shipped e168fcc, #202/#203).
