@@ -102,16 +102,17 @@ function jwtExp(token: string): number | null {
   }
 }
 
-// Derive the earliest expiry (unix seconds) across everything in the state:
-// Supabase-style JSON localStorage values carry a top-level `expires_at`; their
-// access_token is a JWT whose `exp` is a fallback; cookies carry `expires`.
-// Returns null when nothing dated is found (expiry unknown — cannot fail-fast).
-//
-// NOTE (#176 finding #2): an unauthenticated app does NOT necessarily redirect
-// to a login page, so expiry MUST be derived from the token, never from a
-// runtime login-URL bounce.
-export function profileExpiry(state: StorageState): number | null {
+interface AuthTokenInfo {
+  accessExpiry: number | null;
+  hasRefreshToken: boolean;
+}
+
+// Extract auth-token expiry and refresh_token presence from localStorage bundles.
+// Cookies are intentionally excluded — an unrelated short-lived cookie (CSRF,
+// analytics) must not pull the auth expiry earlier (#190 defect 1b).
+function extractAuthTokenInfo(state: StorageState): AuthTokenInfo {
   const candidates: number[] = [];
+  let hasRefreshToken = false;
   for (const origin of state.origins) {
     for (const entry of origin.localStorage) {
       let parsed: unknown;
@@ -121,7 +122,8 @@ export function profileExpiry(state: StorageState): number | null {
         continue;
       }
       if (parsed && typeof parsed === "object") {
-        const obj = parsed as { expires_at?: unknown; access_token?: unknown };
+        const obj = parsed as { expires_at?: unknown; access_token?: unknown; refresh_token?: unknown };
+        if (typeof obj.refresh_token === "string" && obj.refresh_token) hasRefreshToken = true;
         if (typeof obj.expires_at === "number") candidates.push(obj.expires_at);
         else if (typeof obj.access_token === "string") {
           const exp = jwtExp(obj.access_token);
@@ -130,11 +132,19 @@ export function profileExpiry(state: StorageState): number | null {
       }
     }
   }
-  for (const cookie of state.cookies) {
-    if (typeof cookie.expires === "number" && cookie.expires > 0) candidates.push(cookie.expires);
-  }
-  if (candidates.length === 0) return null;
-  return Math.min(...candidates);
+  return { accessExpiry: candidates.length > 0 ? Math.min(...candidates) : null, hasRefreshToken };
+}
+
+// Derive the auth-token expiry (unix seconds) from localStorage only — the
+// Supabase-style bundle's top-level `expires_at`, or the access_token JWT `exp`
+// as a fallback. Cookies are excluded (#190 defect 1b).
+// Returns null when nothing dated is found (expiry unknown — cannot fail-fast).
+//
+// NOTE (#176 finding #2): an unauthenticated app does NOT necessarily redirect
+// to a login page, so expiry MUST be derived from the token, never from a
+// runtime login-URL bounce.
+export function profileExpiry(state: StorageState): number | null {
+  return extractAuthTokenInfo(state).accessExpiry;
 }
 
 // Origins + cookie domains the profile carries — the implicit allowlist for v1.
@@ -202,6 +212,13 @@ export interface ProfileStatus {
   // unix seconds, or null when no dated material was found
   expiresAt: number | null;
   expired: boolean;
+  // true when a refresh_token is present in the localStorage bundle — the browser
+  // Supabase client (autoRefreshToken on) will mint a new access token on load.
+  // Caveat: Supabase ROTATES refresh tokens on each use, so a refresh_token
+  // captured while the human was actively using the same login may have been
+  // invalidated by subsequent logins after capture. We rely on in-browser
+  // auto-refresh only — no server-side refresh is attempted here.
+  refreshable: boolean;
   // present only when expiresAt is known
   expiresInSeconds?: number;
 }
@@ -210,17 +227,40 @@ export function profileStatus(name: string, now: number = Date.now()): ProfileSt
   const path = profilePath(name);
   const state = readProfile(name);
   if (!state) {
-    return { name: sanitizeProfileName(name), exists: false, path, domains: [], expiresAt: null, expired: false };
+    return { name: sanitizeProfileName(name), exists: false, path, domains: [], expiresAt: null, expired: false, refreshable: false };
   }
-  const expiresAt = profileExpiry(state);
+  const { accessExpiry, hasRefreshToken } = extractAuthTokenInfo(state);
   const nowSec = Math.floor(now / 1000);
+  const accessExpired = accessExpiry !== null && accessExpiry <= nowSec;
+  // Three-way gate (#190 defect 1a):
+  //   access valid                            → not expired
+  //   access expired + refresh_token present  → not expired (browser auto-refreshes)
+  //   access expired + no refresh_token       → expired (genuinely dead)
+  const expired = accessExpired && !hasRefreshToken;
   return {
     name: sanitizeProfileName(name),
     exists: true,
     path,
     domains: profileDomains(state),
-    expiresAt,
-    expired: expiresAt !== null && expiresAt <= nowSec,
-    ...(expiresAt !== null ? { expiresInSeconds: expiresAt - nowSec } : {}),
+    expiresAt: accessExpiry,
+    expired,
+    refreshable: hasRefreshToken,
+    ...(accessExpiry !== null ? { expiresInSeconds: accessExpiry - nowSec } : {}),
   };
+}
+
+export function fmtExpiry(s: ProfileStatus): string {
+  if (s.expiresAt === null) return "expiry unknown (no dated session material found)";
+  const when = new Date(s.expiresAt * 1000).toLocaleString();
+  if (s.expired) return `EXPIRED (${when}) — re-run: forge auth-profile login ${s.name} --url <url>`;
+  const secs = s.expiresInSeconds ?? 0;
+  if (s.refreshable && secs <= 0) {
+    return `access token expired (${when}) — auto-refreshes on load (refresh token present)`;
+  }
+  if (secs > 0) {
+    const mins = Math.round(secs / 60);
+    const rel = mins < 60 ? `${mins}m` : mins < 1440 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
+    return `valid (${when}, ~${rel} left)`;
+  }
+  return `valid (${when}, ~0m left)`;
 }

@@ -11,10 +11,12 @@ import {
   profileExpiry,
   profileDomains,
   profileStatus,
+  fmtExpiry,
   reconcileOriginForContainer,
   reconcileStateForContainer,
   AUTH_DIR,
   type StorageState,
+  type ProfileStatus,
 } from "./auth-profiles.js";
 
 // Build a Supabase-shaped localStorage value with a top-level expires_at.
@@ -33,6 +35,18 @@ function supabaseValue(expiresAt: number): string {
 function jwtOnlyValue(exp: number): string {
   const payload = Buffer.from(JSON.stringify({ exp })).toString("base64url");
   return JSON.stringify({ access_token: `h.${payload}.s`, refresh_token: "r" });
+}
+
+// Like supabaseValue but without a refresh_token — represents a non-Supabase or
+// simple token-only capture where the session cannot be auto-refreshed.
+function supabaseValueNoRefresh(expiresAt: number): string {
+  return JSON.stringify({
+    access_token: "h.p.s",
+    token_type: "bearer",
+    expires_in: 3600,
+    expires_at: expiresAt,
+    user: { id: "u" },
+  });
 }
 
 function state(opts: Partial<StorageState> = {}): StorageState {
@@ -66,12 +80,14 @@ test("profileExpiry falls back to JWT exp when no expires_at", () => {
   assert.equal(profileExpiry(s), 2000);
 });
 
-test("profileExpiry takes the earliest across ls + cookies", () => {
+test("profileExpiry ignores cookies — a short-lived cookie does not pull auth expiry earlier", () => {
+  // Regression for #190 defect 1b: cookie.expires=3000 < ls.expires_at=5000, but
+  // the cookie must not determine auth expiry.
   const s = state({
     origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValue(5000) }] }],
-    cookies: [{ name: "c", value: "v", domain: "a.test", path: "/", expires: 3000, httpOnly: true, secure: true }],
+    cookies: [{ name: "csrf", value: "v", domain: "a.test", path: "/", expires: 3000, httpOnly: true, secure: true }],
   });
-  assert.equal(profileExpiry(s), 3000);
+  assert.equal(profileExpiry(s), 5000);
 });
 
 test("profileExpiry ignores session cookies and non-JSON values", () => {
@@ -110,20 +126,50 @@ test("removeProfile reports existence", () => {
   assert.equal(removeProfile("temp"), false);
 });
 
-test("profileStatus flags expired vs valid against injected now", () => {
+test("profileStatus: valid access token is not expired", () => {
   const nowMs = 10_000_000;
   const nowSec = nowMs / 1000; // 10000
   writeProfile("fresh", state({ origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValue(nowSec + 3600) }] }] }));
-  writeProfile("stale", state({ origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValue(nowSec - 1) }] }] }));
-
   const fresh = profileStatus("fresh", nowMs);
   assert.equal(fresh.exists, true);
   assert.equal(fresh.expired, false);
+  assert.equal(fresh.refreshable, true);
   assert.equal(fresh.expiresInSeconds, 3600);
   assert.deepEqual(fresh.domains, ["https://a.test"]);
+});
 
-  const stale = profileStatus("stale", nowMs);
-  assert.equal(stale.expired, true);
+test("profileStatus: expired access token WITH refresh_token is not expired (refreshable)", () => {
+  // #190 defect 1a: the browser Supabase client auto-refreshes on load, so the
+  // session is live as long as the refresh_token is valid.
+  const nowMs = 10_000_000;
+  const nowSec = nowMs / 1000;
+  writeProfile("stale-refreshable", state({ origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValue(nowSec - 1) }] }] }));
+  const s = profileStatus("stale-refreshable", nowMs);
+  assert.equal(s.expired, false);
+  assert.equal(s.refreshable, true);
+});
+
+test("profileStatus: expired access token WITHOUT refresh_token is expired", () => {
+  const nowMs = 10_000_000;
+  const nowSec = nowMs / 1000;
+  writeProfile("dead", state({ origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValueNoRefresh(nowSec - 1) }] }] }));
+  const s = profileStatus("dead", nowMs);
+  assert.equal(s.expired, true);
+  assert.equal(s.refreshable, false);
+});
+
+test("profileStatus: short-lived cookie does not mark a valid auth profile as expired", () => {
+  // #190 defect 1b regression: a CSRF/analytics cookie with a near expiry must
+  // not pull the auth expiry calculation earlier.
+  const nowMs = 10_000_000;
+  const nowSec = nowMs / 1000;
+  writeProfile("with-cookie", state({
+    origins: [{ origin: "https://a.test", localStorage: [{ name: "t", value: supabaseValue(nowSec + 3600) }] }],
+    cookies: [{ name: "csrf", value: "x", domain: "a.test", path: "/", expires: nowSec - 1, httpOnly: true, secure: true }],
+  }));
+  const s = profileStatus("with-cookie", nowMs);
+  assert.equal(s.expired, false);
+  assert.equal(s.expiresAt, nowSec + 3600);
 });
 
 test("profileStatus on a missing profile is not expired, marked absent", () => {
@@ -178,4 +224,37 @@ test("reconcileStateForContainer leaves real-DNS state unchanged", () => {
   const { state: out, changed } = reconcileStateForContainer(s);
   assert.equal(changed, false);
   assert.equal(out.origins[0]!.origin, "https://staging.example.com");
+});
+
+// fmtExpiry — operator-facing display formatting
+
+function makeStatus(overrides: Partial<ProfileStatus>): ProfileStatus {
+  return { name: "test", exists: true, path: "/fake", domains: [], expiresAt: null, expired: false, refreshable: false, ...overrides };
+}
+
+const FIXED_EXPIRES_AT = 1_000_000; // unix seconds
+
+test("fmtExpiry: unknown expiry", () => {
+  assert.ok(fmtExpiry(makeStatus({ expiresAt: null })).includes("expiry unknown"));
+});
+
+test("fmtExpiry: valid access token shows positive countdown, no negative value", () => {
+  const out = fmtExpiry(makeStatus({ expiresAt: FIXED_EXPIRES_AT, expired: false, refreshable: true, expiresInSeconds: 3600 }));
+  assert.ok(out.startsWith("valid ("), `expected 'valid (' prefix, got: ${out}`);
+  assert.ok(out.includes("~1h left"), `expected '~1h left', got: ${out}`);
+  assert.ok(!out.includes("-"), `must not contain a negative value: ${out}`);
+});
+
+test("fmtExpiry: refreshable shows auto-refresh message, not EXPIRED, not negative countdown", () => {
+  // #190 defect 1a display regression: expired access + refresh_token must not show EXPIRED or negative countdown
+  const out = fmtExpiry(makeStatus({ expiresAt: FIXED_EXPIRES_AT, expired: false, refreshable: true, expiresInSeconds: -60 }));
+  assert.ok(out.includes("auto-refreshes on load"), `expected auto-refresh message, got: ${out}`);
+  assert.ok(!out.includes("EXPIRED"), `must not say EXPIRED: ${out}`);
+  assert.ok(!out.includes("-60"), `must not show negative countdown: ${out}`);
+});
+
+test("fmtExpiry: genuinely expired (no refresh_token) shows EXPIRED, not auto-refresh", () => {
+  const out = fmtExpiry(makeStatus({ expiresAt: FIXED_EXPIRES_AT, expired: true, refreshable: false, expiresInSeconds: -60 }));
+  assert.ok(out.startsWith("EXPIRED"), `expected EXPIRED prefix, got: ${out}`);
+  assert.ok(!out.includes("auto-refreshes"), `must not suggest auto-refresh: ${out}`);
 });

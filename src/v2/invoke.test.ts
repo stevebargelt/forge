@@ -672,6 +672,9 @@ test("invoke: closes the owned run as 'complete' even when the task fails (RunSt
 function supabaseValue(expiresAt: number): string {
   return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt, refresh_token: "r" });
 }
+function supabaseValueNoRefresh(expiresAt: number): string {
+  return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt });
+}
 
 test("invoke: --auth-profile fails fast (no container) when the profile is missing", async () => {
   setupRuntimeStub();
@@ -696,11 +699,11 @@ test("invoke: --auth-profile fails fast (no container) when the profile is missi
 test("invoke: --auth-profile fails fast (no container) when the profile is expired", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
-  // expires_at one second in the past.
+  // expires_at one second in the past, no refresh_token — genuinely dead.
   const past = Math.floor(Date.now() / 1000) - 1;
   writeProfile("stale-admin", {
     cookies: [],
-    origins: [{ origin: "https://staging.test", localStorage: [{ name: "sb-x-auth-token", value: supabaseValue(past) }] }],
+    origins: [{ origin: "https://staging.test", localStorage: [{ name: "sb-x-auth-token", value: supabaseValueNoRefresh(past) }] }],
   });
   let execCalled = false;
   const guardExec: DockerExecFn = async () => { execCalled = true; return 0; };
@@ -716,6 +719,32 @@ test("invoke: --auth-profile fails fast (no container) when the profile is expir
   assert.equal(r.status, "failed");
   assert.match(r.error!, /expired/);
   assert.equal(execCalled, false, "no container should spawn for an expired profile");
+});
+
+test("invoke: --auth-profile with expired access_token but refresh_token present is NOT blocked as expired", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  // Expired access token but refresh_token present — browser will auto-refresh, so not dead.
+  const past = Math.floor(Date.now() / 1000) - 1;
+  writeProfile("refreshable-admin", {
+    cookies: [],
+    origins: [{ origin: "https://staging.test", localStorage: [{ name: "sb-x-auth-token", value: supabaseValue(past) }] }],
+  });
+
+  const r = await invoke({
+    agentRole: "manual-qa",
+    task: "test the admin",
+    projectDir: "/tmp/x",
+    authProfile: "refreshable-admin",
+    dockerExec: async () => 0,
+  });
+
+  // auth.profile_applied must be emitted (profile passed the expiry gate).
+  // auth.profile_failed must NOT be emitted. Task may fail for unrelated reasons.
+  const events = eventsForTask(r.taskId);
+  assert.ok(events.some((e) => e.eventType === "auth.profile_applied"), "auth.profile_applied must be emitted for a refreshable profile");
+  assert.ok(!events.some((e) => e.eventType === "auth.profile_failed"), "auth.profile_failed must NOT be emitted for a refreshable profile");
+  if (r.status === "failed") assert.doesNotMatch(r.error!, /expired/);
 });
 
 test("invoke: staged auth-state is CLEANED UP after the task terminates (AWN-8; staging details covered in auth-state.test.ts)", async () => {

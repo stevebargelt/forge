@@ -9,6 +9,9 @@ import { writeProfile, profilePath } from "../util/auth-profiles.js";
 function supabaseValue(expiresAt: number): string {
   return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt, refresh_token: "r" });
 }
+function supabaseValueNoRefresh(expiresAt: number): string {
+  return JSON.stringify({ access_token: "h.p.s", expires_at: expiresAt });
+}
 const future = () => Math.floor(Date.now() / 1000) + 3600;
 const past = () => Math.floor(Date.now() / 1000) - 1;
 
@@ -30,11 +33,23 @@ test("resolveAuthStateForContainer throws on missing profile", () => {
 test("resolveAuthStateForContainer throws on expired profile", () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-as-"));
   delete process.env.FORGE_CONTAINER_HOST;
+  // No refresh_token — genuinely dead session.
   writeProfile("stale", {
+    cookies: [],
+    origins: [{ origin: "https://app.test", localStorage: [{ name: "t", value: supabaseValueNoRefresh(past()) }] }],
+  });
+  assert.throws(() => resolveAuthStateForContainer("stale", dir), /expired/);
+});
+
+test("resolveAuthStateForContainer does NOT throw when access token is expired but refresh_token is present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-as-"));
+  delete process.env.FORGE_CONTAINER_HOST;
+  // Expired access token + refresh_token — browser auto-refreshes; not blocked.
+  writeProfile("refreshable", {
     cookies: [],
     origins: [{ origin: "https://app.test", localStorage: [{ name: "t", value: supabaseValue(past()) }] }],
   });
-  assert.throws(() => resolveAuthStateForContainer("stale", dir), /expired/);
+  assert.doesNotThrow(() => resolveAuthStateForContainer("refreshable", dir));
 });
 
 test("resolveAuthStateForContainer stages a reconciled mode-600 copy for localhost origins", () => {

@@ -396,8 +396,7 @@ test("integ failure_kind: auth_expired task.failed payload has failure_kind + er
             name: "sb-x-auth-token",
             value: JSON.stringify({
               access_token: fakeAccessToken,
-              expires_at: Math.floor(Date.now() / 1000) - 7200, // 2 hours in the past
-              refresh_token: fakeRefreshToken,
+              expires_at: Math.floor(Date.now() / 1000) - 7200, // 2 hours in the past — no refresh_token, genuinely dead
             }),
           },
         ],

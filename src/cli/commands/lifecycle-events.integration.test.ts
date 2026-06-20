@@ -698,8 +698,7 @@ test("integ lifecycle auth.profile_failed (expired profile): emits auth.profile_
             name: "sb-x-auth-token",
             value: JSON.stringify({
               access_token: "expired.tok",
-              expires_at: Math.floor(Date.now() / 1000) - 3600, // 1 hour ago
-              refresh_token: "expired.ref",
+              expires_at: Math.floor(Date.now() / 1000) - 3600, // 1 hour ago — no refresh_token, genuinely dead
             }),
           },
         ],

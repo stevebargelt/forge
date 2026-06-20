@@ -5,22 +5,13 @@ import {
   profileStatus,
   removeProfile,
   writeProfile,
+  fmtExpiry,
   type ProfileStatus,
 } from "../../util/auth-profiles.js";
 
 // `forge auth-profile` manages captured app-under-test browser sessions (#176).
 // This is ORTHOGONAL to `forge auth` (which manages the Anthropic API credential
 // for agent containers). Naming is deliberately distinct.
-
-function fmtExpiry(s: ProfileStatus): string {
-  if (s.expiresAt === null) return "expiry unknown (no dated session material found)";
-  const when = new Date(s.expiresAt * 1000).toLocaleString();
-  if (s.expired) return `EXPIRED (${when}) — re-run: forge auth-profile login ${s.name} --url <url>`;
-  const secs = s.expiresInSeconds ?? 0;
-  const mins = Math.round(secs / 60);
-  const rel = mins < 60 ? `${mins}m` : mins < 1440 ? `${Math.round(mins / 60)}h` : `${Math.round(mins / 1440)}d`;
-  return `valid (${when}, ~${rel} left)`;
-}
 
 function printStatus(s: ProfileStatus): void {
   if (!s.exists) {
