@@ -1,8 +1,9 @@
 ---
 id: FG-222
 type: story
-status: active
+status: done
 title: Session/orchestrator tasks stuck 'running' need a heartbeat-based reaper (not container-based)
+closed: 2026-06-20
 ---
 
 Surfaced during AWN-1 (#214): the real DB has several task-session-* (phase=session, role=orchestrator) tasks stuck status='running' from orchestrator/design sessions that ended without finalizing. AWN-1's reconcile deliberately SKIPS them (no container.started — they're host-side), so they stay 'running' forever and inflate forge status / dashboard "in flight".
