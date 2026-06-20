@@ -77,7 +77,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 
 ## Upgrading
 
-When forge has new commits, run `forge upgrade` from any project. It pulls the forge repo, runs `npm install`, refreshes `~/.forge/` seeds, and re-inits the current project's orchestrator block. See `docs/how-to-upgrade.md` for flags and the multi-project flow.
+When forge has new commits, run `forge upgrade` from any project. It pulls the forge repo, runs `npm install`, refreshes `~/.forge/` seeds, and re-inits the current project's orchestrator block — then a read-only release check runs automatically (image, runtime CLIs, auth, policies, seed drift). To also rebuild the agent Docker image in the same command, add `--rebuild-image`. See `docs/how-to-upgrade.md` for all flags and the multi-project flow.
 
 ## Docs
 
