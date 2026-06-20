@@ -1,8 +1,9 @@
 ---
 id: FG-223
 type: story
-status: active
+status: done
 title: "AWN-4 phase 2: contract enforcement — record satisfied checks, workflow-YAML contracts, orchestrator prefers contracts"
+closed: 2026-06-20
 ---
 
 Follow-up to AWN-4 phase 1 (#217, which landed the TaskContract schema + manifest carry + forge show + forge invoke --contract). Phase 2 closes the doc's remaining §4 acceptance:
