@@ -1,8 +1,9 @@
 ---
 id: FG-249
 type: story
-status: active
+status: done
 title: "Handoff notes: derive 'Picked up next' from a backlog priority model instead of hand-listing (Fix B, gated)"
+closed: 2026-06-20
 ---
 
 **Follow-on to #248 (Fix A shipped in 5387cd8).** Fix A added reconciliation so /orient + /handoff catch stale ticket refs in the notes. This is the structural alternative discussed alongside it: stop hand-listing tickets in "Picked up next" at all — render them live from the backlog so they cannot drift ("derive, don't denormalize").
