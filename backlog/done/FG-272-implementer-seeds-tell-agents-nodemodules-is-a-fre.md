@@ -1,8 +1,9 @@
 ---
 id: FG-272
 type: story
-status: active
+status: done
 title: "Implementer seeds: tell agents node_modules is a fresh container-local volume — install before build (#245 companion)"
+closed: 2026-06-20
 ---
 
 **Companion to #245** (container-local node_modules shadow volume, commit 02ca0b9). With the shadow volume, the container's `/project/node_modules` starts EMPTY (the host's modules are intentionally hidden, and on darwin they're wrong-platform anyway). Build/test agents must run a clean install (npm/pnpm/yarn, per the project) before building/testing, instead of leaning on the mounted host modules.

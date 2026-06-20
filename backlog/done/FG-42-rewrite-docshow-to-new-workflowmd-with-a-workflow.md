@@ -1,8 +1,9 @@
 ---
 id: FG-42
 type: story
-status: active
+status: done
 title: Rewrite docs/how-to-new-workflow.md with a workflow we don't already have
+closed: 2026-06-20
 ---
 
 **Why:** Current example is `code-review` which duplicates the existing `codebase-assessment` workflow. The doc reads as a paper exercise. Replace with a workflow forge actually doesn't have, ideally one that exercises a primitive we've built but not documented (`onReject` branching, gate=verdict + fanout combo, multi-authority red panels).

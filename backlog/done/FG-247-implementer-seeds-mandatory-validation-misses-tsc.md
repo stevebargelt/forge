@@ -1,8 +1,9 @@
 ---
 id: FG-247
 type: story
-status: active
+status: done
 title: Implementer seeds' mandatory validation misses tsc type-check + format-check — forge-clean changes fail CI
+closed: 2026-06-20
 ---
 
 **Process finding (from Pixtron, 2026-06-02).** Pixtron #16 failed CI twice on changes the forge container reported `complete`/clean: a real `tsc` type error, and unformatted files. This will recur on every forge-authored web-admin change. Sibling to #178 (there: forge-test picks the wrong test *runner*; here: the sanctioned validation path is missing two mandatory *steps* — type-check and format-check).
