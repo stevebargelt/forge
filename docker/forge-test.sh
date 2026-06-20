@@ -61,23 +61,69 @@ if [[ $# -eq 0 ]]; then
   exec npm test
 fi
 
-if ! command -v tsx >/dev/null 2>&1; then
-  echo "forge-test: the 'tsx' runner is not available in this container." >&2
-  echo "forge-test: rebuild the agent image (./docker/build.sh) — tsx ships in it as of #299. Do NOT 'npm i -g tsx' ad hoc." >&2
-  exit 127
-fi
+# Detect the test runner from package.json.
+# Priority: scripts.test pattern -> devDependencies jest/vitest -> node:test.
+detect_runner() {
+  if [[ ! -f ./package.json ]]; then
+    echo "node:test"
+    return
+  fi
+  node -e "
+    try {
+      const p = JSON.parse(require('fs').readFileSync('./package.json', 'utf8'));
+      const ts = (p.scripts && p.scripts.test) || '';
+      const deps = Object.assign({}, p.dependencies || {}, p.devDependencies || {});
+      if (ts.includes('jest'))        { process.stdout.write('jest'); }
+      else if (ts.includes('vitest')) { process.stdout.write('vitest'); }
+      else if (ts)                    { process.stdout.write('node:test'); }
+      else if (deps.jest)             { process.stdout.write('jest'); }
+      else if (deps.vitest)           { process.stdout.write('vitest'); }
+      else                            { process.stdout.write('node:test'); }
+    } catch(e) { process.stdout.write('node:test'); }
+  " 2>/dev/null || echo "node:test"
+}
 
-# forge's OWN suite needs src/test-setup.ts loaded (points FORGE_HOME at a temp
-# dir to isolate the real ~/.forge/forge.db, and clears FORGE_NOTIFY so the suite
-# never fires real notifications — #199). Gate this on BEING THE FORGE REPO
-# (package.json name == "forge") AND the file existing — src/test-setup.ts is a
-# common project-local filename, so file-existence alone would wrongly preload a
-# stranger's setup file and could alter its env or fail before the target test
-# runs. A generic tsx project (or one with its own src/test-setup.ts) runs plain.
-if [[ -f ./package.json ]] \
-  && grep -Eq '"name"[[:space:]]*:[[:space:]]*"forge"[[:space:]]*,?' package.json \
-  && [[ -f ./src/test-setup.ts ]]; then
-  exec tsx --import ./src/test-setup.ts --test "$@"
-else
-  exec tsx --test "$@"
-fi
+RUNNER=$(detect_runner)
+
+case "$RUNNER" in
+  jest)
+    JEST_BIN="./node_modules/.bin/jest"
+    if [[ ! -x "$JEST_BIN" ]]; then
+      echo "forge-test: jest detected but $JEST_BIN not found — is jest installed?" >&2
+      exit 127
+    fi
+    echo "forge-test: detected runner: jest" >&2
+    exec "$JEST_BIN" "$@"
+    ;;
+  vitest)
+    VITEST_BIN="./node_modules/.bin/vitest"
+    if [[ ! -x "$VITEST_BIN" ]]; then
+      echo "forge-test: vitest detected but $VITEST_BIN not found — is vitest installed?" >&2
+      exit 127
+    fi
+    echo "forge-test: detected runner: vitest" >&2
+    exec "$VITEST_BIN" run "$@"
+    ;;
+  *)
+    # node:test with tsx (original behavior)
+    if ! command -v tsx >/dev/null 2>&1; then
+      echo "forge-test: the 'tsx' runner is not available in this container." >&2
+      echo "forge-test: rebuild the agent image (./docker/build.sh) — tsx ships in it as of #299. Do NOT 'npm i -g tsx' ad hoc." >&2
+      exit 127
+    fi
+    # forge's OWN suite needs src/test-setup.ts loaded (points FORGE_HOME at a temp
+    # dir to isolate the real ~/.forge/forge.db, and clears FORGE_NOTIFY so the suite
+    # never fires real notifications — #199). Gate this on BEING THE FORGE REPO
+    # (package.json name == "forge") AND the file existing — src/test-setup.ts is a
+    # common project-local filename, so file-existence alone would wrongly preload a
+    # stranger's setup file and could alter its env or fail before the target test
+    # runs. A generic tsx project (or one with its own src/test-setup.ts) runs plain.
+    if [[ -f ./package.json ]] \
+      && grep -Eq '"name"[[:space:]]*:[[:space:]]*"forge"[[:space:]]*,?' package.json \
+      && [[ -f ./src/test-setup.ts ]]; then
+      exec tsx --import ./src/test-setup.ts --test "$@"
+    else
+      exec tsx --test "$@"
+    fi
+    ;;
+esac
