@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { findProjectRoot, extractNameFromArgs, stripNameFromArgs } from "./claude.js";
+import {
+  findProjectRoot,
+  extractNameFromArgs,
+  stripNameFromArgs,
+  extractBedrockFromArgs,
+  extractAwsProfileFromArgs,
+  stripBedrockFlagsFromArgs,
+} from "./claude.js";
 
 const MARKER = "<!-- forge:orchestrator-start -->";
 
@@ -108,4 +115,79 @@ test("strip + extract together: user override survives through the pipeline", ()
   assert.deepEqual(final, ["-n", "user-chose-this", "--continue", "--model", "sonnet"]);
   // -n appears exactly once.
   assert.equal(final.filter((a) => a === "-n" || a === "--name").length, 1);
+});
+
+// ----- extractBedrockFromArgs -----
+
+test("extractBedrockFromArgs: returns false when --bedrock not present", () => {
+  assert.equal(extractBedrockFromArgs([]), false);
+  assert.equal(extractBedrockFromArgs(["--continue", "--model", "sonnet"]), false);
+});
+
+test("extractBedrockFromArgs: returns true when --bedrock is present", () => {
+  assert.equal(extractBedrockFromArgs(["--bedrock"]), true);
+  assert.equal(extractBedrockFromArgs(["--continue", "--bedrock", "--model", "sonnet"]), true);
+});
+
+// ----- extractAwsProfileFromArgs -----
+
+test("extractAwsProfileFromArgs: returns undefined when not present", () => {
+  assert.equal(extractAwsProfileFromArgs([]), undefined);
+  assert.equal(extractAwsProfileFromArgs(["--bedrock", "--continue"]), undefined);
+});
+
+test("extractAwsProfileFromArgs: extracts value from two-token form", () => {
+  assert.equal(extractAwsProfileFromArgs(["--aws-profile", "my-profile"]), "my-profile");
+  assert.equal(
+    extractAwsProfileFromArgs(["--bedrock", "--aws-profile", "adx-dev", "--continue"]),
+    "adx-dev",
+  );
+});
+
+test("extractAwsProfileFromArgs: extracts value from --aws-profile=<value> form", () => {
+  assert.equal(extractAwsProfileFromArgs(["--aws-profile=my-profile"]), "my-profile");
+  assert.equal(extractAwsProfileFromArgs(["--bedrock", "--aws-profile=adx-dev"]), "adx-dev");
+});
+
+// ----- stripBedrockFlagsFromArgs -----
+
+test("stripBedrockFlagsFromArgs: returns input unchanged when no bedrock flags", () => {
+  const input = ["--continue", "--model", "sonnet"];
+  assert.deepEqual(stripBedrockFlagsFromArgs(input), input);
+});
+
+test("stripBedrockFlagsFromArgs: removes --bedrock", () => {
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--bedrock", "--continue"]),
+    ["--continue"],
+  );
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--continue", "--bedrock", "--model", "sonnet"]),
+    ["--continue", "--model", "sonnet"],
+  );
+});
+
+test("stripBedrockFlagsFromArgs: removes --aws-profile and its value (two-token form)", () => {
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--aws-profile", "adx-dev", "--continue"]),
+    ["--continue"],
+  );
+});
+
+test("stripBedrockFlagsFromArgs: removes --aws-profile=value (one-token form)", () => {
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--aws-profile=adx-dev", "--continue"]),
+    ["--continue"],
+  );
+});
+
+test("stripBedrockFlagsFromArgs: removes both --bedrock and --aws-profile together", () => {
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--bedrock", "--aws-profile", "adx-dev", "--continue"]),
+    ["--continue"],
+  );
+  assert.deepEqual(
+    stripBedrockFlagsFromArgs(["--bedrock", "--aws-profile=adx-dev", "--model", "sonnet"]),
+    ["--model", "sonnet"],
+  );
 });

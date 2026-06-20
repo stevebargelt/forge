@@ -27,7 +27,9 @@ import { execSync } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve as pathResolve } from "node:path";
 import { homedir } from "node:os";
-import { resolveProjectMeta } from "../../util/project-meta.js";
+import { resolveProjectMeta, readProjectAuth } from "../../util/project-meta.js";
+import { detectStaleStsCache } from "../../util/creds.js";
+import { startSsoWatchdog } from "../../util/sso-watchdog.js";
 import { insertRun, updateRunStatus } from "../../store/runs.js";
 import { insertTask, markTaskComplete } from "../../store/tasks.js";
 import { extractUsageFromTranscript, insertUsageRows } from "../../store/model-calls.js";
@@ -52,19 +54,63 @@ export function registerClaude(program: Command): void {
         console.log(`forge claude: chdir to project root: ${projectRoot}`);
       }
 
-      // 2. Resolve the display name. Honor user-supplied -n / --name override.
-      const userSuppliedName = extractNameFromArgs(args);
+      // 2. Extract forge-specific flags from args before passing through to claude.
+      const bedrockFlag = extractBedrockFromArgs(args);
+      const awsProfileFlag = extractAwsProfileFromArgs(args);
+      const argsWithoutBedrockFlags = stripBedrockFlagsFromArgs(args);
+
+      // 3. Read project auth config from .forge/project.json.
+      const projectAuth = readProjectAuth(projectRoot);
+
+      // 4. Determine auth mode and build child env.
+      //    Bedrock is active when: --bedrock flag, project.json auth:bedrock, or env already arms it.
+      const envBedrock = process.env.CLAUDE_CODE_USE_BEDROCK === "1";
+      const bedrockActive = bedrockFlag || projectAuth?.auth === "bedrock" || envBedrock;
+
+      // Fail fast for apikey mode when the key is missing.
+      if (projectAuth?.auth === "apikey" && !process.env.ANTHROPIC_API_KEY) {
+        console.error(`forge claude: project.json auth=apikey requires ANTHROPIC_API_KEY to be set`);
+        process.exit(1);
+      }
+
+      let resolvedProfile: string | undefined;
+      let childEnv: NodeJS.ProcessEnv = process.env;
+
+      if (bedrockActive) {
+        // Profile resolution order: --aws-profile flag > project.json.awsProfile > AWS_PROFILE env > "default"
+        resolvedProfile = awsProfileFlag ?? projectAuth?.awsProfile ?? process.env.AWS_PROFILE ?? "default";
+
+        // STS pre-flight: detect stale STS credentials before spending a session on them.
+        const staleness = detectStaleStsCache();
+        if (staleness?.stale) {
+          console.error(
+            `forge claude: AWS STS credentials are stale — the STS cache predates the current SSO session.\n` +
+            `  Run: aws sts get-caller-identity --profile ${resolvedProfile}`
+          );
+          process.exit(1);
+        }
+
+        // Arm the child env without mutating the parent shell.
+        childEnv = {
+          ...process.env,
+          CLAUDE_CODE_USE_BEDROCK: "1",
+          AWS_PROFILE: resolvedProfile,
+        };
+      }
+
+      // 5. Resolve the display name. Honor user-supplied -n / --name override.
+      const userSuppliedName = extractNameFromArgs(argsWithoutBedrockFlags);
       const resolvedName = userSuppliedName ?? resolveProjectMeta(projectRoot)?.label ?? basename(projectRoot);
 
-      // 3. Pre-flight warnings (non-blocking).
+      // 6. Pre-flight warnings (non-blocking).
       const warnings = preflightChecks(projectRoot);
       for (const w of warnings) console.log(`forge claude: ⚠ ${w}`);
 
-      // 4. Status banner.
-      console.log(statusBanner(projectRoot, resolvedName));
+      // 7. Status banner.
+      console.log(statusBanner(projectRoot, resolvedName, resolvedProfile));
       console.log("");
 
-      // 5. Create an orchestrator run + task so model_calls captured at session
+      // 8. Create an orchestrator run + task so model_calls captured at session
       //    end show up in the dashboard usage view with proper project grouping.
       const runId = newRunId("orchestrator");
       const taskId = newTaskId("session");
@@ -96,18 +142,24 @@ export function registerClaude(program: Command): void {
         // Best-effort — don't block the session if DB writes fail.
       }
 
-      // 6. Build the final argv. Strip user-supplied -n / --name (we set ours);
-      //    insert our --name first so flags-after can still reference it.
-      const passthrough = stripNameFromArgs(args);
+      // 9. Ensure the SSO watchdog is running when bedrock is active so the
+      //    SSO token stays fresh for the duration of the session.
+      if (bedrockActive) {
+        startSsoWatchdog(runId);
+      }
+
+      // 10. Build the final argv. Strip user-supplied -n / --name (we set ours);
+      //     insert our --name first so flags-after can still reference it.
+      const passthrough = stripNameFromArgs(argsWithoutBedrockFlags);
       const finalArgs: string[] = ["-n", resolvedName, ...passthrough];
 
-      // 7. Exec claude with stdio inherited so the user gets a real interactive
-      //    session. Child inherits the parent's env (FORGE_REPO_DIR, AWS_*,
-      //    CLAUDE_CODE_USE_BEDROCK, ANTHROPIC_API_KEY, etc.).
+      // 11. Exec claude with stdio inherited so the user gets a real interactive
+      //     session. Child env has bedrock vars injected when active (parent shell
+      //     is never mutated).
       const child = spawn("claude", finalArgs, {
         cwd: projectRoot,
         stdio: "inherit",
-        env: process.env,
+        env: childEnv,
       });
       child.on("exit", (code, signal) => {
         captureOrchestratorUsage(projectRoot, taskId, runId);
@@ -173,6 +225,40 @@ export function stripNameFromArgs(args: string[]): string[] {
   return out;
 }
 
+// Return true when --bedrock appears anywhere in the passthrough arg list.
+export function extractBedrockFromArgs(args: string[]): boolean {
+  return args.includes("--bedrock");
+}
+
+// Extract --aws-profile <value> or --aws-profile=<value> from the arg list.
+export function extractAwsProfileFromArgs(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--aws-profile" && i + 1 < args.length) {
+      return args[i + 1];
+    }
+    if (args[i]?.startsWith("--aws-profile=")) {
+      return args[i]!.slice("--aws-profile=".length);
+    }
+  }
+  return undefined;
+}
+
+// Remove --bedrock and --aws-profile (plus its value) from the arg list so
+// forge-specific flags don't leak through to claude.
+export function stripBedrockFlagsFromArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--bedrock") continue;
+    if (args[i] === "--aws-profile") {
+      i += 1;  // skip the value too
+      continue;
+    }
+    if (args[i]?.startsWith("--aws-profile=")) continue;
+    out.push(args[i]!);
+  }
+  return out;
+}
+
 function preflightChecks(projectRoot: string): string[] {
   const warnings: string[] = [];
 
@@ -214,8 +300,9 @@ function preflightChecks(projectRoot: string): string[] {
   return warnings;
 }
 
-function statusBanner(projectRoot: string, name: string): string {
+function statusBanner(projectRoot: string, name: string, bedrockProfile?: string): string {
   const parts: string[] = [`Launching as '${name}' orchestrator`];
+  if (bedrockProfile) parts.push(`bedrock:${bedrockProfile}`);
   const branch = gitInfo(projectRoot, "rev-parse --abbrev-ref HEAD");
   if (branch) parts.push(`branch: ${branch}`);
   const ahead = gitInfo(projectRoot, "rev-list --count origin/HEAD..HEAD") ?? gitInfo(projectRoot, "rev-list --count @{u}..HEAD");

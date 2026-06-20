@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { resolveProjectMeta, _clearCacheForTesting } from "./project-meta.js";
+import { resolveProjectMeta, readProjectAuth, _clearCacheForTesting } from "./project-meta.js";
 
 let dir: string;
 
@@ -175,4 +175,83 @@ test("resolveProjectMeta: name override is read from the repo root, applied to s
   const sub = join(dir, "web-admin");
   mkdirSync(sub, { recursive: true });
   assert.equal(resolveProjectMeta(sub)?.label, "wnba-led-scoreboard");
+});
+
+// ----- readProjectAuth (FG-158) -----
+
+test("readProjectAuth: returns null when .forge/project.json is absent", () => {
+  assert.equal(readProjectAuth(dir), null);
+});
+
+test("readProjectAuth: returns null when project.json has no auth fields", () => {
+  writeProjectJson(dir, { name: "MyProject", description: "no auth here" });
+  assert.equal(readProjectAuth(dir), null);
+});
+
+test("readProjectAuth: reads auth=bedrock", () => {
+  writeProjectJson(dir, { auth: "bedrock" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "bedrock");
+  assert.equal(cfg.awsProfile, undefined);
+});
+
+test("readProjectAuth: reads auth=oauth", () => {
+  writeProjectJson(dir, { auth: "oauth" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "oauth");
+});
+
+test("readProjectAuth: reads auth=apikey", () => {
+  writeProjectJson(dir, { auth: "apikey" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "apikey");
+});
+
+test("readProjectAuth: ignores unknown auth value", () => {
+  writeProjectJson(dir, { auth: "magic-sauce" });
+  assert.equal(readProjectAuth(dir), null);
+});
+
+test("readProjectAuth: reads awsProfile when present with auth=bedrock", () => {
+  writeProjectJson(dir, { auth: "bedrock", awsProfile: "adx-dev" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "bedrock");
+  assert.equal(cfg.awsProfile, "adx-dev");
+});
+
+test("readProjectAuth: reads awsProfile even without auth field", () => {
+  writeProjectJson(dir, { awsProfile: "adx-dev" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, undefined);
+  assert.equal(cfg.awsProfile, "adx-dev");
+});
+
+test("readProjectAuth: ignores empty string awsProfile", () => {
+  writeProjectJson(dir, { auth: "bedrock", awsProfile: "" });
+  const cfg = readProjectAuth(dir);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "bedrock");
+  assert.equal(cfg.awsProfile, undefined);
+});
+
+test("readProjectAuth: returns null when project.json is malformed JSON", () => {
+  mkdirSync(join(dir, ".forge"), { recursive: true });
+  writeFileSync(join(dir, ".forge", "project.json"), "{ not valid json ");
+  assert.equal(readProjectAuth(dir), null);
+});
+
+test("readProjectAuth: reads auth from git root when called from a subdir", () => {
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  writeProjectJson(dir, { auth: "bedrock", awsProfile: "root-profile" });
+  const sub = join(dir, "web-admin");
+  mkdirSync(sub, { recursive: true });
+  const cfg = readProjectAuth(sub);
+  assert.ok(cfg);
+  assert.equal(cfg.auth, "bedrock");
+  assert.equal(cfg.awsProfile, "root-profile");
 });

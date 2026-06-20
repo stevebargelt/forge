@@ -30,6 +30,16 @@ export type ProjectMeta = {
   description?: string;
 };
 
+// Auth configuration from .forge/project.json (FG-158).
+// auth: bedrock → arms CLAUDE_CODE_USE_BEDROCK=1 + AWS_PROFILE for the child.
+// auth: oauth   → no-op default; claude uses OAuth credentials as normal.
+// auth: apikey  → verifies ANTHROPIC_API_KEY is set before launch.
+// awsProfile    → overrides AWS_PROFILE resolution when auth=bedrock.
+export type ProjectAuthConfig = {
+  auth?: "bedrock" | "oauth" | "apikey";
+  awsProfile?: string;
+};
+
 const cache = new Map<string, ProjectMeta>();
 
 export function resolveProjectMeta(projectDir: string | null): ProjectMeta | null {
@@ -70,6 +80,29 @@ function readProjectJson(projectDir: string): { name?: string; description?: str
       result.description = parsed["description"];
     }
     return result;
+  } catch {
+    return null;
+  }
+}
+
+// Read auth configuration from <projectDir>/.forge/project.json (via git root).
+// Returns null when the file is absent, unreadable, or contains no auth fields.
+export function readProjectAuth(projectDir: string): ProjectAuthConfig | null {
+  const root = findGitRoot(projectDir);
+  const path = join(root, ".forge", "project.json");
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const result: ProjectAuthConfig = {};
+    const auth = parsed["auth"];
+    if (auth === "bedrock" || auth === "oauth" || auth === "apikey") {
+      result.auth = auth;
+    }
+    const awsProfile = parsed["awsProfile"];
+    if (typeof awsProfile === "string" && awsProfile.length > 0) {
+      result.awsProfile = awsProfile;
+    }
+    return Object.keys(result).length > 0 ? result : null;
   } catch {
     return null;
   }
