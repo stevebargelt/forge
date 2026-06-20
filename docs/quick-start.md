@@ -36,12 +36,13 @@ Verify with `forge auth status`. To switch accounts, `forge auth logout` then `f
 
 ```bash
 aws sso login --profile adx-dev
-. ~/code/forge/scripts/use-bedrock.sh       # arms AWS_PROFILE + CLAUDE_CODE_USE_BEDROCK=1 + the SSO watchdog
 ```
 
-Sourcing (not running) the script is required so the env vars stay set in your shell. The script does NOT snapshot STS env vars — agent containers read SSO state directly from a mounted `~/.aws` and a host-side watchdog (`scripts/run-sso-watchdog.sh`) keeps the SSO cache fresh in the background. See FORGE-DEC-013 for why.
+That's the only required step. For the interactive session, pass `--bedrock` to `forge claude` instead of sourcing `scripts/use-bedrock.sh` — see the **Bedrock mode via `forge claude`** tip in step 4. For agent dispatches (`forge next`), forge auto-detects Bedrock when `AWS_PROFILE` is set in your shell or when `~/.aws/config` has an SSO-backed default profile.
 
-For multi-hour runs the watchdog refreshes silently every 5 minutes via the SSO refresh token — no browser pop unless your refresh token (typically days/weeks) has also expired. The watchdog auto-starts when forge dispatches a run and auto-stops when the run completes; PID is tracked at `~/.forge/sso-watchdog.pid`.
+`scripts/use-bedrock.sh` still works if you want the vars armed in your parent shell (for tools running outside forge). Agent containers read SSO state from a mounted `~/.aws` (RO); see FORGE-DEC-013.
+
+For multi-hour runs the watchdog refreshes silently every 5 minutes via the SSO refresh token — no browser pop unless your refresh token (typically days/weeks) has also expired. `forge claude --bedrock` starts the watchdog automatically for the session; `forge next` starts it at dispatch time. PID is tracked at `~/.forge/sso-watchdog.pid`.
 
 ### API key (escape hatch)
 
@@ -76,6 +77,27 @@ After `forge init`, you have two ways to drive forge in this project. They're eq
 **Orchestrator-led (the conversational path).** Start `claude` in `~/code/my-app` (or `forge claude`, see below). The orchestrator block in `CLAUDE.md` makes that session the project's forge orchestrator. You say *"add OAuth login using the existing user table"*, the orchestrator classifies the request (implementation work), picks the right workflow (`feature`), constructs the brief, calls `forge new feature` for you, watches the run, presents each gate with a recommendation, and reports the final result. You never type a `forge` command yourself. This is the recommended path for ad-hoc work.
 
 **Tip — `forge claude`.** Use `forge claude` instead of bare `claude` and you get: (a) the session display name auto-set to the project's friendly label (shown in prompt box, /resume picker, terminal title); (b) chdir to the project root if invoked from a subdir; (c) a one-line status banner with branch / unpushed commits / active ticket count; (d) pre-flight warnings if the project hasn't been bootstrapped on this machine (missing `.claude/settings.local.json`, stale forge symlinks). All extra args (`--continue`, `--resume`, `--model`, `--add-dir`, etc.) pass through to `claude` unchanged. For fully transparent use, alias it in your shell rc: `alias claude='forge claude'`.
+
+**Bedrock mode via `forge claude`.** Pass `--bedrock` to activate Bedrock without sourcing `scripts/use-bedrock.sh` first. Forge injects `CLAUDE_CODE_USE_BEDROCK=1` and `AWS_PROFILE` into the spawned `claude` process only — your parent shell is never modified:
+
+```bash
+forge claude --bedrock
+forge claude --bedrock --aws-profile adx-dev    # explicit profile override
+```
+
+`--aws-profile` sets which AWS profile to use. When bedrock is active, the profile is resolved in this order: `--aws-profile` flag → `.forge/project.json` `awsProfile` field → `AWS_PROFILE` env var → `"default"`. The resolved profile appears in the launch banner (e.g. `bedrock:adx-dev`). Before launching, forge runs a stale-STS pre-flight and exits with an error if the STS cache predates the current SSO session; the SSO watchdog starts automatically to keep the token fresh.
+
+To persist the auth mode per project, set `auth` in `.forge/project.json`:
+
+```json
+{
+  "name": "My App",
+  "auth": "bedrock",
+  "awsProfile": "adx-dev"
+}
+```
+
+`auth` accepts `"bedrock"`, `"oauth"`, or `"apikey"`. With `auth: "bedrock"` here, `--bedrock` is not needed on every launch and `awsProfile` sits between the flag and the env var in the resolution order above. With `auth: "apikey"`, `forge claude` exits immediately if `ANTHROPIC_API_KEY` is unset.
 
 **Direct CLI (the scripted path).** Run `forge new` / `forge invoke` yourself. Useful when you're automating, repeating the same workflow many times, or driving forge from outside a Claude Code session. Steps 5–8 below walk this path explicitly.
 
