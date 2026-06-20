@@ -13,7 +13,7 @@ import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
 import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
 import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
-import { docsImpactSuggestion, loadOperatorSurfaces, type TaskContract } from "../../v2/contract.js";
+import { docsImpactSuggestion, loadOperatorSurfaces } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
 
 export type ShowResult =
@@ -353,17 +353,6 @@ export function getManifestRuntime(taskDirPath: string): ManifestRuntime | undef
   }
 }
 
-// AWN-4: the task contract this task was dispatched under, from its manifest.
-export function getManifestContract(taskDirPath: string): TaskContract | undefined {
-  try {
-    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
-    const manifest = JSON.parse(raw) as { contract?: TaskContract };
-    return manifest.contract;
-  } catch {
-    return undefined;
-  }
-}
-
 // Docs-drift Walk (#241): the files an implementer reported touching, for
 // operator-surface inference. Tolerant of a missing/malformed result.
 export function getResultFilesModified(taskDirPath: string): string[] {
@@ -530,7 +519,6 @@ export function registerShow(program: Command): void {
       if (result.kind === "task") {
         const { task, verdicts, events } = result;
         const tDir = taskDir(task.runId, task.id);
-        const contract = getManifestContract(tDir);
         const runtimeMeta = getManifestRuntime(tDir);
         const stdoutLog = join(tDir, "container.stdout.log");
         const stderrLog = join(tDir, "container.stderr.log");
@@ -615,13 +603,6 @@ export function registerShow(program: Command): void {
           console.log(`  reconcile: CANDIDATE (${reconcileReason}) — DB says running but the container is gone; run \`forge show --reconcile ${task.id}\` to finalize`);
         }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
-        if (contract) {
-          console.log(`  contract:  ${contract.objective}${contract.risk ? `  [risk: ${contract.risk}]` : ""}`);
-          if (contract.allowed_paths?.length) console.log(`    allowed:   ${contract.allowed_paths.join(", ")}`);
-          if (contract.validation?.commands?.length) console.log(`    validate:  ${contract.validation.commands.join(" ; ")}`);
-          if (contract.review?.invariants?.length) console.log(`    invariants: ${contract.review.invariants.join(" | ")}`);
-          if (contract.operator_behavior_changed) console.log(`    operator behavior: changes — docs impact expected`);
-        }
         // Docs-drift Walk (#241): if the completed task touched operator surfaces,
         // suggest the documentation-maintainer (advisory only — not a gate yet).
         // #246: surfaces are project-configurable via <project>/.forge/docs-surfaces.yml.

@@ -96,7 +96,7 @@ Acceptance criteria:
 - Tests cover retry after idle timeout, auth failure, cancelled task, malformed
   result, and gate rejection.
 
-### 4. Task Contract Schema
+### 4. Task Contract Schema *(shipped in AWN-4 #217, then removed — see FORGE-DEC-021)*
 
 Goal: give agents sharper assignments and give reviewers/orchestrators concrete
 criteria to evaluate.

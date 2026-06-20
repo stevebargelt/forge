@@ -13,8 +13,7 @@
 // as a cheap pre-check and as the backstop for quick-invoke chains, which have
 // no docs phase.
 //
-// Coarse signal: impact = a task declared operator_behavior_changed in its
-// contract OR touched an operator surface (inference). resolved = some task
+// Coarse signal: impact = a task touched an operator surface (inference). resolved = some task
 // reported docs_updated, or recorded a deferral reason (docs_not_updated_reason).
 
 import { readFileSync } from "node:fs";
@@ -27,11 +26,9 @@ import {
   loadOperatorSurfaces,
   operatorSurfacesTouched,
   OPERATOR_SURFACES,
-  type TaskContract,
 } from "./contract.js";
 
 export interface TaskDocsSignals {
-  contractFlag: boolean; // contract.operator_behavior_changed === true
   filesModified: string[]; // result.files_modified
   docsUpdated: boolean; // result.docs_updated non-empty (documenter ran)
   deferred: boolean; // result.docs_not_updated_reason set
@@ -54,7 +51,7 @@ export function assessDocsImpact(
   let impacted = false;
   let resolved = false;
   for (const s of signals) {
-    if (s.contractFlag || inferOperatorBehaviorChanged(s.filesModified, operatorSurfaces)) {
+    if (inferOperatorBehaviorChanged(s.filesModified, operatorSurfaces)) {
       impacted = true;
       for (const surf of operatorSurfacesTouched(s.filesModified, operatorSurfaces)) surfaces.add(surf);
     }
@@ -88,7 +85,6 @@ function readJson(path: string): Record<string, unknown> | null {
 export function assessRunDocsImpact(runId: string): RunDocsImpact {
   const signals: TaskDocsSignals[] = tasksForRun(runId).map((t) => {
     const dir = taskDir(runId, t.id);
-    const manifest = readJson(join(dir, "manifest.json")) as { contract?: TaskContract } | null;
     const result = readJson(join(dir, "result.json"));
     const filesModified = Array.isArray(result?.["files_modified"])
       ? (result!["files_modified"] as unknown[]).filter((f): f is string => typeof f === "string")
@@ -97,7 +93,6 @@ export function assessRunDocsImpact(runId: string): RunDocsImpact {
       Array.isArray(result?.["docs_updated"]) && (result!["docs_updated"] as unknown[]).length > 0;
     const reason = result?.["docs_not_updated_reason"];
     return {
-      contractFlag: manifest?.contract?.operator_behavior_changed === true,
       filesModified,
       docsUpdated,
       deferred: typeof reason === "string" && reason.length > 0,

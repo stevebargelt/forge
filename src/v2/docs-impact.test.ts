@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { assessDocsImpact, formatDocsImpactWarning, type TaskDocsSignals } from "./docs-impact.js";
 
 const sig = (o: Partial<TaskDocsSignals>): TaskDocsSignals => ({
-  contractFlag: false,
   filesModified: [],
   docsUpdated: false,
   deferred: false,
@@ -20,12 +19,6 @@ test("assessDocsImpact: operator-surface change with no docs work → impacted, 
   assert.equal(r.impacted, true);
   assert.equal(r.resolved, false);
   assert.deepEqual(r.surfaces, ["src/cli/"]);
-});
-
-test("assessDocsImpact: contract flag alone marks impact even with no files", () => {
-  const r = assessDocsImpact([sig({ contractFlag: true })]);
-  assert.equal(r.impacted, true);
-  assert.equal(r.resolved, false);
 });
 
 test("assessDocsImpact: docs_updated on any task resolves the impact", () => {

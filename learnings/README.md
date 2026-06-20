@@ -39,6 +39,7 @@ learnings/
 | FORGE-DEC-016 | 2026-05-08 | [~~Manual phases and the awaiting_human_input task status~~](decisions/2026-05-08_manual-phase-and-awaiting-human-input.md) *(superseded by FORGE-DEC-020)* |
 | FORGE-DEC-017 | 2026-05-08 | [`awaiting_red` task status](decisions/2026-05-08_awaiting-red-status.md) |
 | FORGE-DEC-020 | 2026-06-20 | [Remove `awaiting_human_input` task status](decisions/2026-06-20_remove-awaiting-human-input-status.md) *(supersedes FORGE-DEC-016)* |
+| FORGE-DEC-021 | 2026-06-20 | [Remove TaskContract feature (AWN-4 phase 1, closes FG-223 unbuilt)](decisions/2026-06-20_remove-taskcontract-feature.md) |
 
 ## Patterns index
 

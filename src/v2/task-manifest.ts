@@ -1,6 +1,5 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { TaskContract } from "./contract.js";
 
 export type TaskManifest = {
   taskId: string;
@@ -30,9 +29,6 @@ export type TaskManifest = {
     promptStrategy: "claude-stdin-package" | "stdin-prepend" | "runtime-context-file" | "message-arg";
     authStrategy: "oauth-volume" | "codex-auth" | "env-provider-api-key" | "pi-auth-json" | "local-endpoint" | "aws-bedrock";
   };
-  // AWN-4: the task contract this task was dispatched under, if any. Surfaced in
-  // forge show; consumed by the agent via its rendered package.
-  contract?: TaskContract;
   // AWN-7: the model resolution record — answers "why did this task use this
   // model?" Present only in policy mode (a model-policy.yml resolved this task);
   // omitted in legacy mode. resolvedBy="legacy" is never written here. auth is
