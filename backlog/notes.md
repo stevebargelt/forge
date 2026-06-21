@@ -1,27 +1,27 @@
-**Last session ended 2026-06-19** (fourth session that day — a backlog audit + cleanup grind).
+**Last session ended 2026-06-20** (full walk of the active backlog, one ticket at a time, deciding build-vs-close on each).
 
-**Where we left off:** Audited all 53 open tickets against the live codebase (5 parallel investigator agents) and closed 27 — stale/already-shipped, obsolete, parked-by-decision, or product-decided. Then proved DEC-019 (the #245 container-local node_modules shadow volume) actually unblocks the forge-on-forge AGENT pipeline — ran real `engineer` + `test-engineer` containers against this repo, host `better_sqlite3.node` survived (stayed Mach-O arm64) — and used the unblocked pipeline to ship two waves of work. Seeds were force-reinstalled at session end; `forge doctor` is green.
+**Where we left off:** Walked all 26 active tickets interactively. Net: active backlog 26 → 8, all remaining are genuine (no stubs/speculation/gold-plating left). `main` is fully green (1540/1540, typecheck clean) — the FG-178 runner-detection regression that was red on the host got root-caused and fixed (FG-338). The disposition all session: verify each ticket's premise still holds (artifact exists? problem visible? consumer exists?) before building, and default to closing speculative/cosmetic/superseded work.
 
 **Picked up next:**
-1. **FG-158 — live Bedrock validation on the work laptop.** Code + docs landed and committed (`c93498b` / `80510de`), 1529 tests green, but the real Bedrock path (live SSO/STS, `startSsoWatchdog`, AWS_PROFILE → real profile, claude→Bedrock) was never exercised here. Run `forge claude --bedrock` on the corp laptop, confirm it arms without sourcing use-bedrock.sh, then close FG-158. This is the only thing gating its close.
-2. **FG-306 item 3** — the leftover low-pri code item: `forge doctor` derives in-image CLI expectations from installed runtime YAMLs, not the (provider,auth)→runtime binding table, so a binding-table-reachable runtime with a missing/malformed seed YAML emits no `cli <x>` row. Only matters for a broken install; covered today. Either implement the diagnostic row or close FG-306 as not-worth-it.
-3. **Resume closing bucket C (real features needing design).** 26 remain, all genuine builds/epics. Highest-leverage threads carried from before: FG-258 Walk items (FG-253 / FG-283 provider adapter surfaces, FG-308 project-local `.forge` config), and FG-337 → FG-268 (pi local/weak models). All now dogfoodable through the real agent pipeline OR `--profile pi-groq`.
+1. **FG-258 (provider-agnostic runtime / pi) is the real forward thread** — it's the FG-291 baseline spine and dogfoodable for free here via `--profile pi-groq`. Its kept children are the work: FG-337 (capture final assistant msg when a clean runtime writes no result.json — build the fallback, sequence into the pi runtime work), then FG-253 (provider adapters) and FG-268 (local models) in the Walk/Run phases.
+2. **FG-251 — the showcase `research-synthesis` workflow.** FG-291's "prove multi-agent value" item; sequenced behind FG-258 mixed-provider routing. Highest-leverage feature once the runtime split is solid.
+3. **FG-190 items 2–9** — the remaining auth-profile correctness/cleanup (TOCTOU chmod, CDP timeout, wrong-tab capture, IPv6, cookie scoping, doc honesty). Item 1 (expiry/refresh-token) shipped. All low-pri pre-launch; pick up when convenient.
 
 **External state to remember:**
-- **The forge-on-forge agent pipeline is unblocked (DEC-019, live-validated 2026-06-19).** Implementation forge-on-forge can now route through `engineer`→`test-engineer` (and docs through `documentation-maintainer`) — "implement directly" is now a process choice, not a corruption-safety rule. Shadow volume = `src/v2/spawn.ts` ~235 (darwin + rw only; escape hatch `FORGE_NO_NM_SHADOW=1`). Memory note updated. If a host binary ever flips to ELF after an agent run, that's a DEC-019 regression — check the mount, don't reflexively ban agents.
-- **Parallel doc/seed agents on the SAME files race and silently clobber each other.** FG-247 and FG-272 both edited the 4 implementer seeds in parallel; FG-247 (last writer) wiped FG-272's edits. Caught by a post-run grep; re-ran FG-272 serially. Lesson: serialize agent edits that touch overlapping files.
-- **Seeds were force-reinstalled** (`FORCE=1 ./scripts/install-seeds.sh`) so this session's seed edits (FG-247/272/160) are live in `~/.forge/agents/`. The old documentation-maintainer "drift" warning was just a stale host copy (now resolved), not a local edit. `forge doctor`: OK, no drift.
-- **pi runs FREE on this machine** via the `pi-groq` profile (`provider: groq`, `runtime: pi-apikey`, `model: openai/gpt-oss-120b`) in `~/.forge/model-policy.yml` `allowed_profiles`. Run: `nvm use 24`; `export GROQ_API_KEY=…` (free key, no billing, SAME shell); `forge invoke <role> --profile pi-groq`. pi-oauth still bills the Anthropic API. `llama-3.3-70b-versatile` mangles tool-calling; `gpt-oss-120b` works.
-- **Node 24 required** — `nvm use 24` (VS Code terminals keep landing on 20). FG-336 prints a clear preflight message now, but you still must switch.
+- **Non-ticket thread — FG-158 corp-laptop Bedrock validation.** Code shipped; only the live `forge claude --bedrock` run on the corp laptop gates its close. A weekly cloud reminder routine fires Mondays 9am PT (claude.ai routine trig_01XFfSfNKSsPi3uUV1FaCmTx). Not actionable from this Mac.
+- **24 commits unpushed** (direct-to-main; no push requested this session).
+- **pi runs FREE** via `--profile pi-groq` (GROQ_API_KEY, same shell; `gpt-oss-120b` does tool-calling, `llama-3.3-70b` mangles it). The forge-on-forge agent pipeline is unblocked (DEC-019) — engineer/test-engineer/doc-maintainer all ran cleanly against this repo all session.
+- **Container vs host test discrepancy is gone** — FG-338 fixed the bash-3.2 `source <(...)` harness bug. The host suite is now authoritative and green; in-container runs match.
 
-**Decisions worth not relitigating:**
-- The 27 closes this session were deliberate (audit-evidenced). FG-158 and FG-306 were kept OPEN on purpose (acceptance gate / leftover code item) — not oversights.
-- FG-160 was scoped as a minimal seed-prose change (architect emits a Mermaid diagram), not a result-schema/dashboard feature. FG-247 was scoped to seed prose only; the optional `typecheck_run`/`format_checked` result-field enforcement was explicitly deferred (note it if ever filed).
-- FG-42's new `security-audit.yml` example workflow was validated schema-correct against `src/v2/schema.ts` (real `gate: verdict` + mixed red authority + `on_reject`) and is installed on the host.
+**Decisions worth not relitigating (this session's closes):**
+- FG-141, FG-149, FG-150 — closed speculative (no observed problem / no consumer).
+- FG-167 — removed orphaned `awaiting_human_input` status (never produced; superseded by `forge design`). ADR FORGE-DEC-020.
+- FG-172 — closed; `request-changes` KEPT (correct for regeneration gates), implementation fix-cycles use review-loop.
+- FG-222 + FG-311 — closed as gold-plating; stuck session tasks are 1 invisible straggler per project, nothing depends on them. No reaper.
+- FG-223 — removed unused TaskContract feature; docs-impact helpers in contract.ts retained. ADR FORGE-DEC-021.
+- FG-225/243/249/234/33/306/308 — closed (empty placeholder / overtaken by docs-as-pipeline / Fix A sufficient / polish / artifacts removed / done via #252+FG-332).
+- FG-273 — epic closed; MVP acceptance met (orchestrator routes from compiled policy; route/raci CLI live). Provider-adapter remainder lives in FG-253.
 
-**Shipped (for reference):**
-- Backlog audit: closed 20 (FG-191/173/185/232/245/250/112/73/130/148/184/203/88/60/61/129/293/294/282/283) + FG-270/FG-178/FG-310/FG-160/FG-247/FG-272/FG-42.
-- FG-270: render `## Spec` section in the red task package (architect intent + tech-lead plan).
-- FG-178: forge-test detects jest/vitest/node:test instead of hardcoding node:test.
-- FG-158 (open): `forge claude --bedrock` + `.forge/project.json` auth — child-env injection, no shell sourcing.
-- Wave 2 docs/seeds: FG-247 (mandatory project-aware type-check/format-check), FG-272 (fresh node_modules note), FG-310 (container isolation), FG-306 item 2 (README), FG-160 (architect Mermaid), FG-42 (how-to rewrite).
+**Shipped (for reference, git is canonical):**
+- FG-167 remove awaiting_human_input (FORGE-DEC-020); FG-177 Playwright-E2E-vs-browser-tools split + anti-downgrade gate; FG-190 item1 auth-profile expiry/refresh-token fix; FG-223 remove TaskContract (FORGE-DEC-021); FG-28 per-run constraint scoping via `--tag`/`tags:` (+docs); FG-338 runner-detection test harness portability fix.
+- FG-273 RACI PRD status flipped to shipped.
