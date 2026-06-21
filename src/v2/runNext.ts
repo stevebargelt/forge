@@ -845,6 +845,12 @@ async function dispatchFanoutStep(args: {
     })),
   };
 
+  // No container runs for the parent — write result.json explicitly so
+  // deriveUpstream can find it when a downstream step depends_on this one.
+  const parentTaskDir = taskDir(args.runId, parentId);
+  mkdirSync(parentTaskDir, { recursive: true });
+  writeFileSync(join(parentTaskDir, "result.json"), JSON.stringify(parentResult));
+
   // failure_mode determines whether a partial result fails the parent.
   const anyFailed = childOutcomes.some((c) => c.status === "failed");
   if (anyFailed && fanout.failure_mode === "fail-phase") {
