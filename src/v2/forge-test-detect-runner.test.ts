@@ -15,18 +15,33 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const forgeTestScript = join(root, "docker", "forge-test.sh");
 
 function runDetectRunner(fixtureDir: string): string {
-  const result = spawnSync(
-    "bash",
-    [
-      "-c",
-      // Source only the detect_runner() function block, then call it from the
-      // fixture directory.  Process substitution avoids set -euo pipefail and
-      // the exec statements at the top of forge-test.sh.
-      `source <(sed -n '/^detect_runner()/,/^}/p' "${forgeTestScript}") && cd "${fixtureDir}" && detect_runner`,
-    ],
-    { encoding: "utf8" }
-  );
-  return result.stdout.trim() || "node:test";
+  // Extract detect_runner() to a temp file — process substitution (`source <(...)`)
+  // races on macOS bash 3.2, leaving the function undefined (exit 127). A temp file
+  // works on both bash 3.2 (macOS host) and bash 5 (container).
+  const tmpDir = mkdtempSync(join(tmpdir(), "forge-detect-runner-"));
+  const tmpFile = join(tmpDir, "detect_runner.sh");
+  try {
+    const extract = spawnSync(
+      "sed",
+      ["-n", "/^detect_runner()/,/^}/p", forgeTestScript],
+      { encoding: "utf8" }
+    );
+    assert.equal(extract.status, 0, `sed failed: ${extract.stderr}`);
+    writeFileSync(tmpFile, extract.stdout);
+
+    const result = spawnSync(
+      "bash",
+      ["-c", `source "${tmpFile}" && cd "${fixtureDir}" && detect_runner`],
+      { encoding: "utf8" }
+    );
+    assert.ok(
+      result.error === undefined && result.status === 0,
+      `detect_runner failed (status=${result.status}): ${result.stderr}`
+    );
+    return result.stdout.trim();
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 }
 
 function withFixture(pkg: object | null, fn: (dir: string) => void): void {
