@@ -1,8 +1,9 @@
 ---
 id: FG-33
 type: story
-status: active
+status: done
 title: Resolve workflowAdditions vs base output schema conflict
+closed: 2026-06-21
 ---
 
 **Why:** Hit a real failure: framer's base CLAUDE.md says output `{claims, experiments}` while `codebase-assessment.scope.workflowAdditions` says output `{lenses, priorities}`. The composed prompt had both schemas — the agent saw two contradictory contracts and asked for clarification instead of obeying either.
