@@ -54,6 +54,7 @@ import {
 import { checkResolvedAvailability } from "./provider-doctor.js";
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
+import { requiresStructuredResult } from "./role-capabilities.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -1227,6 +1228,13 @@ async function runContainer(args: {
     });
     if (a.error) msg = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    // FG-337: clean completion + captured assistant text + narrative role →
+    // synthesize an inferred result instead of hard-failing.
+    if (!a.modelError && a.finalAssistantText && args.role && !requiresStructuredResult(args.role)) {
+      const inferred = { contract: "inferred", summary: a.finalAssistantText, status: "complete" };
+      writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+      return { kind: "ok", result: inferred };
+    }
     failTask(args.taskId, { runId: args.runId, kind, error: msg });
     return { kind: "failed", error: msg };
   }

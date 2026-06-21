@@ -137,6 +137,22 @@ These aren't enforced by forge — they're conventions in agent seeds. The dashb
 }
 ```
 
+### Inferred result (narrative roles on pi runtime)
+
+When `research-specialist`, `prompt-author`, or `manual-qa` runs on the pi runtime
+and completes cleanly without writing `result.json`, forge synthesizes a result
+rather than failing the task (FG-337). This shape can appear in `tasks.result` and
+`result.json` for those roles:
+
+```json
+{ "contract": "inferred", "summary": "<final assistant message text>", "status": "complete" }
+```
+
+The `contract: "inferred"` field distinguishes a synthesized result from one the
+agent produced. Only fires on pi; only for the three narrative roles; only on a
+clean completion (no truncation, no model error). The dashboard falls back to
+JSON pretty-print for this shape — there is no per-role renderer for it.
+
 ## HTTP API surface (read-only)
 
 The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. Default base URL: `http://127.0.0.1:8024` (port overridable via `PORT` env var or `forge dashboard start --port <n>`).

@@ -31,8 +31,10 @@ function isObj(v: unknown): v is Record<string, unknown> {
 /** Attribution of a failed run. `modelError: true` ⇒ a provider/model error,
  *  with `error` set to the cause. `false` ⇒ no provider signal found; `error`
  *  may be set (pi always explains itself) or undefined (caller keeps its
- *  default container_crash / result_missing message). */
-export type ProviderFailureAnalysis = { modelError: boolean; error?: string };
+ *  default container_crash / result_missing message).
+ *  FG-337: `finalAssistantText` is set (pi only) on a clean completion so the
+ *  caller can synthesize an inferred result for narrative roles. */
+export type ProviderFailureAnalysis = { modelError: boolean; error?: string; finalAssistantText?: string };
 
 function eachJsonl(stdoutRaw: string): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];

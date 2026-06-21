@@ -1,7 +1,7 @@
 # Decision: pi result / completion contract — agent writes result.json; forge attributes a missing one
 
-**Date:** 2026-06-05
-**Tickets:** #264 (Crawl exit — result-contract parity), #258 (Pi epic), #267 (model_error classification)
+**Date:** 2026-06-05 (FG-337 amendment: 2026-06-21)
+**Tickets:** #264 (Crawl exit — result-contract parity), #258 (Pi epic), #267 (model_error classification), FG-337 (inferred-result fallback for narrative roles)
 **Status:** decided + tested. Sibling to [pi prompt injection](./2026-06-05_pi-prompt-injection.md).
 
 ## The boundary: how pi output becomes forge `result.json`
@@ -36,8 +36,10 @@ stdout (`src/v2/pi-result.ts`, `analyzePiFailure(stdout) → { modelError, error
    no final message captured)`.
 3. no `agent_end` terminal event → `pi produced no completion event … truncated or
    the container crashed mid-run`.
-4. clean `agent_end`, no error, still no file → `pi completed but wrote no
-   /task/result.json (the agent did not honor the output contract)`.
+4. clean `agent_end`, no error, still no file → the error string is `pi completed
+   but wrote no /task/result.json (the agent did not honor the output contract)`,
+   BUT: for **narrative roles** (see FG-337 below) forge synthesizes a result
+   instead of hard-failing.
 
 `errorMessage` and `auto_retry_*` set `modelError: true`; the truncated (no `agent_end`) and clean-but-no-result cases set it `false`. `attributePiNoResult`
 is retained as a back-compat thin wrapper over `analyzePiFailure` (returns `.error`
@@ -54,10 +56,35 @@ generic `result_missing` path (#267).
 
 ## Why not synthesize a "complete" when the agent writes nothing?
 
-Rejected. Deriving success from a clean exit would mask a no-op run and diverge
-from the contract every other runtime is held to (agent must produce
-`result.json`). #264 makes the *failure* honest and attributable; it does not
-lower the bar for success.
+For **structured roles** (engineer, test-engineer, reds, architect, specialists,
+documentation-maintainer — the default), this is still rejected: deriving success
+from a clean exit would mask a no-op run and diverge from the contract every other
+runtime is held to. #264 makes the *failure* honest and attributable for those
+roles; it does not lower the bar.
+
+**FG-337 (2026-06-21): inferred-result fallback for narrative roles**
+
+Narrative/triage roles (`research-specialist`, `prompt-author`, `manual-qa`) produce
+human-readable text output. Their seeds instruct them to write `result.json`, but
+they do not honor a structured field contract — a research specialist's value is in
+the prose, not a machine-parseable shape. For these roles only, when the pi runtime
+reaches case 4 (clean `agent_end`, no file) and has captured the final assistant
+message, forge **synthesizes a result and completes the task** rather than failing:
+
+```json
+{ "contract": "inferred", "summary": "<final assistant message text>", "status": "complete" }
+```
+
+The `contract: "inferred"` field lets `forge show` and gates distinguish a
+synthesized result from one the agent produced itself. This fallback fires **only
+on the pi runtime** — other runtimes are unaffected. Real failures (truncation, no
+`agent_end`, provider/model errors flagged by `modelError: true`) still fail even
+for narrative roles; the fallback never masks them.
+
+Role membership is determined by `src/v2/role-capabilities.ts`
+(`requiresStructuredResult` returns `false` for the three narrative roles, `true`
+for everything else). To add a new role to the narrative set, add it to
+`NARRATIVE_ROLES` in that file.
 
 ## Out of scope (unchanged by this)
 

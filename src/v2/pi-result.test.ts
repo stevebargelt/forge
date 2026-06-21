@@ -92,3 +92,46 @@ test("#267: truncated output (no agent_end) is NOT a model error", () => {
   assert.equal(analyzePiFailure(jsonl({ type: "agent_start" })).modelError, false);
   assert.equal(analyzePiFailure("").modelError, false);
 });
+
+// ── FG-337: finalAssistantText — clean completion surfaces assistant text ─────
+
+test("FG-337: clean completion with string content sets finalAssistantText", () => {
+  const stdout = jsonl(
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: "Paris is the capital of France." }] },
+  );
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.modelError, false);
+  assert.equal(a.finalAssistantText, "Paris is the capital of France.");
+});
+
+test("FG-337: clean completion with block-array content sets finalAssistantText", () => {
+  const stdout = jsonl(
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: [{ type: "text", text: "Hello " }, { type: "text", text: "world." }] }] },
+  );
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.finalAssistantText, "Hello \nworld.");
+});
+
+test("FG-337: clean completion with no content has no finalAssistantText", () => {
+  const stdout = jsonl(
+    { type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn" }] },
+  );
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.modelError, false);
+  assert.equal(a.finalAssistantText, undefined);
+});
+
+test("FG-337: model error does not set finalAssistantText", () => {
+  const stdout = jsonl(
+    { type: "agent_end", messages: [{ role: "assistant", errorMessage: "401 auth failed" }] },
+  );
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.modelError, true);
+  assert.equal(a.finalAssistantText, undefined);
+});
+
+test("FG-337: truncated run (no agent_end) does not set finalAssistantText", () => {
+  const stdout = jsonl({ type: "agent_start" });
+  const a = analyzePiFailure(stdout);
+  assert.equal(a.finalAssistantText, undefined);
+});

@@ -1171,3 +1171,84 @@ test("#264: a pi run that completes but writes no result.json blames the agent c
   // #267: a contract failure is NOT a model error — it stays a generic result_missing kind.
   assert.notEqual(failureKindForTask(r.taskId), "model_error");
 });
+
+// ── FG-337: inferred-result fallback ─────────────────────────────────────────
+
+// pi JSONL for a clean completion with assistant text content.
+function piCleanWithText(text: string): string {
+  return (
+    JSON.stringify({ type: "agent_start" }) + "\n" +
+    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: text }] }) + "\n"
+  );
+}
+
+test("FG-337: narrative role (research-specialist) completes via inferred result when pi exits cleanly with text", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg337-narr-"));
+  const r = await invoke({
+    agentRole: "research-specialist",
+    task: "what is the capital of France?",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(piCleanWithText("The capital of France is Paris.")),
+  });
+  assert.equal(r.status, "complete");
+  const result = r.result as { contract: string; summary: string; status: string };
+  assert.equal(result.contract, "inferred");
+  assert.equal(result.summary, "The capital of France is Paris.");
+  assert.equal(result.status, "complete");
+  // Inferred result is persisted to disk.
+  const dir = taskDir(r.runId, r.taskId);
+  const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as { contract: string };
+  assert.equal(onDisk.contract, "inferred");
+});
+
+test("FG-337: structured role (engineer) still hard-fails even when pi exits cleanly with text", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg337-struct-"));
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "write some code",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(piCleanWithText("I wrote the code.")),
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /completed but wrote no .*result\.json/);
+});
+
+test("FG-337: truncated pi run (no agent_end) still fails for narrative role", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg337-trunc-"));
+  const truncated = JSON.stringify({ type: "agent_start" }) + "\n";
+  const r = await invoke({
+    agentRole: "research-specialist",
+    task: "research something",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(truncated),
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /no completion event/);
+});
+
+test("FG-337: pi model error still fails for narrative role (inferred path requires clean completion)", async () => {
+  setupPiRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg337-modelerr-"));
+  const modelErr =
+    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", errorMessage: "401 invalid api key" }] }) + "\n";
+  const r = await invoke({
+    agentRole: "research-specialist",
+    task: "research something",
+    projectDir,
+    runtimeName: "pi-stub",
+    dockerExec: makePiNoResultExec(modelErr),
+  });
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /pi run failed/);
+  assert.equal(failureKindForTask(r.taskId), "model_error");
+});

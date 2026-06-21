@@ -1556,3 +1556,130 @@ result:
     else process.env.GROQ_API_KEY = savedGroq;
   }
 });
+
+// ── FG-337: inferred-result fallback on the runNext/workflow path ─────────────
+
+const FG337_NARRATIVE_WORKFLOW: Workflow = {
+  name: "test-fg337-narrative",
+  description: "single narrative pi step",
+  inputs: [{ name: "brief", required: true, type: "text" }],
+  steps: [
+    { id: "research-step", agent: "research-specialist", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
+  ],
+};
+
+const FG337_STRUCTURED_WORKFLOW: Workflow = {
+  name: "test-fg337-structured",
+  description: "single structured pi step",
+  inputs: [{ name: "brief", required: true, type: "text" }],
+  steps: [
+    { id: "engineer-step", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "pi-stub", reds: [] },
+  ],
+};
+
+test("runNext FG-337: narrative role completes via inferred result when pi exits cleanly with assistant text", async () => {
+  ensurePiRuntime();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  try {
+    const { runId } = startRun({
+      workflow: FG337_NARRATIVE_WORKFLOW,
+      title: "fg337 narrative",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+    const stdout =
+      JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: "Paris is the capital of France." }] }) + "\n";
+
+    const wave = await runNext({ runId, workflow: FG337_NARRATIVE_WORKFLOW, dockerExec: makePiNoResultExec(stdout) });
+    assert.deepEqual(wave.completedSteps, ["research-step"]);
+    assert.deepEqual(wave.failedSteps, []);
+
+    const task = tasksForRun(runId).find((t) => t.phase === "research-step")!;
+    assert.equal(task.status, "complete");
+    const result = task.result as { contract: string; summary: string; status: string } | undefined;
+    assert.equal(result?.contract, "inferred");
+    assert.equal(result?.summary, "Paris is the capital of France.");
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("runNext FG-337: structured role (engineer) still hard-fails even with pi clean completion + text", async () => {
+  ensurePiRuntime();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  try {
+    const { runId } = startRun({
+      workflow: FG337_STRUCTURED_WORKFLOW,
+      title: "fg337 structured",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+    const stdout =
+      JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: "I did the work." }] }) + "\n";
+
+    const wave = await runNext({ runId, workflow: FG337_STRUCTURED_WORKFLOW, dockerExec: makePiNoResultExec(stdout) });
+    assert.deepEqual(wave.failedSteps, ["engineer-step"]);
+
+    const task = tasksForRun(runId).find((t) => t.phase === "engineer-step")!;
+    assert.equal(task.status, "failed");
+    assert.match(task.error ?? "", /completed but wrote no .*result\.json/);
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("runNext FG-337: truncated pi run (no agent_end) still fails even for narrative role", async () => {
+  ensurePiRuntime();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  try {
+    const { runId } = startRun({
+      workflow: FG337_NARRATIVE_WORKFLOW,
+      title: "fg337 truncated",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+    const stdout = JSON.stringify({ type: "agent_start" }) + "\n";
+
+    const wave = await runNext({ runId, workflow: FG337_NARRATIVE_WORKFLOW, dockerExec: makePiNoResultExec(stdout) });
+    assert.deepEqual(wave.failedSteps, ["research-step"]);
+
+    const task = tasksForRun(runId).find((t) => t.phase === "research-step")!;
+    assert.equal(task.status, "failed");
+    assert.match(task.error ?? "", /no completion event/);
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("runNext FG-337: pi model error still fails for narrative role (not inferrable)", async () => {
+  ensurePiRuntime();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  try {
+    const { runId } = startRun({
+      workflow: FG337_NARRATIVE_WORKFLOW,
+      title: "fg337 model error",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+    const stdout =
+      JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", errorMessage: "401 invalid api key" }] }) + "\n";
+
+    const wave = await runNext({ runId, workflow: FG337_NARRATIVE_WORKFLOW, dockerExec: makePiNoResultExec(stdout) });
+    assert.deepEqual(wave.failedSteps, ["research-step"]);
+
+    const task = tasksForRun(runId).find((t) => t.phase === "research-step")!;
+    assert.equal(task.status, "failed");
+    assert.match(task.error ?? "", /pi run failed/);
+    assert.equal(failureKindForTask(task.id), "model_error");
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});

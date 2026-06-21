@@ -43,6 +43,7 @@ import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } fro
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
+import { requiresStructuredResult } from "./role-capabilities.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -415,6 +416,20 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     });
     if (a.error) error = a.error;
     if (a.modelError) kind = classify({ source: "model_error" });
+    // FG-337: clean completion + captured assistant text + narrative role →
+    // synthesize an inferred result instead of hard-failing.
+    if (!a.modelError && a.finalAssistantText && !requiresStructuredResult(args.agentRole)) {
+      const inferred = { contract: "inferred", summary: a.finalAssistantText, status: "complete" };
+      writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+      if (!markTaskComplete(taskId, inferred)) {
+        const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
+        closeRunIfIdle(finalStatus === "complete");
+        return { runId, taskId, status: finalStatus, result: inferred, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
+      }
+      logEvent("task.completed", { runId, taskId });
+      closeRunIfIdle(true);
+      return { runId, taskId, status: "complete", result: inferred };
+    }
     failTask(taskId, { runId, kind, error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };

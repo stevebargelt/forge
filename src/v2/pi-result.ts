@@ -29,14 +29,33 @@ function isObj(v: unknown): v is Record<string, unknown> {
  *  the failure is a PROVIDER/model error (pi surfaced an assistant `errorMessage`,
  *  or `auto_retry_*` events) — the caller maps that to forge's `model_error`
  *  failure_kind with the cause surfaced, instead of a generic result_missing /
- *  container_crash. Kept decoupled from failure-kind.ts (just a boolean). */
-export type PiFailureAnalysis = { modelError: boolean; error: string };
+ *  container_crash. Kept decoupled from failure-kind.ts (just a boolean).
+ *  FG-337: `finalAssistantText` is set on a clean completion (sawAgentEnd, no
+ *  error) so the caller can synthesize an inferred result for narrative roles. */
+export type PiFailureAnalysis = { modelError: boolean; error: string; finalAssistantText?: string };
+
+// FG-337: extract readable text from an assistant message's content field.
+// Handles both a bare string and an array of text blocks.
+function extractAssistantText(m: Record<string, unknown>): string | undefined {
+  if (typeof m["content"] === "string" && m["content"].length > 0) return m["content"];
+  if (Array.isArray(m["content"])) {
+    const parts: string[] = [];
+    for (const block of m["content"]) {
+      if (isObj(block) && block["type"] === "text" && typeof block["text"] === "string") {
+        parts.push(block["text"]);
+      }
+    }
+    if (parts.length > 0) return parts.join("\n");
+  }
+  return undefined;
+}
 
 /** Analyze pi's stdout (read when no usable /task/result.json was produced) into
  *  an attributable failure, in priority order:
  *   1. provider/model error (assistant `errorMessage`, or `auto_retry_*`) → modelError
  *   2. no `agent_end` terminal event → truncated / crashed mid-run
- *   3. clean completion but no result.json → the agent ignored the contract */
+ *   3. clean completion but no result.json → the agent ignored the contract
+ *      (FG-337: finalAssistantText is set here so callers can infer a result) */
 export function analyzePiFailure(stdoutRaw: string): PiFailureAnalysis {
   const lines = stdoutRaw.split("\n").map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return { modelError: false, error: "pi produced no output (no JSONL on stdout)" };
@@ -44,10 +63,15 @@ export function analyzePiFailure(stdoutRaw: string): PiFailureAnalysis {
   let sawAgentEnd = false;
   let sawAutoRetry = false;
   let lastError: string | undefined;
+  let lastAssistantText: string | undefined;
 
   const noteAssistant = (m: unknown): void => {
-    if (isObj(m) && m["role"] === "assistant" && typeof m["errorMessage"] === "string") {
+    if (!isObj(m) || m["role"] !== "assistant") return;
+    if (typeof m["errorMessage"] === "string") {
       lastError = m["errorMessage"];
+    } else {
+      const text = extractAssistantText(m);
+      if (text !== undefined) lastAssistantText = text;
     }
   };
 
@@ -71,7 +95,11 @@ export function analyzePiFailure(stdoutRaw: string): PiFailureAnalysis {
   if (!sawAgentEnd) {
     return { modelError: false, error: "pi produced no completion event (agent_end) — output truncated or the container crashed mid-run" };
   }
-  return { modelError: false, error: "pi completed but wrote no /task/result.json (the agent did not honor the output contract)" };
+  return {
+    modelError: false,
+    error: "pi completed but wrote no /task/result.json (the agent did not honor the output contract)",
+    ...(lastAssistantText !== undefined ? { finalAssistantText: lastAssistantText } : {}),
+  };
 }
 
 /** Back-compat (#264): the attributed failure string only. */
