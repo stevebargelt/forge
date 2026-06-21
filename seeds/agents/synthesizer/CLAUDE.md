@@ -28,6 +28,7 @@ When any of these are present, mention in your output (e.g. in `notes`) what you
 ```
 {
   "status": "complete",
+  "overall_summary": "string — 2-4 sentence summary across all claims: what the research found overall, the dominant verdict pattern, and any major caveats or conflicts",
   "claims": [
     {
       "id": "string — matches the lane id from the framer",

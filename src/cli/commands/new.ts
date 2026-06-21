@@ -28,6 +28,7 @@ export function registerNew(program: Command): void {
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
     .option("--unrouted", "#297: acknowledge an intentionally unrouted run (suppress the route-preflight warning)")
     .option("--tag <tag>", "FG-28: tag this run for constraint scoping; repeat to add multiple tags (e.g. --tag ios --tag mobile)", (val: string, acc: string[]) => [...acc, val], [] as string[])
+    .option("--out <path>", "research-synthesis: write the final report to this path instead of <project>/research/<slug>.md")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       ensureForgeDirs();
@@ -85,6 +86,13 @@ export function registerNew(program: Command): void {
         if (st.expired) {
           throw new Error(`auth profile '${authProfile}' is expired — run: forge auth-profile login ${authProfile} --url <url>`);
         }
+      }
+
+      const reportOutput = (options as { out?: string }).out;
+      if (reportOutput) {
+        const expandedReportOutput = expandTildePath(reportOutput);
+        inputs["reportOutputPath"] = expandedReportOutput;
+        console.log(`Report output: ${expandedReportOutput}`);
       }
 
       const modelProfile = (options as { profile?: string }).profile;

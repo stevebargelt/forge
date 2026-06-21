@@ -182,15 +182,15 @@ test("FG-251: research-synthesis seed workflow loads cleanly via loadWorkflow", 
 // Section 2: Step DAG shape assertions
 // ---------------------------------------------------------------------------
 
-test("FG-251: research-synthesis has exactly 5 steps in the expected order", () => {
+test("FG-251: research-synthesis has exactly 4 steps in the expected order (docs step removed in FG-344)", () => {
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
 
   const wf = loadWorkflow("research-synthesis");
   const ids = wf.steps.map((s) => s.id);
-  assert.deepEqual(ids, ["frame", "research-primary", "research-skeptic", "synthesize", "docs"],
-    "step IDs must appear in the designed order");
+  assert.deepEqual(ids, ["frame", "research-primary", "research-skeptic", "synthesize"],
+    "step IDs must appear in the designed order — docs step was removed in FG-344 (research emits a report, not operator docs)");
 });
 
 test("FG-251: research-primary depends_on [frame] only — no cross-dependency with research-skeptic (Req A)", () => {
@@ -262,7 +262,7 @@ test("FG-251: research-skeptic has fanout from frame with array_key: lanes", () 
 // Section 4: Gate assignments
 // ---------------------------------------------------------------------------
 
-test("FG-251: gate assignments match design intent (human on frame + synthesize, auto on research steps + docs)", () => {
+test("FG-251: gate assignments match design intent (human on frame + synthesize, auto on research steps; no docs step after FG-344)", () => {
   const wfDir = join(process.env.FORGE_HOME!, "workflows");
   mkdirSync(wfDir, { recursive: true });
   writeFileSync(join(wfDir, "research-synthesis.yml"), readFileSync(seedWorkflowPath, "utf8"));
@@ -277,8 +277,8 @@ test("FG-251: gate assignments match design intent (human on frame + synthesize,
     "research-skeptic gate must be auto — narrative output, synthesizer reads both sides");
   assert.equal(gateMap["synthesize"], "human",
     "synthesize gate must be human — operator reviews per-claim verdicts before closing");
-  assert.equal(gateMap["docs"], "auto",
-    "docs gate must be auto — doc reconciliation needs no human approval");
+  assert.equal(gateMap["docs"], undefined,
+    "docs step must not exist — FG-344 removed it; research emits a report artifact, not operator docs");
 });
 
 // ---------------------------------------------------------------------------

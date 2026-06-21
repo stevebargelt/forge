@@ -118,24 +118,8 @@ steps:
       research-skeptic.children[i] correspond to frame.lanes[i].
       Match on index, not on lane id, to handle any ordering edge cases.
 
-      Output {status: "complete", claims: [{id, claim, verdict, evidence, disagreements, confidence}]}
+      Output {status: "complete", overall_summary: "2-4 sentence roll-up across all claims", claims: [{id, claim, verdict, evidence, disagreements, confidence}]}
       where verdict is one of: supported | refuted | inconclusive.
       Base every verdict solely on evidence from both branches — no outside knowledge.
       When branches conflict, note the conflict in disagreements and lean toward
       inconclusive unless one side's evidence is clearly stronger.
-
-  # ----- docs -----
-  # Reconciles operator-facing documentation after the synthesis run.
-  # Gate: auto — orchestrator advances without a human stop.
-  - id: docs
-    agent: documentation-maintainer
-    depends_on: [synthesize]
-    gate: auto
-    workflow_additions: |
-      Reconcile operator-facing documentation with the synthesis findings. Read
-      the upstream synthesize result to see what was determined, then find any
-      affected docs and update them to match. If no operator-visible documentation
-      was affected, say so explicitly via docs_not_updated_reason rather than
-      leaving it empty.
-      Output {docs_updated, docs_not_updated_reason, stale_docs_found,
-      operator_behavior_changed}.

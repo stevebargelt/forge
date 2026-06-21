@@ -4,6 +4,7 @@ import { ensureForgeDirs } from "../../util/paths.js";
 import { getTask } from "../../store/tasks.js";
 import { getRun } from "../../store/runs.js";
 import { withRunLock, RunBusyError } from "../../util/run-lock.js";
+import { renderResearchReport } from "../../v2/report.js";
 
 export function registerGate(program: Command): void {
   program
@@ -66,6 +67,14 @@ export function registerGate(program: Command): void {
         const runAfter = getRun(id);
         if (runAfter?.status === "complete") {
           console.log(`\nRun complete.`);
+          if (runAfter.workflow === "research-synthesis") {
+            try {
+              const report = await renderResearchReport(runAfter.id);
+              console.log(`Report written to ${report.outputPath}`);
+            } catch (err) {
+              console.error(`forge gate: report render failed — ${(err as Error).message}`);
+            }
+          }
         } else {
           console.log(`\nNext:\n  forge next ${id}`);
         }
@@ -92,6 +101,14 @@ export function registerGate(program: Command): void {
       const runAfter = getRun(result.task.runId);
       if (runAfter?.status === "complete") {
         console.log(`\nRun complete.`);
+        if (runAfter.workflow === "research-synthesis") {
+          try {
+            const report = await renderResearchReport(runAfter.id);
+            console.log(`Report written to ${report.outputPath}`);
+          } catch (err) {
+            console.error(`forge gate: report render failed — ${(err as Error).message}`);
+          }
+        }
       } else {
         console.log(`\nNext:\n  forge next ${result.task.runId}`);
       }

@@ -58,6 +58,7 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "modelProfile",
   "workspace",
   "tags",
+  "reportOutputPath",
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {

@@ -22,8 +22,6 @@ frame
   └── research-skeptic (lane-1, lane-2, …)   ←— depends_on: [frame] only
        ↓
    synthesize
-       ↓
-     docs
 ```
 
 ## What to expect at each phase
@@ -59,6 +57,7 @@ The synthesizer reads all primary and skeptic outputs, paired by lane, and emits
 ```json
 {
   "status": "complete",
+  "overall_summary": "2-4 sentence roll-up across all claims",
   "claims": [
     {
       "id": "lane-1",
@@ -86,9 +85,7 @@ forge gate task-synthesize-<suffix> advance
 forge next run-cache-invalidation-safety-<suffix> --project ~/code/myproject
 ```
 
-### `docs` — documentation reconciliation
-
-Gate: **auto**. The documentation-maintainer checks whether this run's synthesis findings require any doc updates. Output: `{docs_updated, docs_not_updated_reason, stale_docs_found, operator_behavior_changed}`.
+When you advance the synthesize gate, forge automatically renders a `report.md` and prints its path to the console (`Report written to <project>/research/<slug>.md`). The report contains the question, an overall summary, and per-claim verdict sections.
 
 ## Mixed-provider routing
 
@@ -116,13 +113,46 @@ All outputs live under `~/.forge/runs/<run-id>/`:
 | `task-frame-*` | `result.json` | `{question, lanes: [{id, claim, context}]}` |
 | `task-research-primary-*` | `stdout.log` | prose findings per lane (supporting evidence) |
 | `task-research-skeptic-*` | `stdout.log` | prose findings per lane (counter-evidence) |
-| `task-synthesize-*` | `result.json` | `{claims: [{id, claim, verdict, evidence, disagreements, confidence}]}` |
+| `task-synthesize-*` | `result.json` | `{overall_summary, claims: [{id, claim, verdict, evidence, disagreements, confidence}]}` — drives the auto-generated report |
 
-The synthesizer's `result.json` is the durable deliverable. The researcher logs are your audit trail for understanding how each verdict was reached.
+The synthesizer's `result.json` is the structured source of truth. The auto-generated report at `<project>/research/<slug>-<run-id-suffix>.md` is the human-readable deliverable. Use `forge report <run-id>` to re-render it at any time.
+
+The researcher logs are your audit trail for understanding how each verdict was reached.
 
 ## When something goes wrong
 
 - **Frame rejected**: the lanes were too vague or overlapping. Reject with specific feedback; the framer re-runs with your rationale in context.
 - **Research child fails**: that lane becomes `inconclusive` in synthesis. Check `~/.forge/runs/<run-id>/<task-id>/container.stderr.log`. If it was infra (OOM, creds), fix and rerun `forge next`.
 - **Synthesis rejected**: the synthesizer re-runs with your rejection rationale, re-reading the same researcher outputs. Provide specific per-lane feedback (e.g. "lane-3 verdict cited no code-level evidence").
-- **Docs phase produces `operator_behavior_changed: true` with empty `docs_updated`**: the maintainer found a doc gap but couldn't resolve it. Invoke `forge invoke documentation-maintainer --task "..."` on the same run to drive it to closure.
+
+## Reading the report
+
+When you advance the synthesize gate, forge writes a Markdown report automatically. No manual step required.
+
+**Default location:** `<project>/research/<slug>-<run-id-suffix>.md`
+
+The report contains the question, a 2–4 sentence overall summary across all claims, and one section per claim with its verdict, confidence level, evidence citations, and any disagreements between the two research branches.
+
+**Re-render at any time:**
+
+```bash
+forge report <run-id>
+```
+
+Prints the report to stdout. Useful if you want to pipe it, diff it, or share it.
+
+**Export to a specific path:**
+
+```bash
+forge report <run-id> --out ~/reports/my-research.md
+```
+
+**Override the default output location at run creation:**
+
+```bash
+forge new research-synthesis "my-question" \
+  --question "..." \
+  --out ~/reports/my-research.md
+```
+
+The `--out` path is stored in the run and used automatically when the report is generated on synthesize gate advance.
