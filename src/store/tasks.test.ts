@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "./db.js";
+import { makeInMemoryDb, setDbForTest, applyMigrations } from "./db.js";
 import { insertRun } from "./runs.js";
 import {
   insertTask,
@@ -164,6 +164,18 @@ test("tasksForRunPhase filters by phase", () => {
   insertTask(task({ id: "task-h3", phase: "frame" }));
   const frameTasks = tasksForRunPhase(RUN.id, "frame");
   assert.equal(frameTasks.length, 2);
+});
+
+// FG-341: applyMigrations must NOT rename 'frame' → 'frame-question'.
+// The investigation workflow (which had that rename) is gone; research-synthesis
+// legitimately uses a 'frame' phase. Re-opening the DB (applyMigrations re-runs)
+// must leave research-synthesis frame tasks intact.
+test("FG-341: applyMigrations does not rename phase 'frame' to 'frame-question'", () => {
+  insertTask(task({ id: "task-fg341", phase: "frame" }));
+  applyMigrations(db);
+  const t = getTask("task-fg341");
+  assert.ok(t, "task must still exist after re-migration");
+  assert.equal(t!.phase, "frame", "phase must remain 'frame' — not renamed to 'frame-question'");
 });
 
 test("re-running a failed task: markTaskRunning clears error, then markTaskComplete leaves error null", () => {

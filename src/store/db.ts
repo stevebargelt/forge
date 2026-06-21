@@ -39,12 +39,6 @@ export function applyMigrations(db: DatabaseInstance): void {
     db.exec(`ALTER TABLE tasks ADD COLUMN resolved_by TEXT`);
   }
 
-  // Phase rename: investigation.frame → investigation.frame-question. UPDATE
-  // any existing task rows so dashboards / status / loadWorkflow can resolve
-  // the phase against the renamed workflow file. Idempotent — second run finds
-  // 0 rows.
-  db.exec(`UPDATE tasks SET phase = 'frame-question' WHERE phase = 'frame'`);
-
   // Workflow rename (2026-05-08): old run rows reference deleted workflow names.
   // Rather than maintain alias maps in workflows.ts forever (Steven 2026-05-08:
   // "Start after this run. Solves it no?"), in-place migrate. Idempotent.
