@@ -1,9 +1,10 @@
 ---
 id: FG-338
 type: story
-status: active
+status: done
 title: forge-test runner detection returns node:test instead of jest/vitest (FG-178 regression, 4 red tests on main)
 created: 2026-06-20
+closed: 2026-06-21
 ---
 
 **Found:** 2026-06-20 while running the full suite on the host to verify FG-190. Pre-existing — fails on clean `main`, unrelated to the change under test.
