@@ -1,4 +1,4 @@
 {
-  "tools": ["read"],
-  "notes": "Synthesizer aggregates upstream phase outputs."
+  "tools": ["write"],
+  "notes": "Synthesizer works solely from upstream branch inputs passed in via inputs.upstream — no project access. Only write is needed to emit /task/result.json."
 }
