@@ -82,4 +82,4 @@ Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed promp
 
 - The agent's `model` (e.g. `"spec-writer"`, `"fast-orchestrator"`) is a logical alias resolved by LiteLLM. You don't pin a real model name in the workflow file — change the alias mapping in your LiteLLM config, the workflow re-routes automatically.
 - For an authoritative red role, set `redConfig.authority: "authoritative"` and `gateOnVerdict: true`. A `fail` verdict from that red will set the blue task to `blocked_by_red`.
-- Constraint files at `~/.forge/constraints/` filter into the agent's prompt by `roles:` frontmatter. To make a new constraint apply to your role, list `security-reviewer` in `roles:`.
+- Constraint files at `~/.forge/constraints/` filter into the agent's prompt by `roles:`, `workflows:`, and `phases:` frontmatter. To make a new constraint apply to your role, list `security-reviewer` in `roles:`. Add `tags: [<tag>]` to scope a constraint to runs created with `forge new --tag <tag>` — useful for project-specific constraints that should not fire on every project's runs.
