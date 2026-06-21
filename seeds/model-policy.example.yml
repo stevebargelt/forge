@@ -72,12 +72,20 @@ model_profiles:
   # pi via Groq API key. Requires GROQ_API_KEY in the host env; `forge providers
   # doctor` reports groq/api availability. A dispatch fails loud before running if
   # the key is absent. Add to allowed_profiles and defaults to enable.
+  #
+  # tool_capable: pi runtimes front arbitrary upstreams (Groq, Ollama, etc.) whose
+  # tool-calling quality is unknown. The default for pi profiles is NOT capable —
+  # structured roles (engineer, red-*, etc.) are refused at dispatch unless the
+  # capability entry explicitly sets tool_capable: true. Narrative roles (research-
+  # specialist, etc.) are always allowed through; FG-337 handles their completion.
+  # Anthropic and OpenAI subscription/API profiles are known-good and default to
+  # capable — they require no tool_capable field.
   pi-groq:
     provider: groq
     runtime: pi-apikey
     auth: api
     map:
-      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
+      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard, tool_capable: true }
 
 defaults:
   # Ultimate fallback when no activity/agent override matches.

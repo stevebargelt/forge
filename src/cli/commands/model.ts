@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { resolveModel, type ModelResolution } from "../../v2/model-resolution.js";
 import { probeAuth, type AuthProbe } from "../../v2/provider-doctor.js";
+import { loadRuntime } from "../../v2/loader.js";
+import { resolveRuntimeMetadata } from "../../v2/schema.js";
+import { requiresStructuredResult } from "../../v2/role-capabilities.js";
 
 export function registerModel(program: Command): void {
   const model = program
@@ -50,13 +53,33 @@ export function registerModel(program: Command): void {
         const probe: AuthProbe | undefined =
           opts.check && resolution.auth ? probeAuth(resolution.provider, resolution.auth) : undefined;
 
+        const legacy = resolution.resolvedBy === "legacy";
+
+        // FG-339: compute tool capability and dispatchability for policy-mode resolutions.
+        let effectiveToolCapable: boolean | undefined;
+        let dispatchable: boolean | undefined;
+        let toolCapabilityNote: string | undefined;
+        if (!legacy) {
+          try {
+            const rt = loadRuntime(resolution.runtime);
+            const runtimeMeta = resolveRuntimeMetadata(rt);
+            effectiveToolCapable = resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
+            dispatchable = !requiresStructuredResult(agent) || effectiveToolCapable;
+          } catch {
+            toolCapabilityNote = `(could not resolve runtime '${resolution.runtime}' — tool capability unknown)`;
+          }
+        }
+
         if (opts.json) {
-          console.log(JSON.stringify({ ...resolution, ...(probe ? { availability: probe } : {}) }, null, 2));
+          console.log(JSON.stringify({
+            ...resolution,
+            ...(probe ? { availability: probe } : {}),
+            ...(!legacy && effectiveToolCapable !== undefined ? { toolCapable: resolution.toolCapable, effectiveToolCapable, dispatchable } : {}),
+          }, null, 2));
           return;
         }
 
-        const legacy = resolution.resolvedBy === "legacy";
-        const line = (k: string, v: string) => console.log(`  ${k.padEnd(13)}${v}`);
+        const line = (k: string, v: string) => console.log(`  ${k.padEnd(15)}${v}`);
         console.log(`forge model resolve ${agent}`);
         line("mode:", legacy ? "legacy (no model-policy.yml — runtime.models)" : "policy");
         line("capability:", resolution.alias ?? "(n/a)");
@@ -69,6 +92,20 @@ export function registerModel(program: Command): void {
         }
         line("runtime:", resolution.runtime);
         line("resolved by:", resolution.resolvedBy);
+        if (!legacy) {
+          if (toolCapabilityNote) {
+            console.log(`  ${toolCapabilityNote}`);
+          } else if (effectiveToolCapable !== undefined) {
+            const capableStr = resolution.toolCapable !== undefined
+              ? (resolution.toolCapable ? "yes" : "no")
+              : `unset (inferred: ${effectiveToolCapable ? "yes" : "no — pi runtime defaults non-capable"})`;
+            line("tool capable:", capableStr);
+            const dispStr = dispatchable
+              ? "yes"
+              : `no (fix: set tool_capable: true on the capability entry, or use a non-pi profile)`;
+            line("dispatchable:", dispStr);
+          }
+        }
         if (probe) {
           const icon = probe.status === "available" ? "✓" : probe.status === "unavailable" ? "✗" : "?";
           console.log("");

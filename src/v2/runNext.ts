@@ -51,7 +51,7 @@ import {
   manifestModelBlock,
   type ModelResolution,
 } from "./model-resolution.js";
-import { checkResolvedAvailability } from "./provider-doctor.js";
+import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
@@ -624,6 +624,7 @@ async function runOneRed(args: {
     taskPackage,
     resolution: redResolution,
     workflowAlias: args.red.activity,
+    role: args.red.agent,
     dockerExec: args.dockerExec,
   });
 
@@ -1060,6 +1061,28 @@ async function runContainer(args: {
     });
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: availability.reason });
     return { kind: "failed", error: availability.reason };
+  }
+  // FG-339: fail loud if a tool-requiring role is dispatched to a non-tool-capable
+  // model. Policy mode only — legacy mode (resolvedBy==='legacy') is a no-op.
+  // Pi runtimes default non-capable (guilty-until-proven); others default capable.
+  if (args.resolution.resolvedBy !== "legacy") {
+    const effectiveToolCapable = args.resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
+    const toolCapability = checkToolCapability(args.role, effectiveToolCapable, args.resolution.profile, args.resolution.model, args.resolution.alias);
+    if (!toolCapability.ok) {
+      logEvent("model.profile_unavailable", {
+        runId: args.runId,
+        taskId: args.taskId,
+        payload: {
+          profile: args.resolution.profile,
+          provider: args.resolution.provider,
+          auth: args.resolution.auth,
+          capability: "tool",
+          reason: toolCapability.reason,
+        },
+      });
+      failTask(args.taskId, { runId: args.runId, kind: classify({}), error: toolCapability.reason });
+      return { kind: "failed", error: toolCapability.reason };
+    }
   }
   const resolvedBlock = manifestModelBlock(args.resolution);
   if (resolvedBlock) {

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { probeAuth, doctorReport, checkResolvedAvailability } from "./provider-doctor.js";
+import { probeAuth, doctorReport, checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import type { ModelResolution } from "./model-resolution.js";
 
 // A policy-mode resolution pinned to api (probe is unavailable when no key set).
@@ -170,4 +170,28 @@ test("checkResolvedAvailability: unavailable + on_unavailable=fallback → fail 
 test("checkResolvedAvailability: available auth proceeds", () => {
   process.env.ANTHROPIC_API_KEY = "sk-x"; // api now available
   assert.deepEqual(checkResolvedAvailability(apiResolution("fail")), { ok: true });
+});
+
+// FG-339: checkToolCapability tests
+test("checkToolCapability: structured role + non-capable model refuses with reason naming profile and model", () => {
+  const r = checkToolCapability("engineer", false, "pi-non-capable", "llama-3.3-70b-stub", "default");
+  assert.equal(r.ok, false);
+  if (!r.ok) {
+    assert.match(r.reason, /engineer/);
+    assert.match(r.reason, /tool_capable/);
+    assert.match(r.reason, /pi-non-capable/);
+    assert.match(r.reason, /llama-3.3-70b-stub/);
+  }
+});
+
+test("checkToolCapability: structured role + capable model passes", () => {
+  assert.deepEqual(checkToolCapability("engineer", true), { ok: true });
+});
+
+test("checkToolCapability: narrative role + non-capable model passes (FG-337 backstop)", () => {
+  assert.deepEqual(checkToolCapability("research-specialist", false), { ok: true });
+});
+
+test("checkToolCapability: undefined role + non-capable model passes", () => {
+  assert.deepEqual(checkToolCapability(undefined, false), { ok: true });
 });

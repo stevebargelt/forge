@@ -55,6 +55,9 @@ export type ModelResolution = {
   /** Effective on_unavailable (profile override ?? policy default). "fail" in
    *  legacy mode (irrelevant — no dispatch availability gate runs in legacy). */
   onUnavailable: OnUnavailable;
+  /** Whether the resolved model supports tool calls. Undefined = unset in policy
+   *  (defaults at dispatch time: non-pi runtimes default true, pi defaults false). */
+  toolCapable?: boolean;
 };
 
 // Pass-1 fallback: agent role -> default capability activity. Small + local for
@@ -215,6 +218,7 @@ export function resolveModel(opts: ResolveOpts): ModelResolution {
     resolvedBy,
     runtime,
     onUnavailable: profile.on_unavailable ?? policy.on_unavailable,
+    toolCapable: entry.tool_capable,
   };
 }
 

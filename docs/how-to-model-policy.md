@@ -86,6 +86,11 @@ forge providers doctor                                          # which provider
 forge show <task-id>                                            # the resolution record for a real task
 ```
 
+In policy mode, `forge model resolve` also reports **`tool capable`** (whether
+the policy entry sets `tool_capable`, and the inferred value for pi vs non-pi
+runtimes) and **`dispatchable`** (whether the role can actually be dispatched to
+this model). If `dispatchable: no`, the fix is shown inline.
+
 Every policy-mode task writes provider + model + auth + `resolvedBy` into its
 `manifest.json` and emits `model.profile_resolved` (or
 `model.profile_unavailable` when the gate fails).
@@ -137,7 +142,7 @@ model_profiles:
     runtime: pi-apikey      # explicit runtime YAML; skips the (provider, auth) binding table
     auth: api               # injects GROQ_API_KEY (resolved via the upstream provider)
     map:
-      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard }
+      default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard, tool_capable: true }
 ```
 
 When `runtime:` is set on a profile:
@@ -160,6 +165,45 @@ behavior unchanged.
 > `provider:` value fails at runtime invocation, not at policy load. The
 > `runtime:` name fails loud at dispatch time if the runtime YAML is not
 > installed in `~/.forge/runtimes/`.
+
+## Tool capability gate (FG-339)
+
+Pi runtimes front arbitrary upstream models (Groq, Ollama, …) whose tool-calling
+reliability is unknown. Forge enforces a **fail-fast capability gate at dispatch
+time**: if the resolved role requires structured `result.json` output (engineer,
+red-*, and similar structured roles) and the model is not confirmed tool-capable,
+the task fails immediately with a clear message — before any container starts.
+
+**Default policy by runtime:**
+
+| Runtime | Default | Override |
+|---|---|---|
+| Anthropic (subscription / api / bedrock) | capable | no `tool_capable` field needed |
+| OpenAI / Codex | capable | no `tool_capable` field needed |
+| Pi (`pi-apikey`, `pi-oauth`) | **NOT capable** | set `tool_capable: true` on the capability entry |
+
+Pi defaults to non-capable because its upstream is unknown at policy-load time.
+Set `tool_capable: true` on each capability entry in a pi profile only after
+confirming the model reliably calls tools:
+
+```yaml
+map:
+  default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard, tool_capable: true }
+```
+
+**Narrative roles are not affected.** Roles like `research-specialist` and
+`prompt-author` do not require structured result.json output, so they pass the
+gate regardless of `tool_capable`. FG-337's inferred-result fallback handles
+their completion.
+
+**Diagnose before dispatch:**
+
+```bash
+forge model resolve <agent> --project <dir>   # shows tool_capable + dispatchable verdict
+```
+
+If `dispatchable: no`, add `tool_capable: true` to the relevant capability entry
+or switch to a non-pi profile.
 
 ## Still future — Run (#225)
 

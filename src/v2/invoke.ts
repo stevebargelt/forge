@@ -37,7 +37,7 @@ import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { loadRuntime } from "./loader.js";
 import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
-import { checkResolvedAvailability } from "./provider-doctor.js";
+import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
@@ -227,6 +227,23 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     failTask(taskId, { runId, kind: classify({}), error: availability.reason });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error: availability.reason };
+  }
+  // FG-339: fail loud if a tool-requiring role is dispatched to a non-tool-capable
+  // model. Policy mode only — legacy mode (resolvedBy==='legacy') is a no-op.
+  // Pi runtimes default non-capable (guilty-until-proven); others default capable.
+  if (resolution.resolvedBy !== "legacy") {
+    const effectiveToolCapable = resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
+    const toolCapability = checkToolCapability(args.agentRole, effectiveToolCapable, resolution.profile, resolution.model, resolution.alias);
+    if (!toolCapability.ok) {
+      logEvent("model.profile_unavailable", {
+        runId,
+        taskId,
+        payload: { profile: resolution.profile, provider: resolution.provider, auth: resolution.auth, capability: "tool", reason: toolCapability.reason },
+      });
+      failTask(taskId, { runId, kind: classify({}), error: toolCapability.reason });
+      closeRunIfIdle(false);
+      return { runId, taskId, status: "failed", error: toolCapability.reason };
+    }
   }
   const resolvedBlock = manifestModelBlock(resolution);
   if (resolvedBlock) {

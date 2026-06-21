@@ -1502,7 +1502,7 @@ model_profiles:
     auth: api
     runtime: pi-upstream-stub
     map:
-      default: { model: llama-3.3-70b-versatile, cost_tier: cheap }
+      default: { model: llama-3.3-70b-versatile, cost_tier: cheap, tool_capable: true }
 defaults:
   profile: pi-groq
   activity: {}

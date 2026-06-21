@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { hasAwsSsoConfigured, readOauthHint, codexAuthFile, apiKeyEnvForProvider } from "../util/creds.js";
 import type { EffectiveAuth, ModelResolution } from "./model-resolution.js";
+import { requiresStructuredResult } from "./role-capabilities.js";
 
 export type ProbeStatus = "available" | "unavailable" | "unknown";
 
@@ -117,6 +118,39 @@ export function doctorReport(): AuthProbe[] {
 }
 
 export type AvailabilityCheck = { ok: true } | { ok: false; reason: string };
+
+// FG-339: dispatch-time tool-capability gate. Refuses to dispatch a role that
+// requires structured result.json output onto a model that cannot reliably call
+// tools. The `effectiveToolCapable` value is computed by the caller:
+//   resolution.toolCapable ?? (runtimeMeta.runtimeKind !== 'pi')
+// Pi runtimes are guilty-until-proven-innocent (tool_capable must be explicitly
+// set true in the policy entry). Anthropic/OpenAI default to capable.
+export function checkToolCapability(
+  role: string | undefined,
+  effectiveToolCapable: boolean,
+  profile?: string,
+  model?: string,
+  alias?: string,
+): AvailabilityCheck {
+  if (role === undefined) return { ok: true };
+  if (!requiresStructuredResult(role)) return { ok: true };
+  if (effectiveToolCapable) return { ok: true };
+  const context = [
+    profile ? `profile '${profile}'` : undefined,
+    model ? `model '${model}'` : undefined,
+    alias ? `alias '${alias}'` : undefined,
+  ].filter(Boolean).join(", ");
+  return {
+    ok: false,
+    reason:
+      `role '${role}' requires a tool-capable model (it produces structured result.json output) ` +
+      `but the resolved model is not tool-capable` +
+      (context ? ` (${context})` : ``) +
+      `. ` +
+      `Fix: set tool_capable: true on the capability entry in your model-policy.yml, ` +
+      `or switch to a profile using a tool-capable model (anthropic or openai).`,
+  };
+}
 
 // Dispatch-time fail-loud gate (ADR §6). Runs only in policy mode. CONSERVATIVE:
 // blocks only on a DEFINITIVE "unavailable" probe — "unknown" always proceeds, so

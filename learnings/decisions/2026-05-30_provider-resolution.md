@@ -173,6 +173,19 @@ bounded by `max_cost_tier` + `allowed_profiles`). Any fallback writes
 users (goal 3) set their default profile to the provider they have, or opt into
 fallback — not a special case.
 
+**Tool-capability gate (FG-339, 2026-06-21):** a second fail-loud gate runs at
+dispatch time for pi-runtime profiles. Pi fronts arbitrary upstream models of
+unknown tool-calling quality; a structured role (engineer, red-*, etc.) on a
+non-capable model dies mid-stream with a cryptic rejection. The gate refuses
+early with a clear message naming the role, profile, model, and the fix. The
+discriminator is the existing `requiresStructuredResult(role)` axis
+(`src/v2/role-capabilities.ts`), NOT a new `requiresTools` flag — nearly every
+role uses tools, so the meaningful distinction is "must produce structured
+result.json" (no FG-337 backstop) vs. "narrative output" (FG-337 catches it).
+Default: non-pi runtimes are CAPABLE; pi runtimes are NOT CAPABLE unless the
+capability entry sets `tool_capable: true`. This targets the real failure surface
+(Groq/Ollama via pi) without touching any existing working policy.
+
 ### 7. Staging — Crawl / Walk / Run (same vocabulary as the observability roadmap)
 
 > **Status — Crawl SHIPPED (2026-05-31, #220).** Landed: opt-in `model-policy.yml`
@@ -291,7 +304,9 @@ For every task, the resolved **provider + model + auth mode + `resolvedBy`** mus
 - be shown by `forge show` (answers "why did this task use this model?");
 - be reproducible via a dry-run **`forge model resolve <agent> --activity <a> --project <dir>`**
   (explains selected profile, fallbacks considered, availability failures;
-  static by default, `--check` runs availability probes);
+  static by default, `--check` runs availability probes; also reports
+  `tool_capable` / `dispatchable` verdict for pi profiles so incompatibilities
+  are visible before any container starts — FG-339);
 - be diagnosable via **`forge providers doctor`** (which providers have working
   auth in this env).
 

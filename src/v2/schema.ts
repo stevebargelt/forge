@@ -444,6 +444,7 @@ const OnUnavailableSchema = z.enum(["fail", "fallback"]);
 const CapabilityEntrySchema = z.object({
   model: z.string().min(1),
   cost_tier: CostTierSchema,
+  tool_capable: z.boolean().optional(),
 });
 
 const ModelProfileSchema = z
