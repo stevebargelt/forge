@@ -1,8 +1,9 @@
 ---
 id: FG-306
 type: story
-status: active
+status: done
 title: "doctor/upgrade follow-ups: quick-start docs + RUNTIME_BINDING CLI-expectation row (#229)"
+closed: 2026-06-21
 ---
 
 **Type:** Follow-ups from #229's review-loop (adjacent polish, not release blockers). Low priority.
