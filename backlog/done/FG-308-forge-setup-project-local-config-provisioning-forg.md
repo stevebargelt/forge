@@ -1,8 +1,9 @@
 ---
 id: FG-308
 type: story
-status: active
+status: done
 title: "forge setup: project-local config provisioning (.forge/model-policy.yml + docs-surfaces.yml) + forge new first-run advisory"
+closed: 2026-06-21
 ---
 
 **Type:** Follow-up / enhancement from #252's review-loop. The #252 review-loop fixer attempted this autonomously but it landed through a structurally-failed loop (reviewer_failed; round-2 verification broke), so the unreviewed WIP was discarded. Re-do cleanly.
