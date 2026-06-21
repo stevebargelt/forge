@@ -1,6 +1,6 @@
 # PRD - RACI-to-routing-policy system
 
-**Status:** draft
+**Status:** shipped — FG-273 closed 2026-06-20. MVP acceptance met: the orchestrator routes from the generated policy; `forge route explain`/`validate`/`compile`/`governance` and `forge raci validate`/`propose`/`apply` are all live.
 **Captured:** 2026-06-04
 **Revised:** 2026-06-04 — incorporated design-session refinements: two validators
 (`forge raci validate` + `forge route validate`), orchestrator-mediated authoring
