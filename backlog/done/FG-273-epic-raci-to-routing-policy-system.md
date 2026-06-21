@@ -1,8 +1,9 @@
 ---
 id: FG-273
 type: story
-status: active
+status: done
 title: "EPIC: RACI-to-routing-policy system"
+closed: 2026-06-21
 ---
 
 **PRD:** `docs/prds/raci-routing-policy.md`.
