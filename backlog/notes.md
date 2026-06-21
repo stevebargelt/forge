@@ -1,6 +1,6 @@
 **Last session ended 2026-06-20** (full walk of the active backlog, one ticket at a time, deciding build-vs-close on each).
 
-**Where we left off:** Walked all 26 active tickets interactively. Net: active backlog 26 → 8, all remaining are genuine (no stubs/speculation/gold-plating left). `main` is fully green (1540/1540, typecheck clean) — the FG-178 runner-detection regression that was red on the host got root-caused and fixed (FG-338). The disposition all session: verify each ticket's premise still holds (artifact exists? problem visible? consumer exists?) before building, and default to closing speculative/cosmetic/superseded work.
+**Where we left off:** Walked all 26 active tickets interactively. Net: active backlog 26 → 8, all remaining are genuine (no stubs/speculation/gold-plating left). `main` is fully green (1540/1540, typecheck clean) — the FG-178 runner-detection regression that was red on the host got root-caused and fixed (FG-338). All work pushed to origin (through ecd4cb1). The disposition all session: verify each ticket's premise still holds (artifact exists? problem visible? consumer exists?) before building, and default to closing speculative/cosmetic/superseded work.
 
 **Picked up next:**
 1. **FG-258 (provider-agnostic runtime / pi) is the real forward thread** — it's the FG-291 baseline spine and dogfoodable for free here via `--profile pi-groq`. Its kept children are the work: FG-337 (capture final assistant msg when a clean runtime writes no result.json — build the fallback, sequence into the pi runtime work), then FG-253 (provider adapters) and FG-268 (local models) in the Walk/Run phases.
@@ -8,8 +8,8 @@
 3. **FG-190 items 2–9** — the remaining auth-profile correctness/cleanup (TOCTOU chmod, CDP timeout, wrong-tab capture, IPv6, cookie scoping, doc honesty). Item 1 (expiry/refresh-token) shipped. All low-pri pre-launch; pick up when convenient.
 
 **External state to remember:**
+- **Everything is pushed** — `origin/main` is at ecd4cb1; working tree clean, 0 commits ahead. (Note: this session pushed direct to main, which the user explicitly approved this time; default remains direct-to-main, no CI/PRs.)
 - **Non-ticket thread — FG-158 corp-laptop Bedrock validation.** Code shipped; only the live `forge claude --bedrock` run on the corp laptop gates its close. A weekly cloud reminder routine fires Mondays 9am PT (claude.ai routine trig_01XFfSfNKSsPi3uUV1FaCmTx). Not actionable from this Mac.
-- **24 commits unpushed** (direct-to-main; no push requested this session).
 - **pi runs FREE** via `--profile pi-groq` (GROQ_API_KEY, same shell; `gpt-oss-120b` does tool-calling, `llama-3.3-70b` mangles it). The forge-on-forge agent pipeline is unblocked (DEC-019) — engineer/test-engineer/doc-maintainer all ran cleanly against this repo all session.
 - **Container vs host test discrepancy is gone** — FG-338 fixed the bash-3.2 `source <(...)` harness bug. The host suite is now authoritative and green; in-container runs match.
 
