@@ -1,9 +1,10 @@
 ---
 id: FG-337
 type: story
-status: active
+status: done
 title: "runtime: capture final assistant message as result when a runtime completes cleanly but writes no result.json"
 created: 2026-06-19
+closed: 2026-06-21
 ---
 
 **Found:** 2026-06-19, dogfooding pi on a free Groq model (FG-258). Two failure modes both reduce to free/weak-model tool-calling:
