@@ -1,8 +1,9 @@
 ---
 id: FG-251
 type: story
-status: active
+status: done
 title: "Dual-research workflow: v2-native replacement for old investigation"
+closed: 2026-06-21
 ---
 
 **Captured from user direction 2026-06-02.** We want the dual-research / synthesis shape as a v2-native replacement for the removed `investigation` pipeline. This is about the workflow semantics; the broader config/setup ergonomics are split to #252.
