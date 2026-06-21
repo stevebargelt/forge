@@ -101,3 +101,27 @@ test("startRun: no modelProfile key when --profile omitted", () => {
   const run = getRun(result.runId);
   assert.ok(!("modelProfile" in (run!.metadata as Record<string, unknown>)));
 });
+
+// FG-28: --tag stores tags in run metadata
+test("startRun: tags land in metadata when provided", () => {
+  const result = startRun({
+    workflow: HELLO_WORKFLOW,
+    title: "with tags",
+    inputs: { brief: "x" },
+    projectDir: "/tmp",
+    tags: ["ios", "mobile"],
+  });
+  const run = getRun(result.runId);
+  assert.deepEqual((run!.metadata as Record<string, unknown>)["tags"], ["ios", "mobile"]);
+});
+
+test("startRun: no tags key when tags omitted", () => {
+  const result = startRun({
+    workflow: HELLO_WORKFLOW,
+    title: "no tags",
+    inputs: { brief: "x" },
+    projectDir: "/tmp",
+  });
+  const run = getRun(result.runId);
+  assert.ok(!("tags" in (run!.metadata as Record<string, unknown>)));
+});

@@ -27,6 +27,7 @@ export type ComposeArgs = {
   role: string;
   workflow: Workflow;
   step: Step;
+  runTags?: string[];
   // Override defaults for tests.
   agentDir?: string;
   constraintsDir?: string;
@@ -64,6 +65,7 @@ export function composeSystemPrompt(args: ComposeArgs): string {
     workflow: args.workflow.name,
     phase: args.step.id,  // v1's "phase" maps 1:1 to v2's "step.id"
     level: "suggest",
+    runTags: args.runTags,
   });
   if (suggest.length > 0) {
     const body = suggest.map((c) => `## Constraint: ${c.id}\n\n${c.body}`).join("\n\n");

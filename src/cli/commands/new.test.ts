@@ -63,7 +63,7 @@ test("assertNoControlPlaneMeta: rejects modelProfile in --meta", () => {
 });
 
 test("assertNoControlPlaneMeta: rejects every reserved key", () => {
-  for (const key of ["workspace", "designDir", "authProfile"]) {
+  for (const key of ["workspace", "designDir", "authProfile", "tags"]) {
     assert.throws(
       () => assertNoControlPlaneMeta({ [key]: "x" }),
       new RegExp(`reserved key '${key}'`),

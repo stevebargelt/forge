@@ -35,6 +35,9 @@ export type StartRunArgs = {
    *  metadata; runNext pins every task (primary/red/fanout) to it at the highest
    *  profile-selection precedence. No-op in legacy mode (no model-policy.yml). */
   modelProfile?: string;
+  /** FG-28: opt-in constraint scoping. Tagged constraints only fire for runs that
+   *  carry at least one matching tag. Untagged constraints remain global. */
+  tags?: string[];
 };
 
 export type StartRunResult = {
@@ -54,6 +57,7 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "authProfile",
   "modelProfile",
   "workspace",
+  "tags",
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {
@@ -72,6 +76,7 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.workspace) metadata["workspace"] = args.workspace;
   if (args.authProfile) metadata["authProfile"] = args.authProfile;
   if (args.modelProfile) metadata["modelProfile"] = args.modelProfile;
+  if (args.tags && args.tags.length > 0) metadata["tags"] = args.tags;
 
   const run: Run = {
     id: runId,

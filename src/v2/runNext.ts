@@ -299,6 +299,7 @@ async function dispatchSingleStep(args: {
       role: agentRole,
       workflow: args.workflow,
       step,
+      runTags: runTagsFromMetadata(args.runMetadata),
     }),
   };
 
@@ -573,6 +574,7 @@ async function runOneRed(args: {
     workflow: args.workflow.name,
     phase: args.step.id,
     level: "force",
+    runTags: runTagsFromMetadata(args.runMetadata),
   })
     .map((c) => c.antiPrompt)
     .filter((p): p is string => typeof p === "string" && p.length > 0);
@@ -586,6 +588,7 @@ async function runOneRed(args: {
       role: args.red.agent,
       workflow: args.workflow,
       step: args.step,
+      runTags: runTagsFromMetadata(args.runMetadata),
     }),
     artifact: args.artifact,
     ...(args.spec ? { spec: args.spec } : {}),
@@ -933,6 +936,7 @@ async function runFanoutChild(args: {
       role: agentRole,
       workflow: args.workflow,
       step,
+      runTags: runTagsFromMetadata(args.runMetadata),
     }),
   };
 
@@ -1353,4 +1357,9 @@ function authProfileForRole(runMetadata: Record<string, unknown>, role: string):
 function runModelProfile(runMetadata: Record<string, unknown>): string | undefined {
   const profile = runMetadata["modelProfile"];
   return typeof profile === "string" && profile ? profile : undefined;
+}
+
+function runTagsFromMetadata(runMetadata: Record<string, unknown>): string[] | undefined {
+  const tags = runMetadata["tags"];
+  return Array.isArray(tags) ? (tags as string[]) : undefined;
 }

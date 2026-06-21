@@ -27,6 +27,7 @@ export function registerNew(program: Command): void {
     .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
     .option("--unrouted", "#297: acknowledge an intentionally unrouted run (suppress the route-preflight warning)")
+    .option("--tag <tag>", "FG-28: tag this run for constraint scoping; repeat to add multiple tags (e.g. --tag ios --tag mobile)", (val: string, acc: string[]) => [...acc, val], [] as string[])
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       ensureForgeDirs();
@@ -87,6 +88,7 @@ export function registerNew(program: Command): void {
       }
 
       const modelProfile = (options as { profile?: string }).profile;
+      const tags = (options as { tag: string[] }).tag;
 
       const { runId } = startRun({
         workflow,
@@ -97,6 +99,7 @@ export function registerNew(program: Command): void {
         workspace,
         authProfile,
         modelProfile,
+        ...(tags.length > 0 ? { tags } : {}),
       });
 
       console.log(`Created run ${runId}`);

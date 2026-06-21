@@ -109,3 +109,57 @@ Don't bluff.`
   assert.ok(out.includes("Don't bluff."));
   rmSync(root, { recursive: true, force: true });
 });
+
+test("composeSystemPrompt: tagged constraint is excluded when runTags has no match", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeFileSync(
+    join(constraintsDir, "ios-only.md"),
+    `---
+id: ios-only
+level: suggest
+roles: []
+workflows: []
+tags: [ios]
+---
+iOS-specific rule.`
+  );
+  const out = composeSystemPrompt({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    runTags: ["android"],
+  });
+  assert.ok(!out.includes("ios-only"));
+  assert.ok(!out.includes("iOS-specific rule."));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("composeSystemPrompt: tagged constraint is included when runTags has a match", () => {
+  const { agentDir, constraintsDir, root } = setup();
+  writeFileSync(join(agentDir, "CLAUDE.md"), "# architect");
+  writeFileSync(
+    join(constraintsDir, "ios-only.md"),
+    `---
+id: ios-only
+level: suggest
+roles: []
+workflows: []
+tags: [ios]
+---
+iOS-specific rule.`
+  );
+  const out = composeSystemPrompt({
+    role: "architect",
+    workflow: WORKFLOW,
+    step: WORKFLOW.steps[0]!,
+    agentDir,
+    constraintsDir,
+    runTags: ["ios"],
+  });
+  assert.ok(out.includes("ios-only"));
+  assert.ok(out.includes("iOS-specific rule."));
+  rmSync(root, { recursive: true, force: true });
+});

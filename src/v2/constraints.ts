@@ -20,6 +20,7 @@ export type Constraint = {
   roles: string[];
   workflows: string[];
   phases?: string[];
+  tags: string[];
   body: string;
   antiPrompt?: string;
 };
@@ -45,6 +46,7 @@ export function parseConstraintFile(path: string): Constraint {
     roles: Array.isArray(fm["roles"]) ? (fm["roles"] as string[]) : [],
     workflows: Array.isArray(fm["workflows"]) ? (fm["workflows"] as string[]) : [],
     phases: Array.isArray(fm["phases"]) ? (fm["phases"] as string[]) : undefined,
+    tags: Array.isArray(fm["tags"]) ? (fm["tags"] as string[]) : [],
     body: parsed.content.trim(),
     antiPrompt: typeof fm["antiPrompt"] === "string" ? fm["antiPrompt"] : undefined,
   };
@@ -52,13 +54,14 @@ export function parseConstraintFile(path: string): Constraint {
 
 export function filterConstraints(
   all: Constraint[],
-  opts: { role: string; workflow: string; phase: string; level?: ConstraintLevel },
+  opts: { role: string; workflow: string; phase: string; level?: ConstraintLevel; runTags?: string[] },
 ): Constraint[] {
   return all.filter((c) => {
     if (opts.level && c.level !== opts.level) return false;
     if (c.roles.length > 0 && !c.roles.includes(opts.role)) return false;
     if (c.workflows.length > 0 && !c.workflows.includes(opts.workflow)) return false;
     if (c.phases && c.phases.length > 0 && !c.phases.includes(opts.phase)) return false;
+    if (c.tags.length > 0 && !c.tags.some((t) => (opts.runTags ?? []).includes(t))) return false;
     return true;
   });
 }
