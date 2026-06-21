@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Narrative output role — no result.json required. Reads project files and runs shell commands to find counter-evidence for the assigned claim."
+}

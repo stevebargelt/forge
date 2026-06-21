@@ -26,10 +26,17 @@ When any of these are present, mention in your output (e.g. in `notes`) what you
 ```
 {
   "status": "complete",
-  "architecturalImplications": "...",
-  "antiFindings": ["..."],
-  "openQuestions": ["..."]
+  "claims": [
+    {
+      "id": "string — matches the lane id from the framer",
+      "claim": "string — the original claim being evaluated",
+      "verdict": "supported | refuted | inconclusive",
+      "evidence": "string — concrete citations from both research branches that support this verdict",
+      "disagreements": "string — where the two research branches conflicted; empty string if they agreed",
+      "confidence": "high | medium | low"
+    }
+  ]
 }
 ```
 
-Anti-findings are things that, if true, would invalidate parts of the synthesis. Be honest about them.
+Write one entry per claim lane. Base every verdict solely on the evidence provided in inputs — do not introduce outside knowledge. When the two research branches conflict, note the conflict in `disagreements` and let that disagreement drive the verdict toward `inconclusive` unless one side's evidence is clearly stronger.

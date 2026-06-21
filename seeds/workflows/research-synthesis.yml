@@ -1,0 +1,141 @@
+# forge v2 — `research-synthesis` workflow
+#
+# Demonstrates genuine multi-agent value (FG-291): two independent researchers
+# investigate each claim lane from opposite angles (supporting vs. counter-evidence),
+# then a synthesizer produces per-claim verdicts grounded in both sides' findings.
+#
+# Key design decisions:
+#   - No gate: verdict anywhere — per #73, researchers produce prose, not red-verdicts.
+#     The synthesizer's per-claim judgment (supported|refuted|inconclusive) IS the
+#     quality gate.
+#   - research-primary and research-skeptic both depend_on: [frame] ONLY. This is the
+#     structural guarantee of independence — neither reads the other before synthesis.
+#   - Mixed-provider routing: pin research-primary and research-skeptic to different
+#     provider profiles in overrides.agents (model-policy.yml) to use independent
+#     providers for the two parallel branches.
+
+name: research-synthesis
+description: |
+  Independent dual-research and synthesis. A framer decomposes the question into
+  concrete lanes; two researchers (primary and skeptic) investigate each lane
+  independently using different provider profiles; a synthesizer produces a
+  per-claim verdict (supported|refuted|inconclusive) grounded in both sides'
+  evidence.
+
+inputs:
+  - name: question
+    required: true
+    type: text
+    help: "The research question to investigate — specific enough to decompose into testable claims."
+
+steps:
+  # ----- frame -----
+  # Decomposes the user question into 3-7 independently researchable claim lanes.
+  # Gate: human — the operator reviews the framing before committing to N parallel
+  # research branches. A bad frame wastes the entire fanout, so human review here
+  # is cost-effective.
+  - id: frame
+    agent: research-framer
+    gate: human
+    workflow_additions: |
+      Decompose inputs.question into 3-7 concrete, independently researchable
+      claims. Write result.json with shape:
+        {status: "complete", question: string, lanes: [{id, claim, context}]}
+      Each lane must be a specific, falsifiable claim — not a category or open
+      question. The downstream fanout depends on the lanes array being present
+      and non-empty; a missing or malformed lanes array hard-fails both parallel
+      research branches immediately.
+
+  # ----- research-primary -----
+  # Fans out one child per lane. Each child finds SUPPORTING evidence for the
+  # lane's claim. depends_on: [frame] only — no cross-dependency with
+  # research-skeptic, which is the structural guarantee of independence.
+  # Gate: auto — narrative output; the synthesizer reads both branches and
+  # surfaces disagreements. No red panel needed here.
+  - id: research-primary
+    agent: research-primary
+    depends_on: [frame]
+    gate: auto
+    fanout:
+      from_upstream:
+        step: frame
+        array_key: lanes
+        input_key: lane
+      failure_mode: fail-phase
+    workflow_additions: |
+      Read inputs.lane.claim and inputs.lane.context. Search the project and
+      any relevant sources for evidence that SUPPORTS the claim. Produce prose
+      findings with concrete citations. This is a narrative output — no
+      result.json required.
+
+  # ----- research-skeptic -----
+  # Mirrors research-primary but adversarially framed: find counter-evidence.
+  # CRITICAL: depends_on: [frame] ONLY — no dependency on research-primary.
+  # The two branches run concurrently; neither sees the other before synthesis.
+  # Gate: auto — narrative output; no red panel needed.
+  - id: research-skeptic
+    agent: research-skeptic
+    depends_on: [frame]
+    gate: auto
+    fanout:
+      from_upstream:
+        step: frame
+        array_key: lanes
+        input_key: lane
+      failure_mode: fail-phase
+    workflow_additions: |
+      Read inputs.lane.claim and inputs.lane.context. Search the project and
+      any relevant sources for evidence that CHALLENGES, refutes, or complicates
+      the claim. Approach it as a skeptic, not a neutral reviewer. Produce prose
+      counter-findings with concrete citations. This is a narrative output — no
+      result.json required.
+
+  # ----- synthesize -----
+  # Reads both research branches and emits per-claim verdicts.
+  # Gate: human — the operator reviews the synthesis before closing the run.
+  # No reds: per the #73 lesson, researchers produce prose findings, not
+  # red-verdict pass/fail. The synthesizer's per-claim judgment IS the quality
+  # gate here.
+  #
+  # Fanout aggregate shape: each fanout step produces a children array.
+  # Pair research-primary and research-skeptic children BY INDEX — they fan out
+  # from the same lanes array in the same order, so index alignment is exact.
+  - id: synthesize
+    agent: synthesizer
+    depends_on: [frame, research-primary, research-skeptic]
+    gate: human
+    workflow_additions: |
+      Read the framing and both research branches to produce a per-claim synthesis.
+
+      Upstream structure:
+        inputs.upstream[0] = frame result: {question, lanes: [{id, claim, context}]}
+        inputs.upstream[1] = research-primary fanout aggregate:
+                             {children: [{index, status, result}]}
+        inputs.upstream[2] = research-skeptic fanout aggregate:
+                             {children: [{index, status, result}]}
+
+      Pair children by index: research-primary.children[i] and
+      research-skeptic.children[i] correspond to frame.lanes[i].
+      Match on index, not on lane id, to handle any ordering edge cases.
+
+      Output {status: "complete", claims: [{id, claim, verdict, evidence, disagreements, confidence}]}
+      where verdict is one of: supported | refuted | inconclusive.
+      Base every verdict solely on evidence from both branches — no outside knowledge.
+      When branches conflict, note the conflict in disagreements and lean toward
+      inconclusive unless one side's evidence is clearly stronger.
+
+  # ----- docs -----
+  # Reconciles operator-facing documentation after the synthesis run.
+  # Gate: auto — orchestrator advances without a human stop.
+  - id: docs
+    agent: documentation-maintainer
+    depends_on: [synthesize]
+    gate: auto
+    workflow_additions: |
+      Reconcile operator-facing documentation with the synthesis findings. Read
+      the upstream synthesize result to see what was determined, then find any
+      affected docs and update them to match. If no operator-visible documentation
+      was affected, say so explicitly via docs_not_updated_reason rather than
+      leaving it empty.
+      Output {docs_updated, docs_not_updated_reason, stale_docs_found,
+      operator_behavior_changed}.

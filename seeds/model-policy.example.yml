@@ -104,6 +104,10 @@ overrides:
   agents:
     red-security: claude-bedrock
     red-wide: codex-subscription
+    # Mixed-provider dual research: each independent researcher runs on a different
+    # provider, ensuring no shared context or provider-level bias between branches.
+    research-primary: claude-subscription
+    research-skeptic: codex-subscription
 
 # Bounds orchestrator autonomy (enforced once bounded orchestrator choice lands
 # in the Run stage, #225). Empty/absent = all defined profiles allowed.

@@ -342,11 +342,13 @@ APIs/data/business-logic, `review_security` for auth/crypto/secrets/input
 validation. Selected reviews run in parallel; verdicts aggregate at the
 orchestrator level.
 
-**Routing guidance: `research` target.** Today `research` dispatches the installed
-`research-specialist` agent (`path: invoke`). When #251 lands a v2-native
-`research-synthesis` workflow, repoint this route to that workflow
-(`path: workflow`, `responsible: research-synthesis`). Kept on today's agent until
-then.
+**Routing guidance: `research` target.** `research` dispatches the single
+`research-specialist` agent (`path: invoke`) for quick investigation and source
+questions. The v2-native `research-synthesis` workflow has shipped (FG-251) and is
+the opt-in path — run it deliberately via `forge new research-synthesis` when you
+want rigorous dual-research (independent primary + skeptic per claim, then
+synthesis). The default research route stays lightweight; reach for the workflow
+when depth and verification matter more than speed.
 
 **Routing guidance: multi-type prompts — split and sequence.** "Build feature X
 and document it" decomposes into `implementation_full` then `documentation_durable`

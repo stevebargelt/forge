@@ -6,7 +6,7 @@ Glossary of forge terms. One paragraph each, with a concrete example from `run-l
 
 A single workflow invocation. Created by `forge new`, given a unique id like `run-litellm-eval-96a1da`. Recorded in the `runs` table with status `active` | `complete` | `abandoned`, plus the `projectDir` of the directory it was created from. SQLite is the resume state — a run that's parked at a gate survives reboots.
 
-Example: `forge new investigation "litellm-eval" --question "Does LiteLLM solve provider routing?"` creates one run.
+Example: `forge new research-synthesis "litellm-eval" --question "Does LiteLLM solve provider routing?"` creates one run.
 
 ## Project
 
@@ -60,7 +60,7 @@ Example: the framer task `task-frame-f68eb8` produced 5 claims and 7 experiments
 
 A fixed step in a workflow. Phases run in order; each phase has one or more agent roles, an optional set of red agents, and a gate. Phases are defined in YAML workflow files under `~/.forge/workflows/` (seeds at `seeds/workflows/`).
 
-Example: the investigation workflow has four phases — `frame`, `investigate`, `synthesize`, `recommend`.
+Example: the research-synthesis workflow has five steps — `frame`, `research-primary`, `research-skeptic`, `synthesize`, `docs`.
 
 ## Gate
 

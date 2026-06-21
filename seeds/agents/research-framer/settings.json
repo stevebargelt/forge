@@ -1,0 +1,4 @@
+{
+  "tools": ["read", "bash"],
+  "notes": "Research framer may read project files and run shell commands to understand the project before decomposing the research question into lanes."
+}

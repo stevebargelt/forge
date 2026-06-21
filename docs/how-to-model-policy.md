@@ -191,10 +191,10 @@ map:
   default: { model: moonshotai/kimi-k2-instruct, cost_tier: standard, tool_capable: true }
 ```
 
-**Narrative roles are not affected.** Roles like `research-specialist` and
-`prompt-author` do not require structured result.json output, so they pass the
-gate regardless of `tool_capable`. FG-337's inferred-result fallback handles
-their completion.
+**Narrative roles are not affected.** Roles like `research-specialist`,
+`research-primary`, `research-skeptic`, and `prompt-author` do not require
+structured result.json output, so they pass the gate regardless of `tool_capable`.
+FG-337's inferred-result fallback handles their completion.
 
 **Diagnose before dispatch:**
 

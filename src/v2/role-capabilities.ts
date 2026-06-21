@@ -12,6 +12,8 @@
 
 const NARRATIVE_ROLES = new Set([
   "research-specialist",
+  "research-primary",
+  "research-skeptic",
   "prompt-author",
   "manual-qa",
 ]);
