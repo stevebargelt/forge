@@ -1,10 +1,11 @@
 ---
 id: FG-350
 type: story
-status: active
+status: done
 title: "Control-plane receipts: persist route, workflow, config, and constraint provenance per run/task"
 epic: FG-291
 created: 2026-06-22
+closed: 2026-06-22
 ---
 
 ## Problem
