@@ -2,7 +2,7 @@
 id: FG-345
 type: story
 status: active
-title: "git worktrees for concurrent rw/blue agents: OS-level write isolation (parity with reds), with a reconcile/merge step"
+title: "git worktrees for ALL agents (parent design story): OS-level write isolation + reconcile/merge — needs architecture pass before implementation"
 created: 2026-06-22
 ---
 
