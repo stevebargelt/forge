@@ -96,7 +96,7 @@ controlPlane: {
     path?: string          // omitted for synthetic (forge invoke) and unknown
   },
   runtime: {
-    name: string,
+    name: string,           // resolved concrete runtime name (e.g. claude-apikey), not the requested sentinel
     source: "host" | "project",
     path: string
   },
@@ -113,7 +113,7 @@ controlPlane: {
     requiredFollowups: string[]
   },
   docsSurfaces: {
-    source: "project" | "built-in",
+    source: "project" | "built-in",  // "project" only when .forge/docs-surfaces.yml is present AND valid; "built-in" when absent or invalid (invalid also appends a warning to warnings[])
     path?: string          // omitted when source is "built-in"
   },
   constraints: {
@@ -122,11 +122,12 @@ controlPlane: {
     forceCount: number     // force-level constraints matched for this task slot
   },
   projectDir: string,
+  mountMode: "rw" | "ro", // "ro" for red/review tasks; "rw" for primary, blue, and fan-out children
   warnings?: string[]      // non-fatal issues building this receipt (e.g. route lookup failed)
 }
 ```
 
-`source` values: `host` = resolved from the forge host installation; `project` = overridden by the project's `.forge/` directory; `synthetic` = built in-memory (no YAML file, always the case for `forge invoke` workflows); `absent` = no file found, legacy resolution used; `built-in` = forge's built-in default (no project file).
+`source` values: `host` = resolved from the forge host installation; `project` = overridden by the project's `.forge/` directory; `synthetic` = built in-memory (no YAML file, always the case for `forge invoke` workflows); `absent` = no file found, legacy resolution used; `built-in` = forge's built-in default (project `.forge/docs-surfaces.yml` absent or invalid).
 
 The block stores **no secrets, token material, or auth file paths** — only config file paths and resolved counts.
 
