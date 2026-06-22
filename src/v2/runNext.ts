@@ -786,10 +786,33 @@ async function dispatchFanoutStep(args: {
   // primary row to represent the step in tasks-for-run; fanout children
   // hang off it via parentId.
   const allTasks = tasksForRun(args.runId);
+  // Prefer the PENDING primary (created by gate request-changes on a prior
+  // blocked_by_red/failed parent). Old failed/blocked parents are audit records
+  // and must NOT be reused as the live fan-out parent for the new child wave —
+  // doing so attaches retry children to the dead lineage and wedges the run
+  // (FG-364). A pending primary is the only one actively waiting to be dispatched.
   const existingParent = allTasks.find(
-    (t) => t.phase === step.id && t.parentId === undefined,
+    (t) => t.phase === step.id && t.parentId === undefined && t.status === "pending",
   );
   const parentId = existingParent?.id ?? newTaskId(step.id);
+
+  // Defense-in-depth: if a running/awaiting_red primary already has fan-out
+  // children, this is a re-entrant dispatch (computeReadyQueue can be tricked by
+  // pending child/red tasks in the phase). Return without creating a duplicate wave.
+  const activeWithChildren = allTasks.find(
+    (t) =>
+      t.phase === step.id &&
+      t.parentId === undefined &&
+      (t.status === "running" || t.status === "awaiting_red") &&
+      allTasks.some((c) => c.parentId === t.id && !c.agentRole.startsWith("red-")),
+  );
+  if (activeWithChildren) return activeWithChildren.status;
+  if (existingParent) {
+    const pendingHasChildren = allTasks.some(
+      (c) => c.parentId === existingParent.id && !c.agentRole.startsWith("red-"),
+    );
+    if (pendingHasChildren) return existingParent.status;
+  }
 
   // Read the upstream array. The fanout source is fanout.from_upstream.step,
   // and the value lives at result[array_key].

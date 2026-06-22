@@ -20,7 +20,7 @@
 // blocked_by_red also requires --force to advance.
 
 import type { GateDecision, Task, TaskPackage, VerdictRow } from "../types/index.js";
-import { getTask, setTaskStatus, insertTask, markTaskComplete } from "../store/tasks.js";
+import { getTask, setTaskStatus, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
@@ -192,44 +192,61 @@ export async function gate(
         `Task ${taskId} is in a manual step ('${step.id}'); request-changes is not supported. Use 'reject' to loop back to '${step.on_reject ?? "the prior step"}', or re-submit with corrected artifacts.`,
       );
     }
-    // Close the current task, seed a fresh pending in the SAME step. The
-    // runner's "reuse pending row in same step" logic picks it up.
+    // Fail the old task, preserving its result so it stays an audit record.
     failTask(taskId, {
       runId: run.id,
       kind: classify({ source: "gate_rejected" }),
       error: "request-changes; superseded",
+      result: task.result,
     });
-    const newId = newTaskId(task.phase);
-    const tp: TaskPackage = {
-      ...task.taskPackage,
-      taskId: newId,
-      composedSystemPrompt: "",
-      inputs: {
-        ...task.taskPackage.inputs,
-        requestedChanges: rationale ?? "",
-      },
-    };
-    const newTask: Task = {
-      id: newId,
-      runId: task.runId,
-      // PRIMARY task (parentId undefined) so runNext.dispatchStep reuses this
-      // pending row — a parentId-child is ignored, dropping the requestedChanges
-      // guidance. Matches this block's stated intent ("runner reuses the pending
-      // row in the same step"). Same fix as forge retry (AWN-3 finding).
-      phase: task.phase,
-      agentRole: task.agentRole,
-      agentAlias: task.agentAlias,
-      status: "pending",
-      taskPackage: tp,
-      createdAt: nowIso(),
-    };
-    insertTask(newTask);
-    logEvent("task.created", {
-      runId: run.id,
-      taskId: newId,
-      payload: { from: "request-changes" },
-    });
-    nextTasks = [newTask];
+
+    // Dedup: if a pending replacement primary already exists for this phase,
+    // update its requestedChanges instead of creating a second pending primary.
+    // dispatchFanoutStep .find() picks the oldest pending; two pending primaries
+    // would silently orphan the newer rationale.
+    const existingPending = tasksForRun(task.runId).find(
+      (t) => t.phase === task.phase && t.parentId === undefined && t.status === "pending",
+    );
+
+    if (existingPending) {
+      updateTaskPackageInputs(existingPending.id, { requestedChanges: rationale ?? "" });
+      logEvent("gate.decided", {
+        runId: run.id,
+        taskId: existingPending.id,
+        payload: { decision: "request-changes-dedup", rationale },
+      });
+      nextTasks = [getTask(existingPending.id)!];
+    } else {
+      const newId = newTaskId(task.phase);
+      const tp: TaskPackage = {
+        ...task.taskPackage,
+        taskId: newId,
+        composedSystemPrompt: "",
+        inputs: {
+          ...task.taskPackage.inputs,
+          requestedChanges: rationale ?? "",
+        },
+      };
+      const newTask: Task = {
+        id: newId,
+        runId: task.runId,
+        // parentId intentionally absent — primary task, not a child. The runner's
+        // "reuse pending row in same step" logic requires this (AWN-3).
+        phase: task.phase,
+        agentRole: task.agentRole,
+        agentAlias: task.agentAlias,
+        status: "pending",
+        taskPackage: tp,
+        createdAt: nowIso(),
+      };
+      insertTask(newTask);
+      logEvent("task.created", {
+        runId: run.id,
+        taskId: newId,
+        payload: { from: "request-changes" },
+      });
+      nextTasks = [newTask];
+    }
   }
 
   return { task: getTask(taskId)!, nextTasks };

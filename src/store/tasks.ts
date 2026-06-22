@@ -144,3 +144,15 @@ export function markTaskAwaitingGate(id: string, result: unknown): void {
     )
     .run(JSON.stringify(result), id);
 }
+
+export function updateTaskPackageInputs(id: string, inputs: Record<string, unknown>): void {
+  const task = getTask(id);
+  if (!task) return;
+  const updated: TaskPackage = {
+    ...task.taskPackage,
+    inputs: { ...task.taskPackage.inputs, ...inputs },
+  };
+  getDb()
+    .prepare(`UPDATE tasks SET task_package = ? WHERE id = ?`)
+    .run(JSON.stringify(updated), id);
+}
