@@ -645,3 +645,64 @@ test("FG-350 fix4: red task manifest records mountMode ro, primary task records 
     rmSync(projectDir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// FG-350 fix5: invoke with readOnlyProject:true records mountMode="ro"
+// ---------------------------------------------------------------------------
+
+test("FG-350 fix5: invoke with readOnlyProject:true records mountMode='ro' in controlPlane receipt", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix5-"));
+  try {
+    const r = await invoke({
+      agentRole: "red-wide",
+      task: "audit the project read-only",
+      projectDir,
+      readOnlyProject: true,
+      dockerExec: makeStubExec(),
+    });
+
+    assert.equal(r.status, "complete", `invoke must succeed; error: ${r.error ?? "(none)"}`);
+    const manifest = JSON.parse(
+      readFileSync(join(taskDir(r.runId, r.taskId), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(manifest.controlPlane !== undefined, "controlPlane must be present");
+    assert.equal(
+      manifest.controlPlane!.mountMode,
+      "ro",
+      "invoke with readOnlyProject:true must record mountMode='ro', not hardcoded 'rw'",
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-350 fix5: invoke without readOnlyProject records mountMode='rw' in controlPlane receipt", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix5b-"));
+  try {
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do rw work",
+      projectDir,
+      dockerExec: makeStubExec(),
+    });
+
+    assert.equal(r.status, "complete", `invoke must succeed; error: ${r.error ?? "(none)"}`);
+    const manifest = JSON.parse(
+      readFileSync(join(taskDir(r.runId, r.taskId), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(manifest.controlPlane !== undefined, "controlPlane must be present");
+    assert.equal(
+      manifest.controlPlane!.mountMode,
+      "rw",
+      "invoke without readOnlyProject must record mountMode='rw'",
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});

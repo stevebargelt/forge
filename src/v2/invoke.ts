@@ -366,7 +366,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     ...(routingReceipt ? { routing: routingReceipt } : {}),
     docsSurfaces: docsSurfacesResult.receipt,
     constraints: { dir: constraintsDir, suggestCount, forceCount },
-    mountMode: "rw",
+    mountMode: args.readOnlyProject ? "ro" : "rw",
     projectDir: args.projectDir,
     warnings: receiptWarnings.length > 0 ? receiptWarnings : undefined,
   });
