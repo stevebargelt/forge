@@ -42,9 +42,9 @@ import { filterConstraints, loadAllConstraints } from "./constraints.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
-import { writeTaskManifest } from "./task-manifest.js";
+import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { loadRuntime } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource } from "./loader.js";
 import {
   resolveModel,
   taskModelFields,
@@ -336,6 +336,33 @@ async function dispatchSingleStep(args: {
     logEvent("task.created", { runId: args.runId, taskId });
   }
 
+  // FG-350: build control-plane receipt inputs from run metadata. routeReceipt
+  // and workflowReceipt are RECORDED at startRun (step 3); constraint counts are
+  // computed at dispatch time scoped to this specific task slot.
+  const workflowReceipt = args.runMetadata["workflowReceipt"] as
+    | { source: "host" | "project"; path: string }
+    | undefined;
+  const routeReceipt = args.runMetadata["routeReceipt"] as
+    | Record<string, unknown>
+    | undefined;
+  const cpRunTags = runTagsFromMetadata(args.runMetadata);
+  const cpConstraints = loadAllConstraints(join(homeForge(), "constraints"));
+  const cpSuggestCount = filterConstraints(cpConstraints, {
+    role: agentRole,
+    workflow: args.workflow.name,
+    phase,
+    level: "suggest",
+    runTags: cpRunTags,
+  }).length;
+  const cpForceCount = filterConstraints(cpConstraints, {
+    role: agentRole,
+    workflow: args.workflow.name,
+    phase,
+    level: "force",
+    runTags: cpRunTags,
+  }).length;
+  const cpWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, workflowReceipt);
+
   const dispatchResult = await runContainer({
     taskId,
     runId: args.runId,
@@ -348,6 +375,15 @@ async function dispatchSingleStep(args: {
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
+    controlPlaneInputs: {
+      workflowName: args.workflow.name,
+      workflowSource: cpWorkflowProv.source,
+      workflowPath: cpWorkflowProv.path,
+      workflowWarnings: cpWorkflowProv.warnings,
+      routeReceipt,
+      suggestCount: cpSuggestCount,
+      forceCount: cpForceCount,
+    },
   });
 
   if (dispatchResult.kind === "failed") {
@@ -615,6 +651,33 @@ async function runOneRed(args: {
   });
   logEvent("task.created", { runId: args.runId, taskId: redTaskId });
 
+  // FG-350: build control-plane receipt inputs for the RED agent. Constraint
+  // counts are scoped to the RED's own role/workflow/step rather than the
+  // primary's — the receipt records what constraints THIS agent slot evaluated.
+  const redWorkflowReceipt = args.runMetadata["workflowReceipt"] as
+    | { source: "host" | "project"; path: string }
+    | undefined;
+  const redRouteReceipt = args.runMetadata["routeReceipt"] as
+    | Record<string, unknown>
+    | undefined;
+  const redRunTags = runTagsFromMetadata(args.runMetadata);
+  const redConstraints = loadAllConstraints(join(homeForge(), "constraints"));
+  const redSuggestCount = filterConstraints(redConstraints, {
+    role: args.red.agent,
+    workflow: args.workflow.name,
+    phase: args.step.id,
+    level: "suggest",
+    runTags: redRunTags,
+  }).length;
+  const redForceCount = filterConstraints(redConstraints, {
+    role: args.red.agent,
+    workflow: args.workflow.name,
+    phase: args.step.id,
+    level: "force",
+    runTags: redRunTags,
+  }).length;
+  const redWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, redWorkflowReceipt);
+
   const result = await runContainer({
     taskId: redTaskId,
     runId: args.runId,
@@ -626,6 +689,15 @@ async function runOneRed(args: {
     workflowAlias: args.red.activity,
     role: args.red.agent,
     dockerExec: args.dockerExec,
+    controlPlaneInputs: {
+      workflowName: args.workflow.name,
+      workflowSource: redWorkflowProv.source,
+      workflowPath: redWorkflowProv.path,
+      workflowWarnings: redWorkflowProv.warnings,
+      routeReceipt: redRouteReceipt,
+      suggestCount: redSuggestCount,
+      forceCount: redForceCount,
+    },
   });
 
   if (result.kind === "failed") {
@@ -969,6 +1041,32 @@ async function runFanoutChild(args: {
   });
   logEvent("task.created", { runId: args.runId, taskId: childTaskId, payload: { fanoutChild: true, index: args.index } });
 
+  // FG-350: control-plane receipt for fanout children — same provenance logic as
+  // dispatchSingleStep; constraint counts scoped to this child's role/step.
+  const fcWorkflowReceipt = args.runMetadata["workflowReceipt"] as
+    | { source: "host" | "project"; path: string }
+    | undefined;
+  const fcRouteReceipt = args.runMetadata["routeReceipt"] as
+    | Record<string, unknown>
+    | undefined;
+  const fcRunTags = runTagsFromMetadata(args.runMetadata);
+  const fcConstraints = loadAllConstraints(join(homeForge(), "constraints"));
+  const fcSuggestCount = filterConstraints(fcConstraints, {
+    role: agentRole,
+    workflow: args.workflow.name,
+    phase: step.id,
+    level: "suggest",
+    runTags: fcRunTags,
+  }).length;
+  const fcForceCount = filterConstraints(fcConstraints, {
+    role: agentRole,
+    workflow: args.workflow.name,
+    phase: step.id,
+    level: "force",
+    runTags: fcRunTags,
+  }).length;
+  const fcWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, fcWorkflowReceipt);
+
   const dispatchResult = await runContainer({
     taskId: childTaskId,
     runId: args.runId,
@@ -981,6 +1079,15 @@ async function runFanoutChild(args: {
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
+    controlPlaneInputs: {
+      workflowName: args.workflow.name,
+      workflowSource: fcWorkflowProv.source,
+      workflowPath: fcWorkflowProv.path,
+      workflowWarnings: fcWorkflowProv.warnings,
+      routeReceipt: fcRouteReceipt,
+      suggestCount: fcSuggestCount,
+      forceCount: fcForceCount,
+    },
   });
 
   if (dispatchResult.kind === "failed") {
@@ -1027,6 +1134,18 @@ async function runContainer(args: {
   authProfile?: string;
   role?: string; // AWN-6: agent role, for project-command auth role-gating
   dockerExec?: DockerExecFn;
+  // FG-350: dispatch-time control-plane inputs for the manifest receipt. When
+  // provided, runContainer assembles a ControlPlaneReceipt and writes it into
+  // the manifest.json so explain views read RECORDED dispatch-time truth.
+  controlPlaneInputs?: {
+    workflowName: string;
+    workflowSource: "host" | "project" | "synthetic" | "unknown";
+    workflowPath?: string;
+    workflowWarnings?: string[];
+    routeReceipt?: Record<string, unknown>;
+    suggestCount: number;
+    forceCount: number;
+  };
 }): Promise<ContainerOutcome> {
   const dir = taskDir(args.runId, args.taskId);
   mkdirSync(dir, { recursive: true });
@@ -1039,8 +1158,13 @@ async function runContainer(args: {
   logEvent("task.started", { runId: args.runId, taskId: args.taskId });
 
   let runtime: Runtime;
+  let runtimeSource: "host" | "project" = "host";
+  let runtimePath = "";
   try {
-    runtime = loadRuntime(args.resolution.runtime);
+    const loaded = loadRuntimeWithSource(args.resolution.runtime, { projectDir: args.projectDir });
+    runtime = loaded;
+    runtimeSource = loaded.source;
+    runtimePath = loaded.path;
   } catch (e) {
     const msg = `loadRuntime failed: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
@@ -1140,6 +1264,63 @@ async function runContainer(args: {
   // manifest so forge show reports the value this task actually ran under.
   const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
 
+  // FG-350: assemble control-plane receipt when inputs are provided. Recorded at
+  // dispatch time so Explain views answer "why this config" from RECORDED facts,
+  // not recomputed from current host/project config.
+  let controlPlane: ReturnType<typeof manifestControlPlaneBlock> | undefined;
+  if (args.controlPlaneInputs) {
+    const cp = args.controlPlaneInputs;
+    const rr = cp.routeReceipt;
+    const routing = rr && typeof rr["responsible"] === "string"
+      ? {
+          routeKey: String(rr["routeKey"]),
+          source: rr["source"] as "host" | "project",
+          policyPath: String(rr["policyPath"]),
+          responsible: String(rr["responsible"]),
+          pathType: String(rr["pathType"]),
+          requiredFollowups: Array.isArray(rr["requiredFollowups"])
+            ? (rr["requiredFollowups"] as string[])
+            : [],
+        }
+      : undefined;
+    const receiptWarnings = rr && Array.isArray(rr["warnings"])
+      ? (rr["warnings"] as string[])
+      : undefined;
+    const allWarnings = [
+      ...(receiptWarnings ?? []),
+      ...(cp.workflowWarnings ?? []),
+    ];
+    let modelPolicyLoaded: ReturnType<typeof loadModelPolicyWithSource>;
+    try {
+      modelPolicyLoaded = loadModelPolicyWithSource({ projectDir: args.projectDir });
+    } catch (e) {
+      const msg = `loadModelPolicy failed: ${(e as Error).message}`;
+      cleanupStagedAuth(dir); // AWN-8
+      failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+      return { kind: "failed", error: msg };
+    }
+    const docsSurfacesPath = join(args.projectDir, ".forge", "docs-surfaces.yml");
+    controlPlane = manifestControlPlaneBlock({
+      workflow: { name: cp.workflowName, source: cp.workflowSource, path: cp.workflowPath },
+      runtime: { name: args.resolution.runtime, source: runtimeSource, path: runtimePath },
+      modelPolicy: {
+        source: modelPolicyLoaded.source,
+        path: modelPolicyLoaded.source !== "absent" ? modelPolicyLoaded.path : undefined,
+      },
+      routing,
+      docsSurfaces: existsSync(docsSurfacesPath)
+        ? { source: "project" as const, path: docsSurfacesPath }
+        : { source: "built-in" as const },
+      constraints: {
+        dir: join(homeForge(), "constraints"),
+        suggestCount: cp.suggestCount,
+        forceCount: cp.forceCount,
+      },
+      projectDir: args.projectDir,
+      warnings: allWarnings.length > 0 ? allWarnings : undefined,
+    });
+  }
+
   writeTaskManifest(dir, {
     taskId: args.taskId,
     runId: args.runId,
@@ -1148,6 +1329,7 @@ async function runContainer(args: {
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
     runtime: { name: args.resolution.runtime, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(args.resolution) ? { model: manifestModelBlock(args.resolution) } : {}),
+    ...(controlPlane ? { controlPlane } : {}),
   });
 
   const spawnCtx: SpawnContext = {
@@ -1327,6 +1509,28 @@ function buildRedSpec(workflow: Workflow, allTasks: Task[]): string | undefined 
 
 function homeForge(): string {
   return process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge");
+}
+
+// Resolve where a workflow YAML came from. Uses the receipt recorded at startRun
+// when available. When absent (caller didn't pass workflowSource to startRun),
+// re-probes the filesystem at dispatch time so we never claim "host" without
+// checking. Returns source="unknown" with a warning if the probe itself fails —
+// the receipt must never silently record "host" when the source is indeterminate.
+function resolveWorkflowSource(
+  workflowName: string,
+  projectDir: string,
+  receipt: { source: "host" | "project"; path: string } | undefined
+): { source: "host" | "project" | "unknown"; path?: string; warnings?: string[] } {
+  if (receipt) return receipt;
+  try {
+    const loaded = loadWorkflowWithSource(workflowName, { projectDir });
+    return { source: loaded.source, path: loaded.path };
+  } catch {
+    return {
+      source: "unknown",
+      warnings: [`workflow source probe failed for "${workflowName}"; source recorded as unknown`],
+    };
+  }
 }
 
 function emptyTaskPackage(taskId: string, runId: string, phase: string, role: string): TaskPackage {

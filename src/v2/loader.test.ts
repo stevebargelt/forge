@@ -5,7 +5,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadWorkflow, loadRuntime, loadModelPolicy } from "./loader.js";
+import {
+  loadWorkflow,
+  loadRuntime,
+  loadModelPolicy,
+  loadWorkflowWithSource,
+  loadRuntimeWithSource,
+  loadModelPolicyWithSource,
+} from "./loader.js";
 
 const VALID_WORKFLOW = `
 name: feature
@@ -229,4 +236,94 @@ test("loadModelPolicy: validation error names the file path", () => {
   assert.ok(err instanceof Error);
   assert.match((err as Error).message, /model-policy/);
   assert.match((err as Error).message, /unknown profile 'ghost'/);
+});
+
+// ─── FG-350: WithSource provenance loader variants ───────────────────────────
+
+test("loadWorkflowWithSource: returns source='project' when project override exists", () => {
+  mkdirSync(join(homeDir, "workflows"), { recursive: true });
+  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
+
+  mkdirSync(join(projectDir, ".forge", "workflows"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "workflows", "feature.yml"), VALID_WORKFLOW);
+
+  const result = loadWorkflowWithSource("feature", { projectDir });
+  assert.equal(result.source, "project");
+  assert.ok(result.path.includes(projectDir), "path must be inside projectDir");
+  assert.equal(result.name, "feature");
+});
+
+test("loadWorkflowWithSource: returns source='host' when only workspace copy present", () => {
+  mkdirSync(join(homeDir, "workflows"), { recursive: true });
+  writeFileSync(join(homeDir, "workflows", "feature.yml"), VALID_WORKFLOW);
+  // No project override written.
+
+  const result = loadWorkflowWithSource("feature", { projectDir });
+  assert.equal(result.source, "host");
+  assert.ok(result.path.includes(homeDir), "path must be inside workspace FORGE_HOME");
+  assert.equal(result.name, "feature");
+});
+
+test("loadRuntimeWithSource: returns source='project' when project override exists", () => {
+  mkdirSync(join(homeDir, "runtimes"), { recursive: true });
+  writeFileSync(join(homeDir, "runtimes", "claude-bedrock.yml"), VALID_RUNTIME);
+
+  mkdirSync(join(projectDir, ".forge", "runtimes"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "runtimes", "claude-bedrock.yml"), VALID_RUNTIME);
+
+  const result = loadRuntimeWithSource("claude-bedrock", { projectDir });
+  assert.equal(result.source, "project");
+  assert.ok(result.path.includes(projectDir), "path must be inside projectDir");
+  assert.equal(result.name, "claude-bedrock");
+});
+
+test("loadRuntimeWithSource: returns source='host' when only workspace copy present", () => {
+  mkdirSync(join(homeDir, "runtimes"), { recursive: true });
+  writeFileSync(join(homeDir, "runtimes", "claude-bedrock.yml"), VALID_RUNTIME);
+
+  const result = loadRuntimeWithSource("claude-bedrock", { projectDir });
+  assert.equal(result.source, "host");
+  assert.ok(result.path.includes(homeDir), "path must be inside workspace FORGE_HOME");
+  assert.equal(result.name, "claude-bedrock");
+});
+
+test("loadModelPolicyWithSource: returns { source: 'absent' } when no policy file exists", () => {
+  // Neither workspace nor project has model-policy.yml.
+  const result = loadModelPolicyWithSource();
+  assert.equal(result.source, "absent");
+  assert.equal(result.policy, undefined);
+
+  const resultWithCtx = loadModelPolicyWithSource({ projectDir });
+  assert.equal(resultWithCtx.source, "absent");
+  assert.equal(resultWithCtx.policy, undefined);
+});
+
+test("loadModelPolicyWithSource: returns { source: 'project', path } when project file exists", () => {
+  // Write workspace policy too — project must win.
+  writeFileSync(join(homeDir, "model-policy.yml"), VALID_POLICY);
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "model-policy.yml"), VALID_POLICY);
+
+  const result = loadModelPolicyWithSource({ projectDir });
+  // Assign to string to avoid TypeScript narrowing result itself via assert.equal,
+  // then guard on the discriminant to access path/policy on the non-absent variant.
+  const src: string = result.source;
+  assert.equal(src, "project");
+  if (result.source !== "absent") {
+    assert.ok(result.path.includes(projectDir), "path must be inside projectDir");
+    assert.ok(result.policy !== undefined, "policy must be parsed and present");
+  }
+});
+
+test("loadModelPolicyWithSource: returns { source: 'host', path } when only workspace file exists", () => {
+  writeFileSync(join(homeDir, "model-policy.yml"), VALID_POLICY);
+  // No project file.
+
+  const result = loadModelPolicyWithSource({ projectDir });
+  const src: string = result.source;
+  assert.equal(src, "host");
+  if (result.source !== "absent") {
+    assert.ok(result.path.includes(homeDir), "path must be inside workspace FORGE_HOME");
+    assert.ok(result.policy !== undefined, "policy must be parsed and present");
+  }
 });

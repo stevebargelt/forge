@@ -32,6 +32,12 @@ mounted file, not printed).
 `stateMounted`. It records *whether* a sensitive capability was mounted, never
 *where* a credential lives or any token material.
 
+The `controlPlane` block (added FG-350) records dispatch-time config provenance:
+config file paths, source labels (`host`/`project`/`absent`/`built-in`), and
+constraint counts. It stores **no secrets, token material, or auth file paths** —
+the same discipline as the `auth` block. Auth profile names and runtime paths are
+config references, not credential material.
+
 ## Auth profiles
 
 - `required_env` is checked by **name** only; forge never reads or logs the values.

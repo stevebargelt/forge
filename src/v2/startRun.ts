@@ -15,6 +15,8 @@ import type { Workflow } from "./schema.js";
 import { insertRun } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newRunId } from "../util/ids.js";
+import { resolvePolicyPath } from "../raci/project.js";
+import { explainRouteFile } from "../cli/commands/route.js";
 
 export type StartRunArgs = {
   workflow: Workflow;
@@ -38,6 +40,13 @@ export type StartRunArgs = {
   /** FG-28: opt-in constraint scoping. Tagged constraints only fire for runs that
    *  carry at least one matching tag. Untagged constraints remain global. */
   tags?: string[];
+  /** FG-350: resolved route key for this run. When provided, startRun resolves
+   *  the routing policy and stores a routeReceipt in run metadata capturing the
+   *  dispatch-time routing decision (responsible, pathType, requiredFollowups). */
+  routeKey?: string;
+  /** FG-350: provenance of the workflow file (host or project, with path). When
+   *  provided, stored as workflowReceipt in run metadata. */
+  workflowSource?: { source: "host" | "project"; path: string };
 };
 
 export type StartRunResult = {
@@ -59,6 +68,8 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "workspace",
   "tags",
   "reportOutputPath",
+  "routeReceipt",
+  "workflowReceipt",
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {
@@ -78,6 +89,30 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.authProfile) metadata["authProfile"] = args.authProfile;
   if (args.modelProfile) metadata["modelProfile"] = args.modelProfile;
   if (args.tags && args.tags.length > 0) metadata["tags"] = args.tags;
+
+  if (args.routeKey !== undefined) {
+    const resolved = resolvePolicyPath(args.projectDir);
+    const explanation = explainRouteFile(resolved.path, args.routeKey);
+    if (explanation.ok) {
+      metadata["routeReceipt"] = {
+        routeKey: args.routeKey,
+        source: resolved.source,
+        policyPath: resolved.path,
+        responsible: explanation.route.responsible,
+        pathType: explanation.route.path,
+        requiredFollowups: explanation.route.required_followups,
+      };
+    } else {
+      metadata["routeReceipt"] = {
+        routeKey: args.routeKey,
+        warnings: explanation.findings.map((f) => f.message),
+      };
+    }
+  }
+
+  if (args.workflowSource !== undefined) {
+    metadata["workflowReceipt"] = args.workflowSource;
+  }
 
   const run: Run = {
     id: runId,

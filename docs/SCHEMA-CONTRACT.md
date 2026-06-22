@@ -63,6 +63,7 @@ Columns the dashboard reads:
 
 Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
 
+- `manifest.json` — dispatch-time metadata for the task (see below)
 - `result.json` — same content as `tasks.result` in the DB
 - `container.stdout.log` — raw agent container stdout (JSON-stream from `claude --output-format stream-json`)
 - `container.stderr.log` — raw container stderr
@@ -70,6 +71,64 @@ Per-task workspace at `~/.forge/runs/<runId>/<taskId>/`:
 - `CLAUDE.md` — the composed system prompt the agent saw
 
 The dashboard reads `container.stdout.log` and `container.stderr.log` for the detail view; the rest are for the human's inspection via `forge show` or direct filesystem access.
+
+### `manifest.json` structure
+
+Top-level fields written at dispatch time:
+
+- `taskId` / `runId` — string identifiers
+- `files` — map of well-known filenames (`prompt`, `package`, `result`, `stdout`, `stderr`)
+- `container` — `{ name, idleTimeoutMs? }` — effective idle timeout resolved at dispatch
+- `auth` — `{ profileRequested: boolean, stateMounted: boolean }` — booleans only; no credential material (see [redaction.md](redaction.md))
+- `runtime` — `{ name, kind, logFormat, promptStrategy, authStrategy }` — execution behavior resolved from the runtime YAML
+- `model` — *(optional)* model resolution record (policy mode only); omitted in legacy mode
+- `controlPlane` — *(optional)* RECORDED dispatch-time control-plane provenance; omitted on pre-FG-350 manifests (legacy-compatible)
+
+#### `controlPlane` block
+
+Written on all dispatch paths (forge invoke, pipeline single-step, fan-out children, and red tasks). Records the configuration that was **active at dispatch**; this is distinct from the *effective* current configuration and is never recomputed after the task starts. Absent on manifests written before FG-350 — consumers must degrade gracefully when `controlPlane === undefined`.
+
+```
+controlPlane: {
+  workflow: {
+    name: string,
+    source: "host" | "project" | "synthetic" | "unknown",
+    path?: string          // omitted for synthetic (forge invoke) and unknown
+  },
+  runtime: {
+    name: string,
+    source: "host" | "project",
+    path: string
+  },
+  modelPolicy: {
+    source: "host" | "project" | "absent",
+    path?: string          // omitted when source is "absent"
+  },
+  routing?: {              // present only when dispatched under a route key
+    routeKey: string,
+    source: "host" | "project",
+    policyPath: string,
+    responsible: string,
+    pathType: string,
+    requiredFollowups: string[]
+  },
+  docsSurfaces: {
+    source: "project" | "built-in",
+    path?: string          // omitted when source is "built-in"
+  },
+  constraints: {
+    dir: string,           // host path to the constraints directory
+    suggestCount: number,  // suggest-level constraints matched for this task slot
+    forceCount: number     // force-level constraints matched for this task slot
+  },
+  projectDir: string,
+  warnings?: string[]      // non-fatal issues building this receipt (e.g. route lookup failed)
+}
+```
+
+`source` values: `host` = resolved from the forge host installation; `project` = overridden by the project's `.forge/` directory; `synthetic` = built in-memory (no YAML file, always the case for `forge invoke` workflows); `absent` = no file found, legacy resolution used; `built-in` = forge's built-in default (no project file).
+
+The block stores **no secrets, token material, or auth file paths** — only config file paths and resolved counts.
 
 ## Agent-output shapes the dashboard renders
 

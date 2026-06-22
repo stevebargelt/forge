@@ -183,6 +183,129 @@ export function loadModelPolicy(ctx: LoadContext = {}): ModelPolicy | undefined 
   return result.data;
 }
 
+// --- Provenance-returning loader variants ---
+//
+// Each *WithSource variant applies identical resolution logic to its existing
+// counterpart but also returns which config layer supplied the file ('host' for
+// workspace, 'project' for project-level override) plus the resolved path.
+// These are consumed by the control-plane receipt (FG-350) to record dispatch-
+// time provenance without modifying any existing caller.
+
+/** Augments a loaded object T with the config layer that supplied it. */
+export type LoadedWithSource<T> = T & { source: "host" | "project"; path: string };
+
+export function loadWorkflowWithSource(
+  name: string,
+  ctx: LoadContext = {}
+): LoadedWithSource<Workflow> {
+  const projectPath = ctx.projectDir
+    ? join(ctx.projectDir, ".forge", "workflows", `${name}.yml`)
+    : undefined;
+  const workspacePath = join(forgeHome(), "workflows", `${name}.yml`);
+
+  const isProject = !!(projectPath && existsSync(projectPath));
+  const path = isProject ? projectPath! : workspacePath;
+  if (!existsSync(path)) {
+    throw new Error(
+      `workflow '${name}' not found at ${projectPath ?? workspacePath} (or workspace default)`
+    );
+  }
+  const raw = readFileSync(path, "utf8");
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (e) {
+    throw new Error(`workflow '${name}' (${path}): YAML parse error — ${(e as Error).message}`);
+  }
+  const result = WorkflowSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(formatZodError(`workflow '${name}' (${path})`, result.error));
+  }
+  if (result.data.name !== name) {
+    throw new Error(
+      `workflow at ${path} declares name='${result.data.name}' but was loaded by name='${name}' — they must match`
+    );
+  }
+  return { ...result.data, source: isProject ? "project" : "host", path };
+}
+
+export function loadRuntimeWithSource(
+  name: string,
+  ctx: LoadContext = {}
+): LoadedWithSource<Runtime> {
+  let resolvedName = name;
+  if (name === "claude") {
+    const literalProject = ctx.projectDir
+      ? join(ctx.projectDir, ".forge", "runtimes", "claude.yml")
+      : undefined;
+    const literalWorkspace = join(forgeHome(), "runtimes", "claude.yml");
+    if (!(literalProject && existsSync(literalProject)) && !existsSync(literalWorkspace)) {
+      resolvedName = detectRuntimeName(ctx);
+    }
+  }
+
+  const projectPath = ctx.projectDir
+    ? join(ctx.projectDir, ".forge", "runtimes", `${resolvedName}.yml`)
+    : undefined;
+  const workspacePath = join(forgeHome(), "runtimes", `${resolvedName}.yml`);
+
+  const isProject = !!(projectPath && existsSync(projectPath));
+  const path = isProject ? projectPath! : workspacePath;
+  if (!existsSync(path)) {
+    throw new Error(
+      `runtime '${resolvedName}' not found at ${projectPath ?? workspacePath} (or workspace default)`
+    );
+  }
+  const raw = readFileSync(path, "utf8");
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (e) {
+    throw new Error(
+      `runtime '${resolvedName}' (${path}): YAML parse error — ${(e as Error).message}`
+    );
+  }
+  const result = RuntimeSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(formatZodError(`runtime '${resolvedName}' (${path})`, result.error));
+  }
+  return { ...result.data, source: isProject ? "project" : "host", path };
+}
+
+/** Discriminated union returned by loadModelPolicyWithSource. */
+export type ModelPolicyWithSource =
+  | { source: "host" | "project"; path: string; policy: ModelPolicy }
+  | { source: "absent"; policy: undefined };
+
+export function loadModelPolicyWithSource(ctx: LoadContext = {}): ModelPolicyWithSource {
+  const projectPath = ctx.projectDir
+    ? join(ctx.projectDir, ".forge", "model-policy.yml")
+    : undefined;
+  const workspacePath = join(forgeHome(), "model-policy.yml");
+
+  const isProject = !!(projectPath && existsSync(projectPath));
+  const path = isProject
+    ? projectPath!
+    : existsSync(workspacePath)
+      ? workspacePath
+      : undefined;
+
+  if (!path) return { source: "absent", policy: undefined };
+
+  const raw = readFileSync(path, "utf8");
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(raw);
+  } catch (e) {
+    throw new Error(`model-policy (${path}): YAML parse error — ${(e as Error).message}`);
+  }
+  const result = ModelPolicySchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(formatZodError(`model-policy (${path})`, result.error));
+  }
+  return { source: isProject ? "project" : "host", path, policy: result.data };
+}
+
 function formatZodError(prefix: string, err: import("zod").ZodError): string {
   const lines: string[] = [`${prefix}: schema validation failed`];
   for (const issue of err.issues) {

@@ -1,6 +1,86 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+// FG-350: RECORDED dispatch-time control-plane provenance. Written once at task
+// dispatch and never recomputed — Explain views read RECORDED truth, not current
+// host/project config. The vocabulary: SOURCE = where a file was resolved from;
+// DERIVED = inferred from available data; EFFECTIVE = the resolved value at dispatch;
+// RECORDED = the persisted fact (what this receipt stores).
+
+export type ControlPlaneReceipt = {
+  /** The workflow that dispatched this task. synthetic = forge invoke (no YAML file). unknown = source probe failed. */
+  workflow: {
+    name: string;
+    source: "host" | "project" | "synthetic" | "unknown";
+    path?: string;
+  };
+  /** The runtime YAML loaded at dispatch time. */
+  runtime: {
+    name: string;
+    source: "host" | "project";
+    path: string;
+  };
+  /** Model policy evaluated at dispatch. absent = no policy file, legacy resolution used. */
+  modelPolicy: {
+    source: "host" | "project" | "absent";
+    path?: string;
+  };
+  /** Routing receipt when the task was dispatched under a route key. */
+  routing?: {
+    routeKey: string;
+    source: "host" | "project";
+    policyPath: string;
+    responsible: string;
+    pathType: string;
+    requiredFollowups: string[];
+  };
+  /** docs-surfaces.yml evaluated at dispatch. built-in = no project file. */
+  docsSurfaces: {
+    source: "project" | "built-in";
+    path?: string;
+  };
+  /** Constraint counts applied at dispatch for this specific task slot. */
+  constraints: {
+    dir: string;
+    suggestCount: number;
+    forceCount: number;
+  };
+  projectDir: string;
+  /** Non-fatal issues encountered while building this receipt (e.g. routing lookup failed). */
+  warnings?: string[];
+};
+
+export type ControlPlaneReceiptInputs = {
+  workflow: ControlPlaneReceipt["workflow"];
+  runtime: ControlPlaneReceipt["runtime"];
+  modelPolicy: ControlPlaneReceipt["modelPolicy"];
+  routing?: ControlPlaneReceipt["routing"];
+  docsSurfaces: ControlPlaneReceipt["docsSurfaces"];
+  constraints: ControlPlaneReceipt["constraints"];
+  projectDir: string;
+  warnings?: string[];
+};
+
+/** Pure function — no side effects. Assembles the RECORDED control-plane receipt
+ *  from dispatch-time inputs. Import from either dispatch path (invoke or runNext). */
+export function manifestControlPlaneBlock(inputs: ControlPlaneReceiptInputs): ControlPlaneReceipt {
+  const receipt: ControlPlaneReceipt = {
+    workflow: inputs.workflow,
+    runtime: inputs.runtime,
+    modelPolicy: inputs.modelPolicy,
+    docsSurfaces: inputs.docsSurfaces,
+    constraints: inputs.constraints,
+    projectDir: inputs.projectDir,
+  };
+  if (inputs.routing !== undefined) {
+    receipt.routing = inputs.routing;
+  }
+  if (inputs.warnings !== undefined && inputs.warnings.length > 0) {
+    receipt.warnings = inputs.warnings;
+  }
+  return receipt;
+}
+
 export type TaskManifest = {
   taskId: string;
   runId: string;
@@ -44,6 +124,9 @@ export type TaskManifest = {
     resolvedBy: string;
     runtime: string;
   };
+  // FG-350: RECORDED dispatch-time control-plane provenance. Optional: pre-FG-350
+  // manifests omit it. Consumers must degrade gracefully when absent (legacy path).
+  controlPlane?: ControlPlaneReceipt;
 };
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {

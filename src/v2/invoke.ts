@@ -31,17 +31,20 @@ import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
+import { resolvePolicyPath } from "../raci/project.js";
+import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, type SpawnContext } from "./spawn.js";
-import { loadRuntime } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
-import { writeTaskManifest } from "./task-manifest.js";
+import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
+import { loadAllConstraints, filterConstraints } from "./constraints.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 
@@ -63,6 +66,9 @@ export type InvokeArgs = {
    *  projectDir=~/code/audit-workspace/repos/team-payments). Defaults at
    *  the CLI layer to cwd. */
   workspace?: string;
+  /** FG-350: resolved route key (from `forge route explain`), recorded in the
+   *  control-plane receipt so explain views can show dispatch-time routing. */
+  routeKey?: string;
   // Injected for tests; real callers leave undefined → docker is used.
   dockerExec?: DockerExecFn;
 };
@@ -200,10 +206,16 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   markTaskRunning(taskId);
   logEvent("task.started", { runId, taskId });
 
-  // Load runtime + build docker args.
+  // Load runtime + build docker args. loadRuntimeWithSource captures the
+  // provenance (host vs project override) for the FG-350 control-plane receipt.
   let runtime: Runtime;
+  let runtimeSource: "host" | "project";
+  let runtimePath: string;
   try {
-    runtime = loadRuntime(resolution.runtime);
+    const runtimeLoaded = loadRuntimeWithSource(resolution.runtime, { projectDir: args.projectDir });
+    runtime = runtimeLoaded;
+    runtimeSource = runtimeLoaded.source;
+    runtimePath = runtimeLoaded.path;
   } catch (e) {
     const error = `loadRuntime failed: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
@@ -289,6 +301,74 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // manifest so forge show reports the value this task actually ran under.
   const idleTimeoutMs = resolveIdleTimeoutMs(runtime.container.idle_timeout_seconds);
 
+  // FG-350: assemble the control-plane receipt — records dispatch-time provenance
+  // so explain views answer "why did Forge run this task this way" from RECORDED
+  // facts, not recomputed from current config. Workflow is always 'synthetic' for
+  // invoke (the workflow object is built in-memory, not loaded from a YAML file).
+  let modelPolicyLoaded: ReturnType<typeof loadModelPolicyWithSource>;
+  try {
+    modelPolicyLoaded = loadModelPolicyWithSource({ projectDir: args.projectDir });
+  } catch (e) {
+    const error = `loadModelPolicy failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
+
+  const docsSurfacesPath = join(args.projectDir, ".forge", "docs-surfaces.yml");
+  const docsSurfacesExists = existsSync(docsSurfacesPath);
+
+  const constraintsDir = join(process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge"), "constraints");
+  const allConstraints = loadAllConstraints(constraintsDir);
+  const suggestCount = filterConstraints(allConstraints, {
+    role: args.agentRole,
+    workflow: "invoke",
+    phase: "task",
+    level: "suggest",
+  }).length;
+  const forceCount = filterConstraints(allConstraints, {
+    role: args.agentRole,
+    workflow: "invoke",
+    phase: "task",
+    level: "force",
+  }).length;
+
+  const receiptWarnings: string[] = [];
+  const routingReceipt = (() => {
+    if (!args.routeKey) return undefined;
+    const policyResolved = resolvePolicyPath(args.projectDir);
+    const explanation = explainRouteFile(policyResolved.path, args.routeKey);
+    if (!explanation.ok) {
+      const detail = explanation.findings.map((f) => f.message).join("; ");
+      receiptWarnings.push(`route lookup failed for routeKey="${args.routeKey}": ${detail}`);
+      return undefined;
+    }
+    return {
+      routeKey: args.routeKey,
+      source: policyResolved.source,
+      policyPath: policyResolved.path,
+      responsible: explanation.route.responsible,
+      pathType: explanation.route.path,
+      requiredFollowups: explanation.route.required_followups,
+    };
+  })();
+
+  const controlPlane = manifestControlPlaneBlock({
+    workflow: { name: "invoke", source: "synthetic" },
+    runtime: { name: resolution.runtime, source: runtimeSource, path: runtimePath },
+    modelPolicy: modelPolicyLoaded.source === "absent"
+      ? { source: "absent" }
+      : { source: modelPolicyLoaded.source, path: modelPolicyLoaded.path },
+    ...(routingReceipt ? { routing: routingReceipt } : {}),
+    docsSurfaces: docsSurfacesExists
+      ? { source: "project" as const, path: docsSurfacesPath }
+      : { source: "built-in" as const },
+    constraints: { dir: constraintsDir, suggestCount, forceCount },
+    projectDir: args.projectDir,
+    warnings: receiptWarnings.length > 0 ? receiptWarnings : undefined,
+  });
+
   writeTaskManifest(dir, {
     taskId,
     runId,
@@ -297,6 +377,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
     runtime: { name: resolution.runtime, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
+    controlPlane,
   });
 
   // Usage attribution: prefer the resolved capability alias (policy mode); fall
