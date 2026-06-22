@@ -43,6 +43,7 @@ import { buildDockerArgs, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
+import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource } from "./loader.js";
 import {
@@ -669,13 +670,7 @@ async function runOneRed(args: {
     level: "suggest",
     runTags: redRunTags,
   }).length;
-  const redForceCount = filterConstraints(redConstraints, {
-    role: args.red.agent,
-    workflow: args.workflow.name,
-    phase: args.step.id,
-    level: "force",
-    runTags: redRunTags,
-  }).length;
+  const redForceCount = failureModes.length;
   const redWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, redWorkflowReceipt);
 
   const result = await runContainer({
@@ -1160,11 +1155,13 @@ async function runContainer(args: {
   let runtime: Runtime;
   let runtimeSource: "host" | "project" = "host";
   let runtimePath = "";
+  let runtimeName = "";
   try {
     const loaded = loadRuntimeWithSource(args.resolution.runtime, { projectDir: args.projectDir });
     runtime = loaded;
     runtimeSource = loaded.source;
     runtimePath = loaded.path;
+    runtimeName = loaded.name;
   } catch (e) {
     const msg = `loadRuntime failed: ${(e as Error).message}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
@@ -1299,23 +1296,23 @@ async function runContainer(args: {
       failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
       return { kind: "failed", error: msg };
     }
-    const docsSurfacesPath = join(args.projectDir, ".forge", "docs-surfaces.yml");
+    const docsSurfacesResult = resolveDocsSurfacesReceipt(args.projectDir);
+    if (docsSurfacesResult.warning) allWarnings.push(docsSurfacesResult.warning);
     controlPlane = manifestControlPlaneBlock({
       workflow: { name: cp.workflowName, source: cp.workflowSource, path: cp.workflowPath },
-      runtime: { name: args.resolution.runtime, source: runtimeSource, path: runtimePath },
+      runtime: { name: runtimeName, source: runtimeSource, path: runtimePath },
       modelPolicy: {
         source: modelPolicyLoaded.source,
         path: modelPolicyLoaded.source !== "absent" ? modelPolicyLoaded.path : undefined,
       },
       routing,
-      docsSurfaces: existsSync(docsSurfacesPath)
-        ? { source: "project" as const, path: docsSurfacesPath }
-        : { source: "built-in" as const },
+      docsSurfaces: docsSurfacesResult.receipt,
       constraints: {
         dir: join(homeForge(), "constraints"),
         suggestCount: cp.suggestCount,
         forceCount: cp.forceCount,
       },
+      mountMode: args.projectMode,
       projectDir: args.projectDir,
       warnings: allWarnings.length > 0 ? allWarnings : undefined,
     });

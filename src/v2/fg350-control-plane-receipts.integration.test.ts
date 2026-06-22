@@ -398,3 +398,250 @@ test("FG-350 int: manifest without controlPlane key is parseable (legacy compat)
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// FG-350 fix1: red forceCount reflects primary-role force constraints
+// ---------------------------------------------------------------------------
+
+const WORKFLOW_WITH_REDS: Workflow = {
+  name: "fg350-with-reds",
+  description: "FG-350: step with a red for receipt accuracy tests",
+  inputs: [],
+  steps: [
+    {
+      id: "work",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "claude",
+      reds: [{ agent: "red-narrow", authority: "authoritative", gate_on_verdict: true }],
+    },
+  ],
+};
+
+test("FG-350 fix1: red forceCount reflects primary-role force constraints, not red-role constraints", async () => {
+  // Isolated FORGE_HOME: write a force constraint scoped to the PRIMARY agent
+  // ("engineer") so failureModes.length === 1. Without the fix, the receipt
+  // recorded forceCount=0 (filtered under the red's own role "red-narrow").
+  const origForgeHome = process.env.FORGE_HOME;
+  const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg350-fix1-"));
+  process.env.FORGE_HOME = isolatedHome;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix1-proj-"));
+  try {
+    const runtimeDir = join(isolatedHome, "runtimes");
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(join(runtimeDir, "claude.yml"), `name: claude
+description: fix1 test stub
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+
+    const constraintsDir = join(isolatedHome, "constraints");
+    mkdirSync(constraintsDir, { recursive: true });
+    writeFileSync(join(constraintsDir, "test-force-engineer.md"), `---
+id: test-force-engineer
+level: force
+roles: [engineer]
+antiPrompt: "do not skip tests"
+---
+Do not skip tests.
+`);
+
+    const { runId } = startRun({
+      workflow: WORKFLOW_WITH_REDS,
+      title: "fg350 fix1 test",
+      inputs: {},
+      projectDir,
+    });
+    await runNext({ runId, workflow: WORKFLOW_WITH_REDS, dockerExec: makeStubExec() });
+
+    const allTasks = tasksForRun(runId);
+    const redTasks = allTasks.filter((t) => t.parentId !== undefined);
+    assert.ok(redTasks.length > 0, "at least one red task must exist");
+
+    const redManifest = JSON.parse(
+      readFileSync(join(taskDir(runId, redTasks[0]!.id), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(redManifest.controlPlane !== undefined, "red must have controlPlane receipt");
+    assert.equal(
+      redManifest.controlPlane!.constraints.forceCount,
+      1,
+      "red forceCount must equal the primary-role force constraints passed as failureModes (1), not 0",
+    );
+  } finally {
+    process.env.FORGE_HOME = origForgeHome;
+    rmSync(isolatedHome, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FG-350 fix2: sentinel runtime records concrete declared name
+// ---------------------------------------------------------------------------
+
+test("FG-350 fix2: sentinel 'claude' runtime records the concrete declared name in the receipt", async () => {
+  // Isolated FORGE_HOME with only claude-apikey.yml (no claude.yml) forces sentinel
+  // resolution: loadRuntimeWithSource("claude") → resolvedName="claude-apikey".
+  // Without the fix, the receipt recorded name:"claude" (the sentinel); after the
+  // fix it records the YAML-declared name "claude-apikey".
+  const origForgeHome = process.env.FORGE_HOME;
+  const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg350-fix2-"));
+  process.env.FORGE_HOME = isolatedHome;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix2-proj-"));
+  try {
+    // Write ONLY claude-apikey.yml — no claude.yml so sentinel resolution fires.
+    const runtimeDir = join(isolatedHome, "runtimes");
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(join(runtimeDir, "claude-apikey.yml"), `name: claude-apikey
+description: fix2 test stub
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "test sentinel runtime",
+      projectDir,
+      dockerExec: makeStubExec(),
+    });
+
+    assert.equal(r.status, "complete", `invoke must succeed; error: ${r.error ?? "(none)"}`);
+    const manifest = JSON.parse(
+      readFileSync(join(taskDir(r.runId, r.taskId), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(manifest.controlPlane !== undefined, "controlPlane must be present");
+    assert.equal(
+      manifest.controlPlane!.runtime.name,
+      "claude-apikey",
+      "sentinel-resolved runtime must record the concrete YAML-declared name 'claude-apikey'",
+    );
+    assert.notEqual(
+      manifest.controlPlane!.runtime.name,
+      "claude",
+      "the sentinel name 'claude' must NOT be recorded in the receipt",
+    );
+  } finally {
+    process.env.FORGE_HOME = origForgeHome;
+    rmSync(isolatedHome, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FG-350 fix3: invalid docs-surfaces.yml records source built-in + warning
+// ---------------------------------------------------------------------------
+
+test("FG-350 fix3: invalid docs-surfaces.yml records source built-in and a warning", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix3-"));
+  try {
+    // Write an invalid docs-surfaces.yml (wrong key — schema requires `surfaces:`).
+    const forgeDir = join(projectDir, ".forge");
+    mkdirSync(forgeDir, { recursive: true });
+    writeFileSync(join(forgeDir, "docs-surfaces.yml"), "wrong_key: [something]\n");
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "test docs-surfaces fallback",
+      projectDir,
+      dockerExec: makeStubExec(),
+    });
+
+    assert.equal(r.status, "complete", `invoke must succeed; error: ${r.error ?? "(none)"}`);
+    const manifest = JSON.parse(
+      readFileSync(join(taskDir(r.runId, r.taskId), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(manifest.controlPlane !== undefined, "controlPlane must be present");
+    assert.equal(
+      manifest.controlPlane!.docsSurfaces.source,
+      "built-in",
+      "invalid docs-surfaces.yml must fall back to source='built-in'",
+    );
+    assert.ok(
+      Array.isArray(manifest.controlPlane!.warnings) && manifest.controlPlane!.warnings!.length > 0,
+      "a warning must be recorded when docs-surfaces.yml is present but invalid",
+    );
+    assert.ok(
+      manifest.controlPlane!.warnings!.some((w) => w.includes("docs-surfaces")),
+      "the warning must reference docs-surfaces.yml",
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FG-350 fix4: red task records ro mountMode, primary records rw
+// ---------------------------------------------------------------------------
+
+test("FG-350 fix4: red task manifest records mountMode ro, primary task records rw", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg350-fix4-"));
+  try {
+    const { runId } = startRun({
+      workflow: WORKFLOW_WITH_REDS,
+      title: "fg350 fix4 mount test",
+      inputs: {},
+      projectDir,
+    });
+    await runNext({ runId, workflow: WORKFLOW_WITH_REDS, dockerExec: makeStubExec() });
+
+    const allTasks = tasksForRun(runId);
+    const primaryTask = allTasks.find((t) => t.parentId === undefined);
+    const redTasks = allTasks.filter((t) => t.parentId !== undefined);
+
+    assert.ok(primaryTask !== undefined, "primary task must exist");
+    assert.ok(redTasks.length > 0, "at least one red task must exist");
+
+    const primaryManifest = JSON.parse(
+      readFileSync(join(taskDir(runId, primaryTask!.id), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(primaryManifest.controlPlane !== undefined, "primary must have controlPlane receipt");
+    assert.equal(
+      primaryManifest.controlPlane!.mountMode,
+      "rw",
+      "primary task must record mountMode='rw'",
+    );
+
+    const redManifest = JSON.parse(
+      readFileSync(join(taskDir(runId, redTasks[0]!.id), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.ok(redManifest.controlPlane !== undefined, "red must have controlPlane receipt");
+    assert.equal(
+      redManifest.controlPlane!.mountMode,
+      "ro",
+      "red task must record mountMode='ro' (read-only project mount)",
+    );
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});

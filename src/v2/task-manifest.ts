@@ -46,6 +46,8 @@ export type ControlPlaneReceipt = {
     forceCount: number;
   };
   projectDir: string;
+  /** Mount mode for the project directory at dispatch: ro = read-only (reds), rw = read-write (primary/fanout). */
+  mountMode: "rw" | "ro";
   /** Non-fatal issues encountered while building this receipt (e.g. routing lookup failed). */
   warnings?: string[];
 };
@@ -57,6 +59,7 @@ export type ControlPlaneReceiptInputs = {
   routing?: ControlPlaneReceipt["routing"];
   docsSurfaces: ControlPlaneReceipt["docsSurfaces"];
   constraints: ControlPlaneReceipt["constraints"];
+  mountMode: ControlPlaneReceipt["mountMode"];
   projectDir: string;
   warnings?: string[];
 };
@@ -70,6 +73,7 @@ export function manifestControlPlaneBlock(inputs: ControlPlaneReceiptInputs): Co
     modelPolicy: inputs.modelPolicy,
     docsSurfaces: inputs.docsSurfaces,
     constraints: inputs.constraints,
+    mountMode: inputs.mountMode,
     projectDir: inputs.projectDir,
   };
   if (inputs.routing !== undefined) {

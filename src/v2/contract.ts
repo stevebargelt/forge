@@ -63,6 +63,33 @@ export function loadOperatorSurfaces(projectDir?: string): readonly string[] {
   }
 }
 
+/** Resolve the docs-surfaces receipt for the control-plane manifest. Returns the
+ *  effective source ("project" if a valid project file was loaded, "built-in" if absent
+ *  or invalid) and a warning string when a present-but-invalid project file was ignored. */
+export function resolveDocsSurfacesReceipt(projectDir: string): {
+  receipt: { source: "project" | "built-in"; path?: string };
+  warning?: string;
+} {
+  const path = join(projectDir, ".forge", "docs-surfaces.yml");
+  if (!existsSync(path)) return { receipt: { source: "built-in" } };
+  try {
+    const parsed = DocsSurfacesFileSchema.safeParse(parseYaml(readFileSync(path, "utf8")));
+    if (!parsed.success) {
+      const detail = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+      return {
+        receipt: { source: "built-in" },
+        warning: `docs-surfaces.yml invalid — ${detail}; using forge defaults`,
+      };
+    }
+    return { receipt: { source: "project", path } };
+  } catch (e) {
+    return {
+      receipt: { source: "built-in" },
+      warning: `docs-surfaces.yml: ${(e as Error).message}; using forge defaults`,
+    };
+  }
+}
+
 function matchesSurface(path: string, surfaces: readonly string[]): string | null {
   const p = path.replace(/^\.?\//, "");
   for (const s of surfaces) {

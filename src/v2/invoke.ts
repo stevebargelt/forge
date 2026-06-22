@@ -45,6 +45,7 @@ import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } fro
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
 import { loadAllConstraints, filterConstraints } from "./constraints.js";
+import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 
@@ -211,11 +212,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   let runtime: Runtime;
   let runtimeSource: "host" | "project";
   let runtimePath: string;
+  let runtimeName: string;
   try {
     const runtimeLoaded = loadRuntimeWithSource(resolution.runtime, { projectDir: args.projectDir });
     runtime = runtimeLoaded;
     runtimeSource = runtimeLoaded.source;
     runtimePath = runtimeLoaded.path;
+    runtimeName = runtimeLoaded.name;
   } catch (e) {
     const error = `loadRuntime failed: ${(e as Error).message}`;
     failTask(taskId, { runId, kind: classify({}), error });
@@ -316,9 +319,6 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     return { runId, taskId, status: "failed", error };
   }
 
-  const docsSurfacesPath = join(args.projectDir, ".forge", "docs-surfaces.yml");
-  const docsSurfacesExists = existsSync(docsSurfacesPath);
-
   const constraintsDir = join(process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge"), "constraints");
   const allConstraints = loadAllConstraints(constraintsDir);
   const suggestCount = filterConstraints(allConstraints, {
@@ -354,17 +354,19 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     };
   })();
 
+  const docsSurfacesResult = resolveDocsSurfacesReceipt(args.projectDir);
+  if (docsSurfacesResult.warning) receiptWarnings.push(docsSurfacesResult.warning);
+
   const controlPlane = manifestControlPlaneBlock({
     workflow: { name: "invoke", source: "synthetic" },
-    runtime: { name: resolution.runtime, source: runtimeSource, path: runtimePath },
+    runtime: { name: runtimeName, source: runtimeSource, path: runtimePath },
     modelPolicy: modelPolicyLoaded.source === "absent"
       ? { source: "absent" }
       : { source: modelPolicyLoaded.source, path: modelPolicyLoaded.path },
     ...(routingReceipt ? { routing: routingReceipt } : {}),
-    docsSurfaces: docsSurfacesExists
-      ? { source: "project" as const, path: docsSurfacesPath }
-      : { source: "built-in" as const },
+    docsSurfaces: docsSurfacesResult.receipt,
     constraints: { dir: constraintsDir, suggestCount, forceCount },
+    mountMode: "rw",
     projectDir: args.projectDir,
     warnings: receiptWarnings.length > 0 ? receiptWarnings : undefined,
   });

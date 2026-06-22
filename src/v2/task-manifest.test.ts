@@ -110,6 +110,7 @@ function makeFullReceiptInputs(): ControlPlaneReceiptInputs {
     docsSurfaces: { source: "project", path: "/proj/.forge/docs-surfaces.yml" },
     constraints: { dir: "/home/.forge/constraints", suggestCount: 3, forceCount: 1 },
     projectDir: "/proj",
+    mountMode: "rw",
   };
 }
 
