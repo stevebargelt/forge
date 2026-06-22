@@ -22,6 +22,43 @@ FG-252 (done) explicitly called for the interactive half — "on forge init/upgr
 - **Generate `~/.forge/model-policy.yml` from the answers** — model_profiles, defaults.activity, overrides.agents — instead of copying the seed verbatim. Output is explicit, reviewable YAML.
 - **Preserve direct YAML editing as the expert escape hatch**, not the primary path (FG-252 principle).
 
+## Wizard scope / output
+
+The setup flow should stay focused on model/provider routing. It may show a
+broader readiness summary, but it should not become the owner of every setup
+surface.
+
+Generated model profiles must use concrete mechanism names:
+
+`<provider>-<auth>-<model-family>`
+
+Examples:
+
+- `anthropic-subscription-sonnet`
+- `anthropic-bedrock-sonnet`
+- `openai-subscription-codex`
+- `groq-api-qwen`
+- `pi-local-ollama`
+
+Do not introduce vague modes such as `personal-cheap`, `balanced`, or `work`.
+
+At the end, print a concise effective routing summary naming which concrete
+profile handles each standard capability / notable role.
+
+Example:
+
+```text
+Forge model routing:
+  default work:          anthropic-subscription-sonnet
+  reasoning-heavy work:  anthropic-subscription-opus
+  red review:            anthropic-subscription-haiku
+  research skeptic:      openai-subscription-codex
+```
+
+If setup detects missing seeds, routing policy, runtime image, dashboard
+readiness, or auth gaps, report them as readiness findings with next actions.
+Do not silently fix unrelated surfaces unless the user explicitly confirms.
+
 ## Notes / scope
 
 - Host-level model-policy generation is the core. Project-level overrides can reuse the same Q&A flow (a project may specialize routing) but project policy is FILE-LEVEL REPLACEMENT today, so a generated project policy is a full file, not a delta — see the related drift problem below.

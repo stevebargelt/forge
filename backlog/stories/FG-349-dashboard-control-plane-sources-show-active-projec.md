@@ -58,6 +58,55 @@ Example:
 
 `project .forge/model-policy.yml active — fully replaces host ~/.forge/model-policy.yml`
 
+## Override Semantics Requirement
+
+The view must show override semantics for each config surface. For project
+overrides, it must explicitly say "fully replaces host", not merely "project
+active".
+
+Seeds must be labeled as templates/install sources, never active runtime config.
+
+If a config surface uses merge semantics now or in the future, the view must
+label it explicitly as merge semantics.
+
+Invalid project config should be visible as a warning even when Forge falls back
+to defaults. For example, an invalid `.forge/docs-surfaces.yml` should render as
+`project override present but invalid; effective source: built-in defaults`,
+not just `built-in defaults active`.
+
+## Dashboard Placement
+
+This should land as the first panel in a dashboard Control Plane area, not as an
+isolated one-off page.
+
+Initial panel:
+
+- Sources
+
+Future panels this area should be able to host:
+
+- Routing governance / RACI audit
+- Model policy matrix and auth availability
+- Runtime readiness
+- Installed agents and workflows
+- Seed drift
+- Orchestrator sessions
+
+## Source / Derived / Effective Vocabulary
+
+Use consistent labels:
+
+- SOURCE: human-authored config.
+- DERIVED: Forge-compiled/generated config.
+- EFFECTIVE: the config Forge would use now for this project after precedence
+  and overrides.
+- RECORDED: historical config/provenance captured when a run/task dispatched.
+
+The Control-Plane Sources view is primarily an EFFECTIVE view, but it should
+also identify SOURCE and DERIVED files. RECORDED data belongs primarily in the
+Run Map / Explain panel, but this view should use the same vocabulary so the
+dashboard does not teach two mental models.
+
 ## CLI/API Shape
 
 Dashboard should call a structured API/query.
