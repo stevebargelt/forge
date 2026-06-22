@@ -128,5 +128,5 @@ Forge IS its own project. You can run `forge init ~/code/forge` (or `cd ~/code/f
 
 Two caveats specific to the meta case:
 
-1. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/spine/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
+1. **Don't edit forge source files from inside an agent container that has forge mounted at `/project`.** That works — but you're now changing the same binary that's running the run. If the agent edits `src/v2/spawn.ts` and the parent forge process re-spawns a child container mid-run, the source has moved underneath. Use the pipeline for forge changes, but expect to restart any in-flight orchestrator session afterward to pick up the new behavior.
 2. **The forge repo's `CLAUDE.md` (the one at the repo root, checked into git) is for sessions WORKING ON forge** — it doesn't contain the orchestrator block. If you want to be orchestrated when developing forge, run `forge init --project ~/code/forge`; the block will be appended after the existing content.

@@ -112,7 +112,7 @@ This decision *supersedes* vault DEC-006 for macOS hosts. On Linux hosts where t
 
 - `src/util/creds.ts` — `detectCredsMode()`, `oauthVolumeName()`, `ensureCreds()` (validates per-spawn; in OAuth mode, runs a one-shot `docker run -v <vol>:/home/agent/.claude agent-dev-worker test -s /home/agent/.claude/.credentials.json`)
 - `src/cli/commands/auth.ts` — `forge auth login`, `forge auth status`, `forge auth logout`
-- `src/spine/spawn.ts` — branches on `detectCredsMode()` at `docker run` arg-build time
+- `src/v2/spawn.ts` — branches on `detectCredsMode()` at `docker run` arg-build time
 - `src/workflows/_agentRefs.ts` — model alias resolution branches on `CLAUDE_CODE_USE_BEDROCK`; Bedrock-style IDs in BEDROCK_MAP, Anthropic-direct IDs in DIRECT_MAP. `FORGE_USE_LITELLM=1` shortcuts both
 - `scripts/use-bedrock.sh` — sourced helper that exports AWS Bedrock creds + `CLAUDE_CODE_USE_BEDROCK=1` for the current shell
 

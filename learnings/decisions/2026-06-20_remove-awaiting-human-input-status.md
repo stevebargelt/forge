@@ -17,7 +17,7 @@ None of that wiring was ever built:
 
 - `forge submit` does not exist — no command file, not registered in the CLI.
 - No workflow uses an `agents: []` phase.
-- `src/spine/next.ts` has no branch that creates tasks in `awaiting_human_input`; the empty-agents path from the ADR was never implemented.
+- `src/v2/runNext.ts` has no branch that creates tasks in `awaiting_human_input`; the empty-agents path from the ADR was never implemented.
 - As a result, nothing in the codebase ever *produces* this status. It exists only in consumers (status-switch arms, dashboard render paths, advise output) that handle a state that can never occur.
 
 The human-in-the-loop design need that FORGE-DEC-016 was trying to address is already served by a different mechanism: `forge design` (FORGE-DEC-014), which tracks a host-side Pencil session without requiring a task-status detour through forge's state machine. FORGE-DEC-016 was effectively superseded by FORGE-DEC-014 before `awaiting_human_input` was ever wired up.

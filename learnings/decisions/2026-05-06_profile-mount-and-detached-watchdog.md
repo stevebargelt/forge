@@ -120,12 +120,12 @@ We layer Option B (sync refresh in `ensureCreds` via `FORGE_CREDS_REFRESH`) as a
 
 - `scripts/run-sso-watchdog.sh` — vendored from Terry's workspace with attribution. Verbatim except for a header noting origin. Defaults: 60-min threshold, 300-sec poll, profile from `SSO_WATCHDOG_PROFILE`.
 - `src/util/sso-watchdog.ts` — start/stop/isRunning + private `_ssoWatchdogPidFile()` test seam. Spawns with `detached: true` + `unref()`. PID file at `~/.forge/sso-watchdog.pid` (overridable via `FORGE_HOME`).
-- `src/spine/spawn.ts` — bedrock branch passes only `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_PROFILE`, `AWS_REGION`. Mounts `awsConfigDir()` (default `~/.aws`, override via `FORGE_AWS_DIR`) at `/home/agent/.aws:ro`.
+- `src/v2/spawn.ts` — bedrock branch passes only `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_PROFILE`, `AWS_REGION`. Mounts `awsConfigDir()` (default `~/.aws`, override via `FORGE_AWS_DIR`) at `/home/agent/.aws:ro`.
 - `src/util/creds.ts` — bedrock mode requires `AWS_PROFILE` (used to require `AWS_ACCESS_KEY_ID`). Validates `awsConfigDir()` exists; calls `FORGE_CREDS_REFRESH` if set as a defensive synchronous refresh.
 - `scripts/use-bedrock.sh` — sets `AWS_PROFILE`, `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, `FORGE_SSO_WATCHDOG`, `SSO_WATCHDOG_PROFILE`. Drops the old `aws configure export-credentials --format env` snapshot.
 - `forge next` calls `startSsoWatchdog(runId)` after reconcile. `forge next` calls `stopSsoWatchdog()` only when `run.status` is `complete` or `abandoned`, so the watchdog persists across phase boundaries.
 
-Tests (in `src/util/sso-watchdog.test.ts`): isWatchdogRunning behaviors (no file, stale PID, live process), start/stop roundtrip with a real dummy script, idempotent start, graceful stop with no PID file, no-op when `FORGE_SSO_WATCHDOG` is unset or missing. In `src/spine/spawn.test.ts`: bedrock mode mounts `~/.aws` RO and sets `AWS_PROFILE`/`AWS_REGION`; doesn't pass STS env vars; oauth and apikey modes unchanged.
+Tests (in `src/util/sso-watchdog.test.ts`): isWatchdogRunning behaviors (no file, stale PID, live process), start/stop roundtrip with a real dummy script, idempotent start, graceful stop with no PID file, no-op when `FORGE_SSO_WATCHDOG` is unset or missing. In `src/v2/spawn.test.ts`: bedrock mode mounts `~/.aws` RO and sets `AWS_PROFILE`/`AWS_REGION`; doesn't pass STS env vars; oauth and apikey modes unchanged.
 
 ---
 

@@ -49,7 +49,7 @@ Concretely: do `grep` / `find` over `/project` and verify your steps don't doubl
 `discipline` routes each plan-step to the right specialist agent in the build phase:
 
 - **`frontend`** — anything user-facing: `src/dashboard/`, `client/`, `*.tsx`, `*.jsx`, `*.css`, browser-side JS, design corpus.
-- **`backend`** — server logic + data layer: `src/store/`, `src/spine/`, `src/v2/`, API handlers, SQL, business logic that doesn't render.
+- **`backend`** — server logic + data layer: `src/store/`, `src/v2/`, API handlers, SQL, business logic that doesn't render.
 - **`infosec`** — auth, secrets handling, RBAC, audit trails, security-sensitive surfaces.
 - **`platform`** — CI/CD config, build tooling, Dockerfiles, infra-as-code, `package.json` workspace plumbing.
 - **`general`** — anything that doesn't fit cleanly. Falls back to the generic `engineer` agent. Use sparingly — if half your steps are `general`, your plan is probably under-decomposed.

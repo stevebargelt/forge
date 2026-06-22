@@ -64,7 +64,7 @@ Shows agent outputs across every project on the host, live-polling every 2s. Rea
 
 | Path | Purpose |
 |---|---|
-| `src/` | TypeScript source: types, store, spine, CLI |
+| `src/` | TypeScript source: cli, notify, ops, raci, store, types, util, v2 (runner primitives) |
 | `dashboard/` | Web dashboard workspace (server + client + design corpus) |
 | `seeds/` | Default agent dirs, constraints, runtimes, workflows (copied into `~/.forge/`) |
 | `docker/agent-dev-worker.Dockerfile` | Agent container image |

@@ -57,12 +57,15 @@ The vault's DEC-006 (host file mount) does NOT work on macOS — Claude Code sto
 
 ```
 src/
-├── cli/            CLI entry + commands (new, next, gate, show, status, auth, backlog, invoke, watch)
-├── spine/          dispatch, next, spawn, spawnRed, gate, composeSystemPrompt, workflows, constraints
-├── store/          SQLite schema + accessors per table
+├── cli/            CLI entry + commands (new, next, gate, show, status, auth, backlog, invoke, watch, route, ...)
+├── v2/             YAML-driven runner: dispatch, spawn, next, gate, reconcile, loader, compose, constraints, docs-impact
+├── store/          SQLite schema + accessors per table (runs, tasks, events, gates, verdicts, model-calls)
+├── raci/           Routing policy: RACI parse/compile, route validate/explain, propose/apply, governance
+├── ops/            Operational incident detection + repair (orphan reconcile candidates)
+├── notify/         Milestone notifications: ntfy + twilio delivery, consent, formatting
+├── backlog/        Backlog accessors: structured + legacy parse, serialize, config
 ├── types/          Authoritative TypeScript types (matches the sketch)
-├── util/           paths, ids, creds, sso-watchdog
-└── workflows/      One file per workflow
+└── util/           paths, ids, creds, auth-profiles, git-root, run-lock, heartbeats
 
 seeds/              Default agent dirs and constraints; copied into ~/.forge/ by install-seeds.sh
 docker/             Agent image

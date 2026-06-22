@@ -92,7 +92,7 @@ The "but YAML is more accessible" argument doesn't apply here — forge is a per
 ## Implementation Notes
 
 - Each `src/workflows/<name>.ts` exports `export const workflow: Workflow = { ... }`
-- `src/spine/workflows.ts` `loadWorkflow(name)` does a dynamic `import()` + a structural check (`name` matches, `phases` is an array)
+- `src/v2/loader.ts` `loadWorkflow(name)` does a dynamic `import()` + a structural check (`name` matches, `phases` is an array)
 - `_agentRefs.ts` exports a small `agent(role, model)` helper so workflow files don't duplicate the `~/.forge/agents/<role>` path computation
 - Adding a new workflow name requires touching three places: `WorkflowName` (types), `VALID_NAMES` (workflows.ts), and the new file. By design — it's small enough to be obvious
 

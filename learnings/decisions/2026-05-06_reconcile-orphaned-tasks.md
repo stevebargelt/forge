@@ -70,7 +70,7 @@ Run forge as a long-lived process that polls running tasks.
 
 **Rationale**: SQLite is already the resume state for forge. Reconciliation extends that pattern to "result files on disk are also authoritative." This matches the existing design ethos: the spine recovers from interrupted state rather than trying to prevent interruption. Bulletproofing the spawn pipeline (Option A) is still worth doing for *some* causes, but reconciliation is the safety net that makes all causes survivable.
 
-The reconciler is in its own module (`src/spine/reconcile.ts`) so the `next.ts` and `status.ts` integration points are one-liners.
+The reconciler is in its own module (`src/v2/reconcile.ts`) so the `next.ts` and `status.ts` integration points are one-liners.
 
 ---
 
@@ -92,7 +92,7 @@ The reconciler is in its own module (`src/spine/reconcile.ts`) so the `next.ts` 
 
 ## Implementation Notes
 
-- `src/spine/reconcile.ts` — `reconcileRun(runId, workflow)`. Reads tasks via `tasksForRun`, processes each `running` task whose `result.json` exists.
+- `src/v2/reconcile.ts` — `reconcileRun(runId, workflow)`. Reads tasks via `tasksForRun`, processes each `running` task whose `result.json` exists.
 - Idempotency: the reconciler only acts on tasks in `running` status. A task already `complete`/`failed`/`awaiting_gate`/etc. is skipped, so re-running reconciliation is safe.
 - Red verdict path: when reconciling a task with a `parentId` whose phase declares reds, the reconciler writes the verdict row AND transitions the parent's status (`blocked_by_red` for authoritative-fail-with-gate, `awaiting_gate` otherwise). It only mutates the parent if the parent is in `complete` or `running` (i.e., still pre-gate); a parent the user already gated is left alone.
 - `forge status` reconciles before reporting so the displayed state matches reality. `forge next` reconciles before the dispatch loop so it can pick up where the orphan left off.
