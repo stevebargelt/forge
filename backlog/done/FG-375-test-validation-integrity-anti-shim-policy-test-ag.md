@@ -1,9 +1,10 @@
 ---
 id: FG-375
 type: story
-status: active
+status: done
 title: "Test validation integrity / anti-shim policy: test agents fail (not fake) on missing deps; done-gate flags shim surgery (FG-372 follow-up)"
 created: 2026-06-23
+closed: 2026-06-23
 ---
 
 **Follow-up to / scoped under FG-372 (Shipping Reviewer).** Split out because FG-372 is design-status while this is concrete, and the seed-rule portion is independently shippable without the full Shipping Reviewer.
