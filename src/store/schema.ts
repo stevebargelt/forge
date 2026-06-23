@@ -35,7 +35,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   resolved_profile  TEXT,
   resolved_provider TEXT,
   resolved_auth     TEXT,
-  resolved_by       TEXT
+  resolved_by       TEXT,
+  -- FG-351: per-task git worktree path. Null when worktree mode is disabled (default).
+  -- Set BEFORE runContainer and readable after process restart. Task branch identity
+  -- is deterministically derived as forge/<runId>/<taskId> — no separate DB column needed.
+  worktree_path     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_run ON tasks(run_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);

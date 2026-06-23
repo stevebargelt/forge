@@ -6,6 +6,9 @@ export const FORGE_HOME = process.env.FORGE_HOME ?? join(homedir(), ".forge");
 export const RUNS_DIR = join(FORGE_HOME, "runs");
 export const AGENTS_DIR = join(FORGE_HOME, "agents");
 export const CONSTRAINTS_DIR = join(FORGE_HOME, "constraints");
+// FG-351: git worktrees live under WORKTREES_DIR/<runId>/<taskId>. Inside
+// Docker Desktop's macOS file-sharing allowlist (under ~/.forge).
+export const WORKTREES_DIR = join(FORGE_HOME, "worktrees");
 // The installed host RACI source (authoring view). `forge raci validate` lints
 // this by default.
 export const RACI_PATH = join(FORGE_HOME, "forge-raci.md");
@@ -21,7 +24,7 @@ export const RACI_AUDIT_LOG_PATH = join(FORGE_HOME, "raci-audit.log");
 export const DB_PATH = process.env.FORGE_DB_PATH ?? join(FORGE_HOME, "forge.db");
 
 export function ensureForgeDirs(): void {
-  for (const dir of [FORGE_HOME, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR]) {
+  for (const dir of [FORGE_HOME, RUNS_DIR, AGENTS_DIR, CONSTRAINTS_DIR, WORKTREES_DIR]) {
     mkdirSync(dir, { recursive: true });
   }
 }
@@ -32,6 +35,11 @@ export function runDir(runId: string): string {
 
 export function taskDir(runId: string, taskId: string): string {
   return join(RUNS_DIR, runId, taskId);
+}
+
+// FG-351: path where a task's git worktree is checked out.
+export function worktreeDir(runId: string, taskId: string): string {
+  return join(WORKTREES_DIR, runId, taskId);
 }
 
 // Host path of the PROMPT.md a prompt-author task wrote. The agent writes to

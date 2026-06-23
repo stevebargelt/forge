@@ -21,6 +21,7 @@ type TaskRow = {
   resolved_provider: string | null;
   resolved_auth: string | null;
   resolved_by: string | null;
+  worktree_path: string | null;
 };
 
 function rowToTask(row: TaskRow): Task {
@@ -43,14 +44,15 @@ function rowToTask(row: TaskRow): Task {
     startedAt: row.started_at ?? undefined,
     completedAt: row.completed_at ?? undefined,
     error: row.error ?? undefined,
+    worktreePath: row.worktree_path ?? undefined,
   };
 }
 
 export function insertTask(task: Task): void {
   getDb()
     .prepare(
-      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, created_at, started_at, completed_at, error, resolved_profile, resolved_provider, resolved_auth, resolved_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (id, run_id, parent_id, phase, agent_role, agent_alias, agent_model, status, task_package, result, created_at, started_at, completed_at, error, resolved_profile, resolved_provider, resolved_auth, resolved_by, worktree_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       task.id,
@@ -70,8 +72,15 @@ export function insertTask(task: Task): void {
       task.resolvedProfile ?? null,
       task.resolvedProvider ?? null,
       task.resolvedAuth ?? null,
-      task.resolvedBy ?? null
+      task.resolvedBy ?? null,
+      task.worktreePath ?? null
     );
+}
+
+export function setTaskWorktreePath(id: string, worktreePath: string): void {
+  getDb()
+    .prepare(`UPDATE tasks SET worktree_path = ? WHERE id = ?`)
+    .run(worktreePath, id);
 }
 
 export function getTask(id: string): Task | undefined {

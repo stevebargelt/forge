@@ -113,6 +113,11 @@ export type Task = {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  // FG-351: git worktree path for this task. Set before container starts (when
+  // FORGE_WORKTREES=1); readable after process restart. Null for tasks that ran
+  // without worktree isolation. Branch identity is derived deterministically as
+  // forge/<runId>/<taskId> and does not need a separate column.
+  worktreePath?: string;
 };
 
 export type DispatchResult = {

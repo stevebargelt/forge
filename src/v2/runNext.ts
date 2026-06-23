@@ -25,7 +25,7 @@ import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, setTaskStatus } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict } from "../store/verdicts.js";
@@ -56,6 +56,14 @@ import { checkResolvedAvailability, checkToolCapability } from "./provider-docto
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
+// FG-351: worktree lifecycle — gate check, create, cleanup, branch naming.
+import {
+  isWorktreeModeEnabled,
+  preflightWorktreeGate,
+  createWorktree,
+  removeWorktreeIfSafe,
+  cleanupFailedWorktreeSetup,
+} from "./worktree-lifecycle.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
 // the input value carries a discipline string that's in the map, route to the
@@ -372,10 +380,57 @@ async function dispatchSingleStep(args: {
   }).length;
   const cpWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, workflowReceipt);
 
+  // FG-374/FG-351 gate ordering: preflightProjectMount must run BEFORE any state
+  // mutation (worktree creation or DB write). A failed preflight must not leave a
+  // leaked worktree or a stale task row. preflightProjectMount also runs inside
+  // runContainer as a safety net for the red path; this call takes precedence for
+  // primary dispatch so the worktree block is never reached on a bad mount.
+  try {
+    preflightProjectMount(args.projectDir);
+  } catch (e) {
+    const msg = `preflightProjectMount failed: ${(e as Error).message}`;
+    failTask(taskId, { runId: args.runId, kind: classify({}), error: msg });
+    return "failed";
+  }
+
+  // FG-351: create a task-scoped git worktree when worktree mode is enabled.
+  // preflightWorktreeGate + createWorktree run BEFORE runContainer; the DB write
+  // (setTaskWorktreePath) is durable BEFORE the container starts so reconcile can
+  // find the path after a process restart. checkResultPersistence keeps args.projectDir
+  // (the original host mount) — that seam is owned by FG-354.
+  let primaryWorktreePath: string | undefined;
+  if (isWorktreeModeEnabled()) {
+    try {
+      preflightWorktreeGate(args.projectDir);
+      const wt = createWorktree(args.projectDir, args.runId, taskId);
+      primaryWorktreePath = wt.worktreePath;
+      setTaskWorktreePath(taskId, primaryWorktreePath);
+      // Operator diagnostic: untracked/ignored host files are NOT in the worktree.
+      // Git worktrees carry committed/tracked content only. Emit a warning so the
+      // limitation is visible in forge logs even before a dedicated event type lands.
+      if (wt.untrackedFiles.length > 0) {
+        process.stderr.write(
+          `[forge/worktree] task ${taskId}: ${wt.untrackedFiles.length} untracked host file(s) not in worktree: ${wt.untrackedFiles.slice(0, 5).join(", ")}${wt.untrackedFiles.length > 5 ? ` (+${wt.untrackedFiles.length - 5} more)` : ""}\n`
+        );
+      }
+    } catch (e) {
+      // Gate or create failure: no durable DB state to unwind (setTaskWorktreePath
+      // only runs after a successful createWorktree), but the task must not stay
+      // stuck in pending — transition to failed so the run can report the error.
+      // cleanupFailedWorktreeSetup is NOT EPHEMERAL-gated: the agent never ran,
+      // so there is no output to preserve — always safe to remove partial state.
+      const msg = `worktree setup failed: ${(e as Error).message}`;
+      cleanupFailedWorktreeSetup(args.projectDir, args.runId, taskId);
+      failTask(taskId, { runId: args.runId, kind: classify({}), error: msg });
+      return "failed";
+    }
+  }
+
   const dispatchResult = await runContainer({
     taskId,
     runId: args.runId,
     projectDir: args.projectDir,
+    worktreePath: primaryWorktreePath,
     projectMode: "rw",
     designDir: args.designDir,
     taskPackage,
@@ -459,10 +514,22 @@ async function dispatchSingleStep(args: {
       return "blocked_by_red";
     }
     // No authoritative fail — proceed to normal gate semantics.
-    return finalizePrimary(taskId, args.runId, step.gate, result);
+    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
+    // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
+    // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+    if (statusAfterReds === "complete" && primaryWorktreePath) {
+      removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir);
+    }
+    return statusAfterReds;
   }
 
-  return finalizePrimary(taskId, args.runId, step.gate, result);
+  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
+  // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
+  // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+  if (finalStatus === "complete" && primaryWorktreePath) {
+    removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir);
+  }
+  return finalStatus;
 }
 
 // Final status write for a primary task (no reds path, or reds passed).
@@ -692,6 +759,8 @@ async function runOneRed(args: {
   const redForceCount = failureModes.length;
   const redWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, redWorkflowReceipt);
 
+  // FG-351: reds are read-only reviewers — no worktree isolation needed or created.
+  // Worktree isolation for reds is deferred to a future story.
   const result = await runContainer({
     taskId: redTaskId,
     runId: args.runId,
@@ -1121,10 +1190,48 @@ async function runFanoutChild(args: {
   }).length;
   const fcWorkflowProv = resolveWorkflowSource(args.workflow.name, args.projectDir, fcWorkflowReceipt);
 
+  // FG-374/FG-351 gate ordering: same as primary dispatch — preflight must run
+  // BEFORE any state mutation so a bad mount cannot leak a worktree or DB row.
+  try {
+    preflightProjectMount(args.projectDir);
+  } catch (e) {
+    const msg = `preflightProjectMount failed: ${(e as Error).message}`;
+    failTask(childTaskId, { runId: args.runId, kind: classify({}), error: msg });
+    return { index: args.index, value: args.value, childTaskId, status: "failed" };
+  }
+
+  // FG-351: create a task-scoped git worktree for each fanout child when worktree
+  // mode is enabled. Same pattern as primary dispatch: DB write before container
+  // start so reconcile can find the path after a process restart.
+  let childWorktreePath: string | undefined;
+  if (isWorktreeModeEnabled()) {
+    try {
+      preflightWorktreeGate(args.projectDir);
+      const wt = createWorktree(args.projectDir, args.runId, childTaskId);
+      childWorktreePath = wt.worktreePath;
+      setTaskWorktreePath(childTaskId, childWorktreePath);
+      if (wt.untrackedFiles.length > 0) {
+        process.stderr.write(
+          `[forge/worktree] task ${childTaskId}: ${wt.untrackedFiles.length} untracked host file(s) not in worktree: ${wt.untrackedFiles.slice(0, 5).join(", ")}${wt.untrackedFiles.length > 5 ? ` (+${wt.untrackedFiles.length - 5} more)` : ""}\n`
+        );
+      }
+    } catch (e) {
+      // Gate or create failure: transition the child task to failed so the fanout
+      // run can report the error instead of hanging with a pending child.
+      // cleanupFailedWorktreeSetup is NOT EPHEMERAL-gated: the agent never ran,
+      // so there is no output to preserve — always safe to remove partial state.
+      const msg = `worktree setup failed: ${(e as Error).message}`;
+      cleanupFailedWorktreeSetup(args.projectDir, args.runId, childTaskId);
+      failTask(childTaskId, { runId: args.runId, kind: classify({}), error: msg });
+      return { index: args.index, value: args.value, childTaskId, status: "failed" };
+    }
+  }
+
   const dispatchResult = await runContainer({
     taskId: childTaskId,
     runId: args.runId,
     projectDir: args.projectDir,
+    worktreePath: childWorktreePath,
     projectMode: "rw",
     designDir: args.designDir,
     taskPackage,
@@ -1160,6 +1267,11 @@ async function runFanoutChild(args: {
   // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
   if (markTaskComplete(childTaskId, dispatchResult.result)) {
     logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
+    // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
+    // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+    if (childWorktreePath) {
+      removeWorktreeIfSafe(childWorktreePath, args.runId, childTaskId, args.projectDir);
+    }
   }
   return {
     index: args.index,
@@ -1183,6 +1295,10 @@ async function runContainer(args: {
   taskId: string;
   runId: string;
   projectDir: string;
+  // FG-351: when worktree mode is active, the worktree path replaces projectDir
+  // as the container's PROJECT_DIR mount. projectDir retains the original value
+  // for persistence checks and other non-mount uses.
+  worktreePath?: string;
   projectMode: "rw" | "ro";
   designDir?: string;
   taskPackage: TaskPackage;
@@ -1408,7 +1524,11 @@ async function runContainer(args: {
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
     TASK_DIR: dir,
-    PROJECT_DIR: args.projectDir,
+    // FG-351: resolve the container project mount. When worktree mode is active,
+    // use the task-scoped worktree path; otherwise use the original projectDir.
+    // This is the ONLY place the worktree substitution enters spawn processing.
+    // The shadow-volume trigger (spawn.ts:247-259) is NOT affected.
+    PROJECT_DIR: args.worktreePath ?? args.projectDir,
     PROJECT_MODE: args.projectMode,
     MODEL: args.resolution.model,
     UPSTREAM_PROVIDER: args.resolution.provider ?? "",

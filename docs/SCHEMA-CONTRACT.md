@@ -31,6 +31,7 @@ Columns the dashboard reads:
 - `result` — nullable JSON string. Dashboard parses + dispatches to per-agent renderer based on `agent_role`
 - `created_at` / `started_at` / `completed_at` — nullable ISO 8601
 - `error` — nullable string
+- `worktree_path` — nullable string, the host filesystem path of the task's git worktree when worktree mode is enabled (`FORGE_WORKTREES=1`). `null` for default bind-mount runs. Set durably before container dispatch so it survives process restart. Task branch identity is derived deterministically as `forge/<runId>/<taskId>` and is not stored separately. Added by FG-351; additive and nullable — pre-FG-351 rows and dashboard code that does not read this column degrade gracefully.
 
 ### `verdicts` table
 

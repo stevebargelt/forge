@@ -24,6 +24,7 @@ import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
+import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -94,6 +95,13 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     // AWN-8: reconciliation is a terminal transition too — don't leave the staged
     // bearer token behind (no-op when there's no auth file).
     cleanupStagedAuth(taskDir(t.runId, t.id));
+    // FG-351: ephemeral/test-mode worktree cleanup. Production no-op until
+    // FG-352 (merge-back) makes cleanup safe for real agent output.
+    // run.projectDir is required as git cwd — skip cleanup if the run has no
+    // recorded projectDir (e.g. legacy rows created before FG-374).
+    if (t.worktreePath && run.projectDir) {
+      removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
+    }
   }
 
   // Orphaned duplicate primaries: a pending primary in a phase that another

@@ -38,6 +38,12 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveTasks.has("resolved_by")) {
     db.exec(`ALTER TABLE tasks ADD COLUMN resolved_by TEXT`);
   }
+  // FG-351: per-task worktree path. Additive + nullable — existing binaries tolerate
+  // the column; new binaries ALTER on first open. Task branch identity is NOT stored
+  // here — it is deterministically derived as forge/<runId>/<taskId> at runtime.
+  if (!haveTasks.has("worktree_path")) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN worktree_path TEXT`);
+  }
 
   // Workflow rename (2026-05-08): old run rows reference deleted workflow names.
   // Rather than maintain alias maps in workflows.ts forever (Steven 2026-05-08:
