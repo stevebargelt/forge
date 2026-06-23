@@ -1,9 +1,10 @@
 ---
 id: FG-352
 type: story
-status: active
+status: done
 title: "Worktree merge primitive (FG-345 child 2): host-side sequential --ff-only merge-back, merge_conflict failure_kind, retain-branch-on-conflict"
 created: 2026-06-22
+closed: 2026-06-23
 ---
 
 **Parent:** FG-345. **Depends on:** FG-351 (foundation). Covers the SINGLE-PRIMARY (sequential) merge path; fan-out ordering is FG-353.
