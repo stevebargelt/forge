@@ -1,9 +1,10 @@
 ---
 id: FG-374
 type: story
-status: active
+status: done
 title: forge invoke/new mounts cwd blindly — resolve project root or hard-fail on suspicious subdir mounts
 created: 2026-06-23
+closed: 2026-06-23
 ---
 
 **Priority: high — infrastructure / correctness.** Prevents a whole class of bogus agent runs.
@@ -29,6 +30,23 @@ A test-engineer was dispatched while the orchestrator shell was `cd`'d into `das
 - The task manifest records BOTH `invocationCwd` and the resolved `projectDir`.
 - Container preflight verifies required project markers are visible inside the container before the agent executes (fail fast, before any agent tokens are spent).
 - Regression test covers invoking from a workspace subdirectory (asserts root resolution or the hard-fail).
+
+## Resolution policy (refined with operator 2026-06-23)
+
+Three cases, distinguished by how the subdir mount is requested:
+
+1. **Implicit (default cwd) is a subdir of a detected root:** resolve UPWARD to the root and mount it; if the root cannot be inferred confidently, HARD-FAIL ("run from the project root or pass --project <dir>").
+2. **Explicit `--project <subdir>` from an interactive/human CLI** (TTY present, not `--json`): warn-and-honor is acceptable (explicit human choice).
+3. **Explicit `--project <subdir>` from orchestrator/agent automation** (no TTY, or `--json`): HARD-FAIL unless an override flag is present.
+
+Override flag: `--allow-subproject`. With it, an explicit subdir mount succeeds and the manifest records `explicitSubproject: true`.
+
+```
+forge invoke --project dashboard ...                    # FAILS if dashboard is inside detected root /repo (automation default)
+forge invoke --project dashboard --allow-subproject ... # succeeds; manifest records explicitSubproject: true
+```
+
+Interactive-vs-automation is detected from TTY presence (`process.stdout.isTTY`) and/or the `--json` flag — the orchestrator invokes via Bash with no TTY, so it lands in the strict (case 3) path by default.
 
 ## Notes
 
