@@ -1,9 +1,10 @@
 ---
 id: FG-368
 type: story
-status: active
+status: done
 title: run.completed logs anyFailed:true on a successful request-changes retry run (telemetry inaccuracy)
 created: 2026-06-22
+closed: 2026-06-23
 ---
 
 **Found:** 2026-06-22, red-backend confirmation of the FG-364 hardening.
