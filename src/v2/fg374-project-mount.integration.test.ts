@@ -10,11 +10,12 @@
 //      absent (not `null`, not `false` — absent); the manifest is still parseable.
 //   3. PREFLIGHT: preflightProjectMount passes when .git marker is present.
 //   4. PREFLIGHT: preflightProjectMount passes when package.json marker is present.
-//   5. PREFLIGHT: preflightProjectMount throws a clear, actionable error when
-//      neither marker is present (hard-fail path).
-//   6. CLI wiring: SKIPPED — requires a real container; see note below.
+//   5. PREFLIGHT: preflightProjectMount throws on an EMPTY directory (genuinely
+//      broken mount). A non-empty dir WITHOUT markers passes with a warning.
+//   6. CLI wiring: exercises the option-parsing → resolveProjectMount seam that
+//      the FG-359 incident exposed (running from a workspace subdir).
 
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync,
@@ -27,6 +28,7 @@ import { invoke, type DockerExecFn } from "./invoke.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
 import { preflightProjectMount } from "./spawn.js";
+import { resolveProjectMount } from "../util/resolve-project-mount.js";
 
 // ─── Shared test harness ─────────────────────────────────────────────────────
 
@@ -206,6 +208,21 @@ test("fg374 manifest legacy-safety: invoke WITHOUT fg374 fields → controlPlane
 // ─── 3–5. PREFLIGHT: preflightProjectMount — direct function tests ────────────
 // Tests use real temp directories. No container invocation.
 
+test("fg374 preflight: throws when directory does not exist", () => {
+  const dir = "/tmp/forge-preflight-nonexistent-should-not-exist-" + Date.now();
+  assert.throws(
+    () => preflightProjectMount(dir),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok((err as Error).message.includes(dir));
+      assert.match((err as Error).message, /preflight/i);
+      assert.match((err as Error).message, /does not exist/i);
+      return true;
+    },
+    "preflightProjectMount must throw when the directory does not exist"
+  );
+});
+
 test("fg374 preflight: passes when .git marker is present", () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-preflight-git-"));
   try {
@@ -247,44 +264,147 @@ test("fg374 preflight: passes when both .git and package.json are present", () =
   }
 });
 
-test("fg374 preflight: throws clear actionable error when no marker present", () => {
+test("fg374 preflight: warns (does not throw) for an empty directory", () => {
   const dir = mkdtempSync(join(tmpdir(), "forge-preflight-empty-"));
+  const warnLines: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnLines.push(args.join(" ")); };
   try {
-    assert.throws(
+    assert.doesNotThrow(
       () => preflightProjectMount(dir),
-      (err: unknown) => {
-        assert.ok(err instanceof Error, "must throw an Error");
-        // The message must name the projectDir so operators can diagnose which dir failed.
-        assert.ok(
-          (err as Error).message.includes(dir),
-          `error message must include the failing dir: ${(err as Error).message}`
-        );
-        // The message must name the expected markers so the operator knows what to check.
-        assert.match((err as Error).message, /\.git/, "error must mention .git marker");
-        assert.match((err as Error).message, /package\.json/, "error must mention package.json marker");
-        // Must name the preflight so it's diagnosable in CI logs.
-        assert.match(
-          (err as Error).message,
-          /preflight/i,
-          "error must reference preflight to distinguish from other mount errors"
-        );
-        return true;
-      },
-      "preflightProjectMount must throw with a clear, actionable error when no marker is present"
+      "preflightProjectMount must NOT throw for an empty dir — only warns"
+    );
+    assert.ok(
+      warnLines.some((l) => l.includes(dir)),
+      "must emit a console.warn mentioning the dir when it is empty"
+    );
+    assert.ok(
+      warnLines.some((l) => /empty/i.test(l)),
+      "warning must mention that the directory is empty"
     );
   } finally {
+    console.warn = origWarn;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// ─── 6. CLI wiring: skipped ──────────────────────────────────────────────────
-// Asserting that the CLI (invoke.ts command handler) passes explicitSubproject
-// through to invoke() would require a real container or a full CLI invocation
-// harness that spawns a child process. The integration path from resolveProjectMount
-// → invoke args is exercised at the unit level (the CLI calls resolveProjectMount
-// and spreads its result into invoke args — readable directly in
-// src/cli/commands/invoke.ts lines 57-98). A container-free wiring test would
-// require mocking the commander action, which duplicates the unit test surface.
-// The end-to-end manifest tests above (tests 1 & 2) prove the full chain from
-// invoke() args → controlPlane block → written manifest.json, which is the
-// observable integration boundary that matters for ops.
+test("fg374 preflight: passes (with warning) for non-empty dir without .git or package.json", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-preflight-nomarker-"));
+  const warnLines: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => { warnLines.push(args.join(" ")); };
+  try {
+    writeFileSync(join(dir, "README.md"), "# project");
+    assert.doesNotThrow(
+      () => preflightProjectMount(dir),
+      "preflightProjectMount must NOT throw for a non-empty dir without markers"
+    );
+    assert.ok(
+      warnLines.some((l) => l.includes(dir)),
+      "must emit a console.warn mentioning the dir when no marker is present"
+    );
+  } finally {
+    console.warn = origWarn;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── 6. CLI wiring: option-parsing → resolveProjectMount seam ───────────────
+// The FG-359 incident was triggered by a CLI command run from a workspace
+// subdir. These tests exercise the resolveProjectMount boundary that the CLI
+// option-parsing feeds into — the same seam that would have caught FG-359.
+// We test the seam directly (parse-equivalent args → resolved result) rather
+// than driving Commander full-stack, which requires a container. The unit tests
+// in src/util/resolve-project-mount.test.ts cover resolveProjectMount in
+// isolation; these integration tests verify the OUTCOME the CLI produces for
+// each user-visible option combination.
+
+test("fg374 cli-seam: implicit invocation from workspace subdir → resolves to git root", () => {
+  const root = mkdtempSync(join(tmpdir(), "forge-fg374-cli-root-"));
+  try {
+    // Set up a git repo root with confident markers
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
+    const sub = join(root, "dashboard");
+    mkdirSync(sub, { recursive: true });
+
+    // Simulate: no --project flag (requestedDir=undefined), isTTY=false, cwd=subdir
+    // This mirrors: running `forge invoke` from `<repo>/dashboard/`
+    const result = resolveProjectMount(undefined, { isTTY: false, json: false, allowSubproject: false }, sub);
+
+    assert.equal(result.projectDir, root, "must resolve up to the git root");
+    assert.equal(result.resolvedFromSubdir, true, "must set resolvedFromSubdir=true");
+    assert.equal(result.explicitSubproject, false);
+    assert.equal(result.invocationCwd, sub, "invocationCwd must record where we were invoked from");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fg374 cli-seam: explicit --project <subdir> with --json hard-fails (automation guard)", () => {
+  const root = mkdtempSync(join(tmpdir(), "forge-fg374-cli-hardfail-"));
+  try {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
+    const sub = join(root, "dashboard");
+    mkdirSync(sub, { recursive: true });
+
+    // Simulate: --project <subdir> --json (automation mode, no --allow-subproject)
+    // This is the failure mode from FG-359: explicit subdir + json flag = hard-fail.
+    assert.throws(
+      () => resolveProjectMount(sub, { isTTY: true, json: true, allowSubproject: false }),
+      /is a subdirectory of/,
+      "must hard-fail when --project is a subdir and --json is set"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fg374 cli-seam: explicit --project <subdir> + --allow-subproject succeeds with explicitSubproject=true", () => {
+  const root = mkdtempSync(join(tmpdir(), "forge-fg374-cli-allowsub-"));
+  try {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
+    const sub = join(root, "packages", "api");
+    mkdirSync(sub, { recursive: true });
+
+    // Simulate: --project <subdir> --allow-subproject (intentional subdir mount)
+    const result = resolveProjectMount(sub, { isTTY: false, json: false, allowSubproject: true });
+
+    assert.equal(result.projectDir, sub, "must honor the requested subdir");
+    assert.equal(result.explicitSubproject, true, "must set explicitSubproject=true");
+    assert.equal(result.resolvedFromSubdir, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fg374 cli-seam: interactive (isTTY=true, json=false) warns and honors subdir", () => {
+  const root = mkdtempSync(join(tmpdir(), "forge-fg374-cli-tty-"));
+  const stderrLines: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+    stderrLines.push(typeof chunk === "string" ? chunk : chunk.toString());
+    return true;
+  });
+  try {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
+    const sub = join(root, "dashboard");
+    mkdirSync(sub, { recursive: true });
+
+    // Simulate: interactive shell (isTTY=true, json=false), explicit --project <subdir>
+    const result = resolveProjectMount(sub, { isTTY: true, json: false, allowSubproject: false });
+
+    assert.equal(result.projectDir, sub, "must honor the subdir in interactive mode");
+    assert.equal(result.explicitSubproject, false, "explicitSubproject is false (no --allow-subproject)");
+    assert.ok(
+      stderrLines.some((l) => l.includes("cross-workspace deps may be missing")),
+      "must emit a warning about subdir mount in interactive mode"
+    );
+  } finally {
+    mock.restoreAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

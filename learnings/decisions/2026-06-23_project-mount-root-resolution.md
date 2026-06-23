@@ -90,14 +90,16 @@ Both `forge invoke` and `forge new` add `--allow-subproject`. With it:
 
 ## Spawn preflight
 
-`src/v2/spawn.ts` adds `preflightProjectMount(projectDir)`. Called just before `docker run`, it checks that `projectDir` contains `.git` or `package.json`. Fails fast if neither is present:
+`src/v2/spawn.ts` adds `preflightProjectMount(projectDir)`. Called just before `docker run` on **both** the `forge invoke` path (`src/v2/invoke.ts`) and the `forge new` workflow path (`src/v2/runNext.ts` → `runContainer`), it hard-fails only when the path does not exist or is not a directory. An empty directory or a directory with no `.git` or `package.json` emits a `console.warn` and passes — forge supports non-git/non-npm project layouts (and tests use bare `mkdtemp` directories).
 
-```
-project mount preflight failed: <dir> has no .git or package.json —
-verify the correct project directory is mounted at /project
-```
+| Condition | Outcome |
+|---|---|
+| Path does not exist | hard-fail (throws) |
+| Path is not a directory | hard-fail (throws) |
+| Directory is empty | `console.warn`, passes |
+| No `.git` or `package.json` | `console.warn`, passes |
 
-This catches edge cases where resolution succeeded but the resolved path is empty or non-project (e.g. a bare home directory).
+The `forge new` (workflow) path now has full parity on manifest fields as well: `invocationCwd`, `resolvedFromSubdir`, and `explicitSubproject` are stored in run metadata at `startRun` time and threaded into each task's control-plane receipt by `runNext`.
 
 ---
 

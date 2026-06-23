@@ -37,7 +37,7 @@ export function registerNew(program: Command): void {
 
       // FG-374: resolve the project mount root; hard-fail on suspicious subdir mounts.
       // new.ts has no --json flag; isTTY determines interactive vs automation path.
-      const { projectDir, invocationCwd, explicitSubproject } = resolveProjectMount(
+      const { projectDir, invocationCwd, resolvedFromSubdir, explicitSubproject } = resolveProjectMount(
         (options as { project?: string }).project,
         {
           isTTY: process.stdout.isTTY ?? false,
@@ -119,6 +119,7 @@ export function registerNew(program: Command): void {
         authProfile,
         modelProfile,
         invocationCwd,
+        resolvedFromSubdir,
         explicitSubproject,
         ...(tags.length > 0 ? { tags } : {}),
       });

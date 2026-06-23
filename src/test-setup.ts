@@ -1,9 +1,26 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const tempHome = mkdtempSync(join(tmpdir(), "forge-test-"));
 process.env["FORGE_HOME"] = tempHome;
+
+// FG-374: integration tests use hardcoded /tmp/<name> project dirs as
+// placeholders. With preflightProjectMount now active on both invoke and
+// runNext paths, these dirs must exist before any test runs.
+for (const dir of [
+  "/tmp/test-project",
+  "/tmp/x",
+  "/tmp/proj",
+  "/tmp/some-project",
+  "/tmp/integ-manifest-project",
+  "/tmp/fg364-test-project",
+  "/tmp/fg368-test-project",
+  "/tmp/fg371-test-project",
+  "/tmp/fg371-retry-once-test",
+]) {
+  mkdirSync(dir, { recursive: true });
+}
 
 // #198: silence notifications for the whole suite via the explicit, provider-
 // agnostic kill switch. NO_NOTIFY=true short-circuits isAnyProviderEnabled() and

@@ -16,7 +16,7 @@
 // substitution context per-step (TASK_ID, MODEL, etc.) and this function
 // produces the full `docker run ... claude ...` argv.
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
@@ -294,17 +294,39 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   return { args, stdin };
 }
 
-// FG-374: verify that the resolved projectDir has at least one expected project
-// marker before exec'ing the container. A missing marker indicates the mount
-// would land a broken or unexpected directory at /project, wasting agent tokens.
+// FG-374: verify that the resolved projectDir is mountable before exec'ing.
+// Hard-fails only for genuinely broken mounts: missing path or non-directory.
+// Empty dirs and marker-less dirs are valid (tests use bare mkdtemp dirs;
+// forge supports non-git/non-npm project layouts) — they emit a warning only.
 // Call this just before exec — after buildDockerArgs succeeds.
 export function preflightProjectMount(projectDir: string): void {
+  const stat = statSync(projectDir, { throwIfNoEntry: false });
+  if (!stat) {
+    throw new Error(
+      `project mount preflight failed: ${projectDir} does not exist — ` +
+        `verify the correct project directory is mounted at /project`
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(
+      `project mount preflight failed: ${projectDir} is not a directory — ` +
+        `verify the correct project directory is mounted at /project`
+    );
+  }
+  const entries = readdirSync(projectDir);
+  if (entries.length === 0) {
+    console.warn(
+      `forge: project mount preflight: ${projectDir} is empty — ` +
+        `verify the correct project directory is mounted at /project`
+    );
+    return;
+  }
   const hasGit = existsSync(join(projectDir, ".git"));
   const hasPkg = existsSync(join(projectDir, "package.json"));
   if (!hasGit && !hasPkg) {
-    throw new Error(
-      `project mount preflight failed: ${projectDir} has no .git or package.json — ` +
-        `verify the correct project directory is mounted at /project`
+    console.warn(
+      `forge: project mount preflight: ${projectDir} has no .git or package.json — ` +
+        `proceeding; verify this is the intended project root`
     );
   }
 }

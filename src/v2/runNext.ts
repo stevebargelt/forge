@@ -39,7 +39,7 @@ import { checkResultPersistence, persistenceErrorMessage } from "./persistence-c
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
@@ -392,6 +392,17 @@ async function dispatchSingleStep(args: {
       routeReceipt,
       suggestCount: cpSuggestCount,
       forceCount: cpForceCount,
+      // FG-374: thread from run metadata (recorded by startRun); absent on
+      // runs created before FG-374 — optional fields keep this legacy-safe.
+      invocationCwd: typeof args.runMetadata["invocationCwd"] === "string"
+        ? args.runMetadata["invocationCwd"]
+        : undefined,
+      resolvedFromSubdir: args.runMetadata["resolvedFromSubdir"] === true
+        ? true
+        : undefined,
+      explicitSubproject: args.runMetadata["explicitSubproject"] === true
+        ? true
+        : undefined,
     },
   });
 
@@ -700,6 +711,15 @@ async function runOneRed(args: {
       routeReceipt: redRouteReceipt,
       suggestCount: redSuggestCount,
       forceCount: redForceCount,
+      invocationCwd: typeof args.runMetadata["invocationCwd"] === "string"
+        ? args.runMetadata["invocationCwd"]
+        : undefined,
+      resolvedFromSubdir: args.runMetadata["resolvedFromSubdir"] === true
+        ? true
+        : undefined,
+      explicitSubproject: args.runMetadata["explicitSubproject"] === true
+        ? true
+        : undefined,
     },
   });
 
@@ -1121,6 +1141,15 @@ async function runFanoutChild(args: {
       routeReceipt: fcRouteReceipt,
       suggestCount: fcSuggestCount,
       forceCount: fcForceCount,
+      invocationCwd: typeof args.runMetadata["invocationCwd"] === "string"
+        ? args.runMetadata["invocationCwd"]
+        : undefined,
+      resolvedFromSubdir: args.runMetadata["resolvedFromSubdir"] === true
+        ? true
+        : undefined,
+      explicitSubproject: args.runMetadata["explicitSubproject"] === true
+        ? true
+        : undefined,
     },
   });
 
@@ -1179,6 +1208,11 @@ async function runContainer(args: {
     routeReceipt?: Record<string, unknown>;
     suggestCount: number;
     forceCount: number;
+    // FG-374: project-mount provenance from the originating CLI invocation.
+    // Optional/legacy-safe: runs created before FG-374 omit these.
+    invocationCwd?: string;
+    resolvedFromSubdir?: boolean;
+    explicitSubproject?: boolean;
   };
 }): Promise<ContainerOutcome> {
   const dir = taskDir(args.runId, args.taskId);
@@ -1353,6 +1387,9 @@ async function runContainer(args: {
       },
       mountMode: args.projectMode,
       projectDir: args.projectDir,
+      ...(cp.invocationCwd !== undefined ? { invocationCwd: cp.invocationCwd } : {}),
+      ...(cp.resolvedFromSubdir !== undefined ? { resolvedFromSubdir: cp.resolvedFromSubdir } : {}),
+      ...(cp.explicitSubproject !== undefined ? { explicitSubproject: cp.explicitSubproject } : {}),
       warnings: allWarnings.length > 0 ? allWarnings : undefined,
     });
   }
@@ -1386,6 +1423,17 @@ async function runContainer(args: {
     dockerArgs = buildDockerArgs(runtime, spawnCtx);
   } catch (e) {
     const msg = `buildDockerArgs failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
+    return { kind: "failed", error: msg };
+  }
+
+  // FG-374: verify the resolved projectDir is a non-empty directory before
+  // exec'ing — mirrors the same guard in invoke.ts.
+  try {
+    preflightProjectMount(args.projectDir);
+  } catch (e) {
+    const msg = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
     failTask(args.taskId, { runId: args.runId, kind: classify({}), error: msg });
     return { kind: "failed", error: msg };
