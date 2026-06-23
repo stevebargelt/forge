@@ -50,7 +50,7 @@ test("integ check-agent-diff: dirty fixture → --json output is { clean: false 
   mkdirSync(join(projectDir, "node_modules", "@forge", "fake"), { recursive: true });
 
   const result = runCheckAgentDiff(["--json", "--project", projectDir]);
-  assert.equal(result.status, 0, `CLI exited non-zero: ${result.stderr}`);
+  assert.equal(result.status, 1, `CLI must exit 1 for dirty scan: ${result.stderr}`);
 
   // JSON must parse cleanly
   let parsed: { clean: boolean; flags: Array<{ kind: string; path: string; detail: string }> };
@@ -93,6 +93,26 @@ test("integ check-agent-diff: clean fixture → --json output is { clean: true, 
   assert.deepEqual(parsed!.flags, [], "flags must be empty for a clean fixture");
 });
 
+// ── --no-fail advisory mode ───────────────────────────────────────────────────
+
+test("integ check-agent-diff: dirty fixture + --no-fail → exit 0 but flags still reported in JSON", () => {
+  execSync("git init -q", { cwd: projectDir, stdio: "pipe" });
+  writeFileSync(join(projectDir, "package.json"), '{"name":"test-fixture"}');
+  execSync("git add package.json", { cwd: projectDir, stdio: "pipe" });
+  mkdirSync(join(projectDir, "node_modules", "@forge", "fake"), { recursive: true });
+
+  const result = runCheckAgentDiff(["--json", "--no-fail", "--project", projectDir]);
+  assert.equal(result.status, 0, `--no-fail must force exit 0: ${result.stderr}`);
+
+  let parsed: { clean: boolean; flags: Array<{ kind: string; path: string; detail: string }> };
+  assert.doesNotThrow(() => {
+    parsed = JSON.parse(result.stdout) as typeof parsed;
+  }, "output must be valid JSON even in advisory mode");
+
+  assert.equal(parsed!.clean, false, "clean must still be false in advisory mode");
+  assert.ok(parsed!.flags.length > 0, "flags must still be reported in advisory mode");
+});
+
 // ── --project scoping ─────────────────────────────────────────────────────────
 
 test("integ check-agent-diff: --project <dir> scopes the scan to the named directory, not cwd", () => {
@@ -103,7 +123,7 @@ test("integ check-agent-diff: --project <dir> scopes the scan to the named direc
 
     // Run FROM the clean projectDir but point --project at dirtyDir → dirty result
     const dirtyResult = runCheckAgentDiff(["--json", "--project", dirtyDir], projectDir);
-    assert.equal(dirtyResult.status, 0, `CLI failed for dirty dir: ${dirtyResult.stderr}`);
+    assert.equal(dirtyResult.status, 1, `CLI must exit 1 for dirty dir: ${dirtyResult.stderr}`);
     const dirtyParsed = JSON.parse(dirtyResult.stdout) as { clean: boolean; flags: Array<{ kind: string }> };
     assert.equal(dirtyParsed.clean, false, "--project must scope scan to dirtyDir, which has a shim");
     assert.ok(

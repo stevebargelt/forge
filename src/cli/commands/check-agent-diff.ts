@@ -22,18 +22,23 @@ export function registerCheckAgentDiff(program: Command): void {
   program
     .command("check-agent-diff")
     .description(
-      "Inspect a project for environment fabrication signatures (forge_shim, dependency_surgery, stub_module). Read-only — never mutates.",
+      "Inspect a project for environment fabrication signatures (forge_shim, dependency_surgery, stub_module). Exits non-zero when fabrication flags are found (use --no-fail for advisory mode). Read-only — never mutates.",
     )
     .option("--project <dir>", "project directory to inspect (default: cwd)")
     .option("--json", "emit structured { clean, flags } as JSON")
-    .action((opts: { project?: string; json?: boolean }) => {
+    .option("--no-fail", "exit 0 even when flags are found (advisory/reporting mode)")
+    .action((opts: { project?: string; json?: boolean; fail: boolean }) => {
       const projectDir = resolve(opts.project ?? process.cwd());
       const result = detectEnvFabrication(projectDir);
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
-        return;
+      } else {
+        console.log(renderHuman(result));
       }
-      console.log(renderHuman(result));
+
+      if (!result.clean && opts.fail) {
+        process.exitCode = 1;
+      }
     });
 }
