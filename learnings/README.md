@@ -40,6 +40,7 @@ learnings/
 | FORGE-DEC-017 | 2026-05-08 | [`awaiting_red` task status](decisions/2026-05-08_awaiting-red-status.md) |
 | FORGE-DEC-020 | 2026-06-20 | [Remove `awaiting_human_input` task status](decisions/2026-06-20_remove-awaiting-human-input-status.md) *(supersedes FORGE-DEC-016)* |
 | FORGE-DEC-021 | 2026-06-20 | [Remove TaskContract feature (AWN-4 phase 1, closes FG-223 unbuilt)](decisions/2026-06-20_remove-taskcontract-feature.md) |
+| FORGE-DEC-022 | 2026-06-23 | [Resolve project mount root on invoke/new; hard-fail on suspicious subdir mounts (FG-374)](decisions/2026-06-23_project-mount-root-resolution.md) |
 
 ## Patterns index
 

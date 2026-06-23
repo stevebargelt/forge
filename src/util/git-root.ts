@@ -8,8 +8,12 @@ import { dirname, join, parse } from "node:path";
 //
 // Project IDENTITY is the repo root: a monorepo subdir like
 // `.../wnba-led-scoreboard/web-admin` takes the repo's name, and runs dispatched
-// against subdirs roll up under one project. This does NOT change a run's
-// projectDir (the mount target) — only how projects are labeled/grouped.
+// against subdirs roll up under one project.
+//
+// FG-374 (was FG-359): this root IS now also the mount target (projectDir) for
+// implicit invocations from a subdir. resolveProjectMount() in
+// src/util/resolve-project-mount.ts owns that decision; this function is the
+// pure filesystem walk it calls.
 export function findGitRoot(startDir: string): string {
   let dir = startDir;
   const fsRoot = parse(dir).root;

@@ -36,7 +36,7 @@ import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
-import { buildDockerArgs, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
 import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
@@ -70,6 +70,13 @@ export type InvokeArgs = {
   /** FG-350: resolved route key (from `forge route explain`), recorded in the
    *  control-plane receipt so explain views can show dispatch-time routing. */
   routeKey?: string;
+  /** FG-374: directory forge was invoked from (recorded in the control-plane
+   *  receipt; may differ from projectDir when resolved up from a subdir). */
+  invocationCwd?: string;
+  /** FG-374: true when projectDir was resolved up from a monorepo subdir. */
+  resolvedFromSubdir?: boolean;
+  /** FG-374: true when --allow-subproject was passed to intentionally mount a subdir. */
+  explicitSubproject?: boolean;
   // Injected for tests; real callers leave undefined → docker is used.
   dockerExec?: DockerExecFn;
 };
@@ -368,6 +375,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     constraints: { dir: constraintsDir, suggestCount, forceCount },
     mountMode: args.readOnlyProject ? "ro" : "rw",
     projectDir: args.projectDir,
+    ...(args.invocationCwd !== undefined ? { invocationCwd: args.invocationCwd } : {}),
+    ...(args.resolvedFromSubdir !== undefined ? { resolvedFromSubdir: args.resolvedFromSubdir } : {}),
+    ...(args.explicitSubproject !== undefined ? { explicitSubproject: args.explicitSubproject } : {}),
     warnings: receiptWarnings.length > 0 ? receiptWarnings : undefined,
   });
 
@@ -415,6 +425,18 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     dockerArgs = buildDockerArgs(runtime, ctx);
   } catch (e) {
     const error = `buildDockerArgs failed: ${(e as Error).message}`;
+    cleanupStagedAuth(dir); // AWN-8
+    failTask(taskId, { runId, kind: classify({}), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
+
+  // FG-374: verify the resolved projectDir has expected project markers before
+  // exec'ing — a broken mount wastes agent tokens on a bare directory.
+  try {
+    preflightProjectMount(args.projectDir);
+  } catch (e) {
+    const error = `preflightProjectMount failed: ${(e as Error).message}`;
     cleanupStagedAuth(dir); // AWN-8
     failTask(taskId, { runId, kind: classify({}), error });
     closeRunIfIdle(false);

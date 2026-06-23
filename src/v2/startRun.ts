@@ -47,6 +47,10 @@ export type StartRunArgs = {
   /** FG-350: provenance of the workflow file (host or project, with path). When
    *  provided, stored as workflowReceipt in run metadata. */
   workflowSource?: { source: "host" | "project"; path: string };
+  /** FG-374: directory forge was invoked from (recorded for provenance). */
+  invocationCwd?: string;
+  /** FG-374: true when --allow-subproject was passed. */
+  explicitSubproject?: boolean;
 };
 
 export type StartRunResult = {
@@ -70,6 +74,8 @@ export const CONTROL_PLANE_METADATA_KEYS = [
   "reportOutputPath",
   "routeReceipt",
   "workflowReceipt",
+  "invocationCwd",      // FG-374
+  "explicitSubproject", // FG-374
 ] as const;
 
 export function startRun(args: StartRunArgs): StartRunResult {
@@ -89,6 +95,8 @@ export function startRun(args: StartRunArgs): StartRunResult {
   if (args.authProfile) metadata["authProfile"] = args.authProfile;
   if (args.modelProfile) metadata["modelProfile"] = args.modelProfile;
   if (args.tags && args.tags.length > 0) metadata["tags"] = args.tags;
+  if (args.invocationCwd) metadata["invocationCwd"] = args.invocationCwd;
+  if (args.explicitSubproject) metadata["explicitSubproject"] = args.explicitSubproject;
 
   if (args.routeKey !== undefined) {
     const resolved = resolvePolicyPath(args.projectDir);

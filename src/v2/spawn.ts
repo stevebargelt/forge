@@ -294,6 +294,21 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   return { args, stdin };
 }
 
+// FG-374: verify that the resolved projectDir has at least one expected project
+// marker before exec'ing the container. A missing marker indicates the mount
+// would land a broken or unexpected directory at /project, wasting agent tokens.
+// Call this just before exec — after buildDockerArgs succeeds.
+export function preflightProjectMount(projectDir: string): void {
+  const hasGit = existsSync(join(projectDir, ".git"));
+  const hasPkg = existsSync(join(projectDir, "package.json"));
+  if (!hasGit && !hasPkg) {
+    throw new Error(
+      `project mount preflight failed: ${projectDir} has no .git or package.json — ` +
+        `verify the correct project directory is mounted at /project`
+    );
+  }
+}
+
 // Exported for tests so we can assert env-pairs and mount-pairs.
 export const _internal = {
   buildDockerArgs,

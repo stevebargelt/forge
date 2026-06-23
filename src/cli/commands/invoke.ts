@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ensureForgeDirs } from "../../util/paths.js";
+import { resolveProjectMount } from "../../util/resolve-project-mount.js";
 import { invoke } from "../../v2/invoke.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 
@@ -25,6 +26,7 @@ export function registerInvoke(program: Command): void {
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
     .option("--unrouted", "#297: acknowledge an intentionally unrouted dispatch (suppress the route-preflight warning)")
     .option("--json", "emit the result.json verbatim to stdout instead of a human-readable summary")
+    .option("--allow-subproject", "FG-374: intentionally mount a subdir of a git repo (normally an error in automation)")
     .action(async (agentRole: string, opts: {
       task?: string;
       taskFile?: string;
@@ -41,6 +43,7 @@ export function registerInvoke(program: Command): void {
       route?: string;
       unrouted?: boolean;
       json?: boolean;
+      allowSubproject?: boolean;
     }) => {
       ensureForgeDirs();
 
@@ -50,7 +53,16 @@ export function registerInvoke(program: Command): void {
         throw new Error("provide --task <text> or --task-file <path>");
       }
 
-      const projectDir = resolve(opts.project ?? process.cwd());
+      // FG-374: resolve the project mount root; hard-fail on suspicious subdir mounts.
+      const { projectDir, invocationCwd, resolvedFromSubdir, explicitSubproject } = resolveProjectMount(
+        opts.project,
+        {
+          isTTY: process.stdout.isTTY ?? false,
+          json: opts.json ?? false,
+          allowSubproject: opts.allowSubproject ?? false,
+        }
+      );
+
       if (!existsSync(projectDir)) {
         throw new Error(`project dir does not exist: ${projectDir}`);
       }
@@ -80,6 +92,9 @@ export function registerInvoke(program: Command): void {
         runId: opts.run,
         runTitle: opts.runTitle,
         workspace,
+        invocationCwd,
+        resolvedFromSubdir,
+        explicitSubproject,
       });
 
       if (opts.json) {

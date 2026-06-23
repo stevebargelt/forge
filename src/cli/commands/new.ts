@@ -2,6 +2,7 @@ import type { Command } from "commander";
 import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { ensureForgeDirs, expandTildePath } from "../../util/paths.js";
+import { resolveProjectMount } from "../../util/resolve-project-mount.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
@@ -27,13 +28,23 @@ export function registerNew(program: Command): void {
     .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
     .option("--unrouted", "#297: acknowledge an intentionally unrouted run (suppress the route-preflight warning)")
+    .option("--allow-subproject", "FG-374: intentionally mount a subdir of a git repo (normally an error in automation)")
     .option("--tag <tag>", "FG-28: tag this run for constraint scoping; repeat to add multiple tags (e.g. --tag ios --tag mobile)", (val: string, acc: string[]) => [...acc, val], [] as string[])
     .option("--out <path>", "research-synthesis: write the final report to this path instead of <project>/research/<slug>.md")
     .description("Create a new workflow run (v2 YAML-driven)")
     .action(async (workflowName: string, title: string, options) => {
       ensureForgeDirs();
 
-      const projectDir = expandTildePath((options as { project?: string }).project ?? process.cwd());
+      // FG-374: resolve the project mount root; hard-fail on suspicious subdir mounts.
+      // new.ts has no --json flag; isTTY determines interactive vs automation path.
+      const { projectDir, invocationCwd, explicitSubproject } = resolveProjectMount(
+        (options as { project?: string }).project,
+        {
+          isTTY: process.stdout.isTTY ?? false,
+          json: false,
+          allowSubproject: (options as { allowSubproject?: boolean }).allowSubproject ?? false,
+        }
+      );
       const workspace = expandTildePath((options as { workspace?: string }).workspace ?? process.cwd());
 
       // #297: route-resolution preflight FIRST — before any credential/Docker work.
@@ -107,6 +118,8 @@ export function registerNew(program: Command): void {
         workspace,
         authProfile,
         modelProfile,
+        invocationCwd,
+        explicitSubproject,
         ...(tags.length > 0 ? { tags } : {}),
       });
 

@@ -48,6 +48,12 @@ export type ControlPlaneReceipt = {
   projectDir: string;
   /** Mount mode for the project directory at dispatch: ro = read-only (reds), rw = read-write (primary/fanout). */
   mountMode: "rw" | "ro";
+  /** FG-374: directory forge was invoked from (may differ from projectDir when resolved from a subdir). */
+  invocationCwd?: string;
+  /** FG-374: true when projectDir was resolved up from a subdir (implicit invocation from within a monorepo). */
+  resolvedFromSubdir?: boolean;
+  /** FG-374: true when --allow-subproject was passed to intentionally mount a subdir. */
+  explicitSubproject?: boolean;
   /** Non-fatal issues encountered while building this receipt (e.g. routing lookup failed). */
   warnings?: string[];
 };
@@ -61,6 +67,9 @@ export type ControlPlaneReceiptInputs = {
   constraints: ControlPlaneReceipt["constraints"];
   mountMode: ControlPlaneReceipt["mountMode"];
   projectDir: string;
+  invocationCwd?: string;
+  resolvedFromSubdir?: boolean;
+  explicitSubproject?: boolean;
   warnings?: string[];
 };
 
@@ -78,6 +87,15 @@ export function manifestControlPlaneBlock(inputs: ControlPlaneReceiptInputs): Co
   };
   if (inputs.routing !== undefined) {
     receipt.routing = inputs.routing;
+  }
+  if (inputs.invocationCwd !== undefined) {
+    receipt.invocationCwd = inputs.invocationCwd;
+  }
+  if (inputs.resolvedFromSubdir !== undefined) {
+    receipt.resolvedFromSubdir = inputs.resolvedFromSubdir;
+  }
+  if (inputs.explicitSubproject !== undefined) {
+    receipt.explicitSubproject = inputs.explicitSubproject;
   }
   if (inputs.warnings !== undefined && inputs.warnings.length > 0) {
     receipt.warnings = inputs.warnings;

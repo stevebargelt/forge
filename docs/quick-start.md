@@ -126,7 +126,7 @@ Next:
   forge next run-add-login-7c2a91
 ```
 
-`forge new` records the current directory as the run's `projectDir`. Agent containers will mount it at `/project` (read-write for engineers, read-only for reds). You can override with `--project <dir>` if you want to drive a run for a different repo from your current cwd.
+`forge new` resolves the project mount root before launching any container. When run from inside a git repo, it walks up to the repo root and mounts that (with an informational notice). Agent containers then see the full repo at `/project` (read-write for engineers, read-only for reds). Override with `--project <dir>` to target a specific directory; if that directory is a subdir of a git repo, pass `--allow-subproject` to suppress the automation hard-fail. See FORGE-DEC-022 for the full resolution policy.
 
 ## 6. Dispatch the first phase
 

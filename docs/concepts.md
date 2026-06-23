@@ -10,7 +10,15 @@ Example: `forge new research-synthesis "litellm-eval" --question "Does LiteLLM s
 
 ## Project
 
-The directory mounted at `/project` in the agent container. Recorded on each run as `runs.project_dir`. Defaults to the cwd at `forge new` / `forge invoke` time; override with `--project <dir>`. Implementer agents see it read-write; red agents see it read-only at the OS level (FORGE-DEC-006).
+The directory mounted at `/project` in the agent container. Recorded on each run as `runs.project_dir`. Implementer agents see it read-write; red agents see it read-only at the OS level (FORGE-DEC-006).
+
+On `forge new` / `forge invoke`, forge resolves the mount target before launching any container (FG-374, FORGE-DEC-022):
+
+- **Not inside a git repo** — mounts cwd (or `--project <dir>`) unchanged.
+- **Inside a git repo, no `--project` flag** — resolves up to the repo root (requires `.forge` or `package.json` there); prints an informational notice. Hard-fails if no confident root is found.
+- **`--project <subdir>` pointing inside a git repo** — hard-fails in automation (no TTY or `--json`); warns-and-honors in interactive sessions. Pass `--allow-subproject` to override in both contexts.
+
+Override with `--project <dir>` to target a different repo from your cwd. Pass `--allow-subproject` when you intentionally want a subdir mount (records `explicitSubproject: true` in the task manifest).
 
 Example: a run created via `cd ~/code/my-app && forge new feature "add login" --brief "..."` has `projectDir = /Users/you/code/my-app`. Every container spawned for that run mounts that path at `/project`.
 
