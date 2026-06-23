@@ -848,3 +848,268 @@ test("FG-368: anyFailed — fanout child failure with parent completing doesn't 
   const naiveAnyFailed = tasksAfterWave2.some((t) => t.status === "failed");
   assert.ok(naiveAnyFailed, "sanity: at least one task (a child) is failed, naive check confirms the fix matters");
 });
+
+// ---------------------------------------------------------------------------
+// FG-371: forward requestedChanges into fanout retry children
+// ---------------------------------------------------------------------------
+
+test("FG-371: fresh fanout children do NOT receive requestedChanges key", async () => {
+  // A first-time fan-out dispatch (no prior request-changes) must produce children
+  // whose inputs have no requestedChanges key — byte-identical to pre-FG-371.
+  ensureFg364WorkflowYaml();
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const { runId } = startRun({
+    workflow: FG364_WORKFLOW,
+    title: "fg371 fresh fanout — no requestedChanges",
+    inputs: {},
+    projectDir: "/tmp/fg371-test-project",
+  });
+
+  const state = { redRound: 2 }; // reds pass immediately
+  const exec = makeFg364Exec(state);
+
+  await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec }); // plan
+  await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec }); // build → complete (reds pass)
+
+  const freshChildren = tasksForRun(runId).filter(
+    (t) => t.phase === "build" && t.parentId !== undefined && !t.agentRole.startsWith("red-"),
+  );
+  assert.ok(freshChildren.length > 0, "FG-371: fresh build children must exist");
+  for (const child of freshChildren) {
+    assert.ok(
+      !("requestedChanges" in child.taskPackage.inputs),
+      `FG-371: fresh child ${child.id} must NOT have requestedChanges key in inputs`,
+    );
+  }
+});
+
+test("FG-371: request-changes retry children receive parent's requestedChanges rationale", async () => {
+  // After gate(parent, "request-changes", rationale), the next wave of fanout children
+  // must have requestedChanges === rationale in their inputs.
+  ensureFg364WorkflowYaml();
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const RATIONALE = "add comprehensive null-checks per red-wide feedback";
+
+  const { runId } = startRun({
+    workflow: FG364_WORKFLOW,
+    title: "fg371 retry children get requestedChanges",
+    inputs: {},
+    projectDir: "/tmp/fg371-test-project",
+  });
+
+  const state = { redRound: 1 };
+  const exec = makeFg364Exec(state);
+
+  await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec }); // plan
+  await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec }); // build → blocked_by_red
+
+  const blockedParent = tasksForRun(runId).find(
+    (t) => t.phase === "build" && t.parentId === undefined && t.status === "blocked_by_red",
+  )!;
+  assert.ok(blockedParent, "FG-371: build parent must be blocked_by_red after round 1");
+
+  await gate(blockedParent.id, "request-changes", RATIONALE, { force: true });
+
+  // Retry with passing reds.
+  state.redRound = 2;
+  await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec }); // build retry
+
+  const newParent = tasksForRun(runId).find(
+    (t) => t.phase === "build" && t.parentId === undefined && t.status === "complete",
+  )!;
+  assert.ok(newParent, "FG-371: new build parent must be complete after retry");
+
+  const retryChildren = tasksForRun(runId).filter(
+    (t) => t.parentId === newParent.id && !t.agentRole.startsWith("red-"),
+  );
+  assert.ok(retryChildren.length > 0, "FG-371: retry children must exist under the new parent");
+
+  for (const child of retryChildren) {
+    assert.equal(
+      (child.taskPackage.inputs as Record<string, unknown>)["requestedChanges"],
+      RATIONALE,
+      `FG-371: retry child ${child.id} must carry requestedChanges === parent rationale`,
+    );
+  }
+});
+
+test("FG-371: retry-once failure_mode — requestedChanges forwarded to re-dispatched child (second call site)", async () => {
+  // After a request-changes gate, the retry-once path (runNext.ts ~line 913) re-dispatches
+  // any failed child a second time. Both call sites pass requestedChanges.
+  // This test pins the SECOND call site: the re-dispatched (retry-once) child must
+  // also carry requestedChanges in its inputs.
+
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const RETRY_ONCE_WF_NAME = "fg371-retry-once";
+  const RETRY_ONCE_WF: Workflow = {
+    name: RETRY_ONCE_WF_NAME,
+    description: "FG-371: retry-once path forwards requestedChanges",
+    inputs: [],
+    steps: [
+      {
+        id: "plan",
+        agent: "planner",
+        gate: "auto",
+        manual: false,
+        depends_on: [],
+        runtime: "claude",
+        reds: [],
+      },
+      {
+        id: "build",
+        agent: "engineer",
+        gate: "auto",
+        manual: false,
+        depends_on: ["plan"],
+        runtime: "claude",
+        reds: [
+          { agent: "red-wide", authority: "authoritative", gate_on_verdict: true },
+        ],
+        fanout: {
+          from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+          max_concurrency: 4,
+          failure_mode: "retry-once",
+        },
+      },
+    ],
+  };
+
+  // gate() loads the workflow YAML by name — write it so it resolves.
+  const fhome = process.env.FORGE_HOME!;
+  const wfPath = join(fhome, "workflows", `${RETRY_ONCE_WF_NAME}.yml`);
+  if (!existsSync(wfPath)) {
+    mkdirSync(dirname(wfPath), { recursive: true });
+    writeFileSync(
+      wfPath,
+      `name: ${RETRY_ONCE_WF_NAME}
+description: "FG-371: retry-once path forwards requestedChanges"
+inputs: []
+steps:
+  - id: plan
+    agent: planner
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: claude
+    reds: []
+  - id: build
+    agent: engineer
+    gate: auto
+    manual: false
+    depends_on: [plan]
+    runtime: claude
+    reds:
+      - agent: red-wide
+        authority: authoritative
+        gate_on_verdict: true
+    fanout:
+      from_upstream:
+        step: plan
+        array_key: steps
+        input_key: step
+      max_concurrency: 4
+      failure_mode: retry-once
+`,
+    );
+  }
+
+  const RATIONALE = "fix null-pointer per red feedback (retry-once path)";
+
+  const { runId } = startRun({
+    workflow: RETRY_ONCE_WF,
+    title: "fg371 retry-once requestedChanges",
+    inputs: {},
+    projectDir: "/tmp/fg371-retry-once-test",
+  });
+
+  // In wave 2 (redRound=1): children succeed, red fails → blocked_by_red.
+  // In wave 3 (redRound=2): exactly the FIRST build child that runs fails,
+  //   triggering the retry-once re-dispatch. All subsequent calls (including
+  //   the retry) succeed.
+  const state = { redRound: 1, retryChildFailed: false };
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-plan-")) {
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", steps: ["step-a", "step-b"] }));
+      return 0;
+    }
+    if (taskId.startsWith("task-red-build-")) {
+      const result =
+        state.redRound === 1
+          ? { status: "complete", verdict: "fail", confidence: 0.9, findings: [{ severity: "high", summary: "broken", evidence: "x", hypothesis: "y" }] }
+          : { status: "complete", verdict: "pass", confidence: 0.9, findings: [] };
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      return 0;
+    }
+    if (taskId.startsWith("task-build-")) {
+      // In the retry wave (redRound=2), fail exactly the first child so
+      // retry-once fires. The retry and all other children succeed.
+      if (state.redRound === 2 && !state.retryChildFailed) {
+        state.retryChildFailed = true;
+        // exit code 1 + empty result.json (pre-initialized by runContainer) → container_crash → child fails
+        return 1;
+      }
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", diff_summary: "ok", files_modified: [] }));
+      return 0;
+    }
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    return 0;
+  };
+
+  // Wave 1: plan completes.
+  await runNext({ runId, workflow: RETRY_ONCE_WF, dockerExec: exec });
+
+  // Wave 2: build dispatches, children succeed, red FAILS → parent blocked_by_red.
+  await runNext({ runId, workflow: RETRY_ONCE_WF, dockerExec: exec });
+
+  const blockedParent = tasksForRun(runId).find(
+    (t) => t.phase === "build" && t.parentId === undefined && t.status === "blocked_by_red",
+  )!;
+  assert.ok(blockedParent, "FG-371 retry-once: build parent must be blocked_by_red after round 1");
+
+  await gate(blockedParent.id, "request-changes", RATIONALE, { force: true });
+
+  // Wave 3: retry with passing reds; one child fails initially and is re-dispatched
+  // by the retry-once path (runNext.ts second call site).
+  state.redRound = 2;
+  await runNext({ runId, workflow: RETRY_ONCE_WF, dockerExec: exec });
+
+  const newParent = tasksForRun(runId).find(
+    (t) => t.phase === "build" && t.parentId === undefined && t.status === "complete",
+  );
+  assert.ok(newParent, "FG-371 retry-once: new build parent must complete");
+
+  // There must be at least one failed child proving retry-once actually fired.
+  const allBuildChildren = tasksForRun(runId).filter(
+    (t) => t.parentId === newParent!.id && !t.agentRole.startsWith("red-"),
+  );
+  assert.ok(allBuildChildren.length > 0, "FG-371 retry-once: build children must exist under new parent");
+
+  const failedInitialAttempt = allBuildChildren.find((t) => t.status === "failed");
+  assert.ok(
+    failedInitialAttempt,
+    "FG-371 retry-once: at least one child must have failed initially — proves the retry-once call site was exercised",
+  );
+
+  // ALL children — including the initially-failed child and its re-dispatched retry —
+  // must carry requestedChanges in their inputs. This pins both call sites.
+  for (const child of allBuildChildren) {
+    assert.equal(
+      (child.taskPackage.inputs as Record<string, unknown>)["requestedChanges"],
+      RATIONALE,
+      `FG-371 retry-once: child ${child.id} (status=${child.status}) must carry requestedChanges`,
+    );
+  }
+});

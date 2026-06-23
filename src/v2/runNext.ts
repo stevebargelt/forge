@@ -803,6 +803,8 @@ async function dispatchFanoutStep(args: {
     (t) => t.phase === step.id && t.parentId === undefined && t.status === "pending",
   );
   const parentId = existingParent?.id ?? newTaskId(step.id);
+  const rc = existingParent?.taskPackage.inputs["requestedChanges"];
+  const requestedChanges = typeof rc === "string" ? rc : undefined;
 
   // Defense-in-depth: if a running/awaiting_red primary already has fan-out
   // children, this is a re-entrant dispatch (computeReadyQueue can be tricked by
@@ -897,6 +899,7 @@ async function dispatchFanoutStep(args: {
         designDir: args.designDir,
         runMetadata: args.runMetadata,
         dockerExec: args.dockerExec,
+        requestedChanges,
       })),
     );
     childOutcomes.push(...results);
@@ -922,6 +925,7 @@ async function dispatchFanoutStep(args: {
           designDir: args.designDir,
           runMetadata: args.runMetadata,
           dockerExec: args.dockerExec,
+          requestedChanges,
         })),
       );
       // Replace failed outcomes with retry outcomes.
@@ -1011,6 +1015,7 @@ async function runFanoutChild(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  requestedChanges?: string;
 }): Promise<ChildOutcome> {
   const step = args.step;
   const agentRole = resolveChildAgent(step, args.fanout, args.value);
@@ -1031,6 +1036,9 @@ async function runFanoutChild(args: {
     [inputKey]: args.value,
     fanoutIndex: args.index,
   };
+  if (args.requestedChanges) {
+    childInputs["requestedChanges"] = args.requestedChanges;
+  }
   for (const key of CONTROL_PLANE_METADATA_KEYS) delete childInputs[key];
   const taskPackage: TaskPackage = {
     taskId: childTaskId,
