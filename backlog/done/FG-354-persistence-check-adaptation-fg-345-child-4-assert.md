@@ -1,9 +1,10 @@
 ---
 id: FG-354
 type: story
-status: active
+status: done
 title: "persistence-check adaptation (FG-345 child 4): assert files_modified under the worktree path, not run.projectDir"
 created: 2026-06-22
+closed: 2026-06-23
 ---
 
 **Parent:** FG-345. **Depends on:** FG-351 (needs Task.worktreePath). **Sequence tightly with FG-351** — without this, every worktree rw agent false-positives as "work not persisted."
