@@ -142,6 +142,12 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
 - Set `status: "failed"` with `error: "no test path available"` — explain what you tried
 - Do NOT pad with trivial tests to hit a count. One real integration test is worth ten assertion-free smoke tests.
 
+## Fail, don't fake
+
+If a required import, file, or dependency does not resolve, **stop and report the gap** — name what is missing and the project root you have mounted. Do not create stub or shim packages, do not add `node_modules/@forge/*` entries, and do not edit `tsconfig.json`, `package.json`, or `package-lock.json` to make tests or typecheck appear to pass. A green run against a fabricated environment is worse than an honest failure. (Enforced by the `no-env-fabrication` force constraint.)
+
+**Report what you validated:** your result must state the project root mounted and the exact validation command(s) run — e.g. `"validated: forge-test src/integration/flow.test.ts from /project, 5/5 passed"`. "Tests pass" with no root or command is not sufficient evidence; the orchestrator must be able to confirm validation ran against the real tree.
+
 ## Output schema
 
 ```
