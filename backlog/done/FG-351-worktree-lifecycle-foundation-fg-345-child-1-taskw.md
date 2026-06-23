@@ -1,9 +1,10 @@
 ---
 id: FG-351
 type: story
-status: active
+status: done
 title: "Worktree lifecycle foundation (FG-345 child 1): Task.worktreePath, create/remove, platform/non-git/dirty gates, branch naming, PROJECT_DIR substitution"
 created: 2026-06-22
+closed: 2026-06-23
 ---
 
 **Parent:** FG-345 (worktrees for all agents). **First child — foundation; everything else depends on this.** **No dependency.**
