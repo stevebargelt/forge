@@ -19,6 +19,7 @@ Navigation tabs:
 - **usage** — token usage rollup and time-series, grouped by role / workflow / project / model.
 - **ops** — operational metrics rollup.
 - **governance** — effective routing policy, host-vs-project diff, recent audit.
+- **backlog** — read-only view of the selected project's backlog: session-handoff notes and ticket list (grouped by type: epic / story / idea), filterable by type and status, searchable by title and body. Requires a project to be selected. Mutations (create, close, move tickets) remain on the `forge backlog` CLI.
 
 Click any activity card to see the full result.json + container stdout + related verdicts/gates.
 
@@ -28,6 +29,7 @@ The server exposes read-only JSON endpoints at `http://127.0.0.1:8024/api/…`. 
 
 - **`/api/feed`**, **`/api/in-flight`**, **`/api/projects`**, **`/api/task/:id`** — core activity data
 - **`/api/usage`**, **`/api/usage/timeseries`**, **`/api/usage/model-mix`** — token usage metrics
+- **`/api/backlog`** — returns `{ notes, tickets }` for `?projectDir=<dir>`; reads `<projectDir>/backlog/notes.md` and the structured ticket files. Returns `{ notes: "", tickets: [] }` when `projectDir` is absent or the backlog directory does not exist. Read-only.
 
 All metrics endpoints accept `?since=30d&projectDir=/path` query params. Full parameter and response-shape reference: `docs/SCHEMA-CONTRACT.md`.
 

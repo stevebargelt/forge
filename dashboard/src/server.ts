@@ -11,11 +11,12 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance } from "./queries.js";
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
+import { listTickets } from "@forge/backlog";
 
 const PORT = Number(process.env.PORT ?? 8024);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -23,7 +24,7 @@ const HOST = process.env.HOST ?? "127.0.0.1";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = resolve(HERE, "..", "client");
 
-const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+export const server = createServer((req: IncomingMessage, res: ServerResponse) => {
   try {
     handle(req, res);
   } catch (e) {
@@ -98,6 +99,19 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     // host-vs-project diff, drift/uncompiled/invalid warnings, and recent audit.
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(routingGovernance(projectDir)));
+    return;
+  }
+
+  if (path === "/api/backlog") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    if (!projectDir) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes: "", tickets: [] }));
+      return;
+    }
+    const notesPath = join(projectDir, "backlog", "notes.md");
+    const notes = existsSync(notesPath) ? readFileSync(notesPath, "utf8") : "";
+    const tickets = listTickets(projectDir);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ notes, tickets }));
     return;
   }
 

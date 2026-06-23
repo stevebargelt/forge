@@ -6,6 +6,7 @@ import htm from "https://esm.sh/htm@3.1.1";
 import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
+import { BacklogView } from "./backlog.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -33,6 +34,7 @@ function App() {
   const [ops, setOps] = useState(null);
   const [opsSince, setOpsSince] = useState("30d");
   const [governance, setGovernance] = useState(null);
+  const [backlog, setBacklog] = useState(null);
 
   const poll = useCallback(async () => {
     try {
@@ -114,6 +116,23 @@ function App() {
     return () => clearInterval(id);
   }, [pollGovernance, view]);
 
+  const pollBacklog = useCallback(async () => {
+    if (!projectFilter) { setBacklog(null); return; }
+    try {
+      const q = `?projectDir=${encodeURIComponent(projectFilter.projectDir)}`;
+      const res = await fetch(`/api/backlog${q}`);
+      if (res.ok) setBacklog(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, [projectFilter]);
+
+  useEffect(() => {
+    if (view !== "backlog") return;
+    pollBacklog();
+    const id = setInterval(pollBacklog, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollBacklog, view]);
+
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -141,6 +160,7 @@ function App() {
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>governance</button>
+            <button class=${"tab " + (view === "backlog" ? "tab-active" : "")} onClick=${() => switchView("backlog")}>backlog</button>
           </nav>
         </h1>
         <div class="muted mono">${new Date(now).toLocaleTimeString()}</div>
@@ -152,6 +172,8 @@ function App() {
         ? html`<${ProjectsView} projects=${projects} onPick=${filterByProject} />`
         : view === "governance"
         ? html`<${GovernanceView} data=${governance} />`
+        : view === "backlog"
+        ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
         : view === "ops"
         ? html`<${OpsView} data=${ops} since=${opsSince} onSinceChange=${setOpsSince} />`
         : view === "usage"
@@ -199,6 +221,7 @@ function initialView() {
   if (h === "usage") return "usage";
   if (h === "ops") return "ops";
   if (h === "governance") return "governance";
+  if (h === "backlog") return "backlog";
   return "activity";
 }
 

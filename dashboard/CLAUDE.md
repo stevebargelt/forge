@@ -4,10 +4,11 @@ The forge dashboard workspace. Read-only view of `~/.forge/forge.db` plus an HTT
 
 ## Layout
 
-- `src/server.ts` — HTTP server (~100 LoC). Routes the API + serves the shell.
+- `src/server.ts` — HTTP server (~200 LoC). Routes the API + serves the shell.
 - `src/queries.ts` — `better-sqlite3` reads against `~/.forge/forge.db`. Row types imported from `@forge/types` (forge's `src/types/index.ts`); schema drift surfaces as a TypeScript error here.
 - `src/shell.ts` — the HTML shell + CSS (template literals).
 - `client/main.js`, `client/renderers.js` — browser JS, served as static files (no build, no bundling).
+- `client/backlog.js` — read-only backlog view (tab: "backlog"); mirrors `/api/backlog`. No writes.
 - `design/` — Pencil design corpus (`dashboard.pen` + PNG exports).
 
 ## Run

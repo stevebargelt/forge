@@ -1,0 +1,170 @@
+// Integration tests for GET /api/backlog (FG-363 Dashboard Backlog Viewer).
+//
+// Boots the real dashboard HTTP server on a dedicated test port, exercises the
+// route with a real fixture backlog, and confirms read-only behaviour.
+//
+// Mirrors the harness in queries-ops.test.ts: env vars set before import,
+// dynamic server import, real fixture filesystem, HTTP assertions.
+
+import { after, test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  statSync,
+  readdirSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listTickets } from "@forge/backlog";
+
+const TEST_PORT = 18764;
+const BASE = `http://127.0.0.1:${TEST_PORT}`;
+
+// --- env must be set before server.ts is evaluated (module-level reads) ---
+const tmpHome = mkdtempSync(join(tmpdir(), "forge-backlog-rt-"));
+process.env.FORGE_HOME = tmpHome;
+process.env.PORT = String(TEST_PORT);
+process.env.HOST = "127.0.0.1";
+
+// --- fixture project: real backlog/ with notes + epic/story/idea tickets ---
+const fixtureDir = mkdtempSync(join(tmpdir(), "forge-backlog-fx-"));
+mkdirSync(join(fixtureDir, "backlog", "epics"), { recursive: true });
+mkdirSync(join(fixtureDir, "backlog", "stories"), { recursive: true });
+mkdirSync(join(fixtureDir, "backlog", "ideas"), { recursive: true });
+
+writeFileSync(
+  join(fixtureDir, "backlog", "notes.md"),
+  "# Session handoff\n\nSome notes here.\n",
+);
+writeFileSync(
+  join(fixtureDir, "backlog", "epics", "FG-100-test-epic.md"),
+  "---\nid: FG-100\ntype: epic\nstatus: active\ntitle: Test Epic\n---\nEpic body.\n",
+);
+writeFileSync(
+  join(fixtureDir, "backlog", "stories", "FG-101-test-story.md"),
+  "---\nid: FG-101\ntype: story\nstatus: active\ntitle: Test Story\nepic: FG-100\n---\nStory body.\n",
+);
+writeFileSync(
+  join(fixtureDir, "backlog", "ideas", "FG-102-test-idea.md"),
+  "---\nid: FG-102\ntype: idea\nstatus: active\ntitle: Test Idea\n---\nIdea body.\n",
+);
+
+// --- start the real server (side-effect import; reads PORT from env) ---
+const { server } = await import("./server.js");
+
+after(() => {
+  server.closeAllConnections?.();
+  server.close();
+});
+
+async function waitForServer(ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`${BASE}/`);
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 40));
+    }
+  }
+  throw new Error(`Server on port ${TEST_PORT} did not start within ${ms}ms`);
+}
+
+await waitForServer();
+
+// ---- helpers ----
+
+async function getBacklog(params: string): Promise<{ notes: string; tickets: Array<Record<string, unknown>> }> {
+  const res = await fetch(`${BASE}/api/backlog${params}`);
+  assert.equal(res.status, 200, `Expected 200, got ${res.status} for /api/backlog${params}`);
+  return res.json() as Promise<{ notes: string; tickets: Array<Record<string, unknown>> }>;
+}
+
+// ---- tests ----
+
+test("GET /api/backlog: returns 200 with notes and tickets for a real backlog", async () => {
+  const body = await getBacklog(`?projectDir=${encodeURIComponent(fixtureDir)}`);
+  assert.ok(body.notes.includes("Session handoff"), "notes must include fixture content");
+  assert.ok(Array.isArray(body.tickets), "tickets must be an array");
+  assert.ok(body.tickets.length >= 3, `expected >=3 tickets, got ${body.tickets.length}`);
+});
+
+test("GET /api/backlog: ticket set matches listTickets() — dashboard and CLI agree", async () => {
+  const body = await getBacklog(`?projectDir=${encodeURIComponent(fixtureDir)}`);
+  const direct = listTickets(fixtureDir);
+
+  assert.equal(
+    body.tickets.length,
+    direct.length,
+    `HTTP returned ${body.tickets.length} tickets; listTickets() returned ${direct.length}`,
+  );
+
+  const httpIds = new Set(body.tickets.map((t) => t["id"]));
+  const directIds = new Set(direct.map((t) => t.id));
+  assert.deepEqual(
+    [...httpIds].sort(),
+    [...directIds].sort(),
+    "ticket IDs from /api/backlog and listTickets() must match",
+  );
+});
+
+test("GET /api/backlog: tickets include epic, story, and idea types", async () => {
+  const { tickets } = await getBacklog(`?projectDir=${encodeURIComponent(fixtureDir)}`);
+  const types = new Set(tickets.map((t) => t["type"]));
+  assert.ok(types.has("epic"), "expected an epic ticket");
+  assert.ok(types.has("story"), "expected a story ticket");
+  assert.ok(types.has("idea"), "expected an idea ticket");
+});
+
+test("GET /api/backlog: story ticket carries epic field when set in frontmatter", async () => {
+  const { tickets } = await getBacklog(`?projectDir=${encodeURIComponent(fixtureDir)}`);
+  const story = tickets.find((t) => t["id"] === "FG-101");
+  assert.ok(story, "FG-101 story not found in response");
+  assert.equal(story!["epic"], "FG-100", "story must carry its epic field");
+});
+
+test("GET /api/backlog: absent backlog dir → 200 with empty notes and tickets, not 500", async () => {
+  const emptyDir = mkdtempSync(join(tmpdir(), "forge-no-backlog-"));
+  const res = await fetch(`${BASE}/api/backlog?projectDir=${encodeURIComponent(emptyDir)}`);
+  assert.equal(res.status, 200, "absent backlog must return 200, not an error status");
+  const body = (await res.json()) as { notes: string; tickets: unknown[] };
+  assert.equal(body.notes, "", "notes must be empty string for absent backlog");
+  assert.deepEqual(body.tickets, [], "tickets must be empty array for absent backlog");
+});
+
+test("GET /api/backlog: missing projectDir param → 200 with empty payload", async () => {
+  const body = await getBacklog("");
+  assert.equal(body.notes, "", "notes must be empty when projectDir is omitted");
+  assert.deepEqual(body.tickets, [], "tickets must be empty when projectDir is omitted");
+});
+
+test("GET /api/backlog: read-only — no files written to fixture project", async () => {
+  function snapMtimes(dir: string): Map<string, number> {
+    const m = new Map<string, number>();
+    function walk(d: string): void {
+      for (const entry of readdirSync(d, { withFileTypes: true })) {
+        const full = join(d, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else m.set(full, statSync(full).mtimeMs);
+      }
+    }
+    walk(dir);
+    return m;
+  }
+
+  const backlogDir = join(fixtureDir, "backlog");
+  const before = snapMtimes(backlogDir);
+  await fetch(`${BASE}/api/backlog?projectDir=${encodeURIComponent(fixtureDir)}`);
+  const after = snapMtimes(backlogDir);
+
+  assert.deepEqual(
+    [...before.keys()].sort(),
+    [...after.keys()].sort(),
+    "file set must not change after a GET request",
+  );
+  for (const [path, mt] of before) {
+    assert.equal(after.get(path), mt, `${path} was modified — route must be read-only`);
+  }
+});

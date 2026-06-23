@@ -541,4 +541,31 @@ section.usage-section { margin-top: 20px; }
 .gov-table tr:last-child td { border-bottom: none; }
 .gov-route-key { color: var(--fg); }
 .gov-hints { font-size: 11px; margin-top: 2px; max-width: 240px; }
+
+/* #FG-363: backlog view */
+.backlog-view { margin-top: 16px; }
+.backlog-notes { margin-bottom: 20px; }
+.backlog-notes-body { cursor: default; }
+.backlog-controls { margin-bottom: 4px; }
+.backlog-search {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  width: 280px;
+  outline: none;
+}
+.backlog-search:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(122, 159, 255, 0.2); }
+.backlog-search::placeholder { color: var(--fg-faint); }
+.backlog-empty { margin: 24px 0; font-style: italic; }
+.backlog-group { margin-bottom: 24px; }
+.backlog-ticket-card { cursor: pointer; }
+.backlog-ticket-card:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backlog-ticket-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.backlog-type-badge { background: rgba(122, 159, 255, 0.12); color: var(--accent); }
+.backlog-id { user-select: all; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 `;

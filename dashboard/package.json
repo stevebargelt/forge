@@ -7,7 +7,8 @@
   "scripts": {
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test $(find src -name '*.test.ts' -type f)"
+    "test": "tsx --test $(find src -name '*.test.ts' -type f)",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",
