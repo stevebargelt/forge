@@ -21,6 +21,7 @@ import { runNext, type DockerExecFn } from "./runNext.js";
 import { gate } from "./gate.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask, insertTask, setTaskStatus } from "../store/tasks.js";
+import { eventsForRun } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
 import type { Workflow } from "./schema.js";
 
@@ -301,6 +302,15 @@ test("FG-364: fanout request-changes — new pending primary is the live parent 
     "AC-5: docs step must dispatch after build completes",
   );
   assert.equal(wave4.runStatus, "complete", "AC-5: run must reach complete after docs");
+
+  // FG-368: superseded audit-record task must NOT inflate anyFailed.
+  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
+  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
+  assert.equal(
+    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
+    false,
+    "FG-368: anyFailed must be false — superseded failed task must not count",
+  );
 });
 
 test("FG-364: idempotency — repeated runNext after retry completes does not create duplicate build children", async () => {
@@ -647,4 +657,194 @@ test("FG-364: multi-batch fan-out — all children dispatch under new parent acr
     oldChildren.map((t) => t.id).sort(),
     "old parent must have the same children by id — no new distinct children after request-changes",
   );
+});
+
+// ---------------------------------------------------------------------------
+// FG-368: anyFailed rollup correctness — negative case and child-exclusion
+// ---------------------------------------------------------------------------
+
+test("FG-368: anyFailed — genuinely failed phase with no replacement → anyFailed: true", async () => {
+  // A 2-step workflow where the second step fails permanently (no request-changes,
+  // no retry). The run must complete with anyFailed: true in run.completed.
+  // This is the negative case that proves the FG-368 fix didn't blanket-suppress failures.
+
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const GENUINE_FAILURE_WF: Workflow = {
+    name: "fg368-genuine-failure",
+    description: "FG-368: negative test — genuine failure produces anyFailed: true",
+    inputs: [],
+    steps: [
+      {
+        id: "setup",
+        agent: "planner",
+        gate: "auto",
+        manual: false,
+        depends_on: [],
+        runtime: "claude",
+        reds: [],
+      },
+      {
+        id: "work",
+        agent: "engineer",
+        gate: "auto",
+        manual: false,
+        depends_on: ["setup"],
+        runtime: "claude",
+        reds: [],
+      },
+    ],
+  };
+
+  const { runId } = startRun({
+    workflow: GENUINE_FAILURE_WF,
+    title: "fg368 genuine failure test",
+    inputs: {},
+    projectDir: "/tmp/fg368-test-project",
+  });
+
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-setup-")) {
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+      return 0;
+    }
+    // work step: exit code 1 without writing result.json → container_crash → task fails.
+    // result.json was pre-initialized to "" by runContainer; the non-zero exit code +
+    // empty resultRaw triggers the failure path in runContainer.
+    return 1;
+  };
+
+  // Wave 1: setup dispatches and completes.
+  const wave1 = await runNext({ runId, workflow: GENUINE_FAILURE_WF, dockerExec: exec });
+  assert.deepEqual(wave1.completedSteps, ["setup"], "setup must complete in wave 1");
+
+  // Wave 2: work dispatches and fails → run reaches complete with anyFailed: true.
+  const wave2 = await runNext({ runId, workflow: GENUINE_FAILURE_WF, dockerExec: exec });
+  assert.deepEqual(wave2.failedSteps, ["work"], "work must fail in wave 2");
+  assert.equal(wave2.runStatus, "complete", "run must reach complete even when a step fails");
+
+  // Verify the work task is truly failed in the DB.
+  const workTask = tasksForRun(runId).find((t) => t.phase === "work" && t.parentId === undefined);
+  assert.ok(workTask, "work task must exist");
+  assert.equal(workTask!.status, "failed", "work task must be failed");
+
+  // The run.completed event must carry anyFailed: true.
+  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
+  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
+  assert.equal(
+    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
+    true,
+    "FG-368: anyFailed must be true — genuinely failed phase with no replacement must count",
+  );
+});
+
+test("FG-368: anyFailed — fanout child failure with parent completing doesn't inflate anyFailed", async () => {
+  // With failure_mode: "continue", a fanout child can fail while the parent still
+  // completes. Children (parentId !== undefined) must NOT enter the anyFailed rollup —
+  // only top-level (parentId === undefined) tasks are considered.
+  //
+  // The fix (runNext.ts:180-185) filters to parentId === undefined before computing
+  // anyFailed. This test confirms children are excluded.
+
+  ensureFg364WorkflowYaml();
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const { runId } = startRun({
+    workflow: FG364_WORKFLOW,
+    title: "fg368 fanout child failure test",
+    inputs: {},
+    projectDir: "/tmp/fg368-test-project",
+  });
+
+  // Track whether the first fanout child dispatch has been seen.
+  // Children have synthetic phase ids "build-0", "build-1", so their task ids
+  // start with "task-build-0-" or "task-build-1-".  The parent itself never runs
+  // through dockerExec (it's synthetic).  We fail the very first child; the second
+  // and all reds pass.  With failure_mode: "continue" the parent still completes.
+  let firstChildSeen = false;
+
+  const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-plan-")) {
+      // Return 2 fanout items so we get 2 children.
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", steps: ["step-a", "step-b"] }));
+      return 0;
+    }
+    if (taskId.startsWith("task-red-build-")) {
+      // Red always passes — we want the parent to complete despite the child failure.
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", verdict: "pass", confidence: 0.9, findings: [] }));
+      return 0;
+    }
+    if (taskId.startsWith("task-build-")) {
+      // First child (task-build-0-<random> OR whichever is dispatched first) fails.
+      if (!firstChildSeen) {
+        firstChildSeen = true;
+        // Exit code 1 + empty result.json (pre-initialized to "") → container_crash → child fails.
+        return 1;
+      }
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", diff_summary: "ok", files_modified: [] }));
+      return 0;
+    }
+    if (taskId.startsWith("task-docs-")) {
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+      return 0;
+    }
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    return 0;
+  };
+
+  // Wave 1: plan.
+  const wave1 = await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec });
+  assert.deepEqual(wave1.completedSteps, ["plan"], "plan must complete in wave 1");
+
+  // Wave 2: build fanout — one child fails, one succeeds, red passes.
+  // With failure_mode: "continue" the parent still reaches complete.
+  const wave2 = await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec });
+  assert.deepEqual(wave2.dispatchedSteps, ["build"], "build must dispatch in wave 2");
+
+  const tasksAfterWave2 = tasksForRun(runId);
+  const buildParent = tasksAfterWave2.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(buildParent, "build parent must exist");
+  assert.equal(buildParent!.status, "complete", "build parent must be complete (failure_mode: continue + red passes)");
+
+  const failedChildren = tasksAfterWave2.filter(
+    (t) => t.parentId === buildParent!.id && t.status === "failed",
+  );
+  assert.ok(failedChildren.length > 0, "at least one build child must be failed");
+
+  // Wave 3: docs dispatches and completes → run.completed emitted.
+  const wave3 = await runNext({ runId, workflow: FG364_WORKFLOW, dockerExec: exec });
+  assert.ok(wave3.dispatchedSteps.includes("docs"), "docs must dispatch in wave 3");
+  assert.equal(wave3.runStatus, "complete", "run must reach complete");
+
+  // The run.completed event must carry anyFailed: false.
+  // Even though a child failed, children (parentId !== undefined) are excluded
+  // from the rollup. Only top-level tasks count, and the build parent is complete.
+  const completedEvent = eventsForRun(runId).find((e) => e.eventType === "run.completed");
+  assert.ok(completedEvent, "FG-368: run.completed event must be emitted");
+  assert.equal(
+    (completedEvent!.payload as Record<string, unknown>)["anyFailed"],
+    false,
+    "FG-368: anyFailed must be false — fanout children (parentId !== undefined) are excluded from the rollup",
+  );
+
+  // Confirm: if we walked all tasks naively (including children), anyFailed would be
+  // non-zero — this verifies the fix is what makes it false, not the absence of failures.
+  const naiveAnyFailed = tasksAfterWave2.some((t) => t.status === "failed");
+  assert.ok(naiveAnyFailed, "sanity: at least one task (a child) is failed, naive check confirms the fix matters");
 });

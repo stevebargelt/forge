@@ -174,7 +174,15 @@ export async function runNext(args: {
     // "failed" state for runs. Mark complete regardless; the human / orchestrator
     // reads task statuses to know whether the run failed. Aligns with how the
     // v1 spine treats run completion.
-    const anyFailed = tasksAfter.some((t) => t.status === "failed" && t.parentId === undefined);
+    // A superseded failed task (request-changes audit record) must not count:
+    // it is superseded when another top-level task in the same phase is NOT
+    // failed (i.e. a successful replacement exists).
+    const topLevelByPhase = tasksAfter.filter((t) => t.parentId === undefined);
+    const anyFailed = topLevelByPhase.some(
+      (t) =>
+        t.status === "failed" &&
+        !topLevelByPhase.some((other) => other.phase === t.phase && other.status !== "failed"),
+    );
     runStatus = "complete";
     updateRunStatus(args.runId, "complete");
     logEvent("run.completed", { runId: args.runId, payload: { anyFailed } });

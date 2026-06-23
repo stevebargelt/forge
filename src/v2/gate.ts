@@ -210,12 +210,18 @@ export async function gate(
 
     if (existingPending) {
       updateTaskPackageInputs(existingPending.id, { requestedChanges: rationale ?? "" });
+      const updatedPending = getTask(existingPending.id);
+      if (!updatedPending) {
+        throw new Error(
+          `request-changes dedup: task ${existingPending.id} vanished after updateTaskPackageInputs`,
+        );
+      }
       logEvent("gate.decided", {
         runId: run.id,
         taskId: existingPending.id,
         payload: { decision: "request-changes-dedup", rationale },
       });
-      nextTasks = [getTask(existingPending.id)!];
+      nextTasks = [updatedPending];
     } else {
       const newId = newTaskId(task.phase);
       const tp: TaskPackage = {
