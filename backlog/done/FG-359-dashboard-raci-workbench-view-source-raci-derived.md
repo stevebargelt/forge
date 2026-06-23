@@ -1,10 +1,11 @@
 ---
 id: FG-359
 type: story
-status: active
+status: done
 title: "Dashboard RACI Workbench: view source RACI, derived policy, effective routes, and audit history"
 epic: FG-291
 created: 2026-06-22
+closed: 2026-06-23
 ---
 
 ## Problem
@@ -48,3 +49,10 @@ Add a read-only dashboard RACI Workbench in the Control Plane area. It should ma
 - Host-vs-project route differences are visible.
 - Audit history remains visible.
 - The view is read-only and reuses existing governance validation/query logic where possible.
+- The dashboard exposes a read-only RACI Workbench for the selected project in the Control Plane area.
+- Server/API tests cover host-only RACI, project override RACI, stale/drifted compiled policy, and no audit entries.
+- The API response explicitly separates `source`, `derived`, `effective`, and `recorded` sections.
+- The UI labels SOURCE / DERIVED / EFFECTIVE / RECORDED exactly and does not collapse them into a generic route table.
+- Host-vs-project route differences are shown only when a project override exists; host-only projects do not show a misleading comparison.
+- Missing or stale compiled routing policy produces a visible warning, not a silent empty state.
+- No dashboard endpoint or UI action mutates RACI markdown, routing-policy YAML, or audit logs.
