@@ -471,7 +471,7 @@ async function dispatchSingleStep(args: {
   // files_modified but none of those files landed on the host project mount, the
   // work was written to an ephemeral path and discarded — fail loudly (don't run
   // reds, don't gate over an empty diff) instead of advancing on a green lie.
-  const persistence = checkResultPersistence(args.projectDir, result);
+  const persistence = checkResultPersistence(primaryWorktreePath ?? args.projectDir, result);
   if (!persistence.ok) {
     const error = persistenceErrorMessage(persistence);
     failTask(taskId, { runId: args.runId, kind: "work_not_persisted", error, result });

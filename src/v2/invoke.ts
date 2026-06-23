@@ -561,7 +561,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // persist by design, so files_modified there isn't loss). If the result claims
   // files but none reached the host, the work was discarded; fail loudly.
   if (!args.readOnlyProject) {
-    const persistence = checkResultPersistence(args.projectDir, result);
+    const persistence = checkResultPersistence(getTask(taskId)?.worktreePath ?? args.projectDir, result);
     if (!persistence.ok) {
       const error = persistenceErrorMessage(persistence);
       failTask(taskId, { runId, kind: "work_not_persisted", error, result });
