@@ -18,7 +18,7 @@ Navigation tabs:
 - **projects** — per-project summary; click a project to filter the activity feed to that project.
 - **usage** — token usage rollup and time-series, grouped by role / workflow / project / model.
 - **ops** — operational metrics rollup.
-- **governance** — effective routing policy, host-vs-project diff, recent audit.
+- **workbench** — read-only RACI Workbench. Four sections: SOURCE (active RACI file and kind), DERIVED (compiled routing-policy path and health), EFFECTIVE (routes in force and host→project diff, or null if the policy is broken), RECORDED (recent RACI audit log entries). Tab label is "workbench"; URL hash stays `#governance` for compatibility. No mutations — propose/apply is FG-361.
 - **backlog** — read-only view of the selected project's backlog: session-handoff notes and ticket list (grouped by type: epic / story / idea), filterable by type and status, searchable by title and body. Requires a project to be selected. Mutations (create, close, move tickets) remain on the `forge backlog` CLI.
 
 Click any activity card to see the full result.json + container stdout + related verdicts/gates.

@@ -797,7 +797,31 @@ export type RaciAuditEntry = {
   validation: { raci: boolean; route: boolean };
 };
 
-export type GovernancePanel = GovernanceView & { recentAudit: RaciAuditEntry[] };
+// FG-359: four-section WorkbenchPanel replaces the flat GovernancePanel.
+// source=RACI file in force; derived=compiled policy health; effective=routes+diff;
+// recorded=audit log. Backed by the same governanceView() core.
+
+export type WorkbenchHealth =
+  | "ok"
+  | "uncompiled-override"
+  | "stale-drift"
+  | "compile-error"
+  | "policy-not-found";
+
+export type WorkbenchPanel = {
+  source: { kind: "project" | "host"; raciPath: string };
+  derived: {
+    policyPath: string;
+    health: WorkbenchHealth;
+    findings?: Extract<GovernanceView, { ok: false }>["findings"];
+    accountable?: string;
+  };
+  effective: {
+    routes: Extract<GovernanceView, { ok: true }>["routes"];
+    diff?: Extract<GovernanceView, { ok: true }>["diff"];
+  } | null;
+  recorded: { entries: RaciAuditEntry[] };
+};
 
 /** Tail of the host-global RACI audit log (newest first). Tolerates a missing
  *  file (no changes yet) and skips any unparseable line. */
@@ -815,6 +839,47 @@ function recentRaciAudit(limit: number): RaciAuditEntry[] {
   return out.reverse();
 }
 
-export function routingGovernance(projectDir?: string): GovernancePanel {
-  return { ...governanceView({ projectDir }), recentAudit: recentRaciAudit(8) };
+export function routingGovernance(projectDir?: string): WorkbenchPanel {
+  const view = governanceView({ projectDir });
+
+  const raciPath =
+    view.source === "project" && projectDir !== undefined
+      ? join(projectDir, ".forge", "forge-raci.md")
+      : join(FORGE_HOME, "forge-raci.md");
+
+  let health: WorkbenchHealth;
+  let findings: WorkbenchPanel["derived"]["findings"];
+  let accountable: string | undefined;
+
+  if (!view.ok) {
+    findings = view.findings;
+    const codes = view.findings.map((f) => f.code);
+    if (codes.includes("override_not_compiled")) health = "uncompiled-override";
+    else if (codes.includes("raci_compile_error")) health = "compile-error";
+    else health = "policy-not-found";
+  } else {
+    accountable = view.accountable;
+    if (view.drift && view.drift.length > 0) {
+      findings = view.drift as WorkbenchPanel["derived"]["findings"];
+      health = view.drift.some((f) => f.code === "raci_compile_error") ? "compile-error" : "stale-drift";
+    } else {
+      health = "ok";
+    }
+  }
+
+  const effective = view.ok
+    ? { routes: view.routes, ...(view.diff ? { diff: view.diff } : {}) }
+    : null;
+
+  return {
+    source: { kind: view.source, raciPath },
+    derived: {
+      policyPath: view.path,
+      health,
+      ...(findings ? { findings } : {}),
+      ...(accountable !== undefined ? { accountable } : {}),
+    },
+    effective,
+    recorded: { entries: recentRaciAudit(8) },
+  };
 }

@@ -508,9 +508,8 @@ section.usage-section { margin-top: 20px; }
   line-height: 1.1;
   margin-bottom: 4px;
 }
-/* #285: routing / governance panel (read-only). */
+/* #285 / FG-359: RACI Workbench (read-only routing/governance panel). */
 .gov-view { display: flex; flex-direction: column; }
-.gov-header { margin-bottom: 16px; }
 .gov-card { margin-bottom: 8px; }
 .badge.gov-src-host { background: rgba(122, 159, 255, 0.15); color: var(--accent); }
 .badge.gov-src-project { background: rgba(192, 132, 252, 0.18); color: var(--magenta); }
@@ -541,6 +540,33 @@ section.usage-section { margin-top: 20px; }
 .gov-table tr:last-child td { border-bottom: none; }
 .gov-route-key { color: var(--fg); }
 .gov-hints { font-size: 11px; margin-top: 2px; max-width: 240px; }
+
+/* FG-359: workbench four-section labels (SOURCE / DERIVED / EFFECTIVE / RECORDED). */
+.workbench-section { margin-top: 8px; }
+.workbench-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+.workbench-section:first-child .workbench-section-label { border-top: none; padding-top: 0; margin-top: 16px; }
+
+/* Health badge — text + color signal (non-color a11y: symbol prefix, FG-123). */
+.gov-health-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.gov-health-ok   { background: rgba(74,  222, 128, 0.12); color: var(--ok); }
+.gov-health-warn { background: rgba(250, 204,  21, 0.12); color: var(--warn); }
+.gov-health-err  { background: rgba(248, 113, 113, 0.12); color: var(--err); }
 
 /* #FG-363: backlog view */
 .backlog-view { margin-top: 16px; }

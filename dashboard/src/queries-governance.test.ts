@@ -40,21 +40,34 @@ function projectWith(raci: string, policyRaci: string): string {
 
 test("routingGovernance: host default returns source=host and the route matrix", () => {
   const g = routingGovernance();
-  assert.ok(g.ok);
-  assert.equal(g.source, "host");
-  assert.ok(Object.keys(g.routes).length > 0);
-  assert.equal(g.routes.implementation_quick!.responsible, "engineer");
-  assert.ok(!g.diff, "host view has no override diff");
+  // AC: exactly four top-level sections (WorkbenchPanel, not flat GovernancePanel)
+  assert.deepEqual(Object.keys(g).sort(), ["derived", "effective", "recorded", "source"]);
+  // AC 1: host-only
+  assert.equal(g.source.kind, "host");
+  assert.ok(g.source.raciPath.includes("forge-raci.md"));
+  assert.equal(g.derived.health, "ok");
+  assert.ok(g.effective !== null);
+  assert.ok(Object.keys(g.effective!.routes).length > 0);
+  assert.equal(g.effective!.routes.implementation_quick!.responsible, "engineer");
+  assert.ok(!("diff" in g.effective!), "host view has no override diff");
+  // AC 4: no audit log written yet — does not throw, returns empty entries
+  assert.deepEqual(g.recorded.entries, []);
 });
 
 test("routingGovernance: a project override returns source=project with a host-vs-project diff", () => {
   const proj = projectWith(mutated, mutated); // RACI and policy both mutated — consistent
   const g = routingGovernance(proj);
-  assert.ok(g.ok);
-  assert.equal(g.source, "project");
-  assert.equal(g.routes.implementation_quick!.responsible, "backend-specialist");
-  assert.ok(g.diff);
-  const mod = g.diff!.modified.find((m) => m.route === "implementation_quick");
+  // AC: exactly four top-level sections
+  assert.deepEqual(Object.keys(g).sort(), ["derived", "effective", "recorded", "source"]);
+  // AC 2: project override
+  assert.equal(g.source.kind, "project");
+  assert.ok(g.source.raciPath.endsWith(".forge/forge-raci.md"), "project raciPath ends with .forge/forge-raci.md");
+  assert.equal(g.derived.health, "ok");
+  assert.ok(g.effective !== null);
+  assert.equal(g.effective!.routes.implementation_quick!.responsible, "backend-specialist");
+  // AC 2: diff present for project override
+  assert.ok(g.effective!.diff, "project override has a host-vs-project diff");
+  const mod = g.effective!.diff!.modified.find((m) => m.route === "implementation_quick");
   assert.ok(mod && mod.fields.some((f) => f.field === "responsible" && f.after === "backend-specialist"));
 });
 
@@ -62,9 +75,12 @@ test("routingGovernance: a stale project policy surfaces a drift warning", () =>
   // RACI says backend-specialist, but the compiled policy is the old seed (engineer).
   const proj = projectWith(mutated, SEED);
   const g = routingGovernance(proj);
-  assert.ok(g.ok);
-  assert.ok(g.drift && g.drift.length > 0);
-  assert.ok(g.drift!.some((f) => f.code === "policy_drift" && f.route === "implementation_quick"));
+  // AC: exactly four top-level sections
+  assert.deepEqual(Object.keys(g).sort(), ["derived", "effective", "recorded", "source"]);
+  // AC 3: stale-drift health, findings populated — NOT a silent ok
+  assert.equal(g.derived.health, "stale-drift");
+  assert.ok(g.derived.findings && g.derived.findings.length > 0);
+  assert.ok(g.derived.findings!.some((f) => f.code === "policy_drift" && f.route === "implementation_quick"));
 });
 
 test("routingGovernance: an uncompiled project override is an unhealthy (not ok) view", () => {
@@ -72,8 +88,12 @@ test("routingGovernance: an uncompiled project override is an unhealthy (not ok)
   mkdirSync(join(dir, ".forge"), { recursive: true });
   writeFileSync(join(dir, ".forge", "forge-raci.md"), SEED); // RACI but no compiled policy
   const g = routingGovernance(dir);
-  assert.equal(g.ok, false);
-  assert.ok(!g.ok && g.findings.some((f) => f.code === "override_not_compiled"));
+  // AC: exactly four top-level sections
+  assert.deepEqual(Object.keys(g).sort(), ["derived", "effective", "recorded", "source"]);
+  // AC 3: uncompiled-override health, effective===null
+  assert.equal(g.derived.health, "uncompiled-override");
+  assert.equal(g.effective, null);
+  assert.ok(g.derived.findings && g.derived.findings.some((f) => f.code === "override_not_compiled"));
 });
 
 test("routingGovernance: recent RACI audit entries are surfaced newest-first", () => {
@@ -92,7 +112,9 @@ test("routingGovernance: recent RACI audit entries are surfaced newest-first", (
   appendFileSync(join(tmpHome, "raci-audit.log"), entry("2026-06-02T00:00:00.000Z", ["implementation_quick"]));
 
   const g = routingGovernance();
-  assert.equal(g.recentAudit.length, 2);
-  assert.equal(g.recentAudit[0]!.timestamp, "2026-06-02T00:00:00.000Z", "newest first");
-  assert.deepEqual(g.recentAudit[0]!.routes_modified, ["implementation_quick"]);
+  // AC: exactly four top-level sections
+  assert.deepEqual(Object.keys(g).sort(), ["derived", "effective", "recorded", "source"]);
+  assert.equal(g.recorded.entries.length, 2);
+  assert.equal(g.recorded.entries[0]!.timestamp, "2026-06-02T00:00:00.000Z", "newest first");
+  assert.deepEqual(g.recorded.entries[0]!.routes_modified, ["implementation_quick"]);
 });

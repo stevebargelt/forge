@@ -225,11 +225,20 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/in-flight` | `projectDir` | Currently-running / awaiting-gate tasks |
 | `GET /api/projects` | — | Project registry: name, color, last activity, live sessions |
 | `GET /api/task/:id` | — | Full task detail (result + stdout/stderr + verdicts + gates) |
-| `GET /api/governance` | `projectDir` | Effective routing policy, host-vs-project diff, recent audit |
+| `GET /api/governance` | `projectDir` | RACI Workbench panel (`WorkbenchPanel`): source, derived, effective, recorded (see shape below) |
 | `GET /api/ops` | `since` (default `30d`), `projectDir` | Ops metrics rollup |
 | `GET /api/usage` | `groupBy` (`role\|workflow\|project\|model\|alias`), `since` (default `30d`), `projectDir`, `limit` (1–200, default 50) | Token usage rollup by dimension |
 | `GET /api/usage/timeseries` | `since` (default `30d`), `projectDir` | Daily token usage time-series |
 | `GET /api/usage/model-mix` | `groupBy` (same as `/api/usage`), `since` (default `30d`), `projectDir` | Model distribution by dimension |
+
+### `GET /api/governance` response shape (`WorkbenchPanel`)
+
+Read-only. Returns a `WorkbenchPanel` JSON object with four top-level sections. No mutations are exposed — propose/apply is a separate future item.
+
+- `source` — `{ kind: "project" | "host", raciPath: string }` — which RACI file is in force and its absolute path.
+- `derived` — `{ policyPath: string, health: WorkbenchHealth, findings?: Finding[], accountable?: string }` — the compiled routing-policy state. `health` is one of `"ok" | "stale-drift" | "compile-error" | "uncompiled-override" | "policy-not-found"`. `findings` is present when health is not `"ok"`. `accountable` is the policy-level accountable field (present only when `ok` or `stale-drift`).
+- `effective` — `{ routes: RouteMap, diff?: OverrideDiff } | null` — routes currently in force plus an optional host→project diff. `null` when the policy is broken and no effective routes exist.
+- `recorded` — `{ entries: RaciAuditEntry[] }` — tail of `~/.forge/raci-audit.log` (up to 8 entries, newest first). Empty when no RACI changes have been recorded yet.
 
 ### `GET /api/task/:id` response shape
 
