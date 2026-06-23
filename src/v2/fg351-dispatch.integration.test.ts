@@ -234,10 +234,13 @@ test("fg351 (dispatch-1): FORGE_WORKTREES=1 → docker /project mount uses workt
     `task.worktreePath must be under WORKTREES_DIR, got: ${primary!.worktreePath}`
   );
 
-  // The worktree directory must exist on disk (git worktree add succeeded).
-  assert.ok(
+  // FG-352: after a successful merge-back, the worktree is cleaned up
+  // (removeWorktreeIfSafe is called with provenMerged=true). The path is still
+  // recorded in task.worktreePath (DB record), but the directory is gone.
+  assert.equal(
     existsSync(primary!.worktreePath!),
-    "worktree directory must exist on disk after createWorktree"
+    false,
+    "worktree directory must be removed by FG-352 proven-merged cleanup after task completes"
   );
 
   // Critical assertion: the docker /project mount must be the WORKTREE path.

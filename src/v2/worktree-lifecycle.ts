@@ -4,10 +4,9 @@
 // Task branch identity is DETERMINISTIC: forge/<runId>/<taskId>. No DB column
 // needed; any call site can derive the branch name from the task/run metadata.
 //
-// Safety invariant: removeWorktreeIfSafe is a production no-op until FG-352
-// (merge-back) lands. In ephemeral/test mode (FORGE_WORKTREES_EPHEMERAL=1) it
-// removes the worktree + branch, which is only safe because no real agent output
-// exists to merge back yet.
+// FG-352: removeWorktreeIfSafe removes on two conditions: EPHEMERAL test mode,
+// or provenMerged=true (the merge-back succeeded, so discarding the worktree is
+// safe). Never removes an unmerged worktree outside EPHEMERAL test mode.
 //
 // Kill switch: FORGE_NO_WORKTREES=1 disables worktree mode entirely (makes
 // isWorktreeModeEnabled() return false regardless of FORGE_WORKTREES). Use it to
@@ -163,26 +162,29 @@ export function createWorktree(
 
 /** Remove a task worktree and its branch when doing so is SAFE.
  *
- *  Production no-op: merge-back (FG-352) does not exist yet, so any real agent
- *  output lives ONLY in the worktree. Removing it would discard unmerged work.
+ *  Safe to remove under two conditions:
+ *    1. Ephemeral/test mode (FORGE_WORKTREES_EPHEMERAL=1) — no real output at risk.
+ *    2. provenMerged=true (FG-352) — merge-back succeeded; projectDir has the changes.
  *
- *  Ephemeral/test mode (FORGE_WORKTREES_EPHEMERAL=1): safe to remove because
- *  the gate is test-only — no real agent output is at risk.
+ *  No-discard invariant: never remove an unmerged worktree outside EPHEMERAL mode.
+ *  Callers must NOT pass provenMerged=true unless the merge already succeeded.
  *
  *  Silently skips if the path is absent (idempotent).
  *
  *  @param projectDir - resolved git repo root. All git commands run with this as
  *    cwd — never process.cwd(). Callers (reconcile.ts) must supply run.projectDir.
  *    If projectDir is not available (run was created without it), skip this call.
+ *  @param provenMerged - set true only after a successful mergeWorktreeBranch call.
  */
 export function removeWorktreeIfSafe(
   worktreePath: string,
   runId: string,
   taskId: string,
-  projectDir: string
+  projectDir: string,
+  provenMerged = false
 ): void {
-  // Production guard: no-op until FG-352 (merge-back) makes cleanup safe.
-  if (process.env.FORGE_WORKTREES_EPHEMERAL !== "1") return;
+  // Only remove in ephemeral test mode OR after a proven merge-back (FG-352).
+  if (process.env.FORGE_WORKTREES_EPHEMERAL !== "1" && !provenMerged) return;
 
   if (!existsSync(worktreePath)) return;
 
@@ -208,6 +210,62 @@ export function removeWorktreeIfSafe(
     });
   } catch {
     // Best-effort: branch may already be gone.
+  }
+}
+
+// ── Merge-back ────────────────────────────────────────────────────────────────
+
+export type MergeWorktreeBranchResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+/** Merge the task worktree branch into run.projectDir using fast-forward-only.
+ *
+ *  Called by dispatchSingleStep after checkResultPersistence passes, before
+ *  markTaskComplete. Returns ok:false on any failure (non-ff, conflict, git
+ *  error) — the caller must failTask and retain the worktree for inspection.
+ *
+ *  Contract: agents are expected to commit their work on the task branch. As a
+ *  safety net, this function auto-stages and commits any uncommitted changes in
+ *  the worktree before merging. If the agent already committed everything, the
+ *  auto-commit is a no-op. If the merge is a clean no-op (no new commits on the
+ *  branch), it succeeds silently ("Already up to date.").
+ */
+export function mergeWorktreeBranch(
+  projectDir: string,
+  worktreePath: string,
+  runId: string,
+  taskId: string
+): MergeWorktreeBranchResult {
+  const branch = worktreeBranchName(runId, taskId);
+
+  // Auto-stage and commit any uncommitted changes. If the agent already
+  // committed everything, `git commit` exits non-zero ("nothing to commit")
+  // and we catch it. Untracked files (surfaced as diagnostic at createWorktree)
+  // are included via `git add .` so new agent-created files are captured.
+  try {
+    execFileSync("git", ["add", "."], { cwd: worktreePath, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", `forge: auto-commit task ${taskId} output`], {
+      cwd: worktreePath,
+      stdio: "ignore",
+    });
+  } catch {
+    // Nothing to commit (agent already committed), or commit failed (e.g. no
+    // git identity set). Proceed: the branch tip is whatever the agent committed.
+  }
+
+  try {
+    execFileSync("git", ["merge", "--ff-only", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return { ok: true };
+  } catch (e) {
+    const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+    return {
+      ok: false,
+      error: `git merge --ff-only ${branch} failed: ${stderr || String(e)}`,
+    };
   }
 }
 

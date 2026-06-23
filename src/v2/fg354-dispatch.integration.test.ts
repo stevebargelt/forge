@@ -231,16 +231,17 @@ test("fg354 (dispatch-1): FORGE_WORKTREES=1 → file in worktree satisfies persi
     repo,
     "/project mount must be the worktree, not run.projectDir",
   );
-  // The file must exist in the worktree (written by the stub).
-  assert.ok(
-    existsSync(join(primary!.worktreePath!, "changed.ts")),
-    "changed.ts must exist in worktree after stub exec",
-  );
-  // The file must NOT exist in the original repo (it was only written to the worktree).
+  // FG-352: after a successful merge-back, the worktree is removed (provenMerged=true).
+  // The file that was written to the worktree is now in run.projectDir (merged).
   assert.equal(
-    existsSync(join(repo, "changed.ts")),
+    existsSync(primary!.worktreePath!),
     false,
-    "changed.ts must NOT exist in projectDir — it was only written to the worktree",
+    "worktree must be removed by FG-352 proven-merged cleanup after task completes",
+  );
+  // The file must exist in the original repo (merged from the worktree branch by FG-352).
+  assert.ok(
+    existsSync(join(repo, "changed.ts")),
+    "changed.ts must exist in projectDir after FG-352 merge-back",
   );
 });
 

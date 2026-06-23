@@ -56,11 +56,12 @@ import { checkResolvedAvailability, checkToolCapability } from "./provider-docto
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
-// FG-351: worktree lifecycle — gate check, create, cleanup, branch naming.
+// FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
 import {
   isWorktreeModeEnabled,
   preflightWorktreeGate,
   createWorktree,
+  mergeWorktreeBranch,
   removeWorktreeIfSafe,
   cleanupFailedWorktreeSetup,
 } from "./worktree-lifecycle.js";
@@ -478,6 +479,20 @@ async function dispatchSingleStep(args: {
     return "failed";
   }
 
+  // FG-352: merge the task worktree branch into run.projectDir (main checkout).
+  // Skipped entirely when primaryWorktreePath is undefined — the default/non-worktree
+  // path is byte-for-byte unchanged.
+  if (primaryWorktreePath) {
+    const merge = mergeWorktreeBranch(args.projectDir, primaryWorktreePath, args.runId, taskId);
+    if (!merge.ok) {
+      failTask(taskId, { runId: args.runId, kind: "merge_conflict", error: merge.error, result });
+      // Retain worktree and branch for inspection — do NOT call removeWorktreeIfSafe.
+      return "failed";
+    }
+    // FG-357 seam: post-merge build+test integration gate goes here
+    // (after merge, before markTaskComplete / reds dispatch / phase advance).
+  }
+
   // Reds: spawn after primary completes. Each red is a child task.
   // Aggregate verdicts then set primary status per policy.
   if (step.reds.length > 0) {
@@ -515,19 +530,19 @@ async function dispatchSingleStep(args: {
     }
     // No authoritative fail — proceed to normal gate semantics.
     const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
-    // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
-    // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+    // FG-352: cleanup after proven-merged worktree (provenMerged=true because
+    // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
     if (statusAfterReds === "complete" && primaryWorktreePath) {
-      removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir);
+      removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir, true);
     }
     return statusAfterReds;
   }
 
   const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
-  // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
-  // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+  // FG-352: cleanup after proven-merged worktree (provenMerged=true because
+  // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
   if (finalStatus === "complete" && primaryWorktreePath) {
-    removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir);
+    removeWorktreeIfSafe(primaryWorktreePath, args.runId, taskId, args.projectDir, true);
   }
   return finalStatus;
 }
@@ -1267,8 +1282,8 @@ async function runFanoutChild(args: {
   // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
   if (markTaskComplete(childTaskId, dispatchResult.result)) {
     logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
-    // FG-351: ephemeral/test-mode cleanup on normal completion. Production no-op
-    // (EPHEMERAL unset) because FG-352 merge-back does not exist yet.
+    // FG-353: fanout child merge ordering — merge-back for fanout children is
+    // owned by FG-353. Until then, only EPHEMERAL mode removes (provenMerged=false).
     if (childWorktreePath) {
       removeWorktreeIfSafe(childWorktreePath, args.runId, childTaskId, args.projectDir);
     }
