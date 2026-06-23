@@ -1,6 +1,6 @@
 **Last session ended 2026-06-22.**
 
-**Where we left off:** Long session that shipped FG-350 (control-plane receipts) and FG-364 (pipeline fan-out request-changes deadlock), then answered a token-accounting question and filed FG-369. Pivoted off the FG-345 worktree epic at the user's call ("visibility first"): did FG-350 as the data foundation, then fixed FG-364 because the feature pipeline was untrustworthy for fan-out. Pipeline is now trustworthy for fan-out request-changes.
+**Where we left off:** Long session that shipped FG-350 (control-plane receipts) and FG-364 (pipeline fan-out request-changes deadlock), then answered a token-accounting question and filed FG-369. Pivoted off the FG-345 worktree epic at the user's call ("visibility first"): did FG-350 as the data foundation, then fixed FG-364 because the feature pipeline was untrustworthy for fan-out. All work committed AND pushed to origin/main (tree in sync). Pipeline is now trustworthy for fan-out request-changes.
 
 **Picked up next:**
 1. **FG-349 — Control-Plane Sources** (dashboard EFFECTIVE config view). Next in the user's visibility ordering (FG-350 done → 349 → 348 → 359). Now runnable THROUGH the feature pipeline since FG-364 fixed the fan-out deadlock. Largely independent (reads live config, not receipts) — could even parallel FG-348.
@@ -10,8 +10,8 @@
 
 **External state to remember:**
 - **OAuth token expired mid-session** and was re-logged-in via `forge auth login`. `forge auth status` reported "ok" the whole time because its health probe only checks the credentials FILE exists, not token validity (the FG-120 shallow-probe gap) — so a 401 inside agent containers is the real signal, not `auth status`. Watch for it.
-- **~15 commits ahead of origin/main, UNPUSHED** (direct-to-main workflow; user has not said to push).
-- **Untracked files in the tree that are NOT this session's** — likely other Claude/forge sessions: `backlog/ideas/FG-361`, `backlog/stories/FG-362`, `FG-363`, `FG-367`, `docs/prds/reducing-control-plane-complexity.md`, `research/gastown-forge-assessment.md`. Left untouched deliberately. Reconcile/commit or discard with their owner before they rot.
+- **All commits pushed to origin/main; working tree in sync** (no unpushed work pending).
+- **Untracked files in the tree that are NOT this session's** — likely other Claude/forge sessions: `backlog/ideas/FG-361` (dashboard RACI editor), `backlog/stories/FG-362`, `FG-363`, `FG-367`, `docs/prds/reducing-control-plane-complexity.md`, `research/gastown-forge-assessment.md`. Left untouched deliberately. Reconcile/commit or discard with their owner before they rot.
 
 **Decisions worth not relitigating:**
 - **Worktrees = all agents, always (FG-345).** Settled and designed; children FG-351-358 filed off an architecture pass. Do NOT re-narrow to "rw/blue only" (a prior handoff did; it was wrong). Cost is a non-factor; the value is converting silent races into detectable conflicts + a post-merge integration gate (FG-357).
