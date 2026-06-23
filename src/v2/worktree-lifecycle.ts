@@ -227,9 +227,10 @@ export type MergeWorktreeBranchResult =
  *
  *  Contract: agents are expected to commit their work on the task branch. As a
  *  safety net, this function auto-stages and commits any uncommitted changes in
- *  the worktree before merging. If the agent already committed everything, the
- *  auto-commit is a no-op. If the merge is a clean no-op (no new commits on the
- *  branch), it succeeds silently ("Already up to date.").
+ *  the worktree before merging. If the worktree has no changes, the commit is
+ *  skipped entirely. If the commit fails with changes present (hook, missing
+ *  identity, lock file), ok:false is returned — the caller must retain the
+ *  worktree. If the merge is a clean no-op, it succeeds silently.
  */
 export function mergeWorktreeBranch(
   projectDir: string,
@@ -239,19 +240,40 @@ export function mergeWorktreeBranch(
 ): MergeWorktreeBranchResult {
   const branch = worktreeBranchName(runId, taskId);
 
-  // Auto-stage and commit any uncommitted changes. If the agent already
-  // committed everything, `git commit` exits non-zero ("nothing to commit")
-  // and we catch it. Untracked files (surfaced as diagnostic at createWorktree)
-  // are included via `git add .` so new agent-created files are captured.
+  // Check for uncommitted changes before attempting auto-commit.
+  // We must distinguish "nothing to commit" (safe to proceed) from "commit
+  // failed with changes present" (agent output would be lost — must return
+  // ok:false so the caller retains the worktree instead of discarding it).
+  let statusOut = "";
   try {
-    execFileSync("git", ["add", "."], { cwd: worktreePath, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", `forge: auto-commit task ${taskId} output`], {
+    statusOut = execFileSync("git", ["status", "--porcelain"], {
       cwd: worktreePath,
-      stdio: "ignore",
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
     });
-  } catch {
-    // Nothing to commit (agent already committed), or commit failed (e.g. no
-    // git identity set). Proceed: the branch tip is whatever the agent committed.
+  } catch (e) {
+    return {
+      ok: false,
+      error: `git status in worktree ${worktreePath} failed: ${String(e)}`,
+    };
+  }
+
+  if (statusOut.trim().length > 0) {
+    // Worktree has uncommitted changes — auto-stage and commit. Untracked files
+    // are captured via `git add .` (surfaced as a diagnostic at createWorktree).
+    try {
+      execFileSync("git", ["add", "."], { cwd: worktreePath, stdio: "ignore" });
+      execFileSync("git", ["commit", "-m", `forge: auto-commit task ${taskId} output`], {
+        cwd: worktreePath,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch (e) {
+      const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+      return {
+        ok: false,
+        error: `auto-commit of task ${taskId} output failed: ${stderr || String(e)}`,
+      };
+    }
   }
 
   try {

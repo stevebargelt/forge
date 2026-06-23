@@ -17,10 +17,13 @@
 //   (5) Merge failure retains branch AND worktree for inspection.
 //   (6) Successful merge cleans up worktree directory and branch.
 //   (7) No downstream dispatch after merge failure.
+//  (11) Auto-commit fails with changes present → ok:false, task fails, worktree
+//       and branch retained (regression guard for the no-discard invariant).
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chmodSync,
   mkdirSync,
   writeFileSync,
   existsSync,
@@ -639,4 +642,94 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
   const tasks = tasksForRun(runId);
   const verifyTasks = tasks.filter((t) => t.phase === "verify");
   assert.equal(verifyTasks.length, 0, "no verify task must be created after step 1 merge failure");
+});
+
+// ─── (11) Auto-commit fails with changes present → no-discard invariant ──────
+//
+// Regression guard: a worktree that HAS uncommitted output but where git commit
+// FAILS must NOT be reported as a proven-merged success. Before this fix, the
+// catch block swallowed the commit failure and proceeded to `git merge --ff-only`,
+// which returned "Already up to date." — the caller then called
+// removeWorktreeIfSafe(provenMerged=true), discarding the agent's uncommitted work.
+//
+// The pre-commit hook approach induces a deterministic commit failure. Hooks are
+// stored in the main repo's .git/hooks/ and shared across all worktrees.
+
+test("fg352 (11): auto-commit fails with changes present — ok:false, task fails, worktree and branch retained", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+
+  const { runId } = startRun({
+    workflow: SINGLE_STEP_WORKFLOW,
+    title: "fg352 commit failure retains worktree",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const worktreePath = findProjectMountHost(args);
+    assert.ok(worktreePath, "stub: /project mount must be in docker args");
+    writeFileSync(stderrPath, "");
+
+    // Install a pre-commit hook that always exits 1. Hooks are shared across all
+    // worktrees of this repo, so this deterministically fails the auto-commit in
+    // mergeWorktreeBranch.
+    const hookPath = join(repo, ".git", "hooks", "pre-commit");
+    writeFileSync(hookPath, "#!/bin/sh\nexit 1\n");
+    chmodSync(hookPath, 0o755);
+
+    // Write agent output but do NOT commit — leaves uncommitted changes in the
+    // worktree for mergeWorktreeBranch's auto-commit to discover and attempt.
+    writeFileSync(join(worktreePath!, "agent-output.ts"), "export const result = 42;\n");
+
+    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["agent-output.ts"] });
+    return 0;
+  };
+
+  const wave = await runNext({
+    runId,
+    workflow: SINGLE_STEP_WORKFLOW,
+    dockerExec: stubExec,
+  });
+
+  // Task must FAIL — not complete. The auto-commit failed with changes present.
+  assert.deepEqual(wave.failedSteps, ["build"], "build must fail when auto-commit fails with changes present");
+  assert.deepEqual(wave.completedSteps, [], "no steps must complete");
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(primary, "primary build task must exist");
+  assert.equal(primary!.status, "failed", "task status must be failed");
+  assert.equal(
+    failureKindForTask(primary!.id),
+    "merge_conflict",
+    "failure kind must be merge_conflict",
+  );
+
+  // Worktree directory must be RETAINED — removeWorktreeIfSafe must NOT have
+  // been called with provenMerged=true.
+  const worktreePath = primary!.worktreePath!;
+  assert.ok(worktreePath, "task.worktreePath must be set");
+  assert.ok(existsSync(worktreePath), "worktree directory must be retained when auto-commit fails");
+
+  // Uncommitted agent output must still be accessible in the retained worktree.
+  assert.ok(
+    existsSync(join(worktreePath, "agent-output.ts")),
+    "agent output must be present in the retained worktree",
+  );
+
+  // Task branch must be RETAINED for operator inspection.
+  const branch = worktreeBranchName(runId, primary!.id);
+  let branchExists: boolean;
+  try {
+    execFileSync("git", ["rev-parse", "--verify", branch], { cwd: repo, stdio: "ignore" });
+    branchExists = true;
+  } catch {
+    branchExists = false;
+  }
+  assert.ok(branchExists, `task branch ${branch} must be retained when auto-commit fails`);
 });
