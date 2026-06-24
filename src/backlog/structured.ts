@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmdirSync, rmSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
 
@@ -249,6 +249,100 @@ export function closeTicket(projectDir: string, id: string, commit?: string): vo
     atomicMoveFile(found.path, destPath, newContent);
   } else {
     writeFileSync(found.path, newContent);
+  }
+}
+
+// ─── Backlog write lock ───────────────────────────────────────────────────────
+// Guards the read-max-id → write-ticket critical section so that two concurrent
+// `forge backlog file` invocations cannot both observe the same max id and
+// allocate a duplicate ticket id.
+//
+// Mechanism: atomic directory create (mkdirSync without recursive — EEXIST if held).
+// Directory creation is atomic on all POSIX filesystems including overlayfs/tmpfs,
+// and eliminates the half-written-body window that plagued the O_EXCL file approach.
+// Holder identity is written inside the directory after the mkdir; reclaim only when
+// the marker file is parseable AND the holder is provably dead (ESRCH from kill -0).
+
+const LOCK_DIR_NAME = ".backlog-write.lockdir";
+const LOCK_POLL_MS = 50;        // retry interval while waiting
+const LOCK_WAIT_MS = 10_000;    // give up after 10 s
+
+type BacklogLockData = { pid: number; acquiredAtMs: number };
+
+function backlogLockDir(projectDir: string): string {
+  return join(backlogDir(projectDir), LOCK_DIR_NAME);
+}
+
+function backlogLockPidAlive(pid: number): boolean {
+  if (pid <= 0) return false; // 0 / negative are not real process ids (0 = process group)
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // ESRCH → no such process. EPERM → exists but not ours (alive).
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readBacklogLockHolder(lockDir: string): BacklogLockData | null {
+  try {
+    return JSON.parse(readFileSync(join(lockDir, "holder"), "utf8")) as BacklogLockData;
+  } catch {
+    return null;
+  }
+}
+
+function tryAcquireBacklogLock(lockDir: string): boolean {
+  try {
+    mkdirSync(lockDir); // no recursive — EEXIST if lock is held; atomic on all POSIX filesystems
+    writeFileSync(join(lockDir, "holder"), JSON.stringify({ pid: process.pid, acquiredAtMs: Date.now() }));
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    return false;
+  }
+}
+
+/** Run fn while holding a project-scoped backlog write lock.
+ *  A lock held by a dead pid is reclaimed automatically.
+ *  A live-pid lock that outlasts the wait window throws with a manual-recovery message. */
+export function withBacklogLock<T>(projectDir: string, fn: () => T): T {
+  mkdirSync(backlogDir(projectDir), { recursive: true });
+  const lockDir = backlogLockDir(projectDir);
+  const deadline = Date.now() + LOCK_WAIT_MS;
+
+  for (;;) {
+    if (tryAcquireBacklogLock(lockDir)) {
+      try {
+        return fn();
+      } finally {
+        // Only release if we still hold the lock (wasn't reclaimed while fn() ran)
+        const held = readBacklogLockHolder(lockDir);
+        if (held?.pid === process.pid) {
+          try { unlinkSync(join(lockDir, "holder")); } catch { /* already gone */ }
+          try { rmdirSync(lockDir); } catch { /* already gone */ }
+        }
+      }
+    }
+
+    // Lock directory exists — reclaim only if the holder pid is provably dead.
+    // null = holder file not yet written (brief window between mkdir and writeFileSync) — keep waiting.
+    const held = readBacklogLockHolder(lockDir);
+    if (held !== null && !backlogLockPidAlive(held.pid)) {
+      try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* another waiter got here first */ }
+      continue;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `backlog lock held by live pid ${held?.pid ?? "unknown"} at ${lockDir} for longer than ${LOCK_WAIT_MS}ms; if this is stale, remove ${lockDir} manually`,
+      );
+    }
+
+    // Short busy-wait before retrying (safe in a CLI process)
+    const until = Date.now() + LOCK_POLL_MS;
+    while (Date.now() < until) { /* spin */ }
   }
 }
 

@@ -20,6 +20,7 @@ import {
   listTickets as listStructuredTickets,
   moveTicket as moveStructuredTicket,
   readTicket,
+  withBacklogLock,
   writeTicket,
   type TicketType,
   type TicketStatus,
@@ -95,23 +96,27 @@ export function registerBacklog(program: Command): void {
       const dir = resolve(opts.project ?? process.cwd());
       const config = readBacklogConfig(dir);
       const prefix = config.prefix ?? "FG";
-      const existing = listStructuredTickets(dir);
-      const nextNum = existing.reduce((max, t) => {
-        const m = t.id.match(/^[A-Z]+-(\d+)$/);
-        const n = m ? parseInt(m[1]!, 10) : 0;
-        return Math.max(max, n);
-      }, 0) + 1;
-      const id = `${prefix}-${nextNum}`;
+      // Read stdin before acquiring the lock (stdin reads must not block inside a critical section)
       const bodyRaw = readBodyArg(opts.body);
-      const ticket: StructuredTicket = {
-        id,
-        type: (opts.type as TicketType) ?? "story",
-        status: "active",
-        title,
-        body: bodyRaw,
-        created: new Date().toISOString().slice(0, 10),
-      };
-      writeTicket(dir, ticket);
+      const id = withBacklogLock(dir, () => {
+        const existing = listStructuredTickets(dir);
+        const nextNum = existing.reduce((max, t) => {
+          const m = t.id.match(/^[A-Z]+-(\d+)$/);
+          const n = m ? parseInt(m[1]!, 10) : 0;
+          return Math.max(max, n);
+        }, 0) + 1;
+        const newId = `${prefix}-${nextNum}`;
+        const ticket: StructuredTicket = {
+          id: newId,
+          type: (opts.type as TicketType) ?? "story",
+          status: "active",
+          title,
+          body: bodyRaw,
+          created: new Date().toISOString().slice(0, 10),
+        };
+        writeTicket(dir, ticket);
+        return newId;
+      });
       console.log(`Created ${id} in stories/${generateSlug(title)}: ${title}`);
     });
 

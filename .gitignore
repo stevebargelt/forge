@@ -18,3 +18,6 @@ system-map-render*.png
 # forge — per-developer claude-code config (machine-local, not committed)
 .claude/settings.local.json
 .claude/commands/
+
+# forge — transient backlog id-allocation lock (FG-398); never committed
+backlog/.backlog-write.lockdir

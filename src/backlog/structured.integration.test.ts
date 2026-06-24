@@ -3,8 +3,8 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -594,4 +594,235 @@ test("integ FG-397: ghost in ideas dir — list warns and returns done copy", ()
   const matches = tickets.filter((t) => t.id === "FG-93");
   assert.equal(matches.length, 1, "ghost in ideas/ must appear exactly once in list");
   assert.equal(matches[0]!.status, "done", "done copy must win for ghost in ideas/");
+});
+
+// ─── FG-398: concurrent write lock ───────────────────────────────────────────
+
+function runForgeAsync(args: string[], cwd: string): Promise<{ stdout: string; stderr: string; status: number | null }> {
+  return new Promise((resolve) => {
+    const proc = spawn(tsx, [entry, ...args], { cwd });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+    proc.on("close", (code) => { resolve({ stdout, stderr, status: code }); });
+  });
+}
+
+test("integ FG-398: concurrent file invocations produce unique ticket ids", async () => {
+  // Fire 5 concurrent `forge backlog file` commands against the same project dir.
+  // Without the lock they would all see the same max id (FG-30) and all create FG-31.
+  // With the lock each writer serializes through the critical section and gets a distinct id.
+  const N = 5;
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      runForgeAsync(["backlog", "file", `Concurrent ticket ${i + 1}`, "--project", projectDir], projectDir),
+    ),
+  );
+
+  for (const r of results) {
+    assert.equal(r.status, 0, `a concurrent file invocation failed: stdout=${r.stdout} stderr=${r.stderr}`);
+  }
+
+  const ids = results.map((r) => {
+    const m = r.stdout.match(/Created ([A-Z]+-\d+)/);
+    assert.ok(m, `expected 'Created <id>' in stdout: ${r.stdout}`);
+    return m![1]!;
+  });
+
+  const unique = new Set(ids);
+  assert.equal(unique.size, N, `expected ${N} unique ids, got duplicates: ${ids.join(", ")}`);
+
+  // Also verify that the on-disk ticket count grew by exactly N
+  const allFiles = [
+    ...readdirSync(join(projectDir, "backlog", "stories")),
+  ];
+  // stories/ starts with FG-30-implement-thing.md; after N new writes it has N+1
+  assert.equal(allFiles.length, N + 1, `expected ${N + 1} story files, got: ${allFiles.join(", ")}`);
+});
+
+test("integ FG-398: stale lock (dead pid) is reclaimed automatically", () => {
+  // Plant a lock directory whose holder pid is 0 (never a valid running process on POSIX)
+  const lockDir = join(projectDir, "backlog", ".backlog-write.lockdir");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, "holder"), JSON.stringify({ pid: 0, acquiredAtMs: Date.now() }));
+
+  const res = runForge(["backlog", "file", "After dead-pid lock", "--project", projectDir]);
+  assert.equal(res.status, 0, `file should succeed after reclaiming dead-pid lock: ${res.stderr}`);
+  assert.match(res.stdout, /Created FG-31/, "should allocate FG-31 after reclaiming stale lock");
+  assert.ok(!existsSync(lockDir), "lock directory must be released after use");
+});
+
+test("integ FG-398: live-pid lock is NOT stolen — fails loud with manual-recovery message", () => {
+  // Plant a lockdir whose holder references a live pid (our own process.pid) with an old timestamp.
+  // Liveness, not age, decides reclaim — the lock must NOT be stolen from a live pid.
+  const lockDir = join(projectDir, "backlog", ".backlog-write.lockdir");
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, "holder"), JSON.stringify({ pid: process.pid, acquiredAtMs: Date.now() - 60_000 }));
+
+  const res = runForge(["backlog", "file", "Should not be created", "--project", projectDir]);
+  assert.notEqual(res.status, 0, "must fail when a live pid holds the lock");
+  assert.match(res.stderr, /live pid/, "error must mention live pid");
+  assert.match(res.stderr, /manually/, "error must give manual-recovery instruction");
+  assert.ok(existsSync(lockDir), "lock directory must NOT be stolen or removed");
+});
+
+test("integ FG-398: non-FG configured prefix is used for new ticket ids", () => {
+  // Overwrite the project config with prefix: TS
+  writeFileSync(join(projectDir, ".forge", "config.yml"), "backlog:\n  prefix: TS\n");
+
+  const res = runForge(["backlog", "file", "TypeScript story", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+  assert.match(res.stdout, /Created TS-/, "ticket id must use the configured prefix, not a hardcoded FG");
+
+  const storiesDir = join(projectDir, "backlog", "stories");
+  const files = readdirSync(storiesDir);
+  const newFile = files.find((f) => f.includes("typescript-story"));
+  assert.ok(newFile, `expected 'typescript-story' file in stories/, got: ${files.join(", ")}`);
+
+  const content = readFileSync(join(storiesDir, newFile!), "utf8");
+  assert.match(content, /id: TS-/, "frontmatter id must use TS- prefix");
+  assert.doesNotMatch(content, /id: FG-/, "frontmatter id must NOT use FG- prefix");
+});
+
+test("integ FG-398: lock directory is cleaned up after successful file", () => {
+  const lockDir = join(projectDir, "backlog", ".backlog-write.lockdir");
+  const res = runForge(["backlog", "file", "Lock cleanup test", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+  assert.ok(!existsSync(lockDir), "lock directory must not persist after successful ticket creation");
+});
+
+// ─── FG-398 strengthened: higher-concurrency and on-disk content integrity ───
+
+test("integ FG-398 strengthened: 10 concurrent file invocations produce unique ids with verified on-disk content", async () => {
+  // 10-way race — twice the pressure of the basic test.  Verifies both stdout ids
+  // AND the frontmatter id written inside each file are unique (catches silent collisions
+  // where two processes both write a file but one overwrites the other).
+  const N = 10;
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      runForgeAsync(["backlog", "file", `Race ticket ${i + 1}`, "--project", projectDir], projectDir),
+    ),
+  );
+
+  for (const r of results) {
+    assert.equal(r.status, 0, `concurrent invocation failed: stdout=${r.stdout} stderr=${r.stderr}`);
+  }
+
+  const stdoutIds = results.map((r) => {
+    const m = r.stdout.match(/Created ([A-Z]+-\d+)/);
+    assert.ok(m, `expected 'Created <id>' in stdout: ${r.stdout}`);
+    return m![1]!;
+  });
+  if (new Set(stdoutIds).size !== N) {
+    const sortedLog = results
+      .flatMap((r, i) =>
+        r.stderr.split("\n")
+          .filter((l) => l.startsWith("LOCKLOG "))
+          .map((l) => { try { const e = JSON.parse(l.slice(8)) as { t?: number; [k: string]: unknown }; return { proc: i + 1, id: stdoutIds[i], ...e }; } catch { return null; } })
+      )
+      .filter((e): e is NonNullable<typeof e> => e !== null)
+      .sort((a, b) => (a.t ?? 0) - (b.t ?? 0))
+      .map((e) => JSON.stringify(e))
+      .join("\n");
+    assert.fail(`duplicate ids in stdout: ${stdoutIds.join(", ")}\n\nSorted lock interleaving:\n${sortedLog}`);
+  }
+
+  // stories/ starts with FG-30; after N new writes it must have exactly N+1 files
+  const storiesDir = join(projectDir, "backlog", "stories");
+  const allFiles = readdirSync(storiesDir);
+  assert.equal(allFiles.length, N + 1, `expected ${N + 1} files in stories/, got: ${allFiles.join(", ")}`);
+
+  // Parse each file and verify frontmatter ids are all distinct (no silent overwrite)
+  const onDiskIds = allFiles.map((f) => {
+    const content = readFileSync(join(storiesDir, f), "utf8");
+    const m = content.match(/^id: ([A-Z]+-\d+)/m);
+    assert.ok(m, `could not parse id from frontmatter of ${f}`);
+    return m![1]!;
+  });
+  assert.equal(
+    new Set(onDiskIds).size, N + 1,
+    `duplicate frontmatter ids on disk after concurrent race: ${onDiskIds.join(", ")}`,
+  );
+});
+
+test("integ FG-398 strengthened: concurrent race across story and epic types produces all-unique ids", async () => {
+  // 5 stories + 5 epics racing simultaneously.  The lock must serialize the
+  // read-max-id step across all writers regardless of --type, so ids are globally
+  // unique even when written to different subdirectories.
+  const stories = Array.from({ length: 5 }, (_, i) =>
+    runForgeAsync(["backlog", "file", `Concurrent story ${i + 1}`, "--type", "story", "--project", projectDir], projectDir),
+  );
+  const epics = Array.from({ length: 5 }, (_, i) =>
+    runForgeAsync(["backlog", "file", `Concurrent epic ${i + 1}`, "--type", "epic", "--project", projectDir], projectDir),
+  );
+
+  const all = await Promise.all([...stories, ...epics]);
+  for (const r of all) {
+    assert.equal(r.status, 0, `concurrent invocation failed: stderr=${r.stderr}`);
+  }
+
+  const ids = all.map((r) => {
+    const m = r.stdout.match(/Created ([A-Z]+-\d+)/);
+    assert.ok(m, `expected 'Created <id>' in stdout: ${r.stdout}`);
+    return m![1]!;
+  });
+  assert.equal(new Set(ids).size, 10, `expected 10 unique ids across story+epic concurrent race, got: ${ids.join(", ")}`);
+
+  // stories/ started with 1 file (FG-30), epics/ with 1 (FG-20) — each should gain 5
+  const storiesCount = readdirSync(join(projectDir, "backlog", "stories")).length;
+  const epicsCount = readdirSync(join(projectDir, "backlog", "epics")).length;
+  assert.equal(storiesCount, 6, `stories/ must have 1 pre-existing + 5 new, got ${storiesCount}`);
+  assert.equal(epicsCount, 6, `epics/ must have 1 pre-existing + 5 new, got ${epicsCount}`);
+});
+
+test("integ FG-398 strengthened: stale lock with recently-killed real process pid is reclaimed", async () => {
+  // More realistic than the pid=0 test: we spawn an actual process, capture its pid,
+  // kill it, then plant a fresh-timestamp lock directory with that dead-but-once-real pid.
+  // This exercises backlogLockPidAlive() against a PID that ESRCH-kills (no such process).
+  const lockDir = join(projectDir, "backlog", ".backlog-write.lockdir");
+  mkdirSync(join(projectDir, "backlog"), { recursive: true });
+
+  const child = spawn("sleep", ["100"]);
+  const deadPid = child.pid!;
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+
+  // Fresh timestamp so the aged-lock path does NOT trigger — only the dead-pid path
+  mkdirSync(lockDir, { recursive: true });
+  writeFileSync(join(lockDir, "holder"), JSON.stringify({ pid: deadPid, acquiredAtMs: Date.now() }));
+
+  const res = runForge(["backlog", "file", "After real dead-pid lock", "--project", projectDir]);
+  assert.equal(res.status, 0, `file should succeed after reclaiming real dead-pid lock: stderr=${res.stderr}`);
+  assert.match(res.stdout, /Created FG-31/, "should allocate FG-31 after reclaiming the dead-pid lock");
+  assert.ok(!existsSync(lockDir), "lock directory must not persist after successful file");
+});
+
+test("integ FG-398 strengthened: concurrent file invocations with non-FG prefix all get unique ids", async () => {
+  // Extends the non-FG prefix test to a concurrent scenario, confirming the lock
+  // serializes reads across all concurrent writers even when the prefix is not FG.
+  writeFileSync(join(projectDir, ".forge", "config.yml"), "backlog:\n  prefix: TS\n");
+
+  const N = 5;
+  const results = await Promise.all(
+    Array.from({ length: N }, (_, i) =>
+      runForgeAsync(["backlog", "file", `TS concurrent ticket ${i + 1}`, "--project", projectDir], projectDir),
+    ),
+  );
+
+  for (const r of results) {
+    assert.equal(r.status, 0, `concurrent TS-prefix invocation failed: stderr=${r.stderr}`);
+  }
+
+  const ids = results.map((r) => {
+    const m = r.stdout.match(/Created (TS-\d+)/);
+    assert.ok(m, `expected 'Created TS-<n>' in stdout: ${r.stdout}`);
+    return m![1]!;
+  });
+  assert.equal(new Set(ids).size, N, `duplicate ids with TS prefix after concurrent race: ${ids.join(", ")}`);
+
+  // All files on disk must use TS- prefix and have distinct ids
+  const storiesDir = join(projectDir, "backlog", "stories");
+  const newFiles = readdirSync(storiesDir).filter((f) => f.startsWith("TS-"));
+  assert.equal(newFiles.length, N, `expected ${N} TS- prefixed files, got: ${newFiles.join(", ")}`);
 });
