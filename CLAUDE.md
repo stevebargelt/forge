@@ -82,7 +82,7 @@ learnings/          ADRs and patterns for forge itself
 
 ## Documentation
 
-`README.md` is one-screen orientation. `docs/quick-start.md` is end-to-end. The four `how-to-*.md` files cover starting each workflow type and adding new agents/workflows. `docs/concepts.md` is the glossary.
+`README.md` is one-screen orientation. `docs/quick-start.md` is end-to-end. The `how-to-*.md` files cover starting each workflow type, adding new agents/workflows, and writing/running tests (`docs/how-to-testing.md`). `docs/concepts.md` is the glossary.
 
 If you change a CLI flag or rename a primitive, update the relevant doc in the same commit.
 
