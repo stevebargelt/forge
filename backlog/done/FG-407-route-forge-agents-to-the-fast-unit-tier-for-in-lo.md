@@ -1,9 +1,11 @@
 ---
 id: FG-407
 type: story
-status: active
+status: done
 title: Route Forge agents to the fast unit tier for in-loop iteration; orchestrator runs the aggregate gate before shipped claims (FG-406 follow-on)
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: 060379a
 ---
 
 ## Problem
