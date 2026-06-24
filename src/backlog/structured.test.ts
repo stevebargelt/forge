@@ -439,6 +439,38 @@ test("listTickets: ghost active is not returned when filtering status=active", (
   assert.ok(tickets.some((t) => t.id === "FG-55"), "real active ticket FG-55 must be present");
 });
 
+// FG-403 regressions: listTickets must scan all dirs regardless of status filter
+
+test("listTickets --status done: ghost duplicate emits warning AND returns done copy", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-70");
+  let tickets!: StructuredTicket[];
+  const stderr = captureStderr(() => {
+    tickets = listTickets(dir, { status: "done" });
+  });
+  assert.match(stderr, /ERROR/i, "must print ERROR to stderr even with --status done");
+  assert.match(stderr, /FG-70/, "error must name the ticket id");
+  assert.match(stderr, /duplicate/i, "error must mention duplicate");
+  const matches = tickets.filter((t) => t.id === "FG-70");
+  assert.equal(matches.length, 1, "must return exactly one entry for the ghost id");
+  assert.equal(matches[0]!.status, "done", "done copy must win");
+});
+
+test("listTickets --status done: returns status:done ticket stranded in active dir", () => {
+  const dir = makeTmpDir();
+  // Simulate partial-failure: done-content written to stories/ but renameSync never ran
+  const base = join(dir, "backlog");
+  mkdirSync(join(base, "stories"), { recursive: true });
+  const strandedContent =
+    `---\nid: FG-71\ntype: story\nstatus: done\ntitle: Stranded done ticket\nclosed: '2026-06-24'\n---\n\nBody.\n`;
+  writeFileSync(join(base, "stories", "FG-71-stranded-done-ticket.md"), strandedContent);
+  // No copy exists in done/
+  const tickets = listTickets(dir, { status: "done" });
+  const match = tickets.find((t) => t.id === "FG-71");
+  assert.ok(match, "stranded status:done ticket must appear in --status done results");
+  assert.equal(match!.status, "done");
+});
+
 test("listTickets: ghost for epic type reports correctly", () => {
   const dir = makeTmpDir();
   const base = join(dir, "backlog");

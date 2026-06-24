@@ -145,16 +145,12 @@ export type ListFilter = {
 
 export function listTickets(projectDir: string, filters: ListFilter = {}): StructuredTicket[] {
   const base = backlogDir(projectDir);
-  const dirsToScan: string[] = [];
-
-  if (filters.status === "done") {
-    dirsToScan.push(DONE_DIR);
-  } else if (filters.type) {
-    dirsToScan.push(TYPE_DIRS[filters.type]);
-    if (!filters.status) dirsToScan.push(DONE_DIR);
-  } else {
-    dirsToScan.push("ideas", "epics", "stories", DONE_DIR);
-  }
+  // Always scan all structured dirs (active dirs first, done last) so that
+  // dedup/ghost detection fires on every path, including --status done.
+  // Filtering is applied post-scan from frontmatter, not from which dir was scanned.
+  // NOTE: a cleaner crash-safety fix would be for atomicMoveFile to write into done/ first;
+  // that is FG-397's responsibility and is not changed here.
+  const dirsToScan = ["ideas", "epics", "stories", DONE_DIR];
 
   const searchLower = filters.search ? filters.search.toLowerCase() : undefined;
 

@@ -826,3 +826,54 @@ test("integ FG-398 strengthened: concurrent file invocations with non-FG prefix 
   const newFiles = readdirSync(storiesDir).filter((f) => f.startsWith("TS-"));
   assert.equal(newFiles.length, N, `expected ${N} TS- prefixed files, got: ${newFiles.join(", ")}`);
 });
+
+// ─── FG-403: listTickets --status done integrity ──────────────────────────────
+
+test("integ FG-403: list --status done --json surfaces ticket with done-frontmatter stranded in active dir", () => {
+  // Simulate FG-397 partial state: done-frontmatter written into stories/ but renameSync never ran.
+  // No copy in done/ — ticket exists only in the active dir with status:done in its frontmatter.
+  const base = join(projectDir, "backlog");
+  mkdirSync(join(base, "stories"), { recursive: true });
+  const strandedContent =
+    "---\nid: FG-80\ntype: story\nstatus: done\ntitle: Stranded done ticket\nclosed: '2026-06-24'\n---\n\nStranded body.\n";
+  writeFileSync(join(base, "stories", "FG-80-stranded-done-ticket.md"), strandedContent);
+
+  const res = runForge(["backlog", "list", "--status", "done", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+
+  const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string; title: string }>;
+  const match = tickets.find((t) => t.id === "FG-80");
+  assert.ok(match, "stranded status:done ticket must appear in --status done --json results");
+  assert.equal(match!.status, "done");
+  assert.equal(match!.title, "Stranded done ticket");
+  // Single copy — no duplicate warning expected
+  assert.equal(res.stderr, "", "no duplicate warning expected for a single-copy stranded ticket");
+});
+
+test("integ FG-403: list --status done emits ERROR to stderr AND returns done copy for ghost duplicate", () => {
+  // Plant the FG-397 ghost state: same id in both stories/ (active) and done/ (done).
+  plantGhostInteg(join(projectDir, "backlog"), "FG-81", "stories");
+
+  const res = runForge(["backlog", "list", "--status", "done", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0, "command must succeed even with ghost duplicate");
+  assert.match(res.stderr, /ERROR/i, "must emit ERROR to stderr even when filtering by --status done");
+  assert.match(res.stderr, /FG-81/, "error must name the duplicate ticket id");
+  assert.match(res.stderr, /duplicate/i, "error must mention duplicate");
+
+  const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string }>;
+  const matches = tickets.filter((t) => t.id === "FG-81");
+  assert.equal(matches.length, 1, "ghost ticket must appear exactly once in --status done output");
+  assert.equal(matches[0]!.status, "done", "done copy must win over the ghost active copy");
+});
+
+test("integ FG-403: list --status done with no ghost returns exactly done tickets and no spurious warning", () => {
+  // Clean fixture (from setupStructuredBacklog): only FG-5 is in done/; no ghost copies anywhere.
+  const res = runForge(["backlog", "list", "--status", "done", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+  assert.equal(res.stderr, "", "no duplicate warning must be emitted when there are no ghost copies");
+
+  const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string }>;
+  assert.equal(tickets.length, 1, "must return exactly the done tickets — no spurious additions");
+  assert.equal(tickets[0]!.id, "FG-5");
+  assert.equal(tickets[0]!.status, "done");
+});
