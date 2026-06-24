@@ -1,9 +1,11 @@
 ---
 id: FG-399
 type: story
-status: active
+status: done
 title: "backlog close: --commit <sha> is accepted but not recorded for structured tickets (no commit/closed-sha frontmatter field) — restore the close audit trail lost vs the legacy path"
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: 639ace3
 ---
 
 ## Problem
