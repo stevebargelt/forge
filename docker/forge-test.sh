@@ -12,16 +12,62 @@
 # tests from /tmp/forge-work — leaving the host's node_modules untouched.
 #
 # Usage:
-#   forge-test                      # run all tests (npm test)
-#   forge-test src/spine/foo.test.ts  # run a single test file
+#   forge-test                        # unit tier (test:unit if present, else npm test)
+#   forge-test --unit                 # npm run test:unit
+#   forge-test --integration          # npm run test:integration
+#   forge-test --worktree             # npm run test:worktree
+#   forge-test --all                  # npm run test:all (full aggregate incl. dashboard)
+#   forge-test src/spine/foo.test.ts  # run a single test file directly with tsx
 #   forge-test --test pattern         # any flags passed to tsx/node:test
 #
+# Tier flags are the first argument only; --test and file paths are passthroughs
+# to the underlying runner (tsx/jest/vitest) and are unaffected.
+#
 # Exit code: forwarded from the test runner.
+#
+# FORGE_TEST_PRINT_CMD=1: resolve which command would run, print it to stdout,
+# and exit 0 WITHOUT copying/rebuilding/running. Used by tests to verify
+# selection logic without the container scratch setup.
+# FORGE_SRC_DIR: override the project root checked for package.json scripts
+# (default: /project). Only meaningful with FORGE_TEST_PRINT_CMD=1.
 
 set -euo pipefail
 
 WORK_DIR="/tmp/forge-work"
-SRC_DIR="/project"
+SRC_DIR="${FORGE_SRC_DIR:-/project}"
+
+# Returns 0 if the named npm script exists in the given package.json file.
+_pkg_has_script() {
+  node -e "
+    try {
+      const p = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+      process.exit((p.scripts && p.scripts[process.argv[2]]) ? 0 : 1);
+    } catch(e) { process.exit(1); }
+  " "$1" "$2" 2>/dev/null
+}
+
+# ── PRINT-CMD MODE ──────────────────────────────────────────────────────────
+# Exit early: print the resolved command without running the scratch setup.
+if [[ "${FORGE_TEST_PRINT_CMD:-}" == "1" ]]; then
+  if [[ $# -eq 0 ]]; then
+    if _pkg_has_script "$SRC_DIR/package.json" "test:unit"; then
+      echo "npm run test:unit"
+    else
+      echo "npm test"
+    fi
+  elif [[ "$1" == "--unit" ]]; then
+    echo "npm run test:unit"
+  elif [[ "$1" == "--integration" ]]; then
+    echo "npm run test:integration"
+  elif [[ "$1" == "--worktree" ]]; then
+    echo "npm run test:worktree"
+  elif [[ "$1" == "--all" ]]; then
+    echo "npm run test:all"
+  else
+    echo "tsx --test $*"
+  fi
+  exit 0
+fi
 
 if [[ ! -d "$SRC_DIR" ]]; then
   echo "forge-test: /project not mounted; nothing to test" >&2
@@ -44,23 +90,39 @@ else
   cd "$WORK_DIR"
 fi
 
-# Forward all arguments to the test runner. Default to `npm test` when called
-# with no args (the project's own script, which finds tsx on PATH — global, #299
-# — when it's not in node_modules/.bin); otherwise run the given files directly.
-#
-# #299: the file-args path uses the `tsx` CLI binary, NOT `node --import tsx` — a
-# GLOBAL tsx install is not resolvable by `node --import tsx` (global modules
-# aren't on node's import path), whereas the `tsx` CLI is self-contained on PATH.
-# Fail loud with a useful diagnostic if the runner genuinely isn't present.
+# Returns 0 if the named npm script exists in ./package.json (work dir).
+_has_script() {
+  _pkg_has_script "./package.json" "$1"
+}
+
+# ── TIER FLAGS (first arg only) ─────────────────────────────────────────────
+if [[ $# -ge 1 ]]; then
+  case "$1" in
+    --unit|--integration|--worktree|--all)
+      _npm_script="test:${1#--}"
+      if ! _has_script "$_npm_script"; then
+        echo "forge-test: no \"$_npm_script\" script in $WORK_DIR/package.json" >&2
+        exit 2
+      fi
+      exec npm run "$_npm_script"
+      ;;
+  esac
+fi
+
+# ── NO-ARGS DEFAULT ──────────────────────────────────────────────────────────
 if [[ $# -eq 0 ]]; then
-  if ! grep -q '"test"' package.json 2>/dev/null; then
+  if _has_script "test:unit"; then
+    exec npm run test:unit
+  elif ! grep -q '"test"' package.json 2>/dev/null; then
     echo "forge-test: no \"test\" script in $WORK_DIR/package.json — this project has no test runner to invoke." >&2
     echo "forge-test: add a test script, or call \`forge-test <file.test.ts>\` to run files directly with tsx." >&2
     exit 2
+  else
+    exec npm test
   fi
-  exec npm test
 fi
 
+# ── FILE / PATTERN PASSTHROUGH ──────────────────────────────────────────────
 # Detect the test runner from package.json.
 # Priority: scripts.test pattern -> devDependencies jest/vitest -> node:test.
 detect_runner() {

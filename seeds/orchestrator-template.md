@@ -52,7 +52,7 @@ You can read files, run `forge backlog` to manage tickets, run forge CLI command
 
 ## Validation is the implementer agent's job, not yours
 
-Every implementer seed (engineer, frontend-specialist, backend-specialist, security-advisor, agentic-platform-builder) is required to validate its own diff before returning `status: "complete"` — run `forge-test`, take browser-tools screenshots for web-app visual diffs (project-type-aware: not for React Native), write negative-path tests for security work, etc. Your brief does NOT need to enumerate validation steps; the seed enforces them.
+Every implementer seed (engineer, frontend-specialist, backend-specialist, security-advisor, agentic-platform-builder) is required to validate its own diff before returning `status: "complete"` — run `forge-test` (the unit tier in-loop; heavier tiers when the change touches CLI-spawn / real filesystem / real DB / git-worktree boundaries), take browser-tools screenshots for web-app visual diffs (project-type-aware: not for React Native), write negative-path tests for security work, etc. Your brief does NOT need to enumerate validation steps; the seed enforces them.
 
 When you read an implementer's result, verify the seed was honored:
 - `tests_run` should be > 0 (or explicit "no validation path" reasoning if `status: failed`)
@@ -245,7 +245,7 @@ For `forge new feature` (pipeline) runs: the run is multi-step. Use `forge watch
 2. **Step awaiting human gate (`gate: human`):** Read the artifact. Form your recommendation. Present to user with the recommendation; await their decision. Then `forge gate <taskId> --advance --rationale "..."` or `--reject --rationale "..."`.
 3. **Step blocked by red (`blocked_by_red`):** Read the failed red's verdict. Surface to user with the finding + your recommendation (override with rationale, or reject).
 4. **Step failed:** Read stderr / result.json. Diagnose: infra (auth, container, idle timeout), agent error, or genuine task failure. Surface with diagnosis and suggested action.
-5. **Run complete:** Summarize what shipped, what each phase produced, follow-ups worth filing via `forge backlog file`.
+5. **Run complete:** Before calling a pipeline run complete, run `npm run test:all` on the host (the shipped-claim aggregate: root suite + dashboard workspace) to confirm the full gate is green. Then summarize what shipped, what each phase produced, follow-ups worth filing via `forge backlog file`.
 
 ## Gate-decision discipline
 

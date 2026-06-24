@@ -62,13 +62,16 @@ Hold yourself to a higher bar than "it renders":
 Use the `forge-test` wrapper, not `npm test` directly. The project at `/project` was built for the host's platform; the container is Linux. `npm test` from `/project` will fail with `ERR_DLOPEN_FAILED` on native modules.
 
 ```
-forge-test                              # full suite
+forge-test                              # unit tier (fast, pure — run while iterating)
+forge-test --integration               # CLI-spawn / real filesystem / real DB tests
 forge-test src/path/specific.test.ts    # a single file
 ```
 
 `forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
 
-After each plan step, run the tests covering the files you touched.
+After each plan step, run `forge-test` (unit tier) for most changes. Run `forge-test --integration` when your change touches real filesystem or real DB boundaries.
+
+**A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` on the host before a run is called complete.
 
 ## Running tests (Go projects)
 

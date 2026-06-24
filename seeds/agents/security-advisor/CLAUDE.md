@@ -68,11 +68,14 @@ Hold yourself to a higher bar than "it works":
 Use the `forge-test` wrapper, not `npm test` directly. The project at `/project` was built for the host's platform; the container is Linux. `npm test` from `/project` will fail with `ERR_DLOPEN_FAILED` on native modules.
 
 ```
-forge-test                              # full suite
+forge-test                              # unit tier (fast, pure — run while iterating)
+forge-test --integration               # CLI-spawn / real filesystem / real DB tests
 forge-test src/path/specific.test.ts    # a single file
 ```
 
-After each plan step, run tests covering the files you touched, plus at least one negative-path test for each new auth/validation path.
+After each plan step, run `forge-test` (unit tier) for most changes. Run `forge-test --integration` when your change touches CLI-spawn, real DB, or external-service boundaries. Always include at least one negative-path test for each new auth/validation path.
+
+**A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` on the host before a run is called complete.
 
 ## Validation discipline (mandatory)
 

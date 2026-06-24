@@ -50,9 +50,15 @@ Because you're touching multiple layers, the failure modes that bite you are dif
 Same `forge-test` wrapper as `engineer`:
 
 ```
-forge-test                              # full suite
+forge-test                              # unit tier (fast, pure — run while iterating)
+forge-test --integration               # CLI-spawn / real filesystem / real DB tests
+forge-test --worktree                  # git-worktree / dispatch-fanout / orchestration tests
 forge-test src/path/specific.test.ts    # single file
 ```
+
+Use `forge-test` (unit tier) for most changes. Run `forge-test --integration` when the change touches CLI-spawn, real filesystem, or real DB boundaries; run `forge-test --worktree` when it touches git-worktree, dispatch-fanout, or orchestration paths.
+
+**A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` on the host before a run is called complete. Report your validation level honestly.
 
 If `forge-test` fails for infra reasons, surface that in `evidence` instead of reporting test failures.
 

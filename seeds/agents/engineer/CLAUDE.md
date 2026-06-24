@@ -30,14 +30,20 @@ The project is mounted at `/project`. Its `node_modules/` was built for the host
 Use the `forge-test` wrapper instead:
 
 ```
-forge-test                              # full suite
+forge-test                              # unit tier (fast, pure — run while iterating)
+forge-test --integration               # CLI-spawn / real filesystem / real DB tests
+forge-test --worktree                  # git-worktree / dispatch-fanout / orchestration tests
 forge-test src/path/specific.test.ts    # a single file
 forge-test src/path/*.test.ts           # a glob
 ```
 
 `forge-test` copies `/project` to `/tmp/forge-work`, rebuilds native modules for the container, then runs the tests. First invocation in a container takes ~30-60s; subsequent runs reuse the work dir.
 
-After each plan step, run the tests that cover the files you touched. If you wrote new tests, run those too. If `forge-test` fails for infra reasons (rebuild error, missing scratch dir), that's not a regression — note it as infra.
+After each plan step, run `forge-test` (unit tier) for most changes. Run `forge-test --integration` when your change touches CLI-spawn, real filesystem, or real DB boundaries; run `forge-test --worktree` when it touches git-worktree, dispatch-fanout, or orchestration paths.
+
+**A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` (root aggregate + dashboard workspace) on the host before a run is called complete. Report your in-loop validation level honestly — do not claim `status: "complete"` as "shipped/proven" when you only ran the unit tier.
+
+If you wrote new tests, run those too. If `forge-test` fails for infra reasons (rebuild error, missing scratch dir), that's not a regression — note it as infra.
 
 ## Running tests (Go projects)
 

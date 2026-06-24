@@ -47,6 +47,17 @@ npm test
 npm run test:all
 ```
 
+## Agent-iteration contract
+
+Within an agent's in-loop validation, use `forge-test` at the right tier:
+
+- **`forge-test`** (unit tier, no args) — the default. Fast and pure; run this while iterating on most changes.
+- **`forge-test --integration`** — when the change touches CLI-spawn, real filesystem, or real DB boundaries.
+- **`forge-test --worktree`** — when the change touches git-worktree operations, dispatch-fanout, or orchestration paths.
+- **`forge-test <file.test.ts>`** or **`forge-test --test <pattern>`** — run a specific file or pattern regardless of tier.
+
+**A green unit tier is in-loop confidence, not a shipped claim.** The orchestrator runs `npm run test:all` (the shipped-claim aggregate: root suite + dashboard workspace) on the host before a run is called complete. Agents must report their validation tier honestly in their result — `status: "complete"` means the diff was validated at the level appropriate for its change; it does not mean the full aggregate has been verified.
+
 ## Naming a new test file
 
 Pick the suffix that matches the slowest operation the test performs:

@@ -105,14 +105,16 @@ Read the Stack section of `/project/CLAUDE.md` to determine your verification st
 Use the `forge-test` wrapper, not `npm test` directly:
 
 ```
-forge-test                              # full suite
+forge-test                              # unit tier (default — fast, pure)
+forge-test --integration               # CLI-spawn / real filesystem / real DB tests
+forge-test --worktree                  # git-worktree / dispatch-fanout / orchestration tests
 forge-test src/path/specific.test.ts    # a single file
 forge-test src/path/*.test.ts           # a glob
 ```
 
 `forge-test` copies `/project` to `/tmp/forge-work`, rebuilds native modules for the container, then runs tests. First invocation takes ~30-60s; subsequent runs reuse the work dir.
 
-After writing your tests, run them via `forge-test` to confirm they pass. **Do not submit tests you haven't run.** A test file that fails on first run is worse than no test — it wastes everyone's time.
+After writing your tests, run them via the appropriate tier: `forge-test` (unit tier) for pure in-memory tests; `forge-test --integration` for integration tests; `forge-test --worktree` for worktree tests. **Do not submit tests you haven't run.** A test file that fails on first run is worse than no test — it wastes everyone's time.
 
 ## Running tests (Go projects)
 
@@ -131,7 +133,7 @@ Write `_test.go` files following Go conventions: table-driven tests, `t.Run` sub
 
 **You do not return `status: "complete"` until every test you wrote passes and all available gates below are green.**
 
-- Run all your new test files via `forge-test` (Node) or `go test` (Go)
+- Run all your new test files via `forge-test` (unit tier, no args) or the appropriate heavier tier (`--integration`, `--worktree`) depending on what boundaries your tests cross — or `go test` (Go)
 - If any fail, fix them or remove them — never ship red tests
 - For Playwright E2E specs, run `npx playwright test` and confirm all pass
 - **Type-check** (mandatory for TypeScript projects): discover the command from `/project/package.json` scripts — try `type-check`, then `typecheck`, then `tsc` in that order. If none of those scripts exist but `/project/tsconfig.json` is present, run `npx tsc --noEmit`. For Go: `go vet ./...`. Mark as **n/a only when the project contains no TypeScript** (no `.ts`/`.tsx` files, no `tsconfig.json`). `forge-test` transpiles TS and strips types — tests passing does NOT mean the type-check is clean. **If an available type-check gate exists and you skip it, your status is `failed`.**
