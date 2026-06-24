@@ -10,11 +10,12 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { planCommitMsgHook } from "./init.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "..", "cli", "index.ts");
@@ -139,4 +140,77 @@ test("integ FG-332: second forge init run reports already-exists for backlog/ an
   const out = second.stdout;
   assert.match(out, /backlog\/.*no-op|already exists/, "second init should report no-op for backlog/");
   assert.match(out, /model-policy\.yml.*no-op|already exists/, "second init should report no-op for model-policy.yml");
+});
+
+// ----- planCommitMsgHook — git-dependent cases (FG-408: moved from unit tier) -----
+
+test("planCommitMsgHook: returns install when .git/hooks exists and no commit-msg present", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "install");
+  if (plan.action === "install") {
+    assert.match(plan.target, /\.git\/hooks\/commit-msg$/);
+    assert.match(plan.source, /commit-msg-no-ai-attribution$/);
+  }
+});
+
+test("planCommitMsgHook: returns already-linked when a symlink already points at our source", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const prodPlan = planCommitMsgHook(projectDir);
+  assert.equal(prodPlan.action, "install");
+  if (prodPlan.action !== "install") throw new Error("setup failed");
+  symlinkSync(prodPlan.source, prodPlan.target);
+
+  const replan = planCommitMsgHook(projectDir);
+  assert.equal(replan.action, "already-linked");
+});
+
+test("planCommitMsgHook: returns exists-other when a non-symlink hook is already in place", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
+  writeFileSync(hookPath, "#!/bin/sh\necho 'some other hook'\n");
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action === "exists-other") {
+    assert.match(plan.details, /regular file/);
+  }
+});
+
+test("planCommitMsgHook: returns exists-other when a symlink points somewhere else", () => {
+  execSync("git init -q", { cwd: projectDir });
+  const decoy = join(projectDir, "decoy-hook");
+  writeFileSync(decoy, "#!/bin/sh\nexit 0\n");
+  const hookPath = join(projectDir, ".git", "hooks", "commit-msg");
+  symlinkSync(decoy, hookPath);
+  const plan = planCommitMsgHook(projectDir);
+  assert.equal(plan.action, "exists-other");
+  if (plan.action === "exists-other") {
+    assert.match(plan.details, /symlink/);
+  }
+});
+
+// ----- forge init CLI end-to-end via execSync (FG-408: moved from unit tier) -----
+
+test("forge init --prefix: writes prefix into .forge/config.yml", () => {
+  execSync(`npm run forge -- init --project ${projectDir} --no-install-hooks --prefix FG`, {
+    cwd: process.cwd(),
+    stdio: "pipe",
+  });
+  const configPath = join(projectDir, ".forge", "config.yml");
+  assert.ok(existsSync(configPath), ".forge/config.yml should be created");
+  const content = readFileSync(configPath, "utf8");
+  assert.match(content, /prefix.*FG|FG.*prefix/, "config.yml should contain the prefix");
+});
+
+test("forge init --dry-run: reports backlog scaffold, config, model-policy, docs-surfaces without writing", () => {
+  const out = execSync(`npm run forge -- init --project ${projectDir} --no-install-hooks --prefix TEST --dry-run`, {
+    cwd: process.cwd(),
+    stdio: "pipe",
+  }).toString();
+  assert.match(out, /backlog\//i, "dry-run should mention backlog/ scaffold");
+  assert.match(out, /prefix.*TEST|config\.yml/i, "dry-run should mention config.yml prefix");
+  assert.match(out, /model-policy\.yml/i, "dry-run should mention model-policy.yml");
+  assert.match(out, /docs-surfaces\.yml/i, "dry-run should mention docs-surfaces.yml");
+  assert.ok(!existsSync(join(projectDir, ".forge")), ".forge/ should not be created in dry-run");
+  assert.ok(!existsSync(join(projectDir, "backlog")), "backlog/ should not be created in dry-run");
 });
