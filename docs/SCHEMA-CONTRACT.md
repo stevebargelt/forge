@@ -33,6 +33,8 @@ Columns the dashboard reads:
 - `error` — nullable string
 - `worktree_path` — nullable string, the host filesystem path of the task's git worktree when worktree mode is enabled (`FORGE_WORKTREES=1`). `null` for default bind-mount runs. Set durably before container dispatch so it survives process restart. Task branch identity is derived deterministically as `forge/<runId>/<taskId>` and is not stored separately. Added by FG-351; additive and nullable — pre-FG-351 rows and dashboard code that does not read this column degrade gracefully.
 
+  Fan-out steps additionally create a step-scoped **integration branch** (`forge/<runId>/<parentTaskId>/integration`) checked out at `~/.forge/worktrees/<runId>/<parentTaskId>/integration`. Child branches are merged into this integration tree sequentially (in child index order, `--no-ff`) before fan-out reds review it. The integration branch and worktree are not tracked in the `tasks` table; they are retained on conflict or failure (for inspection) and removed only after the integration branch successfully fast-forward-merges to HEAD. Three lifecycle events mark the integration path in `forge show`: `integration.worktree_created`, `integration.child_merged`, and `integration.merged_to_head`. This behavior is active only when `FORGE_WORKTREES=1` (FG-353).
+
 ### `verdicts` table
 
 - `id`, `task_id`, `red_task_id` — strings

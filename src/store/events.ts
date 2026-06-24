@@ -40,7 +40,11 @@ export type EventType =
   // #202/#203: an orchestrator-declared checkpoint (forge notify milestone). The
   // orchestrator owns *meaning*; forge owns delivery/dedupe/policy. Always
   // recorded (audit trail) regardless of whether a push was sent.
-  | "orchestrator.milestone";
+  | "orchestrator.milestone"
+  // FG-353: worktree integration git mutation events for forge show / dashboard.
+  | "integration.worktree_created"
+  | "integration.child_merged"
+  | "integration.merged_to_head";
 
 export type Event = {
   id: number;

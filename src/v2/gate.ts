@@ -21,6 +21,7 @@
 
 import type { GateDecision, Task, TaskPackage, VerdictRow } from "../types/index.js";
 import { getTask, setTaskStatus, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
+import { getDb } from "../store/db.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
@@ -129,6 +130,21 @@ export async function gate(
   let nextTasks: Task[] = [];
 
   if (decision === "advance") {
+    const isFanoutParent = typeof task.taskPackage?.inputs?.["fanout"] === "object";
+    if (blocked && isFanoutParent) {
+      // FG-353: blocked_by_red fanout parent needs re-entry into dispatchFanoutStep
+      // so the integration branch can be merged to HEAD before the parent completes.
+      // Set gateForced in inputs so dispatchFanoutStep detects re-entry, then
+      // transition to pending so the runner picks it up.
+      // Atomic: both writes must succeed together so a crash cannot leave
+      // the task in blocked_by_red with gateForced:true set (wedged).
+      getDb().transaction(() => {
+        updateTaskPackageInputs(taskId, { ...task.taskPackage.inputs, gateForced: true });
+        setTaskStatus(taskId, "pending");
+      })();
+      return { task: getTask(taskId)!, nextTasks: [] };
+    }
+    // Non-fanout or non-blocked advance: unchanged.
     markTaskComplete(taskId, task.result);
     logEvent("task.completed", { runId: run.id, taskId });
 

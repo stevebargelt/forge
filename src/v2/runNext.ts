@@ -28,11 +28,11 @@ import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigge
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
-import { insertVerdict } from "../store/verdicts.js";
+import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
-import { taskDir } from "../util/paths.js";
+import { taskDir, integrationWorktreeDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
@@ -57,6 +57,7 @@ import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 // FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
+// FG-353: integration worktree helpers added.
 import {
   isWorktreeModeEnabled,
   preflightWorktreeGate,
@@ -64,6 +65,12 @@ import {
   mergeWorktreeBranch,
   removeWorktreeIfSafe,
   cleanupFailedWorktreeSetup,
+  integrationBranchName,
+  integrationBranchExists,
+  createIntegrationWorktree,
+  mergeChildIntoIntegration,
+  mergeIntegrationBranchToHead,
+  cleanupIntegrationWorktree,
 } from "./worktree-lifecycle.js";
 
 // Resolve the agent role for a fanout child. When fanout.agent_map is set and
@@ -922,6 +929,86 @@ async function dispatchFanoutStep(args: {
   );
   if (activeWithChildren) return activeWithChildren.status;
   if (existingParent) {
+    const gateForced = existingParent.taskPackage?.inputs?.["gateForced"] === true;
+    if (gateForced) {
+      // FG-353 re-entry: gate.ts set gateForced on a blocked_by_red fanout parent
+      // so we can merge the integration branch to HEAD before finalizing the parent.
+      const redsAlreadyRan = verdictsForTask(existingParent.id).length > 0;
+      markTaskRunning(existingParent.id);
+      const savedResultPath = join(taskDir(args.runId, existingParent.id), "result.json");
+      let savedResult: unknown;
+      try {
+        savedResult = JSON.parse(readFileSync(savedResultPath, "utf8"));
+      } catch (e) {
+        failTask(existingParent.id, {
+          runId: args.runId,
+          kind: classify({}),
+          error: `re-entry: missing or malformed result.json for task ${existingParent.id}: ${String(e)}`,
+        });
+        return "failed";
+      }
+      if (
+        isWorktreeModeEnabled() &&
+        redsAlreadyRan &&
+        integrationBranchExists(args.projectDir, args.runId, existingParent.id)
+      ) {
+        // Skip child dispatch and red dispatch — go directly to integration->HEAD merge.
+        const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, existingParent.id);
+        logEvent("integration.merged_to_head", {
+          runId: args.runId,
+          taskId: existingParent.id,
+          payload: {
+            ok: headMerge.ok,
+            branch: integrationBranchName(args.runId, existingParent.id),
+            reEntry: true,
+            error: !headMerge.ok ? headMerge.error : undefined,
+          },
+        });
+        if (!headMerge.ok) {
+          failTask(existingParent.id, {
+            runId: args.runId,
+            kind: "merge_conflict",
+            error: headMerge.error,
+            result: savedResult,
+          });
+          return "failed";
+        }
+        // FG-357 seam: post-merge build+test integration gate goes here
+        // Only proven-merged (completed) children may be cleaned up; failed children
+        // were never integrated and must retain their worktree/branch (no-discard).
+        const childTasksForCleanup = allTasks.filter(
+          (t) =>
+            t.parentId === existingParent.id &&
+            !t.agentRole.startsWith("red-") &&
+            t.status === "complete",
+        );
+        for (const child of childTasksForCleanup) {
+          const childWtPath = child.worktreePath as string | undefined;
+          if (childWtPath) {
+            removeWorktreeIfSafe(childWtPath, args.runId, child.id, args.projectDir, true);
+          }
+        }
+        cleanupIntegrationWorktree(args.projectDir, args.runId, existingParent.id);
+      } else if (isWorktreeModeEnabled() && redsAlreadyRan) {
+        // Worktree mode is on and reds already ran (integration was built and
+        // reviewed) but the integration branch is now missing — inconsistent state.
+        // Fail loudly rather than silently completing without merging child work to HEAD.
+        failTask(existingParent.id, {
+          runId: args.runId,
+          kind: "merge_conflict",
+          error:
+            `re-entry: integration branch missing for task ${existingParent.id} — ` +
+            `expected ${integrationBranchName(args.runId, existingParent.id)}, ` +
+            `cannot complete without merging child work to HEAD`,
+          result: savedResult,
+        });
+        return "failed";
+      }
+      // For non-worktree re-entry (or worktree re-entry before reds ran),
+      // finalize the parent normally.
+      return finalizePrimary(existingParent.id, args.runId, step.gate, savedResult);
+    }
+    // Original pendingHasChildren guard unchanged below.
     const pendingHasChildren = allTasks.some(
       (c) => c.parentId === existingParent.id && !c.agentRole.startsWith("red-"),
     );
@@ -1064,6 +1151,73 @@ async function dispatchFanoutStep(args: {
     return "failed";
   }
 
+  // FG-353 Change 5: merge successful child branches into a dedicated integration
+  // worktree (in child index order, --no-ff) so fan-out reds review the integrated
+  // output rather than any single child. Non-worktree path is byte-for-byte unchanged.
+  // Wrapped in try/catch so any unexpected git error transitions the parent to failed
+  // rather than leaving it running/wedged.
+  let integrationWorktreePath: string | undefined;
+  if (isWorktreeModeEnabled()) {
+    const successfulChildren = childOutcomes
+      .filter((c) => c.status === "complete")
+      .sort((a, b) => a.index - b.index);
+    try {
+      const { integrationPath } = createIntegrationWorktree(
+        args.projectDir,
+        args.runId,
+        parentId,
+      );
+      integrationWorktreePath = integrationPath;
+      logEvent("integration.worktree_created", {
+        runId: args.runId,
+        taskId: parentId,
+        payload: {
+          integrationPath,
+          branch: integrationBranchName(args.runId, parentId),
+          childCount: successfulChildren.length,
+        },
+      });
+      for (const child of successfulChildren) {
+        if (!child.worktreePath) continue;
+        const merge = mergeChildIntoIntegration(
+          integrationWorktreePath,
+          args.runId,
+          child.childTaskId,
+          child.worktreePath,
+        );
+        logEvent("integration.child_merged", {
+          runId: args.runId,
+          taskId: parentId,
+          payload: {
+            childTaskId: child.childTaskId,
+            childIndex: child.index,
+            ok: merge.ok,
+            error: !merge.ok ? merge.error : undefined,
+          },
+        });
+        if (!merge.ok) {
+          failTask(parentId, {
+            runId: args.runId,
+            kind: "merge_conflict",
+            error: merge.error,
+            result: parentResult,
+          });
+          // Retain integration branch and the offending child worktree for inspection.
+          return "failed";
+        }
+      }
+    } catch (e) {
+      const errMsg = `integration worktree setup failed: ${(e as Error).message ?? String(e)}`;
+      failTask(parentId, {
+        runId: args.runId,
+        kind: "merge_conflict",
+        error: errMsg,
+        result: parentResult,
+      });
+      return "failed";
+    }
+  }
+
   // Reds run per-parent on the aggregate (FORGE-DEC / #139: not per-child). The
   // single-step path does this; the fanout path used to skip it entirely, so the
   // build phase's authoritative reds never dispatched and the verdict gate had no
@@ -1078,22 +1232,91 @@ async function dispatchFanoutStep(args: {
       step,
       primaryTaskId: parentId,
       primaryResult: parentResult,
-      projectDir: args.projectDir,
+      // FG-353 Change 6: fan-out reds receive the integration tree as their
+      // /project mount. Falls back to args.projectDir in non-worktree mode.
+      projectDir: integrationWorktreePath ?? args.projectDir,
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
     });
 
     if (aggregate.authoritativeFail) {
-      setTaskStatus(parentId, "blocked_by_red");
-      logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
+      // Save result via markTaskAwaitingGate (sets awaiting_gate), then restore
+      // the blocked_by_red status. Single setTaskStatus avoids double-setting churn.
       markTaskAwaitingGate(parentId, parentResult);
       setTaskStatus(parentId, "blocked_by_red");
+      logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
       const runForNotify = getRun(args.runId);
       if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
+      // Integration branch + child worktrees retained for inspection on blocked_by_red.
       return "blocked_by_red";
     }
+
+    // FG-353 Change 7: reds passed — merge integration branch to HEAD and clean up.
+    if (integrationWorktreePath) {
+      const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
+      logEvent("integration.merged_to_head", {
+        runId: args.runId,
+        taskId: parentId,
+        payload: {
+          ok: headMerge.ok,
+          branch: integrationBranchName(args.runId, parentId),
+          error: !headMerge.ok ? headMerge.error : undefined,
+        },
+      });
+      if (!headMerge.ok) {
+        failTask(parentId, {
+          runId: args.runId,
+          kind: "merge_conflict",
+          error: headMerge.error,
+          result: parentResult,
+        });
+        return "failed";
+      }
+      // FG-357 seam: post-merge build+test integration gate goes here
+      // (after integration->HEAD merge, before markTaskComplete / phase advance).
+      // Only proven-merged (completed) children may be cleaned up; failed children
+      // were never integrated and must retain their worktree/branch (no-discard).
+      for (const child of childOutcomes.filter((c) => c.status === "complete")) {
+        if (child.worktreePath) {
+          removeWorktreeIfSafe(child.worktreePath, args.runId, child.childTaskId, args.projectDir, true);
+        }
+      }
+      cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
+    }
     return finalizePrimary(parentId, args.runId, step.gate, parentResult);
+  }
+
+  // No reds path: merge integration to HEAD directly before finalizing.
+  if (integrationWorktreePath) {
+    const headMerge = mergeIntegrationBranchToHead(args.projectDir, args.runId, parentId);
+    logEvent("integration.merged_to_head", {
+      runId: args.runId,
+      taskId: parentId,
+      payload: {
+        ok: headMerge.ok,
+        branch: integrationBranchName(args.runId, parentId),
+        error: !headMerge.ok ? headMerge.error : undefined,
+      },
+    });
+    if (!headMerge.ok) {
+      failTask(parentId, {
+        runId: args.runId,
+        kind: "merge_conflict",
+        error: headMerge.error,
+        result: parentResult,
+      });
+      return "failed";
+    }
+    // FG-357 seam: post-merge build+test integration gate goes here
+    // Only proven-merged (completed) children may be cleaned up; failed children
+    // were never integrated and must retain their worktree/branch (no-discard).
+    for (const child of childOutcomes.filter((c) => c.status === "complete")) {
+      if (child.worktreePath) {
+        removeWorktreeIfSafe(child.worktreePath, args.runId, child.childTaskId, args.projectDir, true);
+      }
+    }
+    cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
   }
 
   return finalizePrimary(parentId, args.runId, step.gate, parentResult);
@@ -1105,6 +1328,8 @@ type ChildOutcome = {
   childTaskId: string;
   status: "complete" | "failed";
   result?: unknown;
+  // FG-353: worktree path for this child, used for integration merges + cleanup.
+  worktreePath?: string;
 };
 
 async function runFanoutChild(args: {
@@ -1276,17 +1501,15 @@ async function runFanoutChild(args: {
   });
 
   if (dispatchResult.kind === "failed") {
-    return { index: args.index, value: args.value, childTaskId, status: "failed" };
+    // FG-353: include worktreePath so dispatchFanoutStep can clean up failed children.
+    return { index: args.index, value: args.value, childTaskId, status: "failed", worktreePath: childWorktreePath };
   }
 
   // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
   if (markTaskComplete(childTaskId, dispatchResult.result)) {
     logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
-    // FG-353: fanout child merge ordering — merge-back for fanout children is
-    // owned by FG-353. Until then, only EPHEMERAL mode removes (provenMerged=false).
-    if (childWorktreePath) {
-      removeWorktreeIfSafe(childWorktreePath, args.runId, childTaskId, args.projectDir);
-    }
+    // FG-353: cleanup responsibility moves to dispatchFanoutStep after proven HEAD merge.
+    // The old per-child removeWorktreeIfSafe call is removed here.
   }
   return {
     index: args.index,
@@ -1294,6 +1517,7 @@ async function runFanoutChild(args: {
     childTaskId,
     status: "complete",
     result: dispatchResult.result,
+    worktreePath: childWorktreePath,
   };
 }
 

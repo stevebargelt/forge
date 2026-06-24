@@ -19,7 +19,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findGitRoot } from "../util/git-root.js";
-import { WORKTREES_DIR, worktreeDir } from "../util/paths.js";
+import { WORKTREES_DIR, worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 
 // ── Branch naming ─────────────────────────────────────────────────────────────
 
@@ -263,10 +263,11 @@ export function mergeWorktreeBranch(
     // are captured via `git add .` (surfaced as a diagnostic at createWorktree).
     try {
       execFileSync("git", ["add", "."], { cwd: worktreePath, stdio: "ignore" });
-      execFileSync("git", ["commit", "-m", `forge: auto-commit task ${taskId} output`], {
-        cwd: worktreePath,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      execFileSync(
+        "git",
+        ["-c", "user.name=forge", "-c", "user.email=forge@local", "commit", "-m", `forge: auto-commit task ${taskId} output`],
+        { cwd: worktreePath, stdio: ["ignore", "ignore", "pipe"] }
+      );
     } catch (e) {
       const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
       return {
@@ -318,4 +319,200 @@ export function cleanupFailedWorktreeSetup(
       });
     } catch { /* fully best-effort */ }
   }
+}
+
+// ── FG-353 Integration worktree helpers ───────────────────────────────────────
+
+/** Deterministic integration branch name for a fan-out step.
+ *  Pattern: forge/<runId>/<parentTaskId>/integration. */
+export function integrationBranchName(runId: string, parentTaskId: string): string {
+  return `forge/${runId}/${parentTaskId}/integration`;
+}
+
+/** Check if the integration branch already exists in the repo. Used for
+ *  re-entry detection in dispatchFanoutStep. */
+export function integrationBranchExists(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): boolean {
+  const branch = integrationBranchName(runId, parentTaskId);
+  try {
+    execFileSync("git", ["rev-parse", "--verify", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Create the integration worktree for a fan-out step.
+ *
+ *  Prune-then-create for retry safety: if a stale integration branch/worktree
+ *  exists (from an aborted prior attempt), force-remove it unconditionally —
+ *  a stale integration worktree is always from an aborted prior attempt and
+ *  never has agent output to preserve (unlike child worktrees). */
+export function createIntegrationWorktree(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): { integrationPath: string } {
+  const integrationPath = integrationWorktreeDir(runId, parentTaskId);
+  const branch = integrationBranchName(runId, parentTaskId);
+
+  if (integrationBranchExists(projectDir, runId, parentTaskId)) {
+    try {
+      execFileSync("git", ["worktree", "remove", "--force", integrationPath], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* best-effort */ }
+    try {
+      execFileSync("git", ["branch", "-D", branch], {
+        cwd: projectDir,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* best-effort */ }
+  }
+
+  mkdirSync(join(WORKTREES_DIR, runId, parentTaskId), { recursive: true });
+
+  execFileSync("git", ["worktree", "add", integrationPath, "-b", branch], {
+    cwd: projectDir,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  return { integrationPath };
+}
+
+/** Merge a single child task branch into the integration worktree.
+ *
+ *  Same no-discard contract as mergeWorktreeBranch (FG-352): auto-stages and
+ *  commits any uncommitted changes in the child worktree before merging.
+ *  Changes present + commit fails => ok:false (caller retains child worktree).
+ *  Uses --no-ff so each child gets an explicit merge commit on the integration branch.
+ *
+ *  Call in child INDEX order for deterministic history. */
+export function mergeChildIntoIntegration(
+  integrationWorktreePath: string,
+  runId: string,
+  childTaskId: string,
+  childWorktreePath: string
+): MergeWorktreeBranchResult {
+  const branch = worktreeBranchName(runId, childTaskId);
+
+  let statusOut = "";
+  try {
+    statusOut = execFileSync("git", ["status", "--porcelain"], {
+      cwd: childWorktreePath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch (e) {
+    return {
+      ok: false,
+      error: `git status in child worktree ${childWorktreePath} failed: ${String(e)}`,
+    };
+  }
+
+  if (statusOut.trim().length > 0) {
+    try {
+      execFileSync(
+        "git",
+        ["-c", "user.name=forge", "-c", "user.email=forge@local", "add", "."],
+        { cwd: childWorktreePath, stdio: "ignore" }
+      );
+      execFileSync(
+        "git",
+        [
+          "-c", "user.name=forge", "-c", "user.email=forge@local",
+          "commit", "-m", `forge: auto-commit task ${childTaskId} output`,
+        ],
+        { cwd: childWorktreePath, stdio: ["ignore", "ignore", "pipe"] }
+      );
+    } catch (e) {
+      const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+      return {
+        ok: false,
+        error: `auto-commit of child task ${childTaskId} output failed: ${stderr || String(e)}`,
+      };
+    }
+  }
+
+  try {
+    execFileSync(
+      "git",
+      [
+        "-c", "user.name=forge", "-c", "user.email=forge@local",
+        "merge", "--no-ff", branch,
+      ],
+      { cwd: integrationWorktreePath, stdio: ["ignore", "ignore", "pipe"] }
+    );
+    return { ok: true };
+  } catch (e) {
+    const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+    // Abort the failed merge so the integration worktree is not left in MERGING
+    // state. The branch and worktree are retained for inspection via reflog.
+    try {
+      execFileSync("git", ["merge", "--abort"], {
+        cwd: integrationWorktreePath,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+    } catch { /* best-effort: abort may not be needed if merge failed before starting */ }
+    return {
+      ok: false,
+      error: `git merge --no-ff ${branch} into integration failed: ${stderr || String(e)}`,
+    };
+  }
+}
+
+/** Merge the integration branch into run.projectDir HEAD using fast-forward-only.
+ *
+ *  Safe to use --ff-only: the integration branch was created from HEAD and only
+ *  received committed --no-ff merges, making it a strict forward descendant. */
+export function mergeIntegrationBranchToHead(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): MergeWorktreeBranchResult {
+  const branch = integrationBranchName(runId, parentTaskId);
+  try {
+    execFileSync("git", ["merge", "--ff-only", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return { ok: true };
+  } catch (e) {
+    const stderr = ((e as { stderr?: Buffer }).stderr ?? Buffer.alloc(0)).toString().trim();
+    return {
+      ok: false,
+      error: `git merge --ff-only ${branch} into HEAD failed: ${stderr || String(e)}`,
+    };
+  }
+}
+
+/** Unconditional best-effort cleanup of the integration worktree and branch.
+ *  Not EPHEMERAL-gated — called only after a proven HEAD merge.
+ *  Mirrors cleanupFailedWorktreeSetup semantics. */
+export function cleanupIntegrationWorktree(
+  projectDir: string,
+  runId: string,
+  parentTaskId: string
+): void {
+  const path = integrationWorktreeDir(runId, parentTaskId);
+  const branch = integrationBranchName(runId, parentTaskId);
+  try {
+    execFileSync("git", ["worktree", "remove", "--force", path], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch { /* best-effort */ }
+  try {
+    execFileSync("git", ["branch", "-D", branch], {
+      cwd: projectDir,
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+  } catch { /* best-effort */ }
 }

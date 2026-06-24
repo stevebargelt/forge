@@ -42,6 +42,11 @@ export function worktreeDir(runId: string, taskId: string): string {
   return join(WORKTREES_DIR, runId, taskId);
 }
 
+// FG-353: path where the fan-out integration worktree is checked out.
+export function integrationWorktreeDir(runId: string, parentTaskId: string): string {
+  return join(WORKTREES_DIR, runId, parentTaskId, "integration");
+}
+
 // Host path of the PROMPT.md a prompt-author task wrote. The agent writes to
 // `/task/PROMPT.md` (in-container); that bind-mounts to taskDir() on the host.
 // The dashboard renders the prompt body inline; validation works off the run's
