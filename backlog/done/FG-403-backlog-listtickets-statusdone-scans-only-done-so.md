@@ -1,9 +1,11 @@
 ---
 id: FG-403
 type: story
-status: active
+status: done
 title: "backlog listTickets: status=done scans only done/, so a partial close (done-content written to active dir before rename) is invisible to list --status done and skips ghost-dup detection — scan all dirs then filter by frontmatter (FG-397 follow-up)"
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: de0b42a
 ---
 
 ## Problem
