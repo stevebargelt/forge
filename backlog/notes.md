@@ -5,7 +5,7 @@
 **Picked up next:**
 1. **FG-377 — persistence-check false-positive on macOS** (filed this session). Highest-impact infra: the check false-fails on shadow-volume write lag and wastes a full agent round. Settle/retry window. Bit us once this session.
 2. **FG-349 — Control-Plane Sources** and **FG-348 — Run Map**: the remaining dashboard visibility thread (FG-350→359 done; these are next). FG-349 reads live config; FG-348 consumes the FG-350 controlPlane receipt.
-3. **FG-372 — Shipping Reviewer** (design-status): the broader done-gate/readiness design. FG-375 is its concrete anti-shim sub-layer; the "report validation command path" idea proved its worth this session (would have caught "engineer ran only 3 test files").
+3. **FG-372 — Shipping Reviewer** (epic/design parent): the broader done-gate/readiness design. FG-375 is its concrete anti-shim sub-layer; the "report validation command path" idea proved its worth this session (would have caught "engineer ran only 3 test files").
 4. **FG-378** (low): replace test-setup.ts hardcoded /tmp placeholder dirs with mkdtemp.
 
 **External state to remember:**

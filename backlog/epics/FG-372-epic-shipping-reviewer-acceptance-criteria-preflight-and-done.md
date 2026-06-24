@@ -1,8 +1,8 @@
 ---
 id: FG-372
-type: story
+type: epic
 status: active
-title: "Shipping Reviewer: acceptance-criteria preflight and operational done gate"
+title: "[EPIC] Shipping Reviewer: acceptance-criteria preflight and operational done gate"
 epic: FG-291
 created: 2026-06-23
 ---
@@ -19,9 +19,9 @@ The goal is not to add a slow generic reviewer everywhere. The goal is to add th
 
 ## Design Status
 
-This item needs more design before implementation. Do not treat it as shovel-ready.
+This item is a design parent / epic. Do not treat it as a single implementation story.
 
-The likely implementation should be split after design into smaller stories, because this affects workflow semantics, orchestrator instructions, dashboard/operator expectations, and possibly red/test-engineer role boundaries.
+Implementation should land through child stories, because this affects workflow semantics, orchestrator instructions, dashboard/operator expectations, and red/test-engineer role boundaries.
 
 Dependency note: the Shipping Reviewer must be able to run required verification commands in its own environment. FG-376 captures the prerequisite that reviewer/agent containers need real project dependencies in disposable worktrees; otherwise reviewer validation is only advisory and host/orchestrator verification remains the only authoritative gate.
 
@@ -68,11 +68,36 @@ It should act like a combined product owner and tech lead:
 
 The reviewer should be checklist-driven and evidence-based. It should cite the acceptance criterion or operator instruction being checked. It should not re-solve the whole implementation unless the checklist exposes a risk.
 
+The reviewer must receive enough originating context to do acceptance review, not only generic code review. A reviewer without the ask can only ask whether the diff is plausible; a Shipping Reviewer must ask whether the shipped diff satisfies the accepted intent.
+
 Authority decision:
 
 - The Shipping Reviewer is mandatory for all mutating work before Forge may report "shipped" or "done."
 - Engineers may report implementation complete, test engineers may report validation passed, and reds may report no blocking findings; only the Shipping Reviewer can approve the operational "shipped/done" claim.
 - Non-mutating research/advisory work may use a lighter closeout, but the final response must not imply code was shipped.
+
+## Reviewer Context Packet
+
+The Shipping Reviewer must be invoked with a bounded **Reviewer Context Packet** assembled by the orchestrator. This is load-bearing: the reviewer should not be expected to infer the original ask from a diff alone.
+
+Minimum packet fields:
+
+- Backlog item body, status, type, parent/epic, and acceptance criteria.
+- Kickoff prompt or latest operator ask that triggered the work.
+- Latest operator instructions since kickoff, including corrections and scope changes.
+- Accepted architect and tech-lead decisions, including explicit non-goals and deferrals.
+- Request-changes history for the task.
+- Red findings, test-engineer findings, and which findings were accepted, rejected, or deferred.
+- Engineer implementation summary.
+- Exact commit SHA(s), diff range, and changed-file list.
+- Verification commands run, with host/container distinction and pass/fail output summaries.
+- Known deferred scope and linked follow-up backlog items.
+
+Reviewer instruction:
+
+> Start from the ask and accepted decisions, then inspect the diff, then inspect nearby production paths, then inspect tests for coverage of the ask.
+
+This ordering is intentional. It lets the reviewer say "the code is internally clean but solves the wrong path," which ordinary test and red passes often miss.
 
 ## Readiness Preflight Requirements
 
@@ -171,6 +196,19 @@ When Forge says work is shipped, the response should include:
 - explicit deferred scope, if any;
 - whether the done audit passed.
 
+## Child Story Split
+
+FG-372 should be delivered through smaller stories:
+
+- **FG-381 — Reviewer Context Packet:** define and assemble the packet supplied to the Shipping Reviewer.
+- **FG-382 — Readiness Preflight:** classify backlog items before implementation and pause when acceptance criteria are missing.
+- **FG-383 — Done Audit Mechanics:** mechanical closeout checks for git, backlog, pushed state, verification, and deferrals.
+- **FG-384 — LLM Shipping Reviewer Role:** implement the product-owner/tech-lead acceptance reviewer using the context packet.
+- **FG-385 — Risk-Targeted Reds Planner:** select targeted red probes from touched surfaces and risk invariants.
+- **FG-386 — Dashboard/Operator Surface:** expose readiness and done-audit state so humans do not need to run CLI commands.
+
+This epic should remain the canonical design contract. Child stories should be concrete and independently shippable.
+
 ## Risk Signals For Heavier Review
 
 The Shipping Reviewer should escalate to deeper review when a change touches:
@@ -212,6 +250,7 @@ The Shipping Reviewer should escalate to deeper review when a change touches:
 Design acceptance for this story:
 
 - Define the Shipping Reviewer role, authority, and boundaries.
+- Define the Reviewer Context Packet fields, assembly responsibility, and how the reviewer uses it.
 - Define readiness preflight inputs, outputs, and failure modes.
 - Define operational done gate inputs, outputs, and blocking checks.
 - Decide which checks are mechanical and which require an LLM reviewer.
