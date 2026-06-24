@@ -1,0 +1,209 @@
+# Campaign Runner Shipping Plan
+
+This document tracks the deliverables required before Forge can truthfully claim Campaign Runner is shipped.
+
+The goal is not just "run a list." A shipped Campaign Runner must be durable, inspectable, resumable, and honest about blocked work.
+
+## Shipped Bar
+
+Campaign Runner is shipped when an operator can give Forge an explicit ordered list or an epic, approve the generated plan, and trust Forge to work the campaign with durable state, conservative continuation rules, and a truthful campaign report.
+
+Minimum shipped behavior:
+
+- plan from explicit ticket lists and structured epic children;
+- compute a stable `plan_hash` from canonical plan content;
+- record approval of the exact `plan_hash` before execution;
+- reject stale starts when the current resolved plan hash differs from the approved hash;
+- execute sequentially by default;
+- preserve durable campaign and campaign-item state across restart;
+- reuse Forge run/task lifecycle vocabulary for item status where practical;
+- store campaign-specific meaning as outcome, blocker kind, continue policy, reason, and requested human action;
+- pause or hold when blockers may affect later work;
+- continue only when later work is independent or explicitly allowed by campaign mode;
+- require the normal per-item quality gates before any shipped claim;
+- produce human and JSON campaign reports;
+- expose enough dashboard state that a human can understand overnight work without running CLI commands.
+
+## Delivery Phases
+
+### Phase 0: Backlog Integrity Prerequisites
+
+These must be fixed before trusting campaign automation to mutate backlog state repeatedly.
+
+- **FG-389**: remove legacy `BACKLOG.md` support.
+- **FG-397**: make structured backlog close/move atomic.
+- **FG-398**: make file-backed ticket id generation safe under concurrent writers.
+- **FG-399**: record `forge backlog close --commit <sha>` in structured tickets.
+
+Exit criteria:
+
+- structured backlog is the only active backlog model;
+- close/move operations cannot leave partial state;
+- concurrent ticket creation cannot reuse an id;
+- ticket close audit metadata is not silently dropped;
+- tests cover the integrity failure modes.
+
+### Phase 1: Plan-Only Campaigns
+
+Plan-only mode should be useful before execution exists.
+
+- **FG-390**: durable campaign and campaign-item model.
+- **FG-391**: campaign planner for explicit lists and epic expansion.
+
+Exit criteria:
+
+- `dry_run` campaign mode exists;
+- explicit ordered lists resolve deterministically;
+- epic children expand from structured metadata;
+- planner preserves operator order unless it records a recommended reorder with a reason;
+- canonical plan content and `plan_hash` are recorded;
+- plan approval metadata can be recorded against an exact `plan_hash`, but execution is not required yet;
+- missing, blocked, empty, or ambiguous inputs fail loudly.
+
+### Phase 2: Sequential Execution MVP
+
+This is the first useful overnight slice, but it should remain conservative.
+
+- **FG-392**: execute approved campaign items one at a time.
+- **FG-393**: blocker and continue semantics.
+- **FG-394**: CLI status, report, pause, resume, and abandon.
+
+Exit criteria:
+
+- campaigns cannot start without an approved `plan_hash`;
+- campaign start confirms the current `plan_hash` matches the approved `plan_hash`;
+- stale plans require re-plan/re-approval instead of silently executing drifted work;
+- exactly one campaign item runs at a time;
+- each item records run id, lifecycle status, outcome, blocker kind, continue policy, and requested human action;
+- failed or blocked items do not erase evidence;
+- later items continue only when the blocker is local or continuation was explicitly approved by mode;
+- shared infrastructure, backlog, git, auth, dependency, test harness, campaign-system, and merge-state failures hold the campaign;
+- a checkpoint or final Campaign Report is available in human and JSON form.
+
+### Phase 3: Quality Gate Integration
+
+Campaigns should not make "done" claims that individual Forge runs could not defend.
+
+Dependencies:
+
+- **FG-382**: readiness preflight for backlog items.
+- **FG-383**: done-audit mechanical closeout checks.
+- **FG-384**: Shipping Reviewer workflow integration.
+- **FG-367**: branch, commit, push, and PR discipline for Forge-managed projects.
+- **FG-376**: agent worktree dependency parity for real test execution.
+- **FG-357**: post-merge integration gate for merged worktree output.
+
+Exit criteria:
+
+- readiness is checked before starting each campaign item;
+- done audit runs before item shipped claims;
+- Shipping Reviewer has the original ask, backlog context, implementation summary, verification commands, and review history;
+- host verification requirements are explicit;
+- git/branch/PR policy is visible in the report;
+- unavailable gates force `pilot` mode, pause, or explicit operator override.
+
+### Phase 4: Dashboard Visibility
+
+The CLI can bootstrap the feature, but shipped Campaign Runner needs human-visible state.
+
+- **FG-395**: dashboard campaign view.
+
+Exit criteria:
+
+- dashboard lists active and recent campaigns;
+- campaign detail shows current item, blockers, outcomes, runs, tasks, tickets, branches, worktrees, PRs, and report checkpoints;
+- dashboard uses the same JSON/report contract as CLI;
+- dashboard does not require project-tracked file writes to show state.
+
+### Phase 5: Parallel Campaigns
+
+Parallel execution is explicitly later work.
+
+- **FG-396**: parallel campaign lanes and merge/refinery behavior.
+
+Exit criteria:
+
+- parallelism is opt-in or evidence-driven, not default;
+- each lane runs in isolated branch/worktree state;
+- merge/refinery order is explicit;
+- conflicts retain evidence and do not discard work;
+- integrated output passes post-merge validation before campaign-level success;
+- campaign reports explain what ran in parallel and how it was integrated.
+
+## Campaign State Model
+
+Campaign status should describe lifecycle:
+
+- `planned`
+- `running`
+- `paused`
+- `complete`
+- `failed`
+- `abandoned`
+
+Campaign item status should reuse or align with existing Forge run/task lifecycle vocabulary where practical. Campaign-specific interpretation belongs beside status:
+
+- `outcome`: `shipped`, `blocked`, `skipped`, `held`, `needs_refinement`, `failed`;
+- `blocker_kind`: `scope`, `readiness`, `tests`, `merge_conflict`, `auth`, `dependency`, `git_state`, `infrastructure`, `campaign_system`, `human_decision`;
+- `continue_policy`: `continue_allowed`, `hold_dependents`, `hold_campaign`;
+- `reason`;
+- `human_action_requested`.
+
+This avoids two competing item-level status systems.
+
+## Campaign Modes
+
+- `dry_run`: plan and report only.
+- `pilot`: conservative execution with visible warnings when gates are incomplete.
+- `sequential`: production-worthy one-item-at-a-time execution.
+- `parallel`: future mode after worktree, dependency, and merge/refinery gates are proven.
+
+## Campaign Report Contract
+
+A campaign report is the generic summary for a checkpointed, paused, failed, or completed campaign.
+
+Minimum report fields:
+
+- campaign id;
+- source input;
+- goal;
+- mode;
+- campaign status;
+- whether Forge believes it is safe to continue;
+- approved `plan_hash`, current `plan_hash` when known, and approval metadata;
+- item rows with ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, branch/worktree/PR/commit when known, verification state, done-audit state, reviewer result, reason, and requested human action;
+- shipped, blocked, held, skipped, and failed groupings;
+- dirty git state or uncommitted intended changes when known;
+- deferred scope and linked follow-up tickets;
+- next recommended operator action.
+
+Reports must distinguish:
+
+- all items shipped;
+- campaign complete with blocked/skipped/held items truthfully reported;
+- campaign paused awaiting human action;
+- campaign failed due to infrastructure or campaign-system failure.
+
+## Overnight Readiness Checklist
+
+Before trusting unattended overnight work:
+
+- backlog integrity prerequisites are complete;
+- campaign state survives restart;
+- sequential execution is proven;
+- blocker semantics are conservative;
+- campaign report is available without inspecting logs;
+- readiness and done-audit gates are integrated or campaign runs in explicit `pilot` mode;
+- Shipping Reviewer is available for final shipped claims;
+- host test verification is required and visible;
+- git branch/commit/PR policy is enforced or explicitly unavailable;
+- dashboard or CLI status can show active blocker and next action.
+
+## Non-Goals For Initial Ship
+
+- No parallel campaigns by default.
+- No hidden reordering after approval.
+- No automatic merge conflict resolution.
+- No claim that every project has an upstream remote.
+- No dashboard editor requirement for the first shipped version.
+- No replacing individual Forge run/task records with campaign-only state.

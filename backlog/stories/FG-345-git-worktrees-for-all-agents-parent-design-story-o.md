@@ -10,7 +10,7 @@ created: 2026-06-22
 
 (story/active — NOT implementation-ready; needs an architecture pass first. This is a decision record + design brief, not a single implementable story. It is epic-sized: it touches spawn, invoke, runNext, persistence-check, task/run state, red review semantics, merge-conflict failure states, cleanup, and integration validation.)
 
-**DECISION (settled — do not relitigate): forge uses a dedicated git worktree per agent. Always. All agent classes.** Decided in conversation after the dogfood research run `run-always-use-git-worktrees-c31675` (report at `research/always-use-git-worktrees-s-c31675.md`). A prior handoff narrowed this to "rw/blue only" — that narrowing is WRONG. The decision is "worktrees, period." This story is about HOW, not WHETHER — and the HOW is large enough that it must go to architecture/planning and be split into implementation children before any engineer touches it.
+**DECISION (settled — do not relitigate): forge uses a dedicated git worktree per agent. Always. All agent classes.** Decided in conversation after the dogfood research run `run-always-use-git-worktrees-c31675` (report at `docs/research/always-use-git-worktrees-s-c31675.md`). A prior handoff narrowed this to "rw/blue only" — that narrowing is WRONG. The decision is "worktrees, period." This story is about HOW, not WHETHER — and the HOW is large enough that it must go to architecture/planning and be split into implementation children before any engineer touches it.
 
 ## Why "always, all agents" (not just blue fan-out)
 

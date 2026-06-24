@@ -48,6 +48,8 @@ Forge already has the right foundation with SQLite runs/tasks/events, backlog fi
 - RACI/source/effective/recorded views for governance state;
 - visible escalation/blocker objects instead of vague "stuck" status.
 
+Forge trace: FG-350 implemented control-plane receipts. FG-348 owns the Run Map / Explain panel. FG-349 owns control-plane source/effective/recorded visibility. FG-359 and related dashboard work cover RACI visibility. FG-363/FG-389 move backlog visibility toward a structured-only model. FG-370 through FG-395 extend the same ledger idea to campaigns.
+
 ### 2. Agent Identity And Track Record
 
 GasTown treats worker identity as durable. A polecat has a name, actor identity, work history, mailbox, and capability record independent of any single terminal session.
@@ -60,6 +62,8 @@ Forge has roles and runtimes, but not yet a strong concept of an individual agen
 - Which implementation agent tends to need rework?
 
 Forge should probably express this as **agent execution history** rather than named worker personas. The dashboard can answer capability/reliability questions without introducing memorable mascot names or manual assignment rituals.
+
+Forge trace: not filed as a dedicated story yet. Related signals exist in model usage, failure kinds, red verdicts, and run/task history. FG-385 should make red-agent targeting more explicit; a future dashboard/reporting story could turn this into role/runtime/model reliability metrics.
 
 ### 3. Worktree And Merge Queue Design
 
@@ -75,6 +79,8 @@ GasTown's Refinery also has a real merge queue model: MRs target branches, gates
 
 The key lesson for Forge: worktrees alone are not the safety feature. The safety feature is the combination of worktree isolation, merge conflict surfacing, post-merge validation, visible branch/merge state, and cleanup/reconcile.
 
+Forge trace: FG-345 is the parent worktree arc. FG-351 established the worktree lifecycle foundation, FG-354 adapted persistence checks, FG-352 added single-primary merge-back, and FG-353 added fan-out integration branches. Remaining/related items include FG-355 red snapshots for single-primary worktrees, FG-356 orphan cleanup, FG-357 post-merge integration gate, FG-358 Linux dependency provisioning, FG-376 dependency parity, and FG-379 operator docs.
+
 ### 4. Convoys As Human Attention Objects
 
 Convoys are one of GasTown's best product ideas. They give a durable object for "this batch of related work" that can span multiple tasks and repos. The convoy is the thing you check, not every worker process.
@@ -87,6 +93,8 @@ Forge's nearest equivalents are runs, workflows, backlog epics/stories, and poss
 - dashboards should show "ready but not dispatched", "running", "awaiting gate", "blocked", and "landed/complete" at the group level.
 
 This reinforces the value of the Run Map and Backlog Viewer stories under FG-291.
+
+Forge trace: FG-348 is the Run Map story. FG-363 is the dashboard backlog viewer. FG-370 introduces Campaign Runner as Forge's higher-level "work batch" object without adopting the GasTown "convoy" noun.
 
 ### 5. Scheduler / Backpressure
 
@@ -101,6 +109,8 @@ Forge has already felt provider auth, rate limit, and runtime pressure. A Forge 
 - record dispatch attempts and failures as receipts/events.
 
 GasTown's "separate scheduling context object" is the cleanest part to borrow.
+
+Forge trace: not filed as a standalone scheduler/backpressure story yet. FG-370/FG-393 cover campaign-level continuation and blocker behavior, but provider/runtime capacity queues and dispatch-attempt records remain an unfiled concept.
 
 ### 6. Mail, Handoff, And Escalation
 
@@ -118,6 +128,8 @@ Forge already has events, results, gates, notifications, and orchestrator-mediat
 
 These should be durable, dashboard-readable, and associated with exact actors and artifacts. Human-visible escalation should become its own dashboard surface eventually.
 
+Forge trace: partially covered by events, gates, failure kinds, notifications, and Reviewer Context Packet work. FG-380 covers host-local handoff/orient state. FG-372/FG-381/FG-384 cover reviewer context and acceptance review. A general typed coordination-message or escalation-object primitive is not filed yet.
+
 ### 7. Provider Integration Tiers
 
 GasTown's provider integration docs are pragmatic: any CLI can be tmux-driven at the lowest tier, then richer presets/hooks/deep integration add lifecycle and context features.
@@ -132,6 +144,8 @@ Forge is taking a different path: Dockerized agents, runtime YAML, model policy,
 - runtime supports resume/handoff.
 
 This could become part of Forge's provider/runtime compatibility matrix.
+
+Forge trace: not filed as a standalone compatibility matrix. Related existing directions include provider-agnostic runtime work, FG-253 provider-adapter surfaces, FG-349 control-plane source visibility, and the future campaign/dashboard surfaces that need to explain capability gaps.
 
 ## GasTown's Main Risks
 
@@ -219,23 +233,41 @@ This gives Forge the good part of GasTown's humane naming without making the met
 
 1. **Finish dashboard visibility before worktree rollout.** GasTown confirms that worktrees create more state to inspect. Forge should not land worktree complexity before the dashboard can explain active branches/worktrees, merge state, cleanup state, and conflicts.
 
+   Forge trace: this was written before the later worktree arc advanced. FG-351/FG-354/FG-352/FG-353 landed opt-in worktree machinery first; FG-348, FG-349, FG-356, FG-357, and FG-379 remain important to make that machinery visible and production-complete.
+
 2. **Keep FG-345/FG-351 scoped.** Borrow GasTown's identity/sandbox/session separation, but do not copy persistent worker pools yet. First cut should be task-scoped worktrees, explicit cleanup, recorded worktree path, visible merge conflict failure, and macOS-only if Linux dependency state is unresolved.
+
+   Forge trace: FG-351 delivered the lifecycle foundation. FG-352 and FG-353 delivered merge-back paths. FG-356, FG-357, FG-358, FG-376, and FG-379 carry the remaining cleanup, validation, dependency, and operator-doc work.
 
 3. **Add a group-level run/fan-out object in the dashboard.** GasTown convoys are valuable because they are attention objects. Forge run map should show groups and blockers, not just a list of task rows.
 
+   Forge trace: FG-348 is the natural home for this. FG-395 should carry the same idea for campaigns.
+
 4. **Make receipts central.** GasTown's durable ledger validates the direction of FG-350. Forge receipts should answer: what source config was read, what effective route/model/runtime was chosen, what project override applied, what artifact was mounted, and what gate/review decided.
 
+   Forge trace: FG-350 implemented the dispatch-time receipt foundation. FG-348 and FG-349 should consume those receipts in dashboard/explain surfaces.
+
 5. **Model queued capacity as separate state.** If Forge adds scheduling/backpressure, use a separate queue/dispatch-attempt record instead of mutating the task contract.
+
+   Forge trace: unfiled. Campaign work may expose the need, but this should not be smuggled into FG-390 unless campaign execution cannot function without it.
 
 ### Medium-Term
 
 6. **Track agent/runtime performance.** Add dashboard/reporting views for model/runtime/role success rates, red precision, failure kinds, and retry outcomes. This captures GasTown's "agent CV" value without creating named worker lore.
 
+   Forge trace: unfiled as a dedicated analytics story. Existing model usage data and failure/verdict history make this feasible later.
+
 7. **Create typed escalation objects.** A task can fail, block, or escalate. Escalation should be queryable and visible with severity, owner, source task, and stale age.
+
+   Forge trace: unfiled as a general primitive. Related to FG-372 Shipping Reviewer, FG-380 host-local handoff state, and campaign blocker semantics in FG-393.
 
 8. **Define runtime capability tiers.** Borrow GasTown's provider integration maturity ladder, but express it in Forge terms: launch, structured output, usage, auth, hooks/tool guard, resume, browser, filesystem mode.
 
+   Forge trace: unfiled as a standalone capability matrix. Related to provider-agnostic runtime work, FG-253, FG-349, and future dashboard/campaign reporting.
+
 9. **Consider integration branches only after task worktrees prove out.** GasTown's integration branch model is compelling for epic-scale work, but it is a second-order feature. Forge should first prove single-task and deterministic fan-out merge semantics with visible post-merge validation.
+
+   Forge trace: FG-353 implemented the fan-out integration branch primitive. FG-357 remains the critical post-merge validation story.
 
 ## What Forge Should Not Copy
 
@@ -279,6 +311,51 @@ GasTown's property layers and role system show the same category of problem from
 ### FG-363 Backlog Viewer
 
 GasTown's Beads-first model makes backlog/work objects central. Forge should close the dashboard gap here. Humans should be able to browse backlog items, see parent/child relationships, inspect notes, and connect backlog items to runs without using CLI commands.
+
+## Traceability Appendix
+
+This section keeps GasTown-derived concepts tied to Forge backlog items without making the research doc the implementation source of truth.
+
+### Concept Glossary
+
+- Durable work ledger: queryable identity, status, actor, event, receipt, and artifact history for work. Implemented in pieces through Forge runs/tasks/events, FG-350 receipts, structured backlog, and Campaign Runner planning.
+- Agent execution history: model/runtime/role reliability over time, including red precision and retry outcomes. Unfiled as a dedicated dashboard/reporting story.
+- Identity / sandbox / session separation: task identity, worktree/branch sandbox, and agent/container session are distinct concepts. Tracked by FG-345 and children.
+- Refinery / merge queue: ordered integration of isolated work before landing. Forge's current equivalent is worktree merge-back plus fan-out integration branch work in FG-352/FG-353, with FG-357 still needed for post-merge validation.
+- Convoy / attention object: a human-facing rollup for grouped work. Forge equivalents should be Run Map groups and Campaign Runner, not a new GasTown-style noun.
+- Scheduler / backpressure context: separate dispatch/capacity state that does not mutate the underlying task contract. Unfiled.
+- Typed coordination message: durable messages such as task completed, review blocked, merge conflicted, route resolved, receipt recorded, escalation opened, and handoff created. Partially represented by events/gates today; general primitive unfiled.
+- Escalation object: queryable, visible blocked/human-attention state with severity, owner, source task, and stale age. Unfiled, but adjacent to FG-372, FG-380, and FG-393.
+- Provider/runtime capability tiers: visible capability levels for runtimes and providers. Unfiled as a matrix, but related to provider-agnostic runtime work and dashboard control-plane visibility.
+- Human layer / machine contract: humane labels like Coordinator, Builder, Reviewer, or Gate resolve to explicit routing/runtime/workflow/event objects. Related to RACI, routing policy, receipts, and dashboard explain views.
+
+### Filed Backlog Links
+
+- FG-345: parent worktree design story.
+- FG-348: dashboard Run Map and task-level Explain panel.
+- FG-349: dashboard control-plane sources and active project config visibility.
+- FG-350: control-plane receipts.
+- FG-351: worktree lifecycle foundation.
+- FG-352: single-primary worktree merge-back.
+- FG-353: fan-out integration branch and merge-back.
+- FG-354: persistence-check adaptation for worktrees.
+- FG-356: orphan worktree cleanup.
+- FG-357: post-merge integration gate.
+- FG-358 / FG-376: dependency parity and Linux/worktree dependency policy.
+- FG-359: RACI Workbench.
+- FG-363: dashboard backlog viewer.
+- FG-370 through FG-396: Campaign Runner, including campaign state, planning, execution, reporting, dashboard, and later parallel/refinery behavior.
+- FG-372 / FG-381 / FG-384 / FG-385 / FG-386: Shipping Reviewer, context packet, targeted reds, and operator surfaces.
+- FG-379: worktree operator docs.
+- FG-380: host-local operational state for handoff/orient/session notes.
+
+### Unfiled Concepts To Revisit
+
+- Agent/runtime performance dashboard, including model/runtime success rates and red precision.
+- Scheduler/backpressure queue with explicit dispatch-attempt records.
+- General typed coordination-message and escalation-object primitives.
+- Provider/runtime capability matrix.
+- Human-friendly workflow/team labels over the machine routing contract.
 
 ## Bottom Line
 
