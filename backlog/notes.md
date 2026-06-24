@@ -1,6 +1,6 @@
 **Last session ended 2026-06-24.**
 
-**Where we left off:** Shipped FG-381 (Reviewer Context Packet) and FG-389 (legacy BACKLOG.md removal) end-to-end through the full pipeline, both reviewed hard by the user and closed. User approved FG-389 as the last act; next move was left open between FG-384 (the Shipping Reviewer that consumes the packet) and the FG-397/398/399 robustness cluster.
+**Where we left off:** Shipped FG-381 (Reviewer Context Packet) and FG-389 (legacy BACKLOG.md removal) end-to-end through the full pipeline, both reviewed hard by the user and closed. Tree is now CLEAN and fully pushed (origin/main at 6ae7b23): the concurrent other-session work that was sitting uncommitted was committed at user request (6ae7b23) alongside the handoff note. Next move was left open between FG-384 (the Shipping Reviewer that consumes the packet) and the FG-397/398/399 robustness cluster.
 
 **Picked up next:**
 1. **FG-384 — LLM Shipping Reviewer role** that consumes the FG-381 Reviewer Context Packet. The payoff for FG-381 and what makes FG-388 (deferred packet docs) reachable; advances the FG-372 epic. BLOCKER to wire first: the packet reads `run.metadata.ticketId` but NOTHING writes that field yet, so `assembleReviewerContextPacket` fail-louds (required missingContext) on every real run — FG-384 (or a small precursor) must add a ticketId populate-path at run creation.
@@ -8,7 +8,7 @@
 3. **FG-376** (worktree node_modules parity) + **FG-357** (post-merge integration gate) — the worktree-arc next moves from the prior session, untouched this session and still ready.
 
 **External state to remember:**
-- Heavy CONCURRENT backlog activity from OTHER orchestrator sessions is sitting uncommitted in the working tree: FG-370 -> epic + FG-390..396 (campaign runner), FG-400/401/402 (dashboard stories), an FG-345 edit, `research/*` deletions, `docs/campaign-runner-plan.md`, `docs/operator-surface-addons.md`, `docs/research/`. NONE of it is from the FG-381/FG-389 work — do NOT sweep it into a commit; another session owns it. Always stage FG-work with explicit pathspecs, never `git add -A`.
+- Several ACTIVE tickets in the backlog are OTHER orchestrator sessions' threads, not part of the FG-381/FG-389 work (now committed but not mine): FG-370 -> epic + FG-390..396 (campaign runner) and FG-400/401/402 (dashboard overview/capability-matrix/attention-inbox). Don't assume they're yours to pick up; another session owns them. When committing FG-work, stage with explicit pathspecs (concurrent sessions dirty the tree).
 - The FG-381 packet's `run.metadata.ticketId` reader is DORMANT (no writer exists) — see FG-384 blocker above.
 - Supacode auto-locks forge-created worktrees (lock owner=supacode); `git worktree remove --force` refuses them — unlock-first or `-f -f`. Relevant to FG-356 cleanup design.
 
