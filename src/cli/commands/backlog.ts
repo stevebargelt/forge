@@ -11,10 +11,11 @@
 //   forge backlog config [--show]
 
 import type { Command } from "commander";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readBacklogConfig } from "../../backlog/config.js";
 import {
+  closeTicket as closeStructuredTicket,
   generateSlug,
   listTickets as listStructuredTickets,
   moveTicket as moveStructuredTicket,
@@ -123,20 +124,7 @@ export function registerBacklog(program: Command): void {
     .option("--project <dir>", "project directory (default: cwd)")
     .action((idArg: string, opts: { commit?: string; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
-      const ticket = readTicket(dir, idArg);
-      const updated: StructuredTicket = {
-        ...ticket,
-        status: "done",
-        closed: new Date().toISOString().slice(0, 10),
-      };
-      writeTicket(dir, updated);
-      for (const sub of ["stories", "epics", "ideas"]) {
-        const d = join(dir, "backlog", sub);
-        if (!existsSync(d)) continue;
-        for (const f of readdirSync(d)) {
-          if (f.startsWith(`${idArg}-`)) unlinkSync(join(d, f));
-        }
-      }
+      closeStructuredTicket(dir, idArg);
       console.log(`Closed ${idArg}`);
     });
 

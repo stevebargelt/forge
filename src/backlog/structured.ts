@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
 
@@ -51,14 +51,29 @@ function subdirForTicket(fm: Pick<TicketFrontmatter, "type" | "status">): string
 function findTicketFile(projectDir: string, id: string): { path: string; subdir: string } | undefined {
   const base = backlogDir(projectDir);
   const dirs = ["ideas", "epics", "stories", DONE_DIR];
+  const matches: Array<{ path: string; subdir: string }> = [];
+
   for (const dir of dirs) {
     const full = join(base, dir);
     if (!existsSync(full)) continue;
     const entries = readdirSync(full);
     const match = entries.find((e) => e.startsWith(`${id}-`) || e === `${id}.md`);
-    if (match) return { path: join(full, match), subdir: dir };
+    if (match) matches.push({ path: join(full, match), subdir: dir });
   }
-  return undefined;
+
+  if (matches.length > 1) {
+    process.stderr.write(
+      `ERROR: ticket ${id} exists in multiple backlog directories:\n` +
+        matches.map((m) => `  ${m.path}`).join("\n") + "\n" +
+        `This indicates a partial failure during a prior close/move. ` +
+        `Remove the stale copy from the active directory.\n`,
+    );
+    // Prefer the done/ copy — it is the intended final state after a close
+    const doneMatch = matches.find((m) => m.subdir === DONE_DIR);
+    return doneMatch ?? matches[0];
+  }
+
+  return matches[0];
 }
 
 function parseTicketFile(content: string): { frontmatter: TicketFrontmatter; body: string } {
@@ -140,7 +155,11 @@ export function listTickets(projectDir: string, filters: ListFilter = {}): Struc
 
   const searchLower = filters.search ? filters.search.toLowerCase() : undefined;
 
-  const results: StructuredTicket[] = [];
+  // Collect into a Map keyed by ticket id to detect and deduplicate ghost copies.
+  // Scan order is active dirs first, done last — when a duplicate is found the
+  // done/ copy wins (it is the intended final state after a close operation).
+  const seen = new Map<string, { ticket: StructuredTicket; subdir: string }>();
+
   for (const subdir of dirsToScan) {
     const dir = join(base, subdir);
     if (!existsSync(dir)) continue;
@@ -149,19 +168,84 @@ export function listTickets(projectDir: string, filters: ListFilter = {}): Struc
       try {
         const content = readFileSync(join(dir, entry), "utf8");
         const { frontmatter, body } = parseTicketFile(content);
-        if (filters.type && frontmatter.type !== filters.type) continue;
-        if (filters.status && frontmatter.status !== filters.status) continue;
-        if (searchLower) {
-          const haystack = (frontmatter.title + " " + body).toLowerCase();
-          if (!haystack.includes(searchLower)) continue;
+        const prev = seen.get(frontmatter.id);
+        if (prev) {
+          process.stderr.write(
+            `ERROR: duplicate ticket id ${frontmatter.id} found in ${prev.subdir}/ and ${subdir}/\n` +
+              `An active ghost may be shadowing the intended ticket. ` +
+              `Remove the stale copy from the active directory.\n`,
+          );
+          // Prefer done/ copy — replace the earlier active copy
+          if (subdir === DONE_DIR) {
+            seen.set(frontmatter.id, { ticket: { ...frontmatter, body }, subdir });
+          }
+        } else {
+          seen.set(frontmatter.id, { ticket: { ...frontmatter, body }, subdir });
         }
-        results.push({ ...frontmatter, body });
       } catch {
         // skip unparseable files
       }
     }
   }
+
+  const results: StructuredTicket[] = [];
+  for (const { ticket } of seen.values()) {
+    if (filters.type && ticket.type !== filters.type) continue;
+    if (filters.status && ticket.status !== filters.status) continue;
+    if (searchLower) {
+      const haystack = (ticket.title + " " + ticket.body).toLowerCase();
+      if (!haystack.includes(searchLower)) continue;
+    }
+    results.push(ticket);
+  }
   return results;
+}
+
+// Writes newContent to srcPath then atomically renames it to destPath so that
+// at no point are two .md copies of the same ticket id visible in the scanned
+// directories. Falls back to write-then-delete on cross-device (EXDEV) mounts.
+function atomicMoveFile(srcPath: string, destPath: string, newContent: string): void {
+  writeFileSync(srcPath, newContent);
+  try {
+    renameSync(srcPath, destPath);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "EXDEV") {
+      // Cross-device: rename is impossible; brief two-copy window is unavoidable
+      writeFileSync(destPath, newContent);
+      unlinkSync(srcPath);
+    } else {
+      throw err;
+    }
+  }
+}
+
+export function closeTicket(projectDir: string, id: string): void {
+  const found = findTicketFile(projectDir, id);
+  if (!found) throw new Error(`Ticket ${id} not found`);
+
+  const content = readFileSync(found.path, "utf8");
+  const { frontmatter, body } = parseTicketFile(content);
+
+  const updated: TicketFrontmatter = {
+    ...frontmatter,
+    status: "done",
+    closed: new Date().toISOString().slice(0, 10),
+  };
+  const newContent = serializeTicket(updated, body);
+
+  const base = backlogDir(projectDir);
+  const destDir = join(base, DONE_DIR);
+  mkdirSync(destDir, { recursive: true });
+
+  const slug = generateSlug(updated.title);
+  const filename = `${updated.id}-${slug}.md`;
+  const destPath = join(destDir, filename);
+
+  if (found.path !== destPath) {
+    atomicMoveFile(found.path, destPath, newContent);
+  } else {
+    writeFileSync(found.path, newContent);
+  }
 }
 
 export function moveTicket(projectDir: string, id: string, newType: TicketType): void {
@@ -171,6 +255,7 @@ export function moveTicket(projectDir: string, id: string, newType: TicketType):
   const content = readFileSync(found.path, "utf8");
   const { frontmatter, body } = parseTicketFile(content);
   const updated: TicketFrontmatter = { ...frontmatter, type: newType, status: "active" };
+
   const base = backlogDir(projectDir);
   const newDir = join(base, TYPE_DIRS[newType]);
   mkdirSync(newDir, { recursive: true });
@@ -178,8 +263,10 @@ export function moveTicket(projectDir: string, id: string, newType: TicketType):
   const slug = generateSlug(updated.title);
   const filename = `${updated.id}-${slug}.md`;
   const newPath = join(newDir, filename);
-  writeFileSync(newPath, serializeTicket(updated, body));
+
   if (found.path !== newPath) {
-    unlinkSync(found.path);
+    atomicMoveFile(found.path, newPath, serializeTicket(updated, body));
+  } else {
+    writeFileSync(found.path, serializeTicket(updated, body));
   }
 }

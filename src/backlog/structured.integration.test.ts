@@ -365,3 +365,189 @@ test("integ structured: backlog move unknown id exits non-zero", () => {
   const res = runForge(["backlog", "move", "FG-999", "epic", "--project", projectDir]);
   assert.notEqual(res.status, 0, "must exit non-zero for missing ticket");
 });
+
+// ─── close: idea type ────────────────────────────────────────────────────────
+
+test("integ structured: backlog close FG-10 moves idea to done/", () => {
+  const res = runForge(["backlog", "close", "FG-10", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+  assert.match(res.stdout, /Closed FG-10/);
+
+  const doneDir = join(projectDir, "backlog", "done");
+  const doneFiles = readdirSync(doneDir);
+  const closed = doneFiles.find((f) => f.startsWith("FG-10-"));
+  assert.ok(closed, `expected FG-10 in done/, found: ${doneFiles.join(", ")}`);
+
+  const ideasDir = join(projectDir, "backlog", "ideas");
+  if (existsSync(ideasDir)) {
+    const ideas = readdirSync(ideasDir);
+    assert.ok(
+      !ideas.some((f) => f.startsWith("FG-10-")),
+      "FG-10 should not remain in ideas/ after close",
+    );
+  }
+});
+
+// ─── duplicate-id (ghost active) detection via CLI ───────────────────────────
+
+// Plants a ghost state: ticket exists in both an active dir and done/,
+// simulating a partial failure from the old write-then-delete close path.
+function plantGhostInteg(base: string, id: string, type: "stories" | "epics" | "ideas"): void {
+  const activeContent = `---\nid: ${id}\ntype: story\nstatus: active\ntitle: Ghost ticket\n---\n\nGhost.\n`;
+  const doneContent = `---\nid: ${id}\ntype: story\nstatus: done\ntitle: Ghost ticket\nclosed: '2026-06-24'\n---\n\nGhost.\n`;
+  mkdirSync(join(base, type), { recursive: true });
+  mkdirSync(join(base, "done"), { recursive: true });
+  writeFileSync(join(base, type, `${id}-ghost-ticket.md`), activeContent);
+  writeFileSync(join(base, "done", `${id}-ghost-ticket.md`), doneContent);
+}
+
+test("integ structured: backlog show prints ERROR on stderr for ghost active ticket", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-99", "stories");
+  const res = runForge(["backlog", "show", "FG-99", "--project", projectDir]);
+  assert.equal(res.status, 0, `command should still succeed`);
+  assert.match(res.stderr, /ERROR/i, "must print ERROR to stderr for ghost ticket");
+  assert.match(res.stderr, /FG-99/, "stderr must name the ticket id");
+});
+
+test("integ structured: backlog show returns done copy for ghost active ticket", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-98", "stories");
+  const res = runForge(["backlog", "show", "FG-98", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0);
+  const ticket = JSON.parse(res.stdout) as Record<string, unknown>;
+  assert.equal(ticket["status"], "done", "done copy must be returned, not the ghost active");
+});
+
+test("integ structured: backlog list warns on stderr for ghost active ticket", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-97", "stories");
+  const res = runForge(["backlog", "list", "--project", projectDir]);
+  assert.equal(res.status, 0);
+  assert.match(res.stderr, /ERROR/i, "must warn on stderr for ghost ticket");
+  assert.match(res.stderr, /FG-97/);
+});
+
+test("integ structured: backlog list shows done status for ghost active ticket", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-96", "epics");
+  const res = runForge(["backlog", "list", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0);
+  const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string }>;
+  const ghost = tickets.filter((t) => t.id === "FG-96");
+  assert.equal(ghost.length, 1, "ghost ticket must appear exactly once");
+  assert.equal(ghost[0]!.status, "done", "ghost ticket must be shown with done status");
+});
+
+// ─── FG-397: atomicity guarantee — close-then-access cross-step handoffs ─────
+
+// Verifies the atomicity guarantee: after a close, immediately querying list
+// or show must return the done copy and never see an active ghost.
+test("integ FG-397: close story then list shows exactly one done copy, no active ghost", () => {
+  const res = runForge(["backlog", "close", "FG-30", "--project", projectDir]);
+  assert.equal(res.status, 0, `close failed: ${res.stderr}`);
+
+  const list = runForge(["backlog", "list", "--json", "--project", projectDir]);
+  assert.equal(list.status, 0, `list failed: ${list.stderr}`);
+  const tickets = JSON.parse(list.stdout) as Array<{ id: string; status: string }>;
+  const copies = tickets.filter((t) => t.id === "FG-30");
+  assert.equal(copies.length, 1, "ticket must appear exactly once in list after close");
+  assert.equal(copies[0]!.status, "done", "ticket must be shown with done status after close");
+  assert.equal(list.stderr, "", "no duplicate-id warnings expected after atomic close");
+});
+
+test("integ FG-397: close story then show returns done status (atomicity)", () => {
+  runForge(["backlog", "close", "FG-30", "--project", projectDir]);
+
+  const show = runForge(["backlog", "show", "FG-30", "--json", "--project", projectDir]);
+  assert.equal(show.status, 0, `show after close failed: ${show.stderr}`);
+  const ticket = JSON.parse(show.stdout) as Record<string, unknown>;
+  assert.equal(ticket["status"], "done", "show must return done status after close");
+  assert.equal(show.stderr, "", "no ghost warning expected after atomic close");
+});
+
+test("integ FG-397: close epic then list shows exactly one done copy, no active ghost", () => {
+  runForge(["backlog", "close", "FG-20", "--project", projectDir]);
+
+  const list = runForge(["backlog", "list", "--json", "--project", projectDir]);
+  assert.equal(list.status, 0);
+  const tickets = JSON.parse(list.stdout) as Array<{ id: string; status: string }>;
+  const copies = tickets.filter((t) => t.id === "FG-20");
+  assert.equal(copies.length, 1, "epic must appear exactly once after close");
+  assert.equal(copies[0]!.status, "done");
+  assert.equal(list.stderr, "", "no ghost warning expected after atomic close");
+});
+
+test("integ FG-397: close idea then list shows exactly one done copy, no active ghost", () => {
+  runForge(["backlog", "close", "FG-10", "--project", projectDir]);
+
+  const list = runForge(["backlog", "list", "--json", "--project", projectDir]);
+  assert.equal(list.status, 0);
+  const tickets = JSON.parse(list.stdout) as Array<{ id: string; status: string }>;
+  const copies = tickets.filter((t) => t.id === "FG-10");
+  assert.equal(copies.length, 1, "idea must appear exactly once after close");
+  assert.equal(copies[0]!.status, "done");
+  assert.equal(list.stderr, "", "no ghost warning expected after atomic close");
+});
+
+test("integ FG-397: move story to epic leaves exactly one copy across all dirs", () => {
+  runForge(["backlog", "move", "FG-30", "epic", "--project", projectDir]);
+
+  const base = join(projectDir, "backlog");
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(base, sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-30-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+});
+
+test("integ FG-397: move epic to story leaves exactly one copy across all dirs", () => {
+  runForge(["backlog", "move", "FG-20", "story", "--project", projectDir]);
+
+  const base = join(projectDir, "backlog");
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(base, sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-20-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+});
+
+test("integ FG-397: move story to idea leaves exactly one copy across all dirs", () => {
+  runForge(["backlog", "move", "FG-30", "idea", "--project", projectDir]);
+
+  const base = join(projectDir, "backlog");
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(base, sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-30-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist across all backlog dirs after move");
+});
+
+// ─── FG-397: ghost detection in ideas/ directory via CLI ─────────────────────
+
+test("integ FG-397: ghost in ideas dir — show prints ERROR to stderr", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-95", "ideas");
+  const res = runForge(["backlog", "show", "FG-95", "--project", projectDir]);
+  assert.equal(res.status, 0, "command must succeed even with ghost");
+  assert.match(res.stderr, /ERROR/i, "must print ERROR for ghost in ideas/");
+  assert.match(res.stderr, /FG-95/);
+});
+
+test("integ FG-397: ghost in ideas dir — show returns done copy, not active ghost", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-94", "ideas");
+  const res = runForge(["backlog", "show", "FG-94", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0);
+  const ticket = JSON.parse(res.stdout) as Record<string, unknown>;
+  assert.equal(ticket["status"], "done", "done copy must win over ghost active in ideas/");
+});
+
+test("integ FG-397: ghost in ideas dir — list warns and returns done copy", () => {
+  plantGhostInteg(join(projectDir, "backlog"), "FG-93", "ideas");
+  const res = runForge(["backlog", "list", "--json", "--project", projectDir]);
+  assert.equal(res.status, 0);
+  assert.match(res.stderr, /ERROR/i, "list must warn on stderr for ghost in ideas/");
+  assert.match(res.stderr, /FG-93/);
+  const tickets = JSON.parse(res.stdout) as Array<{ id: string; status: string }>;
+  const matches = tickets.filter((t) => t.id === "FG-93");
+  assert.equal(matches.length, 1, "ghost in ideas/ must appear exactly once in list");
+  assert.equal(matches[0]!.status, "done", "done copy must win for ghost in ideas/");
+});

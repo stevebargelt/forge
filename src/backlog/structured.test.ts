@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  closeTicket,
   generateSlug,
   readTicket,
   writeTicket,
@@ -11,6 +12,24 @@ import {
   moveTicket,
   type StructuredTicket,
 } from "./structured.js";
+
+// Helper: redirect process.stderr.write to a buffer for the duration of fn()
+function captureStderr(fn: () => void): string {
+  const chunks: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const orig = process.stderr.write as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (process.stderr as any).write = (chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    (process.stderr as unknown as { write: unknown }).write = orig;
+  }
+  return chunks.join("");
+}
 
 // ----- generateSlug -----
 
@@ -237,4 +256,166 @@ test("moveTicket removes file from original location", () => {
 test("moveTicket throws for unknown id", () => {
   const dir = makeTmpDir();
   assert.throws(() => moveTicket(dir, "FG-999", "epic"), /not found/i);
+});
+
+// ----- closeTicket -----
+
+test("closeTicket moves story to done/ and sets status:done", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-20", type: "story" }));
+  closeTicket(dir, "FG-20");
+  const result = readTicket(dir, "FG-20");
+  assert.equal(result.status, "done");
+  assert.ok(result.closed, "closed date should be set");
+  const doneDir = join(dir, "backlog", "done");
+  assert.ok(readdirSync(doneDir).some((f) => f.startsWith("FG-20-")), "FG-20 must be in done/");
+  const storiesDir = join(dir, "backlog", "stories");
+  assert.ok(!readdirSync(storiesDir).some((f) => f.startsWith("FG-20-")), "FG-20 must not remain in stories/");
+});
+
+test("closeTicket moves epic to done/ and removes from epics/", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-21", type: "epic" }));
+  closeTicket(dir, "FG-21");
+  const result = readTicket(dir, "FG-21");
+  assert.equal(result.status, "done");
+  const doneDir = join(dir, "backlog", "done");
+  assert.ok(readdirSync(doneDir).some((f) => f.startsWith("FG-21-")), "FG-21 must be in done/");
+  const epicsDir = join(dir, "backlog", "epics");
+  assert.ok(!readdirSync(epicsDir).some((f) => f.startsWith("FG-21-")), "FG-21 must not remain in epics/");
+});
+
+test("closeTicket moves idea to done/ and removes from ideas/", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-22", type: "idea" }));
+  closeTicket(dir, "FG-22");
+  const result = readTicket(dir, "FG-22");
+  assert.equal(result.status, "done");
+  const doneDir = join(dir, "backlog", "done");
+  assert.ok(readdirSync(doneDir).some((f) => f.startsWith("FG-22-")), "FG-22 must be in done/");
+  const ideasDir = join(dir, "backlog", "ideas");
+  assert.ok(!readdirSync(ideasDir).some((f) => f.startsWith("FG-22-")), "FG-22 must not remain in ideas/");
+});
+
+test("closeTicket leaves exactly one copy (no ghost active)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-23", type: "story" }));
+  closeTicket(dir, "FG-23");
+  // Count all .md files starting with FG-23 across all backlog dirs
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(dir, "backlog", sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-23-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist after close");
+});
+
+test("moveTicket leaves exactly one copy (no ghost active)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-24", type: "story" }));
+  moveTicket(dir, "FG-24", "epic");
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(dir, "backlog", sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-24-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist after move");
+});
+
+test("closeTicket throws for unknown id", () => {
+  const dir = makeTmpDir();
+  assert.throws(() => closeTicket(dir, "FG-999"), /not found/i);
+});
+
+// ----- duplicate-id detection -----
+
+// Simulates the ghost-active state that would result from a crash between
+// the destination write and source removal in the old (non-atomic) close path.
+function plantGhost(dir: string, id: string): void {
+  const base = join(dir, "backlog");
+  mkdirSync(join(base, "stories"), { recursive: true });
+  mkdirSync(join(base, "done"), { recursive: true });
+  const activeContent =
+    `---\nid: ${id}\ntype: story\nstatus: active\ntitle: Ghost ticket\n---\n\nGhost body.\n`;
+  const doneContent =
+    `---\nid: ${id}\ntype: story\nstatus: done\ntitle: Ghost ticket\nclosed: '2026-06-24'\n---\n\nGhost body.\n`;
+  writeFileSync(join(base, "stories", `${id}-ghost-ticket.md`), activeContent);
+  writeFileSync(join(base, "done", `${id}-ghost-ticket.md`), doneContent);
+}
+
+test("readTicket: warns loudly on stderr when ghost active copy exists", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-50");
+  const stderr = captureStderr(() => {
+    readTicket(dir, "FG-50");
+  });
+  assert.match(stderr, /ERROR/i, "must print an ERROR to stderr");
+  assert.match(stderr, /FG-50/, "error must name the ticket id");
+  assert.match(stderr, /multiple|duplicate/i, "error must mention duplicate/multiple");
+});
+
+test("readTicket: returns done copy when ghost active copy exists", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-51");
+  let result!: StructuredTicket;
+  captureStderr(() => {
+    result = readTicket(dir, "FG-51");
+  });
+  assert.equal(result.status, "done", "done copy must win over ghost active copy");
+});
+
+test("listTickets: warns loudly on stderr when ghost active copy exists", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-52");
+  const stderr = captureStderr(() => {
+    listTickets(dir);
+  });
+  assert.match(stderr, /ERROR/i, "must print an ERROR to stderr");
+  assert.match(stderr, /FG-52/, "error must name the ticket id");
+  assert.match(stderr, /duplicate/i, "error must mention duplicate");
+});
+
+test("listTickets: deduplicates ghost — returns exactly one entry and done copy wins", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-53");
+  let tickets!: StructuredTicket[];
+  captureStderr(() => {
+    tickets = listTickets(dir);
+  });
+  const matches = tickets.filter((t) => t.id === "FG-53");
+  assert.equal(matches.length, 1, "listTickets must return exactly one entry per id");
+  assert.equal(matches[0]!.status, "done", "done copy must win in listTickets");
+});
+
+test("listTickets: ghost active is not returned when filtering status=active", () => {
+  const dir = makeTmpDir();
+  plantGhost(dir, "FG-54");
+  // Also add a real active ticket so the list isn't empty
+  writeTicket(dir, makeTicket({ id: "FG-55", type: "story", status: "active" }));
+  let tickets!: StructuredTicket[];
+  captureStderr(() => {
+    tickets = listTickets(dir, { status: "active" });
+  });
+  assert.ok(!tickets.some((t) => t.id === "FG-54"), "ghost ticket FG-54 must not appear as active");
+  assert.ok(tickets.some((t) => t.id === "FG-55"), "real active ticket FG-55 must be present");
+});
+
+test("listTickets: ghost for epic type reports correctly", () => {
+  const dir = makeTmpDir();
+  const base = join(dir, "backlog");
+  mkdirSync(join(base, "epics"), { recursive: true });
+  mkdirSync(join(base, "done"), { recursive: true });
+  const activeContent = `---\nid: FG-60\ntype: epic\nstatus: active\ntitle: Epic ghost\n---\n\nBody.\n`;
+  const doneContent = `---\nid: FG-60\ntype: epic\nstatus: done\ntitle: Epic ghost\nclosed: '2026-06-24'\n---\n\nBody.\n`;
+  writeFileSync(join(base, "epics", "FG-60-epic-ghost.md"), activeContent);
+  writeFileSync(join(base, "done", "FG-60-epic-ghost.md"), doneContent);
+  let tickets!: StructuredTicket[];
+  const stderr = captureStderr(() => {
+    tickets = listTickets(dir);
+  });
+  assert.match(stderr, /ERROR/i);
+  assert.match(stderr, /FG-60/);
+  const matches = tickets.filter((t) => t.id === "FG-60");
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0]!.status, "done");
 });

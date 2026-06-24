@@ -1,9 +1,10 @@
 ---
 id: FG-397
 type: story
-status: active
+status: done
 title: "backlog close: structured move is non-atomic (writeTicket to done/ then unlinkSync story) — a crash between leaves a ghost active copy that shadows the done file"
 created: 2026-06-24
+closed: 2026-06-24
 ---
 
 ## Problem
