@@ -1,9 +1,10 @@
 ---
 id: FG-389
 type: story
-status: active
-title: "Remove legacy BACKLOG.md support now that structured backlog is canonical"
+status: done
+title: Remove legacy BACKLOG.md support now that structured backlog is canonical
 created: 2026-06-23
+closed: 2026-06-24
 ---
 
 ## Problem
