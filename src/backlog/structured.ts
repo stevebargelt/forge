@@ -21,7 +21,7 @@ export type StructuredTicket = TicketFrontmatter & {
   body: string;
 };
 
-const TYPE_DIRS: Record<TicketType, string> = {
+export const TYPE_DIRS: Record<TicketType, string> = {
   idea: "ideas",
   epic: "epics",
   story: "stories",

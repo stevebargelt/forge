@@ -22,6 +22,7 @@ import {
   readTicket,
   withBacklogLock,
   writeTicket,
+  TYPE_DIRS,
   type TicketType,
   type TicketStatus,
   type StructuredTicket,
@@ -117,7 +118,8 @@ export function registerBacklog(program: Command): void {
         writeTicket(dir, ticket);
         return newId;
       });
-      console.log(`Created ${id} in stories/${generateSlug(title)}: ${title}`);
+      const subdir = TYPE_DIRS[(opts.type as TicketType) ?? "story"];
+      console.log(`Created ${id} in ${subdir}/${generateSlug(title)}: ${title}`);
     });
 
   // ----- close -----
