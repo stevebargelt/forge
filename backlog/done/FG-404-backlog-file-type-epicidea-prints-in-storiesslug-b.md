@@ -1,9 +1,11 @@
 ---
 id: FG-404
 type: story
-status: active
+status: done
 title: backlog file --type epic|idea prints 'in stories/<slug>' but the ticket lands in epics/ or ideas/ — success message hardcodes stories/ (backlog.ts:120)
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: 425bf4e
 ---
 
 ## Problem
