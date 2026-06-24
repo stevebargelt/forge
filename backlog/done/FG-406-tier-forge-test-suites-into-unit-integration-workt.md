@@ -1,9 +1,11 @@
 ---
 id: FG-406
 type: story
-status: active
+status: done
 title: Tier Forge test suites into unit, integration, worktree, and aggregate gates
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: 967baf5
 ---
 
 ## Problem
