@@ -1,9 +1,11 @@
 ---
 id: FG-408
 type: story
-status: active
+status: done
 title: "Purify the unit test tier: reclassify subprocess/git/sleep tests out of test:unit + add a content guard (completes FG-406 unit-purity AC, blocks FG-407)"
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: 24dd3c7
 ---
 
 ## Problem
