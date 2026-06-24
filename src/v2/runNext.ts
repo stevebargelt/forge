@@ -18,17 +18,18 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
-import type { Task, TaskPackage, Verdict, Finding, RedAuthority } from "../types/index.js";
+import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
+import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
@@ -610,7 +611,47 @@ async function dispatchReds(args: {
   const artifact = JSON.stringify(args.primaryResult, null, 2);
   const allTasks = tasksForRun(args.runId);
   const spec = buildRedSpec(args.workflow, allTasks);
-  const launches = args.step.reds.map((red) =>
+
+  // FG-381: detect shipping-reviewer and assemble context packet ONCE before dispatch.
+  const shippingReviewerRed = args.step.reds.find((r) => r.agent === "shipping-reviewer");
+  let reviewerContextPacket: ReviewerContextPacket | undefined;
+  let shippingReviewerPreFailed = false;
+  if (shippingReviewerRed) {
+    const packet = assembleReviewerContextPacket(args.runId, args.primaryTaskId, args.projectDir);
+    const requiredMissing = packet.missingContext.filter((m) => m.required);
+    if (requiredMissing.length > 0) {
+      const reviewerTaskId = newTaskId(`red-${args.step.id}`);
+      insertTask({
+        id: reviewerTaskId,
+        runId: args.runId,
+        parentId: args.primaryTaskId,
+        phase: args.step.id,
+        agentRole: shippingReviewerRed.agent,
+        status: "pending",
+        taskPackage: emptyTaskPackage(reviewerTaskId, args.runId, args.step.id, shippingReviewerRed.agent),
+        createdAt: nowIso(),
+      });
+      logEvent("task.created", { runId: args.runId, taskId: reviewerTaskId });
+      const errMsg = `shipping-reviewer: missing required context (${requiredMissing.map((m) => m.field).join(", ")})`;
+      markTaskFailed(reviewerTaskId, errMsg);
+      logEvent("task.failed", {
+        runId: args.runId,
+        taskId: reviewerTaskId,
+        payload: { failure_kind: "unknown", error: errMsg, missingContext: requiredMissing },
+      });
+      shippingReviewerPreFailed = true;
+    } else {
+      reviewerContextPacket = packet;
+    }
+  }
+
+  // Exclude shipping-reviewer from launches when it was pre-failed above.
+  const redsToLaunch =
+    shippingReviewerRed && reviewerContextPacket === undefined
+      ? args.step.reds.filter((r) => r.agent !== "shipping-reviewer")
+      : args.step.reds;
+
+  const launches = redsToLaunch.map((red) =>
     runOneRed({
       runId: args.runId,
       workflow: args.workflow,
@@ -623,6 +664,7 @@ async function dispatchReds(args: {
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
+      reviewerContextPacket: red.agent === "shipping-reviewer" ? reviewerContextPacket : undefined,
     }),
   );
   const results = await Promise.all(launches);
@@ -693,6 +735,11 @@ async function dispatchReds(args: {
       authoritativeFail = true;
     }
   }
+  // Missing required reviewer context is a hard stop: the packet could not be
+  // built so there is nothing to review — block regardless of red configuration.
+  if (shippingReviewerPreFailed) {
+    authoritativeFail = true;
+  }
   return { verdicts, authoritativeFail };
 }
 
@@ -708,6 +755,7 @@ async function runOneRed(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  reviewerContextPacket?: ReviewerContextPacket;
 }): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
   // failureModes: the force-level anti-prompts for the artifact under review.
@@ -729,7 +777,10 @@ async function runOneRed(args: {
     runId: args.runId,
     phase: args.step.id,
     role: args.red.agent,
-    inputs: { failureModes },
+    inputs: {
+      failureModes,
+      ...(args.reviewerContextPacket ? { reviewerContextPacket: args.reviewerContextPacket } : {}),
+    },
     composedSystemPrompt: composeSystemPrompt({
       role: args.red.agent,
       workflow: args.workflow,

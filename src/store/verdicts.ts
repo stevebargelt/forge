@@ -52,3 +52,15 @@ export function verdictsForTask(taskId: string): VerdictRow[] {
     .all(taskId) as Row[];
   return rows.map(rowToVerdict);
 }
+
+export function verdictsForRun(runId: string): VerdictRow[] {
+  const db = getDb();
+  const taskRows = db.prepare(`SELECT id FROM tasks WHERE run_id = ?`).all(runId) as { id: string }[];
+  if (taskRows.length === 0) return [];
+  const ids = taskRows.map((t) => t.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT * FROM verdicts WHERE task_id IN (${placeholders}) ORDER BY created_at ASC`)
+    .all(...ids) as Row[];
+  return rows.map(rowToVerdict);
+}

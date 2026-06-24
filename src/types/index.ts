@@ -179,6 +179,53 @@ export type RecommendedAction = {
 
 export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate";
 
+export type VerificationCommand = {
+  command: string;
+  context: "host" | "container";
+};
+
+export type MissingContextItem = {
+  field: string;
+  reason: string;
+  required: boolean;
+};
+
+export type ReviewerContextPacket = {
+  backlog: {
+    id: string;
+    title: string;
+    type: 'idea' | 'epic' | 'story';
+    body: string;
+    status: 'active' | 'done' | 'blocked' | 'deferred';
+    acceptanceCriteria: string;
+    nonGoals: string;
+    parentEpic: string;
+  } | null;
+  operatorAsk: string | null;
+  architectDecisions: unknown | null;
+  techLeadPlan: unknown | null;
+  requestChangesHistory: Array<{
+    taskId: string;
+    rationale: string;
+    decidedAt: string;
+    verdictFindings: Finding[];
+  }>;
+  redFindings: VerdictRow[];
+  engineerSummary: unknown | null;
+  git: {
+    commitSha?: string;
+    diffRange?: string;
+    changedFiles: string[];
+    worktreePath?: string;
+  };
+  verificationCommands: VerificationCommand[];
+  deferredScope: Array<{
+    description: string;
+    followUpTicketId?: string;
+  }>;
+  missingContext: MissingContextItem[];
+};
+
 export type Incident = {
   kind: IncidentKind;
   severity: IncidentSeverity;

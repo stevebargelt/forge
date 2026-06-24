@@ -45,3 +45,15 @@ export function gatesForTask(taskId: string): GateRow[] {
     .all(taskId) as Row[];
   return rows.map(rowToGate);
 }
+
+export function gatesForRun(runId: string): GateRow[] {
+  const db = getDb();
+  const taskRows = db.prepare(`SELECT id FROM tasks WHERE run_id = ?`).all(runId) as { id: string }[];
+  if (taskRows.length === 0) return [];
+  const ids = taskRows.map((t) => t.id);
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = db
+    .prepare(`SELECT * FROM gates WHERE task_id IN (${placeholders}) ORDER BY decided_at ASC`)
+    .all(...ids) as Row[];
+  return rows.map(rowToGate);
+}
