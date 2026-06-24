@@ -1,10 +1,11 @@
 ---
 id: FG-381
 type: story
-status: active
-title: "Reviewer Context Packet for Shipping Reviewer acceptance review"
+status: done
+title: Reviewer Context Packet for Shipping Reviewer acceptance review
 epic: FG-372
 created: 2026-06-23
+closed: 2026-06-24
 ---
 
 ## Problem
