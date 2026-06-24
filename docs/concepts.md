@@ -35,6 +35,8 @@ Custom Claude Code commands forge installs into each project's `.claude/commands
 
 Both commands hard-code "use the `forge backlog` CLI, do NOT read backlog files directly." The CLI is the bounded interface that protects orchestrator context cost; projects store notes at `backlog/notes.md` and tickets under `backlog/{stories,epics,ideas,done}/`.
 
+`forge backlog close <id>` moves a ticket to `backlog/done/`, sets `status: done`, and records a `closed` date in its frontmatter. Pass `--commit <sha>` to also stamp the closing commit: the done ticket gains a `closed_commit: <sha>` field, tying the ticket to the exact commit that shipped it.
+
 Installed by `forge init` as symlinks into the local forge clone (so `forge upgrade` propagates template edits to all projects without per-project re-copy). `--no-install-hooks` bypasses installation. Project-local overrides (a regular file at `.claude/commands/<name>.md`) are detected as `exists-other` and left alone. Stale forge symlinks pointing at a different/old forge clone path are detected and replaced in place on upgrade.
 
 **Portability convention (`.claude/commands/` is per-developer):** the symlinks contain machine-absolute paths to *this developer's* forge clone, so they're not portable across contributors. `forge init` adds `.claude/commands/` to the project's `.gitignore`. Each contributor runs `forge init` once after cloning to bootstrap their local copies — same shape as `npm install` reconstructing `node_modules/`.

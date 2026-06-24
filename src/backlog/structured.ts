@@ -13,6 +13,7 @@ export type TicketFrontmatter = {
   related?: string[];
   created?: string;
   closed?: string;
+  closedCommit?: string;
   epic?: string;
 };
 
@@ -93,6 +94,7 @@ function parseTicketFile(content: string): { frontmatter: TicketFrontmatter; bod
     ...(raw["related"] ? { related: raw["related"] as string[] } : {}),
     ...(raw["created"] ? { created: String(raw["created"]) } : {}),
     ...(raw["closed"] ? { closed: String(raw["closed"]) } : {}),
+    ...(raw["closed_commit"] ? { closedCommit: String(raw["closed_commit"]) } : {}),
     ...(raw["epic"] ? { epic: String(raw["epic"]) } : {}),
   };
   return { frontmatter, body: body.trimStart() };
@@ -109,6 +111,7 @@ function serializeTicket(fm: TicketFrontmatter, body: string): string {
   if (fm.related && fm.related.length > 0) yamlObj["related"] = fm.related;
   if (fm.created) yamlObj["created"] = fm.created;
   if (fm.closed) yamlObj["closed"] = fm.closed;
+  if (fm.closedCommit) yamlObj["closed_commit"] = fm.closedCommit;
   const yaml = stringifyYaml(yamlObj, { lineWidth: 0 });
   const bodyStr = body.trim().length > 0 ? "\n" + body.trimStart() : "";
   return `---\n${yaml}---\n${bodyStr}`;
@@ -219,7 +222,7 @@ function atomicMoveFile(srcPath: string, destPath: string, newContent: string): 
   }
 }
 
-export function closeTicket(projectDir: string, id: string): void {
+export function closeTicket(projectDir: string, id: string, commit?: string): void {
   const found = findTicketFile(projectDir, id);
   if (!found) throw new Error(`Ticket ${id} not found`);
 
@@ -230,6 +233,7 @@ export function closeTicket(projectDir: string, id: string): void {
     ...frontmatter,
     status: "done",
     closed: new Date().toISOString().slice(0, 10),
+    ...(commit ? { closedCommit: commit } : {}),
   };
   const newContent = serializeTicket(updated, body);
 

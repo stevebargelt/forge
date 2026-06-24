@@ -327,6 +327,45 @@ test("closeTicket throws for unknown id", () => {
   assert.throws(() => closeTicket(dir, "FG-999"), /not found/i);
 });
 
+test("closeTicket records closedCommit when commit sha is provided", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-30", type: "story" }));
+  closeTicket(dir, "FG-30", "abc1234def5678");
+  const result = readTicket(dir, "FG-30");
+  assert.equal(result.status, "done");
+  assert.equal(result.closedCommit, "abc1234def5678");
+});
+
+test("closeTicket does not emit closedCommit when no commit is provided", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-31", type: "story" }));
+  closeTicket(dir, "FG-31");
+  const result = readTicket(dir, "FG-31");
+  assert.equal(result.status, "done");
+  assert.equal(result.closedCommit, undefined);
+});
+
+test("writeTicket/readTicket round-trips closedCommit field losslessly", () => {
+  const dir = makeTmpDir();
+  const ticket = makeTicket({ id: "FG-32", status: "done", closed: "2026-06-24", closedCommit: "deadbeef1234" });
+  writeTicket(dir, ticket);
+  const result = readTicket(dir, "FG-32");
+  assert.equal(result.closedCommit, "deadbeef1234");
+  assert.equal(result.closed, "2026-06-24");
+});
+
+test("readTicket parses pre-existing done ticket without closed_commit field", () => {
+  const dir = makeTmpDir();
+  const base = dir + "/backlog/done";
+  mkdirSync(base, { recursive: true });
+  const content = "---\nid: FG-33\ntype: story\nstatus: done\ntitle: Old done ticket\nclosed: '2026-01-01'\n---\n\nBody.\n";
+  writeFileSync(base + "/FG-33-old-done-ticket.md", content);
+  const result = readTicket(dir, "FG-33");
+  assert.equal(result.status, "done");
+  assert.equal(result.closed, "2026-01-01");
+  assert.equal(result.closedCommit, undefined);
+});
+
 // ----- duplicate-id detection -----
 
 // Simulates the ghost-active state that would result from a crash between

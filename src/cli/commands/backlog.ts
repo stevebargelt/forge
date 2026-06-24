@@ -124,7 +124,7 @@ export function registerBacklog(program: Command): void {
     .option("--project <dir>", "project directory (default: cwd)")
     .action((idArg: string, opts: { commit?: string; project?: string }) => {
       const dir = resolve(opts.project ?? process.cwd());
-      closeStructuredTicket(dir, idArg);
+      closeStructuredTicket(dir, idArg, opts.commit);
       console.log(`Closed ${idArg}`);
     });
 

@@ -11,7 +11,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "cli", "index.ts");
-const tsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
+const localTsx = resolve(here, "..", "..", "node_modules", ".bin", "tsx");
+const tsx = existsSync(localTsx) ? localTsx : "tsx";
 
 let projectDir: string;
 
@@ -300,6 +301,49 @@ test("integ structured: backlog close FG-20 moves epic to done/", () => {
 test("integ structured: backlog close unknown id exits non-zero", () => {
   const res = runForge(["backlog", "close", "FG-999", "--project", projectDir]);
   assert.notEqual(res.status, 0, "must exit non-zero for missing ticket");
+});
+
+test("integ FG-399: backlog close --commit records sha in done ticket frontmatter", () => {
+  const res = runForge(["backlog", "close", "FG-30", "--commit", "abc1234", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+
+  const doneDir = join(projectDir, "backlog", "done");
+  const closed = readdirSync(doneDir).find((f) => f.startsWith("FG-30-"));
+  assert.ok(closed, "FG-30 must be in done/");
+  const content = readFileSync(join(doneDir, closed!), "utf8");
+  assert.match(content, /closed_commit: abc1234/, "closed_commit must appear in frontmatter");
+});
+
+test("integ FG-399: backlog close without --commit emits no closed_commit field", () => {
+  const res = runForge(["backlog", "close", "FG-30", "--project", projectDir]);
+  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
+
+  const doneDir = join(projectDir, "backlog", "done");
+  const closed = readdirSync(doneDir).find((f) => f.startsWith("FG-30-"));
+  assert.ok(closed, "FG-30 must be in done/");
+  const content = readFileSync(join(doneDir, closed!), "utf8");
+  assert.doesNotMatch(content, /closed_commit/, "closed_commit must not appear when --commit is omitted");
+});
+
+test("integ FG-399: show --json after close --commit round-trips closedCommit field", () => {
+  const sha = "deadbeef9876";
+  const closeRes = runForge(["backlog", "close", "FG-30", "--commit", sha, "--project", projectDir]);
+  assert.equal(closeRes.status, 0, `close failed: ${closeRes.stderr}`);
+
+  const showRes = runForge(["backlog", "show", "FG-30", "--json", "--project", projectDir]);
+  assert.equal(showRes.status, 0, `show failed: ${showRes.stderr}`);
+  const ticket = JSON.parse(showRes.stdout) as Record<string, unknown>;
+  assert.equal(ticket["closedCommit"], sha, "closedCommit must survive the close->show round-trip");
+  assert.equal(ticket["status"], "done");
+});
+
+test("integ FG-399: show --json on pre-existing done ticket with no closed_commit has no closedCommit field", () => {
+  // FG-5 was written without a closed_commit field in setupStructuredBacklog()
+  const showRes = runForge(["backlog", "show", "FG-5", "--json", "--project", projectDir]);
+  assert.equal(showRes.status, 0, `show failed: ${showRes.stderr}`);
+  const ticket = JSON.parse(showRes.stdout) as Record<string, unknown>;
+  assert.equal(ticket["status"], "done");
+  assert.ok(!("closedCommit" in ticket), "closedCommit must be absent from a ticket that was never closed with --commit");
 });
 
 // ─── forge backlog move ───────────────────────────────────────────────────────
