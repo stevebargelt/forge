@@ -137,6 +137,28 @@ This story should revisit how Forge uses test engineers and reds:
 
 Open design question: should the Shipping Reviewer replace some low-value red passes for low-risk work, or simply run after them?
 
+## Red-Agent Calibration Insight
+
+Recent Forge-on-Forge work showed that reds are useful when targeted at high-risk control-plane invariants, not when used as generic reviewers. During the worktree and fan-out integration arc, reds found real blockers that ordinary implementation/test passes missed:
+
+- wedged task/run states from unguarded throws;
+- no-discard violations in worktree cleanup;
+- fake/test-only validation hooks in production code;
+- git/worktree merge paths that could silently drop work;
+- non-atomic durable-state transitions;
+- incorrect kill-switch behavior;
+- missing dispatch-seam coverage;
+- silent success paths where the intended merge/integration effect never happened.
+
+The Shipping Reviewer should treat reds as risk-triggered adversarial probes:
+
+- Mandatory for lifecycle, git/worktree/merge, auth, routing, durable state, test infrastructure, and done-gate changes.
+- Focused on explicit failure modes or invariants, not vague "review this" instructions.
+- Blocker-biased for findings involving data loss, wedged state, fake validation, credential leakage, non-atomic state, or silent success without the intended effect.
+- Optional or lightweight for low-risk leaf UI/docs changes.
+
+This should inform both routing and closeout: the reviewer should ask "what invariant could fail catastrophically here?" and use reds to attack that invariant when the touched surface is high risk.
+
 ## Suggested Final Response Contract
 
 When Forge says work is shipped, the response should include:
@@ -159,6 +181,7 @@ The Shipping Reviewer should escalate to deeper review when a change touches:
 - routing policy, RACI, model policy, runtime YAML, or provider selection;
 - database schema or durable state;
 - dashboard state that affects operator decisions;
+- validation/test infrastructure, especially any code that can create fake green results;
 - docs/operator surfaces for changed behavior;
 - broad file surfaces or cross-module contracts;
 - anything explicitly marked high-risk by the operator.
@@ -194,9 +217,11 @@ Design acceptance for this story:
 - Decide which checks are mechanical and which require an LLM reviewer.
 - Decide how latest operator instructions are captured or supplied to the reviewer.
 - Decide how Shipping Reviewer interacts with test engineer and red agents.
+- Define how risk-targeted reds are selected, what invariants they should attack, and which classes of red findings default to blockers.
 - Decide whether implementation should be split into smaller follow-up stories.
 - Include examples of "passes tests but not done" cases, including uncommitted backlog close state and missed conversational scope.
 - Include examples of "tests were not valid" cases, including fake dependency shims and a full-suite failure hidden behind narrower green tests.
+- Include examples where risk-targeted reds found real blockers, including wedged state, no-discard violations, fake validation hooks, and non-atomic durable-state transitions.
 
 Future implementation acceptance should include:
 
