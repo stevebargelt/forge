@@ -26,7 +26,7 @@ Minimum shipped behavior:
 
 ## Delivery Phases
 
-### Phase 0: Backlog Integrity Prerequisites
+### Phase 0: Backlog Integrity Prerequisites — complete
 
 These must be fixed before trusting campaign automation to mutate backlog state repeatedly.
 
@@ -34,6 +34,8 @@ These must be fixed before trusting campaign automation to mutate backlog state 
 - **FG-397**: make structured backlog close/move atomic.
 - **FG-398**: make file-backed ticket id generation safe under concurrent writers.
 - **FG-399**: record `forge backlog close --commit <sha>` in structured tickets.
+- **FG-403**: `listTickets` scans all structured dirs and filters by frontmatter, surfacing partial-move state and ghost duplicates on every read path (reinforces the no-partial-state criterion on the read side).
+- **FG-404**: `backlog file --type epic|idea` success message prints the actual destination dir instead of a hardcoded path.
 
 Exit criteria:
 
