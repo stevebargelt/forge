@@ -1,9 +1,11 @@
 ---
 id: FG-398
 type: story
-status: active
+status: done
 title: "backlog file: ticket-id generation is read-then-write without locking — two concurrent invocations can allocate the same id"
 created: 2026-06-24
+closed: 2026-06-24
+closed_commit: "1289619"
 ---
 
 ## Problem
