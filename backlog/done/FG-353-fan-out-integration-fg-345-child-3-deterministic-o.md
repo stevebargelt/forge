@@ -1,9 +1,10 @@
 ---
 id: FG-353
 type: story
-status: active
+status: done
 title: "Fan-out integration (FG-345 child 3): deterministic ordered child merges into an integration branch BEFORE parent reds"
 created: 2026-06-22
+closed: 2026-06-24
 ---
 
 **Parent:** FG-345. **Depends on:** FG-352 (merge primitive). **This story carries the red-timing correction — write it precisely.**
