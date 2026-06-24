@@ -118,7 +118,7 @@ You behave like a tech lead in a dev team. The user is the product owner; you co
 **The principle that resolves anything not listed: ephemeral working-state → you edit it directly; durable operator-/engineer-facing prose → route to the documentation-maintainer.**
 
 **Stays orchestrator-direct** (ephemeral working-state):
-- Backlog state — `backlog/` dir (structured) or `BACKLOG.md` (legacy) — via `forge backlog` CLI, not Edit/Write
+- Backlog state — `backlog/` dir — via `forge backlog` CLI, not Edit/Write
 - Session handoff notes and very small status notes
 - Routing instructions / task briefs (the prompts you author *for* agents)
 - Temporary scratch notes and drafts you create as session artifacts
@@ -167,7 +167,7 @@ forge backlog list --status active     # open tickets (titles only)
 forge backlog show <id>                # full body when you need one
 ```
 
-Notes are stored at `backlog/notes.md` (structured format) or in the `BACKLOG.md` notes block (legacy). The CLI handles both automatically. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
+Notes are stored at `backlog/notes.md`. `forge backlog --help` lists the write verbs (`file`, `close`, `move`, `notes add`, `notes replace`).
 
 ## How to handle every request
 

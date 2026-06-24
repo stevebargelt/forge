@@ -1,15 +1,8 @@
-// Parse + serialize roundtrip tests.
+// parseBacklog tests against the legacy fixture and inline inputs.
 //
-// Acceptance bar: parsing a representative legacy BACKLOG.md and serializing
-// it back produces byte-identical output. If this test fails, either the file
-// format drifted (intentional, update parser) or the parser is wrong
-// (unintentional, fix it).
-//
-// The fixture is a committed canonical document (__fixtures__/legacy-backlog.md)
-// rather than this repo's own BACKLOG.md — forge migrated to the structured
-// backlog/ format, so there is no longer a root BACKLOG.md to pin to. The
-// single-file parser is still live (forge backlog / review-loop read it for
-// projects on the legacy format), so the roundtrip guarantee still matters.
+// serialize.ts has been removed — roundtrip tests are intentionally gone.
+// The fixture (legacy-backlog.md) is kept so migrate's reader is exercised
+// by the first two tests, and to prevent bit-rot in parse.ts.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,18 +10,10 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseBacklog } from "./parse.js";
-import { serializeBacklog } from "./serialize.js";
 import { SECTION_ORDER } from "./types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BACKLOG_PATH = join(HERE, "__fixtures__", "legacy-backlog.md");
-
-test("parse(BACKLOG.md) → serialize() roundtrips byte-for-byte", () => {
-  const original = readFileSync(BACKLOG_PATH, "utf8");
-  const parsed = parseBacklog(original);
-  const roundtripped = serializeBacklog(parsed);
-  assert.equal(roundtripped, original);
-});
 
 test("parser identifies sections + ticket counts on BACKLOG.md", () => {
   const original = readFileSync(BACKLOG_PATH, "utf8");
@@ -97,9 +82,6 @@ test("## inside ticket body does not split the section", () => {
   assert.match(active[0]!.body, /## Sub-heading/);
   assert.match(active[0]!.body, /More body under subheading/);
   assert.equal(active[1]!.id, 2);
-
-  const round = serializeBacklog(b);
-  assert.equal(round, input);
 });
 
 test("## inside notes block is not treated as a section boundary", () => {
@@ -129,9 +111,6 @@ test("## inside notes block is not treated as a section boundary", () => {
 
   const active = b.sections.get("Active")!;
   assert.equal(active.length, 1);
-
-  const round = serializeBacklog(b);
-  assert.equal(round, input);
 });
 
 test("parser throws when Notes heading is missing", () => {
@@ -166,8 +145,4 @@ test("parser handles a minimal hand-written backlog", () => {
   assert.equal(active[0]!.title, "first ticket");
   assert.equal(active[1]!.id, 2);
   assert.equal(active[1]!.title, "second ticket");
-
-  // Roundtrip.
-  const round = serializeBacklog(b);
-  assert.equal(round, minimal);
 });

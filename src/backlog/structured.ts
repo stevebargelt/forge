@@ -122,6 +122,7 @@ export function writeTicket(projectDir: string, ticket: StructuredTicket): void 
 export type ListFilter = {
   type?: TicketType;
   status?: TicketStatus;
+  search?: string;
 };
 
 export function listTickets(projectDir: string, filters: ListFilter = {}): StructuredTicket[] {
@@ -137,6 +138,8 @@ export function listTickets(projectDir: string, filters: ListFilter = {}): Struc
     dirsToScan.push("ideas", "epics", "stories", DONE_DIR);
   }
 
+  const searchLower = filters.search ? filters.search.toLowerCase() : undefined;
+
   const results: StructuredTicket[] = [];
   for (const subdir of dirsToScan) {
     const dir = join(base, subdir);
@@ -148,6 +151,10 @@ export function listTickets(projectDir: string, filters: ListFilter = {}): Struc
         const { frontmatter, body } = parseTicketFile(content);
         if (filters.type && frontmatter.type !== filters.type) continue;
         if (filters.status && frontmatter.status !== filters.status) continue;
+        if (searchLower) {
+          const haystack = (frontmatter.title + " " + body).toLowerCase();
+          if (!haystack.includes(searchLower)) continue;
+        }
         results.push({ ...frontmatter, body });
       } catch {
         // skip unparseable files

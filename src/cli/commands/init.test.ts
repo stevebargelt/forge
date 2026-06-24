@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyOrchestratorBlock,
-  createBacklogSkeleton,
   executeClaudeCommandsPlan,
   executeClaudeHooksPlan,
   executeGitignoreEntriesPlan,
@@ -237,28 +236,6 @@ test("planCommitMsgHook: returns exists-other when a symlink points somewhere el
   if (plan.action === "exists-other") {
     assert.match(plan.details, /symlink/);
   }
-});
-
-// ----- createBacklogSkeleton (forge init writes a starter BACKLOG.md) -----
-
-test("createBacklogSkeleton: writes a parseable BACKLOG.md when none exists", () => {
-  const backlogPath = join(projectDir, "BACKLOG.md");
-  const result = createBacklogSkeleton(backlogPath);
-  assert.equal(result, "created");
-  assert.ok(existsSync(backlogPath));
-  const content = readFileSync(backlogPath, "utf8");
-  assert.match(content, /# forge — backlog/);
-  assert.match(content, /## Notes for next session/);
-  assert.match(content, /## Active/);
-});
-
-test("createBacklogSkeleton: refuses to overwrite an existing BACKLOG.md", () => {
-  const backlogPath = join(projectDir, "BACKLOG.md");
-  const existing = "# my real backlog\n\n## Notes for next session\nkeep me\n";
-  writeFileSync(backlogPath, existing);
-  const result = createBacklogSkeleton(backlogPath);
-  assert.equal(result, "exists");
-  assert.equal(readFileSync(backlogPath, "utf8"), existing, "existing backlog must not be clobbered");
 });
 
 // ----- planClaudeHooks / executeClaudeHooksPlan (#153, retargeted to

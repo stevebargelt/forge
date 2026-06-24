@@ -307,8 +307,6 @@ function statusBanner(projectRoot: string, name: string, bedrockProfile?: string
   if (branch) parts.push(`branch: ${branch}`);
   const ahead = gitInfo(projectRoot, "rev-list --count origin/HEAD..HEAD") ?? gitInfo(projectRoot, "rev-list --count @{u}..HEAD");
   if (ahead && ahead !== "0") parts.push(`${ahead} commit(s) ahead of origin`);
-  const activeCount = activeBacklogCount(projectRoot);
-  if (activeCount !== undefined) parts.push(`${activeCount} active ticket(s) in BACKLOG`);
   return parts.join(" · ");
 }
 
@@ -316,27 +314,6 @@ function gitInfo(cwd: string, cmd: string): string | undefined {
   try {
     return execSync(`git ${cmd}`, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
   } catch { return undefined; }
-}
-
-// Count active tickets by scanning BACKLOG.md's "## Active" header section.
-// Cheap; runs once at launch. Returns undefined if file is absent.
-function activeBacklogCount(projectRoot: string): number | undefined {
-  const path = join(projectRoot, "BACKLOG.md");
-  if (!existsSync(path)) return undefined;
-  try {
-    const st = statSync(path);
-    if (st.size === 0) return 0;
-    const content = readFileSync(path, "utf8");
-    // Find the Active section and count "### #" headings until the next "## " section.
-    const activeStart = content.search(/^##\s+Active\s*$/m);
-    if (activeStart < 0) return undefined;
-    const rest = content.slice(activeStart);
-    const nextSection = rest.search(/^##\s+(?!Active)/m);
-    const slice = nextSection > 0 ? rest.slice(0, nextSection) : rest;
-    return (slice.match(/^###\s+#\d+/gm) ?? []).length;
-  } catch {
-    return undefined;
-  }
 }
 
 // #163: after claude exits, find its transcript and extract token usage into

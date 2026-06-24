@@ -1,21 +1,13 @@
-// forge backlog — parser.
+// forge backlog — legacy BACKLOG.md parser. Used only by backlog-migrate.
 //
-// Linear scan of BACKLOG.md. Produces a Backlog model.
-//
-// Format expectations (matching the existing file):
+// Format expectations:
 //   - First content: `# forge — backlog` (top-level heading) + intro paragraph
 //   - Section headings: lines starting with `## ` (e.g. `## Active`)
 //   - Ticket headings: `### #<id> — <title>` (em dash separator)
 //   - Everything else is body content owned by whatever heading came before
 //
 // The parser keeps body content as raw markdown — no interpretation of
-// inner structure (lists, code blocks, formatting). That keeps the parser
-// small AND lets humans edit body content freely without changes round-
-// tripping differently.
-//
-// Roundtrip invariant: serialize(parse(file)) === file (modulo a single
-// trailing newline). The parse/serialize tests assert this against the real
-// BACKLOG.md.
+// inner structure (lists, code blocks, formatting).
 
 import { type Backlog, type SectionName, type Ticket, SECTION_ORDER } from "./types.js";
 
@@ -143,9 +135,5 @@ function parseTicketsInSection(sectionLines: string[], section: SectionName): Ti
     tickets.push({ id, title, section, body });
   }
 
-  // Note: lines between the section header and the first ticket (e.g. a
-  // blank line) are conceptually "section preamble" — but the existing file
-  // only ever has a single blank line there, so we don't model it. The
-  // serializer reproduces a single blank line.
   return tickets;
 }

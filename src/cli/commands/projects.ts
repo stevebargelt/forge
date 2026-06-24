@@ -104,7 +104,6 @@ function printShow(r: ProjectRecord): void {
   console.log(`  Last run:    ${r.lastRunAt ? relativeTime(r.lastRunAt) + ` (${r.lastRunAt})` : "no runs yet"}`);
   console.log(`  Total runs:  ${r.runCount}`);
   console.log(`  In-flight:   ${r.inFlightCount}`);
-  console.log(`  BACKLOG.md:  ${r.hasBacklogMd ? "present" : "absent"}`);
   const recent = listRuns().filter((run) => run.projectDir === r.projectDir).slice(0, 10);
   if (recent.length > 0) {
     console.log(``);

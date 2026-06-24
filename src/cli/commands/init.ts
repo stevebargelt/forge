@@ -2,7 +2,6 @@ import type { Command } from "commander";
 import { copyFileSync, existsSync, lstatSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { skeletonBacklogContent } from "../../backlog/skeleton.js";
 import { writeBacklogConfig } from "../../backlog/config.js";
 import { ensureHostRoutingPolicy } from "../../raci/host-policy.js";
 import { RACI_PATH, ROUTING_POLICY_PATH } from "../../util/paths.js";
@@ -231,16 +230,6 @@ function resolveHookSource(): string {
   throw new Error(
     `commit-msg hook source not found. Looked at:\n  ${candidates.join("\n  ")}`
   );
-}
-
-// Write the starter BACKLOG.md. Refuses to overwrite an existing file — the
-// backlog is the canonical task list and clobbering it would lose real work.
-// Exported for testing. Callers gate on existsSync before invoking; this
-// re-checks as a guard so the helper is safe to call directly.
-export function createBacklogSkeleton(backlogMdPath: string): "created" | "exists" {
-  if (existsSync(backlogMdPath)) return "exists";
-  writeFileSync(backlogMdPath, skeletonBacklogContent());
-  return "created";
 }
 
 const BACKLOG_SUBDIRS = ["stories", "epics", "ideas", "done"] as const;

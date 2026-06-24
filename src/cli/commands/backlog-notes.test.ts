@@ -3,26 +3,9 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectBacklogFormat } from "./backlog.js";
-import { readBacklog, writeBacklog } from "../../backlog/io.js";
-import { appendNotes, setNotes } from "../../backlog/ops.js";
 
-// Tests for forge backlog notes (show/add/replace) in both legacy and structured formats.
-// Uses direct module imports rather than subprocess spawning — the subprocess approach
-// fails in forge-work because commander isn't in node_modules there.
-
-const BACKLOG = `# Backlog
-
-## Notes for next session
-
-ORIGINAL NOTE — must be replaced.
-
-## Active
-
-### #1 — sample ticket
-
-body
-`;
+// Tests for forge backlog notes (show/add/replace) — structured format only.
+// Uses direct file operations to mirror the command logic without spawning a subprocess.
 
 let projectDir: string;
 
@@ -34,49 +17,6 @@ afterEach(() => {
   rmSync(projectDir, { recursive: true, force: true });
 });
 
-// ---- detectBacklogFormat ----
-
-test("detectBacklogFormat: returns 'legacy' for BACKLOG.md", () => {
-  writeFileSync(join(projectDir, "BACKLOG.md"), BACKLOG);
-  assert.equal(detectBacklogFormat(projectDir), "legacy");
-});
-
-test("detectBacklogFormat: returns 'structured' for backlog/ dir", () => {
-  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
-  assert.equal(detectBacklogFormat(projectDir), "structured");
-});
-
-test("detectBacklogFormat: structured takes precedence when both exist", () => {
-  writeFileSync(join(projectDir, "BACKLOG.md"), BACKLOG);
-  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
-  assert.equal(detectBacklogFormat(projectDir), "structured");
-});
-
-// ---- legacy notes (via ops layer) ----
-
-test("legacy notes replace: text replaces the notes block", () => {
-  writeFileSync(join(projectDir, "BACKLOG.md"), BACKLOG);
-  const b = readBacklog(projectDir);
-  const next = setNotes(b, "**Picked up next:** ship it.\n");
-  writeBacklog(projectDir, next);
-  const content = readFileSync(join(projectDir, "BACKLOG.md"), "utf8");
-  assert.match(content, /\*\*Picked up next:\*\* ship it\./);
-  assert.doesNotMatch(content, /ORIGINAL NOTE/);
-  assert.match(content, /### #1 — sample ticket/); // tickets untouched
-});
-
-test("legacy notes add: text appends to notes block", () => {
-  writeFileSync(join(projectDir, "BACKLOG.md"), BACKLOG);
-  const b = readBacklog(projectDir);
-  const next = appendNotes(b, "appended line");
-  writeBacklog(projectDir, next);
-  const content = readFileSync(join(projectDir, "BACKLOG.md"), "utf8");
-  assert.match(content, /ORIGINAL NOTE/);
-  assert.match(content, /appended line/);
-});
-
-// ---- structured notes (direct file ops, mirroring the command logic) ----
-
 function structuredNotesPath(dir: string): string {
   return join(dir, "backlog", "notes.md");
 }
@@ -87,7 +27,6 @@ function setupStructured(dir: string): void {
 
 test("structured: show returns '(no notes)' when notes.md absent", () => {
   setupStructured(projectDir);
-  // mirrors the notes show action for structured format
   const notesPath = structuredNotesPath(projectDir);
   const output = !existsSync(notesPath) ? "(no notes)\n" : readFileSync(notesPath, "utf8");
   assert.equal(output, "(no notes)\n");
@@ -148,10 +87,9 @@ test("structured: replace respects empty-input guard", () => {
   const notesPath = structuredNotesPath(projectDir);
   writeFileSync(notesPath, "safe content\n");
   const text = "   ";
-  // mirrors the guard in the action: throw if text.trim().length === 0
   assert.throws(() => {
     if (text.trim().length === 0) throw new Error("notes replace: empty input");
     writeFileSync(notesPath, text);
   }, /empty input/);
-  assert.match(readFileSync(notesPath, "utf8"), /safe content/); // original survived
+  assert.match(readFileSync(notesPath, "utf8"), /safe content/);
 });

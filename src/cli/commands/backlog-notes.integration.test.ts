@@ -167,15 +167,6 @@ test("integ FG-326: format detection routes notes to backlog/notes.md for struct
   assert.ok(!existsSync(join(projectDir, "BACKLOG.md")), "BACKLOG.md should not be created");
 });
 
-test("integ FG-326: format detection routes notes to BACKLOG.md for legacy format", () => {
-  const backlogMd = `# Backlog\n\n## Notes for next session\n\nlegacy note\n\n## Active\n`;
-  writeFileSync(join(projectDir, "BACKLOG.md"), backlogMd);
-  const res = runForge(["backlog", "notes", "show", "--project", projectDir]);
-  assert.equal(res.status, 0, `stderr: ${res.stderr}`);
-  assert.match(res.stdout, /legacy note/);
-  // backlog/notes.md should NOT have been created
-  assert.ok(!existsSync(notesPath()), "backlog/notes.md should not be created for legacy format");
-});
 
 test("integ FG-326: structured format takes precedence when both backlog/ and BACKLOG.md exist", () => {
   // Has both — structured wins

@@ -167,6 +167,52 @@ test("listTickets returns empty array for empty backlog dir", () => {
   assert.deepEqual(listTickets(dir), []);
 });
 
+test("listTickets --search matches ticket by title substring (case-insensitive)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-1", title: "Implement OAuth login", body: "some body" }));
+  writeTicket(dir, makeTicket({ id: "FG-2", title: "Fix typo in README", body: "other body" }));
+  const results = listTickets(dir, { search: "oauth" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0]!.id, "FG-1");
+});
+
+test("listTickets --search matches ticket by body substring (case-insensitive)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-1", title: "Feature A", body: "Depends on WidgetFactory refactor" }));
+  writeTicket(dir, makeTicket({ id: "FG-2", title: "Feature B", body: "Unrelated content here" }));
+  const results = listTickets(dir, { search: "widgetfactory" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0]!.id, "FG-1");
+});
+
+test("listTickets --search returns zero tickets for nonsense string (exact bug reproduction)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-1", title: "Real ticket one", body: "Real body one" }));
+  writeTicket(dir, makeTicket({ id: "FG-2", title: "Real ticket two", body: "Real body two" }));
+  const results = listTickets(dir, { search: "definitely-not-a-real-ticket-string" });
+  assert.equal(results.length, 0);
+});
+
+test("listTickets --search combines with --status filter", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-1", title: "Auth feature", status: "active" }));
+  writeTicket(dir, makeTicket({ id: "FG-2", title: "Auth refactor", status: "done" }));
+  writeTicket(dir, makeTicket({ id: "FG-3", title: "Unrelated", status: "active" }));
+  const results = listTickets(dir, { search: "auth", status: "active" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0]!.id, "FG-1");
+});
+
+test("listTickets --search combines with --type filter", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-1", type: "story", title: "Auth story" }));
+  writeTicket(dir, makeTicket({ id: "FG-2", type: "epic", title: "Auth epic" }));
+  writeTicket(dir, makeTicket({ id: "FG-3", type: "story", title: "Other story" }));
+  const results = listTickets(dir, { search: "auth", type: "story" });
+  assert.equal(results.length, 1);
+  assert.equal(results[0]!.id, "FG-1");
+});
+
 // ----- moveTicket -----
 
 test("moveTicket moves from stories to epics", () => {

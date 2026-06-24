@@ -10,8 +10,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
 import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
-import { readBacklog } from "../../backlog/io.js";
-import { findTicket } from "../../backlog/ops.js";
+import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
@@ -148,10 +147,10 @@ function readScripts(projectDir: string): Record<string, unknown> {
 export function registerReviewLoop(program: Command): void {
   program
     .command("review-loop")
-    .argument("<ticket-id>", "backlog ticket id (e.g. 301 or #301) whose committed work to review")
+    .argument("<ticket-id>", "structured ticket id (e.g. FG-301) whose committed work to review")
     .option("--max-rounds <n>", "max review/fix rounds", (v) => parseInt(v, 10), 2)
     .option("--since <sha>", "review the commit range <sha>..HEAD instead of inferring from the ticket")
-    .option("--project <dir>", "project dir (default: cwd) — holds BACKLOG.md, git repo, package.json")
+    .option("--project <dir>", "project dir (default: cwd) — holds backlog/, git repo, package.json")
     .option("--route <key>", "#297 resolved route key (preflight before every dispatch)")
     .option("--unrouted", "#297 acknowledge an intentionally unrouted loop")
     .option("--review-profile <name>", "model profile for the reviewer (red-wide)")
@@ -164,21 +163,20 @@ export function registerReviewLoop(program: Command): void {
     }) => {
       ensureForgeDirs();
       const projectDir = resolve(opts.project ?? process.cwd());
-      const num = ticketIdArg.replace(/^#/, "").trim();
+      const ticketId = ticketIdArg.replace(/^#/, "").trim();
 
-      const ticket = findTicket(readBacklog(projectDir), parseInt(num, 10));
-      if (!ticket) throw new Error(`no ticket #${num} in ${join(projectDir, "BACKLOG.md")}`);
+      const ticket = readTicket(projectDir, ticketId);
 
       // Infer commits from the PROJECT repo, not Forge's launch dir.
-      const range = resolveCommitRange(num, { since: opts.since, git: (gitArgs) => git(gitArgs, projectDir) });
+      const range = resolveCommitRange(ticketId, { since: opts.since, git: (gitArgs) => git(gitArgs, projectDir) });
       if (range.mode === "none") {
-        throw new Error(`no commits reference #${num} (and no --since). Pass --since <sha> to set the range.`);
+        throw new Error(`no commits reference ${ticketId} (and no --since). Pass --since <sha> to set the range.`);
       }
       const diff = buildDiff(range, projectDir);
 
       // Present (guardrail): ticket, route, range, rounds, stop conditions.
       const spanNote = range.spansUnmatched ? `, spans unrelated commits → diffing the ${range.shas.length} ticket shas` : "";
-      console.log(`review-loop: #${num} — ${ticket.title}`);
+      console.log(`review-loop: ${ticket.id} — ${ticket.title}`);
       console.log(`  route:        ${opts.route ?? "(none — unrouted)"}`);
       console.log(`  commit range: ${range.diffRange} (${range.mode}${spanNote})`);
       console.log(`  max rounds:   ${opts.maxRounds}`);
@@ -191,15 +189,15 @@ export function registerReviewLoop(program: Command): void {
       applyRoutePreflight({ command: "forge review-loop", route: opts.route, unrouted: opts.unrouted, projectDir, enforce: preflightEnforceFromEnv() });
 
       const { deps, getRunId } = buildReviewLoopDeps({
-        ticketId: num,
-        acceptance: `#${num} — ${ticket.title}\n\n${ticket.body}`,
+        ticketId,
+        acceptance: `${ticket.id} — ${ticket.title}\n\n${ticket.body}`,
         diff, projectDir, scripts: readScripts(projectDir),
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
       });
 
       const outcome = await runReviewLoop({ maxRounds: opts.maxRounds }, deps);
-      const note = renderReviewLoopNote({ ticketId: num, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
+      const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
 
       const runId = getRunId();
       if (runId) {
@@ -211,7 +209,7 @@ export function registerReviewLoop(program: Command): void {
       }
 
       if (outcome.closeable) {
-        console.log(`\n✓ closeable — reviewer passed AND verification is green. Close with:  forge backlog close ${num}`);
+        console.log(`\n✓ closeable — reviewer passed AND verification is green. Close with:  forge backlog close ${ticketId}`);
       } else {
         console.log(`\n✗ not closeable — stop reason: ${outcome.stopReason}. The ticket is left open.`);
         process.exitCode = 1;

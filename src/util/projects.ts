@@ -27,7 +27,6 @@ export type ProjectRecord = {
   lastRunAt?: string;     // ISO; undefined if no runs yet
   runCount: number;       // 0 for filesystem-only projects
   inFlightCount: number;
-  hasBacklogMd: boolean;  // <project>/BACKLOG.md exists
   readmeFirstLine?: string;
   liveSessions: number;   // #153: count of live Claude Code orchestrator sessions
 };
@@ -85,7 +84,6 @@ export function listProjects(opts: ListOptions = {}): ProjectRecord[] {
       color: meta.color,
       runCount: agg.runCount,
       inFlightCount: agg.inFlightCount,
-      hasBacklogMd: existsSync(join(agg.projectDir, "BACKLOG.md")),
       liveSessions: liveByRoot.get(agg.projectDir) ?? 0,
       ...(meta.description ? { description: meta.description } : {}),
       ...(agg.lastRunAt ? { lastRunAt: agg.lastRunAt } : {}),
