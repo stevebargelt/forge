@@ -108,6 +108,99 @@ const FANOUT_WITH_RED_WORKFLOW: Workflow = {
   ],
 };
 
+// Three-step workflow: source → build (fanout, gate:verdict, authoritative red)
+// → downstream (auto gate). Used to assert that forced re-entry on a verdict-gated
+// fanout parent completes (not awaiting_gate) and unblocks downstream.
+const FANOUT_VERDICT_DOWNSTREAM_WORKFLOW: Workflow = {
+  name: "fg353-fanout-verdict-downstream-test",
+  description: "FG-353 fanout with gate:verdict and downstream step",
+  inputs: [],
+  steps: [
+    {
+      id: "source",
+      agent: "planner",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "fg353-dispatch-test",
+      reds: [],
+    },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "verdict",
+      manual: false,
+      depends_on: ["source"],
+      runtime: "fg353-dispatch-test",
+      reds: [
+        { agent: "red-narrow", authority: "authoritative", gate_on_verdict: true },
+      ],
+      fanout: {
+        from_upstream: { step: "source", array_key: "items", input_key: "item" },
+        max_concurrency: 2,
+        failure_mode: "continue",
+      },
+    },
+    {
+      id: "downstream",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["build"],
+      runtime: "fg353-dispatch-test",
+      reds: [],
+    },
+  ],
+};
+
+// Three-step workflow: source → build (fanout, gate:human, authoritative red)
+// → downstream (auto gate). Used to assert that forced re-entry on a human-gated
+// fanout parent completes (not awaiting_gate) and unblocks downstream.
+// gate:human (like gate:verdict) calls finalizePrimary which returns awaiting_gate;
+// the FG-353 fix must bypass finalizePrimary in the gateForced re-entry path
+// regardless of gate type.
+const FANOUT_HUMAN_DOWNSTREAM_WORKFLOW: Workflow = {
+  name: "fg353-fanout-human-downstream-test",
+  description: "FG-353 fanout with gate:human and downstream step",
+  inputs: [],
+  steps: [
+    {
+      id: "source",
+      agent: "planner",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "fg353-dispatch-test",
+      reds: [],
+    },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "human",
+      manual: false,
+      depends_on: ["source"],
+      runtime: "fg353-dispatch-test",
+      reds: [
+        { agent: "red-narrow", authority: "authoritative", gate_on_verdict: true },
+      ],
+      fanout: {
+        from_upstream: { step: "source", array_key: "items", input_key: "item" },
+        max_concurrency: 2,
+        failure_mode: "continue",
+      },
+    },
+    {
+      id: "downstream",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["build"],
+      runtime: "fg353-dispatch-test",
+      reds: [],
+    },
+  ],
+};
+
 // ─── Shared harness ───────────────────────────────────────────────────────────
 
 let db: DatabaseInstance;
@@ -245,6 +338,100 @@ steps:
         input_key: item
       max_concurrency: 2
       failure_mode: continue
+`,
+  );
+}
+
+// Write the FANOUT_VERDICT_DOWNSTREAM_WORKFLOW YAML so gate() can load it by name.
+function ensureFanoutVerdictDownstreamWorkflowYaml(): void {
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfPath = join(forgeHome, "workflows", "fg353-fanout-verdict-downstream-test.yml");
+  if (existsSync(wfPath)) return;
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: fg353-fanout-verdict-downstream-test
+description: FG-353 fanout with gate:verdict and downstream step
+inputs: []
+steps:
+  - id: source
+    agent: planner
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: fg353-dispatch-test
+    reds: []
+  - id: build
+    agent: engineer
+    gate: verdict
+    manual: false
+    depends_on: [source]
+    runtime: fg353-dispatch-test
+    reds:
+      - agent: red-narrow
+        authority: authoritative
+        gate_on_verdict: true
+    fanout:
+      from_upstream:
+        step: source
+        array_key: items
+        input_key: item
+      max_concurrency: 2
+      failure_mode: continue
+  - id: downstream
+    agent: engineer
+    gate: auto
+    manual: false
+    depends_on: [build]
+    runtime: fg353-dispatch-test
+    reds: []
+`,
+  );
+}
+
+// Write the FANOUT_HUMAN_DOWNSTREAM_WORKFLOW YAML so gate() can load it by name.
+function ensureFanoutHumanDownstreamWorkflowYaml(): void {
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfPath = join(forgeHome, "workflows", "fg353-fanout-human-downstream-test.yml");
+  if (existsSync(wfPath)) return;
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: fg353-fanout-human-downstream-test
+description: FG-353 fanout with gate:human and downstream step
+inputs: []
+steps:
+  - id: source
+    agent: planner
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: fg353-dispatch-test
+    reds: []
+  - id: build
+    agent: engineer
+    gate: human
+    manual: false
+    depends_on: [source]
+    runtime: fg353-dispatch-test
+    reds:
+      - agent: red-narrow
+        authority: authoritative
+        gate_on_verdict: true
+    fanout:
+      from_upstream:
+        step: source
+        array_key: items
+        input_key: item
+      max_concurrency: 2
+      failure_mode: continue
+  - id: downstream
+    agent: engineer
+    gate: auto
+    manual: false
+    depends_on: [build]
+    runtime: fg353-dispatch-test
+    reds: []
 `,
   );
 }
@@ -1699,4 +1886,341 @@ test("fg353 (13): forced re-entry HEAD-merge failure => parent FAILED with merge
     false,
     "child1.ts must NOT be in run.projectDir — integration→HEAD merge never succeeded",
   );
+});
+
+// ─── (14) Forced re-entry with gate:verdict — parent COMPLETE (not awaiting_gate) ─
+//
+// This is the canonical FG-353 regression: the feature.yml fan-out build step uses
+// gate:verdict. Without the fix, forced re-entry bounces the parent back to
+// awaiting_gate instead of completing. With the fix it must complete directly.
+//
+// FORGE_WORKTREES=1, FANOUT_VERDICT_DOWNSTREAM_WORKFLOW (gate:verdict + downstream).
+// Wave 1: source completes.
+// Wave 2: children complete, integration built, red authoritative-fails → blocked_by_red.
+// gate(parentId, "advance", ..., { force: true }) → parent pending + gateForced=true.
+// Wave 3 (re-entry): parent must be COMPLETE (NOT awaiting_gate), integration merged to
+//   HEAD (both child files in run.projectDir), no new children or reds dispatched.
+// Wave 4: downstream step dispatches/completes (proving the gate actually advanced).
+
+test("fg353 (14): forced re-entry on gate:verdict fanout — parent COMPLETE not awaiting_gate, downstream advances", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+  process.env.FORGE_WORKTREES_EPHEMERAL = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  ensureFanoutVerdictDownstreamWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_VERDICT_DOWNSTREAM_WORKFLOW,
+    title: "fg353 verdict re-entry test",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const FAIL_VERDICT = {
+    status: "complete",
+    verdict: "fail",
+    confidence: 0.9,
+    findings: [
+      {
+        severity: "high",
+        summary: "fg353 verdict gate test finding",
+        evidence: "test evidence",
+        hypothesis: "test hypothesis",
+      },
+    ],
+  };
+
+  let wave3ExecCount = 0;
+  let downstreamDispatched = false;
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-red-build-")) {
+      // Red returns authoritative fail → parent will be blocked_by_red.
+      writeTaskResult(stdoutPath, FAIL_VERDICT);
+    } else if (taskId.startsWith("task-downstream-")) {
+      downstreamDispatched = true;
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else {
+      wave3ExecCount++;
+      writeTaskResult(stdoutPath, { status: "complete" });
+    }
+    return 0;
+  };
+
+  // ── Wave 1: source step ────────────────────────────────────────────────────
+  const wave1 = await runNext({ runId, workflow: FANOUT_VERDICT_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave1.completedSteps, ["source"]);
+
+  // ── Wave 2: fanout (children + integration + red fails) ───────────────────
+  const wave2 = await runNext({ runId, workflow: FANOUT_VERDICT_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.ok(
+    wave2.awaitingGate.includes("build") || wave2.failedSteps.includes("build"),
+    "build must be blocked or awaiting gate after authoritative red fail",
+  );
+
+  const tasksAfterWave2 = tasksForRun(runId);
+  const parentTask = tasksAfterWave2.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(parentTask, "fanout parent task must exist");
+  const parentId = parentTask!.id;
+  assert.equal(parentTask!.status, "blocked_by_red", "parent must be blocked_by_red after authoritative fail");
+
+  const initialChildCount = tasksAfterWave2.filter(
+    (t) => t.parentId === parentId && !t.agentRole.startsWith("red-"),
+  ).length;
+  const initialRedCount = tasksAfterWave2.filter(
+    (t) => t.parentId === parentId && t.agentRole.startsWith("red-"),
+  ).length;
+  assert.equal(initialChildCount, 2, "two children after wave 2");
+  assert.equal(initialRedCount, 1, "one red after wave 2");
+
+  // Integration branch must be retained (not merged/cleaned yet).
+  const integPath = integrationWorktreeDir(runId, parentId);
+  assert.ok(existsSync(integPath), "integration worktree must be retained when parent is blocked_by_red");
+
+  // ── Force-advance via gate ────────────────────────────────────────────────
+  await gate(parentId, "advance", "forced: fg353 verdict gate test", { force: true });
+
+  const tasksAfterGate = tasksForRun(runId);
+  const parentAfterGate = tasksAfterGate.find((t) => t.id === parentId);
+  assert.equal(parentAfterGate!.status, "pending", "parent must be pending after gate force-advance");
+  assert.strictEqual(
+    parentAfterGate!.taskPackage?.inputs?.["gateForced"],
+    true,
+    "gateForced flag must be set on parent inputs",
+  );
+
+  // ── Wave 3: re-entry — must COMPLETE, not bounce to awaiting_gate ─────────
+  const wave3ExecsBefore = wave3ExecCount;
+  const wave3 = await runNext({ runId, workflow: FANOUT_VERDICT_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+
+  // KEY ASSERTION: build must complete in wave 3, NOT go to awaiting_gate.
+  // This is the canonical FG-353 regression on gate:verdict fan-out parents.
+  assert.deepEqual(wave3.completedSteps, ["build"], "build must COMPLETE in wave 3 re-entry — NOT awaiting_gate");
+  assert.equal(wave3.awaitingGate.includes("build"), false, "build must NOT bounce to awaiting_gate in wave 3");
+  assert.deepEqual(wave3.failedSteps, [], "no steps must fail in wave 3");
+
+  // No new containers must have been dispatched in wave 3 (no child/red re-dispatch).
+  assert.equal(wave3ExecCount, wave3ExecsBefore, "no new docker execs in wave 3 re-entry");
+
+  const tasksAfterWave3 = tasksForRun(runId);
+  const parentAfterWave3 = tasksAfterWave3.find((t) => t.id === parentId);
+  assert.equal(parentAfterWave3!.status, "complete", "parent must be complete after wave 3");
+
+  // No new children or reds must have been created.
+  const finalChildCount = tasksAfterWave3.filter(
+    (t) => t.parentId === parentId && !t.agentRole.startsWith("red-"),
+  ).length;
+  const finalRedCount = tasksAfterWave3.filter(
+    (t) => t.parentId === parentId && t.agentRole.startsWith("red-"),
+  ).length;
+  assert.equal(finalChildCount, initialChildCount, "no new children dispatched in wave 3");
+  assert.equal(finalRedCount, initialRedCount, "no new reds dispatched in wave 3");
+
+  // Integration merged to HEAD — both child files must be in run.projectDir.
+  assert.ok(
+    existsSync(join(repo, "child0.ts")),
+    "child0.ts must be in run.projectDir after re-entry integration merge",
+  );
+  assert.ok(
+    existsSync(join(repo, "child1.ts")),
+    "child1.ts must be in run.projectDir after re-entry integration merge",
+  );
+
+  // Integration worktree must be removed (provenMerged cleanup).
+  assert.equal(
+    existsSync(integPath),
+    false,
+    "integration worktree must be removed after re-entry proven-merge cleanup",
+  );
+
+  // ── Wave 4: downstream step must dispatch (gate actually advanced) ─────────
+  const wave4 = await runNext({ runId, workflow: FANOUT_VERDICT_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave4.completedSteps, ["downstream"], "downstream step must complete in wave 4");
+  assert.ok(downstreamDispatched, "downstream container must have been dispatched in wave 4");
+});
+
+// ─── (15) Forced re-entry with gate:human — parent COMPLETE (not awaiting_gate) ─
+//
+// Independent variant of test 14 using gate:human on the fanout build step.
+// Proves the FG-353 fix is gate-type-agnostic: the gateForced re-entry block
+// calls markTaskComplete directly (bypassing finalizePrimary), so the parent
+// completes regardless of whether the step has gate:verdict or gate:human.
+// Without the fix, finalizePrimary would return awaiting_gate for gate:human
+// just as it would for gate:verdict.
+//
+// FORGE_WORKTREES=1, FANOUT_HUMAN_DOWNSTREAM_WORKFLOW (gate:human + authoritative red + downstream).
+// Wave 1: source completes.
+// Wave 2: children complete, integration built, red authoritative-fails → blocked_by_red.
+// gate(parentId, "advance", ..., { force: true }) → parent pending + gateForced=true.
+// Wave 3 (re-entry): parent must be COMPLETE (NOT awaiting_gate), integration merged to
+//   HEAD (both child files in run.projectDir), no new children or reds dispatched.
+// Wave 4: downstream step dispatches/completes (proving the gate actually advanced).
+
+test("fg353 (15): forced re-entry on gate:human fanout — parent COMPLETE not awaiting_gate, downstream advances", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+  process.env.FORGE_WORKTREES_EPHEMERAL = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+  ensureFanoutHumanDownstreamWorkflowYaml();
+
+  const { runId } = startRun({
+    workflow: FANOUT_HUMAN_DOWNSTREAM_WORKFLOW,
+    title: "fg353 human-gate re-entry test",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const FAIL_VERDICT = {
+    status: "complete",
+    verdict: "fail",
+    confidence: 0.9,
+    findings: [
+      {
+        severity: "high",
+        summary: "fg353 human gate test finding",
+        evidence: "test evidence",
+        hypothesis: "test hypothesis",
+      },
+    ],
+  };
+
+  let wave3ExecCount = 0;
+  let downstreamDispatched = false;
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-red-build-")) {
+      // Red returns authoritative fail → parent will be blocked_by_red.
+      writeTaskResult(stdoutPath, FAIL_VERDICT);
+    } else if (taskId.startsWith("task-downstream-")) {
+      downstreamDispatched = true;
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else {
+      wave3ExecCount++;
+      writeTaskResult(stdoutPath, { status: "complete" });
+    }
+    return 0;
+  };
+
+  // ── Wave 1: source step ────────────────────────────────────────────────────
+  const wave1 = await runNext({ runId, workflow: FANOUT_HUMAN_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave1.completedSteps, ["source"]);
+
+  // ── Wave 2: fanout (children + integration + red fails) ───────────────────
+  const wave2 = await runNext({ runId, workflow: FANOUT_HUMAN_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.ok(
+    wave2.awaitingGate.includes("build") || wave2.failedSteps.includes("build"),
+    "build must be blocked or awaiting gate after authoritative red fail",
+  );
+
+  const tasksAfterWave2 = tasksForRun(runId);
+  const parentTask = tasksAfterWave2.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(parentTask, "fanout parent task must exist");
+  const parentId = parentTask!.id;
+  assert.equal(parentTask!.status, "blocked_by_red", "parent must be blocked_by_red after authoritative fail");
+
+  const initialChildCount = tasksAfterWave2.filter(
+    (t) => t.parentId === parentId && !t.agentRole.startsWith("red-"),
+  ).length;
+  const initialRedCount = tasksAfterWave2.filter(
+    (t) => t.parentId === parentId && t.agentRole.startsWith("red-"),
+  ).length;
+  assert.equal(initialChildCount, 2, "two children after wave 2");
+  assert.equal(initialRedCount, 1, "one red after wave 2");
+
+  // Integration branch must be retained (not merged/cleaned yet).
+  const integPath = integrationWorktreeDir(runId, parentId);
+  assert.ok(existsSync(integPath), "integration worktree must be retained when parent is blocked_by_red");
+
+  // ── Force-advance via gate ────────────────────────────────────────────────
+  await gate(parentId, "advance", "forced: fg353 human gate test", { force: true });
+
+  const tasksAfterGate = tasksForRun(runId);
+  const parentAfterGate = tasksAfterGate.find((t) => t.id === parentId);
+  assert.equal(parentAfterGate!.status, "pending", "parent must be pending after gate force-advance");
+  assert.strictEqual(
+    parentAfterGate!.taskPackage?.inputs?.["gateForced"],
+    true,
+    "gateForced flag must be set on parent inputs",
+  );
+
+  // ── Wave 3: re-entry — must COMPLETE, not bounce to awaiting_gate ─────────
+  // gate:human finalizePrimary returns awaiting_gate; the fix bypasses finalizePrimary
+  // and calls markTaskComplete directly in the gateForced re-entry block.
+  const wave3ExecsBefore = wave3ExecCount;
+  const wave3 = await runNext({ runId, workflow: FANOUT_HUMAN_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+
+  // KEY ASSERTION: build must complete in wave 3, NOT go to awaiting_gate.
+  // This is the gate:human variant of the FG-353 regression (gate:verdict was test 14).
+  assert.deepEqual(wave3.completedSteps, ["build"], "build must COMPLETE in wave 3 re-entry — NOT awaiting_gate");
+  assert.equal(wave3.awaitingGate.includes("build"), false, "build must NOT bounce to awaiting_gate in wave 3");
+  assert.deepEqual(wave3.failedSteps, [], "no steps must fail in wave 3");
+
+  // No new containers must have been dispatched in wave 3 (no child/red re-dispatch).
+  assert.equal(wave3ExecCount, wave3ExecsBefore, "no new docker execs in wave 3 re-entry");
+
+  const tasksAfterWave3 = tasksForRun(runId);
+  const parentAfterWave3 = tasksAfterWave3.find((t) => t.id === parentId);
+  assert.equal(parentAfterWave3!.status, "complete", "parent must be complete after wave 3");
+
+  // No new children or reds must have been created.
+  const finalChildCount = tasksAfterWave3.filter(
+    (t) => t.parentId === parentId && !t.agentRole.startsWith("red-"),
+  ).length;
+  const finalRedCount = tasksAfterWave3.filter(
+    (t) => t.parentId === parentId && t.agentRole.startsWith("red-"),
+  ).length;
+  assert.equal(finalChildCount, initialChildCount, "no new children dispatched in wave 3");
+  assert.equal(finalRedCount, initialRedCount, "no new reds dispatched in wave 3");
+
+  // Integration merged to HEAD — both child files must be in run.projectDir.
+  assert.ok(
+    existsSync(join(repo, "child0.ts")),
+    "child0.ts must be in run.projectDir after re-entry integration merge",
+  );
+  assert.ok(
+    existsSync(join(repo, "child1.ts")),
+    "child1.ts must be in run.projectDir after re-entry integration merge",
+  );
+
+  // Integration worktree must be removed (provenMerged cleanup).
+  assert.equal(
+    existsSync(integPath),
+    false,
+    "integration worktree must be removed after re-entry proven-merge cleanup",
+  );
+
+  // ── Wave 4: downstream step must dispatch (gate actually advanced) ─────────
+  const wave4 = await runNext({ runId, workflow: FANOUT_HUMAN_DOWNSTREAM_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave4.completedSteps, ["downstream"], "downstream step must complete in wave 4");
+  assert.ok(downstreamDispatched, "downstream container must have been dispatched in wave 4");
 });

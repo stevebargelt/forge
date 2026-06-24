@@ -1005,8 +1005,14 @@ async function dispatchFanoutStep(args: {
         return "failed";
       }
       // For non-worktree re-entry (or worktree re-entry before reds ran),
-      // finalize the parent normally.
-      return finalizePrimary(existingParent.id, args.runId, step.gate, savedResult);
+      // complete directly — the human advance decision was already recorded when
+      // gate advance --force ran, so re-gating via finalizePrimary would bounce
+      // a verdict/human gate back to awaiting_gate instead of completing (FG-353).
+      if (!markTaskComplete(existingParent.id, savedResult)) {
+        return getTask(existingParent.id)?.status ?? "failed";
+      }
+      logEvent("task.completed", { runId: args.runId, taskId: existingParent.id });
+      return "complete";
     }
     // Original pendingHasChildren guard unchanged below.
     const pendingHasChildren = allTasks.some(
