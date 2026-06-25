@@ -1,9 +1,11 @@
 ---
 id: FG-411
 type: story
-status: active
+status: done
 title: Campaign show/report (and start/resume) crash when a source ticket was deleted — resolvePlan throws uncaught
 created: 2026-06-25
+closed: 2026-06-25
+closed_commit: de798d10da34ec2989b3d9d243a38514c96a2b29
 ---
 
 ## Problem
