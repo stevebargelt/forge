@@ -4,15 +4,15 @@
 
 The suite is split into three tiers selected by **filename suffix**. Every `*.test.ts` file belongs to exactly one tier — `src/test-tiers.test.ts` enforces this as a partition proof that fails the suite if any file is in two tiers or in none.
 
-| Tier | Suffix | Command | Count |
-|------|--------|---------|-------|
-| Unit | `*.test.ts` (excluding the two below) | `npm run test:unit` | 1508 |
-| Integration | `*.integration.test.ts` | `npm run test:integration` | 316 |
-| Worktree | `*.worktree.test.ts` | `npm run test:worktree` | 85 |
-| Aggregate (root) | all three above | `npm test` | 1909 |
-| Shipped-claim aggregate | root + dashboard workspace | `npm run test:all` | 1936 |
+| Tier | Suffix | Command |
+|------|--------|---------|
+| Unit | `*.test.ts` (excluding the two below) | `npm run test:unit` |
+| Integration | `*.integration.test.ts` | `npm run test:integration` |
+| Worktree | `*.worktree.test.ts` | `npm run test:worktree` |
+| Aggregate (root) | all three above | `npm test` |
+| Shipped-claim aggregate | root + dashboard workspace | `npm run test:all` |
 
-`npm test` (root aggregate) runs the full root suite and is the regression gate. `npm run test:all` additionally runs the dashboard workspace (`npm test -w dashboard`, 27 tests) and is the gate to run before claiming work shipped.
+`npm test` (root aggregate) runs the full root suite and is the regression gate. `npm run test:all` additionally runs the dashboard workspace (`npm test -w dashboard`) and is the gate to run before claiming work shipped.
 
 ## What belongs in each tier
 
