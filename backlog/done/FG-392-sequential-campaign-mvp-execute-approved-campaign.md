@@ -1,10 +1,12 @@
 ---
 id: FG-392
 type: story
-status: active
+status: done
 title: "Sequential Campaign MVP: execute approved campaign items one at a time"
 epic: FG-370
 created: 2026-06-24
+closed: 2026-06-25
+closed_commit: f72db42
 ---
 
 ## Problem
