@@ -189,6 +189,7 @@ Approval is a durable state-machine precondition for execution: `forge campaign 
 | `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Current plan hash (re-resolved from stored `sourceInput` against stored `projectDir`) differs from `approved_plan_hash` | Re-plan and re-approve |
 | `dry_run_not_executable` | Campaign mode is `dry_run` — plan-and-report only; `start` refuses to dispatch any work or mutate the repo | Re-plan with `--mode pilot` or `--mode sequential` and re-approve |
+| `recovery_needed` | One or more campaign items are in a non-terminal, non-pending state (`running`, `awaiting_gate`, `awaiting_red`, `blocked_by_red`, or similar) — campaign stays `planned`, no dispatch occurs | Inspect the stuck item with `forge campaign show <id>` (the `Next action` line names the ticket and its `run_id`); reset the item to `pending` or mark it `failed` (manual DB operation — see crash recovery below), then start again |
 | `already_running` | A `planned → running` CAS in the database rejected the transition — another `start` process already holds it | Wait or recover — see crash recovery below |
 
 **Important:** `forge campaign plan` defaults to `--mode dry_run`. A `dry_run` campaign is plan-and-report only — `forge campaign start` will refuse it with `dry_run_not_executable`. To actually execute a campaign, plan with `--mode pilot` or `--mode sequential` and re-approve before starting.
@@ -215,6 +216,8 @@ Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the
 
 **Note:** `forge campaign resume` only operates on a `paused` campaign. A campaign stuck in `running` after a process crash is not the same as paused — no automated recovery path exists yet; manual database intervention is still required.
 
+**In-flight items are a hard block on both `start` and `resume`.** If the campaign is reset to `planned` (below) but the item is still in a non-terminal, non-pending state, `forge campaign start` refuses with `recovery_needed` and the item must be reset too before any work is dispatched. The same guard applies to `forge campaign resume` on a `paused` campaign — if an item was mid-flight when the driver died or the campaign was paused, `resume` refuses with `recovery_needed` rather than continuing or completing over the unfinished item. Use `forge campaign show <id>` to identify the stuck item: the `Next action` line names the ticket id, its current lifecycle status, and the `run_id` to inspect. Reset the item in the DB before retrying.
+
 **Manual crash recovery:**
 
 ```sql
@@ -230,7 +233,9 @@ UPDATE campaign_items
  WHERE campaign_id = '<campaign-id>' AND lifecycle_status = 'running';
 ```
 
-Before re-starting, inspect the run that was in flight (using the persisted `run_id`) to determine whether the engineer agent finished before the crash. If the ticket reached `status: done` with a `closed_commit`, mark the item complete manually rather than re-dispatching the same work.
+For a `paused` campaign with a stuck item (no campaign status reset needed — the campaign is already `paused`), run only the second statement, scoping it to the stuck item's status. After the item is reset, `forge campaign resume` will proceed normally.
+
+Before re-starting or resuming, inspect the run that was in flight (using the persisted `run_id`) to determine whether the engineer agent finished before the crash. If the ticket reached `status: done` with a `closed_commit`, mark the item complete manually rather than re-dispatching the same work.
 
 ### Campaign lifecycle
 
@@ -259,7 +264,7 @@ Human output includes:
 - Staleness indicator: whether the current plan hash matches the approved hash
 - The active item, if any (ticket id and run id)
 - Per-item rows: ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, reason, and requested human action
-- A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.)
+- A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.). When any campaign item is in an in-flight state and the campaign is `paused` (or `running` with a non-running in-flight item), the line instead reads: `recovery needed: item <ticket-id> is <lifecycle-status> (run <run-id>) — inspect the run; reset the item to pending or mark it failed before resuming`.
 
 With `--json`, the output is a single stable object:
 
@@ -300,7 +305,7 @@ The report includes all `show` fields plus:
 
 - `goal` — free-text goal from campaign metadata, if set
 - `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but some items did not ship), or `not_complete`
-- `safetyToContinue` — `can_start`, `can_resume`, `running`, `needs_approval`, `stale`, or `terminal`
+- `safetyToContinue` — `can_start`, `can_resume`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `recovery_needed` is returned for a `paused` campaign that has at least one item in an in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed`
 - `nextOperatorAction` — narrative next step for the operator
@@ -339,9 +344,10 @@ Before re-entering the dispatch loop, `resume` runs the same preconditions as `s
 1. Campaign must be in `paused` status.
 2. `approved_plan_hash` must be set.
 3. The current plan hash (re-resolved from stored `sourceInput`) must match `approved_plan_hash`. If the backlog changed since approval, `resume` refuses with `stale_plan` — re-plan and re-approve are required.
-4. `paused → running` transition succeeds via a CAS guard, preventing two concurrent `resume` calls from double-dispatching.
+4. No campaign item may be in an in-flight state (`running`, `awaiting_gate`, `awaiting_red`, `blocked_by_red`, or any other non-terminal/non-pending state). If any item is in flight, `resume` refuses with `recovery_needed` and leaves the campaign `paused` — the item must be reset manually (see crash recovery above) before resuming. This prevents silently completing a campaign over unfinished work.
+5. `paused → running` transition succeeds via a CAS guard, preventing two concurrent `resume` calls from double-dispatching.
 
-The driver then skips already-completed items and dispatches only remaining `pending` items.
+The driver then skips already-terminal items and dispatches only remaining `pending` items.
 
 `--project <dir>` is verify-only: the resolved path must equal the stored `projectDir` or `resume` refuses. It does not override the execution directory.
 
@@ -357,6 +363,7 @@ Resume stop reasons:
 | `invalid_project_dir` | Stored `projectDir` missing or has no backlog | Restore directory or re-plan |
 | `not_approved` | `approved_plan_hash` not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Plan changed since approval | Re-plan and re-approve |
+| `recovery_needed` | One or more campaign items are in a non-terminal, non-pending state — campaign stays `paused`, no dispatch occurs | Inspect the stuck item with `forge campaign show <id>` (the `Next action` line names the ticket, its lifecycle status, and `run_id`); reset the item to `pending` or mark it `failed` (manual DB operation — see crash recovery above), then resume |
 | `already_running` | Concurrent `resume` won the CAS | Wait or investigate |
 | `paused` | Driver stopped cooperatively | Run `forge campaign resume` again |
 | `complete` | All items processed | None |
