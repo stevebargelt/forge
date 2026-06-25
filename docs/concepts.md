@@ -147,3 +147,19 @@ A run-level assessment of whether changes to operator-visible behavior have been
 Resolution: the docs impact is considered resolved when a task in the run reports a non-empty `docs_updated` array (the `documentation-maintainer` ran and made changes) or a non-empty `docs_not_updated_reason` (a principled deferral was recorded). Recording a reason is equivalent to resolution — it makes the decision explicit and auditable.
 
 Example: after the engineer modified `src/cli/commands/show.ts`, `forge show` printed a docs impact suggestion; the orchestrator chained `forge invoke documentation-maintainer --run <id>` and the maintainer updated this glossary.
+
+## Campaign
+
+An ordered collection of tickets that forge will work in sequence. Created by `forge campaign plan`, which resolves the input (ticket list, epic, or mixed) into a persisted campaign (status `planned`) with items (status `pending`) and a stable `plan_hash` computed from the canonical plan content. The campaign and its items are written to the database; no runs or tasks are created until execution (FG-392).
+
+`forge campaign plan` accepts three input modes:
+
+- **List** (`--tickets <ids>`): explicit comma-separated ordered ticket ids — no epic expansion.
+- **Epic** (`--epic <id>`): expands the epic's children in planner-determined order.
+- **Mixed** (`--epic <id>` + `--add <ids>` / `--exclude <ids>`): epic children with additions or exclusions applied.
+
+`--tickets` and `--epic` are mutually exclusive; `--add` and `--exclude` require `--epic`. Other flags: `--mode dry_run|pilot|sequential` (default `dry_run`), `--project <dir>` (default: cwd), `--json` (machine-readable output). Ambiguous flag combinations and invalid `--mode` values fail loudly.
+
+Output: campaign id, ordered item list with lifecycle status, canonical plan content, and `plan_hash`. With `--json` the output is a single object `{campaignId, orderedItems, canonicalContent, planHash}`. The `plan_hash` is the fingerprint FG-392's pre-execution check will verify before any work starts. See FORGE-DEC-023.
+
+Example: `forge campaign plan --epic FG-100 --exclude FG-5 --mode pilot` plans a campaign from FG-100's children minus FG-5, in pilot mode.

@@ -38,6 +38,7 @@ A campaign plan is fingerprinted by **sha256 over its canonicalized plan content
 - `advisoryAgentsUsed` — whether advisory agents influenced ordering
 - `advisoryRecommendationSummary` — their summary, if any
 - `dependencyDecisions` — explicit dependency ordering decisions
+- `itemRecommendations` — per-item planner recommendation (`sequential` | `held` | `needs_refinement` | `later_parallel_candidate`; defaults to `sequential`); first field added post-decision, validating the "adding a field is a deliberate hash-changing act" consequence above.
 
 **Canonicalization** uses recursive key-sorting (`sortKeysDeep`) before `JSON.stringify`, so object key insertion order cannot affect the hash.
 
