@@ -1,12 +1,10 @@
 ---
 id: FG-393
 type: story
-status: done
+status: active
 title: Campaign blocker and continue semantics
 epic: FG-370
 created: 2026-06-24
-closed: 2026-06-25
-closed_commit: 033ada2
 ---
 
 ## Problem
