@@ -48,6 +48,15 @@ function hasBacklog(dir: string): boolean {
   return existsSync(join(dir, "backlog"));
 }
 
+function findInFlightItem(campaignId: string): CampaignItemRecord | undefined {
+  const items = listCampaignItems(campaignId);
+  const item = items.find(
+    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+  );
+  if (!item) return undefined;
+  return { itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus };
+}
+
 export function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
   const kind = sourceInput["kind"] as string;
   if (kind === "list") {
@@ -262,6 +271,11 @@ export async function startCampaign(
     return { stopReason: "stale_plan", itemRecords };
   }
 
+  const inFlight = findInFlightItem(id);
+  if (inFlight) {
+    return { stopReason: "recovery_needed", itemRecords: [inFlight] };
+  }
+
   if (!tryTransitionCampaignToRunning(id)) {
     return { stopReason: "already_running", itemRecords };
   }
@@ -306,21 +320,9 @@ export async function resumeCampaign(
     return { stopReason: "stale_plan", itemRecords };
   }
 
-  // Pre-flight: refuse if any item is in-flight — leaves campaign paused and inspectable
-  const preflightItems = listCampaignItems(id);
-  const inFlightItem = preflightItems.find(
-    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
-  );
-  if (inFlightItem) {
-    return {
-      stopReason: "recovery_needed",
-      itemRecords: [{
-        itemId: inFlightItem.id,
-        ticketId: inFlightItem.ticketId,
-        runId: inFlightItem.runId,
-        lifecycleStatus: inFlightItem.lifecycleStatus,
-      }],
-    };
+  const inFlight = findInFlightItem(id);
+  if (inFlight) {
+    return { stopReason: "recovery_needed", itemRecords: [inFlight] };
   }
 
   if (!tryTransitionCampaign(id, "paused", "running")) {

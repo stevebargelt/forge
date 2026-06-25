@@ -1336,7 +1336,7 @@ test("FG-394-fix EXACT repro: paused campaign with running item — resumeCampai
 
 // ── FG-394-fix: recovery_needed — all in-flight states ────────────────────────
 
-const IN_FLIGHT_STATES = ["running", "awaiting_gate", "awaiting_human_input", "awaiting_red", "blocked_by_red"] as const;
+const IN_FLIGHT_STATES = ["running", "awaiting_gate", "awaiting_red", "blocked_by_red"] as const;
 
 for (const inflightStatus of IN_FLIGHT_STATES) {
   test(`FG-394-fix: paused campaign with item lifecycleStatus='${inflightStatus}' → recovery_needed, campaign stays paused`, async () => {
@@ -1367,6 +1367,35 @@ for (const inflightStatus of IN_FLIGHT_STATES) {
     assert.equal(result.itemRecords[0]!.lifecycleStatus, inflightStatus);
   });
 }
+
+// ── FG-394-fix: unknown/future status value — pre-flight must still catch it ──
+
+test("FG-394-fix: paused campaign with item lifecycleStatus='unknown_future_value' (not in TaskStatus) → recovery_needed, campaign stays paused", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  // Force a value that is not in the TaskStatus union — bypasses TS type system via raw SQL
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'unknown_future_value', run_id = 'run-unknown-test' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "r", taskId: "t", status: "complete" };
+  };
+
+  const result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "recovery_needed", "unknown/future status must trigger recovery_needed");
+  assert.equal(dispatched, 0, "must not dispatch for unknown status");
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.status, "paused", "campaign must stay paused for unknown status");
+  assert.equal(result.itemRecords[0]!.runId, "run-unknown-test", "itemRecords must expose run_id");
+});
 
 // ── FG-394-fix: clean resume — complete+pending, no in-flight ─────────────────
 
@@ -1428,7 +1457,6 @@ test("FG-394-fix driver defensive: in-flight item mid-list — driver stops reco
     return { runId: "run-fake", taskId: "task-fake", status: "complete" };
   };
 
-  // startCampaign has no pre-flight check — exercises the driver defensive directly
   const result = await startCampaign(campaign.id, { dispatch });
   assert.equal(result.stopReason, "recovery_needed", "driver must return recovery_needed for in-flight mid-list item");
   assert.equal(dispatchCallCount, 0, "dispatch must NOT be called — item3 never reached");
@@ -1452,4 +1480,37 @@ test("FG-394-fix driver defensive: in-flight item mid-list — driver stops reco
   assert.equal(result.itemRecords[0]!.ticketId, "FG-102");
   assert.equal(result.itemRecords[0]!.lifecycleStatus, "running");
   assert.equal(result.itemRecords[0]!.runId, "run-stuck-mid");
+});
+
+// ── FG-394-fix: startCampaign pre-flight — planned campaign with in-flight item ─
+
+test("FG-394-fix: startCampaign pre-flight — planned campaign with in-flight item → recovery_needed, campaign stays planned (not running)", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Corrupt the planned campaign: force item1 into 'running' (e.g. prior driver died mid-item)
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-planned' WHERE id = ?").run(items[0]!.id);
+  // Campaign remains 'planned' — no CAS has happened
+
+  let dispatchCallCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "recovery_needed", "pre-flight must return recovery_needed for in-flight item");
+  assert.equal(dispatchCallCount, 0, "must not dispatch when in-flight item exists");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "planned", "campaign must stay planned — pre-flight fires before CAS to running");
+
+  assert.equal(result.itemRecords.length, 1);
+  assert.equal(result.itemRecords[0]!.ticketId, "FG-101");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "running");
+  assert.equal(result.itemRecords[0]!.runId, "run-stuck-planned");
 });
