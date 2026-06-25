@@ -180,12 +180,26 @@ export function registerCampaign(program: Command): void {
   campaign
     .command("start <campaign-id>")
     .description("Start executing a planned, approved campaign sequentially")
-    .option("--project <dir>", "project directory override (use stored projectDir by default)")
+    .option("--project <dir>", "verify the stored campaign projectDir matches this path (does not override it)")
     .option("--json", "machine-readable JSON output")
     .action(async (campaignId: string, opts: { project?: string; json?: boolean }) => {
-      const projectDirOverride = opts.project ? resolve(opts.project) : undefined;
+      if (opts.project) {
+        const resolvedProject = resolve(opts.project);
+        const existing = getCampaign(campaignId);
+        if (!existing) {
+          process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+          process.exit(1);
+        }
+        if (existing.projectDir !== resolvedProject) {
+          process.stderr.write(
+            `Error: --project ${resolvedProject} does not match stored campaign projectDir ${existing.projectDir ?? "(none)"}\n` +
+            `Campaign always executes against its stored project directory.\n`
+          );
+          process.exit(1);
+        }
+      }
 
-      const result = await startCampaign(campaignId, { projectDirOverride });
+      const result = await startCampaign(campaignId);
 
       const refusalReasons = new Set([
         "not_planned",

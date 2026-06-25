@@ -522,6 +522,38 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
   assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending after item1 failure");
 });
 
+// ── projectDir: stale-plan check always uses campaign.projectDir ──────────────
+
+test("stale-plan check: mutating a DIFFERENT directory does not affect the hash check", async () => {
+  // Plan and approve against projectDir
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Create a separate dir with its own tickets — mutating this must NOT affect hash for projectDir
+  const otherDir = mkdtempSync(join(tmpdir(), "executor-other-"));
+  try {
+    writeTicket(otherDir, {
+      id: "FG-999",
+      type: "story",
+      status: "active",
+      title: "Story in other dir",
+      body: "should not affect the hash check for projectDir",
+      created: "2024-01-01",
+    });
+
+    // startCampaign has no projectDirOverride — it always uses campaign.projectDir.
+    // Mutating otherDir does NOT make the plan stale for the original projectDir.
+    const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+    assert.equal(
+      result.stopReason,
+      "complete",
+      "plan must NOT be considered stale — only campaign.projectDir is used for hash recomputation"
+    );
+  } finally {
+    rmSync(otherDir, { recursive: true, force: true });
+  }
+});
+
 // ── shipped: done ticket without closedCommit ─────────────────────────────────
 
 test("shipped: ticket done but no closedCommit → outcome undefined (not shipped)", async () => {

@@ -1,4 +1,5 @@
 import { getDb } from "./db.js";
+import { isCampaignTransitionAllowed } from "../types/index.js";
 import type {
   Campaign,
   CampaignItem,
@@ -144,7 +145,12 @@ export function listCampaigns(statusFilter?: CampaignStatus): Campaign[] {
 }
 
 export function updateCampaignStatus(id: string, status: CampaignStatus): void {
-  // updateCampaignStatus direct setter is intentionally unchecked here — FG-392 will harden it via isCampaignTransitionAllowed.
+  // Enforces legal state-machine transitions; planned→running race is handled separately by tryTransitionCampaignToRunning's CAS.
+  const current = getCampaign(id);
+  if (!current) throw new Error(`Campaign ${id} not found`);
+  if (!isCampaignTransitionAllowed(current.status, status)) {
+    throw new Error(`Illegal campaign transition ${current.status} -> ${status}`);
+  }
   getDb()
     .prepare(`UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ?`)
     .run(status, nowIso(), id);

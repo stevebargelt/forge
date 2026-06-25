@@ -102,11 +102,18 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveCampaigns.has("plan_hash")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN plan_hash TEXT`);
   }
-  // FG-392: approval columns. Guarded on approved_by (one block — all four added together).
+  // FG-392: approval columns — each guarded independently so a crash between
+  // ALTER statements leaves a partial schema that subsequent opens can repair.
   if (!haveCampaigns.has("approved_by")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN approved_by TEXT`);
+  }
+  if (!haveCampaigns.has("approved_at")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN approved_at TEXT`);
+  }
+  if (!haveCampaigns.has("approval_rationale")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN approval_rationale TEXT`);
+  }
+  if (!haveCampaigns.has("approved_plan_hash")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN approved_plan_hash TEXT`);
   }
   // FG-392: project_dir on campaigns. Separate guard so it applies independently.

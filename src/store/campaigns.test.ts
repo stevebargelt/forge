@@ -100,7 +100,9 @@ test("all six campaign statuses round-trip", () => {
   ];
   for (const status of statuses) {
     const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
-    updateCampaignStatus(campaign.id, status);
+    // Write directly via SQL to test rowToCampaign mapping for all values
+    // without going through the state-machine guard in updateCampaignStatus.
+    db.prepare("UPDATE campaigns SET status = ? WHERE id = ?").run(status, campaign.id);
     const loaded = getCampaign(campaign.id);
     assert.equal(loaded?.status, status, `status "${status}" must round-trip`);
   }
@@ -323,7 +325,8 @@ test("listCampaigns: each of the six statuses returns exactly the matching rows"
   const ids = new Map<CampaignStatus, string>();
   for (const status of statuses) {
     const c = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
-    updateCampaignStatus(c.id, status);
+    // Write directly via SQL to avoid state-machine guard; this tests listCampaigns filtering.
+    db.prepare("UPDATE campaigns SET status = ? WHERE id = ?").run(status, c.id);
     ids.set(status, c.id);
   }
   for (const status of statuses) {
@@ -416,4 +419,51 @@ test("source_input JSON round-trips: mixed with heterogeneous structure", () => 
   const loaded = getCampaign(campaign.id);
   assert.deepEqual(loaded?.sourceInput, input);
   assert.equal(loaded?.sourceKind, "mixed");
+});
+
+// ── updateCampaignStatus transition guard ─────────────────────────────────
+
+test("updateCampaignStatus: throws on illegal transition (complete -> running)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(campaign.id);
+  assert.throws(
+    () => updateCampaignStatus(campaign.id, "running"),
+    /Illegal campaign transition complete -> running/
+  );
+});
+
+test("updateCampaignStatus: throws on illegal transition (planned -> paused)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  assert.throws(
+    () => updateCampaignStatus(campaign.id, "paused"),
+    /Illegal campaign transition planned -> paused/
+  );
+});
+
+test("updateCampaignStatus: throws on illegal transition (failed -> running)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  db.prepare("UPDATE campaigns SET status = 'failed' WHERE id = ?").run(campaign.id);
+  assert.throws(
+    () => updateCampaignStatus(campaign.id, "running"),
+    /Illegal campaign transition failed -> running/
+  );
+});
+
+test("updateCampaignStatus: allows legal transitions (running -> complete, running -> failed)", () => {
+  const c1 = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(c1.id);
+  assert.doesNotThrow(() => updateCampaignStatus(c1.id, "complete"));
+  assert.equal(getCampaign(c1.id)?.status, "complete");
+
+  const c2 = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(c2.id);
+  assert.doesNotThrow(() => updateCampaignStatus(c2.id, "failed"));
+  assert.equal(getCampaign(c2.id)?.status, "failed");
+});
+
+test("updateCampaignStatus: throws if campaign does not exist", () => {
+  assert.throws(
+    () => updateCampaignStatus("campaign-doesnotexist", "running"),
+    /not found/
+  );
 });

@@ -63,7 +63,6 @@ export async function startCampaign(
   id: string,
   opts: {
     dispatch?: (args: InvokeArgs) => Promise<InvokeResult>;
-    projectDirOverride?: string;
   } = {}
 ): Promise<CampaignRunResult> {
   const itemRecords: CampaignItemRecord[] = [];
@@ -73,7 +72,7 @@ export async function startCampaign(
     return { stopReason: "not_planned", itemRecords };
   }
 
-  const effectiveProjectDir = opts.projectDirOverride ?? campaign.projectDir;
+  const effectiveProjectDir = campaign.projectDir;
   if (!effectiveProjectDir) {
     return { stopReason: "no_project_dir", itemRecords };
   }

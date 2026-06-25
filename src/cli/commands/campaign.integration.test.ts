@@ -657,3 +657,123 @@ test("integ campaign start: exits non-zero with message for unapproved campaign"
     `expected approval-related message\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
   );
 });
+
+// ── FG-392: --project mismatch guard ─────────────────────────────────────────
+
+test("integ campaign start --project: exits non-zero when --project differs from stored projectDir", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const otherDir = mkdtempSync(join(tmpdir(), "forge-other-proj-"));
+  try {
+    const startResult = runForge([
+      "campaign", "start", planOutput.campaignId,
+      "--project", otherDir,
+    ]);
+    assert.notEqual(startResult.status, 0, "start with mismatched --project must exit non-zero");
+    const combined = (startResult.stderr + startResult.stdout).toLowerCase();
+    assert.ok(
+      combined.includes("does not match") || combined.includes("mismatch") || combined.includes("stored"),
+      `expected mismatch error\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+    );
+  } finally {
+    rmSync(otherDir, { recursive: true, force: true });
+  }
+});
+
+test("integ campaign start --project: succeeds when --project matches stored projectDir exactly", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Approve the campaign
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // start --project <same dir as stored> should not be rejected by the guard.
+  // It will fail at not_approved or stale_plan — but NOT at the --project mismatch check.
+  // We can't do a full start without a dispatch, so just verify the guard passes.
+  // We look for the NOT "does not match" error in the output.
+  const startResult = runForge([
+    "campaign", "start", planOutput.campaignId,
+    "--project", projectDir,
+    "--json",
+  ]);
+  const combined = (startResult.stderr + startResult.stdout);
+  assert.ok(
+    !combined.includes("does not match") && !combined.includes("does not match stored"),
+    `matching --project must not trigger the mismatch guard\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+// ── Fix 3: partial-schema migration fills missing approval columns ─────────────
+
+test("integ migration: partial approval schema (only approved_by present) gets missing columns filled", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-partial-schema-"));
+  const dbPath = join(dir, "partial.db");
+
+  try {
+    // Build a DB that has approved_by but is missing approved_at, approval_rationale, approved_plan_hash
+    const db1 = new Database(dbPath);
+    db1.pragma("foreign_keys = ON");
+    db1.exec(`
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id         TEXT PRIMARY KEY,
+        status     TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_input TEXT NOT NULL,
+        mode       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        metadata   TEXT,
+        plan_hash  TEXT,
+        approved_by TEXT
+      );
+      CREATE TABLE IF NOT EXISTS campaign_items (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, item_order INTEGER NOT NULL,
+        ticket_id TEXT NOT NULL, run_id TEXT, branch TEXT, worktree_path TEXT, pr_url TEXT,
+        lifecycle_status TEXT NOT NULL, outcome TEXT, blocker_kind TEXT, continue_policy TEXT,
+        reason TEXT, requested_human_action TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, workflow TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, metadata TEXT, project_dir TEXT);
+      CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_id TEXT, phase TEXT NOT NULL, agent_role TEXT NOT NULL, status TEXT NOT NULL, task_package TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, error TEXT);
+      CREATE TABLE IF NOT EXISTS verdicts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, red_task_id TEXT NOT NULL, red_role TEXT NOT NULL, verdict TEXT NOT NULL, confidence REAL NOT NULL, authority TEXT NOT NULL, findings TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gates (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, decision TEXT NOT NULL, rationale TEXT, decided_at TEXT NOT NULL, decided_by TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, model TEXT NOT NULL, alias TEXT, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+    `);
+    db1.close();
+
+    // applyMigrations should add the three missing columns independently
+    const db2 = new Database(dbPath);
+    db2.pragma("foreign_keys = ON");
+    db2.exec(SCHEMA_SQL);
+    applyMigrations(db2);
+
+    const cols = db2.prepare("PRAGMA table_info(campaigns)").all() as { name: string }[];
+    const colNames = new Set(cols.map((c) => c.name));
+    assert.ok(colNames.has("approved_by"), "approved_by must still be present");
+    assert.ok(colNames.has("approved_at"), "approved_at must be added by independent guard");
+    assert.ok(colNames.has("approval_rationale"), "approval_rationale must be added by independent guard");
+    assert.ok(colNames.has("approved_plan_hash"), "approved_plan_hash must be added by independent guard");
+    assert.ok(colNames.has("project_dir"), "project_dir must be present");
+
+    db2.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
