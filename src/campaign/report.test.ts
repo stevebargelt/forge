@@ -1,6 +1,6 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -1227,4 +1227,323 @@ test("FG-393 consistency: blocked-paused campaign — all three surfaces agree, 
 
   // None advise plain resume without blocker resolution
   assert.notEqual(report.nextOperatorAction, "resume the campaign when ready", "nextOperatorAction must not be bare resume for blocked-paused campaign");
+});
+
+// ── FG-411: plan_unresolvable — deleted source ticket ─────────────────────────
+
+function deleteTicketFile(dir: string, ticketId: string): void {
+  const storiesDir = join(dir, "backlog", "stories");
+  const files = readdirSync(storiesDir);
+  const file = files.find((f) => f.startsWith(`${ticketId}-`) || f === `${ticketId}.md`);
+  if (file) unlinkSync(join(storiesDir, file));
+}
+
+test("FG-411: campaignBlocker returns 'plan_unresolvable' (not throw) for start intent when source ticket deleted", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Delete the source ticket file from the backlog
+  deleteTicketFile(projectDir, "FG-101");
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  let result: ReturnType<typeof campaignBlocker>;
+  assert.doesNotThrow(() => {
+    result = campaignBlocker(getCampaign(campaign.id)!, items, "start");
+  }, "campaignBlocker must not throw when source ticket is deleted");
+  assert.equal(result!, "plan_unresolvable", "campaignBlocker must return plan_unresolvable for deleted source ticket");
+});
+
+test("FG-411: campaignBlocker returns 'plan_unresolvable' (not throw) for resume intent when source ticket deleted", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  // Delete the source ticket file from the backlog
+  deleteTicketFile(projectDir, "FG-101");
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  let result: ReturnType<typeof campaignBlocker>;
+  assert.doesNotThrow(() => {
+    result = campaignBlocker(getCampaign(campaign.id)!, items, "resume");
+  }, "campaignBlocker must not throw when source ticket is deleted");
+  assert.equal(result!, "plan_unresolvable", "campaignBlocker must return plan_unresolvable for deleted source ticket (resume)");
+});
+
+test("FG-411: assembleCampaignShow succeeds and advises re-plan when source ticket deleted (planned)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Delete the source ticket file
+  deleteTicketFile(projectDir, "FG-101");
+
+  let result: ReturnType<typeof assembleCampaignShow>;
+  assert.doesNotThrow(() => {
+    result = assembleCampaignShow(campaign.id);
+  }, "assembleCampaignShow must not throw when source ticket is deleted");
+  assert.ok(result!, "assembleCampaignShow must return a result");
+  assert.equal(result!.status, "planned", "campaign status must still be 'planned'");
+  assert.ok(
+    result!.nextAction.includes("re-plan") || result!.nextAction.includes("re-plan"),
+    `nextAction must advise re-plan, got: ${result!.nextAction}`
+  );
+  assert.ok(
+    result!.nextAction !== "start",
+    "nextAction must NOT be 'start' when plan is unresolvable"
+  );
+});
+
+test("FG-411: assembleCampaignReport succeeds — safetyToContinue non-continuable, advises re-plan when source ticket deleted", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Delete the source ticket file
+  deleteTicketFile(projectDir, "FG-101");
+
+  let result: ReturnType<typeof assembleCampaignReport>;
+  assert.doesNotThrow(() => {
+    result = assembleCampaignReport(campaign.id);
+  }, "assembleCampaignReport must not throw when source ticket is deleted");
+  assert.ok(result!, "assembleCampaignReport must return a result");
+  assert.notEqual(result!.safetyToContinue, "can_start", "safetyToContinue must NOT be can_start when plan is unresolvable");
+  assert.notEqual(result!.safetyToContinue, "can_resume", "safetyToContinue must NOT be can_resume when plan is unresolvable");
+  assert.equal(result!.safetyToContinue, "stale", "safetyToContinue must be 'stale' for plan_unresolvable");
+  assert.ok(
+    result!.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must advise re-plan, got: ${result!.nextOperatorAction}`
+  );
+  assert.notEqual(result!.nextOperatorAction, "start the campaign");
+  assert.notEqual(result!.nextOperatorAction, "resume the campaign when ready");
+});
+
+test("FG-411: assembleCampaignShow and assembleCampaignReport render persisted items even when source ticket deleted", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Delete the source ticket file
+  deleteTicketFile(projectDir, "FG-101");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items.length, 1, "show must render the persisted item");
+  assert.equal(show.items[0]!.ticketId, "FG-101");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.items.length, 1, "report must render the persisted item");
+  assert.equal(report.items[0]!.ticketId, "FG-101");
+  assert.equal(report.status, "planned");
+});
+
+test("FG-411: CONSISTENCY — show/report/campaignBlocker all agree for plan_unresolvable", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Delete the source ticket file
+  deleteTicketFile(projectDir, "FG-101");
+
+  assertConsistency(campaign.id, "plan_unresolvable", "planned+deleted_ticket");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("re-plan"), `show.nextAction must mention re-plan, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "stale");
+  assert.ok(report.nextOperatorAction.includes("re-plan"), `nextOperatorAction must mention re-plan, got: ${report.nextOperatorAction}`);
+});
+
+// ── FG-411: epic/mixed source with empty epic → plan_unresolvable ─────────────
+
+test("FG-411: epic source with all active children deleted → campaignBlocker returns plan_unresolvable (start intent)", () => {
+  // Plan with epic input — FG-100 has FG-101 and FG-102 as active children
+  const { campaign } = planCampaign(
+    { kind: "epic", epicId: "FG-100" },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Remove all active children of FG-100 — resolvePlan will throw "no active child stories"
+  deleteTicketFile(projectDir, "FG-101");
+  deleteTicketFile(projectDir, "FG-102");
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  let result: ReturnType<typeof campaignBlocker>;
+  assert.doesNotThrow(() => {
+    result = campaignBlocker(getCampaign(campaign.id)!, items, "start");
+  }, "campaignBlocker must not throw when epic has no active children");
+  assert.equal(result!, "plan_unresolvable", "any resolvePlan failure → plan_unresolvable, not only deleted list ticket");
+});
+
+test("FG-411: epic source with all active children deleted → campaignBlocker returns plan_unresolvable (resume intent)", () => {
+  const { campaign } = planCampaign(
+    { kind: "epic", epicId: "FG-100" },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  deleteTicketFile(projectDir, "FG-101");
+  deleteTicketFile(projectDir, "FG-102");
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  let result: ReturnType<typeof campaignBlocker>;
+  assert.doesNotThrow(() => {
+    result = campaignBlocker(getCampaign(campaign.id)!, items, "resume");
+  }, "campaignBlocker must not throw for resume intent when epic has no active children");
+  assert.equal(result!, "plan_unresolvable", "epic with no active children → plan_unresolvable for resume intent");
+});
+
+// ── FG-411: regression guard — resolvable campaign never returns plan_unresolvable ───
+
+test("FG-411: resolvable campaign still computes null normally (plan_unresolvable only on actual failure)", () => {
+  // Plan + approve without touching backlog — plan remains resolvable
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  const result = campaignBlocker(getCampaign(campaign.id)!, items, "start");
+  assert.equal(result, null, "resolvable campaign must NOT return plan_unresolvable — null means proceed");
+  assert.notEqual(result, "plan_unresolvable", "plan_unresolvable must not appear when plan is resolvable");
+});
+
+test("FG-411: resolvable epic campaign still computes stale_plan when hash changed (plan_unresolvable only on resolve failure)", () => {
+  // Plan with epic input, approve, then ADD a new story → hash changes → stale_plan (not plan_unresolvable)
+  const { campaign } = planCampaign(
+    { kind: "epic", epicId: "FG-100" },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Add a new active child — this changes the plan hash but does NOT remove FG-101/FG-102
+  writeTicket(projectDir, {
+    id: "FG-103",
+    type: "story",
+    status: "active",
+    title: "Story Three added after approval",
+    epic: "FG-100",
+    created: "2024-01-03",
+    body: "Added after approval to induce stale_plan",
+  });
+
+  const items = db.prepare(
+    "SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?"
+  ).all(campaign.id) as Parameters<typeof campaignBlocker>[1];
+
+  const result = campaignBlocker(getCampaign(campaign.id)!, items, "start");
+  assert.equal(result, "stale_plan", "resolvable campaign with changed hash must get stale_plan, not plan_unresolvable");
+  assert.notEqual(result, "plan_unresolvable", "plan_unresolvable must NOT be returned when resolvePlan succeeds");
+});
+
+// ── FG-411: paused campaign + deleted ticket → show/report for resume intent ───────
+
+test("FG-411: paused campaign + deleted source ticket → assembleCampaignShow advises re-plan (not resume)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  deleteTicketFile(projectDir, "FG-101");
+
+  let result: ReturnType<typeof assembleCampaignShow>;
+  assert.doesNotThrow(() => {
+    result = assembleCampaignShow(campaign.id);
+  }, "assembleCampaignShow must not throw when source ticket deleted (paused campaign)");
+  assert.ok(result!, "assembleCampaignShow must return a result");
+  assert.equal(result!.status, "paused", "campaign status must still be paused");
+  assert.ok(
+    result!.nextAction.includes("re-plan"),
+    `nextAction must advise re-plan for paused campaign with deleted ticket, got: ${result!.nextAction}`
+  );
+  assert.notEqual(result!.nextAction, "resume", "nextAction must NOT be bare 'resume' when plan is unresolvable");
+  assert.equal(result!.items.length, 1, "persisted items must still render");
+  assert.equal(result!.items[0]!.ticketId, "FG-101");
+});
+
+test("FG-411: paused campaign + deleted source ticket → assembleCampaignReport safetyToContinue=stale, advises re-plan", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  deleteTicketFile(projectDir, "FG-101");
+
+  let result: ReturnType<typeof assembleCampaignReport>;
+  assert.doesNotThrow(() => {
+    result = assembleCampaignReport(campaign.id);
+  }, "assembleCampaignReport must not throw when source ticket deleted (paused campaign)");
+  assert.ok(result!, "assembleCampaignReport must return a result");
+  assert.equal(result!.status, "paused");
+  assert.equal(result!.safetyToContinue, "stale", "safetyToContinue must be 'stale' for plan_unresolvable (paused)");
+  assert.notEqual(result!.safetyToContinue, "can_resume", "safetyToContinue must NOT be can_resume when plan is unresolvable");
+  assert.ok(
+    result!.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must advise re-plan, got: ${result!.nextOperatorAction}`
+  );
+  assert.notEqual(result!.nextOperatorAction, "resume the campaign when ready");
+  assert.equal(result!.items.length, 1, "persisted items must still render");
+});
+
+test("FG-411: CONSISTENCY — paused campaign + deleted ticket → all three surfaces agree for resume intent", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  deleteTicketFile(projectDir, "FG-101");
+
+  // assertConsistency checks: show.nextAction != "start"/"resume", safety != can_start/can_resume, operator != start/resume
+  assertConsistency(campaign.id, "plan_unresolvable", "paused+deleted_ticket");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("re-plan"), `show.nextAction must mention re-plan, got: ${show.nextAction}`);
+  assert.notEqual(show.nextAction, "resume", "show.nextAction must NOT be 'resume' for paused+unresolvable campaign");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "stale", "safetyToContinue must be stale for paused+plan_unresolvable");
+  assert.ok(report.nextOperatorAction.includes("re-plan"), `nextOperatorAction must mention re-plan, got: ${report.nextOperatorAction}`);
+  assert.notEqual(report.nextOperatorAction, "resume the campaign when ready");
 });

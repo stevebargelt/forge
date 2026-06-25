@@ -1807,3 +1807,126 @@ test("integ exhaustive exit-code guard: resume command exits non-zero for every 
   const resumeD = runForge(["campaign", "resume", outD.campaignId]);
   assert.notEqual(resumeD.status, 0, `recovery_needed must exit non-zero\nstdout: ${resumeD.stdout}\nstderr: ${resumeD.stderr}`);
 });
+
+// ── FG-411: plan_unresolvable — CLI exits non-zero with clear message ─────────
+
+function deleteTicketFileInteg(dir: string, ticketId: string): void {
+  const storiesDir = join(dir, "backlog", "stories");
+  const files = readdirSync(storiesDir);
+  const file = files.find((f: string) => f.startsWith(`${ticketId}-`) || f === `${ticketId}.md`);
+  if (file) rmSync(join(storiesDir, file));
+}
+
+test("FG-411 integ: forge campaign start exits non-zero with re-plan message when source ticket deleted", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Delete the source ticket file to trigger plan_unresolvable
+  deleteTicketFileInteg(projectDir, "FG-101");
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  assert.notEqual(startResult.status, 0, `start with deleted source ticket must exit non-zero\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`);
+  const combined = (startResult.stderr + startResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("re-plan") || combined.includes("unresolvable") || combined.includes("deleted"),
+    `expected re-plan/unresolvable/deleted message\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+test("FG-411 integ: forge campaign resume exits non-zero with re-plan message when source ticket deleted", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  // Set to paused
+  const dbPath = join(forgeHome, "forge.db");
+  const dbConn = new Database(dbPath);
+  dbConn.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  dbConn.close();
+
+  // Delete the source ticket file to trigger plan_unresolvable
+  deleteTicketFileInteg(projectDir, "FG-101");
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, `resume with deleted source ticket must exit non-zero\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+  const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("re-plan") || combined.includes("unresolvable") || combined.includes("deleted"),
+    `expected re-plan/unresolvable/deleted message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+test("FG-411 integ: forge campaign show exits 0 and renders campaign even when source ticket deleted", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  // Delete the source ticket file
+  deleteTicketFileInteg(projectDir, "FG-101");
+
+  const showResult = runForge(["campaign", "show", planOutput.campaignId, "--json"]);
+  assert.equal(showResult.status, 0, `show must exit 0 even when source ticket deleted\nstdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+
+  const output = JSON.parse(showResult.stdout) as { nextAction: string; status: string };
+  assert.equal(output.status, "planned", "campaign status must still be planned");
+  assert.ok(
+    output.nextAction.includes("re-plan") || output.nextAction.includes("re-plan"),
+    `nextAction must advise re-plan, got: ${output.nextAction}`
+  );
+  assert.notEqual(output.nextAction, "start");
+});
+
+test("FG-411 integ: forge campaign report exits 0 and shows non-continuable safety when source ticket deleted", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  // Delete the source ticket file
+  deleteTicketFileInteg(projectDir, "FG-101");
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId, "--json"]);
+  assert.equal(reportResult.status, 0, `report must exit 0 even when source ticket deleted\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  const output = JSON.parse(reportResult.stdout) as { safetyToContinue: string; nextOperatorAction: string };
+  assert.notEqual(output.safetyToContinue, "can_start", "safetyToContinue must not be can_start");
+  assert.notEqual(output.safetyToContinue, "can_resume", "safetyToContinue must not be can_resume");
+  assert.ok(
+    output.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must advise re-plan, got: ${output.nextOperatorAction}`
+  );
+});

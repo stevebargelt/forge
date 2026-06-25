@@ -234,6 +234,8 @@ export function registerCampaign(program: Command): void {
           console.error("campaign has not been approved; run: forge campaign approve <id> --rationale <text>");
         } else if (result.stopReason === "stale_plan") {
           console.error("campaign plan is stale — backlog changed since approval; re-plan and re-approve");
+        } else if (result.stopReason === "plan_unresolvable") {
+          console.error("campaign plan can no longer be resolved (a source ticket may have been deleted) — re-plan with forge campaign plan");
         } else if (result.stopReason === "already_running") {
           console.error("campaign is already running (concurrent start attempt refused)");
         } else if (result.stopReason === "not_planned") {
@@ -336,6 +338,8 @@ export function registerCampaign(program: Command): void {
           console.error("campaign has not been approved; run: forge campaign approve <id> --rationale <text>");
         } else if (result.stopReason === "stale_plan") {
           console.error("campaign plan is stale — backlog changed since approval; re-plan and re-approve");
+        } else if (result.stopReason === "plan_unresolvable") {
+          console.error("campaign plan can no longer be resolved (a source ticket may have been deleted) — re-plan with forge campaign plan");
         } else if (result.stopReason === "already_running") {
           console.error("campaign is already running (concurrent resume attempt refused)");
         } else if (result.stopReason === "item_failed") {

@@ -89,6 +89,7 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
   if (blocker === "not_approved") return "approve";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan";
+  if (blocker === "plan_unresolvable") return "plan can no longer be resolved (a source ticket may have been deleted) — re-plan with forge campaign plan";
   if (blocker === "no_project_dir") return "campaign has no stored project directory — re-plan";
   if (blocker === "invalid_project_dir") return "project directory missing or has no backlog — fix the path / re-plan";
   if (blocker === "not_planned") return `cannot start: campaign is ${campaign.status}`;
@@ -125,6 +126,7 @@ function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToConti
   if (blocker === "not_approved") return "needs_approval";
   if (blocker === "dry_run_not_executable") return "dry_run_not_executable";
   if (blocker === "stale_plan") return "stale";
+  if (blocker === "plan_unresolvable") return "stale";
   if (blocker === null) {
     if (intent === "start") return "can_start";
     return unresolvedBlockedItem(items) ? "needs_resolution" : "can_resume";
@@ -176,6 +178,7 @@ function computeNextOperatorAction(
   if (blocker === "not_approved") return "approve the campaign, then start";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan and re-approve";
+  if (blocker === "plan_unresolvable") return "plan can no longer be resolved (a source ticket may have been deleted) — re-plan with forge campaign plan";
   if (blocker === "no_project_dir") return "campaign has no stored project directory — re-plan";
   if (blocker === "invalid_project_dir") return "project directory missing or has no backlog — fix the path / re-plan";
   if (blocker === "not_planned") return `cannot start: campaign is ${campaign.status}`;

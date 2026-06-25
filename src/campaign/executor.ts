@@ -31,6 +31,7 @@ export type CampaignStopReason =
   | "dry_run_not_executable"
   | "not_approved"
   | "stale_plan"
+  | "plan_unresolvable"
   | "already_running"
   | "not_paused"
   | "paused"
@@ -87,11 +88,17 @@ export function campaignBlocker(
     if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
     if (campaign.mode !== "pilot" && campaign.mode !== "sequential") return "dry_run_not_executable";
     if (!campaign.approvedPlanHash) return "not_approved";
-    const { planHash: currentHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
-      projectDir: dir,
-      mode: campaign.mode as PlanMode,
-    });
-    if (currentHash !== campaign.approvedPlanHash) return "stale_plan";
+    let startHash: string;
+    try {
+      const { planHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
+        projectDir: dir,
+        mode: campaign.mode as PlanMode,
+      });
+      startHash = planHash;
+    } catch {
+      return "plan_unresolvable";
+    }
+    if (startHash !== campaign.approvedPlanHash) return "stale_plan";
     return null;
   } else {
     if (campaign.status !== "paused") return "not_paused";
@@ -99,11 +106,17 @@ export function campaignBlocker(
     if (!dir) return "no_project_dir";
     if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
     if (!campaign.approvedPlanHash) return "not_approved";
-    const { planHash: currentHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
-      projectDir: dir,
-      mode: campaign.mode as PlanMode,
-    });
-    if (currentHash !== campaign.approvedPlanHash) return "stale_plan";
+    let resumeHash: string;
+    try {
+      const { planHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
+        projectDir: dir,
+        mode: campaign.mode as PlanMode,
+      });
+      resumeHash = planHash;
+    } catch {
+      return "plan_unresolvable";
+    }
+    if (resumeHash !== campaign.approvedPlanHash) return "stale_plan";
     return null;
   }
 }
