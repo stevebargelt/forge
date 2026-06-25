@@ -58,6 +58,10 @@ function findInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
   );
 }
 
+function unresolvedBlockedItem(items: CampaignItem[]): CampaignItem | undefined {
+  return items.find((i) => i.lifecycleStatus === "failed" && i.outcome === "blocked");
+}
+
 function recoveryNeededAction(item: CampaignItem): string {
   const runPart = item.runId ? ` (run ${item.runId})` : "";
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
@@ -75,7 +79,12 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
 
   const intent = campaign.status === "planned" ? "start" : "resume";
   const blocker = campaignBlocker(campaign, items, intent);
-  if (blocker === null) return intent === "start" ? "start" : "resume";
+  if (blocker === null) {
+    if (intent === "start") return "start";
+    const blockedItem = unresolvedBlockedItem(items);
+    if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+    return "resume";
+  }
   if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
@@ -95,7 +104,8 @@ export type SafetyToContinue =
   | "needs_approval"
   | "stale"
   | "recovery_needed"
-  | "dry_run_not_executable";
+  | "dry_run_not_executable"
+  | "needs_resolution";
 
 export type CampaignVerdict = "all_shipped" | "complete_with_issues" | "not_complete";
 
@@ -115,7 +125,10 @@ function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToConti
   if (blocker === "not_approved") return "needs_approval";
   if (blocker === "dry_run_not_executable") return "dry_run_not_executable";
   if (blocker === "stale_plan") return "stale";
-  if (blocker === null) return intent === "start" ? "can_start" : "can_resume";
+  if (blocker === null) {
+    if (intent === "start") return "can_start";
+    return unresolvedBlockedItem(items) ? "needs_resolution" : "can_resume";
+  }
   // not_planned / not_paused / no_project_dir / invalid_project_dir: treat as non-continuable
   return "terminal";
 }
@@ -147,8 +160,8 @@ function computeNextOperatorAction(
   const blocker = campaignBlocker(campaign, items, intent);
   if (blocker === null) {
     if (intent === "start") return "start the campaign";
-    // Paused with active blocker: surface the blocking item to guide the operator.
-    const blockedItem = items.find((i) => i.lifecycleStatus === "failed" && i.outcome === "blocked");
+    // Paused with unresolved blocked item: surface it to guide the operator.
+    const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) {
       return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
     }

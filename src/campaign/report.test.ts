@@ -1088,3 +1088,143 @@ test("GUARD: every reachable CampaignStopReason → show and report do NOT retur
     assert.notEqual(report.safetyToContinue, "can_start", "stale_plan: safety must not be can_start");
   }
 });
+
+// ── FG-393 fix: unresolved blocked item → needs_resolution, NOT can_resume ────
+
+test("FG-393 exact repro: paused campaign — FG-101 failed+blocked, FG-102 held → safetyToContinue=needs_resolution", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string; ticket_id: string }[];
+
+  // FG-101: local-blocked (the unresolved blocker)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?"
+  ).run(items[0]!.id);
+  // FG-102: held downstream
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', continue_policy = 'hold_dependents' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "needs_resolution", "safetyToContinue must be needs_resolution (NOT can_resume) when unresolved blocked item exists");
+  assert.notEqual(report.safetyToContinue, "can_resume", "safetyToContinue must NOT be can_resume with an unresolved blocked item");
+  assert.ok(report.nextOperatorAction.includes("resolve blocker"), `nextOperatorAction must say resolve blocker, got: ${report.nextOperatorAction}`);
+  assert.ok(report.nextOperatorAction.includes("FG-101"), `nextOperatorAction must name the blocker ticket, got: ${report.nextOperatorAction}`);
+  assert.ok(report.nextOperatorAction.includes("resume"), `nextOperatorAction must mention resume, got: ${report.nextOperatorAction}`);
+  assert.equal(report.groupings.blocked[0], "FG-101");
+  assert.equal(report.groupings.held[0], "FG-102");
+});
+
+test("FG-393 exact repro: show.nextAction for blocked-paused campaign says resolve blocker", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string }[];
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', continue_policy = 'hold_dependents' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("resolve blocker"), `show.nextAction must say resolve blocker, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("FG-101"), `show.nextAction must name the blocker ticket, got: ${show.nextAction}`);
+  assert.notEqual(show.nextAction, "resume", "show.nextAction must NOT be bare 'resume' when unresolved blocked item exists");
+});
+
+test("FG-393 resolved-blocker case: blocked item resolved but held item remains → can_resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string }[];
+
+  // FG-101: was blocked but operator resolved it (now shipped)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?"
+  ).run(items[0]!.id);
+  // FG-102: still held — resume will reconsider it
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', continue_policy = 'hold_dependents' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "can_resume", "can_resume when no unresolved blocked item even if held items remain");
+  assert.notEqual(report.safetyToContinue, "needs_resolution");
+});
+
+test("FG-393 clean paused campaign (no blocked, no held) → can_resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+  // All items remain pending — cooperative pause mid-run
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "can_resume");
+});
+
+test("FG-393 consistency: blocked-paused campaign — all three surfaces agree, none advise plain resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string }[];
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', continue_policy = 'hold_dependents' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const report = assembleCampaignReport(campaign.id)!;
+
+  // Safety is non-continuable
+  assert.notEqual(report.safetyToContinue, "can_resume", "safety must not be can_resume for blocked-paused campaign");
+  assert.notEqual(report.safetyToContinue, "can_start", "safety must not be can_start for blocked-paused campaign");
+  assert.equal(report.safetyToContinue, "needs_resolution");
+
+  // Show action must not be bare resume
+  assert.notEqual(show.nextAction, "resume", "show.nextAction must not be bare 'resume' for blocked-paused campaign");
+
+  // All three surfaces mention resolving the blocker before resuming
+  assert.ok(show.nextAction.includes("resolve blocker"), `show.nextAction must mention blocker resolution, got: ${show.nextAction}`);
+  assert.ok(report.nextOperatorAction.includes("resolve blocker"), `nextOperatorAction must mention blocker resolution, got: ${report.nextOperatorAction}`);
+
+  // None advise plain resume without blocker resolution
+  assert.notEqual(report.nextOperatorAction, "resume the campaign when ready", "nextOperatorAction must not be bare resume for blocked-paused campaign");
+});
