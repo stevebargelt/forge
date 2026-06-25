@@ -286,6 +286,7 @@ export type Campaign = {
   createdAt: string;
   updatedAt: string;
   metadata?: Record<string, unknown>;
+  planHash?: string;
 };
 
 export type CampaignItem = {

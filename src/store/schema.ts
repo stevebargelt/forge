@@ -112,7 +112,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   mode            TEXT NOT NULL,
   created_at      TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
-  metadata        TEXT
+  metadata        TEXT,
+  plan_hash       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
 

@@ -20,6 +20,7 @@ type CampaignRow = {
   created_at: string;
   updated_at: string;
   metadata: string | null;
+  plan_hash: string | null;
 };
 
 type CampaignItemRow = {
@@ -51,6 +52,7 @@ function rowToCampaign(row: CampaignRow): Campaign {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
+    planHash: row.plan_hash ?? undefined,
   };
 }
 
@@ -129,9 +131,16 @@ export function listCampaigns(statusFilter?: CampaignStatus): Campaign[] {
 }
 
 export function updateCampaignStatus(id: string, status: CampaignStatus): void {
+  // updateCampaignStatus direct setter is intentionally unchecked here — FG-392 will harden it via isCampaignTransitionAllowed.
   getDb()
     .prepare(`UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ?`)
     .run(status, nowIso(), id);
+}
+
+export function setPlanHash(id: string, planHash: string): void {
+  getDb()
+    .prepare(`UPDATE campaigns SET plan_hash = ?, updated_at = ? WHERE id = ?`)
+    .run(planHash, nowIso(), id);
 }
 
 export function addCampaignItem(opts: {

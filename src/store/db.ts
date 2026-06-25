@@ -93,6 +93,15 @@ export function applyMigrations(db: DatabaseInstance): void {
   // Created indexes (created_at index too — used by --since time filters).
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_request ON model_calls(request_id)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_model_calls_created ON model_calls(created_at)`);
+
+  // FG-391: plan_hash column on campaigns. New DBs get it from CREATE TABLE in
+  // schema.ts; existing DBs get it here. Preferred over metadata-only so FG-392
+  // can compare current-vs-approved plan_hash with a simple column lookup.
+  const campaignsCols = db.prepare(`PRAGMA table_info(campaigns)`).all() as { name: string }[];
+  const haveCampaigns = new Set(campaignsCols.map((r) => r.name));
+  if (!haveCampaigns.has("plan_hash")) {
+    db.exec(`ALTER TABLE campaigns ADD COLUMN plan_hash TEXT`);
+  }
 }
 
 // Separate caches for readonly vs writable handles. The earlier single-cache
