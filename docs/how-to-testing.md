@@ -6,11 +6,11 @@ The suite is split into three tiers selected by **filename suffix**. Every `*.te
 
 | Tier | Suffix | Command | Count |
 |------|--------|---------|-------|
-| Unit | `*.test.ts` (excluding the two below) | `npm run test:unit` | 1466 |
-| Integration | `*.integration.test.ts` | `npm run test:integration` | 279 |
+| Unit | `*.test.ts` (excluding the two below) | `npm run test:unit` | 1473 |
+| Integration | `*.integration.test.ts` | `npm run test:integration` | 313 |
 | Worktree | `*.worktree.test.ts` | `npm run test:worktree` | 85 |
-| Aggregate (root) | all three above | `npm test` | 1830 |
-| Shipped-claim aggregate | root + dashboard workspace | `npm run test:all` | 1857 |
+| Aggregate (root) | all three above | `npm test` | 1871 |
+| Shipped-claim aggregate | root + dashboard workspace | `npm run test:all` | 1898 |
 
 `npm test` (root aggregate) runs the full root suite and is the regression gate. `npm run test:all` additionally runs the dashboard workspace (`npm test -w dashboard`, 27 tests) and is the gate to run before claiming work shipped.
 

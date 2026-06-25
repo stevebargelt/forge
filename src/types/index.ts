@@ -236,3 +236,73 @@ export type Incident = {
   evidence: string[];
   recommendedAction: RecommendedAction;
 };
+
+// ── Campaign Runner types (FG-390) ─────────────────────────────────────────
+
+export type CampaignStatus = "planned" | "running" | "paused" | "complete" | "failed" | "abandoned";
+
+export const CAMPAIGN_TRANSITIONS: Record<CampaignStatus, CampaignStatus[]> = {
+  planned:   ["running", "abandoned"],
+  running:   ["paused", "complete", "failed", "abandoned"],
+  paused:    ["running", "abandoned"],
+  complete:  [],
+  failed:    [],
+  abandoned: [],
+};
+
+export function isCampaignTransitionAllowed(from: CampaignStatus, to: CampaignStatus): boolean {
+  return (CAMPAIGN_TRANSITIONS[from] as CampaignStatus[]).includes(to);
+}
+
+// Campaign item lifecycle reuses the run/task status vocabulary — the states
+// (pending → running → complete/failed/blocked_by_red/awaiting_gate) map
+// directly to item progression without a campaign-specific parallel enum.
+export type CampaignItemLifecycleStatus = TaskStatus;
+
+export type CampaignItemOutcome = "shipped" | "blocked" | "skipped" | "held" | "needs_refinement" | "failed";
+
+export type BlockerKind =
+  | "scope"
+  | "readiness"
+  | "tests"
+  | "merge_conflict"
+  | "auth"
+  | "dependency"
+  | "git_state"
+  | "infrastructure"
+  | "campaign_system"
+  | "human_decision";
+
+export type ContinuePolicy = "continue_allowed" | "hold_dependents" | "hold_campaign";
+
+export type SourceKind = "list" | "epic" | "mixed";
+
+export type Campaign = {
+  id: string;
+  status: CampaignStatus;
+  sourceKind: SourceKind;
+  sourceInput: Record<string, unknown>;
+  mode: string;
+  createdAt: string;
+  updatedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type CampaignItem = {
+  id: string;
+  campaignId: string;
+  itemOrder: number;
+  ticketId: string;
+  runId?: string;
+  branch?: string;
+  worktreePath?: string;
+  prUrl?: string;
+  lifecycleStatus: CampaignItemLifecycleStatus;
+  outcome?: CampaignItemOutcome;
+  blockerKind?: BlockerKind;
+  continuePolicy?: ContinuePolicy;
+  reason?: string;
+  requestedHumanAction?: string;
+  createdAt: string;
+  updatedAt: string;
+};

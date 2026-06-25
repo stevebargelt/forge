@@ -21,6 +21,14 @@ export function newGateId(): string {
   return `gate-${shortId()}${shortId()}`;
 }
 
+export function newCampaignId(): string {
+  return `campaign-${shortId()}${shortId()}`;
+}
+
+export function newCampaignItemId(): string {
+  return `citem-${shortId()}${shortId()}`;
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

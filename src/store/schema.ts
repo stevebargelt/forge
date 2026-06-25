@@ -103,4 +103,37 @@ CREATE TABLE IF NOT EXISTS model_calls (
 -- on the IF-NOT-EXISTS path because CREATE INDEX doesn't honor "IF column
 -- exists"). request_id + created_at indexes are also created there for
 -- symmetry — see db.ts.
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id              TEXT PRIMARY KEY,
+  status          TEXT NOT NULL,
+  source_kind     TEXT NOT NULL,
+  source_input    TEXT NOT NULL,
+  mode            TEXT NOT NULL,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  metadata        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
+
+CREATE TABLE IF NOT EXISTS campaign_items (
+  id                     TEXT PRIMARY KEY,
+  campaign_id            TEXT NOT NULL REFERENCES campaigns(id),
+  item_order             INTEGER NOT NULL,
+  ticket_id              TEXT NOT NULL,
+  run_id                 TEXT,
+  branch                 TEXT,
+  worktree_path          TEXT,
+  pr_url                 TEXT,
+  lifecycle_status       TEXT NOT NULL,
+  outcome                TEXT,
+  blocker_kind           TEXT,
+  continue_policy        TEXT,
+  reason                 TEXT,
+  requested_human_action TEXT,
+  created_at             TEXT NOT NULL,
+  updated_at             TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_items_campaign ON campaign_items(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_items_status ON campaign_items(lifecycle_status);
 `;
