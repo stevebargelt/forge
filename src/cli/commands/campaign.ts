@@ -205,6 +205,7 @@ export function registerCampaign(program: Command): void {
         "not_planned",
         "no_project_dir",
         "invalid_project_dir",
+        "dry_run_not_executable",
         "not_approved",
         "stale_plan",
         "already_running",
@@ -219,7 +220,9 @@ export function registerCampaign(program: Command): void {
           console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
         }
 
-        if (result.stopReason === "no_project_dir") {
+        if (result.stopReason === "dry_run_not_executable") {
+          console.error("campaign is dry_run (plan-and-report only) — re-plan with --mode pilot or --mode sequential to execute");
+        } else if (result.stopReason === "no_project_dir") {
           console.error("campaign predates projectDir capture; re-plan with forge campaign plan");
         } else if (result.stopReason === "invalid_project_dir") {
           console.error("campaign projectDir is missing or has no backlog");

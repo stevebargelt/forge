@@ -20,6 +20,7 @@ export type CampaignStopReason =
   | "not_planned"
   | "no_project_dir"
   | "invalid_project_dir"
+  | "dry_run_not_executable"
   | "not_approved"
   | "stale_plan"
   | "already_running"
@@ -80,6 +81,10 @@ export async function startCampaign(
     return { stopReason: "invalid_project_dir", itemRecords };
   }
 
+  if (campaign.mode !== "pilot" && campaign.mode !== "sequential") {
+    return { stopReason: "dry_run_not_executable", itemRecords };
+  }
+
   if (!campaign.approvedPlanHash) {
     return { stopReason: "not_approved", itemRecords };
   }
@@ -121,15 +126,35 @@ export async function startCampaign(
       ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
       : item.ticketId;
 
-    const result = await dispatchFn({
-      agentRole: "engineer",
-      task: taskText,
-      projectDir: effectiveProjectDir,
-      runId,
-      runTitle: item.ticketId,
-    });
+    let dispatchResult: InvokeResult;
+    try {
+      dispatchResult = await dispatchFn({
+        agentRole: "engineer",
+        task: taskText,
+        projectDir: effectiveProjectDir,
+        runId,
+        runTitle: item.ticketId,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      updateCampaignItem(item.id, {
+        lifecycleStatus: "failed",
+        outcome: "failed",
+        blockerKind: "campaign_system",
+        reason,
+      });
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        runId,
+        lifecycleStatus: "failed",
+        outcome: "failed",
+      });
+      updateCampaignStatus(id, "failed");
+      return { stopReason: "item_failed", itemRecords };
+    }
 
-    if (result.status === "complete") {
+    if (dispatchResult.status === "complete") {
       let outcome: CampaignItemOutcome | undefined;
       try {
         const freshTicket = readTicket(effectiveProjectDir, item.ticketId);
@@ -148,7 +173,7 @@ export async function startCampaign(
         outcome,
       });
     } else {
-      const reason = result.error ?? "invoke failed";
+      const reason = dispatchResult.error ?? "invoke failed";
       updateCampaignItem(item.id, {
         lifecycleStatus: "failed",
         outcome: "failed",

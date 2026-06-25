@@ -641,6 +641,7 @@ test("integ campaign start: exits non-zero with message for unapproved campaign"
   const planResult = runForge([
     "campaign", "plan",
     "--tickets", "FG-101",
+    "--mode", "sequential",
     "--project", projectDir,
     "--json",
   ]);

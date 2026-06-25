@@ -113,7 +113,7 @@ test("tryTransitionCampaignToRunning: first call true, second call false (single
 // ── start: unapproved ─────────────────────────────────────────────────────────
 
 test("start refuses unapproved planned campaign with stop reason not_approved", async () => {
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   // Do NOT approve
 
   let dispatchCallCount = 0;
@@ -149,7 +149,7 @@ test("start refuses stale plan with no dispatch and no run rows", async () => {
   // Replan with epic input and mutate epic
 
   // Reset — plan with epic input
-  const { campaign: epicCampaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir });
+  const { campaign: epicCampaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir, mode: "sequential" });
   approveCampaign(epicCampaign.id, { rationale: "Approved" });
 
   // Now add another story to the epic — hash will differ
@@ -183,7 +183,7 @@ test("start refuses stale plan with no dispatch and no run rows", async () => {
 test("happy path two-item: sequential ordering, items dispatched one at a time", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -225,7 +225,7 @@ test("happy path two-item: sequential ordering, items dispatched one at a time",
 test("first-item failure: item2 never dispatched, campaign status failed", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -262,7 +262,7 @@ test("first-item failure: item2 never dispatched, campaign status failed", async
 test("shipped only with evidence: complete but ticket not done → outcome undefined", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -274,7 +274,7 @@ test("shipped only with evidence: complete but ticket not done → outcome undef
 test("shipped with evidence: ticket done + closedCommit → outcome='shipped'", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -363,7 +363,7 @@ test("precondition order: unapproved + stale campaign stops at not_approved (bef
   // Plan with epic input so staleness can be induced by adding a child story.
   // Campaign is deliberately NOT approved — proving not_approved (pos 4) fires
   // before stale_plan (pos 5) when both conditions are true simultaneously.
-  const { campaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir });
+  const { campaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir, mode: "sequential" });
 
   // Mutate backlog: add an active child under FG-100 to change the plan hash
   writeTicket(projectDir, {
@@ -414,7 +414,7 @@ test("precondition order: existing dir with no backlog subdir → invalid_projec
 // ── stale_plan: no state mutation ────────────────────────────────────────────
 
 test("stale_plan: campaign status remains planned (not running) after stale stop", async () => {
-  const { campaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir });
+  const { campaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   // Add a child story to make the plan stale after approval
@@ -439,7 +439,7 @@ test("stale_plan: campaign status remains planned (not running) after stale stop
 // ── no double-dispatch ────────────────────────────────────────────────────────
 
 test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn invoked", async () => {
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   let firstDispatchCount = 0;
@@ -479,7 +479,7 @@ test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn i
 test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; run_id retained after failure", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -526,7 +526,7 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
 
 test("stale-plan check: mutating a DIFFERENT directory does not affect the hash check", async () => {
   // Plan and approve against projectDir
-  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   // Create a separate dir with its own tickets — mutating this must NOT affect hash for projectDir
@@ -559,7 +559,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 test("shipped: ticket done but no closedCommit → outcome undefined (not shipped)", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
-    { projectDir }
+    { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
@@ -582,4 +582,108 @@ test("shipped: ticket done but no closedCommit → outcome undefined (not shippe
     undefined,
     "outcome must be undefined when ticket is done but has no closedCommit"
   );
+});
+
+// ── Fix A: dry_run mode refusal ───────────────────────────────────────────────
+
+test("dry_run mode: startCampaign returns dry_run_not_executable, no dispatch, campaign stays planned", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "dry_run" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const countingDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch: countingDispatch });
+  assert.equal(result.stopReason, "dry_run_not_executable");
+  assert.equal(dispatchCallCount, 0, "dispatch must not be called for dry_run campaign");
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.status, "planned", "campaign must remain planned after dry_run refusal (no CAS transition)");
+});
+
+test("pilot mode: startCampaign proceeds to dispatch (mode gate only blocks dry_run)", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "pilot" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const countingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch: countingDispatch });
+  assert.notEqual(result.stopReason, "dry_run_not_executable");
+  assert.equal(dispatchCallCount, 1, "dispatch must be called for pilot campaign");
+});
+
+test("sequential mode: startCampaign proceeds to dispatch (mode gate only blocks dry_run)", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const countingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch: countingDispatch });
+  assert.notEqual(result.stopReason, "dry_run_not_executable");
+  assert.equal(dispatchCallCount, 1, "dispatch must be called for sequential campaign");
+});
+
+// ── Fix B: dispatch throws → same failure path as returned failure ────────────
+
+test("dispatch throws: item lifecycle=failed, outcome=failed, blocker=campaign_system, run_id retained, campaign=failed, loop stops", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const throwingDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    throw new Error("network timeout");
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch: throwingDispatch });
+  assert.equal(result.stopReason, "item_failed");
+  assert.equal(callCount, 1, "dispatch must be called exactly once — item2 must never dispatch after throw");
+  assert.equal(result.itemRecords.length, 1, "only one item record (the failed one)");
+
+  const item1 = result.itemRecords[0]!;
+  assert.equal(item1.lifecycleStatus, "failed");
+  assert.equal(item1.outcome, "failed");
+
+  // Durable DB state must match returned-failure path
+  const dbItem1 = db.prepare(
+    "SELECT run_id, lifecycle_status, outcome, blocker_kind, reason FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { run_id: string | null; lifecycle_status: string; outcome: string; blocker_kind: string; reason: string };
+  assert.equal(dbItem1.lifecycle_status, "failed");
+  assert.equal(dbItem1.outcome, "failed");
+  assert.equal(dbItem1.blocker_kind, "campaign_system");
+  assert.equal(dbItem1.reason, "network timeout", "thrown error message must be stored as reason");
+  assert.ok(dbItem1.run_id, "run_id must be retained in DB after thrown dispatch (evidence preserved)");
+
+  // item2 must never have been dispatched
+  const dbItem2 = db.prepare(
+    "SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { run_id: string | null; lifecycle_status: string };
+  assert.equal(dbItem2.run_id, null, "item2 run_id must be null — never dispatched");
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending after item1 throw");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "failed");
 });
