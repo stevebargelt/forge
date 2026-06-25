@@ -1,10 +1,12 @@
 ---
 id: FG-391
 type: story
-status: active
+status: done
 title: "Campaign planner: explicit lists, epic expansion, and proposed order"
 epic: FG-370
 created: 2026-06-24
+closed: 2026-06-25
+closed_commit: 933ded1
 ---
 
 ## Problem
