@@ -75,11 +75,16 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
 
   const intent = campaign.status === "planned" ? "start" : "resume";
   const blocker = campaignBlocker(campaign, items, intent);
+  if (blocker === null) return intent === "start" ? "start" : "resume";
   if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan";
-  return intent === "start" ? "start" : "resume";
+  if (blocker === "no_project_dir") return "campaign has no stored project directory — re-plan";
+  if (blocker === "invalid_project_dir") return "project directory missing or has no backlog — fix the path / re-plan";
+  if (blocker === "not_planned") return `cannot start: campaign is ${campaign.status}`;
+  if (blocker === "not_paused") return `cannot resume: campaign is ${campaign.status}`;
+  return `blocked: ${blocker} — resolve before ${intent}`;
 }
 
 export type SafetyToContinue =
@@ -140,12 +145,16 @@ function computeNextOperatorAction(
 
   const intent = campaign.status === "planned" ? "start" : "resume";
   const blocker = campaignBlocker(campaign, items, intent);
+  if (blocker === null) return intent === "start" ? "start the campaign" : "resume the campaign when ready";
   if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve the campaign, then start";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan and re-approve";
-  if (blocker === null) return intent === "start" ? "start the campaign" : "resume the campaign when ready";
-  return `campaign is ${campaign.status} — check status`;
+  if (blocker === "no_project_dir") return "campaign has no stored project directory — re-plan";
+  if (blocker === "invalid_project_dir") return "project directory missing or has no backlog — fix the path / re-plan";
+  if (blocker === "not_planned") return `cannot start: campaign is ${campaign.status}`;
+  if (blocker === "not_paused") return `cannot resume: campaign is ${campaign.status}`;
+  return `blocked: ${blocker} — resolve before ${intent}`;
 }
 
 export type ShowItemRow = {

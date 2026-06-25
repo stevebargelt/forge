@@ -889,3 +889,162 @@ test("CONSISTENCY matrix: paused+in-flight → recovery (not resume)", () => {
   assert.equal(report.safetyToContinue, "recovery_needed");
   assert.notEqual(report.nextOperatorAction, "resume the campaign when ready");
 });
+
+// ── FG-394 LAST INSTANCE: no_project_dir / invalid_project_dir ────────────────
+
+test("CONSISTENCY: planned+approved campaign with no projectDir → not start, blocker-specific message, terminal safety", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  db.prepare("UPDATE campaigns SET project_dir = NULL WHERE id = ?").run(campaign.id);
+
+  assertConsistency(campaign.id, "no_project_dir", "planned+no_project_dir");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.notEqual(show.nextAction, "start", "show.nextAction must not be start");
+  assert.ok(show.nextAction.includes("re-plan"), `show.nextAction must say re-plan, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "terminal", "safetyToContinue must be terminal for no_project_dir");
+  assert.notEqual(report.nextOperatorAction, "start the campaign", "nextOperatorAction must not say start");
+  assert.ok(report.nextOperatorAction.includes("re-plan"), `nextOperatorAction must say re-plan, got: ${report.nextOperatorAction}`);
+});
+
+test("CONSISTENCY: planned+approved campaign with invalid projectDir → not start, blocker-specific message, terminal safety", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  db.prepare("UPDATE campaigns SET project_dir = '/nonexistent/path/fg394' WHERE id = ?").run(campaign.id);
+
+  assertConsistency(campaign.id, "invalid_project_dir", "planned+invalid_project_dir");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.notEqual(show.nextAction, "start", "show.nextAction must not be start");
+  assert.ok(
+    show.nextAction.includes("fix the path") || show.nextAction.includes("re-plan"),
+    `show.nextAction must say fix the path / re-plan, got: ${show.nextAction}`
+  );
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "terminal", "safetyToContinue must be terminal for invalid_project_dir");
+  assert.notEqual(report.nextOperatorAction, "start the campaign", "nextOperatorAction must not say start");
+  assert.ok(
+    report.nextOperatorAction.includes("fix the path") || report.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must say fix the path / re-plan, got: ${report.nextOperatorAction}`
+  );
+});
+
+// ── GUARD: no CampaignStopReason maps action functions to bare start/resume ───
+//
+// Enumerate every reachable blocker from show/report (called with intent start/resume
+// on planned/paused campaigns after status-checks eliminate terminal states):
+//   null            → start/resume (correct — only null should produce the action)
+//   recovery_needed → recovery message
+//   not_approved    → approve message
+//   dry_run_not_executable → re-plan message
+//   stale_plan      → stale message
+//   no_project_dir  → re-plan message (NEW)
+//   invalid_project_dir → fix path message (NEW)
+//   not_planned / not_paused → unreachable: status-checks on planned/paused prevent reaching
+//     campaignBlocker with these values inside computeNextShowAction/computeNextOperatorAction
+//   already_running / paused / abandoned / item_failed / complete → execution-time only;
+//     campaignBlocker never returns these during pre-flight start/resume checks
+//
+// The explicit default `blocked: ${blocker} — resolve before ${intent}` in both functions
+// ensures any future CampaignStopReason added to the union cannot silently fall through.
+
+test("GUARD: every reachable CampaignStopReason → show and report do NOT return bare start/resume (only null does)", () => {
+  // ── null → start (the one correct case) ─────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.equal(show.nextAction, "start", "null blocker: show.nextAction must be start");
+    assert.equal(report.nextOperatorAction, "start the campaign", "null blocker: nextOperatorAction must be 'start the campaign'");
+    assert.equal(report.safetyToContinue, "can_start", "null blocker: safetyToContinue must be can_start");
+  }
+
+  // ── not_approved ─────────────────────────────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "not_approved: show must not say start");
+    assert.notEqual(show.nextAction, "resume", "not_approved: show must not say resume");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "not_approved: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "not_approved: safety must not be can_start");
+  }
+
+  // ── recovery_needed ──────────────────────────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101", "FG-102"] }, { projectDir, mode: "sequential" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    const citems = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(c.id) as { id: string }[];
+    db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-guard-rn' WHERE id = ?").run(citems[0]!.id);
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "recovery_needed: show must not say start");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "recovery_needed: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "recovery_needed: safety must not be can_start");
+  }
+
+  // ── dry_run_not_executable ───────────────────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "dry_run" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "dry_run: show must not say start");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "dry_run: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "dry_run: safety must not be can_start");
+  }
+
+  // ── no_project_dir ───────────────────────────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    db.prepare("UPDATE campaigns SET project_dir = NULL WHERE id = ?").run(c.id);
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "no_project_dir: show must not say start");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "no_project_dir: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "no_project_dir: safety must not be can_start");
+  }
+
+  // ── invalid_project_dir ──────────────────────────────────────────────────────
+  {
+    const { campaign: c } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    db.prepare("UPDATE campaigns SET project_dir = '/nonexistent/path/guard' WHERE id = ?").run(c.id);
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "invalid_project_dir: show must not say start");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "invalid_project_dir: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "invalid_project_dir: safety must not be can_start");
+  }
+
+  // ── stale_plan (last — adds a ticket to projectDir, affecting plan hash) ─────
+  {
+    const { campaign: c } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir, mode: "sequential" });
+    approveCampaign(c.id, { rationale: "LGTM" });
+    writeTicket(projectDir, {
+      id: "FG-199",
+      type: "story",
+      status: "active",
+      title: "Guard stale trigger",
+      epic: "FG-100",
+      created: "2024-01-09",
+      body: "Added post-approval to make plan stale",
+    });
+    const show = assembleCampaignShow(c.id)!;
+    const report = assembleCampaignReport(c.id)!;
+    assert.notEqual(show.nextAction, "start", "stale_plan: show must not say start");
+    assert.notEqual(report.nextOperatorAction, "start the campaign", "stale_plan: report must not say start the campaign");
+    assert.notEqual(report.safetyToContinue, "can_start", "stale_plan: safety must not be can_start");
+  }
+});
