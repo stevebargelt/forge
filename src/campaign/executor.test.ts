@@ -12,11 +12,12 @@ import {
   getCampaignItem,
   approveCampaign,
   tryTransitionCampaignToRunning,
+  updateCampaignStatus,
   setPlanHash,
 } from "../store/campaigns.js";
 import { writeTicket } from "../backlog/structured.js";
 import { planCampaign, computePlanHash, resolvePlan } from "./planner.js";
-import { startCampaign } from "./executor.js";
+import { startCampaign, resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 
 let db: DatabaseInstance;
@@ -686,4 +687,470 @@ test("dispatch throws: item lifecycle=failed, outcome=failed, blocker=campaign_s
 
   const finalCampaign = getCampaign(campaign.id)!;
   assert.equal(finalCampaign.status, "failed");
+});
+
+// ── FG-394: driver skips terminal items ────────────────────────────────────────
+
+test("driver skips terminal items: item1 complete, item2 pending — only item2 dispatched", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Manually mark item1 as complete before start (simulating a previous run)
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete");
+  assert.equal(dispatchLog.length, 1, "only one dispatch (item2)");
+  assert.equal(dispatchLog[0], "FG-102", "only item2 (FG-102) was dispatched");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+// ── FG-394: cooperative pause ─────────────────────────────────────────────────
+
+test("cooperative pause: external pause after item1 — driver stops, does NOT dispatch item2, does NOT attempt complete", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // After item1 dispatches, simulate an external pause
+    if (callCount === 1) {
+      db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "driver must return 'paused' when campaign was paused mid-run");
+  assert.equal(callCount, 1, "only item1 dispatched — item2 never dispatched");
+
+  // Campaign must remain paused (not complete)
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no illegal paused->complete transition");
+
+  // item2 must never have been dispatched
+  const item2 = db.prepare("SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    run_id: string | null; lifecycle_status: string;
+  };
+  assert.equal(item2.run_id, null, "item2 must not have a run_id");
+  assert.equal(item2.lifecycle_status, "pending", "item2 must remain pending");
+});
+
+// ── FG-394: resume ────────────────────────────────────────────────────────────
+
+test("resumeCampaign: transitions paused->running, skips completed item1, dispatches item2, completes", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Simulate: item1 completed in a previous run, campaign was then paused
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete");
+  assert.equal(dispatchLog.length, 1, "only item2 dispatched (item1 was already complete)");
+  assert.equal(dispatchLog[0], "FG-102", "item2 (FG-102) dispatched by resume");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+test("resumeCampaign: refuses non-paused campaign with 'not_paused'", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCalled = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCalled++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  // Campaign is still 'planned' — not paused
+  const result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "not_paused");
+  assert.equal(dispatchCalled, 0, "dispatch must not be called for non-paused campaign");
+});
+
+test("resumeCampaign: refuses stale plan (same protection as startCampaign)", async () => {
+  const { campaign } = planCampaign({ kind: "epic", epicId: "FG-100" }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  // Add a new story to make the plan stale
+  writeTicket(projectDir, {
+    id: "FG-103",
+    type: "story",
+    status: "active",
+    title: "Story Three",
+    epic: "FG-100",
+    created: "2024-01-03",
+    body: "Added after approval",
+  });
+
+  const result = await resumeCampaign(campaign.id, { dispatch: async (_args: InvokeArgs) => ({ runId: "r", taskId: "t", status: "complete" as const }) });
+  assert.equal(result.stopReason, "stale_plan");
+});
+
+// ── FG-394: pause/resume/abandon legal and illegal transitions ─────────────────
+
+test("updateCampaignStatus pause: running->paused is legal", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  assert.doesNotThrow(() => updateCampaignStatus(campaign.id, "paused"));
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+});
+
+test("updateCampaignStatus pause: planned->paused is ILLEGAL — clean Error, not a crash", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  assert.throws(
+    () => updateCampaignStatus(campaign.id, "paused"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error, "must throw an Error instance");
+      assert.ok(err.message.includes("Illegal") || err.message.includes("transition"),
+        `error message must reference transition: ${err.message}`);
+      return true;
+    }
+  );
+  // Campaign must remain planned
+  assert.equal(getCampaign(campaign.id)!.status, "planned");
+});
+
+test("updateCampaignStatus abandon: planned/running/paused->abandoned is legal", () => {
+  // planned -> abandoned
+  const { campaign: c1 } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  assert.doesNotThrow(() => updateCampaignStatus(c1.id, "abandoned"));
+  assert.equal(getCampaign(c1.id)!.status, "abandoned");
+
+  // running -> abandoned
+  const { campaign: c2 } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(c2.id);
+  assert.doesNotThrow(() => updateCampaignStatus(c2.id, "abandoned"));
+  assert.equal(getCampaign(c2.id)!.status, "abandoned");
+
+  // paused -> abandoned
+  const { campaign: c3 } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(c3.id);
+  updateCampaignStatus(c3.id, "paused");
+  assert.doesNotThrow(() => updateCampaignStatus(c3.id, "abandoned"));
+  assert.equal(getCampaign(c3.id)!.status, "abandoned");
+});
+
+test("updateCampaignStatus abandon: complete->abandoned is ILLEGAL", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "complete");
+  assert.throws(() => updateCampaignStatus(campaign.id, "abandoned"), /Illegal|transition/i);
+  assert.equal(getCampaign(campaign.id)!.status, "complete");
+});
+
+test("updateCampaignStatus abandon: failed->abandoned is ILLEGAL", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "failed");
+  assert.throws(() => updateCampaignStatus(campaign.id, "abandoned"), /Illegal|transition/i);
+  assert.equal(getCampaign(campaign.id)!.status, "failed");
+});
+
+test("updateCampaignStatus abandon: abandoned->abandoned is ILLEGAL (double-abandon)", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  updateCampaignStatus(campaign.id, "abandoned");
+  assert.throws(() => updateCampaignStatus(campaign.id, "abandoned"), /Illegal|transition/i);
+});
+
+// ── FG-394: pause-during-failing-item (transition-safety failing path) ──────────
+
+test("pause-during-failing-item: driver returns 'paused', NOT 'item_failed', campaign stays paused, item2 not dispatched", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // External pause happens DURING item1's execution; item1 still fails
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "agent failed under pause" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  // Must return 'paused', NOT 'item_failed' — campaign was paused before the failed transition
+  assert.equal(result.stopReason, "paused", "driver must return paused, not item_failed, when campaign paused during failing item");
+  assert.equal(callCount, 1, "only item1 dispatched");
+
+  // Campaign must stay paused — the running->failed transition must NOT have been attempted
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no running->failed when already paused");
+
+  // item2 must never have been dispatched
+  const item2 = db.prepare("SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    run_id: string | null; lifecycle_status: string;
+  };
+  assert.equal(item2.run_id, null, "item2 must not have a run_id — never dispatched");
+  assert.equal(item2.lifecycle_status, "pending", "item2 must remain pending");
+});
+
+test("pause-during-failing-item: dispatch throws AND campaign paused → returns paused, not item_failed", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // Pause the campaign and then throw — tests the throw handler under paused state
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    throw new Error("dispatch threw under pause");
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  assert.equal(result.stopReason, "paused", "dispatch throw under paused → driver returns paused, not item_failed");
+  assert.equal(callCount, 1, "only item1 dispatched");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no running->failed on throw when paused");
+
+  const item2 = db.prepare("SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    run_id: string | null; lifecycle_status: string;
+  };
+  assert.equal(item2.run_id, null, "item2 not dispatched after throw under pause");
+  assert.equal(item2.lifecycle_status, "pending", "item2 remains pending");
+});
+
+// ── FG-394: pre-dispatch pause (preCheck fires, zero dispatches for item) ────────
+
+test("pre-dispatch pause: item2 precheck sees paused after item1 completes → item2 not dispatched", async () => {
+  // Tests the pre-dispatch check (line 95 in executor.ts): when a 3-item campaign has
+  // item1=complete (skipped), item2=pending, item3=pending, and campaign is paused during
+  // item2's dispatch (returning complete), item2's postCheck fires, returns 'paused',
+  // item3's preCheck NEVER fires (zero additional dispatches).
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Pre-mark item1 as complete — skipped by driver
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // item2 dispatch: pause campaign, return complete
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  assert.equal(result.stopReason, "paused");
+  assert.equal(callCount, 1, "only item2 dispatched — item1 skipped (complete), preCheck for item3 never fires");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign stays paused");
+});
+
+// ── FG-394: skip terminal 3-item (item1=complete, item2=failed, item3=pending) ────
+
+test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY item3 dispatched", async () => {
+  writeTicket(projectDir, {
+    id: "FG-103",
+    type: "story",
+    status: "active",
+    title: "Story Three",
+    epic: "FG-100",
+    created: "2024-01-03",
+    body: "Do the third thing",
+  });
+  writeTicket(projectDir, {
+    id: "FG-100",
+    type: "epic",
+    status: "active",
+    title: "Test Epic",
+    related: ["FG-101", "FG-102", "FG-103"],
+    body: "",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102", "FG-103"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Pre-mark item1=complete, item2=failed
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'failed', blocker_kind = 'campaign_system' WHERE id = ?").run(items[1]!.id);
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete");
+  assert.equal(dispatchLog.length, 1, "only one dispatch (item3)");
+  assert.equal(dispatchLog[0], "FG-103", "only item3 (FG-103) was dispatched");
+
+  // item1 and item2 must not have been re-processed
+  const dbItem1 = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
+  assert.equal(dbItem1.lifecycle_status, "complete", "item1 must remain complete (not re-run)");
+
+  const dbItem2 = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as { lifecycle_status: string };
+  assert.equal(dbItem2.lifecycle_status, "failed", "item2 must remain failed (not re-run)");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+// ── FG-394: edge — pause landing exactly after the LAST item ─────────────────────
+
+test("edge: pause after last item — campaign stays paused, subsequent resume transitions to complete", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // item1 dispatch: pause campaign, then return complete (simulates cooperative pause
+  // landing exactly after the last item's execution)
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  // Driver must return 'paused' — no illegal-transition throw (not complete)
+  assert.equal(result.stopReason, "paused", "driver must return paused when last item completes under pause");
+
+  // Campaign must be paused, not complete (the finalCheck was skipped because postCheck returned early)
+  const afterPause = getCampaign(campaign.id)!;
+  assert.equal(afterPause.status, "paused", "campaign must be paused with all items complete");
+
+  // item1 must be complete (the outcome was written before the pause-check returned)
+  const dbItem1 = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
+  assert.equal(dbItem1.lifecycle_status, "complete", "item1 must be complete even though campaign is paused");
+
+  // Subsequent resume: all items are complete → driveRemainingItems skips all → finalCheck → complete
+  let resumeDispatchCount = 0;
+  const resumeDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    resumeDispatchCount++;
+    return { runId: "run-resume", taskId: "task-resume", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch: resumeDispatch });
+  assert.equal(resumeResult.stopReason, "complete", "resume must reach complete (all items already done)");
+  assert.equal(resumeDispatchCount, 0, "resume must not dispatch anything (all items terminal)");
+
+  const afterResume = getCampaign(campaign.id)!;
+  assert.equal(afterResume.status, "complete", "campaign must transition to complete after resume");
+});
+
+// ── FG-394: illegal pause transitions ────────────────────────────────────────────
+
+test("updateCampaignStatus pause: paused->paused is ILLEGAL (double-pause)", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+  assert.throws(
+    () => updateCampaignStatus(campaign.id, "paused"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.ok(/Illegal|transition/i.test(err.message));
+      return true;
+    }
+  );
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "campaign must remain paused after illegal double-pause attempt");
+});
+
+test("updateCampaignStatus pause: complete->paused is ILLEGAL", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "complete");
+  assert.throws(() => updateCampaignStatus(campaign.id, "paused"), /Illegal|transition/i);
+  assert.equal(getCampaign(campaign.id)!.status, "complete");
+});
+
+test("updateCampaignStatus pause: failed->paused is ILLEGAL", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "failed");
+  assert.throws(() => updateCampaignStatus(campaign.id, "paused"), /Illegal|transition/i);
+  assert.equal(getCampaign(campaign.id)!.status, "failed");
+});
+
+test("updateCampaignStatus pause: abandoned->paused is ILLEGAL", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  updateCampaignStatus(campaign.id, "abandoned");
+  assert.throws(() => updateCampaignStatus(campaign.id, "paused"), /Illegal|transition/i);
+  assert.equal(getCampaign(campaign.id)!.status, "abandoned");
+});
+
+// ── FG-394: abandoned-during-dispatch ────────────────────────────────────────────
+
+test("abandoned-during-succeeding-item: driver returns 'abandoned', item2 not dispatched, campaign stays abandoned", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // External abandon during item1's execution
+    db.prepare("UPDATE campaigns SET status = 'abandoned' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  assert.equal(result.stopReason, "abandoned", "driver must return abandoned when campaign abandoned during item");
+  assert.equal(callCount, 1, "only item1 dispatched");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "abandoned", "campaign must stay abandoned");
+
+  const item2 = db.prepare("SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    run_id: string | null; lifecycle_status: string;
+  };
+  assert.equal(item2.run_id, null, "item2 not dispatched after abandon");
+  assert.equal(item2.lifecycle_status, "pending", "item2 remains pending");
 });

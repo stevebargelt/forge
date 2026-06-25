@@ -3,8 +3,9 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { planCampaign, resolvePlan } from "../../campaign/planner.js";
 import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
-import { listCampaignItems, getCampaign, approveCampaign } from "../../store/campaigns.js";
-import { startCampaign } from "../../campaign/executor.js";
+import { listCampaignItems, getCampaign, approveCampaign, updateCampaignStatus } from "../../store/campaigns.js";
+import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
+import { assembleCampaignShow, assembleCampaignReport } from "../../campaign/report.js";
 
 export function registerCampaign(program: Command): void {
   const campaign = program
@@ -240,5 +241,226 @@ export function registerCampaign(program: Command): void {
       if (refusalReasons.has(result.stopReason)) {
         process.exit(1);
       }
+    });
+
+  campaign
+    .command("pause <campaign-id>")
+    .description("Pause a running campaign (cooperative: the current item finishes first)")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, opts: { json?: boolean }) => {
+      const existing = getCampaign(campaignId);
+      if (!existing) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+      if (existing.status !== "running") {
+        process.stderr.write(
+          `Error: campaign is ${existing.status}, only a running campaign can be paused\n`
+        );
+        process.exit(1);
+      }
+      try {
+        updateCampaignStatus(campaignId, "paused");
+      } catch (err) {
+        process.stderr.write(
+          `Error: campaign is ${existing.status}, only a running campaign can be paused\n`
+        );
+        process.exit(1);
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({
+          campaignId,
+          status: "paused",
+          note: "pause takes effect between items; the current item finishes first",
+        }, null, 2));
+      } else {
+        console.log(`Campaign ${campaignId} paused.`);
+        console.log("Note: pause takes effect between items; the current item finishes first.");
+      }
+    });
+
+  campaign
+    .command("resume <campaign-id>")
+    .description("Resume a paused campaign — blocks until pause/failure/complete (like start)")
+    .option("--project <dir>", "verify the stored campaign projectDir matches this path (does not override it)")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, opts: { project?: string; json?: boolean }) => {
+      if (opts.project) {
+        const resolvedProject = resolve(opts.project);
+        const existing = getCampaign(campaignId);
+        if (!existing) {
+          process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+          process.exit(1);
+        }
+        if (existing.projectDir !== resolvedProject) {
+          process.stderr.write(
+            `Error: --project ${resolvedProject} does not match stored campaign projectDir ${existing.projectDir ?? "(none)"}\n` +
+            `Campaign always executes against its stored project directory.\n`
+          );
+          process.exit(1);
+        }
+      }
+
+      const result = await resumeCampaign(campaignId);
+
+      const refusalReasons = new Set([
+        "not_paused",
+        "no_project_dir",
+        "invalid_project_dir",
+        "not_approved",
+        "stale_plan",
+        "already_running",
+      ]);
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Stop reason: ${result.stopReason}`);
+        for (const rec of result.itemRecords) {
+          const outcomeStr = rec.outcome ? ` (outcome: ${rec.outcome})` : "";
+          console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
+        }
+
+        if (result.stopReason === "not_paused") {
+          console.error("campaign is not paused; only a paused campaign can be resumed");
+        } else if (result.stopReason === "no_project_dir") {
+          console.error("campaign predates projectDir capture; re-plan with forge campaign plan");
+        } else if (result.stopReason === "invalid_project_dir") {
+          console.error("campaign projectDir is missing or has no backlog");
+        } else if (result.stopReason === "not_approved") {
+          console.error("campaign has not been approved; run: forge campaign approve <id> --rationale <text>");
+        } else if (result.stopReason === "stale_plan") {
+          console.error("campaign plan is stale — backlog changed since approval; re-plan and re-approve");
+        } else if (result.stopReason === "already_running") {
+          console.error("campaign is already running (concurrent resume attempt refused)");
+        } else if (result.stopReason === "paused") {
+          console.log("campaign paused between items — run resume again to continue");
+        }
+      }
+
+      if (refusalReasons.has(result.stopReason)) {
+        process.exit(1);
+      }
+    });
+
+  campaign
+    .command("abandon <campaign-id>")
+    .description("Abandon a planned, running, or paused campaign (terminal — irreversible)")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, opts: { json?: boolean }) => {
+      const existing = getCampaign(campaignId);
+      if (!existing) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+      const terminalStatuses = new Set(["complete", "failed", "abandoned"]);
+      if (terminalStatuses.has(existing.status)) {
+        process.stderr.write(
+          `Error: campaign is already ${existing.status} — cannot abandon a terminal campaign\n`
+        );
+        process.exit(1);
+      }
+      try {
+        updateCampaignStatus(campaignId, "abandoned");
+      } catch (err) {
+        process.stderr.write(
+          `Error: campaign is ${existing.status} — cannot transition to abandoned\n`
+        );
+        process.exit(1);
+      }
+      if (opts.json) {
+        console.log(JSON.stringify({ campaignId, status: "abandoned" }, null, 2));
+      } else {
+        console.log(`Campaign ${campaignId} abandoned.`);
+      }
+    });
+
+  campaign
+    .command("show <campaign-id>")
+    .description("Show current state of a campaign (read-only)")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, opts: { json?: boolean }) => {
+      const result = assembleCampaignShow(campaignId);
+      if (!result) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`Campaign: ${result.campaignId}`);
+      console.log(`Status:   ${result.status}`);
+      console.log(`Mode:     ${result.mode}`);
+      console.log(`Project:  ${result.projectDir ?? "(none)"}`);
+      console.log(`Approved plan hash: ${result.approvedPlanHash ?? "(none)"}`);
+      if (result.currentPlanHash) {
+        const staleNote = result.planStale ? " (STALE — re-plan required)" : " (current)";
+        console.log(`Current plan hash:  ${result.currentPlanHash}${staleNote}`);
+      }
+      if (result.activeItem) {
+        console.log(`Active item: ${result.activeItem.ticketId} [run: ${result.activeItem.runId}]`);
+      }
+      console.log("Items:");
+      for (const item of result.items) {
+        const titleStr = item.title ? ` — ${item.title}` : "";
+        const outcomeStr = item.outcome ? ` outcome=${item.outcome}` : "";
+        const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
+        const runStr = item.runId ? ` [run: ${item.runId}]` : "";
+        console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${blockerStr}${runStr}`);
+        if (item.reason) console.log(`    reason: ${item.reason}`);
+        if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
+      }
+      console.log(`Next action: ${result.nextAction}`);
+    });
+
+  campaign
+    .command("report <campaign-id>")
+    .description("Generate a campaign checkpoint/final report (read-only)")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, opts: { json?: boolean }) => {
+      const result = assembleCampaignReport(campaignId);
+      if (!result) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      console.log(`Campaign Report: ${result.campaignId}`);
+      console.log(`Status:          ${result.status}`);
+      console.log(`Mode:            ${result.mode}`);
+      if (result.goal) console.log(`Goal:            ${result.goal}`);
+      console.log(`Verdict:         ${result.verdict}`);
+      console.log(`Safety:          ${result.safetyToContinue}`);
+      console.log(`Approved hash:   ${result.approvedPlanHash ?? "(none)"}`);
+      if (result.currentPlanHash) {
+        console.log(`Current hash:    ${result.currentPlanHash}`);
+      }
+      if (result.dirtyGitState) {
+        console.log(`Dirty git state:\n${result.dirtyGitState}`);
+      }
+      console.log("Items:");
+      for (const item of result.items) {
+        const titleStr = item.title ? ` — ${item.title}` : "";
+        const outcomeStr = item.outcome ? ` outcome=${item.outcome}` : "";
+        const commitStr = item.commit ? ` commit=${item.commit}` : "";
+        const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
+        const runStr = item.runId ? ` [run: ${item.runId}]` : "";
+        console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${commitStr}${blockerStr}${runStr}`);
+        if (item.reason) console.log(`    reason: ${item.reason}`);
+      }
+      console.log("Groupings:");
+      console.log(`  shipped: ${result.groupings.shipped.join(", ") || "(none)"}`);
+      console.log(`  blocked: ${result.groupings.blocked.join(", ") || "(none)"}`);
+      console.log(`  held:    ${result.groupings.held.join(", ") || "(none)"}`);
+      console.log(`  skipped: ${result.groupings.skipped.join(", ") || "(none)"}`);
+      console.log(`  failed:  ${result.groupings.failed.join(", ") || "(none)"}`);
+      console.log(`Next operator action: ${result.nextOperatorAction}`);
     });
 }

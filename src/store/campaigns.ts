@@ -250,11 +250,15 @@ export function approveCampaign(
   return (result.changes ?? 0) > 0;
 }
 
-export function tryTransitionCampaignToRunning(id: string): boolean {
+export function tryTransitionCampaign(id: string, from: CampaignStatus, to: CampaignStatus): boolean {
   const result = getDb()
-    .prepare(`UPDATE campaigns SET status = 'running', updated_at = ? WHERE id = ? AND status = 'planned'`)
-    .run(nowIso(), id);
+    .prepare(`UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ? AND status = ?`)
+    .run(to, nowIso(), id, from);
   return (result.changes ?? 0) > 0;
+}
+
+export function tryTransitionCampaignToRunning(id: string): boolean {
+  return tryTransitionCampaign(id, "planned", "running");
 }
 
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {

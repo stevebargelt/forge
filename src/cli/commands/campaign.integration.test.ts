@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -777,4 +777,737 @@ test("integ migration: partial approval schema (only approved_by present) gets m
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── FG-394: show command ───────────────────────────────────────────────────────
+
+test("integ campaign show: exits non-zero for unknown campaign", () => {
+  const result = runForge(["campaign", "show", "campaign-does-not-exist"]);
+  assert.notEqual(result.status, 0);
+  assert.ok(
+    (result.stderr + result.stdout).includes("not found"),
+    `expected 'not found'\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+});
+
+test("integ campaign show --json: outputs valid JSON with required fields", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const showResult = runForge(["campaign", "show", planOutput.campaignId, "--json"]);
+  assert.equal(showResult.status, 0, `show failed\nstdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+
+  const output = JSON.parse(showResult.stdout) as Record<string, unknown>;
+  assert.ok(typeof output["campaignId"] === "string", "campaignId must be present");
+  assert.ok(typeof output["status"] === "string", "status must be present");
+  assert.ok(typeof output["mode"] === "string", "mode must be present");
+  assert.ok("approvedPlanHash" in output, "approvedPlanHash must be present");
+  assert.ok("currentPlanHash" in output, "currentPlanHash must be present");
+  assert.ok("planStale" in output, "planStale must be present");
+  assert.ok("projectDir" in output, "projectDir must be present");
+  assert.ok("activeItem" in output, "activeItem must be present");
+  assert.ok(Array.isArray(output["items"]), "items must be an array");
+  assert.ok(typeof output["nextAction"] === "string", "nextAction must be present");
+  assert.equal(output["status"], "planned");
+  assert.equal(output["nextAction"], "approve");
+});
+
+test("integ campaign show: human output exits 0 and prints campaign status", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const showResult = runForge(["campaign", "show", planOutput.campaignId]);
+  assert.equal(showResult.status, 0, `show failed\nstdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+  assert.ok(
+    showResult.stdout.includes("planned") || showResult.stdout.includes("Status"),
+    `expected status info in output\nstdout: ${showResult.stdout}`
+  );
+});
+
+// ── FG-394: report command ─────────────────────────────────────────────────────
+
+test("integ campaign report: exits non-zero for unknown campaign", () => {
+  const result = runForge(["campaign", "report", "campaign-does-not-exist"]);
+  assert.notEqual(result.status, 0);
+  assert.ok(
+    (result.stderr + result.stdout).includes("not found"),
+    `expected 'not found'\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+});
+
+test("integ campaign report --json: outputs valid JSON with required fields + groupings", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId, "--json"]);
+  assert.equal(reportResult.status, 0, `report failed\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  const output = JSON.parse(reportResult.stdout) as Record<string, unknown>;
+  // Required top-level fields
+  assert.ok(typeof output["campaignId"] === "string");
+  assert.ok("sourceInput" in output);
+  assert.ok("goal" in output);
+  assert.ok(typeof output["mode"] === "string");
+  assert.ok(typeof output["status"] === "string");
+  assert.ok("approvedPlanHash" in output);
+  assert.ok("currentPlanHash" in output);
+  assert.ok(typeof output["safetyToContinue"] === "string");
+  assert.ok(typeof output["verdict"] === "string");
+  assert.ok(Array.isArray(output["items"]));
+  assert.ok(typeof output["groupings"] === "object" && output["groupings"] !== null);
+  assert.ok("dirtyGitState" in output);
+  assert.ok(Array.isArray(output["deferredScope"]));
+  assert.ok(Array.isArray(output["followUpTickets"]));
+  assert.ok(typeof output["nextOperatorAction"] === "string");
+
+  // Groupings must have all five keys
+  const groupings = output["groupings"] as Record<string, unknown>;
+  assert.ok(Array.isArray(groupings["shipped"]));
+  assert.ok(Array.isArray(groupings["blocked"]));
+  assert.ok(Array.isArray(groupings["held"]));
+  assert.ok(Array.isArray(groupings["skipped"]));
+  assert.ok(Array.isArray(groupings["failed"]));
+});
+
+// ── FG-394: pause command ──────────────────────────────────────────────────────
+
+test("integ campaign pause: exits non-zero for non-running campaign (planned)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing a planned campaign must exit non-zero");
+  const combined = (pauseResult.stderr + pauseResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("planned") || combined.includes("running") || combined.includes("only"),
+    `expected clear error message\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`
+  );
+});
+
+test("integ campaign pause --json: outputs JSON with paused status", () => {
+  // Plan and approve a campaign, then manually set it to running in the DB
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to running via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId, "--json"]);
+  assert.equal(pauseResult.status, 0, `pause failed\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`);
+
+  const output = JSON.parse(pauseResult.stdout) as Record<string, unknown>;
+  assert.equal(output["campaignId"], planOutput.campaignId);
+  assert.equal(output["status"], "paused");
+  assert.ok(
+    typeof output["note"] === "string" && (output["note"] as string).includes("item"),
+    "pause note must mention item (cooperative semantics)"
+  );
+
+  // Verify campaign is now paused in DB
+  const db2 = new Database(dbPath, { readonly: true });
+  const row = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(row.status, "paused");
+});
+
+// ── FG-394: abandon command ────────────────────────────────────────────────────
+
+test("integ campaign abandon: transitions planned->abandoned and exits 0", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId, "--json"]);
+  assert.equal(abandonResult.status, 0, `abandon failed\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`);
+
+  const output = JSON.parse(abandonResult.stdout) as Record<string, unknown>;
+  assert.equal(output["status"], "abandoned");
+
+  // Verify in DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath, { readonly: true });
+  const row = db.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db.close();
+  assert.equal(row.status, "abandoned");
+});
+
+test("integ campaign abandon: exits non-zero for already-terminal campaign", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to complete via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.notEqual(abandonResult.status, 0, "abandoning a complete campaign must exit non-zero");
+  const combined = (abandonResult.stderr + abandonResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("complete") || combined.includes("terminal"),
+    `expected terminal state message\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`
+  );
+});
+
+// ── FG-394: no project-tracked file writes ────────────────────────────────────
+
+test("integ: show/report/pause/abandon do not write any file to projectDir", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  function listFiles(dir: string): string[] {
+    const result: string[] = [];
+    function walk(d: string) {
+      try {
+        const entries = readdirSync(d, { withFileTypes: true });
+        for (const e of entries) {
+          const full = join(d, e.name);
+          if (e.isDirectory()) walk(full);
+          else result.push(full);
+        }
+      } catch { /* ignore */ }
+    }
+    walk(dir);
+    return result.sort();
+  }
+
+  const before = listFiles(projectDir);
+
+  // show
+  runForge(["campaign", "show", campaignId]);
+  runForge(["campaign", "show", campaignId, "--json"]);
+
+  // report
+  runForge(["campaign", "report", campaignId]);
+  runForge(["campaign", "report", campaignId, "--json"]);
+
+  // pause (will fail since campaign is planned, not running — still must not write files)
+  runForge(["campaign", "pause", campaignId]);
+
+  // abandon
+  runForge(["campaign", "abandon", campaignId]);
+
+  const after = listFiles(projectDir);
+
+  assert.deepEqual(after, before, "no commands must create or modify files in projectDir");
+});
+
+// ── FG-394: resume command ─────────────────────────────────────────────────────
+
+test("integ campaign resume: exits non-zero for non-paused campaign (planned)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, "resuming a planned campaign must exit non-zero");
+  const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("not_paused") || combined.includes("paused") || combined.includes("not paused"),
+    `expected paused-state message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+test("integ campaign resume: happy path — all items already complete, campaign reaches complete", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Approve campaign
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Set campaign to paused and mark item as complete (simulates prior run that got paused after last item)
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE campaign_id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId, "--json"]);
+  assert.equal(resumeResult.status, 0, `resume failed\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const output = JSON.parse(resumeResult.stdout) as Record<string, unknown>;
+  assert.equal(output["stopReason"], "complete", "resume must reach complete when all items are already terminal");
+
+  // Verify campaign is complete in DB
+  const db2 = new Database(dbPath, { readonly: true });
+  const row = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(row.status, "complete", "campaign must be complete in DB after resume");
+});
+
+test("integ campaign resume: exits non-zero for stale plan", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--epic", "FG-100",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Set to paused
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  // Add a story to make the plan stale
+  writeTicket(projectDir, {
+    id: "FG-999",
+    type: "story",
+    status: "active",
+    title: "Stale trigger",
+    epic: "FG-100",
+    created: "2024-01-10",
+    body: "Added after approval",
+  });
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, "resume of stale campaign must exit non-zero");
+  const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("stale") || combined.includes("backlog") || combined.includes("re-plan"),
+    `expected stale-plan message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+test("integ campaign resume --project: exits non-zero when --project differs from stored projectDir", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Set to paused
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const otherDir = mkdtempSync(join(tmpdir(), "forge-other-resume-"));
+  try {
+    const resumeResult = runForge([
+      "campaign", "resume", planOutput.campaignId,
+      "--project", otherDir,
+    ]);
+    assert.notEqual(resumeResult.status, 0, "resume with mismatched --project must exit non-zero");
+    const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+    assert.ok(
+      combined.includes("does not match") || combined.includes("mismatch") || combined.includes("stored"),
+      `expected mismatch error\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+    );
+  } finally {
+    rmSync(otherDir, { recursive: true, force: true });
+  }
+});
+
+test("integ campaign resume --project: passes guard when --project matches stored projectDir", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Set to paused and all items complete so resume completes without dispatching
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE campaign_id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge([
+    "campaign", "resume", planOutput.campaignId,
+    "--project", projectDir,
+  ]);
+  // Must NOT trigger mismatch guard — may succeed or fail for other reasons (stale plan etc.)
+  const combined = (resumeResult.stderr + resumeResult.stdout);
+  assert.ok(
+    !combined.includes("does not match") && !combined.includes("does not match stored"),
+    `matching --project must not trigger mismatch guard\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+// ── FG-394: abandon additional legal/illegal states ────────────────────────────
+
+test("integ campaign abandon: transitions running->abandoned and exits 0", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to running via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId, "--json"]);
+  assert.equal(abandonResult.status, 0, `abandon from running failed\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`);
+
+  const output = JSON.parse(abandonResult.stdout) as Record<string, unknown>;
+  assert.equal(output["status"], "abandoned");
+
+  const db2 = new Database(dbPath, { readonly: true });
+  const row = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(row.status, "abandoned");
+});
+
+test("integ campaign abandon: transitions paused->abandoned and exits 0", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to paused via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId, "--json"]);
+  assert.equal(abandonResult.status, 0, `abandon from paused failed\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`);
+
+  const output = JSON.parse(abandonResult.stdout) as Record<string, unknown>;
+  assert.equal(output["status"], "abandoned");
+
+  const db2 = new Database(dbPath, { readonly: true });
+  const row = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(row.status, "abandoned");
+});
+
+test("integ campaign abandon: exits non-zero for failed campaign (no stack trace)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to failed via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'failed' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.notEqual(abandonResult.status, 0, "abandoning a failed campaign must exit non-zero");
+  // Must produce a clean error message, not a stack trace
+  const combined = abandonResult.stderr + abandonResult.stdout;
+  assert.ok(
+    combined.includes("failed") || combined.includes("terminal"),
+    `expected terminal-state message\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`
+  );
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`);
+});
+
+test("integ campaign abandon: exits non-zero for already-abandoned campaign (no stack trace)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Abandon it first
+  const firstAbandon = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.equal(firstAbandon.status, 0);
+
+  // Try to abandon again
+  const secondAbandon = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.notEqual(secondAbandon.status, 0, "double-abandon must exit non-zero");
+  const combined = secondAbandon.stderr + secondAbandon.stdout;
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${secondAbandon.stdout}\nstderr: ${secondAbandon.stderr}`);
+  assert.ok(
+    combined.toLowerCase().includes("abandoned") || combined.toLowerCase().includes("terminal"),
+    `expected abandoned/terminal message\nstdout: ${secondAbandon.stdout}\nstderr: ${secondAbandon.stderr}`
+  );
+});
+
+// ── FG-394: pause illegal from non-running states ─────────────────────────────
+
+test("integ campaign pause: exits non-zero for paused campaign (no stack trace)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to paused via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing an already-paused campaign must exit non-zero");
+  const combined = pauseResult.stderr + pauseResult.stdout;
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`);
+  assert.ok(
+    combined.toLowerCase().includes("paused") || combined.toLowerCase().includes("running") || combined.toLowerCase().includes("only"),
+    `expected clear refusal message\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`
+  );
+});
+
+test("integ campaign pause: exits non-zero for complete campaign (no stack trace)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to complete via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing a complete campaign must exit non-zero");
+  const combined = pauseResult.stderr + pauseResult.stdout;
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`);
+});
+
+test("integ campaign pause: exits non-zero for failed campaign (no stack trace)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set to failed via DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'failed' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing a failed campaign must exit non-zero");
+  const combined = pauseResult.stderr + pauseResult.stdout;
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`);
+});
+
+// ── FG-394: no project-tracked writes — include resume ────────────────────────
+
+test("integ: resume does not write any file to projectDir", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Approve campaign
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0);
+
+  // Set to paused with item complete (so resume completes without dispatching anything)
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE campaign_id = ?").run(planOutput.campaignId);
+  db.close();
+
+  function listFiles(dir: string): string[] {
+    const result: string[] = [];
+    function walk(d: string) {
+      try {
+        const entries = readdirSync(d, { withFileTypes: true });
+        for (const e of entries) {
+          const full = join(d, e.name);
+          if (e.isDirectory()) walk(full);
+          else result.push(full);
+        }
+      } catch { /* ignore */ }
+    }
+    walk(dir);
+    return result.sort();
+  }
+
+  const before = listFiles(projectDir);
+
+  runForge(["campaign", "resume", planOutput.campaignId]);
+  runForge(["campaign", "resume", planOutput.campaignId, "--json"]);
+
+  const after = listFiles(projectDir);
+  assert.deepEqual(after, before, "resume must not create or modify any file in projectDir");
+});
+
+// ── FG-394: report two-campaign two-verdict integration ───────────────────────
+
+test("integ campaign report --json: two campaigns produce all_shipped and complete_with_issues verdicts", () => {
+  // Campaign 1: all items shipped
+  const plan1 = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(plan1.status, 0);
+  const out1 = JSON.parse(plan1.stdout) as { campaignId: string };
+
+  // Campaign 2: one shipped, one failed
+  const plan2 = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-102,FG-103",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(plan2.status, 0);
+  const out2 = JSON.parse(plan2.stdout) as { campaignId: string };
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+
+  // Set campaign 1 to complete with all items shipped
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(out1.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(out1.campaignId);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE campaign_id = ?").run(out1.campaignId);
+
+  // Set campaign 2 to complete with mixed outcomes
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(out2.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(out2.campaignId);
+  const items2 = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(out2.campaignId) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items2[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'failed', blocker_kind = 'campaign_system' WHERE id = ?").run(items2[1]!.id);
+  db.close();
+
+  const report1 = runForge(["campaign", "report", out1.campaignId, "--json"]);
+  assert.equal(report1.status, 0, `report1 failed\nstdout: ${report1.stdout}\nstderr: ${report1.stderr}`);
+  const r1 = JSON.parse(report1.stdout) as Record<string, unknown>;
+  assert.equal(r1["verdict"], "all_shipped", "campaign with all shipped must have verdict=all_shipped");
+
+  const report2 = runForge(["campaign", "report", out2.campaignId, "--json"]);
+  assert.equal(report2.status, 0, `report2 failed\nstdout: ${report2.stdout}\nstderr: ${report2.stderr}`);
+  const r2 = JSON.parse(report2.stdout) as Record<string, unknown>;
+  assert.equal(r2["verdict"], "complete_with_issues", "campaign with mixed outcomes must have verdict=complete_with_issues");
 });
