@@ -1,10 +1,12 @@
 ---
 id: FG-390
 type: story
-status: active
+status: done
 title: "Campaign data model: durable campaign and campaign-item state"
 epic: FG-370
 created: 2026-06-24
+closed: 2026-06-25
+closed_commit: b2ca27b
 ---
 
 ## Problem
