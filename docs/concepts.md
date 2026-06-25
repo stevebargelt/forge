@@ -200,11 +200,44 @@ If all preconditions pass, the campaign transitions to `running` via a compare-a
 
 - The item is marked `outcome: shipped` only if the backlog ticket is `status: done` with a `closed_commit`. A completed agent task alone is never treated as shipped.
 - If the ticket is done but lacks a `closed_commit`, the outcome is left unset.
-- If the task fails, the item is marked `lifecycle: failed, outcome: failed`, the campaign transitions to `failed`, and execution stops. There is no auto-continuation; see FG-393.
+- If the task fails, the runner classifies the failure as SHARED or LOCAL and applies the blocker/continue policy — see [Blockers and continuation](#blockers-and-continuation) below.
 
 **`--project` is verify-only.** If `--project <dir>` is provided, `start` checks that the resolved path equals the campaign's stored `projectDir` and refuses if they differ. It does **not** override the execution directory — the campaign always runs against the `projectDir` captured at plan time. Run `forge campaign start` from the same project root used for `forge campaign plan`, or pass `--project` pointing at that same root.
 
 Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the stored directory, then starts executing items sequentially.
+
+### Blockers and continuation
+
+When an item's engineer task fails, the runner classifies the failure as either SHARED (system-level) or LOCAL (agent-level) and applies a conservative hold/continue policy.
+
+**SHARED blockers hold the whole campaign.** System-level failures indicate a condition that would affect every remaining item. The campaign transitions to `paused` (resumable) and all remaining items stay `pending`. Fix the shared issue, then run `forge campaign resume`.
+
+SHARED blocker kinds: `auth`, `infrastructure`, `git_state`, `dependency`, `merge_conflict`, `campaign_system`. This covers auth missing/expired/injection-failed, container crash/orphan/idle timeout, malformed or missing result, git state, dependency install, merge conflict, and thrown dispatch errors (classified as `infrastructure`).
+
+**LOCAL blockers apply the dependency policy.** When the agent ran but could not complete the ticket (scope, acceptance, or its own tests), the failure is LOCAL. The runner records the blocked item (`lifecycleStatus: failed`, `outcome: blocked`, `blockerKind`, `continuePolicy`, `reason`, `requestedHumanAction`) and then evaluates each remaining `pending` item against the blocked item using the ticket's `related` metadata only — no deeper inference:
+
+| Relation | Sequential mode | Pilot mode |
+|---|---|---|
+| DEPENDENT — either ticket's `related` field lists the other | HELD | HELD |
+| UNKNOWN — blocked ticket has no `related` metadata | HELD | CONTINUES (visible risk) |
+| INDEPENDENT — blocked ticket has `related` metadata, but it does not include the later ticket | CONTINUES | CONTINUES |
+
+A held item keeps `lifecycleStatus: pending` with `outcome: held`, `continuePolicy: hold_dependents`, and an exact reason string. Held items are preserved, never silently skipped.
+
+Reason strings operators will see:
+- `"held because related to blocked item FG-xxx"`
+- `"held because dependency relation is unknown in sequential mode"`
+- `"continued because relation unknown and mode=pilot"`
+- `"continued because related metadata does not link to blocked item"`
+
+**Pilot mode** overrides the UNKNOWN relation only — pilot never continues past a KNOWN dependency and never overrides a SHARED blocker.
+
+**Campaign end-state after all items are processed:**
+- Any held items present → campaign transitions to `paused` (awaiting resume). `forge campaign show` and `forge campaign report` surface held items with their reasons and a `Next action` pointing to the blocking item.
+- No held items → campaign transitions to `complete`.
+- A completed campaign with any blocked, held, or skipped items reports `verdict: complete_with_issues`, never `all_shipped`.
+
+**Resume reconsiders held items.** When `forge campaign resume` re-enters the dispatch loop, it rebuilds the set of still-blocked LOCAL items and re-evaluates each held item against it. A held item whose blocker is resolved (the previously-failed ticket is no longer in the blocked set) is freed and dispatched. A held item whose blocker is still active stays held with a refreshed reason. `resume` does not retry the failed/blocked item itself.
 
 ### Crash recovery (MVP limitation)
 
@@ -245,9 +278,8 @@ Campaigns move through a fixed set of statuses. Control commands enforce legal t
 |---|---|---|
 | `planned` | `running` | `forge campaign start` |
 | `planned` | `abandoned` | `forge campaign abandon` |
-| `running` | `paused` | `forge campaign pause` (cooperative) |
-| `running` | `complete` | automatic (all items processed) |
-| `running` | `failed` | automatic (item failure) |
+| `running` | `paused` | `forge campaign pause` (cooperative), or automatic on SHARED blocker, or automatic when all items processed with held items remaining |
+| `running` | `complete` | automatic (all items processed, no held items) |
 | `running` | `abandoned` | `forge campaign abandon` |
 | `paused` | `running` | `forge campaign resume` |
 | `paused` | `abandoned` | `forge campaign abandon` |
@@ -263,7 +295,7 @@ Human output includes:
 - Campaign status, mode, `projectDir`, and approved plan hash
 - Staleness indicator: whether the current plan hash matches the approved hash
 - The active item, if any (ticket id and run id)
-- Per-item rows: ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, reason, and requested human action
+- Per-item rows: ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, reason, and requested human action. For blocked items `blockerKind`, `reason`, and `requestedHumanAction` are populated; for held items `outcome` is `held` with a `reason` explaining which blocker triggered the hold.
 - A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.). When any campaign item is in an in-flight state and the campaign is `paused` (or `running` with a non-running in-flight item), the line instead reads: `recovery needed: item <ticket-id> is <lifecycle-status> (run <run-id>) — inspect the run; reset the item to pending or mark it failed before resuming`.
 
 With `--json`, the output is a single stable object:
@@ -304,11 +336,11 @@ Use `forge campaign show` for a quick status check; for a full checkpoint report
 The report includes all `show` fields plus:
 
 - `goal` — free-text goal from campaign metadata, if set
-- `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but some items did not ship), or `not_complete`
+- `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but blocked, held, or skipped items exist — never `all_shipped` when any item did not ship), or `not_complete`
 - `safetyToContinue` — `can_start`, `can_resume`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `recovery_needed` is returned for a `paused` campaign that has at least one item in an in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed`
-- `nextOperatorAction` — narrative next step for the operator
+- `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a blocker, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but held items remain, prompts `resume — N held items will be reconsidered`.
 - Per-item: a `commit` field (the ticket's `closed_commit` for shipped items) and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, `reviewerResult`
 
 **Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, and `reviewerResult` are always `null` — the source systems (worktrees, done-audit, reviewer) are not yet built (FG-382/383/384). These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
@@ -337,7 +369,7 @@ With `--json`:
 
 ### Resume
 
-`forge campaign resume <id> [--project <dir>] [--json]` resumes a paused campaign and **blocks until the campaign reaches `paused`, `failed`, or `complete`** — exactly like `forge campaign start`.
+`forge campaign resume <id> [--project <dir>] [--json]` resumes a paused campaign and **blocks until the campaign reaches `paused` or `complete`** — exactly like `forge campaign start`.
 
 Before re-entering the dispatch loop, `resume` runs the same preconditions as `start`:
 
@@ -347,7 +379,7 @@ Before re-entering the dispatch loop, `resume` runs the same preconditions as `s
 4. No campaign item may be in an in-flight state (`running`, `awaiting_gate`, `awaiting_red`, `blocked_by_red`, or any other non-terminal/non-pending state). If any item is in flight, `resume` refuses with `recovery_needed` and leaves the campaign `paused` — the item must be reset manually (see crash recovery above) before resuming. This prevents silently completing a campaign over unfinished work.
 5. `paused → running` transition succeeds via a CAS guard, preventing two concurrent `resume` calls from double-dispatching.
 
-The driver then skips already-terminal items and dispatches only remaining `pending` items.
+The driver then skips already-terminal items, re-evaluates any held items against the current blocked set (freeing those whose blockers are resolved), and dispatches remaining `pending` items in order.
 
 `--project <dir>` is verify-only: the resolved path must equal the stored `projectDir` or `resume` refuses. It does not override the execution directory.
 
@@ -365,9 +397,8 @@ Resume stop reasons:
 | `stale_plan` | Plan changed since approval | Re-plan and re-approve |
 | `recovery_needed` | One or more campaign items are in a non-terminal, non-pending state — campaign stays `paused`, no dispatch occurs | Inspect the stuck item with `forge campaign show <id>` (the `Next action` line names the ticket, its lifecycle status, and `run_id`); reset the item to `pending` or mark it `failed` (manual DB operation — see crash recovery above), then resume |
 | `already_running` | Concurrent `resume` won the CAS | Wait or investigate |
-| `paused` | Driver stopped cooperatively | Run `forge campaign resume` again |
+| `paused` | Driver stopped cooperatively (SHARED blocker or held items remain) | Run `forge campaign resume` again after resolving any blocker |
 | `complete` | All items processed | None |
-| `item_failed` | An item failed — campaign is now `failed` | Investigate and re-plan or abandon |
 
 ### Abandon
 

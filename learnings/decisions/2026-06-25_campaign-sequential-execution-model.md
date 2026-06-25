@@ -67,11 +67,55 @@ Crash recovery is explicitly deferred to FG-394. A process death leaves the camp
 **Negative / Trade-offs:**
 
 - A process holding `forge campaign start` overnight has no automatic recovery path if it dies. The campaign stays stuck in `running`; manual SQLite recovery is required (no automated reset command yet). `forge campaign show` reveals which item was in flight.
-- Sequential throughput is bounded by engineer-agent wall-clock time per item. Multi-item campaigns on large epics will be slow. FG-393 addresses this.
+- Sequential throughput is bounded by engineer-agent wall-clock time per item. Multi-item campaigns on large epics will be slow. Parallel dispatch is still deferred.
 
 ---
 
 ## Revisit Conditions
 
-- **FG-393 ships continue/blocker policy or parallel execution.** Re-evaluate whether the CAS-only concurrency model still suffices.
+- **FG-393 shipped blocker/continue policy** (see Extension below). The CAS-only concurrency model still suffices — FG-393 did not introduce parallel dispatch.
+- **Parallel dispatch deferred.** When parallel execution ships, re-evaluate whether the single CAS guard on `planned → running` is sufficient or whether per-item dispatch guards are needed.
 - **FG-394 shipped** `show`, `report`, `pause`, `resume`, `abandon` (no `reset` command). The interim SQLite manual-recovery procedure in docs/concepts.md is retained — a crashed `running` campaign still requires manual DB intervention. Cooperative-pause, resume-as-active-driver, and atomic CAS terminal transitions are documented in docs/concepts.md (Campaign lifecycle / Pause / Resume sections); no new ADR was warranted because these are extensions of the same sequential-CAS execution model captured here.
+
+---
+
+## Extension: Blocker/continue policy (FG-393)
+
+**Date**: 2026-06-25  
+**Status**: Decided  
+**Decided by**: Steven
+
+### Context
+
+FORGE-DEC-024 deferred partial-failure semantics: "cross-item dependency management and partial-failure semantics are unsolved at this stage." FG-393 ships those semantics. The sequential-dispatch and CAS-concurrency decisions above remain unchanged.
+
+### Decision
+
+Item failures are classified as SHARED (system-level) or LOCAL (agent-level) and handled conservatively:
+
+**SHARED blockers hold the whole campaign.** Auth, infrastructure, container crash/orphan/idle timeout, malformed or missing result, git state, dependency install, merge conflict, and thrown dispatch errors are SHARED. The campaign transitions `running → paused` (resumable); remaining items stay `pending`. The operator fixes the shared condition and runs `forge campaign resume`.
+
+**LOCAL blockers apply the dependency policy** using ticket `related` metadata only — no deeper inference. The blocked item is recorded with `outcome: blocked` and the runner evaluates each remaining pending item:
+- Dependent (either ticket's `related` lists the other) → held in both sequential and pilot mode.
+- Unknown (blocked ticket has no `related`) → held in sequential; continues in pilot.
+- Independent (blocked ticket has `related`, but it does not include the later ticket) → continues in both modes.
+
+Held items preserve `lifecycleStatus: pending` with `outcome: held` and an exact reason string. They are never silently skipped.
+
+**Campaign end-state:** if any held items remain after all items are processed, the campaign transitions `running → paused` (awaiting resume). If none are held, it transitions `running → complete`. A complete campaign with blocked/held/skipped items reports `verdict: complete_with_issues`, never `all_shipped`.
+
+**Resume reconsiders held items:** `forge campaign resume` rebuilds the blocked set from still-failed LOCAL items, frees held items whose blockers are resolved, and re-dispatches them. Still-blocked dependents stay held. `resume` does not retry the failed/blocked item itself.
+
+**Pilot mode** overrides only the UNKNOWN relation — it never continues past a known dependency and never overrides a SHARED blocker.
+
+### Alternatives considered
+
+- *Per-item opt-in via campaign flags.* Rejected: conservative defaults protect the operator from silent cascading failures; pilot mode already provides the opt-in for the UNKNOWN case.
+- *Deep ticket-graph inference (transitive dependencies).* Rejected: the `related` field is the declared contract; inferring undeclared dependencies would be surprising and error-prone.
+- *Stop-on-any-failure (pre-FG-393 behavior).* Superseded: too conservative for LOCAL blockers with declared-independent later items; offered no value for operators who know the remaining work is independent.
+
+### Consequences
+
+- Operator visibility is improved: blocked/held items surface with exact reason strings and `requestedHumanAction` in `forge campaign show` and `forge campaign report`.
+- `running → failed` is no longer triggered by item failures. The `failed` campaign status remains a valid terminal state for pre-FG-393 campaigns in the database.
+- The `item_failed` stop reason is defined in `CampaignStopReason` for type completeness but is not returned by the current dispatch loop.
