@@ -7,6 +7,14 @@ import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign 
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport } from "../../campaign/report.js";
 
+function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
+  if (rec) {
+    const runPart = rec.runId ? ` (run ${rec.runId})` : "";
+    return `recovery needed: item ${rec.ticketId} is ${rec.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before retrying`;
+  }
+  return "recovery needed: campaign has an in-flight item that must be resolved before retrying";
+}
+
 export function registerCampaign(program: Command): void {
   const campaign = program
     .command("campaign")
@@ -202,15 +210,8 @@ export function registerCampaign(program: Command): void {
 
       const result = await startCampaign(campaignId);
 
-      const refusalReasons = new Set([
-        "not_planned",
-        "no_project_dir",
-        "invalid_project_dir",
-        "dry_run_not_executable",
-        "not_approved",
-        "stale_plan",
-        "already_running",
-      ]);
+      // Exit 0 only for clean completion states; all other stop reasons are failures
+      const startSuccessReasons = new Set(["complete", "paused"]);
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -221,7 +222,9 @@ export function registerCampaign(program: Command): void {
           console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
         }
 
-        if (result.stopReason === "dry_run_not_executable") {
+        if (result.stopReason === "recovery_needed") {
+          console.error(recoveryGuidanceMessage(result.itemRecords[0]));
+        } else if (result.stopReason === "dry_run_not_executable") {
           console.error("campaign is dry_run (plan-and-report only) — re-plan with --mode pilot or --mode sequential to execute");
         } else if (result.stopReason === "no_project_dir") {
           console.error("campaign predates projectDir capture; re-plan with forge campaign plan");
@@ -235,10 +238,14 @@ export function registerCampaign(program: Command): void {
           console.error("campaign is already running (concurrent start attempt refused)");
         } else if (result.stopReason === "not_planned") {
           console.error("campaign is not in planned state");
+        } else if (result.stopReason === "item_failed") {
+          console.error("campaign stopped — an item failed during execution; inspect the failed item and re-plan or abandon");
+        } else if (result.stopReason === "abandoned") {
+          console.error("campaign was abandoned during execution");
         }
       }
 
-      if (refusalReasons.has(result.stopReason)) {
+      if (!startSuccessReasons.has(result.stopReason)) {
         process.exit(1);
       }
     });
@@ -296,16 +303,8 @@ export function registerCampaign(program: Command): void {
 
       const result = await resumeCampaign(campaignId);
 
-      const refusalReasons = new Set([
-        "not_paused",
-        "no_project_dir",
-        "invalid_project_dir",
-        "not_approved",
-        "stale_plan",
-        "already_running",
-        "abandoned",
-        "recovery_needed",
-      ]);
+      // Exit 0 only for clean completion states; all other stop reasons are failures
+      const resumeSuccessReasons = new Set(["complete", "paused"]);
 
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -317,13 +316,7 @@ export function registerCampaign(program: Command): void {
         }
 
         if (result.stopReason === "recovery_needed") {
-          const rec = result.itemRecords[0];
-          if (rec) {
-            const runPart = rec.runId ? ` (run ${rec.runId})` : "";
-            console.error(`recovery needed: item ${rec.ticketId} is ${rec.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before resuming`);
-          } else {
-            console.error("recovery needed: campaign has an in-flight item that must be resolved before resuming");
-          }
+          console.error(recoveryGuidanceMessage(result.itemRecords[0]));
         } else if (result.stopReason === "not_paused") {
           console.error("campaign is not paused; only a paused campaign can be resumed");
         } else if (result.stopReason === "abandoned") {
@@ -338,12 +331,14 @@ export function registerCampaign(program: Command): void {
           console.error("campaign plan is stale — backlog changed since approval; re-plan and re-approve");
         } else if (result.stopReason === "already_running") {
           console.error("campaign is already running (concurrent resume attempt refused)");
+        } else if (result.stopReason === "item_failed") {
+          console.error("campaign stopped — an item failed during execution; inspect the failed item and re-plan or abandon");
         } else if (result.stopReason === "paused") {
           console.log("campaign paused between items — run resume again to continue");
         }
       }
 
-      if (refusalReasons.has(result.stopReason)) {
+      if (!resumeSuccessReasons.has(result.stopReason)) {
         process.exit(1);
       }
     });

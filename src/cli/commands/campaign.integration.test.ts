@@ -1610,3 +1610,199 @@ test("integ Fix3: abandon on complete campaign emits message naming ACTUAL statu
   );
   assert.ok(!combined.includes("at Object."), `must not expose a stack trace`);
 });
+
+// ── FG-394-fix2: start CLI recovery_needed ────────────────────────────────────
+
+test("integ campaign start: planned+approved campaign with in-flight item → exits non-zero, stderr has recovery guidance naming ticket+run_id", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Force item into 'running' state (simulates crashed driver)
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-inflight-integ-123' WHERE id = ?").run(items[0]!.id);
+  db.close();
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  assert.notEqual(startResult.status, 0, `start with in-flight item must exit non-zero\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`);
+
+  const combined = startResult.stderr + startResult.stdout;
+  assert.ok(
+    combined.includes("recovery needed"),
+    `output must mention 'recovery needed'\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-101"),
+    `output must name the in-flight ticket FG-101\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("run-inflight-integ-123"),
+    `output must include the run_id\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+// ── FG-394-fix2: resume CLI recovery_needed regression guard ──────────────────
+
+test("integ campaign resume: paused campaign with in-flight item → exits non-zero with recovery guidance (regression guard)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Set campaign to paused with an in-flight item
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-resume-789' WHERE id = ?").run(items[0]!.id);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, `resume with in-flight item must exit non-zero\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const combined = resumeResult.stderr + resumeResult.stdout;
+  assert.ok(
+    combined.includes("recovery needed"),
+    `output must mention 'recovery needed'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-101"),
+    `output must name the in-flight ticket\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("run-stuck-resume-789"),
+    `output must include the run_id\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+// ── FG-394-fix2: exhaustive exit-code guard — start ───────────────────────────
+
+test("integ exhaustive exit-code guard: start command exits non-zero for every pre-flight refusal", () => {
+  const dbPath = join(forgeHome, "forge.db");
+
+  // (a) not_approved: plan sequential, don't approve
+  const planA = runForge([
+    "campaign", "plan", "--tickets", "FG-101", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planA.status, 0);
+  const outA = JSON.parse(planA.stdout) as { campaignId: string };
+  const startA = runForge(["campaign", "start", outA.campaignId]);
+  assert.notEqual(startA.status, 0, `not_approved must exit non-zero\nstdout: ${startA.stdout}\nstderr: ${startA.stderr}`);
+
+  // (b) dry_run_not_executable: plan dry_run, approve it
+  const planB = runForge([
+    "campaign", "plan", "--tickets", "FG-101", "--mode", "dry_run", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planB.status, 0);
+  const outB = JSON.parse(planB.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", outB.campaignId, "--rationale", "ok"]);
+  const startB = runForge(["campaign", "start", outB.campaignId]);
+  assert.notEqual(startB.status, 0, `dry_run_not_executable must exit non-zero\nstdout: ${startB.stdout}\nstderr: ${startB.stderr}`);
+
+  // (c) not_planned: campaign in wrong state (complete)
+  const planC = runForge([
+    "campaign", "plan", "--tickets", "FG-101", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planC.status, 0);
+  const outC = JSON.parse(planC.stdout) as { campaignId: string };
+  const dbC = new Database(dbPath);
+  dbC.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(outC.campaignId);
+  dbC.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(outC.campaignId);
+  dbC.close();
+  const startC = runForge(["campaign", "start", outC.campaignId]);
+  assert.notEqual(startC.status, 0, `not_planned must exit non-zero\nstdout: ${startC.stdout}\nstderr: ${startC.stderr}`);
+
+  // (d) recovery_needed: plan, approve, force item to running
+  const planD = runForge([
+    "campaign", "plan", "--tickets", "FG-102", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planD.status, 0);
+  const outD = JSON.parse(planD.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", outD.campaignId, "--rationale", "ok"]);
+  const dbD = new Database(dbPath);
+  const itemsD = dbD.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(outD.campaignId) as { id: string }[];
+  dbD.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-exhaust-test' WHERE id = ?").run(itemsD[0]!.id);
+  dbD.close();
+  const startD = runForge(["campaign", "start", outD.campaignId]);
+  assert.notEqual(startD.status, 0, `recovery_needed must exit non-zero\nstdout: ${startD.stdout}\nstderr: ${startD.stderr}`);
+});
+
+// ── FG-394-fix2: exhaustive exit-code guard — resume ─────────────────────────
+
+test("integ exhaustive exit-code guard: resume command exits non-zero for every pre-flight refusal", () => {
+  const dbPath = join(forgeHome, "forge.db");
+
+  // (a) not_paused: campaign is planned (not paused)
+  const planA = runForge([
+    "campaign", "plan", "--tickets", "FG-101", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planA.status, 0);
+  const outA = JSON.parse(planA.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", outA.campaignId, "--rationale", "ok"]);
+  const resumeA = runForge(["campaign", "resume", outA.campaignId]);
+  assert.notEqual(resumeA.status, 0, `not_paused must exit non-zero\nstdout: ${resumeA.stdout}\nstderr: ${resumeA.stderr}`);
+
+  // (b) not_approved: paused but no approval
+  const planB = runForge([
+    "campaign", "plan", "--tickets", "FG-101", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planB.status, 0);
+  const outB = JSON.parse(planB.stdout) as { campaignId: string };
+  const dbB = new Database(dbPath);
+  dbB.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(outB.campaignId);
+  dbB.close();
+  const resumeB = runForge(["campaign", "resume", outB.campaignId]);
+  assert.notEqual(resumeB.status, 0, `not_approved (paused) must exit non-zero\nstdout: ${resumeB.stdout}\nstderr: ${resumeB.stderr}`);
+
+  // (c) abandoned: campaign abandoned (not paused)
+  const planC = runForge([
+    "campaign", "plan", "--tickets", "FG-102", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planC.status, 0);
+  const outC = JSON.parse(planC.stdout) as { campaignId: string };
+  const dbC = new Database(dbPath);
+  dbC.prepare("UPDATE campaigns SET status = 'abandoned' WHERE id = ?").run(outC.campaignId);
+  dbC.close();
+  const resumeC = runForge(["campaign", "resume", outC.campaignId]);
+  assert.notEqual(resumeC.status, 0, `not_paused (abandoned) must exit non-zero\nstdout: ${resumeC.stdout}\nstderr: ${resumeC.stderr}`);
+
+  // (d) recovery_needed: paused with in-flight item
+  const planD = runForge([
+    "campaign", "plan", "--tickets", "FG-103", "--mode", "sequential", "--project", projectDir, "--json",
+  ]);
+  assert.equal(planD.status, 0);
+  const outD = JSON.parse(planD.stdout) as { campaignId: string };
+  runForge(["campaign", "approve", outD.campaignId, "--rationale", "ok"]);
+  const dbD = new Database(dbPath);
+  dbD.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(outD.campaignId);
+  const itemsD = dbD.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(outD.campaignId) as { id: string }[];
+  dbD.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-exhaust-resume-test' WHERE id = ?").run(itemsD[0]!.id);
+  dbD.close();
+  const resumeD = runForge(["campaign", "resume", outD.campaignId]);
+  assert.notEqual(resumeD.status, 0, `recovery_needed must exit non-zero\nstdout: ${resumeD.stdout}\nstderr: ${resumeD.stderr}`);
+});

@@ -59,7 +59,7 @@ function findInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
 
 function recoveryNeededAction(item: CampaignItem): string {
   const runPart = item.runId ? ` (run ${item.runId})` : "";
-  return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before resuming`;
+  return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
 }
 
 function computeNextShowAction(
@@ -67,21 +67,23 @@ function computeNextShowAction(
   currentPlanHash: string | null,
   items: CampaignItem[]
 ): string {
+  if (campaign.status === "running") {
+    const inf = findInFlightItem(items);
+    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
+    return "running";
+  }
+
+  // Single guard for all non-running statuses: in-flight item needs recovery
+  const inf = findInFlightItem(items);
+  if (inf) return recoveryNeededAction(inf);
+
   switch (campaign.status) {
     case "planned":
       if (!campaign.approvedPlanHash) return "approve";
       if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale: re-plan";
       return "start";
-    case "running": {
-      const inf = findInFlightItem(items);
-      if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
-      return "running";
-    }
-    case "paused": {
-      const inf = findInFlightItem(items);
-      if (inf) return recoveryNeededAction(inf);
+    case "paused":
       return "resume";
-    }
     case "complete":
       return "complete — none";
     case "failed":
@@ -107,8 +109,9 @@ function computeSafety(campaign: Campaign, currentPlanHash: string | null, items
   if (campaign.status === "complete" || campaign.status === "failed" || campaign.status === "abandoned") {
     return "terminal";
   }
+  // Single guard for paused and planned: in-flight item needs recovery regardless of which
+  if (findInFlightItem(items)) return "recovery_needed";
   if (campaign.status === "paused") {
-    if (findInFlightItem(items)) return "recovery_needed";
     if (!campaign.approvedPlanHash) return "needs_approval";
     if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale";
     return "can_resume";
@@ -131,6 +134,16 @@ function computeNextOperatorAction(
   currentPlanHash: string | null,
   items: CampaignItem[]
 ): string {
+  if (campaign.status === "running") {
+    const inf = findInFlightItem(items);
+    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
+    return "campaign is running — monitor progress";
+  }
+
+  // Single guard for all non-running statuses: in-flight item needs recovery
+  const inf = findInFlightItem(items);
+  if (inf) return recoveryNeededAction(inf);
+
   switch (campaign.status) {
     case "planned":
       if (!campaign.approvedPlanHash) return "approve the campaign, then start";
@@ -138,13 +151,8 @@ function computeNextOperatorAction(
         return "re-plan the campaign (backlog has changed)";
       }
       return "start the campaign";
-    case "running":
-      return "campaign is running — monitor progress";
-    case "paused": {
-      const inf = findInFlightItem(items);
-      if (inf) return recoveryNeededAction(inf);
+    case "paused":
       return "resume the campaign when ready";
-    }
     case "complete":
       if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
       return "review blocked/failed/skipped items";

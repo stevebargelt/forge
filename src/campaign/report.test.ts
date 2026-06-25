@@ -601,6 +601,71 @@ test("assembleCampaignReport: paused campaign with in-flight item → nextOperat
   assert.notEqual(result.verdict, "all_shipped");
 });
 
+// ── FG-394-fix2: planned campaign with in-flight item ─────────────────────────
+
+test("assembleCampaignShow: planned+approved campaign WITH in-flight item → nextAction is recovery (NOT 'start')", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  // Campaign is still 'planned' — no CAS to running
+
+  // Simulate stuck in-flight item (e.g. prior driver died mid-item)
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-planned-show' WHERE id = ?").run(items[0]!.id);
+
+  const result = assembleCampaignShow(campaign.id)!;
+  assert.ok(result.nextAction.includes("recovery needed"), `nextAction must mention recovery, got: ${result.nextAction}`);
+  assert.ok(result.nextAction.includes("FG-101"), `nextAction must mention ticket id, got: ${result.nextAction}`);
+  assert.ok(result.nextAction.includes("run-stuck-planned-show"), `nextAction must include run_id, got: ${result.nextAction}`);
+  assert.notEqual(result.nextAction, "start", "nextAction must NOT be 'start' when in-flight item exists");
+  assert.notEqual(result.nextAction, "approve", "nextAction must NOT be 'approve' when in-flight item exists");
+});
+
+test("assembleCampaignReport: planned+approved campaign WITH in-flight item → safetyToContinue=recovery_needed, nextOperatorAction is recovery (NOT 'start the campaign')", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-planned-report' WHERE id = ?").run(items[0]!.id);
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "recovery_needed", "safetyToContinue must be recovery_needed for planned+in-flight");
+  assert.ok(result.nextOperatorAction.includes("recovery needed"), `nextOperatorAction must mention recovery, got: ${result.nextOperatorAction}`);
+  assert.ok(result.nextOperatorAction.includes("FG-101"), `nextOperatorAction must mention ticket id, got: ${result.nextOperatorAction}`);
+  assert.ok(result.nextOperatorAction.includes("run-stuck-planned-report"), `nextOperatorAction must include run_id, got: ${result.nextOperatorAction}`);
+  assert.notEqual(result.nextOperatorAction, "start the campaign", "nextOperatorAction must NOT be 'start the campaign'");
+  assert.notEqual(result.safetyToContinue, "can_start", "safetyToContinue must NOT be 'can_start'");
+});
+
+test("assembleCampaignShow: clean planned+approved campaign (no in-flight) → nextAction='start' unchanged", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  // No in-flight item
+
+  const result = assembleCampaignShow(campaign.id)!;
+  assert.equal(result.nextAction, "start", "clean planned+approved campaign must still show nextAction='start'");
+});
+
+test("assembleCampaignReport: clean planned+approved campaign (no in-flight) → safetyToContinue=can_start unchanged", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "can_start", "clean planned+approved campaign must still report safetyToContinue=can_start");
+  assert.equal(result.nextOperatorAction, "start the campaign", "clean planned+approved campaign must still say 'start the campaign'");
+});
+
 test("assembleCampaignReport: clean paused campaign (no in-flight) → safetyToContinue=can_resume unchanged", () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
