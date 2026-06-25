@@ -333,13 +333,17 @@ Use `forge campaign show` for a quick status check; for a full checkpoint report
 
 `forge campaign report <id> [--json]` generates a checkpoint or final campaign report. Read-only; does not mutate any state.
 
-The report includes all `show` fields plus:
+The report JSON has a distinct shape from `show`: it omits `planStale`, `projectDir`, and `activeItem`, and uses `nextOperatorAction` instead of `nextAction`. Fields emitted:
 
+- `campaignId`, `status`, `mode`, `approvedPlanHash`, `currentPlanHash` — same semantics as `show`
+- `sourceInput` — the raw source input recorded at plan time (`{kind, ticketIds}` / `{kind, epicId}` / `{kind, epicId, additions, exclusions}`)
 - `goal` — free-text goal from campaign metadata, if set
 - `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but blocked, held, or skipped items exist — never `all_shipped` when any item did not ship), or `not_complete`
-- `safetyToContinue` — `can_start`, `can_resume`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `recovery_needed` is returned for a `paused` campaign that has at least one item in an in-flight state; `forge campaign resume` will refuse until the item is reset manually.
+- `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means an unresolved blocker must be resolved before the campaign can resume. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `recovery_needed` is returned when a campaign has an item in a non-terminal, non-pending in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
-- `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed`
+- `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed` (items with `outcome: needs_refinement` are counted in `failed`)
+- `deferredScope` — always `[]` (reserved)
+- `followUpTickets` — always `[]` (reserved)
 - `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a blocker, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but held items remain, prompts `resume — N held items will be reconsidered`.
 - Per-item: a `commit` field (the ticket's `closed_commit` for shipped items) and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, `reviewerResult`
 
