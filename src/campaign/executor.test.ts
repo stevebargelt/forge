@@ -468,11 +468,12 @@ test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn i
   assert.equal(firstDispatchCount, 1, "first call must dispatch exactly once");
   assert.equal(secondDispatchCount, 0, "second call must never invoke its dispatch fn");
   assert.equal(result1.stopReason, "complete", "first call must complete");
-  // In single-process JS, the second call's sync section runs after the first call's CAS,
-  // so the campaign is already 'running' → not_planned (not 'already_running', which would
-  // require both calls to read 'planned' before either does the CAS — only possible multi-process).
-  assert.equal(result2.stopReason, "not_planned",
-    "second call blocked without dispatching (not_planned in single-process serialization)");
+  // In single-process JS, the second call's sync section runs after the first call's CAS and
+  // the first item is set to lifecycleStatus='running' before the first dispatch awaits.
+  // campaignBlocker checks in-flight items first (status-agnostic), so the second call
+  // returns 'recovery_needed' rather than 'not_planned'. No dispatch is ever invoked.
+  assert.equal(result2.stopReason, "recovery_needed",
+    "second call blocked without dispatching (recovery_needed: in-flight item found before status check)");
 });
 
 // ── crash-recovery durability ─────────────────────────────────────────────────

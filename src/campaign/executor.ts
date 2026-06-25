@@ -9,7 +9,7 @@ import {
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
-import type { CampaignItemLifecycleStatus, CampaignItemOutcome, Run } from "../types/index.js";
+import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, Run } from "../types/index.js";
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
@@ -48,14 +48,6 @@ function hasBacklog(dir: string): boolean {
   return existsSync(join(dir, "backlog"));
 }
 
-function findInFlightItem(campaignId: string): CampaignItemRecord | undefined {
-  const items = listCampaignItems(campaignId);
-  const item = items.find(
-    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
-  );
-  if (!item) return undefined;
-  return { itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus };
-}
 
 export function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
   const kind = sourceInput["kind"] as string;
@@ -71,6 +63,46 @@ export function sourceInputToPlannerInput(sourceInput: Record<string, unknown>):
     additions: sourceInput["additions"] as string[] | undefined,
     exclusions: sourceInput["exclusions"] as string[] | undefined,
   };
+}
+
+// Pure precondition evaluator — no DB writes. Returns the first blocking stop reason or null.
+// In-flight check is status-agnostic and always runs first.
+export function campaignBlocker(
+  campaign: Campaign,
+  items: CampaignItem[],
+  intent: "start" | "resume"
+): CampaignStopReason | null {
+  const inFlight = items.find(
+    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+  );
+  if (inFlight) return "recovery_needed";
+
+  if (intent === "start") {
+    if (campaign.status !== "planned") return "not_planned";
+    const dir = campaign.projectDir;
+    if (!dir) return "no_project_dir";
+    if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
+    if (campaign.mode !== "pilot" && campaign.mode !== "sequential") return "dry_run_not_executable";
+    if (!campaign.approvedPlanHash) return "not_approved";
+    const { planHash: currentHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
+      projectDir: dir,
+      mode: campaign.mode as PlanMode,
+    });
+    if (currentHash !== campaign.approvedPlanHash) return "stale_plan";
+    return null;
+  } else {
+    if (campaign.status !== "paused") return "not_paused";
+    const dir = campaign.projectDir;
+    if (!dir) return "no_project_dir";
+    if (!existsSync(dir) || !hasBacklog(dir)) return "invalid_project_dir";
+    if (!campaign.approvedPlanHash) return "not_approved";
+    const { planHash: currentHash } = resolvePlan(sourceInputToPlannerInput(campaign.sourceInput), {
+      projectDir: dir,
+      mode: campaign.mode as PlanMode,
+    });
+    if (currentHash !== campaign.approvedPlanHash) return "stale_plan";
+    return null;
+  }
 }
 
 // Shared item-dispatch loop used by startCampaign and resumeCampaign.
@@ -242,38 +274,25 @@ export async function startCampaign(
   const itemRecords: CampaignItemRecord[] = [];
 
   const campaign = getCampaign(id);
-  if (!campaign || campaign.status !== "planned") {
+  if (!campaign) {
     return { stopReason: "not_planned", itemRecords };
   }
 
-  const effectiveProjectDir = campaign.projectDir;
-  if (!effectiveProjectDir) {
-    return { stopReason: "no_project_dir", itemRecords };
-  }
-  if (!existsSync(effectiveProjectDir) || !hasBacklog(effectiveProjectDir)) {
-    return { stopReason: "invalid_project_dir", itemRecords };
-  }
-
-  if (campaign.mode !== "pilot" && campaign.mode !== "sequential") {
-    return { stopReason: "dry_run_not_executable", itemRecords };
-  }
-
-  if (!campaign.approvedPlanHash) {
-    return { stopReason: "not_approved", itemRecords };
-  }
-
-  const plannerInput = sourceInputToPlannerInput(campaign.sourceInput);
-  const { planHash: currentHash } = resolvePlan(plannerInput, {
-    projectDir: effectiveProjectDir,
-    mode: campaign.mode as PlanMode,
-  });
-  if (currentHash !== campaign.approvedPlanHash) {
-    return { stopReason: "stale_plan", itemRecords };
-  }
-
-  const inFlight = findInFlightItem(id);
-  if (inFlight) {
-    return { stopReason: "recovery_needed", itemRecords: [inFlight] };
+  const items = listCampaignItems(id);
+  const blocker = campaignBlocker(campaign, items, "start");
+  if (blocker !== null) {
+    if (blocker === "recovery_needed") {
+      const inf = items.find(
+        (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+      );
+      return {
+        stopReason: "recovery_needed",
+        itemRecords: inf
+          ? [{ itemId: inf.id, ticketId: inf.ticketId, runId: inf.runId, lifecycleStatus: inf.lifecycleStatus }]
+          : [],
+      };
+    }
+    return { stopReason: blocker, itemRecords };
   }
 
   if (!tryTransitionCampaignToRunning(id)) {
@@ -282,7 +301,7 @@ export async function startCampaign(
 
   return driveRemainingItems(id, {
     dispatch: opts.dispatch ?? invoke,
-    projectDir: effectiveProjectDir,
+    projectDir: campaign.projectDir!,
   });
 }
 
@@ -295,34 +314,25 @@ export async function resumeCampaign(
   const itemRecords: CampaignItemRecord[] = [];
 
   const campaign = getCampaign(id);
-  if (!campaign || campaign.status !== "paused") {
+  if (!campaign) {
     return { stopReason: "not_paused", itemRecords };
   }
 
-  const effectiveProjectDir = campaign.projectDir;
-  if (!effectiveProjectDir) {
-    return { stopReason: "no_project_dir", itemRecords };
-  }
-  if (!existsSync(effectiveProjectDir) || !hasBacklog(effectiveProjectDir)) {
-    return { stopReason: "invalid_project_dir", itemRecords };
-  }
-
-  if (!campaign.approvedPlanHash) {
-    return { stopReason: "not_approved", itemRecords };
-  }
-
-  const plannerInput = sourceInputToPlannerInput(campaign.sourceInput);
-  const { planHash: currentHash } = resolvePlan(plannerInput, {
-    projectDir: effectiveProjectDir,
-    mode: campaign.mode as PlanMode,
-  });
-  if (currentHash !== campaign.approvedPlanHash) {
-    return { stopReason: "stale_plan", itemRecords };
-  }
-
-  const inFlight = findInFlightItem(id);
-  if (inFlight) {
-    return { stopReason: "recovery_needed", itemRecords: [inFlight] };
+  const items = listCampaignItems(id);
+  const blocker = campaignBlocker(campaign, items, "resume");
+  if (blocker !== null) {
+    if (blocker === "recovery_needed") {
+      const inf = items.find(
+        (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+      );
+      return {
+        stopReason: "recovery_needed",
+        itemRecords: inf
+          ? [{ itemId: inf.id, ticketId: inf.ticketId, runId: inf.runId, lifecycleStatus: inf.lifecycleStatus }]
+          : [],
+      };
+    }
+    return { stopReason: blocker, itemRecords };
   }
 
   if (!tryTransitionCampaign(id, "paused", "running")) {
@@ -335,6 +345,6 @@ export async function resumeCampaign(
 
   return driveRemainingItems(id, {
     dispatch: opts.dispatch ?? invoke,
-    projectDir: effectiveProjectDir,
+    projectDir: campaign.projectDir!,
   });
 }

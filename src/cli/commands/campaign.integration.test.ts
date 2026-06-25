@@ -795,6 +795,7 @@ test("integ campaign show --json: outputs valid JSON with required fields", () =
     "campaign", "plan",
     "--tickets", "FG-101,FG-102",
     "--project", projectDir,
+    "--mode", "sequential",
     "--json",
   ]);
   assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);

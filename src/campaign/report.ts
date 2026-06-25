@@ -6,6 +6,7 @@ import { listTickets, readTicket } from "../backlog/structured.js";
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
+import { campaignBlocker } from "./executor.js";
 
 function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
   const kind = sourceInput["kind"] as string;
@@ -62,35 +63,23 @@ function recoveryNeededAction(item: CampaignItem): string {
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
 }
 
-function computeNextShowAction(
-  campaign: Campaign,
-  currentPlanHash: string | null,
-  items: CampaignItem[]
-): string {
+function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
     if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
     return "running";
   }
+  if (campaign.status === "complete") return "complete — none";
+  if (campaign.status === "failed") return "failed — investigate";
+  if (campaign.status === "abandoned") return "abandoned — none";
 
-  // Single guard for all non-running statuses: in-flight item needs recovery
-  const inf = findInFlightItem(items);
-  if (inf) return recoveryNeededAction(inf);
-
-  switch (campaign.status) {
-    case "planned":
-      if (!campaign.approvedPlanHash) return "approve";
-      if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale: re-plan";
-      return "start";
-    case "paused":
-      return "resume";
-    case "complete":
-      return "complete — none";
-    case "failed":
-      return "failed — investigate";
-    case "abandoned":
-      return "abandoned — none";
-  }
+  const intent = campaign.status === "planned" ? "start" : "resume";
+  const blocker = campaignBlocker(campaign, items, intent);
+  if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
+  if (blocker === "not_approved") return "approve";
+  if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
+  if (blocker === "stale_plan") return "stale: re-plan";
+  return intent === "start" ? "start" : "resume";
 }
 
 export type SafetyToContinue =
@@ -100,26 +89,30 @@ export type SafetyToContinue =
   | "running"
   | "needs_approval"
   | "stale"
-  | "recovery_needed";
+  | "recovery_needed"
+  | "dry_run_not_executable";
 
 export type CampaignVerdict = "all_shipped" | "complete_with_issues" | "not_complete";
 
-function computeSafety(campaign: Campaign, currentPlanHash: string | null, items: CampaignItem[]): SafetyToContinue {
-  if (campaign.status === "running") return "running";
+function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToContinue {
+  if (campaign.status === "running") {
+    const inf = findInFlightItem(items);
+    if (inf && inf.lifecycleStatus !== "running") return "recovery_needed";
+    return "running";
+  }
   if (campaign.status === "complete" || campaign.status === "failed" || campaign.status === "abandoned") {
     return "terminal";
   }
-  // Single guard for paused and planned: in-flight item needs recovery regardless of which
-  if (findInFlightItem(items)) return "recovery_needed";
-  if (campaign.status === "paused") {
-    if (!campaign.approvedPlanHash) return "needs_approval";
-    if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale";
-    return "can_resume";
-  }
-  // planned
-  if (!campaign.approvedPlanHash) return "needs_approval";
-  if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale";
-  return "can_start";
+
+  const intent = campaign.status === "planned" ? "start" : "resume";
+  const blocker = campaignBlocker(campaign, items, intent);
+  if (blocker === "recovery_needed") return "recovery_needed";
+  if (blocker === "not_approved") return "needs_approval";
+  if (blocker === "dry_run_not_executable") return "dry_run_not_executable";
+  if (blocker === "stale_plan") return "stale";
+  if (blocker === null) return intent === "start" ? "can_start" : "can_resume";
+  // not_planned / not_paused / no_project_dir / invalid_project_dir: treat as non-continuable
+  return "terminal";
 }
 
 function computeVerdict(campaign: Campaign, items: CampaignItem[]): CampaignVerdict {
@@ -131,7 +124,6 @@ function computeVerdict(campaign: Campaign, items: CampaignItem[]): CampaignVerd
 function computeNextOperatorAction(
   campaign: Campaign,
   verdict: CampaignVerdict,
-  currentPlanHash: string | null,
   items: CampaignItem[]
 ): string {
   if (campaign.status === "running") {
@@ -139,28 +131,21 @@ function computeNextOperatorAction(
     if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
     return "campaign is running — monitor progress";
   }
-
-  // Single guard for all non-running statuses: in-flight item needs recovery
-  const inf = findInFlightItem(items);
-  if (inf) return recoveryNeededAction(inf);
-
-  switch (campaign.status) {
-    case "planned":
-      if (!campaign.approvedPlanHash) return "approve the campaign, then start";
-      if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) {
-        return "re-plan the campaign (backlog has changed)";
-      }
-      return "start the campaign";
-    case "paused":
-      return "resume the campaign when ready";
-    case "complete":
-      if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
-      return "review blocked/failed/skipped items";
-    case "failed":
-      return "investigate failure and re-plan or abandon";
-    case "abandoned":
-      return "none — campaign abandoned";
+  if (campaign.status === "complete") {
+    if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
+    return "review blocked/failed/skipped items";
   }
+  if (campaign.status === "failed") return "investigate failure and re-plan or abandon";
+  if (campaign.status === "abandoned") return "none — campaign abandoned";
+
+  const intent = campaign.status === "planned" ? "start" : "resume";
+  const blocker = campaignBlocker(campaign, items, intent);
+  if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
+  if (blocker === "not_approved") return "approve the campaign, then start";
+  if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
+  if (blocker === "stale_plan") return "stale: re-plan and re-approve";
+  if (blocker === null) return intent === "start" ? "start the campaign" : "resume the campaign when ready";
+  return `campaign is ${campaign.status} — check status`;
 }
 
 export type ShowItemRow = {
@@ -225,7 +210,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     requestedHumanAction: i.requestedHumanAction ?? null,
   }));
 
-  const nextAction = computeNextShowAction(campaign, currentPlanHash, items);
+  const nextAction = computeNextShowAction(campaign, items);
 
   return {
     campaignId: campaign.id,
@@ -313,9 +298,9 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     }
   }
 
-  const safetyToContinue = computeSafety(campaign, currentPlanHash, items);
+  const safetyToContinue = computeSafety(campaign, items);
   const verdict = computeVerdict(campaign, items);
-  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, currentPlanHash, items);
+  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items);
 
   const goal =
     campaign.metadata?.["goal"] !== undefined

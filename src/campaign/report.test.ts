@@ -16,6 +16,7 @@ import {
 import { planCampaign } from "./planner.js";
 import { writeTicket } from "../backlog/structured.js";
 import { assembleCampaignShow, assembleCampaignReport } from "./report.js";
+import { campaignBlocker } from "./executor.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -679,4 +680,212 @@ test("assembleCampaignReport: clean paused campaign (no in-flight) → safetyToC
   const result = assembleCampaignReport(campaign.id)!;
   assert.equal(result.safetyToContinue, "can_resume", "clean paused campaign must still be can_resume");
   assert.equal(result.nextOperatorAction, "resume the campaign when ready");
+});
+
+// ── FG-394 CONSISTENCY INVARIANT: show/report/campaignBlocker must agree ──────
+
+// Helper: assert that show.nextAction, report.safetyToContinue, and report.nextOperatorAction
+// all agree with campaignBlocker — if the blocker is non-null, none advise the blocked action.
+function assertConsistency(
+  campaignId: string,
+  expectBlocker: string | null,
+  label: string
+) {
+  const show = assembleCampaignShow(campaignId)!;
+  const report = assembleCampaignReport(campaignId)!;
+
+  if (expectBlocker !== null) {
+    // None of the three should advise the blocked action
+    assert.notEqual(show.nextAction, "start", `${label}: show.nextAction must not say 'start' when blocked (${expectBlocker})`);
+    assert.notEqual(show.nextAction, "resume", `${label}: show.nextAction must not say 'resume' when blocked (${expectBlocker})`);
+    assert.notEqual(report.safetyToContinue, "can_start", `${label}: safetyToContinue must not be can_start when blocked (${expectBlocker})`);
+    assert.notEqual(report.safetyToContinue, "can_resume", `${label}: safetyToContinue must not be can_resume when blocked (${expectBlocker})`);
+    assert.notEqual(report.nextOperatorAction, "start the campaign", `${label}: nextOperatorAction must not say start when blocked (${expectBlocker})`);
+    assert.notEqual(report.nextOperatorAction, "resume the campaign when ready", `${label}: nextOperatorAction must not say resume when blocked (${expectBlocker})`);
+  }
+}
+
+// ── Known instance 1 (HIGH): planned + in-flight → recovery, NOT start ──────
+
+test("CONSISTENCY: planned+approved campaign with in-flight item → recovery (not start)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-consistency-1' WHERE id = ?").run(items[0]!.id);
+
+  const blockerResult = campaignBlocker(
+    getCampaign(campaign.id)!,
+    db.prepare("SELECT id, ticket_id as ticketId, lifecycle_status as lifecycleStatus, run_id as runId FROM campaign_items WHERE campaign_id = ?").all(campaign.id) as Parameters<typeof campaignBlocker>[1],
+    "start"
+  );
+  assert.equal(blockerResult, "recovery_needed", "campaignBlocker must return recovery_needed");
+
+  assertConsistency(campaign.id, "recovery_needed", "planned+in-flight");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("recovery needed"), `show.nextAction must mention recovery, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("FG-101"), `show.nextAction must name ticket, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "recovery_needed");
+  assert.ok(report.nextOperatorAction.includes("recovery needed"), `nextOperatorAction must mention recovery, got: ${report.nextOperatorAction}`);
+});
+
+// ── Known instance 2 (HIGH): paused + stale-plan → stale message, NOT resume ──
+
+test("CONSISTENCY: paused+approved+stale campaign → stale message, NOT resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "epic", epicId: "FG-100" },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  // Make plan stale
+  writeTicket(projectDir, {
+    id: "FG-103",
+    type: "story",
+    status: "active",
+    title: "Stale trigger",
+    epic: "FG-100",
+    created: "2024-01-03",
+    body: "Added post-approval",
+  });
+
+  assertConsistency(campaign.id, "stale_plan", "paused+stale");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("stale"), `show.nextAction must mention stale, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "stale");
+  assert.ok(
+    report.nextOperatorAction.includes("stale") || report.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must mention stale/re-plan, got: ${report.nextOperatorAction}`
+  );
+});
+
+// ── Known instance 3 (MEDIUM): planned + dry_run + approved → dry_run message, NOT start ──
+
+test("CONSISTENCY: planned+dry_run+approved → dry_run re-plan message, NOT start/can_start", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "dry_run" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  assertConsistency(campaign.id, "dry_run_not_executable", "planned+dry_run+approved");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(
+    show.nextAction.includes("dry_run") || show.nextAction.includes("re-plan"),
+    `show.nextAction must mention dry_run/re-plan, got: ${show.nextAction}`
+  );
+  assert.notEqual(show.nextAction, "start");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "dry_run_not_executable");
+  assert.notEqual(report.nextOperatorAction, "start the campaign");
+  assert.ok(
+    report.nextOperatorAction.includes("dry_run") || report.nextOperatorAction.includes("re-plan"),
+    `nextOperatorAction must mention dry_run/re-plan, got: ${report.nextOperatorAction}`
+  );
+});
+
+// ── Known instance 4 (MEDIUM): running + anomalous in-flight → safety AND actions both recovery ──
+
+test("CONSISTENCY: running campaign with anomalous in-flight item (awaiting_gate) → safety AND actions both recovery", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+
+  // Force item into anomalous state (awaiting_gate) while campaign is running
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = 'run-anomalous-123' WHERE id = ?").run(items[0]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(
+    show.nextAction.includes("recovery needed"),
+    `show.nextAction must mention recovery for anomalous item, got: ${show.nextAction}`
+  );
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(
+    report.safetyToContinue,
+    "recovery_needed",
+    "safetyToContinue must be recovery_needed for anomalous in-flight item (not 'running')"
+  );
+  assert.ok(
+    report.nextOperatorAction.includes("recovery needed"),
+    `nextOperatorAction must mention recovery for anomalous item, got: ${report.nextOperatorAction}`
+  );
+  // Verify they AGREE — both say recovery, not a disagreement like safety=running, action=recovery
+  assert.notEqual(report.safetyToContinue, "running", "safety must NOT say 'running' when action says recovery");
+});
+
+// ── Matrix: general consistency across status × condition ────────────────────
+
+test("CONSISTENCY matrix: planned+unapproved → all three agree on needs_approval", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  // Not approved
+
+  assertConsistency(campaign.id, "not_approved", "planned+unapproved");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.nextAction, "approve");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "needs_approval");
+});
+
+test("CONSISTENCY matrix: paused+unapproved → all three agree on needs_approval, NOT resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  // Do NOT approve; manually set to paused (bypassing approval)
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  assertConsistency(campaign.id, "not_approved", "paused+unapproved");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.notEqual(show.nextAction, "resume", "show must NOT say resume for unapproved paused campaign");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "needs_approval");
+  assert.notEqual(report.nextOperatorAction, "resume the campaign when ready");
+});
+
+test("CONSISTENCY matrix: paused+in-flight → recovery (not resume)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-paused-matrix' WHERE id = ?").run(items[0]!.id);
+
+  assertConsistency(campaign.id, "recovery_needed", "paused+in-flight");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("recovery needed"));
+  assert.notEqual(show.nextAction, "resume");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.safetyToContinue, "recovery_needed");
+  assert.notEqual(report.nextOperatorAction, "resume the campaign when ready");
 });
