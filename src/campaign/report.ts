@@ -145,7 +145,20 @@ function computeNextOperatorAction(
 
   const intent = campaign.status === "planned" ? "start" : "resume";
   const blocker = campaignBlocker(campaign, items, intent);
-  if (blocker === null) return intent === "start" ? "start the campaign" : "resume the campaign when ready";
+  if (blocker === null) {
+    if (intent === "start") return "start the campaign";
+    // Paused with active blocker: surface the blocking item to guide the operator.
+    const blockedItem = items.find((i) => i.lifecycleStatus === "failed" && i.outcome === "blocked");
+    if (blockedItem) {
+      return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+    }
+    // Blockers resolved but held items remain: resume will reconsider them.
+    const heldCount = items.filter((i) => i.outcome === "held").length;
+    if (heldCount > 0) {
+      return `resume — ${heldCount} held item${heldCount === 1 ? "" : "s"} will be reconsidered`;
+    }
+    return "resume the campaign when ready";
+  }
   if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve the campaign, then start";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";

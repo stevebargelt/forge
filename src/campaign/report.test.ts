@@ -682,6 +682,46 @@ test("assembleCampaignReport: clean paused campaign (no in-flight) → safetyToC
   assert.equal(result.nextOperatorAction, "resume the campaign when ready");
 });
 
+// ── Fix 4: next-action when blockers resolved but held items remain ────────────
+
+test("Fix 4: paused campaign — blocker resolved, held items remain → nextOperatorAction mentions held items", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
+  // Simulate: FG-101 was blocked (LOCAL) and FG-102 was held; operator then resolved FG-101
+  const items = db.prepare(
+    "SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string; ticket_id: string }[];
+
+  // FG-101: resolved (operator marked complete — no longer outcome=blocked)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // FG-102: still held (pending but outcome=held)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', continue_policy = 'hold_dependents' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "can_resume", "campaign is can_resume — blocker resolved");
+  assert.ok(
+    result.nextOperatorAction.includes("held") || result.nextOperatorAction.includes("reconsider"),
+    `nextOperatorAction must mention held items; got: ${result.nextOperatorAction}`
+  );
+  assert.notEqual(
+    result.nextOperatorAction,
+    "resume the campaign when ready",
+    "nextOperatorAction must not be bare 'resume' when held items await reconsidering"
+  );
+});
+
 // ── FG-394 CONSISTENCY INVARIANT: show/report/campaignBlocker must agree ──────
 
 // Helper: assert that show.nextAction, report.safetyToContinue, and report.nextOperatorAction

@@ -9,12 +9,20 @@ import {
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
-import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, Run } from "../types/index.js";
+import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
-import { insertRun } from "../store/runs.js";
+import type { StructuredTicket } from "../backlog/structured.js";
+import { insertRun, updateRunStatus } from "../store/runs.js";
 import { newRunId, nowIso } from "../util/ids.js";
+import { failureKindForTask } from "../v2/failure-kind.js";
+import {
+  classifyFailureKind,
+  isSharedBlocker,
+  relationToBlocked,
+  evaluateContinuePolicy,
+} from "./policy.js";
 
 export type CampaignStopReason =
   | "not_planned"
@@ -37,11 +45,6 @@ export type CampaignItemRecord = {
   runId?: string;
   lifecycleStatus: CampaignItemLifecycleStatus;
   outcome?: CampaignItemOutcome;
-};
-
-export type CampaignRunResult = {
-  stopReason: CampaignStopReason;
-  itemRecords: CampaignItemRecord[];
 };
 
 function hasBacklog(dir: string): boolean {
@@ -105,6 +108,69 @@ export function campaignBlocker(
   }
 }
 
+type BlockedItemEntry = {
+  id: string;
+  ticket: StructuredTicket;
+  blockerKind: BlockerKind;
+};
+
+// Evaluate whether a later item should be held given the current set of blocked items.
+// Returns { hold: true, reason, holderId } or { hold: false }.
+function evaluateForHold(
+  laterTicket: StructuredTicket | undefined,
+  blockedItems: BlockedItemEntry[],
+  mode: string
+): { hold: true; reason: string; holderId: string } | { hold: false } {
+  if (!blockedItems.length) return { hold: false };
+
+  for (const blocker of blockedItems) {
+    const rel = laterTicket
+      ? relationToBlocked({ id: blocker.id, related: blocker.ticket.related }, { id: laterTicket.id, related: laterTicket.related })
+      : "unknown";
+    const policy = evaluateContinuePolicy(blocker.blockerKind, rel, mode);
+
+    if (policy === "hold_dependents" || policy === "hold_campaign") {
+      const reason =
+        rel === "dependent"
+          ? `held because related to blocked item ${blocker.id}`
+          : `held because dependency relation is unknown in sequential mode`;
+      return { hold: true, reason, holderId: blocker.id };
+    }
+  }
+  return { hold: false };
+}
+
+// Reason string for a continued (not held) item, for informational recording.
+function continueReason(
+  laterTicket: StructuredTicket | undefined,
+  blockedItems: BlockedItemEntry[],
+  mode: string
+): string {
+  if (blockedItems.length === 1) {
+    const blockedItem = blockedItems[0]!;
+    const rel = laterTicket
+      ? relationToBlocked({ id: blockedItem.id, related: blockedItem.ticket.related }, { id: laterTicket.id, related: laterTicket.related })
+      : "unknown";
+    if (rel === "unknown" && mode === "pilot") return "continued because relation unknown and mode=pilot";
+    return "continued because related metadata does not link to blocked item";
+  }
+  // Multiple blockers: don't falsely name only the last one — check if pilot+unknown applies
+  if (mode === "pilot") {
+    for (const b of blockedItems) {
+      const rel = laterTicket
+        ? relationToBlocked({ id: b.id, related: b.ticket.related }, { id: laterTicket.id, related: laterTicket.related })
+        : "unknown";
+      if (rel === "unknown") return "continued because relation unknown and mode=pilot";
+    }
+  }
+  return "continued because item is independent of all blocked items";
+}
+
+export type CampaignRunResult = {
+  stopReason: CampaignStopReason;
+  itemRecords: CampaignItemRecord[];
+};
+
 // Shared item-dispatch loop used by startCampaign and resumeCampaign.
 // Requires the campaign to already be in 'running' state.
 // Skips terminal items (complete/failed); dispatches only pending items.
@@ -115,6 +181,7 @@ async function driveRemainingItems(
   opts: {
     dispatch: (args: InvokeArgs) => Promise<InvokeResult>;
     projectDir: string;
+    mode: string;
   }
 ): Promise<CampaignRunResult> {
   const itemRecords: CampaignItemRecord[] = [];
@@ -122,9 +189,25 @@ async function driveRemainingItems(
   const ticketCache = listTickets(opts.projectDir);
   const ticketMap = new Map(ticketCache.map((t) => [t.id, t]));
 
+  // Track LOCAL blocked items for dependency-based hold evaluation.
+  // Rebuilt from terminal failed+blocked items at the start of the loop (for resume),
+  // then extended as new failures occur.
+  const blockedItems: BlockedItemEntry[] = [];
+  let anyHeld = false;
+
   for (const item of items) {
     // Safe-terminal: skip idempotently on re-drive
     if (item.lifecycleStatus === "complete" || item.lifecycleStatus === "failed") {
+      // Rebuild blockedItems from previously-failed LOCAL blocked items for resume re-evaluation.
+      if (
+        item.lifecycleStatus === "failed" &&
+        item.outcome === "blocked" &&
+        item.blockerKind &&
+        !isSharedBlocker(item.blockerKind)
+      ) {
+        const t = ticketMap.get(item.ticketId);
+        if (t) blockedItems.push({ id: item.ticketId, ticket: t, blockerKind: item.blockerKind });
+      }
       continue;
     }
     // In-flight/indeterminate: stop without dispatch or campaign status transition
@@ -136,6 +219,38 @@ async function driveRemainingItems(
         lifecycleStatus: item.lifecycleStatus,
       });
       return { stopReason: "recovery_needed", itemRecords };
+    }
+
+    const laterTicket = ticketMap.get(item.ticketId);
+
+    // Re-evaluate HELD items (resume: items already marked held from a prior run).
+    if (item.outcome === "held") {
+      const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
+      if (holdResult.hold) {
+        // Still held — refresh reason
+        updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
+        anyHeld = true;
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+        continue;
+      }
+      // No longer held — clear and fall through to dispatch
+      updateCampaignItem(item.id, { outcome: undefined, continuePolicy: undefined, reason: undefined, requestedHumanAction: undefined });
+    }
+
+    // Check if this pending item should be newly HELD based on current blockedItems.
+    if (blockedItems.length > 0) {
+      const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
+      if (holdResult.hold) {
+        updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
+        anyHeld = true;
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+        continue;
+      }
+      // continue_allowed — record reason before dispatch (informational)
+      if (laterTicket) {
+        const reason = continueReason(laterTicket, blockedItems, opts.mode);
+        updateCampaignItem(item.id, { reason });
+      }
     }
 
     // Cooperative pause: check campaign status before each dispatch
@@ -176,21 +291,26 @@ async function driveRemainingItems(
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      // Throws are infrastructure-level failures (SHARED).
+      const blockerKind: BlockerKind = "infrastructure";
+      updateRunStatus(runId, "abandoned");
       updateCampaignItem(item.id, {
         lifecycleStatus: "failed",
-        outcome: "failed",
-        blockerKind: "campaign_system",
+        outcome: "blocked",
+        blockerKind,
         reason,
+        requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
+        continuePolicy: "hold_campaign",
       });
       itemRecords.push({
         itemId: item.id,
         ticketId: item.ticketId,
         runId,
         lifecycleStatus: "failed",
-        outcome: "failed",
+        outcome: "blocked",
       });
-      if (tryTransitionCampaign(campaignId, "running", "failed")) {
-        return { stopReason: "item_failed", itemRecords };
+      if (tryTransitionCampaign(campaignId, "running", "paused")) {
+        return { stopReason: "paused", itemRecords };
       }
       const throwPostFail = getCampaign(campaignId);
       return {
@@ -229,32 +349,76 @@ async function driveRemainingItems(
         };
       }
     } else {
+      // Dispatch returned failed — classify and apply FG-393 policy.
       const reason = dispatchResult.error ?? "invoke failed";
+      const failureKind = failureKindForTask(dispatchResult.taskId);
+      const blockerKind = classifyFailureKind(failureKind);
+      const shared = isSharedBlocker(blockerKind);
+
       updateCampaignItem(item.id, {
         lifecycleStatus: "failed",
-        outcome: "failed",
-        blockerKind: "campaign_system",
+        outcome: "blocked",
+        blockerKind,
         reason,
+        requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
+        continuePolicy: shared ? "hold_campaign" : "hold_dependents",
       });
       itemRecords.push({
         itemId: item.id,
         ticketId: item.ticketId,
         runId,
         lifecycleStatus: "failed",
-        outcome: "failed",
+        outcome: "blocked",
       });
-      if (tryTransitionCampaign(campaignId, "running", "failed")) {
-        return { stopReason: "item_failed", itemRecords };
+
+      if (shared) {
+        // Hold the whole campaign — remaining pending items stay pending.
+        if (tryTransitionCampaign(campaignId, "running", "paused")) {
+          return { stopReason: "paused", itemRecords };
+        }
+        const resultPostFail = getCampaign(campaignId);
+        return {
+          stopReason: resultPostFail?.status === "abandoned" ? "abandoned" : "paused",
+          itemRecords,
+        };
       }
-      const resultPostFail = getCampaign(campaignId);
-      return {
-        stopReason: resultPostFail?.status === "abandoned" ? "abandoned" : "paused",
-        itemRecords,
-      };
+
+      // LOCAL blocker — continue. Add to blockedItems so subsequent items can be evaluated.
+      if (laterTicket) {
+        blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind });
+      } else {
+        // Ticket not in ticketMap (deleted?). Use a synthetic entry with no related field
+        // so downstream items get "unknown" relation and are conservatively held.
+        blockedItems.push({
+          id: item.ticketId,
+          ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
+          blockerKind,
+        });
+      }
+
+      // Cooperative pause check after failure: if already paused, stop the loop.
+      if (!postCheck || postCheck.status !== "running") {
+        return {
+          stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
+          itemRecords,
+        };
+      }
     }
   }
 
-  // All pending items processed — atomically transition to complete if still running
+  // All items processed. If any held items remain, campaign → paused (awaiting resume).
+  // If no held items, campaign → complete (may be complete_with_issues per report verdict).
+  if (anyHeld) {
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      return { stopReason: "paused", itemRecords };
+    }
+    const finalCheck = getCampaign(campaignId);
+    return {
+      stopReason: finalCheck?.status === "abandoned" ? "abandoned" : "paused",
+      itemRecords,
+    };
+  }
+
   if (tryTransitionCampaign(campaignId, "running", "complete")) {
     return { stopReason: "complete", itemRecords };
   }
@@ -302,6 +466,7 @@ export async function startCampaign(
   return driveRemainingItems(id, {
     dispatch: opts.dispatch ?? invoke,
     projectDir: campaign.projectDir!,
+    mode: campaign.mode,
   });
 }
 
@@ -346,5 +511,6 @@ export async function resumeCampaign(
   return driveRemainingItems(id, {
     dispatch: opts.dispatch ?? invoke,
     projectDir: campaign.projectDir!,
+    mode: campaign.mode,
   });
 }

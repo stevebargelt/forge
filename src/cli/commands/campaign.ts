@@ -242,6 +242,13 @@ export function registerCampaign(program: Command): void {
           console.error("campaign stopped — an item failed during execution; inspect the failed item and re-plan or abandon");
         } else if (result.stopReason === "abandoned") {
           console.error("campaign was abandoned during execution");
+        } else if (result.stopReason === "paused") {
+          const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
+          if (blocked.length) {
+            console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
+          } else {
+            console.log("campaign paused between items — run resume to continue");
+          }
         }
       }
 

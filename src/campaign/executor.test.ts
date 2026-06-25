@@ -223,7 +223,9 @@ test("happy path two-item: sequential ordering, items dispatched one at a time",
 
 // ── start: first-item failure ─────────────────────────────────────────────────
 
-test("first-item failure: item2 never dispatched, campaign status failed", async () => {
+test("first-item failure (FG-393): item2 held (unknown relation, sequential), campaign paused", async () => {
+  // FG-393: LOCAL blocker → continue; FG-101 has no related field → UNKNOWN relation,
+  // sequential → hold_dependents → FG-102 held. Campaign → paused (held items await resume).
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
     { projectDir, mode: "sequential" }
@@ -237,25 +239,37 @@ test("first-item failure: item2 never dispatched, campaign status failed", async
   };
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatchFail });
-  assert.equal(result.stopReason, "item_failed");
-  assert.equal(callCount, 1, "dispatch must be called exactly once — item2 must never dispatch");
-  assert.equal(result.itemRecords.length, 1, "only one item record (the failed one)");
+  assert.equal(result.stopReason, "paused", "FG-393: LOCAL blocker → campaign paused, not item_failed");
+  assert.equal(callCount, 1, "dispatch must be called exactly once — item2 was held not dispatched");
+  assert.equal(result.itemRecords.length, 2, "both items in records: item1 (blocked) + item2 (held)");
 
   const item1 = result.itemRecords[0]!;
   assert.equal(item1.lifecycleStatus, "failed");
-  assert.equal(item1.outcome, "failed");
+  assert.equal(item1.outcome, "blocked", "FG-393: blocked outcome replaces failed");
+
+  const item2 = result.itemRecords[1]!;
+  assert.equal(item2.lifecycleStatus, "pending", "held items keep pending lifecycle");
+  assert.equal(item2.outcome, "held");
 
   // Verify durable DB state
   const dbItem1 = db.prepare("SELECT lifecycle_status, outcome, blocker_kind, reason FROM campaign_items WHERE ticket_id = 'FG-101'").get() as {
     lifecycle_status: string; outcome: string; blocker_kind: string; reason: string;
   };
   assert.equal(dbItem1.lifecycle_status, "failed");
-  assert.equal(dbItem1.outcome, "failed");
-  assert.equal(dbItem1.blocker_kind, "campaign_system");
+  assert.equal(dbItem1.outcome, "blocked");
+  assert.equal(dbItem1.blocker_kind, "scope", "generic returned-failure → scope (no FailureKind in fake events)");
   assert.equal(dbItem1.reason, "agent exploded");
 
+  const dbItem2 = db.prepare("SELECT lifecycle_status, outcome, continue_policy, reason FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    lifecycle_status: string; outcome: string; continue_policy: string; reason: string;
+  };
+  assert.equal(dbItem2.lifecycle_status, "pending", "held item lifecycle stays pending");
+  assert.equal(dbItem2.outcome, "held");
+  assert.equal(dbItem2.continue_policy, "hold_dependents");
+  assert.equal(dbItem2.reason, "held because dependency relation is unknown in sequential mode");
+
   const finalCampaign = getCampaign(campaign.id)!;
-  assert.equal(finalCampaign.status, "failed");
+  assert.equal(finalCampaign.status, "paused", "FG-393: campaign paused (not failed) on LOCAL blocker");
 });
 
 // ── start: shipped evidence ───────────────────────────────────────────────────
@@ -501,7 +515,8 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
   };
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatchCrash });
-  assert.equal(result.stopReason, "item_failed");
+  // FG-393: returned-failed → LOCAL (scope); item2 is HELD → campaign paused
+  assert.equal(result.stopReason, "paused", "FG-393: LOCAL failure → campaign paused");
 
   // Mid-flight durability: both must be written BEFORE dispatch resolves
   assert.ok(midFlightRunId, "run_id must be written to DB BEFORE dispatch resolves");
@@ -510,18 +525,20 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
 
   // Post-failure evidence: run_id retained so a human/tool can trace the failed run
   const dbItem1 = db.prepare(
-    "SELECT run_id, lifecycle_status, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'"
-  ).get() as { run_id: string | null; lifecycle_status: string; blocker_kind: string };
+    "SELECT run_id, lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { run_id: string | null; lifecycle_status: string; outcome: string; blocker_kind: string };
   assert.ok(dbItem1.run_id, "run_id must be retained in DB after item failure (crash-recovery evidence)");
   assert.equal(dbItem1.lifecycle_status, "failed");
-  assert.equal(dbItem1.blocker_kind, "campaign_system");
+  assert.equal(dbItem1.outcome, "blocked", "FG-393: outcome=blocked for failed items");
+  assert.equal(dbItem1.blocker_kind, "scope", "returned-failed with no FailureKind → scope");
 
-  // item2 must never have been dispatched
+  // item2 was held (pending, not dispatched)
   const dbItem2 = db.prepare(
-    "SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'"
-  ).get() as { run_id: string | null; lifecycle_status: string };
-  assert.equal(dbItem2.run_id, null, "item2 run_id must be null — never dispatched");
-  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending after item1 failure");
+    "SELECT run_id, lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { run_id: string | null; lifecycle_status: string; outcome: string };
+  assert.equal(dbItem2.run_id, null, "item2 run_id must be null — never dispatched (held)");
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending (held lifecycle stays pending)");
+  assert.equal(dbItem2.outcome, "held", "FG-393: item2 held due to unknown dependency relation in sequential mode");
 });
 
 // ── projectDir: stale-plan check always uses campaign.projectDir ──────────────
@@ -647,7 +664,9 @@ test("sequential mode: startCampaign proceeds to dispatch (mode gate only blocks
 
 // ── Fix B: dispatch throws → same failure path as returned failure ────────────
 
-test("dispatch throws: item lifecycle=failed, outcome=failed, blocker=campaign_system, run_id retained, campaign=failed, loop stops", async () => {
+test("dispatch throws (FG-393): SHARED infrastructure blocker, campaign paused, item2 pending (not held)", async () => {
+  // FG-393: throw → infrastructure (SHARED) → hold_campaign → campaign paused.
+  // Remaining items stay pending (loop stops immediately for SHARED blockers).
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101", "FG-102"] },
     { projectDir, mode: "sequential" }
@@ -661,33 +680,54 @@ test("dispatch throws: item lifecycle=failed, outcome=failed, blocker=campaign_s
   };
 
   const result = await startCampaign(campaign.id, { dispatch: throwingDispatch });
-  assert.equal(result.stopReason, "item_failed");
+  assert.equal(result.stopReason, "paused", "FG-393: throw (SHARED) → campaign paused");
   assert.equal(callCount, 1, "dispatch must be called exactly once — item2 must never dispatch after throw");
-  assert.equal(result.itemRecords.length, 1, "only one item record (the failed one)");
+  assert.equal(result.itemRecords.length, 1, "only item1 in records — SHARED stops loop immediately");
 
   const item1 = result.itemRecords[0]!;
   assert.equal(item1.lifecycleStatus, "failed");
-  assert.equal(item1.outcome, "failed");
+  assert.equal(item1.outcome, "blocked", "FG-393: outcome=blocked for SHARED failed items");
 
-  // Durable DB state must match returned-failure path
+  // Durable DB state
   const dbItem1 = db.prepare(
     "SELECT run_id, lifecycle_status, outcome, blocker_kind, reason FROM campaign_items WHERE ticket_id = 'FG-101'"
   ).get() as { run_id: string | null; lifecycle_status: string; outcome: string; blocker_kind: string; reason: string };
   assert.equal(dbItem1.lifecycle_status, "failed");
-  assert.equal(dbItem1.outcome, "failed");
-  assert.equal(dbItem1.blocker_kind, "campaign_system");
+  assert.equal(dbItem1.outcome, "blocked");
+  assert.equal(dbItem1.blocker_kind, "infrastructure", "throw → infrastructure (SHARED)");
   assert.equal(dbItem1.reason, "network timeout", "thrown error message must be stored as reason");
   assert.ok(dbItem1.run_id, "run_id must be retained in DB after thrown dispatch (evidence preserved)");
 
-  // item2 must never have been dispatched
+  // item2 not dispatched, not held (SHARED stops loop before evaluating item2)
   const dbItem2 = db.prepare(
-    "SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'"
-  ).get() as { run_id: string | null; lifecycle_status: string };
+    "SELECT run_id, lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { run_id: string | null; lifecycle_status: string; outcome: string | null };
   assert.equal(dbItem2.run_id, null, "item2 run_id must be null — never dispatched");
-  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending after item1 throw");
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending (SHARED stops before hold evaluation)");
+  assert.equal(dbItem2.outcome, null, "item2 outcome must be null — untouched by SHARED stop");
 
   const finalCampaign = getCampaign(campaign.id)!;
-  assert.equal(finalCampaign.status, "failed");
+  assert.equal(finalCampaign.status, "paused", "FG-393: campaign paused (not failed) on SHARED blocker");
+});
+
+// ── Fix 2: pre-allocated run closed on thrown dispatch ─────────────────────────
+
+test("Fix 2: dispatch throws → pre-allocated Run row is not left 'active'", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const throwingDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    throw new Error("infrastructure failure");
+  };
+
+  await startCampaign(campaign.id, { dispatch: throwingDispatch });
+
+  const runRow = db.prepare("SELECT status FROM runs WHERE title = 'FG-101'").get() as { status: string } | undefined;
+  assert.ok(runRow, "a run row must exist for the dispatched item");
+  assert.notEqual(runRow!.status, "active", "run must not be left 'active' after thrown dispatch");
 });
 
 // ── FG-394: driver skips terminal items ────────────────────────────────────────
@@ -1514,4 +1554,560 @@ test("FG-394-fix: startCampaign pre-flight — planned campaign with in-flight i
   assert.equal(result.itemRecords[0]!.ticketId, "FG-101");
   assert.equal(result.itemRecords[0]!.lifecycleStatus, "running");
   assert.equal(result.itemRecords[0]!.runId, "run-stuck-planned");
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// FG-393: conservative campaign blocker & continue semantics
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Helper: write a ticket with explicit related field
+function writeLinkedTicket(dir: string, id: string, related: string[]) {
+  writeTicket(dir, {
+    id,
+    type: "story",
+    status: "active",
+    title: `Ticket ${id}`,
+    related,
+    body: `Body for ${id}`,
+    created: "2024-01-10",
+  });
+}
+
+// Test 1: dependent relation holds later item in SEQUENTIAL
+test("FG-393 T1: dependent relation holds later item in SEQUENTIAL (outcome=held, correct reason)", async () => {
+  writeLinkedTicket(projectDir, "FG-201", ["FG-202"]);
+  writeLinkedTicket(projectDir, "FG-202", []);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-201", "FG-202"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(callCount, 1, "only FG-201 dispatched");
+
+  const dbItem2 = db.prepare("SELECT outcome, continue_policy, reason FROM campaign_items WHERE ticket_id = 'FG-202'").get() as {
+    outcome: string; continue_policy: string; reason: string;
+  };
+  assert.equal(dbItem2.outcome, "held");
+  assert.equal(dbItem2.continue_policy, "hold_dependents");
+  assert.equal(dbItem2.reason, "held because related to blocked item FG-201", "exact reason string required");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused");
+});
+
+// Test 2: dependent relation ALSO holds in PILOT
+test("FG-393 T2: dependent relation holds later item in PILOT (pilot must NOT override known dependency)", async () => {
+  writeLinkedTicket(projectDir, "FG-211", ["FG-212"]);
+  writeLinkedTicket(projectDir, "FG-212", []);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-211", "FG-212"] },
+    { projectDir, mode: "pilot" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(callCount, 1, "only FG-211 dispatched — known dependency still holds in pilot");
+
+  const dbItem2 = db.prepare("SELECT outcome, reason FROM campaign_items WHERE ticket_id = 'FG-212'").get() as {
+    outcome: string; reason: string;
+  };
+  assert.equal(dbItem2.outcome, "held", "pilot must NOT override known dependency");
+  assert.equal(dbItem2.reason, "held because related to blocked item FG-211");
+});
+
+// Test 3: unknown relation holds in SEQUENTIAL
+test("FG-393 T3: unknown relation holds in SEQUENTIAL (reason is exact string)", async () => {
+  // FG-101 and FG-102 from beforeEach have no related field → unknown relation
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(callCount, 1, "only FG-101 dispatched");
+
+  const dbItem2 = db.prepare("SELECT outcome, reason FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    outcome: string; reason: string;
+  };
+  assert.equal(dbItem2.outcome, "held");
+  assert.equal(dbItem2.reason, "held because dependency relation is unknown in sequential mode");
+});
+
+// Test 4: unknown relation CONTINUES in PILOT
+test("FG-393 T4: unknown relation CONTINUES in PILOT (later item dispatches)", async () => {
+  // FG-101 and FG-102 have no related field → unknown; pilot → continue_allowed
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "pilot" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const ticketId = args.runTitle ?? "";
+    dispatchLog.push(ticketId);
+    // FG-101 fails (LOCAL → scope); FG-102 should still be dispatched
+    if (ticketId === "FG-101") {
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  // FG-102 dispatched and completed → no held items → campaign complete
+  assert.equal(result.stopReason, "complete", "pilot + unknown → continue_allowed → campaign completes");
+  assert.deepEqual(dispatchLog, ["FG-101", "FG-102"], "both items dispatched in pilot mode");
+
+  const dbItem2 = db.prepare("SELECT lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    lifecycle_status: string; outcome: string | null;
+  };
+  assert.equal(dbItem2.lifecycle_status, "complete", "FG-102 completed (continued in pilot)");
+  assert.notEqual(dbItem2.outcome, "held", "FG-102 must NOT be held in pilot with unknown relation");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+// Test 5: explicit INDEPENDENT relation continues
+test("FG-393 T5: explicit INDEPENDENT relation continues (reason is exact string)", async () => {
+  // FG-301 has related=[FG-399] (not FG-302), so FG-301 is INDEPENDENT of FG-302
+  writeLinkedTicket(projectDir, "FG-301", ["FG-399"]);
+  writeLinkedTicket(projectDir, "FG-302", []);
+  writeTicket(projectDir, { id: "FG-399", type: "story", status: "active", title: "Unrelated", body: "", created: "2024-01-10" });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-301", "FG-302"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const ticketId = args.runTitle ?? "";
+    dispatchLog.push(ticketId);
+    if (ticketId === "FG-301") {
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "independent → continue_allowed → campaign completes");
+  assert.deepEqual(dispatchLog, ["FG-301", "FG-302"], "both items dispatched");
+
+  const dbItem2 = db.prepare("SELECT lifecycle_status, outcome, reason FROM campaign_items WHERE ticket_id = 'FG-302'").get() as {
+    lifecycle_status: string; outcome: string | null; reason: string | null;
+  };
+  assert.equal(dbItem2.lifecycle_status, "complete");
+  assert.notEqual(dbItem2.outcome, "held");
+  // exact reason string required (set before dispatch, preserved after complete)
+  assert.equal(dbItem2.reason, "continued because related metadata does not link to blocked item", "exact reason string for independent-continued item");
+});
+
+// Test 6: SHARED/system blocker holds the whole campaign
+test("FG-393 T6: SHARED system blocker (throw) pauses campaign, remaining pending untouched", async () => {
+  // Throw → infrastructure (SHARED) → hold_campaign → campaign paused, item2 stays pending
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    throw new Error("container crash");
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "SHARED blocker → campaign paused");
+  assert.equal(callCount, 1, "only item1 dispatched");
+  assert.equal(result.itemRecords.length, 1, "only blocked item in records (item2 untouched)");
+
+  const dbItem1 = db.prepare("SELECT lifecycle_status, outcome, blocker_kind, continue_policy FROM campaign_items WHERE ticket_id = 'FG-101'").get() as {
+    lifecycle_status: string; outcome: string; blocker_kind: string; continue_policy: string;
+  };
+  assert.equal(dbItem1.lifecycle_status, "failed");
+  assert.equal(dbItem1.outcome, "blocked");
+  assert.equal(dbItem1.blocker_kind, "infrastructure");
+  assert.equal(dbItem1.continue_policy, "hold_campaign");
+
+  const dbItem2 = db.prepare("SELECT lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    lifecycle_status: string; outcome: string | null;
+  };
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending (untouched by SHARED stop)");
+  assert.equal(dbItem2.outcome, null, "item2 must have no outcome (untouched)");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused");
+});
+
+// Test 7: held item preserved with clear reason AND report/show surfaces it
+test("FG-393 T7: held item preserved with clear reason; report/show surfaces grouping + reason + next action", async () => {
+  const { assembleCampaignShow, assembleCampaignReport } = await import("./report.js");
+
+  // FG-101 (no related) fails → FG-102 held (unknown, sequential)
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "failed",
+    error: "scope error",
+  });
+
+  await startCampaign(campaign.id, { dispatch });
+
+  // Verify show
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(show.nextAction.includes("resolve") || show.nextAction.includes("resume"), `nextAction should guide operator, got: ${show.nextAction}`);
+  const heldInShow = show.items.find((i) => i.ticketId === "FG-102");
+  assert.ok(heldInShow, "FG-102 must appear in show items");
+  assert.equal(heldInShow!.outcome, "held");
+  assert.ok(heldInShow!.reason, "held item must have a reason");
+
+  // Verify report
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(report.groupings.held.includes("FG-102"), "FG-102 must appear in held grouping");
+  assert.ok(report.groupings.blocked.includes("FG-101"), "FG-101 must appear in blocked grouping");
+  assert.notEqual(report.verdict, "all_shipped", "campaign with held/blocked items must not be all_shipped");
+  assert.ok(report.nextOperatorAction.includes("resolve") || report.nextOperatorAction.includes("resume"), `nextOperatorAction must guide operator, got: ${report.nextOperatorAction}`);
+});
+
+// Test 8: manual resume after blocker resolution reconsiders held items
+test("FG-393 T8: resume after blocker resolution reconsiders held items, dispatches them, reaches complete", async () => {
+  // Setup: campaign with FG-101 (blocked → no related, sequential → FG-102 held)
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Phase 1: run until FG-101 fails and FG-102 is held
+  const phase1Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "failed",
+    error: "scope error",
+  });
+  const runResult = await startCampaign(campaign.id, { dispatch: phase1Dispatch });
+  assert.equal(runResult.stopReason, "paused", "Phase 1: campaign should be paused");
+
+  // Verify FG-102 is held
+  const itemsBefore = db.prepare("SELECT id, ticket_id, lifecycle_status, outcome FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string; lifecycle_status: string; outcome: string | null }[];
+  const item1Before = itemsBefore.find((i) => i.ticket_id === "FG-101")!;
+  const item2Before = itemsBefore.find((i) => i.ticket_id === "FG-102")!;
+  assert.equal(item1Before.lifecycle_status, "failed");
+  assert.equal(item2Before.outcome, "held", "FG-102 must be held before resolution");
+
+  // Phase 2: "Resolve" the blocker — operator marks FG-101 as complete (no longer outcome=blocked)
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(item1Before.id);
+
+  // Phase 3: resume — FG-101 is now complete (not in blockedItems) → FG-102 reconsidered
+  const dispatchLog: string[] = [];
+  const phase3Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch: phase3Dispatch });
+  assert.equal(resumeResult.stopReason, "complete", "Resume must reach complete after blocker resolved");
+  assert.deepEqual(dispatchLog, ["FG-102"], "Only FG-102 dispatched on resume (FG-101 already terminal)");
+
+  const dbItem2After = db.prepare("SELECT lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    lifecycle_status: string; outcome: string | null;
+  };
+  assert.equal(dbItem2After.lifecycle_status, "complete", "FG-102 must be complete after resume");
+  assert.notEqual(dbItem2After.outcome, "held", "FG-102 must no longer be held after resume");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+// Test 9a: FG-393 does not regress FG-394 — recovery_needed still refuses
+test("FG-393/FG-394 no-regression: recovery_needed still refuses (in-flight item)", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-393' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "r", taskId: "t", status: "complete" };
+  };
+
+  const result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "recovery_needed", "recovery_needed must still fire for in-flight items");
+  assert.equal(dispatched, 0, "must not dispatch when in-flight item exists");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "campaign must stay paused");
+});
+
+// Test 9b: FG-393 — held item with multiple blockers: any hold → stays held
+test("FG-393: item M stays held if ANY prior blocker still holds it", async () => {
+  // FG-401 (no related) fails first → FG-402 held (unknown, sequential)
+  // FG-403 (independent of FG-401 via related) dispatches and also fails
+  // FG-402 should still be held (FG-401 still blocking)
+  writeLinkedTicket(projectDir, "FG-401", ["FG-999"]);  // FG-401 has related=[FG-999], independent of FG-402/FG-403
+  writeLinkedTicket(projectDir, "FG-402", []);            // no related → unknown vs any blocker
+  writeLinkedTicket(projectDir, "FG-403", ["FG-999"]);   // independent of FG-401 (both have related but no link)
+  writeTicket(projectDir, { id: "FG-999", type: "story", status: "active", title: "Other", body: "", created: "2024-01-10" });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-401", "FG-402", "FG-403"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const ticketId = args.runTitle ?? "";
+    dispatchLog.push(ticketId);
+    // FG-401: independent of FG-402 (FG-401.related=[FG-999], no link to FG-402) → FG-402 should be UNKNOWN (FG-401 has non-empty related, no link to FG-402 → independent → continue)
+    // Wait, actually: FG-401 has related=[FG-999]. FG-402 has no related.
+    // relationToBlocked(FG-401, FG-402): FG-401.related includes FG-402? No. FG-402.related includes FG-401? No.
+    // FG-401.related is non-empty → INDEPENDENT.
+    // So FG-402 is independent → continue_allowed → dispatch FG-402.
+    // Then FG-402 dispatches... Let's have FG-402 also fail.
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  await startCampaign(campaign.id, { dispatch });
+
+  // FG-401 and FG-402 both failed (LOCAL), FG-403 evaluated against both blockers
+  // FG-403 has related=[FG-999]: independent of FG-401 → continue_allowed from FG-401
+  // FG-403 has related=[FG-999]: independent of FG-402 (FG-402 has no related → unknown → sequential → hold_dependents from FG-402)
+  // ANY hold → FG-403 held
+  const dbItem3 = db.prepare("SELECT outcome, reason FROM campaign_items WHERE ticket_id = 'FG-403'").get() as {
+    outcome: string; reason: string;
+  };
+  assert.equal(dbItem3.outcome, "held", "FG-403 must be held because FG-402 (unknown relation, sequential) holds it");
+});
+
+// ── FG-393 AC-completeness: blocked item continuePolicy ───────────────────────
+
+test("FG-393 AC: LOCAL blocked item records continuePolicy='hold_dependents'; SHARED records 'hold_campaign'", async () => {
+  // LOCAL blocker must record continuePolicy='hold_dependents' (Fix 1).
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "failed",
+    error: "scope error",
+  });
+
+  await startCampaign(campaign.id, { dispatch });
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind, continue_policy FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string; continue_policy: string | null };
+
+  assert.equal(dbItem.lifecycle_status, "failed");
+  assert.equal(dbItem.outcome, "blocked");
+  assert.equal(dbItem.blocker_kind, "scope");
+  assert.equal(dbItem.continue_policy, "hold_dependents", "LOCAL blocked item must record continuePolicy='hold_dependents'");
+});
+
+// ── FG-393 extended reason strings ───────────────────────────────────────────
+
+test("FG-393 T4-reason: pilot-continued item has exact reason string 'continued because relation unknown and mode=pilot'", async () => {
+  // FG-101 and FG-102 have no related field → unknown relation; pilot mode → continue_allowed.
+  // The reason set on the continued item before dispatch must be the exact string.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "pilot" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const ticketId = args.runTitle ?? "";
+    if (ticketId === "FG-101") {
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "pilot + unknown → continue_allowed → campaign completes");
+
+  const dbItem2 = db.prepare(
+    "SELECT lifecycle_status, reason FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { lifecycle_status: string; reason: string | null };
+
+  assert.equal(dbItem2.lifecycle_status, "complete");
+  assert.equal(
+    dbItem2.reason,
+    "continued because relation unknown and mode=pilot",
+    "exact reason string for pilot-continued item (unknown relation, mode=pilot)"
+  );
+});
+
+// ── FG-393 multi-blocker v2: two local blocks, dependent held, independent of both continues ────
+
+test("FG-393 multi-blocker v2: two local blocks; item dependent on first held; item independent of BOTH continues", async () => {
+  // 4 items in order: FG-501 (fails), FG-502 (fails), FG-503 (held — dep on FG-501), FG-504 (continues — independent of both)
+  // FG-501.related=["FG-503","FG-599"]: links FG-503 as dependent; FG-504 is unlinked → independent of FG-501.
+  // FG-502.related=["FG-596"]: non-empty, no link to FG-503 or FG-504 → FG-503 is independent of FG-502; FG-504 is independent of FG-502.
+  // FG-503.related=[]: no outgoing links; but FG-501.related includes FG-503 → dependent relation → HELD.
+  // FG-504.related=[]: independent of both FG-501 and FG-502 (both have non-empty related that omit FG-504) → continues.
+  writeTicket(projectDir, { id: "FG-599", type: "story", status: "active", title: "Dummy 599", body: "", created: "2024-01-10" });
+  writeTicket(projectDir, { id: "FG-596", type: "story", status: "active", title: "Dummy 596", body: "", created: "2024-01-10" });
+  writeLinkedTicket(projectDir, "FG-501", ["FG-503", "FG-599"]);
+  writeLinkedTicket(projectDir, "FG-502", ["FG-596"]);
+  writeLinkedTicket(projectDir, "FG-503", []);
+  writeLinkedTicket(projectDir, "FG-504", []);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-501", "FG-502", "FG-503", "FG-504"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const ticketId = args.runTitle ?? "";
+    dispatchLog.push(ticketId);
+    if (ticketId === "FG-501" || ticketId === "FG-502") {
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  // FG-503 is held → anyHeld=true → campaign paused
+  assert.equal(result.stopReason, "paused", "campaign pauses because FG-503 is held");
+  assert.deepEqual(
+    dispatchLog,
+    ["FG-501", "FG-502", "FG-504"],
+    "FG-503 held (not dispatched); FG-504 independent-of-both dispatched"
+  );
+
+  // FG-503 must be held due to FG-501 (dependent relation via FG-501.related)
+  const dbItem503 = db.prepare(
+    "SELECT outcome, continue_policy, reason FROM campaign_items WHERE ticket_id = 'FG-503'"
+  ).get() as { outcome: string; continue_policy: string; reason: string };
+  assert.equal(dbItem503.outcome, "held", "FG-503 must be held (dependent on FG-501)");
+  assert.equal(dbItem503.continue_policy, "hold_dependents");
+  assert.equal(
+    dbItem503.reason,
+    "held because related to blocked item FG-501",
+    "exact reason: FG-503 held due to FG-501"
+  );
+
+  // FG-504 must have completed (independent of both blockers) and the continue reason
+  // must not falsely name only the last blocker (FG-502).
+  const dbItem504 = db.prepare(
+    "SELECT lifecycle_status, outcome, reason FROM campaign_items WHERE ticket_id = 'FG-504'"
+  ).get() as { lifecycle_status: string; outcome: string | null; reason: string | null };
+  assert.equal(dbItem504.lifecycle_status, "complete", "FG-504 must complete (independent of both local blockers)");
+  assert.notEqual(dbItem504.outcome, "held", "FG-504 must NOT be held");
+  assert.ok(
+    dbItem504.reason && !dbItem504.reason.includes("FG-501") && !dbItem504.reason.includes("FG-502"),
+    `multi-blocker continue reason must not name only the last blocker (FG-502); got: ${dbItem504.reason}`
+  );
+
+  // Both FG-501 and FG-502 must be blocked
+  const dbItem501 = db.prepare(
+    "SELECT outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-501'"
+  ).get() as { outcome: string; blocker_kind: string };
+  const dbItem502 = db.prepare(
+    "SELECT outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-502'"
+  ).get() as { outcome: string; blocker_kind: string };
+  assert.equal(dbItem501.outcome, "blocked");
+  assert.equal(dbItem502.outcome, "blocked");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign paused (FG-503 held)");
+});
+
+// ── FG-393 report verdict: complete campaign with blocked item → complete_with_issues ────
+
+test("FG-393 report verdict: complete campaign with blocked item → verdict=complete_with_issues, never all_shipped", async () => {
+  // FG-301 (related=[FG-399]): fails LOCAL (scope). FG-302 (no related): independent → continues and completes.
+  // Campaign reaches stopReason='complete' (no held items).
+  // Report verdict must be 'complete_with_issues', never 'all_shipped'.
+  const { assembleCampaignReport } = await import("./report.js");
+
+  writeLinkedTicket(projectDir, "FG-301", ["FG-399"]);
+  writeLinkedTicket(projectDir, "FG-302", []);
+  writeTicket(projectDir, { id: "FG-399", type: "story", status: "active", title: "Unrelated Dep", body: "", created: "2024-01-10" });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-301", "FG-302"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    if ((args.runTitle ?? "") === "FG-301") {
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+    }
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const runResult = await startCampaign(campaign.id, { dispatch });
+  assert.equal(runResult.stopReason, "complete", "campaign must complete (FG-302 independent, no held items)");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(
+    report.verdict,
+    "complete_with_issues",
+    "complete campaign with blocked item must be complete_with_issues, never all_shipped"
+  );
+  assert.notEqual(report.verdict, "all_shipped", "must NEVER be all_shipped when blocked items exist");
+  assert.ok(
+    report.groupings.blocked.includes("FG-301"),
+    "FG-301 must appear in blocked grouping"
+  );
+  assert.equal(
+    report.groupings.held.length,
+    0,
+    "no held items in a completed campaign"
+  );
+  assert.equal(
+    report.groupings.shipped.length,
+    0,
+    "FG-302 not shipped (ticket not done+closedCommit); FG-301 blocked — neither is in shipped grouping"
+  );
 });
