@@ -183,12 +183,15 @@ Approval is a durable state-machine precondition for execution: `forge campaign 
 
 | Stop reason | Meaning | Fix |
 |---|---|---|
-| `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Check `forge campaign show` |
+| `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Inspect status via direct DB query: `SELECT status FROM campaigns WHERE id = '<id>';` (status/report commands coming in FG-394) |
 | `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
 | `invalid_project_dir` | Stored `projectDir` no longer exists or lacks a `backlog` directory | Restore the directory or re-plan |
 | `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Current plan hash (re-resolved from stored `sourceInput` against stored `projectDir`) differs from `approved_plan_hash` | Re-plan and re-approve |
+| `dry_run_not_executable` | Campaign mode is `dry_run` — plan-and-report only; `start` refuses to dispatch any work or mutate the repo | Re-plan with `--mode pilot` or `--mode sequential` and re-approve |
 | `already_running` | A `planned → running` CAS in the database rejected the transition — another `start` process already holds it | Wait or recover — see crash recovery below |
+
+**Important:** `forge campaign plan` defaults to `--mode dry_run`. A `dry_run` campaign is plan-and-report only — `forge campaign start` will refuse it with `dry_run_not_executable`. To actually execute a campaign, plan with `--mode pilot` or `--mode sequential` and re-approve before starting.
 
 If all preconditions pass, the campaign transitions to `running` via a compare-and-swap (CAS) and items execute **strictly one at a time** through the engineer agent. For each item a `run_id` is pre-allocated and persisted **before** dispatch — this is the crash evidence trail.
 
@@ -208,7 +211,7 @@ Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the
 
 - The campaign stays stuck in status `running`.
 - A subsequent `forge campaign start` refuses with stop reason `not_planned`.
-- Recovery evidence is durable: each item's `run_id` is persisted before dispatch, so `forge campaign show` (or a direct DB query) tells you exactly which item was in flight when the process died.
+- Recovery evidence is durable: each item's `run_id` is persisted before dispatch, so a direct DB query tells you exactly which item was in flight when the process died (status/report commands coming in FG-394).
 
 **Interim manual recovery** (temporary procedure until FG-394 ships a `forge campaign reset` command):
 
