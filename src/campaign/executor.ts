@@ -6,7 +6,6 @@ import {
   getCampaign,
   listCampaignItems,
   updateCampaignItem,
-  updateCampaignStatus,
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
@@ -142,14 +141,12 @@ async function driveRemainingItems(
         lifecycleStatus: "failed",
         outcome: "failed",
       });
-      // Only transition campaign to failed if still running
-      const postCheck = getCampaign(campaignId);
-      if (postCheck?.status === "running") {
-        updateCampaignStatus(campaignId, "failed");
+      if (tryTransitionCampaign(campaignId, "running", "failed")) {
         return { stopReason: "item_failed", itemRecords };
       }
+      const throwPostFail = getCampaign(campaignId);
       return {
-        stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
+        stopReason: throwPostFail?.status === "abandoned" ? "abandoned" : "paused",
         itemRecords,
       };
     }
@@ -198,24 +195,26 @@ async function driveRemainingItems(
         lifecycleStatus: "failed",
         outcome: "failed",
       });
-      // Only transition campaign to failed if still running
-      if (postCheck?.status === "running") {
-        updateCampaignStatus(campaignId, "failed");
+      if (tryTransitionCampaign(campaignId, "running", "failed")) {
         return { stopReason: "item_failed", itemRecords };
       }
+      const resultPostFail = getCampaign(campaignId);
       return {
-        stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
+        stopReason: resultPostFail?.status === "abandoned" ? "abandoned" : "paused",
         itemRecords,
       };
     }
   }
 
-  // All pending items processed — complete the campaign if still running
-  const finalCheck = getCampaign(campaignId);
-  if (finalCheck?.status === "running") {
-    updateCampaignStatus(campaignId, "complete");
+  // All pending items processed — atomically transition to complete if still running
+  if (tryTransitionCampaign(campaignId, "running", "complete")) {
+    return { stopReason: "complete", itemRecords };
   }
-  return { stopReason: "complete", itemRecords };
+  const finalCheck = getCampaign(campaignId);
+  return {
+    stopReason: finalCheck?.status === "abandoned" ? "abandoned" : "paused",
+    itemRecords,
+  };
 }
 
 export async function startCampaign(
@@ -301,7 +300,11 @@ export async function resumeCampaign(
   }
 
   if (!tryTransitionCampaign(id, "paused", "running")) {
-    return { stopReason: "already_running", itemRecords };
+    const current = getCampaign(id);
+    return {
+      stopReason: current?.status === "abandoned" ? "abandoned" : "already_running",
+      itemRecords,
+    };
   }
 
   return driveRemainingItems(id, {

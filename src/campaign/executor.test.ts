@@ -1154,3 +1154,142 @@ test("abandoned-during-succeeding-item: driver returns 'abandoned', item2 not di
   assert.equal(item2.run_id, null, "item2 not dispatched after abandon");
   assert.equal(item2.lifecycle_status, "pending", "item2 remains pending");
 });
+
+// ── TOCTOU: atomic CAS prevents illegal transitions when concurrent pause races the terminal write ──
+
+test("TOCTOU success/complete path: dispatch pauses right before terminal transition — returns paused, no illegal complete written", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Dispatch pauses campaign right before returning complete — simulates concurrent pause
+  // landing at the moment the driver would write the terminal 'complete' transition.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  let threw = false;
+  let result: Awaited<ReturnType<typeof startCampaign>>;
+  try {
+    result = await startCampaign(campaign.id, { dispatch });
+  } catch {
+    threw = true;
+    result = { stopReason: "complete", itemRecords: [] }; // dummy to satisfy TS
+  }
+
+  assert.equal(threw, false, "driver must NOT throw even when concurrent pause races the complete transition");
+  assert.equal(result.stopReason, "paused", "driver must return paused, not complete, when campaign was paused concurrently");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no illegal paused->complete written");
+});
+
+test("TOCTOU failure path: dispatch pauses right before terminal transition — returns paused, no illegal failed written", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // Pause right before returning the failure — simulates concurrent pause racing the failed transition
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "agent error" };
+  };
+
+  let threw = false;
+  let result: Awaited<ReturnType<typeof startCampaign>>;
+  try {
+    result = await startCampaign(campaign.id, { dispatch });
+  } catch {
+    threw = true;
+    result = { stopReason: "item_failed", itemRecords: [] };
+  }
+
+  assert.equal(threw, false, "driver must NOT throw even when concurrent pause races the failed transition");
+  assert.equal(result.stopReason, "paused", "driver must return paused, not item_failed, when campaign paused concurrently");
+  assert.equal(callCount, 1, "only item1 dispatched — item2 never reached");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no illegal paused->failed written");
+
+  const item2 = db.prepare("SELECT run_id, lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
+    run_id: string | null; lifecycle_status: string;
+  };
+  assert.equal(item2.run_id, null, "item2 must not have been dispatched");
+  assert.equal(item2.lifecycle_status, "pending", "item2 must remain pending");
+});
+
+test("TOCTOU failure path via throw: dispatch pauses AND throws — returns paused, no illegal failed written", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    throw new Error("thrown under pause");
+  };
+
+  let threw = false;
+  let result: Awaited<ReturnType<typeof startCampaign>>;
+  try {
+    result = await startCampaign(campaign.id, { dispatch });
+  } catch {
+    threw = true;
+    result = { stopReason: "item_failed", itemRecords: [] };
+  }
+
+  assert.equal(threw, false, "driver must NOT throw even when dispatch throws under concurrent pause");
+  assert.equal(result.stopReason, "paused", "throw under concurrent pause → paused, not item_failed");
+  assert.equal(callCount, 1, "only item1 dispatched");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must stay paused — no illegal transition written");
+});
+
+// ── last-item pause boundary ──────────────────────────────────────────────────────────────────────
+
+test("last-item pause boundary: pause lands after final item completes — driver returns paused, subsequent resume reaches complete", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "driver must return paused (NOT complete) when last item done but campaign paused");
+
+  const afterPause = getCampaign(campaign.id)!;
+  assert.equal(afterPause.status, "paused", "campaign must be paused, not complete");
+
+  const dbItem = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
+  assert.equal(dbItem.lifecycle_status, "complete", "item1 must be complete even though campaign is paused");
+
+  // Resume drives zero pending items → post-loop CAS running→complete succeeds
+  let resumeDispatched = 0;
+  const resumeDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    resumeDispatched++;
+    return { runId: "run-resume", taskId: "t", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch: resumeDispatch });
+  assert.equal(resumeResult.stopReason, "complete", "resume with all-complete items must reach complete");
+  assert.equal(resumeDispatched, 0, "resume must not dispatch anything — all items are terminal");
+
+  const afterResume = getCampaign(campaign.id)!;
+  assert.equal(afterResume.status, "complete", "campaign must be complete after resume");
+});

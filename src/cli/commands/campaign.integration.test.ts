@@ -1511,3 +1511,102 @@ test("integ campaign report --json: two campaigns produce all_shipped and comple
   const r2 = JSON.parse(report2.stdout) as Record<string, unknown>;
   assert.equal(r2["verdict"], "complete_with_issues", "campaign with mixed outcomes must have verdict=complete_with_issues");
 });
+
+// ── Fix 3: accurate control-command errors ────────────────────────────────────────────────────────
+
+test("integ Fix3: pause on planned campaign emits clean message naming ACTUAL status (planned), no stack trace", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing a planned campaign must exit non-zero");
+  const combined = pauseResult.stderr + pauseResult.stdout;
+  assert.ok(
+    combined.includes("planned"),
+    `error must name the actual status 'planned'\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`
+  );
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`);
+});
+
+test("integ Fix3: pause on paused campaign emits clean message naming ACTUAL status (paused), no stack trace", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const pauseResult = runForge(["campaign", "pause", planOutput.campaignId]);
+  assert.notEqual(pauseResult.status, 0, "pausing a paused campaign must exit non-zero");
+  const combined = pauseResult.stderr + pauseResult.stdout;
+  assert.ok(
+    combined.includes("paused"),
+    `error must name the actual status 'paused'\nstdout: ${pauseResult.stdout}\nstderr: ${pauseResult.stderr}`
+  );
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace`);
+});
+
+test("integ Fix3: abandon on already-abandoned campaign emits clean message naming ACTUAL status, no stack trace", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // First abandon succeeds
+  const first = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.equal(first.status, 0, `first abandon must succeed\nstderr: ${first.stderr}`);
+
+  // Second abandon: already-abandoned
+  const second = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.notEqual(second.status, 0, "second abandon must exit non-zero");
+  const combined = second.stderr + second.stdout;
+  assert.ok(
+    combined.includes("abandoned"),
+    `error must name the actual status 'abandoned'\nstdout: ${second.stdout}\nstderr: ${second.stderr}`
+  );
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace`);
+});
+
+test("integ Fix3: abandon on complete campaign emits message naming ACTUAL status (complete), no stack trace", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const abandonResult = runForge(["campaign", "abandon", planOutput.campaignId]);
+  assert.notEqual(abandonResult.status, 0, "abandoning a complete campaign must exit non-zero");
+  const combined = abandonResult.stderr + abandonResult.stdout;
+  assert.ok(
+    combined.includes("complete"),
+    `error must name the actual status 'complete'\nstdout: ${abandonResult.stdout}\nstderr: ${abandonResult.stderr}`
+  );
+  assert.ok(!combined.includes("at Object."), `must not expose a stack trace`);
+});

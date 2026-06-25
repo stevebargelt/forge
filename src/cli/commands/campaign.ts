@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { planCampaign, resolvePlan } from "../../campaign/planner.js";
 import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
-import { listCampaignItems, getCampaign, approveCampaign, updateCampaignStatus } from "../../store/campaigns.js";
+import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport } from "../../campaign/report.js";
 
@@ -253,17 +253,10 @@ export function registerCampaign(program: Command): void {
         process.stderr.write(`Error: campaign ${campaignId} not found\n`);
         process.exit(1);
       }
-      if (existing.status !== "running") {
+      if (!tryTransitionCampaign(campaignId, "running", "paused")) {
+        const current = getCampaign(campaignId);
         process.stderr.write(
-          `Error: campaign is ${existing.status}, only a running campaign can be paused\n`
-        );
-        process.exit(1);
-      }
-      try {
-        updateCampaignStatus(campaignId, "paused");
-      } catch (err) {
-        process.stderr.write(
-          `Error: campaign is ${existing.status}, only a running campaign can be paused\n`
+          `Error: campaign is ${current?.status ?? "unknown"}; only a running campaign can be paused\n`
         );
         process.exit(1);
       }
@@ -310,6 +303,7 @@ export function registerCampaign(program: Command): void {
         "not_approved",
         "stale_plan",
         "already_running",
+        "abandoned",
       ]);
 
       if (opts.json) {
@@ -323,6 +317,8 @@ export function registerCampaign(program: Command): void {
 
         if (result.stopReason === "not_paused") {
           console.error("campaign is not paused; only a paused campaign can be resumed");
+        } else if (result.stopReason === "abandoned") {
+          console.error("campaign is abandoned; cannot resume an abandoned campaign");
         } else if (result.stopReason === "no_project_dir") {
           console.error("campaign predates projectDir capture; re-plan with forge campaign plan");
         } else if (result.stopReason === "invalid_project_dir") {
@@ -360,11 +356,10 @@ export function registerCampaign(program: Command): void {
         );
         process.exit(1);
       }
-      try {
-        updateCampaignStatus(campaignId, "abandoned");
-      } catch (err) {
+      if (!tryTransitionCampaign(campaignId, existing.status, "abandoned")) {
+        const current = getCampaign(campaignId);
         process.stderr.write(
-          `Error: campaign is ${existing.status} — cannot transition to abandoned\n`
+          `Error: campaign is ${current?.status ?? "unknown"} — cannot transition to abandoned\n`
         );
         process.exit(1);
       }
