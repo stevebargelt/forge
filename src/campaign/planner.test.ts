@@ -267,14 +267,15 @@ test("mixed: additions appended in given order if not already present", () => {
   );
 });
 
-test("mixed: additions not duplicated if already in expansion", () => {
-  const result = planCampaign(
-    { kind: "mixed", epicId: "FG-100", additions: ["FG-101"] },
-    { projectDir }
+test("mixed: adding id already in epic expansion is rejected", () => {
+  assert.throws(
+    () =>
+      planCampaign(
+        { kind: "mixed", epicId: "FG-100", additions: ["FG-101"] },
+        { projectDir }
+      ),
+    /re-adds ids already in epic expansion/i
   );
-  const ids = result.items.map((i) => i.ticketId);
-  assert.equal(ids.filter((id) => id === "FG-101").length, 1, "FG-101 must appear exactly once");
-  assert.deepEqual(ids, ["FG-101", "FG-103", "FG-102"]);
 });
 
 test("mixed: fails on missing addition ticket", () => {
@@ -296,6 +297,7 @@ test("plan_hash stability: equivalent content produces same hash", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential", "FG-102": "sequential" },
     mode: "dry_run",
     plannerAssumptions: ["a", "b"],
     readinessGateAvailability: "unavailable",
@@ -312,6 +314,7 @@ test("plan_hash stability: key insertion order does not matter", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -325,6 +328,7 @@ test("plan_hash stability: key insertion order does not matter", () => {
     readinessGateAvailability: "unavailable",
     plannerAssumptions: [],
     mode: "dry_run",
+    itemRecommendations: { "FG-101": "sequential" },
     dependencyDecisions: {},
     branchPrStrategy: "one-branch-per-item",
     advisoryRecommendationSummary: null,
@@ -339,6 +343,7 @@ test("plan_hash sensitivity: different item order changes hash", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential", "FG-102": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -355,6 +360,7 @@ test("plan_hash sensitivity: adding a ticket changes hash", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential", "FG-102": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -363,6 +369,7 @@ test("plan_hash sensitivity: adding a ticket changes hash", () => {
   };
   const withExtra: CanonicalPlanContent = {
     ...base,
+    itemRecommendations: { "FG-101": "sequential", "FG-102": "sequential", "FG-103": "sequential" },
     resolvedItemIds: ["FG-101", "FG-102", "FG-103"],
   };
   assert.notEqual(computePlanHash(base), computePlanHash(withExtra));
@@ -374,6 +381,7 @@ test("plan_hash sensitivity: different mode changes hash", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -469,13 +477,18 @@ test("plan_hash sensitivity: removing a ticket changes hash", () => {
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential", "FG-102": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
     resolvedItemIds: ["FG-101", "FG-102"],
     sourceInput: { kind: "list" },
   };
-  const withRemoved: CanonicalPlanContent = { ...base, resolvedItemIds: ["FG-101"] };
+  const withRemoved: CanonicalPlanContent = {
+    ...base,
+    itemRecommendations: { "FG-101": "sequential" },
+    resolvedItemIds: ["FG-101"],
+  };
   assert.notEqual(computePlanHash(base), computePlanHash(withRemoved));
 });
 
@@ -488,6 +501,7 @@ test("plan_hash key order: nested sourceInput and dependencyDecisions key insert
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: { dep_z: "first", dep_a: "second" },
+    itemRecommendations: { "FG-101": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -499,6 +513,7 @@ test("plan_hash key order: nested sourceInput and dependencyDecisions key insert
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: { dep_a: "second", dep_z: "first" },
+    itemRecommendations: { "FG-101": "sequential" },
     mode: "dry_run",
     plannerAssumptions: [],
     readinessGateAvailability: "unavailable",
@@ -622,5 +637,118 @@ test("mixed: excluding all epic children resolves to empty set and throws", () =
         { projectDir }
       ),
     /mixed plan resolved to empty set/i
+  );
+});
+
+// ── duplicate rejection ────────────────────────────────────────────────────────
+
+test("explicit-list: duplicate ticket ids are rejected with clear error", () => {
+  assert.throws(
+    () =>
+      planCampaign(
+        { kind: "list", ticketIds: ["FG-101", "FG-102", "FG-101"] },
+        { projectDir }
+      ),
+    /duplicate ticket ids in explicit list/i
+  );
+});
+
+test("mixed: internal duplicate in --add is rejected with clear error", () => {
+  assert.throws(
+    () =>
+      planCampaign(
+        { kind: "mixed", epicId: "FG-100", additions: ["FG-200", "FG-200"] },
+        { projectDir }
+      ),
+    /duplicate ids in --add/i
+  );
+});
+
+// ── item recommendations ──────────────────────────────────────────────────────
+
+test("item recommendations: all items get sequential recommendation in canonical content", () => {
+  const result = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir }
+  );
+  assert.equal(result.canonicalContent.itemRecommendations["FG-101"], "sequential");
+  assert.equal(result.canonicalContent.itemRecommendations["FG-102"], "sequential");
+});
+
+test("item recommendations: changing recommendation changes plan_hash", () => {
+  const base: CanonicalPlanContent = {
+    advisoryAgentsUsed: false,
+    advisoryRecommendationSummary: null,
+    branchPrStrategy: "one-branch-per-item",
+    dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential" },
+    mode: "dry_run",
+    plannerAssumptions: [],
+    readinessGateAvailability: "unavailable",
+    resolvedItemIds: ["FG-101"],
+    sourceInput: { kind: "list" },
+  };
+  const withHeld: CanonicalPlanContent = {
+    ...base,
+    itemRecommendations: { "FG-101": "held" },
+  };
+  assert.notEqual(computePlanHash(base), computePlanHash(withHeld));
+});
+
+test("item recommendations: stored in metadata.planContent", () => {
+  const result = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir }
+  );
+  const stored = result.campaign.metadata?.planContent as CanonicalPlanContent;
+  assert.ok(stored?.itemRecommendations, "itemRecommendations must be in metadata.planContent");
+  assert.equal(stored.itemRecommendations["FG-101"], "sequential");
+});
+
+test("item recommendations: lifecycle status stays pending (not mutated by recommendations)", () => {
+  const result = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir }
+  );
+  for (const item of result.items) {
+    assert.equal(item.lifecycleStatus, "pending");
+  }
+});
+
+test("item recommendations: map keys exactly match resolvedItemIds — no extras, no omissions", () => {
+  const result = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102", "FG-103"] },
+    { projectDir }
+  );
+  const recKeys = Object.keys(result.canonicalContent.itemRecommendations).sort();
+  const resolvedIds = [...result.canonicalContent.resolvedItemIds].sort();
+  assert.deepEqual(
+    recKeys,
+    resolvedIds,
+    "itemRecommendations must have exactly one entry per resolved item"
+  );
+});
+
+test("plan_hash sensitivity: itemRecommendations populated vs empty changes hash", () => {
+  const withRecs: CanonicalPlanContent = {
+    advisoryAgentsUsed: false,
+    advisoryRecommendationSummary: null,
+    branchPrStrategy: "one-branch-per-item",
+    dependencyDecisions: {},
+    itemRecommendations: { "FG-101": "sequential" },
+    mode: "dry_run",
+    plannerAssumptions: [],
+    readinessGateAvailability: "unavailable",
+    resolvedItemIds: ["FG-101"],
+    sourceInput: { kind: "list" },
+  };
+  const withoutRecs: CanonicalPlanContent = {
+    ...withRecs,
+    itemRecommendations: {},
+  };
+  assert.notEqual(
+    computePlanHash(withRecs),
+    computePlanHash(withoutRecs),
+    "including itemRecommendations must change the plan_hash"
   );
 });

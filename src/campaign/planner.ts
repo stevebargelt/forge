@@ -10,6 +10,7 @@ import { listTickets } from "../backlog/structured.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 
 export type PlanMode = "dry_run" | "pilot" | "sequential";
+export type PlannerRecommendation = "sequential" | "held" | "needs_refinement" | "later_parallel_candidate";
 
 export type ExplicitListInput = { kind: "list"; ticketIds: string[] };
 export type EpicInput = { kind: "epic"; epicId: string };
@@ -27,6 +28,7 @@ export type CanonicalPlanContent = {
   advisoryRecommendationSummary: string | null;
   branchPrStrategy: string;
   dependencyDecisions: Record<string, unknown>;
+  itemRecommendations: Record<string, PlannerRecommendation>;
   mode: string;
   plannerAssumptions: string[];
   readinessGateAvailability: string;
@@ -99,6 +101,15 @@ function expandEpic(projectDir: string, epicId: string): string[] {
 
 function resolveExplicitList(projectDir: string, ticketIds: string[]): string[] {
   if (ticketIds.length === 0) throw new Error("Ticket list must not be empty");
+  const seen = new Set<string>();
+  const dupes: string[] = [];
+  for (const id of ticketIds) {
+    if (seen.has(id)) dupes.push(id);
+    else seen.add(id);
+  }
+  if (dupes.length > 0) {
+    throw new Error(`Duplicate ticket ids in explicit list: ${[...new Set(dupes)].join(", ")}`);
+  }
   const all = listTickets(projectDir);
   const allIds = new Set(all.map((t) => t.id));
   const missing = ticketIds.filter((id) => !allIds.has(id));
@@ -112,6 +123,16 @@ function resolveMixed(
   additions: string[],
   exclusions: string[]
 ): string[] {
+  const addSeen = new Set<string>();
+  const addDupes: string[] = [];
+  for (const id of additions) {
+    if (addSeen.has(id)) addDupes.push(id);
+    else addSeen.add(id);
+  }
+  if (addDupes.length > 0) {
+    throw new Error(`Duplicate ids in --add: ${[...new Set(addDupes)].join(", ")}`);
+  }
+
   const epicIds = expandEpic(projectDir, epicId);
   const exclusionSet = new Set(exclusions);
   const afterExclusions = epicIds.filter((id) => !exclusionSet.has(id));
@@ -125,9 +146,15 @@ function resolveMixed(
     }
   }
 
-  const presentSet = new Set(afterExclusions);
-  const appended = additions.filter((id) => !presentSet.has(id));
-  const result = [...afterExclusions, ...appended];
+  const postExclusionSet = new Set(afterExclusions);
+  const alreadyPresent = additions.filter((id) => postExclusionSet.has(id));
+  if (alreadyPresent.length > 0) {
+    throw new Error(
+      `--add re-adds ids already in epic expansion (after exclusions): ${alreadyPresent.join(", ")}`
+    );
+  }
+
+  const result = [...afterExclusions, ...additions];
 
   if (result.length === 0) {
     throw new Error(
@@ -174,13 +201,29 @@ export function planCampaign(
     sourceKind = "mixed";
   }
 
+  const idSet = new Set<string>();
+  const finalDupes: string[] = [];
+  for (const id of resolvedIds) {
+    if (idSet.has(id)) finalDupes.push(id);
+    else idSet.add(id);
+  }
+  if (finalDupes.length > 0) {
+    throw new Error(`Planner resolved duplicate ids: ${[...new Set(finalDupes)].join(", ")}`);
+  }
+
   const normalizedSourceInput = buildNormalizedSourceInput(input);
+
+  const itemRecommendations: Record<string, PlannerRecommendation> = {};
+  for (const id of resolvedIds) {
+    itemRecommendations[id] = "sequential";
+  }
 
   const canonicalContent: CanonicalPlanContent = {
     advisoryAgentsUsed: false,
     advisoryRecommendationSummary: null,
     branchPrStrategy: "one-branch-per-item",
     dependencyDecisions: {},
+    itemRecommendations,
     mode,
     plannerAssumptions: [
       "items executed sequentially unless mode overridden",
