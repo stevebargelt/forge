@@ -183,7 +183,7 @@ Approval is a durable state-machine precondition for execution: `forge campaign 
 
 | Stop reason | Meaning | Fix |
 |---|---|---|
-| `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Inspect status via direct DB query: `SELECT status FROM campaigns WHERE id = '<id>';` (status/report commands coming in FG-394) |
+| `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Inspect status with `forge campaign show <id>` |
 | `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
 | `invalid_project_dir` | Stored `projectDir` no longer exists or lacks a `backlog` directory | Restore the directory or re-plan |
 | `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
@@ -205,15 +205,17 @@ If all preconditions pass, the campaign transitions to `running` via a compare-a
 
 Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the stored directory, then starts executing items sequentially.
 
-### Crash recovery (MVP limitation — FG-394)
+### Crash recovery (MVP limitation)
 
 `forge campaign start` holds its process for the campaign's entire duration, which may span several hours or overnight. **Crash recovery is not automated in this MVP.** If the `start` process dies mid-run (crash, SIGKILL, power loss):
 
 - The campaign stays stuck in status `running`.
 - A subsequent `forge campaign start` refuses with stop reason `not_planned`.
-- Recovery evidence is durable: each item's `run_id` is persisted before dispatch, so a direct DB query tells you exactly which item was in flight when the process died (status/report commands coming in FG-394).
+- Recovery evidence is durable: each item's `run_id` is persisted before dispatch. Run `forge campaign show <id>` to see which item was in flight when the process died.
 
-**Interim manual recovery** (temporary procedure until FG-394 ships a `forge campaign reset` command):
+**Note:** `forge campaign resume` only operates on a `paused` campaign. A campaign stuck in `running` after a process crash is not the same as paused — no automated recovery path exists yet; manual database intervention is still required.
+
+**Manual crash recovery:**
 
 ```sql
 -- Connect to the forge database (default: ~/.forge/forge.db) with the sqlite3 CLI.
@@ -229,3 +231,147 @@ UPDATE campaign_items
 ```
 
 Before re-starting, inspect the run that was in flight (using the persisted `run_id`) to determine whether the engineer agent finished before the crash. If the ticket reached `status: done` with a `closed_commit`, mark the item complete manually rather than re-dispatching the same work.
+
+### Campaign lifecycle
+
+Campaigns move through a fixed set of statuses. Control commands enforce legal transitions and refuse others with a clear error message and non-zero exit.
+
+| From | To | Command |
+|---|---|---|
+| `planned` | `running` | `forge campaign start` |
+| `planned` | `abandoned` | `forge campaign abandon` |
+| `running` | `paused` | `forge campaign pause` (cooperative) |
+| `running` | `complete` | automatic (all items processed) |
+| `running` | `failed` | automatic (item failure) |
+| `running` | `abandoned` | `forge campaign abandon` |
+| `paused` | `running` | `forge campaign resume` |
+| `paused` | `abandoned` | `forge campaign abandon` |
+
+`complete`, `failed`, and `abandoned` are terminal — no further transitions are accepted.
+
+### Show
+
+`forge campaign show <id> [--json]` prints the current state of a campaign. Read-only; does not mutate any state.
+
+Human output includes:
+
+- Campaign status, mode, `projectDir`, and approved plan hash
+- Staleness indicator: whether the current plan hash matches the approved hash
+- The active item, if any (ticket id and run id)
+- Per-item rows: ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, reason, and requested human action
+- A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.)
+
+With `--json`, the output is a single stable object:
+
+```json
+{
+  "campaignId": "camp-abc123",
+  "status": "paused",
+  "mode": "sequential",
+  "approvedPlanHash": "abc...",
+  "currentPlanHash": "abc...",
+  "planStale": false,
+  "projectDir": "/Users/you/code/my-app",
+  "activeItem": null,
+  "items": [
+    {
+      "ticketId": "FG-10",
+      "title": "Add login",
+      "lifecycleStatus": "complete",
+      "outcome": "shipped",
+      "blockerKind": null,
+      "continuePolicy": null,
+      "runId": "run-fg-10-aabbcc",
+      "reason": null,
+      "requestedHumanAction": null
+    }
+  ],
+  "nextAction": "resume"
+}
+```
+
+Use `forge campaign show` for a quick status check; for a full checkpoint report use `forge campaign report`.
+
+### Report
+
+`forge campaign report <id> [--json]` generates a checkpoint or final campaign report. Read-only; does not mutate any state.
+
+The report includes all `show` fields plus:
+
+- `goal` — free-text goal from campaign metadata, if set
+- `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but some items did not ship), or `not_complete`
+- `safetyToContinue` — `can_start`, `can_resume`, `running`, `needs_approval`, `stale`, or `terminal`
+- `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
+- `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed`
+- `nextOperatorAction` — narrative next step for the operator
+- Per-item: a `commit` field (the ticket's `closed_commit` for shipped items) and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, `reviewerResult`
+
+**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, and `reviewerResult` are always `null` — the source systems (worktrees, done-audit, reviewer) are not yet built (FG-382/383/384). These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
+
+The `--json` shape is stable for future dashboard and orchestrator use.
+
+Example: `forge campaign report camp-abc123` after a completed campaign prints groupings and a verdict of `all_shipped` or `complete_with_issues`.
+
+### Pause
+
+`forge campaign pause <id> [--json]` requests a cooperative pause of a running campaign.
+
+**Cooperative semantics:** pause does NOT interrupt an in-flight item. The live driver (`forge campaign start` or `forge campaign resume` process) finishes the current item, then checks campaign status before dispatching the next one. If the campaign is now `paused`, the driver stops without starting the next item and exits cleanly with stop reason `paused`.
+
+Only a `running` campaign can be paused. Calling `pause` on any other status exits non-zero with the actual current status.
+
+With `--json`:
+
+```json
+{
+  "campaignId": "camp-abc123",
+  "status": "paused",
+  "note": "pause takes effect between items; the current item finishes first"
+}
+```
+
+### Resume
+
+`forge campaign resume <id> [--project <dir>] [--json]` resumes a paused campaign and **blocks until the campaign reaches `paused`, `failed`, or `complete`** — exactly like `forge campaign start`.
+
+Before re-entering the dispatch loop, `resume` runs the same preconditions as `start`:
+
+1. Campaign must be in `paused` status.
+2. `approved_plan_hash` must be set.
+3. The current plan hash (re-resolved from stored `sourceInput`) must match `approved_plan_hash`. If the backlog changed since approval, `resume` refuses with `stale_plan` — re-plan and re-approve are required.
+4. `paused → running` transition succeeds via a CAS guard, preventing two concurrent `resume` calls from double-dispatching.
+
+The driver then skips already-completed items and dispatches only remaining `pending` items.
+
+`--project <dir>` is verify-only: the resolved path must equal the stored `projectDir` or `resume` refuses. It does not override the execution directory.
+
+**Important:** only a `paused` campaign can be resumed. A campaign stuck in `running` after a process crash is not the same as paused — see crash recovery above.
+
+Resume stop reasons:
+
+| Stop reason | Meaning | Fix |
+|---|---|---|
+| `not_paused` | Campaign is not paused | Check status with `forge campaign show <id>` |
+| `abandoned` | Campaign is abandoned (terminal) | No recovery |
+| `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
+| `invalid_project_dir` | Stored `projectDir` missing or has no backlog | Restore directory or re-plan |
+| `not_approved` | `approved_plan_hash` not set | Run `forge campaign approve <id> --rationale <text>` |
+| `stale_plan` | Plan changed since approval | Re-plan and re-approve |
+| `already_running` | Concurrent `resume` won the CAS | Wait or investigate |
+| `paused` | Driver stopped cooperatively | Run `forge campaign resume` again |
+| `complete` | All items processed | None |
+| `item_failed` | An item failed — campaign is now `failed` | Investigate and re-plan or abandon |
+
+### Abandon
+
+`forge campaign abandon <id> [--json]` moves a campaign to the terminal `abandoned` state. Irreversible.
+
+Any `planned`, `running`, or `paused` campaign can be abandoned. Abandoning a `running` campaign takes effect cooperatively with the driver — the in-flight item completes before the driver stops, but the campaign status transitions to `abandoned` immediately.
+
+`complete`, `failed`, and `abandoned` campaigns cannot be abandoned (they are already terminal). The command exits non-zero with the current status.
+
+With `--json`:
+
+```json
+{ "campaignId": "camp-abc123", "status": "abandoned" }
+```

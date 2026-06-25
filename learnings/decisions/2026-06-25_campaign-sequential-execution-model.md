@@ -66,7 +66,7 @@ Crash recovery is explicitly deferred to FG-394. A process death leaves the camp
 
 **Negative / Trade-offs:**
 
-- A process holding `forge campaign start` overnight has no automatic recovery path if it dies. The operator must use interim manual SQLite recovery until FG-394 ships.
+- A process holding `forge campaign start` overnight has no automatic recovery path if it dies. The campaign stays stuck in `running`; manual SQLite recovery is required (no automated reset command yet). `forge campaign show` reveals which item was in flight.
 - Sequential throughput is bounded by engineer-agent wall-clock time per item. Multi-item campaigns on large epics will be slow. FG-393 addresses this.
 
 ---
@@ -74,4 +74,4 @@ Crash recovery is explicitly deferred to FG-394. A process death leaves the camp
 ## Revisit Conditions
 
 - **FG-393 ships continue/blocker policy or parallel execution.** Re-evaluate whether the CAS-only concurrency model still suffices.
-- **FG-394 ships resume/reset.** Document the `forge campaign reset` command and retire the interim SQLite manual-recovery procedure from docs/concepts.md.
+- **FG-394 shipped** `show`, `report`, `pause`, `resume`, `abandon` (no `reset` command). The interim SQLite manual-recovery procedure in docs/concepts.md is retained — a crashed `running` campaign still requires manual DB intervention. Cooperative-pause, resume-as-active-driver, and atomic CAS terminal transitions are documented in docs/concepts.md (Campaign lifecycle / Pause / Resume sections); no new ADR was warranted because these are extensions of the same sequential-CAS execution model captured here.
