@@ -150,7 +150,7 @@ Example: after the engineer modified `src/cli/commands/show.ts`, `forge show` pr
 
 ## Campaign
 
-An ordered collection of tickets that forge will work in sequence. Created by `forge campaign plan`, which resolves the input (ticket list, epic, or mixed) into a persisted campaign (status `planned`) with items (status `pending`) and a stable `plan_hash` computed from the canonical plan content. The campaign and its items are written to the database; no runs or tasks are created until execution (FG-392).
+An ordered collection of tickets that forge will work in sequence. Created by `forge campaign plan`, which resolves the input (ticket list, epic, or mixed) into a persisted campaign (status `planned`) with items (status `pending`) and a stable `plan_hash` computed from the canonical plan content. The campaign and its items are written to the database at plan time; no runs or tasks are created until `forge campaign start` executes the campaign.
 
 `forge campaign plan` accepts three input modes:
 
@@ -160,6 +160,69 @@ An ordered collection of tickets that forge will work in sequence. Created by `f
 
 `--tickets` and `--epic` are mutually exclusive; `--add` and `--exclude` require `--epic`. Other flags: `--mode dry_run|pilot|sequential` (default `dry_run`), `--project <dir>` (default: cwd), `--json` (machine-readable output). Ambiguous flag combinations and invalid `--mode` values fail loudly.
 
-Output: campaign id, ordered item list with lifecycle status, canonical plan content, and `plan_hash`. With `--json` the output is a single object `{campaignId, orderedItems, canonicalContent, planHash}`. The `plan_hash` is the fingerprint FG-392's pre-execution check will verify before any work starts. See FORGE-DEC-023.
+Output: campaign id, ordered item list with lifecycle status, canonical plan content, and `plan_hash`. With `--json` the output is a single object `{campaignId, orderedItems, canonicalContent, planHash}`. The `plan_hash` is the fingerprint that `forge campaign start` re-verifies before dispatching any work — if the backlog has changed since approval, `start` refuses with `stale_plan`. See FORGE-DEC-023.
 
 Example: `forge campaign plan --epic FG-100 --exclude FG-5 --mode pilot` plans a campaign from FG-100's children minus FG-5, in pilot mode.
+
+### Approval
+
+`forge campaign approve <campaign-id> --rationale <text> [--by <operator>] [--json]` records a durable approval on a planned campaign. The command stamps `approved_by`, `approved_at`, `approval_rationale`, and snapshots the current `plan_hash` as `approved_plan_hash` in the database.
+
+Preconditions checked at approval time:
+
+- The campaign must be in `planned` state; calling `approve` on any other status is an error.
+- The campaign's stored `projectDir` must exist on disk and contain a `backlog` directory. A campaign with a missing or invalid project directory cannot be approved.
+
+If the backlog has changed since the campaign was planned (re-resolving `sourceInput` now produces a different hash), `approve` emits a non-fatal warning but records the approval anyway. To establish a clean baseline after a backlog change, re-plan (`forge campaign plan`) and re-approve.
+
+Approval is a durable state-machine precondition for execution: `forge campaign start` refuses if `approved_plan_hash` is not set. See FORGE-DEC-024.
+
+### Start (sequential execution)
+
+`forge campaign start <campaign-id> [--project <dir>] [--json]` executes an approved campaign one item at a time. Before dispatching any work, `start` evaluates preconditions in this order and exits non-zero on the first failure:
+
+| Stop reason | Meaning | Fix |
+|---|---|---|
+| `not_planned` | Campaign status is not `planned` (already running, failed, or complete) | Check `forge campaign show` |
+| `no_project_dir` | Campaign predates `projectDir` capture | Re-plan with `forge campaign plan` |
+| `invalid_project_dir` | Stored `projectDir` no longer exists or lacks a `backlog` directory | Restore the directory or re-plan |
+| `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
+| `stale_plan` | Current plan hash (re-resolved from stored `sourceInput` against stored `projectDir`) differs from `approved_plan_hash` | Re-plan and re-approve |
+| `already_running` | A `planned → running` CAS in the database rejected the transition — another `start` process already holds it | Wait or recover — see crash recovery below |
+
+If all preconditions pass, the campaign transitions to `running` via a compare-and-swap (CAS) and items execute **strictly one at a time** through the engineer agent. For each item a `run_id` is pre-allocated and persisted **before** dispatch — this is the crash evidence trail.
+
+**Outcome semantics.** After an item's engineer task completes:
+
+- The item is marked `outcome: shipped` only if the backlog ticket is `status: done` with a `closed_commit`. A completed agent task alone is never treated as shipped.
+- If the ticket is done but lacks a `closed_commit`, the outcome is left unset.
+- If the task fails, the item is marked `lifecycle: failed, outcome: failed`, the campaign transitions to `failed`, and execution stops. There is no auto-continuation; see FG-393.
+
+**`--project` is verify-only.** If `--project <dir>` is provided, `start` checks that the resolved path equals the campaign's stored `projectDir` and refuses if they differ. It does **not** override the execution directory — the campaign always runs against the `projectDir` captured at plan time. Run `forge campaign start` from the same project root used for `forge campaign plan`, or pass `--project` pointing at that same root.
+
+Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the stored directory, then starts executing items sequentially.
+
+### Crash recovery (MVP limitation — FG-394)
+
+`forge campaign start` holds its process for the campaign's entire duration, which may span several hours or overnight. **Crash recovery is not automated in this MVP.** If the `start` process dies mid-run (crash, SIGKILL, power loss):
+
+- The campaign stays stuck in status `running`.
+- A subsequent `forge campaign start` refuses with stop reason `not_planned`.
+- Recovery evidence is durable: each item's `run_id` is persisted before dispatch, so `forge campaign show` (or a direct DB query) tells you exactly which item was in flight when the process died.
+
+**Interim manual recovery** (temporary procedure until FG-394 ships a `forge campaign reset` command):
+
+```sql
+-- Connect to the forge database (default: ~/.forge/forge.db) with the sqlite3 CLI.
+-- Reset the stuck campaign back to planned:
+UPDATE campaigns
+   SET status = 'planned', updated_at = datetime('now')
+ WHERE id = '<campaign-id>';
+
+-- Reset the in-flight item back to pending:
+UPDATE campaign_items
+   SET lifecycle_status = 'pending', outcome = NULL, run_id = NULL, updated_at = datetime('now')
+ WHERE campaign_id = '<campaign-id>' AND lifecycle_status = 'running';
+```
+
+Before re-starting, inspect the run that was in flight (using the persisted `run_id`) to determine whether the engineer agent finished before the crash. If the ticket reached `status: done` with a `closed_commit`, mark the item complete manually rather than re-dispatching the same work.
