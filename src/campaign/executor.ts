@@ -28,7 +28,8 @@ export type CampaignStopReason =
   | "paused"
   | "abandoned"
   | "item_failed"
-  | "complete";
+  | "complete"
+  | "recovery_needed";
 
 export type CampaignItemRecord = {
   itemId: string;
@@ -81,13 +82,19 @@ async function driveRemainingItems(
   const ticketMap = new Map(ticketCache.map((t) => [t.id, t]));
 
   for (const item of items) {
-    // Skip terminal items — idempotent re-drive
+    // Safe-terminal: skip idempotently on re-drive
     if (item.lifecycleStatus === "complete" || item.lifecycleStatus === "failed") {
       continue;
     }
-    // Only dispatch pending items (running items from a crash are not re-dispatched)
+    // In-flight/indeterminate: stop without dispatch or campaign status transition
     if (item.lifecycleStatus !== "pending") {
-      continue;
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        runId: item.runId,
+        lifecycleStatus: item.lifecycleStatus,
+      });
+      return { stopReason: "recovery_needed", itemRecords };
     }
 
     // Cooperative pause: check campaign status before each dispatch
@@ -297,6 +304,23 @@ export async function resumeCampaign(
   });
   if (currentHash !== campaign.approvedPlanHash) {
     return { stopReason: "stale_plan", itemRecords };
+  }
+
+  // Pre-flight: refuse if any item is in-flight — leaves campaign paused and inspectable
+  const preflightItems = listCampaignItems(id);
+  const inFlightItem = preflightItems.find(
+    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+  );
+  if (inFlightItem) {
+    return {
+      stopReason: "recovery_needed",
+      itemRecords: [{
+        itemId: inFlightItem.id,
+        ticketId: inFlightItem.ticketId,
+        runId: inFlightItem.runId,
+        lifecycleStatus: inFlightItem.lifecycleStatus,
+      }],
+    };
   }
 
   if (!tryTransitionCampaign(id, "paused", "running")) {

@@ -51,19 +51,37 @@ function computeDirtyGitState(projectDir: string): string | null {
   }
 }
 
+function findInFlightItem(items: CampaignItem[]): CampaignItem | undefined {
+  return items.find(
+    (i) => i.lifecycleStatus !== "pending" && i.lifecycleStatus !== "complete" && i.lifecycleStatus !== "failed"
+  );
+}
+
+function recoveryNeededAction(item: CampaignItem): string {
+  const runPart = item.runId ? ` (run ${item.runId})` : "";
+  return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before resuming`;
+}
+
 function computeNextShowAction(
   campaign: Campaign,
-  currentPlanHash: string | null
+  currentPlanHash: string | null,
+  items: CampaignItem[]
 ): string {
   switch (campaign.status) {
     case "planned":
       if (!campaign.approvedPlanHash) return "approve";
       if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale: re-plan";
       return "start";
-    case "running":
+    case "running": {
+      const inf = findInFlightItem(items);
+      if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
       return "running";
-    case "paused":
+    }
+    case "paused": {
+      const inf = findInFlightItem(items);
+      if (inf) return recoveryNeededAction(inf);
       return "resume";
+    }
     case "complete":
       return "complete — none";
     case "failed":
@@ -79,16 +97,18 @@ export type SafetyToContinue =
   | "terminal"
   | "running"
   | "needs_approval"
-  | "stale";
+  | "stale"
+  | "recovery_needed";
 
 export type CampaignVerdict = "all_shipped" | "complete_with_issues" | "not_complete";
 
-function computeSafety(campaign: Campaign, currentPlanHash: string | null): SafetyToContinue {
+function computeSafety(campaign: Campaign, currentPlanHash: string | null, items: CampaignItem[]): SafetyToContinue {
   if (campaign.status === "running") return "running";
   if (campaign.status === "complete" || campaign.status === "failed" || campaign.status === "abandoned") {
     return "terminal";
   }
   if (campaign.status === "paused") {
+    if (findInFlightItem(items)) return "recovery_needed";
     if (!campaign.approvedPlanHash) return "needs_approval";
     if (currentPlanHash && currentPlanHash !== campaign.approvedPlanHash) return "stale";
     return "can_resume";
@@ -108,7 +128,8 @@ function computeVerdict(campaign: Campaign, items: CampaignItem[]): CampaignVerd
 function computeNextOperatorAction(
   campaign: Campaign,
   verdict: CampaignVerdict,
-  currentPlanHash: string | null
+  currentPlanHash: string | null,
+  items: CampaignItem[]
 ): string {
   switch (campaign.status) {
     case "planned":
@@ -119,8 +140,11 @@ function computeNextOperatorAction(
       return "start the campaign";
     case "running":
       return "campaign is running — monitor progress";
-    case "paused":
+    case "paused": {
+      const inf = findInFlightItem(items);
+      if (inf) return recoveryNeededAction(inf);
       return "resume the campaign when ready";
+    }
     case "complete":
       if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
       return "review blocked/failed/skipped items";
@@ -193,7 +217,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     requestedHumanAction: i.requestedHumanAction ?? null,
   }));
 
-  const nextAction = computeNextShowAction(campaign, currentPlanHash);
+  const nextAction = computeNextShowAction(campaign, currentPlanHash, items);
 
   return {
     campaignId: campaign.id,
@@ -281,9 +305,9 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     }
   }
 
-  const safetyToContinue = computeSafety(campaign, currentPlanHash);
+  const safetyToContinue = computeSafety(campaign, currentPlanHash, items);
   const verdict = computeVerdict(campaign, items);
-  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, currentPlanHash);
+  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, currentPlanHash, items);
 
   const goal =
     campaign.metadata?.["goal"] !== undefined

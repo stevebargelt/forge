@@ -1293,3 +1293,163 @@ test("last-item pause boundary: pause lands after final item completes — drive
   const afterResume = getCampaign(campaign.id)!;
   assert.equal(afterResume.status, "complete", "campaign must be complete after resume");
 });
+
+// ── FG-394-fix: recovery_needed — EXACT repro ─────────────────────────────────
+
+test("FG-394-fix EXACT repro: paused campaign with running item — resumeCampaign returns recovery_needed, campaign stays paused, no dispatch", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Simulate: item1 stuck in 'running' (driver died mid-item), campaign paused
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-123' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  let dispatchCallCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await resumeCampaign(campaign.id, { dispatch });
+
+  assert.equal(result.stopReason, "recovery_needed", "must return recovery_needed for in-flight item");
+  assert.equal(dispatchCallCount, 0, "must NOT dispatch any item");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must STAY paused (not become complete)");
+
+  // The stuck item must remain unchanged
+  const stuckItem = db.prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string; run_id: string };
+  assert.equal(stuckItem.lifecycle_status, "running", "stuck item must remain running — not marked complete or failed");
+  assert.equal(stuckItem.run_id, "run-stuck-123", "stuck item run_id must be unchanged");
+
+  // itemRecords must identify the in-flight item with its run_id
+  assert.equal(result.itemRecords.length, 1);
+  assert.equal(result.itemRecords[0]!.ticketId, "FG-101");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "running");
+  assert.equal(result.itemRecords[0]!.runId, "run-stuck-123");
+});
+
+// ── FG-394-fix: recovery_needed — all in-flight states ────────────────────────
+
+const IN_FLIGHT_STATES = ["running", "awaiting_gate", "awaiting_human_input", "awaiting_red", "blocked_by_red"] as const;
+
+for (const inflightStatus of IN_FLIGHT_STATES) {
+  test(`FG-394-fix: paused campaign with item lifecycleStatus='${inflightStatus}' → recovery_needed, campaign stays paused`, async () => {
+    const { campaign } = planCampaign(
+      { kind: "list", ticketIds: ["FG-101"] },
+      { projectDir, mode: "sequential" }
+    );
+    approveCampaign(campaign.id, { rationale: "Approved" });
+
+    const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+    db.prepare("UPDATE campaign_items SET lifecycle_status = ?, run_id = 'run-inflight-test' WHERE id = ?").run(inflightStatus, items[0]!.id);
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+    let dispatched = 0;
+    const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+      dispatched++;
+      return { runId: "r", taskId: "t", status: "complete" };
+    };
+
+    const result = await resumeCampaign(campaign.id, { dispatch });
+    assert.equal(result.stopReason, "recovery_needed", `in-flight status '${inflightStatus}' must trigger recovery_needed`);
+    assert.equal(dispatched, 0, `must not dispatch when item is '${inflightStatus}'`);
+
+    const after = getCampaign(campaign.id)!;
+    assert.equal(after.status, "paused", `campaign must stay paused for in-flight status '${inflightStatus}'`);
+
+    assert.equal(result.itemRecords[0]!.runId, "run-inflight-test", "itemRecords must expose run_id");
+    assert.equal(result.itemRecords[0]!.lifecycleStatus, inflightStatus);
+  });
+}
+
+// ── FG-394-fix: clean resume — complete+pending, no in-flight ─────────────────
+
+test("FG-394-fix: clean paused campaign (some complete, rest pending, no in-flight) resumes normally to complete", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // item1: safe-terminal (complete); item2: pending (dispatchable)
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "clean resume must reach complete");
+  assert.equal(dispatchLog.length, 1, "only pending item dispatched (complete item skipped)");
+  assert.equal(dispatchLog[0], "FG-102", "only FG-102 (pending) dispatched");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "complete");
+});
+
+// ── FG-394-fix: driver defensive — in-flight item mid-list ────────────────────
+
+test("FG-394-fix driver defensive: in-flight item mid-list — driver stops recovery_needed, campaign does NOT become complete", async () => {
+  writeTicket(projectDir, {
+    id: "FG-103",
+    type: "story",
+    status: "active",
+    title: "Story Three",
+    epic: "FG-100",
+    created: "2024-01-03",
+    body: "Do the third thing",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102", "FG-103"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Pre-set: item1=complete (safe-terminal), item2=running (in-flight), item3=pending
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-mid' WHERE id = ?").run(items[1]!.id);
+  // item3 remains pending
+
+  let dispatchCallCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  // startCampaign has no pre-flight check — exercises the driver defensive directly
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "recovery_needed", "driver must return recovery_needed for in-flight mid-list item");
+  assert.equal(dispatchCallCount, 0, "dispatch must NOT be called — item3 never reached");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.notEqual(finalCampaign.status, "complete", "campaign must NOT be complete after recovery_needed stop");
+  assert.notEqual(finalCampaign.status, "failed", "campaign must NOT be failed after recovery_needed stop");
+
+  // item3 must remain pending (never dispatched)
+  const dbItem3 = db.prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE ticket_id = 'FG-103'").get() as { lifecycle_status: string; run_id: string | null };
+  assert.equal(dbItem3.lifecycle_status, "pending", "item3 must remain pending");
+  assert.equal(dbItem3.run_id, null, "item3 must have no run_id");
+
+  // item2 must be unchanged
+  const dbItem2 = db.prepare("SELECT lifecycle_status, run_id FROM campaign_items WHERE ticket_id = 'FG-102'").get() as { lifecycle_status: string; run_id: string };
+  assert.equal(dbItem2.lifecycle_status, "running", "item2 must remain running (driver must not modify it)");
+  assert.equal(dbItem2.run_id, "run-stuck-mid", "item2 run_id must be unchanged");
+
+  // itemRecords must identify the in-flight item
+  assert.equal(result.itemRecords.length, 1);
+  assert.equal(result.itemRecords[0]!.ticketId, "FG-102");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "running");
+  assert.equal(result.itemRecords[0]!.runId, "run-stuck-mid");
+});

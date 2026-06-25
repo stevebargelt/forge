@@ -554,3 +554,64 @@ test("assembleCampaignReport: commit=null for non-shipped item, commit set for s
   assert.equal(item1.commit, "deadbeef123", "shipped item must have commit from ticket");
   assert.equal(item2.commit, null, "non-shipped item must have null commit");
 });
+
+// ── FG-394-fix: show/report surface recovery-needed condition ─────────────────
+
+test("assembleCampaignShow: paused campaign with in-flight item → nextAction has recovery message with ticketId and run_id", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  // Simulate stuck in-flight item
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-show-123' WHERE id = ?").run(items[0]!.id);
+
+  const result = assembleCampaignShow(campaign.id)!;
+  assert.ok(result.nextAction.includes("recovery needed"), `nextAction must mention recovery, got: ${result.nextAction}`);
+  assert.ok(result.nextAction.includes("FG-101"), `nextAction must mention ticket id, got: ${result.nextAction}`);
+  assert.ok(result.nextAction.includes("run-stuck-show-123"), `nextAction must include run_id, got: ${result.nextAction}`);
+  assert.ok(result.nextAction.includes("running"), `nextAction must mention the in-flight status, got: ${result.nextAction}`);
+  // Must NOT say just "resume" (which would ignore the recovery state)
+  assert.notEqual(result.nextAction, "resume");
+});
+
+test("assembleCampaignReport: paused campaign with in-flight item → nextOperatorAction has recovery message + run_id, safetyToContinue=recovery_needed", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  // Simulate stuck in-flight item with known run_id
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-report-456' WHERE id = ?").run(items[0]!.id);
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "recovery_needed", "safetyToContinue must be recovery_needed");
+  assert.ok(result.nextOperatorAction.includes("recovery needed"), `nextOperatorAction must mention recovery, got: ${result.nextOperatorAction}`);
+  assert.ok(result.nextOperatorAction.includes("FG-101"), `nextOperatorAction must mention ticket id, got: ${result.nextOperatorAction}`);
+  assert.ok(result.nextOperatorAction.includes("run-stuck-report-456"), `nextOperatorAction must include run_id, got: ${result.nextOperatorAction}`);
+  // Verdict must NOT claim all_shipped (campaign is paused, not complete)
+  assert.notEqual(result.verdict, "all_shipped");
+});
+
+test("assembleCampaignReport: clean paused campaign (no in-flight) → safetyToContinue=can_resume unchanged", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+  // All items remain pending (no in-flight)
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "can_resume", "clean paused campaign must still be can_resume");
+  assert.equal(result.nextOperatorAction, "resume the campaign when ready");
+});

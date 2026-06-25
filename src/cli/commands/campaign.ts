@@ -304,6 +304,7 @@ export function registerCampaign(program: Command): void {
         "stale_plan",
         "already_running",
         "abandoned",
+        "recovery_needed",
       ]);
 
       if (opts.json) {
@@ -315,7 +316,15 @@ export function registerCampaign(program: Command): void {
           console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
         }
 
-        if (result.stopReason === "not_paused") {
+        if (result.stopReason === "recovery_needed") {
+          const rec = result.itemRecords[0];
+          if (rec) {
+            const runPart = rec.runId ? ` (run ${rec.runId})` : "";
+            console.error(`recovery needed: item ${rec.ticketId} is ${rec.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before resuming`);
+          } else {
+            console.error("recovery needed: campaign has an in-flight item that must be resolved before resuming");
+          }
+        } else if (result.stopReason === "not_paused") {
           console.error("campaign is not paused; only a paused campaign can be resumed");
         } else if (result.stopReason === "abandoned") {
           console.error("campaign is abandoned; cannot resume an abandoned campaign");
