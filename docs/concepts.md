@@ -188,6 +188,7 @@ Approval is a durable state-machine precondition for execution: `forge campaign 
 | `invalid_project_dir` | Stored `projectDir` no longer exists or lacks a `backlog` directory | Restore the directory or re-plan |
 | `not_approved` | `approved_plan_hash` is not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Current plan hash (re-resolved from stored `sourceInput` against stored `projectDir`) differs from `approved_plan_hash` | Re-plan and re-approve |
+| `plan_unresolvable` | The plan can no longer be resolved from stored `sourceInput` — a source ticket may have been deleted from the backlog since planning | Re-plan with `forge campaign plan` |
 | `dry_run_not_executable` | Campaign mode is `dry_run` — plan-and-report only; `start` refuses to dispatch any work or mutate the repo | Re-plan with `--mode pilot` or `--mode sequential` and re-approve |
 | `recovery_needed` | One or more campaign items are in a non-terminal, non-pending state (`running`, `awaiting_gate`, `awaiting_red`, `blocked_by_red`, or similar) — campaign stays `planned`, no dispatch occurs | Inspect the stuck item with `forge campaign show <id>` (the `Next action` line names the ticket and its `run_id`); reset the item to `pending` or mark it `failed` (manual DB operation — see crash recovery below), then start again |
 | `already_running` | A `planned → running` CAS in the database rejected the transition — another `start` process already holds it | Wait or recover — see crash recovery below |
@@ -296,7 +297,7 @@ Human output includes:
 - Staleness indicator: whether the current plan hash matches the approved hash
 - The active item, if any (ticket id and run id)
 - Per-item rows: ticket id, title, lifecycle status, outcome, blocker kind, continue policy, run id, reason, and requested human action. For blocked items `blockerKind`, `reason`, and `requestedHumanAction` are populated; for held items `outcome` is `held` with a `reason` explaining which blocker triggered the hold.
-- A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.). When any campaign item is in an in-flight state and the campaign is `paused` (or `running` with a non-running in-flight item), the line instead reads: `recovery needed: item <ticket-id> is <lifecycle-status> (run <run-id>) — inspect the run; reset the item to pending or mark it failed before resuming`.
+- A `Next action` line with the recommended operator step (`approve`, `start`, `resume`, `complete — none`, etc.). When any campaign item is in an in-flight state and the campaign is `paused` (or `running` with a non-running in-flight item), the line instead reads: `recovery needed: item <ticket-id> is <lifecycle-status> (run <run-id>) — inspect the run; reset the item to pending or mark it failed before resuming`. When the source plan can no longer be resolved (e.g. a source ticket was deleted from the backlog since planning), the line reads: `plan can no longer be resolved (a source ticket may have been deleted) — re-plan with forge campaign plan`. Both `show` and `report` render the full persisted campaign and item state without error in this case; `start` and `resume` refuse non-zero with stop reason `plan_unresolvable`.
 
 With `--json`, the output is a single stable object:
 
@@ -339,7 +340,7 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `sourceInput` — the raw source input recorded at plan time (`{kind, ticketIds}` / `{kind, epicId}` / `{kind, epicId, additions, exclusions}`)
 - `goal` — free-text goal from campaign metadata, if set
 - `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but blocked, held, or skipped items exist — never `all_shipped` when any item did not ship), or `not_complete`
-- `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means an unresolved blocker must be resolved before the campaign can resume. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `recovery_needed` is returned when a campaign has an item in a non-terminal, non-pending in-flight state; `forge campaign resume` will refuse until the item is reset manually.
+- `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means an unresolved blocker must be resolved before the campaign can resume. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `stale` covers two conditions: the plan hash changed since approval (`stale_plan`), or the plan can no longer be resolved at all because a source ticket was deleted from the backlog since planning (`plan_unresolvable`) — both require re-plan and re-approve. `recovery_needed` is returned when a campaign has an item in a non-terminal, non-pending in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed` (items with `outcome: needs_refinement` are counted in `failed`)
 - `deferredScope` — always `[]` (reserved)
@@ -399,6 +400,7 @@ Resume stop reasons:
 | `invalid_project_dir` | Stored `projectDir` missing or has no backlog | Restore directory or re-plan |
 | `not_approved` | `approved_plan_hash` not set | Run `forge campaign approve <id> --rationale <text>` |
 | `stale_plan` | Plan changed since approval | Re-plan and re-approve |
+| `plan_unresolvable` | The plan can no longer be resolved from stored `sourceInput` — a source ticket may have been deleted from the backlog since planning | Re-plan with `forge campaign plan` |
 | `recovery_needed` | One or more campaign items are in a non-terminal, non-pending state — campaign stays `paused`, no dispatch occurs | Inspect the stuck item with `forge campaign show <id>` (the `Next action` line names the ticket, its lifecycle status, and `run_id`); reset the item to `pending` or mark it `failed` (manual DB operation — see crash recovery above), then resume |
 | `already_running` | Concurrent `resume` won the CAS | Wait or investigate |
 | `paused` | Driver stopped cooperatively (SHARED blocker or held items remain) | Run `forge campaign resume` again after resolving any blocker |
