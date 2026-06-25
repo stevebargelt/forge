@@ -1,12 +1,10 @@
 ---
 id: FG-394
 type: story
-status: done
+status: active
 title: "Campaign CLI: status, campaign report, pause, resume, and abandon"
 epic: FG-370
 created: 2026-06-24
-closed: 2026-06-25
-closed_commit: 62afc29
 ---
 
 ## Problem
