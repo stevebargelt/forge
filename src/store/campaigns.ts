@@ -21,6 +21,11 @@ type CampaignRow = {
   updated_at: string;
   metadata: string | null;
   plan_hash: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  approval_rationale: string | null;
+  approved_plan_hash: string | null;
+  project_dir: string | null;
 };
 
 type CampaignItemRow = {
@@ -53,6 +58,11 @@ function rowToCampaign(row: CampaignRow): Campaign {
     updatedAt: row.updated_at,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
     planHash: row.plan_hash ?? undefined,
+    approvedBy: row.approved_by ?? undefined,
+    approvedAt: row.approved_at ?? undefined,
+    approvalRationale: row.approval_rationale ?? undefined,
+    approvedPlanHash: row.approved_plan_hash ?? undefined,
+    projectDir: row.project_dir ?? undefined,
   };
 }
 
@@ -82,6 +92,7 @@ export function createCampaign(opts: {
   sourceInput: Record<string, unknown>;
   mode: string;
   metadata?: Record<string, unknown>;
+  projectDir?: string;
 }): Campaign {
   const now = nowIso();
   const campaign: Campaign = {
@@ -93,11 +104,12 @@ export function createCampaign(opts: {
     createdAt: now,
     updatedAt: now,
     metadata: opts.metadata,
+    projectDir: opts.projectDir,
   };
   getDb()
     .prepare(
-      `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, metadata, project_dir)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       campaign.id,
@@ -107,7 +119,8 @@ export function createCampaign(opts: {
       campaign.mode,
       campaign.createdAt,
       campaign.updatedAt,
-      campaign.metadata ? JSON.stringify(campaign.metadata) : null
+      campaign.metadata ? JSON.stringify(campaign.metadata) : null,
+      campaign.projectDir ?? null
     );
   return campaign;
 }
@@ -213,6 +226,30 @@ export type CampaignItemUpdate = {
   worktreePath?: string;
   prUrl?: string;
 };
+
+export function approveCampaign(
+  id: string,
+  opts: { approvedBy?: string; rationale: string }
+): boolean {
+  const campaign = getCampaign(id);
+  if (!campaign || campaign.status !== "planned") return false;
+  const result = getDb()
+    .prepare(
+      `UPDATE campaigns
+          SET approved_by = ?, approved_at = ?, approval_rationale = ?,
+              approved_plan_hash = plan_hash, updated_at = ?
+        WHERE id = ? AND status = 'planned'`
+    )
+    .run(opts.approvedBy ?? null, nowIso(), opts.rationale, nowIso(), id);
+  return (result.changes ?? 0) > 0;
+}
+
+export function tryTransitionCampaignToRunning(id: string): boolean {
+  const result = getDb()
+    .prepare(`UPDATE campaigns SET status = 'running', updated_at = ? WHERE id = ? AND status = 'planned'`)
+    .run(nowIso(), id);
+  return (result.changes ?? 0) > 0;
+}
 
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
   const existing = getCampaignItem(id);

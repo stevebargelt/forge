@@ -105,15 +105,20 @@ CREATE TABLE IF NOT EXISTS model_calls (
 -- symmetry — see db.ts.
 
 CREATE TABLE IF NOT EXISTS campaigns (
-  id              TEXT PRIMARY KEY,
-  status          TEXT NOT NULL,
-  source_kind     TEXT NOT NULL,
-  source_input    TEXT NOT NULL,
-  mode            TEXT NOT NULL,
-  created_at      TEXT NOT NULL,
-  updated_at      TEXT NOT NULL,
-  metadata        TEXT,
-  plan_hash       TEXT
+  id                  TEXT PRIMARY KEY,
+  status              TEXT NOT NULL,
+  source_kind         TEXT NOT NULL,
+  source_input        TEXT NOT NULL,
+  mode                TEXT NOT NULL,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL,
+  metadata            TEXT,
+  plan_hash           TEXT,
+  approved_by         TEXT,
+  approved_at         TEXT,
+  approval_rationale  TEXT,
+  approved_plan_hash  TEXT,
+  project_dir         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(status);
 

@@ -102,6 +102,17 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveCampaigns.has("plan_hash")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN plan_hash TEXT`);
   }
+  // FG-392: approval columns. Guarded on approved_by (one block — all four added together).
+  if (!haveCampaigns.has("approved_by")) {
+    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_by TEXT`);
+    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_at TEXT`);
+    db.exec(`ALTER TABLE campaigns ADD COLUMN approval_rationale TEXT`);
+    db.exec(`ALTER TABLE campaigns ADD COLUMN approved_plan_hash TEXT`);
+  }
+  // FG-392: project_dir on campaigns. Separate guard so it applies independently.
+  if (!haveCampaigns.has("project_dir")) {
+    db.exec(`ALTER TABLE campaigns ADD COLUMN project_dir TEXT`);
+  }
 }
 
 // Separate caches for readonly vs writable handles. The earlier single-cache

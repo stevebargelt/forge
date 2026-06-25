@@ -287,6 +287,11 @@ export type Campaign = {
   updatedAt: string;
   metadata?: Record<string, unknown>;
   planHash?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  approvalRationale?: string;
+  approvedPlanHash?: string;
+  projectDir?: string;
 };
 
 export type CampaignItem = {

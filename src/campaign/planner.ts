@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import type { Campaign, CampaignItem, SourceKind } from "../types/index.js";
 import {
   addCampaignItem,
@@ -176,10 +177,18 @@ function buildNormalizedSourceInput(input: PlannerInput): Record<string, unknown
   };
 }
 
-export function planCampaign(
+export type ResolvePlanResult = {
+  resolvedIds: string[];
+  sourceKind: SourceKind;
+  normalizedSourceInput: Record<string, unknown>;
+  canonicalContent: CanonicalPlanContent;
+  planHash: string;
+};
+
+export function resolvePlan(
   input: PlannerInput,
   opts: { projectDir: string; mode?: PlanMode }
-): PlanResult {
+): ResolvePlanResult {
   const { projectDir, mode = "dry_run" } = opts;
 
   let resolvedIds: string[];
@@ -236,11 +245,27 @@ export function planCampaign(
 
   const planHash = computePlanHash(canonicalContent);
 
+  return { resolvedIds, sourceKind, normalizedSourceInput, canonicalContent, planHash };
+}
+
+export function planCampaign(
+  input: PlannerInput,
+  opts: { projectDir: string; mode?: PlanMode }
+): PlanResult {
+  const { projectDir, mode = "dry_run" } = opts;
+  const absoluteProjectDir = resolve(projectDir);
+
+  const { resolvedIds, sourceKind, normalizedSourceInput, canonicalContent, planHash } = resolvePlan(
+    input,
+    { projectDir: absoluteProjectDir, mode }
+  );
+
   const campaign = createCampaign({
     sourceKind,
     sourceInput: normalizedSourceInput,
     mode,
     metadata: { planContent: canonicalContent },
+    projectDir: absoluteProjectDir,
   });
 
   setPlanHash(campaign.id, planHash);

@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { SCHEMA_SQL } from "../../store/schema.js";
+import { applyMigrations } from "../../store/db.js";
 import { writeTicket } from "../../backlog/structured.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -424,4 +426,234 @@ test("integ campaign plan --json: itemRecommendations present for every resolved
       `itemRecommendations must have 'sequential' for ${item.ticketId}`
     );
   }
+});
+
+// ── FG-392: additive migration ─────────────────────────────────────────────
+
+test("integ migration: pre-FG-392 campaigns table gets new columns on open; existing rows readable with null new fields", () => {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg392-migration-"));
+  const dbPath = join(dir, "pre392.db");
+
+  try {
+    // Simulate a pre-FG-392 DB: create schema without the new columns
+    const db1 = new Database(dbPath);
+    db1.pragma("foreign_keys = ON");
+    // Create old schema manually (without approved_* and project_dir columns)
+    db1.exec(`
+      CREATE TABLE IF NOT EXISTS campaigns (
+        id         TEXT PRIMARY KEY,
+        status     TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_input TEXT NOT NULL,
+        mode       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        metadata   TEXT,
+        plan_hash  TEXT
+      );
+      CREATE TABLE IF NOT EXISTS campaign_items (
+        id                     TEXT PRIMARY KEY,
+        campaign_id            TEXT NOT NULL REFERENCES campaigns(id),
+        item_order             INTEGER NOT NULL,
+        ticket_id              TEXT NOT NULL,
+        run_id                 TEXT,
+        branch                 TEXT,
+        worktree_path          TEXT,
+        pr_url                 TEXT,
+        lifecycle_status       TEXT NOT NULL,
+        outcome                TEXT,
+        blocker_kind           TEXT,
+        continue_policy        TEXT,
+        reason                 TEXT,
+        requested_human_action TEXT,
+        created_at             TEXT NOT NULL,
+        updated_at             TEXT NOT NULL
+      );
+    `);
+    // Also create stub tables needed by schema.ts FK references
+    db1.exec(`
+      CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, workflow TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, completed_at TEXT, metadata TEXT, project_dir TEXT);
+      CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, parent_id TEXT, phase TEXT NOT NULL, agent_role TEXT NOT NULL, status TEXT NOT NULL, task_package TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, error TEXT);
+      CREATE TABLE IF NOT EXISTS verdicts (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, red_task_id TEXT NOT NULL, red_role TEXT NOT NULL, verdict TEXT NOT NULL, confidence REAL NOT NULL, authority TEXT NOT NULL, findings TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS gates (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, decision TEXT NOT NULL, rationale TEXT, decided_at TEXT NOT NULL, decided_by TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT NOT NULL, payload TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL, model TEXT NOT NULL, alias TEXT, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+    `);
+    const now = new Date().toISOString();
+    db1.prepare(`INSERT INTO campaigns (id, status, source_kind, source_input, mode, created_at, updated_at, plan_hash)
+                 VALUES ('campaign-legacy', 'planned', 'list', '{"kind":"list","ticketIds":["FG-101"]}', 'dry_run', ?, ?, 'hash-abc')`)
+      .run(now, now);
+    db1.close();
+
+    // Now open with FG-392 applyMigrations — should add new columns
+    const db2 = new Database(dbPath);
+    db2.pragma("foreign_keys = ON");
+    db2.exec(SCHEMA_SQL);
+    applyMigrations(db2);
+
+    // Check new columns exist
+    const cols = db2.prepare("PRAGMA table_info(campaigns)").all() as { name: string }[];
+    const colNames = new Set(cols.map((c) => c.name));
+    assert.ok(colNames.has("approved_by"), "approved_by column must exist after migration");
+    assert.ok(colNames.has("approved_at"), "approved_at column must exist after migration");
+    assert.ok(colNames.has("approval_rationale"), "approval_rationale column must exist after migration");
+    assert.ok(colNames.has("approved_plan_hash"), "approved_plan_hash column must exist after migration");
+    assert.ok(colNames.has("project_dir"), "project_dir column must exist after migration");
+
+    // Existing row is readable with null new fields
+    const row = db2.prepare("SELECT * FROM campaigns WHERE id = 'campaign-legacy'").get() as {
+      id: string; status: string; plan_hash: string;
+      approved_by: string | null; approved_plan_hash: string | null; project_dir: string | null;
+    };
+    assert.ok(row, "legacy campaign row must be readable");
+    assert.equal(row.id, "campaign-legacy");
+    assert.equal(row.status, "planned");
+    assert.equal(row.plan_hash, "hash-abc");
+    assert.equal(row.approved_by, null, "approved_by must be null for legacy row");
+    assert.equal(row.approved_plan_hash, null, "approved_plan_hash must be null for legacy row");
+    assert.equal(row.project_dir, null, "project_dir must be null for legacy row");
+
+    // Round-trip the approved fields: write approval and close/reopen
+    const now2 = new Date().toISOString();
+    db2.prepare("UPDATE campaigns SET approved_by = ?, approved_at = ?, approval_rationale = ?, approved_plan_hash = ? WHERE id = ?")
+      .run("tester", now2, "test rationale", "hash-abc", "campaign-legacy");
+    db2.close();
+
+    const db3 = new Database(dbPath);
+    db3.pragma("foreign_keys = ON");
+    db3.exec(SCHEMA_SQL);
+    applyMigrations(db3);
+    const row3 = db3.prepare("SELECT approved_by, approved_at, approval_rationale, approved_plan_hash FROM campaigns WHERE id = ?").get("campaign-legacy") as {
+      approved_by: string; approved_at: string; approval_rationale: string; approved_plan_hash: string;
+    };
+    assert.equal(row3.approved_by, "tester");
+    assert.equal(row3.approval_rationale, "test rationale");
+    assert.equal(row3.approved_plan_hash, "hash-abc");
+    db3.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── FG-392: CLI approve ────────────────────────────────────────────────────
+
+test("integ campaign approve: exits non-zero with message when campaign not found", () => {
+  const result = runForge([
+    "campaign", "approve", "campaign-doesnotexist",
+    "--rationale", "test",
+  ]);
+  assert.notEqual(result.status, 0);
+  assert.ok(
+    (result.stderr + result.stdout).includes("not found"),
+    `expected 'not found'\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+});
+
+test("integ campaign approve: exits non-zero when campaign already running", () => {
+  // Plan a campaign
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Manually set it to running in the DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const result = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "approve after running",
+  ]);
+  assert.notEqual(result.status, 0);
+  const combined = (result.stderr + result.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("planned") || combined.includes("running") || combined.includes("not in planned"),
+    `expected state-rejection message\nstdout: ${result.stdout}\nstderr: ${result.stderr}`
+  );
+});
+
+test("integ campaign approve --json: records approval and outputs JSON", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string; planHash: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+    "--by", "testoperator",
+    "--json",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const output = JSON.parse(approveResult.stdout) as {
+    campaignId: string;
+    approvedBy: string | null;
+    approvedAt: string | null;
+    approvedPlanHash: string | null;
+  };
+  assert.equal(output.campaignId, planOutput.campaignId);
+  assert.equal(output.approvedBy, "testoperator");
+  assert.ok(output.approvedAt, "approvedAt must be set");
+  assert.equal(output.approvedPlanHash, planOutput.planHash, "approvedPlanHash must equal the plan hash");
+});
+
+// ── FG-392: CLI start refusals ─────────────────────────────────────────────
+
+// ── FG-392: project_dir CLI persistence ───────────────────────────────────────
+
+test("integ campaign plan: project_dir column persisted as absolute path in campaigns row", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(result.status, 0, `exit 0 expected\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as { campaignId: string };
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath, { readonly: true });
+  const row = db.prepare("SELECT project_dir FROM campaigns WHERE id = ?").get(output.campaignId) as {
+    project_dir: string | null;
+  };
+  db.close();
+
+  assert.ok(row.project_dir, "project_dir must be persisted in campaigns table");
+  assert.ok(row.project_dir!.startsWith("/"), "stored project_dir must be an absolute path");
+  assert.ok(
+    row.project_dir!.includes(projectDir.replace(/\\/g, "/")),
+    `stored project_dir must include the planned directory\ngot: ${row.project_dir}`
+  );
+});
+
+test("integ campaign start: exits non-zero with message for unapproved campaign", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const startResult = runForge([
+    "campaign", "start", planOutput.campaignId,
+  ]);
+  assert.notEqual(startResult.status, 0, "start of unapproved campaign must exit non-zero");
+  const combined = (startResult.stderr + startResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("not_approved") || combined.includes("approved") || combined.includes("approve"),
+    `expected approval-related message\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
 });

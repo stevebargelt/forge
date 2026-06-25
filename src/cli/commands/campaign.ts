@@ -1,8 +1,10 @@
 import type { Command } from "commander";
-import { resolve } from "node:path";
-import { planCampaign } from "../../campaign/planner.js";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { planCampaign, resolvePlan } from "../../campaign/planner.js";
 import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
-import { listCampaignItems } from "../../store/campaigns.js";
+import { listCampaignItems, getCampaign, approveCampaign } from "../../store/campaigns.js";
+import { startCampaign } from "../../campaign/executor.js";
 
 export function registerCampaign(program: Command): void {
   const campaign = program
@@ -93,6 +95,133 @@ export function registerCampaign(program: Command): void {
         }
         console.log("Canonical content:");
         console.log(JSON.stringify(result.canonicalContent, null, 2));
+      }
+    });
+
+  campaign
+    .command("approve <campaign-id>")
+    .description("Approve a planned campaign, recording the current plan hash as the approved baseline")
+    .requiredOption("--rationale <text>", "approval rationale")
+    .option("--by <operator>", "operator identifier")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, opts: { rationale: string; by?: string; json?: boolean }) => {
+      const existing = getCampaign(campaignId);
+      if (!existing) {
+        process.stderr.write(`Error: campaign ${campaignId} not found\n`);
+        process.exit(1);
+      }
+      if (existing.status !== "planned") {
+        process.stderr.write(`Error: campaign ${campaignId} is not in planned state (status: ${existing.status})\n`);
+        process.exit(1);
+      }
+
+      // Validate projectDir
+      const projectDir = existing.projectDir;
+      if (!projectDir) {
+        process.stderr.write(
+          `Error: campaign predates projectDir capture; re-plan with forge campaign plan\n`
+        );
+        process.exit(1);
+      }
+      if (!existsSync(projectDir) || !existsSync(join(projectDir, "backlog"))) {
+        process.stderr.write(`Error: campaign projectDir is invalid or missing backlog: ${projectDir}\n`);
+        process.exit(1);
+      }
+
+      // Non-fatal staleness warning
+      if (existing.planHash) {
+        try {
+          const sourceInput = existing.sourceInput as { kind: string; ticketIds?: string[]; epicId?: string; additions?: string[]; exclusions?: string[] };
+          let plannerInput: PlannerInput;
+          if (sourceInput["kind"] === "list") {
+            plannerInput = { kind: "list", ticketIds: (sourceInput["ticketIds"] ?? []) };
+          } else if (sourceInput["kind"] === "epic") {
+            plannerInput = { kind: "epic", epicId: sourceInput["epicId"] as string };
+          } else {
+            plannerInput = { kind: "mixed", epicId: sourceInput["epicId"] as string, additions: sourceInput["additions"], exclusions: sourceInput["exclusions"] };
+          }
+          const { planHash: currentHash } = resolvePlan(plannerInput, {
+            projectDir,
+            mode: existing.mode as PlanMode,
+          });
+          if (currentHash !== existing.planHash) {
+            process.stderr.write(
+              `Warning: backlog has changed since this campaign was planned — plan is already stale.\n` +
+              `Approving the current plan hash anyway. Re-plan and re-approve to reset the baseline.\n`
+            );
+          }
+        } catch {
+          // Non-fatal: warn if we can detect staleness, skip if backlog resolution fails
+        }
+      }
+
+      const ok = approveCampaign(campaignId, { approvedBy: opts.by, rationale: opts.rationale });
+      if (!ok) {
+        process.stderr.write(`Error: campaign ${campaignId} could not be approved (not in planned state)\n`);
+        process.exit(1);
+      }
+
+      const approved = getCampaign(campaignId)!;
+      if (opts.json) {
+        console.log(JSON.stringify({
+          campaignId,
+          approvedBy: approved.approvedBy ?? null,
+          approvedAt: approved.approvedAt,
+          approvedPlanHash: approved.approvedPlanHash,
+        }, null, 2));
+      } else {
+        console.log(`Campaign ${campaignId} approved.`);
+        if (approved.approvedBy) console.log(`Approved by: ${approved.approvedBy}`);
+        console.log(`Approved at: ${approved.approvedAt}`);
+        console.log(`Approved plan hash: ${approved.approvedPlanHash}`);
+      }
+    });
+
+  campaign
+    .command("start <campaign-id>")
+    .description("Start executing a planned, approved campaign sequentially")
+    .option("--project <dir>", "project directory override (use stored projectDir by default)")
+    .option("--json", "machine-readable JSON output")
+    .action(async (campaignId: string, opts: { project?: string; json?: boolean }) => {
+      const projectDirOverride = opts.project ? resolve(opts.project) : undefined;
+
+      const result = await startCampaign(campaignId, { projectDirOverride });
+
+      const refusalReasons = new Set([
+        "not_planned",
+        "no_project_dir",
+        "invalid_project_dir",
+        "not_approved",
+        "stale_plan",
+        "already_running",
+      ]);
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Stop reason: ${result.stopReason}`);
+        for (const rec of result.itemRecords) {
+          const outcomeStr = rec.outcome ? ` (outcome: ${rec.outcome})` : "";
+          console.log(`  ${rec.ticketId}: ${rec.lifecycleStatus}${outcomeStr}${rec.runId ? ` [run: ${rec.runId}]` : ""}`);
+        }
+
+        if (result.stopReason === "no_project_dir") {
+          console.error("campaign predates projectDir capture; re-plan with forge campaign plan");
+        } else if (result.stopReason === "invalid_project_dir") {
+          console.error("campaign projectDir is missing or has no backlog");
+        } else if (result.stopReason === "not_approved") {
+          console.error("campaign has not been approved; run: forge campaign approve <id> --rationale <text>");
+        } else if (result.stopReason === "stale_plan") {
+          console.error("campaign plan is stale — backlog changed since approval; re-plan and re-approve");
+        } else if (result.stopReason === "already_running") {
+          console.error("campaign is already running (concurrent start attempt refused)");
+        } else if (result.stopReason === "not_planned") {
+          console.error("campaign is not in planned state");
+        }
+      }
+
+      if (refusalReasons.has(result.stopReason)) {
+        process.exit(1);
       }
     });
 }
