@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -489,4 +489,84 @@ test("listTickets: ghost for epic type reports correctly", () => {
   const matches = tickets.filter((t) => t.id === "FG-60");
   assert.equal(matches.length, 1);
   assert.equal(matches[0]!.status, "done");
+});
+
+// ----- moveTicket closed-field clearing (FG-409) -----
+
+test("moveTicket reopening done ticket clears closed and closedCommit from parsed frontmatter", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-409-a", type: "story" }));
+  closeTicket(dir, "FG-409-a", "deadbeef1234");
+  const doneResult = readTicket(dir, "FG-409-a");
+  assert.equal(doneResult.status, "done");
+  assert.ok(doneResult.closed, "closed must be set after closeTicket");
+  assert.equal(doneResult.closedCommit, "deadbeef1234");
+
+  moveTicket(dir, "FG-409-a", "story");
+  const reopened = readTicket(dir, "FG-409-a");
+  assert.equal(reopened.status, "active");
+  assert.equal(reopened.closed, undefined, "closed must be absent after reopen");
+  assert.equal(reopened.closedCommit, undefined, "closedCommit must be absent after reopen");
+});
+
+test("moveTicket reopening done ticket clears closed fields from raw file content", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-409-b", type: "epic" }));
+  closeTicket(dir, "FG-409-b", "cafebabe9876");
+  moveTicket(dir, "FG-409-b", "story");
+
+  const storiesDir = join(dir, "backlog", "stories");
+  const files = readdirSync(storiesDir).filter((f) => f.startsWith("FG-409-b-"));
+  assert.equal(files.length, 1, "exactly one file in stories/ after reopen");
+  const raw = readFileSync(join(storiesDir, files[0]!), "utf8");
+  assert.ok(!raw.includes("closed:"), "raw file must not contain closed: field");
+  assert.ok(!raw.includes("closed_commit:"), "raw file must not contain closed_commit: field");
+});
+
+test("moveTicket active-to-active move does not add spurious close fields", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-409-c", type: "story" }));
+  moveTicket(dir, "FG-409-c", "epic");
+  const result = readTicket(dir, "FG-409-c");
+  assert.equal(result.status, "active");
+  assert.equal(result.type, "epic");
+  assert.equal(result.closed, undefined, "active ticket must have no closed field after active-to-active move");
+  assert.equal(result.closedCommit, undefined, "active ticket must have no closedCommit after active-to-active move");
+  const epicsDir = join(dir, "backlog", "epics");
+  assert.ok(readdirSync(epicsDir).some((f) => f.startsWith("FG-409-c-")), "ticket must land in epics/");
+});
+
+test("moveTicket reopening done ticket lands in correct type dir and is single-location", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-409-d", type: "story" }));
+  closeTicket(dir, "FG-409-d");
+  moveTicket(dir, "FG-409-d", "epic");
+
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(dir, "backlog", sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith("FG-409-d-")).length;
+  }
+  assert.equal(count, 1, "exactly one copy must exist after reopen");
+  const epicsDir = join(dir, "backlog", "epics");
+  assert.ok(readdirSync(epicsDir).some((f) => f.startsWith("FG-409-d-")), "ticket must be in epics/ not done/");
+});
+
+test("moveTicket idempotent re-move does not reintroduce close fields", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-409-e", type: "story" }));
+  closeTicket(dir, "FG-409-e", "abc123");
+  moveTicket(dir, "FG-409-e", "epic");
+  // Move again — story→epic is already done; re-move epic→story
+  moveTicket(dir, "FG-409-e", "story");
+  const result = readTicket(dir, "FG-409-e");
+  assert.equal(result.status, "active");
+  assert.equal(result.closed, undefined, "closed must remain absent after second move");
+  assert.equal(result.closedCommit, undefined, "closedCommit must remain absent after second move");
+  const storiesDir = join(dir, "backlog", "stories");
+  const files = readdirSync(storiesDir).filter((f) => f.startsWith("FG-409-e-"));
+  assert.equal(files.length, 1, "ticket must be single-location after second move");
+  const raw = readFileSync(join(storiesDir, files[0]!), "utf8");
+  assert.ok(!raw.includes("closed:"), "raw file must not contain closed: after re-move");
+  assert.ok(!raw.includes("closed_commit:"), "raw file must not contain closed_commit: after re-move");
 });

@@ -348,7 +348,8 @@ export function moveTicket(projectDir: string, id: string, newType: TicketType):
 
   const content = readFileSync(found.path, "utf8");
   const { frontmatter, body } = parseTicketFile(content);
-  const updated: TicketFrontmatter = { ...frontmatter, type: newType, status: "active" };
+  const { closed: _closed, closedCommit: _closedCommit, ...restFrontmatter } = frontmatter;
+  const updated: TicketFrontmatter = { ...restFrontmatter, type: newType, status: "active" };
 
   const base = backlogDir(projectDir);
   const newDir = join(base, TYPE_DIRS[newType]);
