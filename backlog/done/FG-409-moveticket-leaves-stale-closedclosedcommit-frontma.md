@@ -1,9 +1,11 @@
 ---
 id: FG-409
 type: story
-status: active
+status: done
 title: moveTicket leaves stale closed/closed_commit frontmatter when reopening done→active
 created: 2026-06-25
+closed: 2026-06-26
+closed_commit: 1a47f92
 ---
 
 ## Problem
