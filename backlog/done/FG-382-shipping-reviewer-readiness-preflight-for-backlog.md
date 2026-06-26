@@ -1,10 +1,12 @@
 ---
 id: FG-382
 type: story
-status: active
-title: "Shipping Reviewer readiness preflight for backlog items"
+status: done
+title: Shipping Reviewer readiness preflight for backlog items
 epic: FG-372
 created: 2026-06-23
+closed: 2026-06-26
+closed_commit: 3de2fe5
 ---
 
 ## Problem
