@@ -1,9 +1,11 @@
 ---
 id: FG-412
 type: story
-status: active
+status: done
 title: "failure-kind: undefined conflates 'no terminal event' with 'task.failed missing failure_kind' — risks misclassifying an unrecorded infra failure as LOCAL"
 created: 2026-06-25
+closed: 2026-06-26
+closed_commit: 927a191
 ---
 
 ## Problem
