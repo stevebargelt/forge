@@ -42,8 +42,8 @@ test("classifyFailureKind: agent-ran failures → scope (LOCAL)", () => {
   assert.equal(classifyFailureKind("gate_rejected"), "scope");
 });
 
-test("classifyFailureKind: undefined (no FailureKind in events) → scope (LOCAL, generic task failure)", () => {
-  assert.equal(classifyFailureKind(undefined), "scope");
+test("classifyFailureKind: undefined (no terminal event) → campaign_system (SHARED — conservative, cannot confirm LOCAL)", () => {
+  assert.equal(classifyFailureKind(undefined), "campaign_system");
 });
 
 test("classifyFailureKind: unknown future string → campaign_system (conservative SHARED)", () => {

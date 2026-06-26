@@ -74,7 +74,9 @@ export function failureKindFromEvents(events: Event[]): string | undefined {
     if (e.eventType === "task.failed") {
       const payload = e.payload as Record<string, unknown> | null;
       if (payload && typeof payload["failure_kind"] === "string") return payload["failure_kind"];
-      return undefined;
+      // task.failed with no recorded kind — at minimum an unknown failure, never "no info".
+      // Reserve undefined for the no-terminal-event case (no task.failed and no task.completed).
+      return "unknown";
     }
   }
   return undefined;

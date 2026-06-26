@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { classify, failTask, type FailureKind } from "./failure-kind.js";
+import { classify, failTask, failureKindFromEvents, type FailureKind } from "./failure-kind.js";
+import type { Event } from "../store/events.js";
 import { AuthProfileError } from "./auth-state.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { eventsForTask } from "../store/events.js";
@@ -323,4 +324,53 @@ test("invoke path: missing auth profile emits task.failed with failure_kind=auth
   const failedEv = events.find((e) => e.eventType === "task.failed");
   assert.ok(failedEv, "task.failed must be emitted");
   assert.equal((failedEv!.payload as Record<string, unknown>)["failure_kind"], "auth_missing");
+});
+
+// --- failureKindFromEvents() unit tests (FG-412) ---
+
+function makeEvent(eventType: string, payload: unknown = null): Event {
+  return { id: 1, runId: "run-x", taskId: "task-x", eventType: eventType as Event["eventType"], payload, createdAt: "2024-01-01T00:00:00Z" };
+}
+
+test("failureKindFromEvents: task.failed with recorded failure_kind → returns that kind", () => {
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "idle_timeout", error: "no output" })];
+  assert.equal(failureKindFromEvents(events), "idle_timeout");
+});
+
+test("failureKindFromEvents: task.failed with NO failure_kind in payload → 'unknown' (FG-412)", () => {
+  // A failed task with no recorded kind is at minimum unknown — never "no info".
+  const events: Event[] = [makeEvent("task.failed", { error: "something failed" })];
+  assert.equal(failureKindFromEvents(events), "unknown", "task.failed + no failure_kind must return 'unknown', not undefined");
+});
+
+test("failureKindFromEvents: task.failed with null payload → 'unknown' (FG-412)", () => {
+  const events: Event[] = [makeEvent("task.failed", null)];
+  assert.equal(failureKindFromEvents(events), "unknown", "task.failed + null payload must return 'unknown'");
+});
+
+test("failureKindFromEvents: no terminal event → undefined (no information)", () => {
+  const events: Event[] = [makeEvent("task.started")];
+  assert.equal(failureKindFromEvents(events), undefined, "no terminal event must return undefined");
+});
+
+test("failureKindFromEvents: empty event list → undefined", () => {
+  assert.equal(failureKindFromEvents([]), undefined);
+});
+
+test("failureKindFromEvents: task.completed (recovered) → undefined", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "model_error" }),
+    makeEvent("task.retried"),
+    makeEvent("task.completed"),
+  ];
+  assert.equal(failureKindFromEvents(events), undefined, "later task.completed supersedes earlier failure");
+});
+
+test("failureKindFromEvents: picks LATEST task.failed (newest-first walk, post-retry)", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "idle_timeout" }),
+    makeEvent("task.retried"),
+    makeEvent("task.failed", { failure_kind: "container_crash" }),
+  ];
+  assert.equal(failureKindFromEvents(events), "container_crash", "latest failure wins");
 });

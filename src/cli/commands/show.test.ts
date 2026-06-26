@@ -186,14 +186,14 @@ test("getFailureKindFromEvents: returns undefined when no task.failed event", ()
   assert.equal(getFailureKindFromEvents(events), undefined);
 });
 
-test("getFailureKindFromEvents: returns undefined when payload has no failure_kind", () => {
+test("getFailureKindFromEvents: returns 'unknown' when payload has no failure_kind (FG-412)", () => {
   const events: Event[] = [makeEvent("task.failed", { error: "something" })];
-  assert.equal(getFailureKindFromEvents(events), undefined);
+  assert.equal(getFailureKindFromEvents(events), "unknown");
 });
 
-test("getFailureKindFromEvents: returns undefined when payload is null", () => {
+test("getFailureKindFromEvents: returns 'unknown' when payload is null (FG-412)", () => {
   const events: Event[] = [makeEvent("task.failed", null)];
-  assert.equal(getFailureKindFromEvents(events), undefined);
+  assert.equal(getFailureKindFromEvents(events), "unknown");
 });
 
 test("getFailureKindFromEvents: returns container_crash from payload", () => {

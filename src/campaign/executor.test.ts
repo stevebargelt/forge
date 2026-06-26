@@ -19,6 +19,7 @@ import { writeTicket } from "../backlog/structured.js";
 import { planCampaign, computePlanHash, resolvePlan } from "./planner.js";
 import { startCampaign, resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
+import { logEvent } from "../store/events.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -70,6 +71,14 @@ function fakeDispatch(status: "complete" | "failed", error?: string) {
     status,
     error,
   });
+}
+
+// Seeds a task.failed event with a concrete LOCAL failure kind so failureKindForTask
+// returns a classifiable local kind (model_error → scope). Required by FG-412: without
+// this seed, a returned-failed with no events → undefined → campaign_system (SHARED),
+// which would hold the campaign rather than exercising the LOCAL-blocker policy.
+function seedLocalFailure(taskId: string): void {
+  logEvent("task.failed", { taskId, payload: { failure_kind: "model_error", error: "agent error" } });
 }
 
 // ── approveCampaign ───────────────────────────────────────────────────────────
@@ -235,6 +244,7 @@ test("first-item failure (FG-393): item2 held (unknown relation, sequential), ca
   let callCount = 0;
   const fakeDispatchFail = async (args: InvokeArgs): Promise<InvokeResult> => {
     callCount++;
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "agent exploded" };
   };
 
@@ -257,7 +267,7 @@ test("first-item failure (FG-393): item2 held (unknown relation, sequential), ca
   };
   assert.equal(dbItem1.lifecycle_status, "failed");
   assert.equal(dbItem1.outcome, "blocked");
-  assert.equal(dbItem1.blocker_kind, "scope", "generic returned-failure → scope (no FailureKind in fake events)");
+  assert.equal(dbItem1.blocker_kind, "scope", "model_error (seeded concrete local kind) → scope (LOCAL)");
   assert.equal(dbItem1.reason, "agent exploded");
 
   const dbItem2 = db.prepare("SELECT lifecycle_status, outcome, continue_policy, reason FROM campaign_items WHERE ticket_id = 'FG-102'").get() as {
@@ -511,6 +521,7 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
       midFlightRunId = row.run_id;
       midFlightLifecycle = row.lifecycle_status;
     }
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "crash" };
   };
 
@@ -530,7 +541,7 @@ test("crash-recovery: run_id + lifecycle=running in DB BEFORE dispatch returns; 
   assert.ok(dbItem1.run_id, "run_id must be retained in DB after item failure (crash-recovery evidence)");
   assert.equal(dbItem1.lifecycle_status, "failed");
   assert.equal(dbItem1.outcome, "blocked", "FG-393: outcome=blocked for failed items");
-  assert.equal(dbItem1.blocker_kind, "scope", "returned-failed with no FailureKind → scope");
+  assert.equal(dbItem1.blocker_kind, "scope", "model_error (seeded concrete local kind) → scope (LOCAL)");
 
   // item2 was held (pending, not dispatched)
   const dbItem2 = db.prepare(
@@ -1573,6 +1584,87 @@ function writeLinkedTicket(dir: string, id: string, related: string[]) {
   });
 }
 
+// FG-412: uncategorized failure → SHARED (conservative direction)
+test("FG-412: uncategorized failure (no task events → undefined kind) → campaign_system (SHARED), campaign paused, item2 pending", async () => {
+  // An uncategorized/unrecorded failure must HOLD the campaign, never continue past it.
+  // The fix: undefined (no terminal event) → campaign_system (SHARED) in classifyFailureKind.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // Deliberately NO seedLocalFailure call — no task events seeded for this task ID.
+    // failureKindForTask("task-uncategorized") → undefined → campaign_system (SHARED).
+    return { runId: args.runId ?? "run-fake", taskId: "task-uncategorized", status: "failed", error: "uncategorized failure" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "FG-412: uncategorized failure → SHARED → campaign paused");
+  assert.equal(callCount, 1, "only item1 dispatched — SHARED stops loop immediately");
+  assert.equal(result.itemRecords.length, 1, "only item1 in records (SHARED stops before evaluating item2)");
+
+  const dbItem1 = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind, continue_policy FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string; continue_policy: string };
+  assert.equal(dbItem1.lifecycle_status, "failed");
+  assert.equal(dbItem1.outcome, "blocked");
+  assert.equal(dbItem1.blocker_kind, "campaign_system", "FG-412: uncategorized failure → campaign_system (SHARED), not scope");
+  assert.equal(dbItem1.continue_policy, "hold_campaign");
+
+  const dbItem2 = db.prepare(
+    "SELECT lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { lifecycle_status: string; outcome: string | null };
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 must remain pending (SHARED stops loop immediately)");
+  assert.equal(dbItem2.outcome, null, "item2 must have no outcome (untouched by SHARED stop)");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign paused on uncategorized failure");
+});
+
+// FG-412: explicit 'unknown' failure_kind is also SHARED — same conservative hold as undefined
+test("FG-412: explicit failure_kind='unknown' → campaign_system (SHARED), campaign paused, item2 NOT dispatched", async () => {
+  // task.failed with failure_kind='unknown' is an old/generic failure record that can't be positively
+  // identified as a LOCAL agent failure. Must HOLD the campaign (SHARED), not continue past it.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    // Explicitly seed failure_kind='unknown' — classifyFailureKind("unknown") must return campaign_system (SHARED).
+    logEvent("task.failed", { taskId: "task-explicit-unknown", payload: { failure_kind: "unknown", error: "unclassified" } });
+    return { runId: args.runId ?? "run-fake", taskId: "task-explicit-unknown", status: "failed", error: "unclassified" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "FG-412: failure_kind='unknown' → SHARED → campaign paused (conservative hold)");
+  assert.equal(callCount, 1, "item2 must NOT be dispatched — 'unknown' is SHARED, stops loop immediately");
+  assert.equal(result.itemRecords.length, 1, "only item1 in records (SHARED stops before evaluating item2)");
+
+  const dbItem1 = db.prepare(
+    "SELECT blocker_kind, continue_policy, outcome FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { blocker_kind: string; continue_policy: string; outcome: string };
+  assert.equal(dbItem1.blocker_kind, "campaign_system", "FG-412: 'unknown' → campaign_system (SHARED), must NOT be scope");
+  assert.equal(dbItem1.continue_policy, "hold_campaign");
+  assert.equal(dbItem1.outcome, "blocked");
+
+  const dbItem2 = db.prepare(
+    "SELECT lifecycle_status, outcome FROM campaign_items WHERE ticket_id = 'FG-102'"
+  ).get() as { lifecycle_status: string; outcome: string | null };
+  assert.equal(dbItem2.lifecycle_status, "pending", "item2 stays pending — SHARED stops loop before evaluating item2");
+  assert.equal(dbItem2.outcome, null, "item2 has no outcome — never reached");
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign paused on 'unknown' failure (conservative SHARED hold)");
+});
+
 // Test 1: dependent relation holds later item in SEQUENTIAL
 test("FG-393 T1: dependent relation holds later item in SEQUENTIAL (outcome=held, correct reason)", async () => {
   writeLinkedTicket(projectDir, "FG-201", ["FG-202"]);
@@ -1587,6 +1679,7 @@ test("FG-393 T1: dependent relation holds later item in SEQUENTIAL (outcome=held
   let callCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     callCount++;
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
   };
 
@@ -1619,6 +1712,7 @@ test("FG-393 T2: dependent relation holds later item in PILOT (pilot must NOT ov
   let callCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     callCount++;
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
   };
 
@@ -1645,6 +1739,7 @@ test("FG-393 T3: unknown relation holds in SEQUENTIAL (reason is exact string)",
   let callCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     callCount++;
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
   };
 
@@ -1672,8 +1767,9 @@ test("FG-393 T4: unknown relation CONTINUES in PILOT (later item dispatches)", a
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     const ticketId = args.runTitle ?? "";
     dispatchLog.push(ticketId);
-    // FG-101 fails (LOCAL → scope); FG-102 should still be dispatched
+    // FG-101 fails (LOCAL → model_error → scope); FG-102 should still be dispatched
     if (ticketId === "FG-101") {
+      seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
@@ -1712,6 +1808,7 @@ test("FG-393 T5: explicit INDEPENDENT relation continues (reason is exact string
     const ticketId = args.runTitle ?? "";
     dispatchLog.push(ticketId);
     if (ticketId === "FG-301") {
+      seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
@@ -1779,12 +1876,10 @@ test("FG-393 T7: held item preserved with clear reason; report/show surfaces gro
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
-    runId: args.runId ?? "run-fake",
-    taskId: "task-fake",
-    status: "failed",
-    error: "scope error",
-  });
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-fake");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
 
   await startCampaign(campaign.id, { dispatch });
 
@@ -1814,12 +1909,10 @@ test("FG-393 T8: resume after blocker resolution reconsiders held items, dispatc
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   // Phase 1: run until FG-101 fails and FG-102 is held
-  const phase1Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
-    runId: args.runId ?? "run-fake",
-    taskId: "task-fake",
-    status: "failed",
-    error: "scope error",
-  });
+  const phase1Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-fake");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
   const runResult = await startCampaign(campaign.id, { dispatch: phase1Dispatch });
   assert.equal(runResult.stopReason, "paused", "Phase 1: campaign should be paused");
 
@@ -1904,6 +1997,7 @@ test("FG-393: item M stays held if ANY prior blocker still holds it", async () =
     // FG-401.related is non-empty → INDEPENDENT.
     // So FG-402 is independent → continue_allowed → dispatch FG-402.
     // Then FG-402 dispatches... Let's have FG-402 also fail.
+    seedLocalFailure("task-fake");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
   };
 
@@ -1929,12 +2023,10 @@ test("FG-393 AC: LOCAL blocked item records continuePolicy='hold_dependents'; SH
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
-    runId: args.runId ?? "run-fake",
-    taskId: "task-fake",
-    status: "failed",
-    error: "scope error",
-  });
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-fake");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
 
   await startCampaign(campaign.id, { dispatch });
 
@@ -1962,6 +2054,7 @@ test("FG-393 T4-reason: pilot-continued item has exact reason string 'continued 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     const ticketId = args.runTitle ?? "";
     if (ticketId === "FG-101") {
+      seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
@@ -2008,6 +2101,7 @@ test("FG-393 multi-blocker v2: two local blocks; item dependent on first held; i
     const ticketId = args.runTitle ?? "";
     dispatchLog.push(ticketId);
     if (ticketId === "FG-501" || ticketId === "FG-502") {
+      seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
@@ -2081,6 +2175,7 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     if ((args.runTitle ?? "") === "FG-301") {
+      seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };

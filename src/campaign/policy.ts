@@ -39,8 +39,9 @@ export function classifyFailureKind(failureKind: string | undefined): BlockerKin
     case "gate_rejected":
       return "scope";
     case undefined:
-      // Returned-failed with no FailureKind in events = generic agent failure → LOCAL
-      return "scope";
+      // No terminal event recorded — anomalous when the campaign saw status:failed.
+      // Cannot positively identify as a LOCAL agent failure; must HOLD the campaign.
+      return "campaign_system";
     default:
       // Future/unknown failure kind → conservative SHARED
       return "campaign_system";
