@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { invoke } from "../v2/invoke.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
+import { evaluateReadiness } from "../readiness/readiness.js";
 import {
   getCampaign,
   listCampaignItems,
@@ -238,16 +239,42 @@ async function driveRemainingItems(
 
     // Re-evaluate HELD items (resume: items already marked held from a prior run).
     if (item.outcome === "held") {
-      const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
-      if (holdResult.hold) {
-        // Still held — refresh reason
-        updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
-        anyHeld = true;
-        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
-        continue;
+      if (item.blockerKind === "readiness") {
+        // Readiness-held: re-run evaluateReadiness against the current ticket body.
+        const currentTicket = ticketMap.get(item.ticketId);
+        if (!currentTicket) {
+          // Ticket not in map — keep held conservatively.
+          anyHeld = true;
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          continue;
+        }
+        const r = evaluateReadiness(currentTicket);
+        if (r.outcome === "needs_refinement" || r.outcome === "blocked") {
+          updateCampaignItem(item.id, {
+            outcome: "held",
+            blockerKind: "readiness",
+            continuePolicy: "hold_dependents",
+            reason: `held because not ready: ${r.gaps.join("; ")}`,
+            requestedHumanAction: `refine ${item.ticketId} then resume${r.refinementProposal ? ` — ${r.refinementProposal}` : ""}`,
+          });
+          anyHeld = true;
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          continue;
+        }
+        // Now ready/exploratory — clear all readiness-hold fields and fall through to dispatch.
+        updateCampaignItem(item.id, { outcome: undefined, blockerKind: undefined, continuePolicy: undefined, reason: undefined, requestedHumanAction: undefined });
+      } else {
+        // Dependency-held: use existing evaluateForHold path.
+        const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
+        if (holdResult.hold) {
+          updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
+          anyHeld = true;
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          continue;
+        }
+        // No longer held — clear and fall through to dispatch.
+        updateCampaignItem(item.id, { outcome: undefined, continuePolicy: undefined, reason: undefined, requestedHumanAction: undefined });
       }
-      // No longer held — clear and fall through to dispatch
-      updateCampaignItem(item.id, { outcome: undefined, continuePolicy: undefined, reason: undefined, requestedHumanAction: undefined });
     }
 
     // Check if this pending item should be newly HELD based on current blockedItems.
@@ -263,6 +290,26 @@ async function driveRemainingItems(
       if (laterTicket) {
         const reason = continueReason(laterTicket, blockedItems, opts.mode);
         updateCampaignItem(item.id, { reason });
+      }
+    }
+
+    // Readiness gate: evaluate ticket before dispatch; hold without dispatching if not ready.
+    {
+      const ticket = ticketMap.get(item.ticketId);
+      if (ticket) {
+        const r = evaluateReadiness(ticket);
+        if (r.outcome === "needs_refinement" || r.outcome === "blocked") {
+          updateCampaignItem(item.id, {
+            outcome: "held",
+            blockerKind: "readiness",
+            continuePolicy: "hold_dependents",
+            reason: `held because not ready: ${r.gaps.join("; ")}`,
+            requestedHumanAction: `refine ${item.ticketId} then resume${r.refinementProposal ? ` — ${r.refinementProposal}` : ""}`,
+          });
+          anyHeld = true;
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          continue;
+        }
       }
     }
 

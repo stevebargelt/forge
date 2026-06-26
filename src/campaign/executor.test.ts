@@ -45,7 +45,7 @@ beforeEach(() => {
     title: "Story One",
     epic: "FG-100",
     created: "2024-01-01",
-    body: "Do the first thing",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
   });
   writeTicket(projectDir, {
     id: "FG-102",
@@ -54,7 +54,7 @@ beforeEach(() => {
     title: "Story Two",
     epic: "FG-100",
     created: "2024-01-02",
-    body: "Do the second thing",
+    body: "## Problem\nStory Two needs implementation.\n\n## Goal\nComplete story two.\n\n## Acceptance Criteria\n- Story two is complete\n",
   });
 });
 
@@ -312,7 +312,7 @@ test("shipped with evidence: ticket done + closedCommit → outcome='shipped'", 
     epic: "FG-100",
     created: "2024-01-01",
     closedCommit: "abc123",
-    body: "Do the first thing",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
   });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
@@ -601,7 +601,7 @@ test("shipped: ticket done but no closedCommit → outcome undefined (not shippe
     title: "Story One",
     epic: "FG-100",
     created: "2024-01-01",
-    body: "Do the first thing",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
     // closedCommit deliberately absent
   });
 
@@ -1047,7 +1047,7 @@ test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY
     title: "Story Three",
     epic: "FG-100",
     created: "2024-01-03",
-    body: "Do the third thing",
+    body: "## Problem\nStory Three needs implementation.\n\n## Goal\nComplete story three.\n\n## Acceptance Criteria\n- Story three is complete\n",
   });
   writeTicket(projectDir, {
     id: "FG-100",
@@ -1488,7 +1488,7 @@ test("FG-394-fix driver defensive: in-flight item mid-list — driver stops reco
     title: "Story Three",
     epic: "FG-100",
     created: "2024-01-03",
-    body: "Do the third thing",
+    body: "## Problem\nStory Three needs implementation.\n\n## Goal\nComplete story three.\n\n## Acceptance Criteria\n- Story three is complete\n",
   });
 
   const { campaign } = planCampaign(
@@ -1571,7 +1571,7 @@ test("FG-394-fix: startCampaign pre-flight — planned campaign with in-flight i
 // FG-393: conservative campaign blocker & continue semantics
 // ════════════════════════════════════════════════════════════════════════════════
 
-// Helper: write a ticket with explicit related field
+// Helper: write a ticket with explicit related field (body is ready: has Problem/Goal/AC sections)
 function writeLinkedTicket(dir: string, id: string, related: string[]) {
   writeTicket(dir, {
     id,
@@ -1579,7 +1579,7 @@ function writeLinkedTicket(dir: string, id: string, related: string[]) {
     status: "active",
     title: `Ticket ${id}`,
     related,
-    body: `Body for ${id}`,
+    body: `## Problem\n${id} needs implementation.\n\n## Goal\nComplete ${id}.\n\n## Acceptance Criteria\n- ${id} is done\n`,
     created: "2024-01-10",
   });
 }
@@ -2205,4 +2205,209 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
     0,
     "FG-302 not shipped (ticket not done+closedCommit); FG-301 blocked — neither is in shipped grouping"
   );
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+// FG-413: readiness preflight gate
+// ════════════════════════════════════════════════════════════════════════════════
+
+test("FG-413: needs_refinement ticket → item HELD (outcome=held, blockerKind=readiness), NOT dispatched, reason mentions gaps", async () => {
+  writeTicket(projectDir, {
+    id: "FG-801",
+    type: "story",
+    status: "active",
+    title: "Unrefined Story",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "Some work to do without proper structure",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-801"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+
+  assert.equal(result.stopReason, "paused", "needs_refinement ticket → campaign paused (held item)");
+  assert.equal(dispatchCallCount, 0, "dispatch must NOT be called for a needs_refinement ticket");
+  assert.equal(result.itemRecords.length, 1);
+  assert.equal(result.itemRecords[0]!.outcome, "held");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "pending");
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind, continue_policy, reason, requested_human_action FROM campaign_items WHERE ticket_id = 'FG-801'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string; continue_policy: string; reason: string; requested_human_action: string };
+  assert.equal(dbItem.lifecycle_status, "pending", "readiness-held item lifecycle must stay pending (not dispatched)");
+  assert.equal(dbItem.outcome, "held");
+  assert.equal(dbItem.blocker_kind, "readiness");
+  assert.equal(dbItem.continue_policy, "hold_dependents");
+  assert.ok(dbItem.reason.includes("not ready"), `reason must include 'not ready', got: ${dbItem.reason}`);
+  assert.ok(
+    dbItem.reason.includes("Problem") || dbItem.reason.includes("Goal") || dbItem.reason.includes("Acceptance Criteria"),
+    `reason must name the missing sections, got: ${dbItem.reason}`
+  );
+  assert.ok(dbItem.requested_human_action.includes("refine FG-801"), `requestedHumanAction must say 'refine FG-801', got: ${dbItem.requested_human_action}`);
+  assert.ok(dbItem.requested_human_action.includes("resume"), `requestedHumanAction must mention 'resume', got: ${dbItem.requested_human_action}`);
+
+  const finalCampaign = getCampaign(campaign.id)!;
+  assert.equal(finalCampaign.status, "paused", "campaign must be paused when readiness-held items exist");
+});
+
+test("FG-413: ready ticket → dispatched normally (readiness gate does not interfere)", async () => {
+  // FG-101 from beforeEach has Problem/Goal/AC sections → ready
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "ready ticket → campaign complete");
+  assert.equal(dispatchCallCount, 1, "dispatch must be called exactly once for ready ticket");
+});
+
+test("FG-413: exploratory ticket (spike marker in title) → dispatched without readiness hold", async () => {
+  writeTicket(projectDir, {
+    id: "FG-802",
+    type: "story",
+    status: "active",
+    title: "Spike: investigate approach for X",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "## Problem\nWe need to understand the best approach.\n",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-802"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "exploratory ticket → campaign complete (not held)");
+  assert.equal(dispatchCallCount, 1, "exploratory ticket must be dispatched (readiness gate: exploratory → proceed)");
+});
+
+test("FG-413: resume — readiness-held item refined to ready → re-dispatched on resume, campaign completes", async () => {
+  writeTicket(projectDir, {
+    id: "FG-811",
+    type: "story",
+    status: "active",
+    title: "Needs Refinement",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "Some work without structure — not ready yet",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-811"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCount++;
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  // Phase 1: start → readiness hold, no dispatch
+  const phase1Result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(phase1Result.stopReason, "paused", "Phase 1: campaign paused (readiness hold)");
+  assert.equal(dispatchCount, 0, "Phase 1: no dispatch");
+
+  const dbItemBefore = db.prepare(
+    "SELECT outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-811'"
+  ).get() as { outcome: string; blocker_kind: string };
+  assert.equal(dbItemBefore.outcome, "held");
+  assert.equal(dbItemBefore.blocker_kind, "readiness");
+
+  // Phase 2: refine the ticket → now ready
+  writeTicket(projectDir, {
+    id: "FG-811",
+    type: "story",
+    status: "active",
+    title: "Needs Refinement",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "## Problem\nThis needs implementation.\n\n## Goal\nComplete it.\n\n## Acceptance Criteria\n- Done\n",
+  });
+
+  // Phase 3: resume → item re-evaluated, now ready, dispatched
+  const phase3Result = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(phase3Result.stopReason, "complete", "Phase 3: campaign complete after ticket refined");
+  assert.equal(dispatchCount, 1, "Phase 3: item dispatched once after refinement");
+
+  const dbItemAfter = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-811'"
+  ).get() as { lifecycle_status: string; outcome: string | null; blocker_kind: string | null };
+  assert.equal(dbItemAfter.lifecycle_status, "complete");
+  assert.notEqual(dbItemAfter.outcome, "held", "item must no longer be held after refinement + resume");
+  assert.notEqual(dbItemAfter.blocker_kind, "readiness", "blockerKind must be cleared after readiness hold lifted");
+});
+
+test("FG-413: resume — readiness-held item still not-ready → stays held, not dispatched", async () => {
+  writeTicket(projectDir, {
+    id: "FG-812",
+    type: "story",
+    status: "active",
+    title: "Still Unrefined",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "Still no structure at all",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-812"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCount = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCount++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  // Phase 1: start → readiness hold
+  const phase1Result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(phase1Result.stopReason, "paused");
+  assert.equal(dispatchCount, 0, "Phase 1: not dispatched");
+
+  const phase1Item = db.prepare(
+    "SELECT outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-812'"
+  ).get() as { outcome: string; blocker_kind: string };
+  assert.equal(phase1Item.outcome, "held");
+  assert.equal(phase1Item.blocker_kind, "readiness");
+
+  // Phase 2: resume WITHOUT refining → still held, not dispatched
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch });
+  assert.equal(resumeResult.stopReason, "paused", "Phase 2: campaign still paused (still not-ready)");
+  assert.equal(dispatchCount, 0, "Phase 2: still not dispatched after unrefined resume");
+
+  const phase2Item = db.prepare(
+    "SELECT outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-812'"
+  ).get() as { outcome: string; blocker_kind: string };
+  assert.equal(phase2Item.outcome, "held", "item must still be held after unrefined resume");
+  assert.equal(phase2Item.blocker_kind, "readiness", "blockerKind must still be readiness after unrefined resume");
 });

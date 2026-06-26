@@ -42,7 +42,7 @@ beforeEach(() => {
     title: "Story One",
     epic: "FG-100",
     created: "2024-01-01",
-    body: "Do the first thing",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
   });
   writeTicket(projectDir, {
     id: "FG-102",
@@ -51,7 +51,7 @@ beforeEach(() => {
     title: "Story Two",
     epic: "FG-100",
     created: "2024-01-02",
-    body: "Do the second thing",
+    body: "## Problem\nStory Two needs implementation.\n\n## Goal\nComplete story two.\n\n## Acceptance Criteria\n- Story two is complete\n",
   });
 });
 
@@ -1546,4 +1546,93 @@ test("FG-411: CONSISTENCY — paused campaign + deleted ticket → all three sur
   assert.equal(report.safetyToContinue, "stale", "safetyToContinue must be stale for paused+plan_unresolvable");
   assert.ok(report.nextOperatorAction.includes("re-plan"), `nextOperatorAction must mention re-plan, got: ${report.nextOperatorAction}`);
   assert.notEqual(report.nextOperatorAction, "resume the campaign when ready");
+});
+
+// ── FG-413: readiness field on report/show items ──────────────────────────────
+
+test("FG-413: assembleCampaignReport populates per-item readiness field (ready ticket → readiness.outcome=ready)", () => {
+  // FG-101 from beforeEach has proper sections → evaluateReadiness → ready
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.items.length, 1);
+  const item = result.items[0]!;
+
+  assert.ok("readiness" in item, "ReportItemRow must have a 'readiness' field");
+  assert.ok(item.readiness !== null, "readiness must be non-null for a ticket that exists in the backlog");
+  assert.equal(item.readiness!.outcome, "ready", "readiness.outcome must be 'ready' for a properly-structured ticket");
+  assert.deepEqual(item.readiness!.gaps, [], "no gaps for a ready ticket");
+  assert.equal(item.readiness!.refinementProposal, null, "no refinementProposal for a ready ticket");
+});
+
+test("FG-413: assembleCampaignShow populates per-item readiness field", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  const result = assembleCampaignShow(campaign.id)!;
+  assert.equal(result.items.length, 1);
+  const item = result.items[0]!;
+
+  assert.ok("readiness" in item, "ShowItemRow must have a 'readiness' field");
+  assert.ok(item.readiness !== null, "readiness must be non-null when ticket exists in backlog");
+  assert.equal(item.readiness!.outcome, "ready");
+});
+
+test("FG-413: readiness field is null for ticket not in backlog", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  // Remove the ticket file so readiness can't be computed
+  const storiesDir = `${projectDir}/backlog/stories`;
+  const files = readdirSync(storiesDir);
+  const file = files.find((f) => f.startsWith("FG-101-") || f === "FG-101.md");
+  if (file) {
+    unlinkSync(join(storiesDir, file));
+  }
+
+  const result = assembleCampaignReport(campaign.id)!;
+  const item = result.items[0]!;
+  assert.equal(item.readiness, null, "readiness must be null when ticket can't be read");
+});
+
+test("FG-413: readiness-held item → nextOperatorAction says refine then resume", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  // Mark FG-101 as readiness-held
+  const items = db.prepare(
+    "SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string; ticket_id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness', continue_policy = 'hold_dependents', reason = 'held because not ready: Missing Problem section', requested_human_action = 'refine FG-101 then resume' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(
+    report.nextOperatorAction.includes("refine") && report.nextOperatorAction.includes("FG-101"),
+    `nextOperatorAction must mention 'refine FG-101', got: ${report.nextOperatorAction}`
+  );
+  assert.ok(
+    report.nextOperatorAction.includes("resume"),
+    `nextOperatorAction must mention 'resume', got: ${report.nextOperatorAction}`
+  );
+  assert.ok(report.groupings.held.includes("FG-101"), "FG-101 must appear in held grouping");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(
+    show.nextAction.includes("refine") && show.nextAction.includes("FG-101"),
+    `show.nextAction must mention 'refine FG-101', got: ${show.nextAction}`
+  );
 });

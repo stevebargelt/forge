@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getCampaign, listCampaignItems } from "../store/campaigns.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
+import { evaluateReadiness } from "../readiness/readiness.js";
+import type { ReadinessResult } from "../readiness/readiness.js";
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
@@ -83,6 +85,8 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
     if (intent === "start") return "start";
     const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+    const readinessHeld = items.find((i) => i.outcome === "held" && i.blockerKind === "readiness");
+    if (readinessHeld) return `refine ${readinessHeld.ticketId} then resume`;
     return "resume";
   }
   if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
@@ -168,9 +172,11 @@ function computeNextOperatorAction(
       return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
     }
     // Blockers resolved but held items remain: resume will reconsider them.
-    const heldCount = items.filter((i) => i.outcome === "held").length;
-    if (heldCount > 0) {
-      return `resume — ${heldCount} held item${heldCount === 1 ? "" : "s"} will be reconsidered`;
+    const heldItems = items.filter((i) => i.outcome === "held");
+    if (heldItems.length > 0) {
+      const readinessHeld = heldItems.find((i) => i.blockerKind === "readiness");
+      if (readinessHeld) return `refine ${readinessHeld.ticketId} then resume`;
+      return `resume — ${heldItems.length} held item${heldItems.length === 1 ? "" : "s"} will be reconsidered`;
     }
     return "resume the campaign when ready";
   }
@@ -196,6 +202,7 @@ export type ShowItemRow = {
   runId: string | null;
   reason: string | null;
   requestedHumanAction: string | null;
+  readiness: ReadinessResult | null;
 };
 
 export type ShowResult = {
@@ -223,12 +230,20 @@ export function assembleCampaignShow(id: string): ShowResult | null {
       ? currentPlanHash !== campaign.approvedPlanHash
       : null;
 
-  // Build title map (best-effort)
+  // Build title + readiness map (best-effort)
   const titleMap = new Map<string, string>();
+  const readinessMap = new Map<string, ReadinessResult>();
   if (campaign.projectDir && existsSync(campaign.projectDir)) {
     try {
       const tickets = listTickets(campaign.projectDir);
-      for (const t of tickets) titleMap.set(t.id, t.title);
+      for (const t of tickets) {
+        titleMap.set(t.id, t.title);
+        try {
+          readinessMap.set(t.id, evaluateReadiness(t));
+        } catch {
+          // ignore per-ticket errors
+        }
+      }
     } catch {
       // ignore
     }
@@ -246,6 +261,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     runId: i.runId ?? null,
     reason: i.reason ?? null,
     requestedHumanAction: i.requestedHumanAction ?? null,
+    readiness: readinessMap.get(i.ticketId) ?? null,
   }));
 
   const nextAction = computeNextShowAction(campaign, items);
@@ -309,15 +325,21 @@ export function assembleCampaignReport(id: string): ReportResult | null {
   const items = listCampaignItems(id);
   const currentPlanHash = computeCurrentPlanHash(campaign);
 
-  // Build title + commit map (best-effort)
+  // Build title + commit + readiness map (best-effort)
   const titleMap = new Map<string, string>();
   const commitMap = new Map<string, string>();
+  const readinessMap = new Map<string, ReadinessResult>();
   if (campaign.projectDir && existsSync(campaign.projectDir)) {
     try {
       const tickets = listTickets(campaign.projectDir);
       for (const t of tickets) {
         titleMap.set(t.id, t.title);
         if (t.closedCommit) commitMap.set(t.id, t.closedCommit);
+        try {
+          readinessMap.set(t.id, evaluateReadiness(t));
+        } catch {
+          // ignore per-ticket errors
+        }
       }
     } catch {
       // ignore
@@ -355,6 +377,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     runId: i.runId ?? null,
     reason: i.reason ?? null,
     requestedHumanAction: i.requestedHumanAction ?? null,
+    readiness: readinessMap.get(i.ticketId) ?? null,
     branch: null,
     worktreePath: null,
     prUrl: null,
