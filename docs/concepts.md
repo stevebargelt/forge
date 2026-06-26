@@ -148,6 +148,40 @@ Resolution: the docs impact is considered resolved when a task in the run report
 
 Example: after the engineer modified `src/cli/commands/show.ts`, `forge show` printed a docs impact suggestion; the orchestrator chained `forge invoke documentation-maintainer --run <id>` and the maintainer updated this glossary.
 
+## Readiness
+
+A mechanical preflight that classifies a backlog item as ready for implementation before any work starts. Run via `forge readiness <ticket-id> [--project <dir>] [--json]`. Read-only — does not write to the project.
+
+**Outcomes:**
+
+| Outcome | Criteria |
+|---|---|
+| `ready` | Ticket has a `## Problem` section, a `## Goal` section (or `## Expected behavior`), and an `## Acceptance Criteria` section with at least one bullet point. |
+| `needs_refinement` | One or more of the above sections is missing, or Acceptance Criteria exists but has no bullet points. The command emits a concrete `refinementProposal` rather than leaving the operator to guess what to add. |
+| `blocked` | Ticket `status` is `blocked`. |
+| `exploratory` | Ticket type is `idea`, or the title or body contains any of: spike, research, explore, exploratory, exploration, investigation. Lighter criteria apply — at least one of Problem or Goal must be present; Acceptance Criteria are not required. If both Problem and Goal are absent the outcome is still `exploratory`, but `gaps` and `refinementProposal` are populated with guidance. |
+
+This is a **cheap structural checklist** — it checks whether the required sections exist and contain content. It is not an LLM reviewer and does not assess whether the content is correct or complete. Semantic quality review and the done audit are later Shipping Reviewer stories (FG-372 epic).
+
+**Scope boundary:** the evaluator checks structural completeness only. Whether the latest operator instruction has been reflected in the ticket body is the **orchestrator's responsibility** — the preflight has no access to the operator conversation and cannot verify that reconciliation.
+
+With `--json` the output is a stable object:
+
+```json
+{
+  "ticketId": "FG-42",
+  "outcome": "needs_refinement",
+  "gaps": ["Missing Goal section (or Expected behavior)", "Acceptance Criteria section has no bullet points"],
+  "refinementProposal": "Add a ## Goal section (or ## Expected behavior) describing what success looks like. Add an ## Acceptance Criteria section with testable bullet points."
+}
+```
+
+`refinementProposal` is `null` when outcome is `ready`, or when outcome is `exploratory` and at least one of Problem or Goal is present. For `blocked` and `needs_refinement` it is always non-null; for `exploratory` with both sections absent it is also non-null.
+
+**Campaign integration is not yet wired.** Populating the campaign report's readiness field and holding not-ready items at campaign start is a planned follow-up (FG-413).
+
+Example: `forge readiness FG-42` on a story that has a Problem section but no Acceptance Criteria returns `outcome: needs_refinement` with a `refinementProposal` explaining what to add.
+
 ## Campaign
 
 An ordered collection of tickets that forge will work in sequence. Created by `forge campaign plan`, which resolves the input (ticket list, epic, or mixed) into a persisted campaign (status `planned`) with items (status `pending`) and a stable `plan_hash` computed from the canonical plan content. The campaign and its items are written to the database at plan time; no runs or tasks are created until `forge campaign start` executes the campaign.
@@ -348,7 +382,7 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a blocker, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but held items remain, prompts `resume — N held items will be reconsidered`.
 - Per-item: a `commit` field (the ticket's `closed_commit` for shipped items) and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, `reviewerResult`
 
-**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, and `reviewerResult` are always `null` — the source systems (worktrees, done-audit, reviewer) are not yet built (FG-382/383/384). These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
+**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, and `reviewerResult` are always `null` — the source systems (worktrees, done-audit, reviewer) are not yet built (FG-383/384). These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
 
 The `--json` shape is stable for future dashboard and orchestrator use.
 
