@@ -2,15 +2,45 @@
 // injected invokeFn (no containers) — assert verdict mapping, dispatch-failure
 // handling, runId threading, and the reviewer/fixer dispatch shape.
 
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
 import { buildReviewLoopDeps, type ReviewLoopContext } from "./review-loop.js";
+
+function gitExec(args: string[], cwd: string): string {
+  return execFileSync("git", args, {
+    cwd, encoding: "utf8",
+    env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "t@t.com" },
+  });
+}
+
+// All tests use a real git repo (beforeEach sets projectDir). The new fix dep
+// calls `git status --porcelain` after any completed engineer dispatch, so
+// /tmp/proj (not a git repo) would crash the old tests.
+let projectDir = "/tmp/proj";
+
+beforeEach(() => {
+  projectDir = mkdtempSync(join(tmpdir(), "forge-rl-"));
+  gitExec(["init", "-q"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "src.ts"), "// initial\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial commit"], projectDir);
+});
+
+afterEach(() => {
+  if (existsSync(projectDir)) rmSync(projectDir, { recursive: true, force: true });
+});
 
 function ctx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
   return {
     ticketId: "301", acceptance: "#301 — do the thing", diff: "diff --git ...",
-    projectDir: "/tmp/proj", scripts: {}, unrouted: true, ...over,
+    projectDir, scripts: {}, unrouted: true, ...over,
   };
 }
 const RESULT = (over: Partial<InvokeResult>): InvokeResult => ({ runId: "run-1", taskId: "t-1", status: "complete", ...over });
@@ -109,4 +139,130 @@ test("#301 deps: threads one runId across dispatches (review creates it, fix reu
   await deps.fix([{ summary: "x", unanchored: true }]); // reuses run-shared
   assert.deepEqual(seen, [undefined, "run-shared"]);
   assert.equal(getRunId(), "run-shared");
+});
+
+// ── FG-415: real git repo wiring tests ───────────────────────────────────────
+
+function gitCtx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
+  return {
+    ticketId: "FG-415", acceptance: "FG-415 — test", diff: "diff",
+    projectDir, scripts: {}, unrouted: true, ...over,
+  };
+}
+
+const COMPLETE = (over: Partial<InvokeResult> = {}): InvokeResult =>
+  ({ runId: "run-1", taskId: "t-1", status: "complete", ...over });
+
+test("#415 fix dep: fixer writes disallowed file → outOfScope returned, tree reverted clean", async () => {
+  // The "fixer" writes a docs/ file into projectDir.
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "docs"), { recursive: true });
+    writeFileSync(join(projectDir, "docs", "foo.md"), "# bad\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.some((p) => p.startsWith("docs/")), `expected docs/ in offending: ${JSON.stringify(offending)}`);
+  // Working tree must be clean after revert.
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `expected clean tree but got: ${status}`);
+  // HEAD must be unchanged (initial commit).
+  const log = gitExec(["log", "--oneline"], projectDir).trim();
+  assert.ok(log.includes("initial commit"), `expected HEAD = initial commit but got: ${log}`);
+});
+
+test("#415 fix dep: fixer writes backlog/ file → outOfScope returned, tree reverted clean", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "backlog"), { recursive: true });
+    writeFileSync(join(projectDir, "backlog", "story.md"), "story\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert`);
+});
+
+test("#415 fix dep: fixer writes in-scope file, verification passes → committedSha returned, tree clean, commit in log", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  // No scripts → verification ok:false (no steps) → ok:false with verificationFailed.
+  // We need scripts to be green; inject a fake runner via scripts containing 'test'.
+  // The easiest way: pass scripts:{} (no typecheck/test) which yields ok:false.
+  // Actually we want verification to PASS — provide scripts with typecheck pointing to a passing cmd.
+  // Instead, provide scripts: {} (no discoverable checks → ok:false). That would cause verificationFailed.
+  // To get a pass, provide scripts that reference commands — but we can't easily inject the runner here.
+  // Use scripts: {} on a project with no package.json → ok:false (no steps) → ok:false → verificationFailed path.
+  // To exercise the happy path (verification passes), we need scripts to be empty so no checks run... wait,
+  // runVerification({}) → ok:false (steps.length === 0). We need ok:true.
+  // Pass a package.json with no typecheck/test scripts → same result.
+  // The only way to pass is to have at least one script and have the runner return ok.
+  // We can't inject the runner through buildReviewLoopDeps.
+  // Instead, write a real passing shell script as the 'test' script in package.json.
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn2 = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn2);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, true);
+  const sha = (r as { committedSha?: string }).committedSha;
+  assert.ok(sha && sha.length > 0, "committedSha must be present");
+  // Tree must be clean.
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after commit`);
+  // Commit must include FG-415 and round number.
+  const log = gitExec(["log", "--oneline"], projectDir);
+  assert.match(log, /FG-415/);
+  assert.match(log, /round 1/);
+});
+
+test("#415 fix dep: fixer writes in-scope file, verification FAILS → verificationFailed returned, nothing committed, diff present", async () => {
+  // No scripts → runVerification → ok:false, no steps → no steps means no findings.
+  // We need scripts with a failing command.
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "false" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+  const headBefore = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// unfixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "false" } }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { verificationFailed?: boolean }).verificationFailed, true);
+  // HEAD must not have moved.
+  const headAfter = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.equal(headAfter, headBefore, "HEAD must not change when verification fails");
+  // Diff must still be present (not reverted).
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.ok(status.length > 0, "dirty diff must remain for inspection");
+});
+
+test("#415 CLI action precondition: git status --porcelain detects dirty tree (mechanism the CLI check uses)", async () => {
+  // Verify the detection mechanism works as expected: a new untracked file makes
+  // the status non-empty, which is what the CLI action gates on.
+  writeFileSync(join(projectDir, "dirty.ts"), "// dirty\n");
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.ok(status.length > 0, "tree is dirty — status must be non-empty");
+  assert.ok(status.includes("dirty.ts"), `expected dirty.ts in porcelain output: ${status}`);
+
+  // After stashing (committing), the tree becomes clean again.
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "clean up"], projectDir);
+  const cleanStatus = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(cleanStatus, "", "after commit, tree must be clean");
 });

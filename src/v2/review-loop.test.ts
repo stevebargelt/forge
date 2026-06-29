@@ -284,3 +284,102 @@ test("#301 loop: verification ok:false with NO failed steps (no checks) → veri
   assert.equal(fixed, false, "no empty fix dispatched when there are no actionable findings");
   assert.equal(r.rounds.length, 1, "stops on round 1 — nothing to fix");
 });
+
+// ── FG-415: richer FixDispatch / out-of-scope / per-round commit ─────────────
+
+test("#415 loop: fix outOfScope → fixer_out_of_scope, closeable false, round has outOfScopePaths", async () => {
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => ({ ok: true, verdict: "needs_fix", findings: ANCHORED }),
+    fix: () => ({ ok: false, outOfScope: true, offendingPaths: ["docs/x.md"] }),
+  }));
+  assert.equal(r.stopReason, "fixer_out_of_scope");
+  assert.equal(r.closeable, false);
+  assert.deepEqual(r.rounds.at(-1)!.outOfScopePaths, ["docs/x.md"]);
+});
+
+test("#415 loop: fix verificationFailed (verification-failed path) → stopReason verification_failed", async () => {
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    verify: () => VERIFY_BAD,
+    fix: () => ({ ok: false, verificationFailed: true, dirtyPaths: ["src/foo.ts"] }),
+  }));
+  assert.equal(r.stopReason, "verification_failed");
+  assert.equal(r.closeable, false);
+  assert.deepEqual(r.rounds.at(-1)!.fixDirtyPaths, ["src/foo.ts"]);
+});
+
+test("#415 loop: fix verificationFailed (needs_fix path) → stopReason verification_failed", async () => {
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => ({ ok: true, verdict: "needs_fix", findings: ANCHORED }),
+    fix: () => ({ ok: false, verificationFailed: true, dirtyPaths: ["src/bar.ts"] }),
+  }));
+  assert.equal(r.stopReason, "verification_failed");
+  assert.equal(r.closeable, false);
+  assert.deepEqual(r.rounds.at(-1)!.fixDirtyPaths, ["src/bar.ts"]);
+});
+
+test("#415 loop: fix { ok:true, committedSha:'abc' } → committedSha recorded on the round", async () => {
+  let round = 0;
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => (++round === 1
+      ? { ok: true, verdict: "needs_fix", findings: ANCHORED }
+      : { ok: true, verdict: "pass", findings: [] }),
+    fix: () => ({ ok: true, committedSha: "abc" }),
+  }));
+  assert.equal(r.stopReason, "passed");
+  assert.equal(r.rounds[0]!.committedSha, "abc");
+});
+
+// ── FG-415: renderReviewLoopNote new fields ───────────────────────────────────
+
+test("#415 note: committed sha shown when fix succeeded with committedSha", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{
+        round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED,
+        fixAttempted: true, committedSha: "deadbeef",
+      }],
+    },
+  );
+  assert.match(note, /committed: deadbeef/);
+});
+
+test("#415 note: fixer out-of-scope paths shown", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "fixer_out_of_scope", closeable: false,
+      rounds: [{
+        round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED,
+        fixAttempted: true, outOfScopePaths: ["docs/concepts.md", "backlog/x.md"],
+      }],
+    },
+  );
+  assert.match(note, /fixer out-of-scope paths: docs\/concepts\.md, backlog\/x\.md/);
+});
+
+test("#415 note: fix left uncommitted (verification failed) shown with paths", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "verification_failed", closeable: false,
+      rounds: [{
+        round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED,
+        fixAttempted: true, fixDirtyPaths: ["src/foo.ts"],
+      }],
+    },
+  );
+  assert.match(note, /fix left uncommitted \(verification failed\): src\/foo\.ts/);
+});
+
+test("#415 note: fixer_out_of_scope stop reason in header", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "fixer_out_of_scope", closeable: false,
+      rounds: [{ round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED, fixAttempted: true, outOfScopePaths: ["docs/x.md"] }],
+    },
+  );
+  assert.match(note, /stop reason:\*\* fixer_out_of_scope/);
+});

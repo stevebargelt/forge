@@ -153,7 +153,10 @@ export function runVerification(
 export type ReviewDispatch =
   | { ok: true; verdict: ReviewerVerdict; findings: Finding[] }
   | { ok: false; error: string };
-export type FixDispatch = { ok: boolean; error?: string };
+export type FixDispatch =
+  | { ok: true; committedSha?: string }
+  | { ok: false; error?: string; outOfScope?: boolean; offendingPaths?: string[];
+      verificationFailed?: boolean; dirtyPaths?: string[] };
 
 /** Explicit terminal states — the only ways the loop stops. */
 export type StopReason =
@@ -162,6 +165,7 @@ export type StopReason =
   | "needs_fix_max_rounds"  // reviewer still needs_fix after max rounds
   | "verification_failed"   // deterministic verification still failing at max rounds
   | "fixer_failed"          // the fixer dispatch failed
+  | "fixer_out_of_scope"    // the fixer mutated orchestrator-owned paths (backlog/, docs/, etc.)
   | "reviewer_failed";      // the reviewer dispatch failed or returned an invalid verdict
 
 export type RoundRecord = {
@@ -172,6 +176,9 @@ export type RoundRecord = {
   findings: Finding[];
   fixAttempted: boolean;
   fixError?: string;
+  committedSha?: string;
+  outOfScopePaths?: string[];
+  fixDirtyPaths?: string[];
 };
 
 /** Turn failed verification steps into fixer findings (unanchored — typecheck/test
@@ -226,13 +233,24 @@ export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLo
       }
       const fix = await deps.fix(findings);
       rec.fixAttempted = true;
-      if (!fix.ok) {
-        rec.fixError = fix.error;
-        rounds.push(rec);
-        return { stopReason: "fixer_failed", closeable: false, rounds };
+      if (fix.ok) {
+        if (fix.committedSha) rec.committedSha = fix.committedSha;
+        rounds.push(rec); // fixed; next round re-verifies
+        continue;
       }
-      rounds.push(rec); // fixed; next round re-verifies
-      continue;
+      if (fix.outOfScope) {
+        rec.outOfScopePaths = fix.offendingPaths;
+        rounds.push(rec);
+        return { stopReason: "fixer_out_of_scope", closeable: false, rounds };
+      }
+      if (fix.verificationFailed) {
+        rec.fixDirtyPaths = fix.dirtyPaths;
+        rounds.push(rec);
+        return { stopReason: "verification_failed", closeable: false, rounds };
+      }
+      rec.fixError = fix.error;
+      rounds.push(rec);
+      return { stopReason: "fixer_failed", closeable: false, rounds };
     }
 
     // Verification green → review.
@@ -261,12 +279,22 @@ export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLo
     }
     const fix = await deps.fix(review.findings);
     rec.fixAttempted = true;
-    if (!fix.ok) {
+    if (fix.ok) {
+      if (fix.committedSha) rec.committedSha = fix.committedSha;
+      rounds.push(rec); // fixed; next round re-verifies + re-reviews
+    } else if (fix.outOfScope) {
+      rec.outOfScopePaths = fix.offendingPaths;
+      rounds.push(rec);
+      return { stopReason: "fixer_out_of_scope", closeable: false, rounds };
+    } else if (fix.verificationFailed) {
+      rec.fixDirtyPaths = fix.dirtyPaths;
+      rounds.push(rec);
+      return { stopReason: "verification_failed", closeable: false, rounds };
+    } else {
       rec.fixError = fix.error;
       rounds.push(rec);
       return { stopReason: "fixer_failed", closeable: false, rounds };
     }
-    rounds.push(rec); // fixed; next round re-verifies + re-reviews
   }
 
   /* istanbul ignore next — maxRounds>=1 always returns inside the loop */
@@ -307,7 +335,21 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
         L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
       }
     }
-    if (r.fixAttempted) L.push(`- fix: ${r.fixError ? `FAILED — ${r.fixError}` : "applied"}`);
+    if (r.fixAttempted) {
+      if (r.fixError) {
+        L.push(`- fix: FAILED — ${r.fixError}`);
+      } else if (r.outOfScopePaths && r.outOfScopePaths.length > 0) {
+        L.push(`- fix: rejected (fixer out of scope)`);
+        L.push(`- fixer out-of-scope paths: ${r.outOfScopePaths.join(", ")}`);
+      } else if (r.fixDirtyPaths && r.fixDirtyPaths.length > 0) {
+        L.push(`- fix left uncommitted (verification failed): ${r.fixDirtyPaths.join(", ")}`);
+      } else if (r.committedSha) {
+        L.push(`- fix: applied`);
+        L.push(`- committed: ${r.committedSha}`);
+      } else {
+        L.push(`- fix: applied`);
+      }
+    }
     L.push("");
   }
   return L.join("\n");

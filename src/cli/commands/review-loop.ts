@@ -84,12 +84,22 @@ export function buildReviewLoopDeps(
   invokeFn: InvokeFn = invoke,
 ): { deps: ReviewLoopDeps; getRunId: () => string | undefined } {
   let runId = ctx.runId;
+  let round = 0;
+
+  // gitInDir runs git commands in ctx.projectDir (the project being reviewed).
+  const gitInDir = (args: string[]): string => {
+    const opts: ExecFileSyncOptions = { cwd: ctx.projectDir, encoding: "utf8" };
+    return execFileSync("git", args, opts).toString();
+  };
+
   const preflight = (): void => {
     applyRoutePreflight({
       command: "forge review-loop", route: ctx.route, unrouted: ctx.unrouted,
       projectDir: ctx.projectDir, enforce: preflightEnforceFromEnv(),
     });
   };
+
+  const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README(\.|$)/;
 
   const deps: ReviewLoopDeps = {
     verify: () => runVerification(ctx.scripts, { cwd: ctx.projectDir }),
@@ -106,13 +116,59 @@ export function buildReviewLoopDeps(
       return parsed.ok ? { ok: true, verdict: parsed.verdict, findings: parsed.findings } : { ok: false, error: `reviewer result.json invalid: ${parsed.error}` };
     },
     fix: async (findings) => {
+      round++;
       preflight();
       const res = await invokeFn({
         agentRole: "engineer", task: fixTask(ctx.ticketId, findings),
         projectDir: ctx.projectDir, runId, modelProfile: ctx.implementProfile,
       });
       runId ??= res.runId;
-      return res.status === "complete" ? { ok: true } : { ok: false, error: res.error ?? "fixer dispatch failed" };
+
+      if (res.status !== "complete") {
+        return { ok: false, error: res.error ?? "fixer dispatch failed" };
+      }
+
+      // Parse git status --porcelain to get changed repo-relative paths.
+      const porcelain = gitInDir(["status", "--porcelain"]);
+      const changed = porcelain
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .filter(Boolean)
+        .map((line) => {
+          // Rename: "R  old -> new" — take the new path (after " -> ")
+          if (line[0] === "R" || line[1] === "R") {
+            const arrow = line.indexOf(" -> ");
+            if (arrow !== -1) return line.slice(arrow + 4).trim();
+          }
+          // Standard: "XY path" — path starts at column 3
+          return line.slice(3).trim();
+        })
+        .filter(Boolean);
+
+      if (changed.length === 0) {
+        return { ok: true };
+      }
+
+      const disallowed = changed.filter((p) => DISALLOWED_RE.test(p));
+      if (disallowed.length > 0) {
+        // The clean-tree precondition + per-round commits mean HEAD is the pre-round
+        // state; resetting to it reverts only this round's changes safely.
+        gitInDir(["reset", "--hard", "HEAD"]);
+        gitInDir(["clean", "-fd"]);
+        return { ok: false, outOfScope: true, offendingPaths: disallowed };
+      }
+
+      // All changed paths are in scope — run verification before committing.
+      const verification = runVerification(ctx.scripts, { cwd: ctx.projectDir });
+      if (!verification.ok) {
+        // Leave the diff for inspection; do NOT commit or revert.
+        return { ok: false, verificationFailed: true, dirtyPaths: changed };
+      }
+
+      gitInDir(["add", "-A"]);
+      gitInDir(["commit", "-m", `fix(review-loop): address ${ctx.ticketId} review findings (round ${round})`]);
+      const sha = gitInDir(["rev-parse", "HEAD"]).trim();
+      return { ok: true, committedSha: sha };
     },
   };
   return { deps, getRunId: () => runId };
@@ -181,9 +237,23 @@ export function registerReviewLoop(program: Command): void {
       console.log(`  commit range: ${range.diffRange} (${range.mode}${spanNote})`);
       console.log(`  max rounds:   ${opts.maxRounds}`);
       console.log(`  reviewer:     red-wide (read-only)   fixer: engineer`);
-      console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | reviewer_failed`);
+      console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | fixer_out_of_scope | reviewer_failed`);
       console.log(`  never auto-closes the ticket; reports whether it's closeable.`);
       if (opts.dryRun) { console.log("\n(dry run — no dispatch)"); return; }
+
+      // Clean-tree precondition: the fixer commits each accepted round, and an
+      // out-of-scope revert resets to HEAD. Both operations are mechanically safe
+      // ONLY when the tree was clean at loop start — a dirty tree would conflate
+      // the user's uncommitted changes with the fixer's round changes.
+      const dirtyStatus = git(["status", "--porcelain"], projectDir).trim();
+      if (dirtyStatus) {
+        console.error(
+          `review-loop requires a clean working tree in ${projectDir} (commit or stash first). ` +
+          `It commits each accepted fix round itself, so a dirty tree would conflate your changes with the fixer's.`,
+        );
+        process.exitCode = 1;
+        return;
+      }
 
       // Fail fast on a bogus route before any dispatch (also enforced per-round).
       applyRoutePreflight({ command: "forge review-loop", route: opts.route, unrouted: opts.unrouted, projectDir, enforce: preflightEnforceFromEnv() });
