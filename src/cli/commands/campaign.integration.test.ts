@@ -2208,3 +2208,183 @@ test("FG-416 integ: forge campaign resume — readiness-held pause still prints 
 // The start handler uses identical branch logic to the resume handler (same diff applied);
 // unit-level coverage via executor.test.ts (FG-393 T1/T3) exercises the itemRecord
 // shape that the CLI branches against.
+
+// ── FG-416: start handler dependency-held branch — DB injection ──────────────────────────────
+
+test("FG-416 integ: forge campaign start — DB-injected dependency-held state emits blocker guidance, not generic 'run resume'", () => {
+  // Drive the start paused handler's dependencyHeld branch by injecting prior-run terminal state:
+  // item1 is already terminal (failed+blocked LOCAL), item2 is pending+held (no blockerKind=readiness).
+  // startCampaign skips terminal item1 (adds it to blockedItems), re-evaluates item2 as
+  // dependency-held → itemRecords[dependencyHeld] non-empty → CLI emits blocker guidance.
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+
+  // FG-101: terminal failed+blocked LOCAL → executor adds to blockedItems, skips dispatch
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', reason = 'prior failure' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // FG-102: pending+held, no blockerKind (dependency-held) → evaluateForHold against FG-101 → stays held
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = NULL, reason = 'held because dependency relation is unknown in sequential mode' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  db.close();
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  // paused is a success reason → exit 0
+  assert.equal(startResult.status, 0, `start must exit 0 for paused campaign\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`);
+
+  const combined = startResult.stdout + startResult.stderr;
+  assert.ok(
+    !combined.includes("run resume"),
+    `output must NOT say 'run resume' (generic branch must not fire)\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-102"),
+    `output must name the dependency-held ticket FG-102\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("blocker") || combined.includes("resolve"),
+    `output must mention 'blocker' or 'resolve'\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("show") || combined.includes("report"),
+    `output must mention 'show' or 'report'\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+// ── FG-416: branch ordering — readiness wins over dependency-held ────────────────────────────
+
+test("FG-416 branch-ordering integ: readiness-held wins over dependency-held (start handler)", () => {
+  // Three items: FG-101 terminal (failed+blocked LOCAL), FG-102 readiness-held,
+  // FG-103 dependency-held. Branch order: readinessHeld → dependencyHeld → blocked → generic.
+  // With BOTH readiness-held and dependency-held present, readiness wins → 'refine' message.
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102,FG-103",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+
+  // FG-101: terminal failed+blocked LOCAL (adds to blockedItems on re-drive)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', reason = 'prior failure' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // FG-102: readiness-held — empty body (from beforeEach) → re-evaluation keeps it readiness-held
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness', reason = 'held because not ready' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  // FG-103: dependency-held — no blockerKind → evaluateForHold against FG-101 → stays held
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = NULL, reason = 'held because dependency relation is unknown in sequential mode' WHERE id = ?"
+  ).run(items[2]!.id);
+
+  db.close();
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  assert.equal(startResult.status, 0, `start must exit 0\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`);
+
+  const combined = startResult.stdout + startResult.stderr;
+  assert.ok(
+    combined.includes("not ready") || combined.includes("refine"),
+    `output must say 'not ready' or 'refine' (readiness wins over dependency)\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-102"),
+    `output must name the readiness-held ticket FG-102\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("unresolved blocker"),
+    `output must NOT say 'unresolved blocker' (dependency branch must not fire over readiness)\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("run resume"),
+    `output must NOT say 'run resume' (generic branch must not fire)\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+test("FG-416 branch-ordering integ: readiness-held wins over dependency-held (resume handler)", () => {
+  // Same three-item scenario through resume (identical branch logic to start).
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102,FG-103",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+
+  // Campaign must be paused for resume to proceed
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+
+  // FG-101: terminal failed+blocked LOCAL
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', reason = 'prior failure' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // FG-102: readiness-held — empty body → re-evaluation keeps it readiness-held
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness', reason = 'held because not ready' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  // FG-103: dependency-held — no blockerKind → stays held against FG-101
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = NULL, reason = 'held because dependency relation is unknown in sequential mode' WHERE id = ?"
+  ).run(items[2]!.id);
+
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.equal(resumeResult.status, 0, `resume must exit 0\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const combined = resumeResult.stdout + resumeResult.stderr;
+  assert.ok(
+    combined.includes("not ready") || combined.includes("refine"),
+    `output must say 'not ready' or 'refine' (readiness wins over dependency)\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-102"),
+    `output must name the readiness-held ticket FG-102\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("unresolved blocker"),
+    `output must NOT say 'unresolved blocker' (dependency branch must not fire over readiness)\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("run resume again"),
+    `output must NOT say 'run resume again' (generic branch must not fire)\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});

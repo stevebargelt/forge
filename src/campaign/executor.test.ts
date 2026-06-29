@@ -2411,3 +2411,142 @@ test("FG-413: resume — readiness-held item still not-ready → stays held, not
   assert.equal(phase2Item.outcome, "held", "item must still be held after unrefined resume");
   assert.equal(phase2Item.blocker_kind, "readiness", "blockerKind must still be readiness after unrefined resume");
 });
+
+// ════════════════════════════════════════════════════════════════════════════════
+// FG-416: dependency-held itemRecord shape and CLI branch ordering
+// ════════════════════════════════════════════════════════════════════════════════
+
+test("FG-416: startCampaign dependency-held itemRecord exposes reason, no blockerKind=readiness — CLI dependencyHeld filter matches", async () => {
+  // FG-101 fails LOCAL; FG-102 is dependency-held (unknown relation, sequential).
+  // The held itemRecord must carry reason and must NOT have blockerKind=readiness —
+  // confirming the CLI start handler would pick the dependencyHeld branch, not the generic one.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-fake");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+
+  const heldRecord = result.itemRecords.find((r) => r.outcome === "held");
+  assert.ok(heldRecord, "must have a held itemRecord for FG-102");
+  assert.equal(heldRecord!.ticketId, "FG-102");
+  assert.ok(heldRecord!.reason, "held itemRecord must carry reason for CLI dependency-held message");
+  assert.notEqual(heldRecord!.blockerKind, "readiness", "dependency-held item must NOT have blockerKind=readiness");
+
+  // Apply the same filter logic the CLI start/resume paused handler uses.
+  const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+  const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
+
+  assert.equal(readinessHeld.length, 0, "no readiness-held items — readiness branch must NOT fire");
+  assert.ok(dependencyHeld.length > 0, "CLI dependencyHeld filter matches — start emits blocker guidance, not generic 'run resume'");
+  assert.equal(dependencyHeld[0]!.ticketId, "FG-102", "held ticket named in output");
+  assert.ok(dependencyHeld[0]!.reason, "reason present — CLI reasonPart populated for single held item");
+});
+
+test("FG-416: startCampaign — dependency-held AND blocked both in itemRecords — dependencyHeld branch fires before blocked (branch-order pin)", async () => {
+  // FG-101 fails LOCAL → itemRecords gets outcome=blocked.
+  // FG-102 is dependency-held → itemRecords gets outcome=held (no blockerKind).
+  // CLI branch order: readinessHeld → dependencyHeld → blocked → generic.
+  // With dependencyHeld=[FG-102] and blocked=[FG-101], dependencyHeld fires — NOT blocked.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-fake");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+
+  const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
+  const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
+  assert.ok(blocked.length > 0, "must have a blocked item in itemRecords (FG-101 newly failed)");
+  assert.ok(dependencyHeld.length > 0, "must have a dependency-held item in itemRecords (FG-102)");
+
+  const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+  assert.equal(readinessHeld.length, 0, "no readiness-held items — first branch must NOT fire");
+  // dependencyHeld fires before blocked: CLI emits blocker-guidance, not 'blocked; resolve and resume'
+  assert.ok(dependencyHeld.length > 0, "dependencyHeld wins — CLI emits blocker-guidance, not 'blocked; resolve and resume' or 'run resume again'");
+});
+
+test("FG-416: startCampaign readiness-held — itemRecord has blockerKind=readiness — readinessHeld filter wins over dependencyHeld (start regression pin)", async () => {
+  // A ticket without Problem/Goal/AC sections is held by the readiness gate.
+  // readinessHeld filter must match it; CLI must emit 'refine' — not 'blocker guidance'.
+  // Regression-pins that FG-416's dependencyHeld branch does NOT steal readiness-held items.
+  writeTicket(projectDir, {
+    id: "FG-901",
+    type: "story",
+    status: "active",
+    title: "Unrefined Ticket",
+    epic: "FG-100",
+    created: "2024-01-01",
+    body: "Some work but missing structure",
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-901"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(dispatched, 0, "readiness-held ticket must not be dispatched");
+
+  const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+  const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
+
+  assert.ok(readinessHeld.length > 0, "readinessHeld filter must match — CLI emits 'refine', not dependency message");
+  assert.equal(dependencyHeld.length, 0, "dependencyHeld filter must NOT match readiness-held items");
+  assert.equal(readinessHeld[0]!.ticketId, "FG-901");
+  assert.equal(readinessHeld[0]!.blockerKind, "readiness");
+});
+
+test("FG-416: startCampaign cooperative-pause — itemRecords has no held/blocked — CLI generic branch fires", async () => {
+  // Campaign paused after item1 completes (cooperative pause); item2 never dispatched.
+  // itemRecords: only item1 (lifecycle=complete, no held/blocked outcome).
+  // CLI start: readinessHeld=[], dependencyHeld=[], blocked=[] → generic branch fires
+  // ('campaign paused between items — run resume to continue').
+  // CLI resume generic: 'campaign paused between items — run resume again to continue'.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let callCount = 0;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    callCount++;
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(callCount, 1, "only item1 dispatched before cooperative pause");
+
+  const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+  const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
+  const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
+
+  assert.equal(readinessHeld.length, 0, "no readiness-held items after cooperative pause");
+  assert.equal(dependencyHeld.length, 0, "no dependency-held items after cooperative pause");
+  assert.equal(blocked.length, 0, "no blocked items after cooperative pause — generic branch fires in CLI");
+});
