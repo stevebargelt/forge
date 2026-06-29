@@ -39,7 +39,7 @@ afterEach(() => {
 
 function ctx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
   return {
-    ticketId: "301", acceptance: "#301 — do the thing", diff: "diff --git ...",
+    ticketId: "301", acceptance: "#301 — do the thing", diffProvider: () => "diff --git ...",
     projectDir, scripts: {}, unrouted: true, ...over,
   };
 }
@@ -145,7 +145,7 @@ test("#301 deps: threads one runId across dispatches (review creates it, fix reu
 
 function gitCtx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
   return {
-    ticketId: "FG-415", acceptance: "FG-415 — test", diff: "diff",
+    ticketId: "FG-415", acceptance: "FG-415 — test", diffProvider: () => "diff",
     projectDir, scripts: {}, unrouted: true, ...over,
   };
 }
@@ -343,6 +343,63 @@ test("#415 fix dep: fixer writes non-ASCII path in docs/ → outOfScope (finding
   );
   const status = gitExec(["status", "--porcelain"], projectDir).trim();
   assert.equal(status, "", `tree must be clean after revert`);
+});
+
+test("#415-p2 fix dep: fixer writes top-level README-notes.md (not README.md) → outOfScope returned, tree reverted clean", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "README-notes.md"), "# notes\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.some((p) => /^README/.test(p)), `expected README* in offending: ${JSON.stringify(offending)}`);
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert`);
+});
+
+test("#415-p1 review dep calls diffProvider() each round rather than caching stale diff", async () => {
+  let callCount = 0;
+  const diffProvider = (): string => { callCount++; return `diff-call-${callCount}`; };
+  const seenTasks: string[] = [];
+  const { deps } = buildReviewLoopDeps(
+    { ...ctx(), diffProvider },
+    async (a) => { seenTasks.push(a.task); return RESULT({ result: { verdict: "pass" } }); },
+  );
+  await deps.review({ ok: true, steps: [] });
+  await deps.review({ ok: true, steps: [] });
+  assert.equal(callCount, 2, "diffProvider must be called once per review round");
+  assert.match(seenTasks[0]!, /diff-call-1/, "round 1 task must contain round-1 diff");
+  assert.match(seenTasks[1]!, /diff-call-2/, "round 2 task must contain round-2 diff, not the stale round-1 value");
+});
+
+test("#415-p1 diffProvider closure: startHead==HEAD → originalDiff; after fixer commit → originalDiff + fixer diff", () => {
+  const originalDiff = "original-diff-content";
+  const startHead = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // Build the same closure logic that registerReviewLoop creates.
+  const diffProvider = (): string => {
+    const head = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+    if (head === startHead) return originalDiff;
+    const fixerCommits = gitExec(["diff", `${startHead}..${head}`], projectDir);
+    return `${originalDiff}\n\n## Fixer commits since review start (${startHead.slice(0, 9)}..${head.slice(0, 9)})\n${fixerCommits}`;
+  };
+
+  // Before any fixer commit: must return the original diff unchanged.
+  assert.equal(diffProvider(), originalDiff, "no fixer commits → must return originalDiff");
+
+  // Simulate a fixer commit with a unique marker.
+  writeFileSync(join(projectDir, "fix.ts"), "// UNIQUE_FIXER_MARKER_XYZ\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "fix(review-loop): address FG-415 review findings (round 1)"], projectDir);
+
+  // After fixer commit: must contain originalDiff AND the fixer's change.
+  const updated = diffProvider();
+  assert.match(updated, /original-diff-content/, "updated diff must still contain originalDiff");
+  assert.match(updated, /UNIQUE_FIXER_MARKER_XYZ/, "updated diff must contain the fixer's committed change");
+  assert.match(updated, /Fixer commits since review start/, "must include the section header");
 });
 
 test("#415 fix dep: fixer renames disallowed→allowed path → outOfScope, old path caught (finding 2)", async () => {

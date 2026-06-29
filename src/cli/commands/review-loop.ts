@@ -66,7 +66,7 @@ function fixTask(ticketId: string, findings: Finding[]): string {
 export type ReviewLoopContext = {
   ticketId: string;
   acceptance: string;
-  diff: string;
+  diffProvider: () => string;
   projectDir: string;
   scripts: Record<string, unknown>;
   route?: string;
@@ -99,14 +99,14 @@ export function buildReviewLoopDeps(
     });
   };
 
-  const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README(\.|$)/;
+  const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README/;
 
   const deps: ReviewLoopDeps = {
     verify: () => runVerification(ctx.scripts, { cwd: ctx.projectDir }),
     review: async (verification) => {
       preflight();
       const res = await invokeFn({
-        agentRole: "red-wide", task: reviewTask(ctx.acceptance, ctx.diff, verification),
+        agentRole: "red-wide", task: reviewTask(ctx.acceptance, ctx.diffProvider(), verification),
         projectDir: ctx.projectDir, readOnlyProject: true, runId,
         runTitle: `review-loop #${ctx.ticketId.replace(/^#/, "")}`, modelProfile: ctx.reviewProfile,
       });
@@ -251,7 +251,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
       if (range.mode === "none") {
         throw new Error(`no commits reference ${ticketId} (and no --since). Pass --since <sha> to set the range.`);
       }
-      const diff = buildDiff(range, projectDir);
+      const originalDiff = buildDiff(range, projectDir);
 
       // Present (guardrail): ticket, route, range, rounds, stop conditions.
       const spanNote = range.spansUnmatched ? `, spans unrelated commits → diffing the ${range.shas.length} ticket shas` : "";
@@ -273,10 +273,18 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
       // Fail fast on a bogus route before any dispatch (also enforced per-round).
       applyRoutePreflight({ command: "forge review-loop", route: opts.route, unrouted: opts.unrouted, projectDir, enforce: preflightEnforceFromEnv() });
 
+      const startHead = git(["rev-parse", "HEAD"], projectDir).trim();
+      const diffProvider = (): string => {
+        const head = git(["rev-parse", "HEAD"], projectDir).trim();
+        if (head === startHead) return originalDiff;
+        const fixerCommits = git(["diff", `${startHead}..${head}`], projectDir);
+        return `${originalDiff}\n\n## Fixer commits since review start (${startHead.slice(0, 9)}..${head.slice(0, 9)})\n${fixerCommits}`;
+      };
+
       const { deps, getRunId } = buildReviewLoopDeps({
         ticketId,
         acceptance: `${ticket.id} — ${ticket.title}\n\n${ticket.body}`,
-        diff, projectDir, scripts: readScripts(projectDir),
+        diffProvider, projectDir, scripts: readScripts(projectDir),
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
       }, invokeFn ?? invoke);
