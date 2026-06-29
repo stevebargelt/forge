@@ -5,7 +5,7 @@ status: done
 title: "review-loop engineer-fixer oversteps scope: edits backlog state + durable docs, leaves changes uncommitted"
 created: 2026-06-29
 closed: 2026-06-29
-closed_commit: 54a9e40
+closed_commit: 2ae6e71
 ---
 
 ## Problem
