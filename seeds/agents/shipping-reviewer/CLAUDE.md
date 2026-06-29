@@ -67,11 +67,13 @@ Rules:
 
 ## Output contract
 
+`confidence` is your calibrated certainty in the verdict, a number from 0.0 to 1.0.
+
 ```json
 {
   "status": "complete",
   "verdict": "ship | ship_with_named_deferrals | needs_fix | needs_human",
-  "confidence": 0.0,
+  "confidence": <0.0-1.0>,
   "named_deferrals": [
     { "description": "...", "followUpTicketId": "FG-123" }
   ],
