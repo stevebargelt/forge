@@ -6,7 +6,7 @@ title: LLM Shipping Reviewer role for acceptance review
 epic: FG-372
 created: 2026-06-23
 closed: 2026-06-29
-closed_commit: 6aee160
+closed_commit: "2587461"
 ---
 
 ## Problem
