@@ -63,6 +63,13 @@ docs re-routed to the documentation-maintainer. Second (reopen) round: fixer lef
 (`executor.ts` / `campaign.ts` / a CLI integration test) uncommitted in the working tree; orchestrator
 inspected and committed them as `925967d`.
 
+**Third occurrence (deterministic, not a fluke):** during the FG-416 review-loop (2026-06-29), round 1's
+fixer again flipped the source ticket's frontmatter to `status: done` in place (an improper close — the
+ticket is closed via `forge backlog close`, which MOVES the file to `done/` with a `closed_commit`) AND
+edited `docs/concepts.md`, both uncommitted. Orchestrator reverted both and routed the genuine doc-precision
+nit through the documentation-maintainer. Same two failure modes (out-of-scope artifact edits + uncommitted)
+recurring across independent tickets confirms this is a systematic fixer-scope defect, not incidental.
+
 ## Relations
 
 - Sibling of FG-340 (test-engineer seed wording → self-commits) — same artifact-ownership / fixer-discipline family.
