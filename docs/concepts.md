@@ -218,7 +218,7 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 - `fail` — at least one required check is a definite `fail`
 - `unknown` — no required check is `fail`, but at least one required check is `unknown`
 
-Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks and is `unknown` only when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` is `unknown` for every item today — there is no host-verification recorder yet (out of scope for FG-383).
+Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks: `pass` when the sum is greater than zero, `fail` when the sum is exactly zero (zero container tests recorded), and `unknown` when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` is `unknown` for every item today — there is no host-verification recorder yet (out of scope for FG-383).
 
 **`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
 
