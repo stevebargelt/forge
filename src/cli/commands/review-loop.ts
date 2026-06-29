@@ -128,22 +128,31 @@ export function buildReviewLoopDeps(
         return { ok: false, error: res.error ?? "fixer dispatch failed" };
       }
 
-      // Parse git status --porcelain to get changed repo-relative paths.
-      const porcelain = gitInDir(["status", "--porcelain"]);
-      const changed = porcelain
-        .split("\n")
-        .map((line) => line.trimEnd())
-        .filter(Boolean)
-        .map((line) => {
-          // Rename: "R  old -> new" — take the new path (after " -> ")
-          if (line[0] === "R" || line[1] === "R") {
-            const arrow = line.indexOf(" -> ");
-            if (arrow !== -1) return line.slice(arrow + 4).trim();
-          }
-          // Standard: "XY path" — path starts at column 3
-          return line.slice(3).trim();
-        })
-        .filter(Boolean);
+      // Parse git status --porcelain -z (NUL-delimited, no C-quoting) to get changed
+      // repo-relative paths. With default core.quotePath, --porcelain wraps non-ASCII
+      // paths in double-quotes + octal escapes, breaking the DISALLOWED_RE prefix check.
+      // -z emits literal UTF-8 paths. Format: "XY path\0" for normal entries;
+      // "XY newpath\0oldpath\0" for renames/copies (R/C in either status column).
+      const porcelain = gitInDir(["status", "--porcelain", "-z"]);
+      const fields = porcelain.split("\0");
+      const changed: string[] = [];
+      let fi = 0;
+      while (fi < fields.length) {
+        const field = fields[fi]!;
+        if (!field) { fi++; continue; }
+        const xy = field.slice(0, 2);
+        const filePath = field.slice(3);
+        if (!filePath) { fi++; continue; }
+        changed.push(filePath);
+        // Rename/copy: next NUL-field is the old path (no XY prefix). Collect both
+        // so a rename FROM a disallowed dir is also caught by the guard.
+        if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
+          fi++;
+          const oldPath = fields[fi];
+          if (oldPath) changed.push(oldPath);
+        }
+        fi++;
+      }
 
       if (changed.length === 0) {
         return { ok: true };
@@ -153,6 +162,7 @@ export function buildReviewLoopDeps(
       if (disallowed.length > 0) {
         // The clean-tree precondition + per-round commits mean HEAD is the pre-round
         // state; resetting to it reverts only this round's changes safely.
+        // Safe: loop entry requires resolveCommitRange to succeed (needs existing commits), so HEAD is born.
         gitInDir(["reset", "--hard", "HEAD"]);
         gitInDir(["clean", "-fd"]);
         return { ok: false, outOfScope: true, offendingPaths: disallowed };
@@ -189,6 +199,19 @@ function buildDiff(range: CommitRange, projectDir: string): string {
   return git(["diff", range.diffRange], projectDir);
 }
 
+/** Check that the working tree is clean. Returns true if clean; logs the
+ *  refusal message, sets process.exitCode=1, and returns false if dirty. */
+export function assertCleanWorkingTree(projectDir: string): boolean {
+  const dirty = git(["status", "--porcelain"], projectDir).trim();
+  if (!dirty) return true;
+  console.error(
+    `review-loop requires a clean working tree in ${projectDir} (commit or stash first). ` +
+    `It commits each accepted fix round itself, so a dirty tree would conflate your changes with the fixer's.`,
+  );
+  process.exitCode = 1;
+  return false;
+}
+
 function readScripts(projectDir: string): Record<string, unknown> {
   try {
     const pkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
@@ -200,7 +223,7 @@ function readScripts(projectDir: string): Record<string, unknown> {
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
 
-export function registerReviewLoop(program: Command): void {
+export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void {
   program
     .command("review-loop")
     .argument("<ticket-id>", "structured ticket id (e.g. FG-301) whose committed work to review")
@@ -245,15 +268,7 @@ export function registerReviewLoop(program: Command): void {
       // out-of-scope revert resets to HEAD. Both operations are mechanically safe
       // ONLY when the tree was clean at loop start — a dirty tree would conflate
       // the user's uncommitted changes with the fixer's round changes.
-      const dirtyStatus = git(["status", "--porcelain"], projectDir).trim();
-      if (dirtyStatus) {
-        console.error(
-          `review-loop requires a clean working tree in ${projectDir} (commit or stash first). ` +
-          `It commits each accepted fix round itself, so a dirty tree would conflate your changes with the fixer's.`,
-        );
-        process.exitCode = 1;
-        return;
-      }
+      if (!assertCleanWorkingTree(projectDir)) return;
 
       // Fail fast on a bogus route before any dispatch (also enforced per-round).
       applyRoutePreflight({ command: "forge review-loop", route: opts.route, unrouted: opts.unrouted, projectDir, enforce: preflightEnforceFromEnv() });
@@ -264,7 +279,7 @@ export function registerReviewLoop(program: Command): void {
         diff, projectDir, scripts: readScripts(projectDir),
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
-      });
+      }, invokeFn ?? invoke);
 
       const outcome = await runReviewLoop({ maxRounds: opts.maxRounds }, deps);
       const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);

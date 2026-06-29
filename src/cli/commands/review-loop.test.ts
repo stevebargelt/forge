@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
-import { buildReviewLoopDeps, type ReviewLoopContext } from "./review-loop.js";
+import { buildReviewLoopDeps, assertCleanWorkingTree, type ReviewLoopContext } from "./review-loop.js";
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -252,17 +252,122 @@ test("#415 fix dep: fixer writes in-scope file, verification FAILS → verificat
   assert.ok(status.length > 0, "dirty diff must remain for inspection");
 });
 
-test("#415 CLI action precondition: git status --porcelain detects dirty tree (mechanism the CLI check uses)", async () => {
-  // Verify the detection mechanism works as expected: a new untracked file makes
-  // the status non-empty, which is what the CLI action gates on.
+test("#415 CLI precondition: dirty tree → assertCleanWorkingTree refuses (exit 1, clean-tree message), dispatch never called", async () => {
   writeFileSync(join(projectDir, "dirty.ts"), "// dirty\n");
-  const status = gitExec(["status", "--porcelain"], projectDir).trim();
-  assert.ok(status.length > 0, "tree is dirty — status must be non-empty");
-  assert.ok(status.includes("dirty.ts"), `expected dirty.ts in porcelain output: ${status}`);
 
-  // After stashing (committing), the tree becomes clean again.
+  let invokeCalled = false;
+  const fakeInvoke = async (): Promise<InvokeResult> => { invokeCalled = true; return COMPLETE(); };
+
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const errors: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => errors.push(String(args[0]));
+
+  // assertCleanWorkingTree is the real code path registerReviewLoop calls.
+  // Simulate the guard exactly as the CLI action does: if not clean, do not dispatch.
+  const clean = assertCleanWorkingTree(projectDir);
+  if (clean) {
+    // Would only reach here on a clean tree; invoke the fixer to prove dispatch runs.
+    const { deps } = buildReviewLoopDeps(gitCtx(), fakeInvoke);
+    await deps.fix([{ summary: "x", unanchored: true }]);
+  }
+
+  console.error = origError;
+
+  assert.equal(clean, false, "must refuse on dirty tree");
+  assert.equal(process.exitCode, 1, "must set exitCode 1");
+  assert.ok(
+    errors.some((msg) => /clean working tree/i.test(msg)),
+    `expected clean-tree message in console.error: ${JSON.stringify(errors)}`,
+  );
+  assert.equal(invokeCalled, false, "dispatch must NOT run on dirty tree");
+
+  process.exitCode = prevExitCode;
+});
+
+// ── FG-415: additional disallowed-path coverage (finding 4) ──────────────────
+
+test("#415 fix dep: fixer writes learnings/ file → outOfScope returned, tree reverted clean", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "learnings"), { recursive: true });
+    writeFileSync(join(projectDir, "learnings", "note.md"), "# note\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.some((p) => p.startsWith("learnings/")), `expected learnings/ in offending: ${JSON.stringify(offending)}`);
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert`);
+  const log = gitExec(["log", "--oneline"], projectDir).trim();
+  assert.ok(log.includes("initial commit"), `HEAD must be unchanged: ${log}`);
+});
+
+test("#415 fix dep: fixer writes top-level README* file → outOfScope returned, tree reverted clean", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "README.md"), "# bad\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.some((p) => /^README/.test(p)), `expected README* in offending: ${JSON.stringify(offending)}`);
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert`);
+});
+
+test("#415 fix dep: fixer writes non-ASCII path in docs/ → outOfScope (finding 1 non-ASCII bypass closed)", async () => {
+  // Commit a file in docs/ so git reports the specific non-ASCII filename (not just ?? docs/).
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", ".gitkeep"), "");
   gitExec(["add", "."], projectDir);
-  gitExec(["commit", "-m", "clean up"], projectDir);
-  const cleanStatus = gitExec(["status", "--porcelain"], projectDir).trim();
-  assert.equal(cleanStatus, "", "after commit, tree must be clean");
+  gitExec(["commit", "-m", "add docs dir"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "docs", "café.md"), "# bad\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(
+    offending.some((p) => p.startsWith("docs/")),
+    `expected docs/ in offending (non-ASCII path): ${JSON.stringify(offending)}`,
+  );
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert`);
+});
+
+test("#415 fix dep: fixer renames disallowed→allowed path → outOfScope, old path caught (finding 2)", async () => {
+  // Commit docs/old.md so it exists and can be renamed.
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "old.md"), "# old\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add docs/old.md"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    gitExec(["mv", "docs/old.md", "old.md"], projectDir);
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "rename", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(
+    offending.some((p) => p.startsWith("docs/")),
+    `expected docs/ old-path in offending: ${JSON.stringify(offending)}`,
+  );
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be clean after revert: ${status}`);
+  // HEAD must still have docs/old.md — the rename was reverted.
+  const log = gitExec(["log", "--oneline"], projectDir).trim();
+  assert.ok(log.includes("add docs/old.md"), `HEAD must be unchanged: ${log}`);
 });
