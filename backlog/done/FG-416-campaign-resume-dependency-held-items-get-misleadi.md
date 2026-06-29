@@ -1,9 +1,11 @@
 ---
 id: FG-416
 type: story
-status: active
+status: done
 title: "campaign resume: dependency-held items get misleading 'run resume again' message (operator loop)"
 created: 2026-06-29
+closed: 2026-06-29
+closed_commit: 52f6911
 ---
 
 ## Problem
