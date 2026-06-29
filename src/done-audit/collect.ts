@@ -4,11 +4,11 @@ import { tasksForRun } from "../store/tasks.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
-export function collectDoneAuditInput(projectDir: string, item: CampaignItem): DoneAuditInput {
+export function collectDoneAuditInputFor(projectDir: string, ticketId: string, runId?: string): DoneAuditInput {
   // ticket — best-effort
   let ticket: DoneAuditInput["ticket"] = null;
   try {
-    const t = readTicket(projectDir, item.ticketId);
+    const t = readTicket(projectDir, ticketId);
     ticket = {
       status: t.status,
       closedCommit: t.closedCommit,
@@ -64,11 +64,11 @@ export function collectDoneAuditInput(projectDir: string, item: CampaignItem): D
   }
 
   let containerTestsRun: number | null = null;
-  if (item.runId) {
+  if (runId) {
     try {
       let sum = 0;
       let contributed = false;
-      for (const task of tasksForRun(item.runId)) {
+      for (const task of tasksForRun(runId)) {
         const r = task.result;
         if (r !== null && typeof r === "object") {
           const testsRun = (r as Record<string, unknown>)["tests_run"];
@@ -86,7 +86,7 @@ export function collectDoneAuditInput(projectDir: string, item: CampaignItem): D
 
   return {
     ticket,
-    item: { lifecycleStatus: item.lifecycleStatus, outcome: item.outcome },
+    item: { lifecycleStatus: "complete" },
     git: { dirty, commitExists, pushed },
     verification: {
       hostVerified: null,   // recorder out of scope for FG-383
@@ -94,4 +94,9 @@ export function collectDoneAuditInput(projectDir: string, item: CampaignItem): D
       acceptedException: null,
     },
   };
+}
+
+export function collectDoneAuditInput(projectDir: string, item: CampaignItem): DoneAuditInput {
+  const input = collectDoneAuditInputFor(projectDir, item.ticketId, item.runId);
+  return { ...input, item: { lifecycleStatus: item.lifecycleStatus, outcome: item.outcome } };
 }

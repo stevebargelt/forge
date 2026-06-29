@@ -636,6 +636,88 @@ test("(n) no-legacy-fallback: ticketId set, structured ticket ABSENT, BACKLOG.md
 
 // ─── FG-381 adversarial: Finding 3 — reverse insertion order ────────────────
 
+// ─── FG-384: doneAudit in ReviewerContextPacket ───────────────────────────────
+
+test("(p) doneAudit: populated with DoneAuditResult shape when ticket is resolvable", () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "fg384-p-"));
+  try {
+    writeStructuredTicket(projectDir, {
+      id: "FG-500",
+      title: "Done Audit Test",
+      body: "## Acceptance Criteria\n\n- Ship it\n\n",
+    });
+
+    insertRun(makeRun("run-p", { ticketId: "FG-500" }));
+    insertTask(makeTask("task-eng-p", "run-p", "engineer", "engineer", "complete", {
+      status: "complete",
+      files_modified: ["src/foo.ts"],
+      tests_run: 12,
+    }));
+    insertGate({
+      id: "gate-p1",
+      taskId: "task-eng-p",
+      decision: "advance",
+      rationale: "go",
+      decidedAt: "2026-01-01T00:00:00Z",
+      decidedBy: "human",
+    });
+
+    const packet = assembleReviewerContextPacket("run-p", "task-eng-p", projectDir);
+
+    // doneAudit must be a non-null DoneAuditResult
+    assert.ok(packet.doneAudit !== null, "doneAudit must be populated when ticket resolves");
+    assert.ok(
+      ["pass", "fail", "unknown"].includes(packet.doneAudit.outcome),
+      `outcome must be a valid DoneAuditOutcome, got: ${packet.doneAudit.outcome}`,
+    );
+    assert.ok(Array.isArray(packet.doneAudit.checks), "doneAudit.checks must be an array");
+    assert.ok(Array.isArray(packet.doneAudit.gaps), "doneAudit.gaps must be an array");
+    // checks should include at least the standard named checks
+    const checkNames = packet.doneAudit.checks.map((c) => c.name);
+    assert.ok(checkNames.includes("ticket_closed"), "must have ticket_closed check");
+    assert.ok(checkNames.includes("host_verification"), "must have host_verification check");
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("(q) doneAudit: null when ticket cannot be resolved (ticketId in metadata but file not found)", () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "fg384-q-"));
+  try {
+    // No backlog directory — ticket FG-999 is not findable
+    insertRun(makeRun("run-q", { ticketId: "FG-999" }));
+    insertTask(makeTask("task-eng-q", "run-q", "engineer", "engineer", "complete", {
+      status: "complete",
+      files_modified: [],
+    }));
+
+    const packet = assembleReviewerContextPacket("run-q", "task-eng-q", projectDir);
+
+    assert.equal(packet.backlog, null, "backlog must be null when ticket not found");
+    assert.equal(packet.doneAudit, null, "doneAudit must be null when ticket cannot be resolved");
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("(r) doneAudit: null when run has no ticketId in metadata", () => {
+  const projectDir = mkdtempSync(join(tmpdir(), "fg384-r-"));
+  try {
+    // No ticketId in metadata
+    insertRun(makeRun("run-r", { brief: "do stuff" }));
+    insertTask(makeTask("task-eng-r", "run-r", "engineer", "engineer", "complete", {
+      status: "complete",
+      files_modified: [],
+    }));
+
+    const packet = assembleReviewerContextPacket("run-r", "task-eng-r", projectDir);
+
+    assert.equal(packet.doneAudit, null, "doneAudit must be null when run has no ticketId");
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
 test("(m) Finding 3 reverse insertion: LATER gate inserted FIRST, EARLIER inserted SECOND → operatorAsk = LATER", () => {
   // This test exercises that operatorAsk resolution is by decidedAt (not insertion order).
   // gatesForRun orders by decided_at ASC; the loop takes the last element — so the

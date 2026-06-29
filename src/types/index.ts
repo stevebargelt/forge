@@ -1,6 +1,9 @@
 // Forge core types. v2 — workflow names are arbitrary YAML strings, not a fixed
 // union. Phase/AgentRef/RedConfig/FanoutConfig types removed; v2 uses schema.ts.
 
+import type { DoneAuditResult } from "../done-audit/done-audit.js";
+export type { DoneAuditResult };
+
 export type GateType = "human" | "auto" | "verdict";
 
 export type RedAuthority = "triage" | "specialist" | "authoritative";
@@ -223,6 +226,7 @@ export type ReviewerContextPacket = {
     description: string;
     followUpTicketId?: string;
   }>;
+  doneAudit: DoneAuditResult | null;
   missingContext: MissingContextItem[];
 };
 

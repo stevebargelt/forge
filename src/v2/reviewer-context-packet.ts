@@ -4,6 +4,8 @@ import { gatesForRun } from "../store/gates.js";
 import { verdictsForRun } from "../store/verdicts.js";
 import { readTicket } from "../backlog/structured.js";
 import type { ReviewerContextPacket, MissingContextItem, Finding } from "../types/index.js";
+import { collectDoneAuditInputFor } from "../done-audit/collect.js";
+import { evaluateDoneAudit } from "../done-audit/done-audit.js";
 
 function extractSection(body: string, heading: string): string {
   const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -22,6 +24,7 @@ export function assembleReviewerContextPacket(
 ): ReviewerContextPacket {
   const run = getRun(runId);
   if (!run) throw new Error(`assembleReviewerContextPacket: run not found: ${runId}`);
+  const rawTicketIdForAudit = run.metadata?.["ticketId"];
 
   const allTasks = tasksForRun(runId);
   const allGates = gatesForRun(runId);
@@ -148,6 +151,17 @@ export function assembleReviewerContextPacket(
       )
     : [];
 
+  // doneAudit: best-effort; only when the backlog ticket resolved (mirrors backlogData null rule).
+  let doneAudit: ReviewerContextPacket["doneAudit"] = null;
+  if (rawTicketIdForAudit !== undefined && rawTicketIdForAudit !== null && backlogData !== null) {
+    try {
+      const auditInput = collectDoneAuditInputFor(projectDir, String(rawTicketIdForAudit), runId);
+      doneAudit = evaluateDoneAudit(auditInput);
+    } catch {
+      // best-effort — null on failure
+    }
+  }
+
   return {
     backlog: backlogData,
     operatorAsk,
@@ -159,6 +173,7 @@ export function assembleReviewerContextPacket(
     git,
     verificationCommands,
     deferredScope,
+    doneAudit,
     missingContext,
   };
 }

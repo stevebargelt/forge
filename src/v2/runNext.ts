@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "n
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
-import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket } from "../types/index.js";
+import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
@@ -881,6 +881,13 @@ async function runOneRed(args: {
   if (markTaskComplete(redTaskId, result.result)) {
     logEvent("task.completed", { runId: args.runId, taskId: redTaskId });
   }
+  if (args.red.agent === "shipping-reviewer") {
+    return {
+      red: args.red,
+      redTaskId,
+      verdict: mapShippingReviewerVerdict(result.result, args.reviewerContextPacket?.doneAudit),
+    };
+  }
   return { red: args.red, redTaskId, verdict: parseVerdict(result.result) };
 }
 
@@ -904,6 +911,75 @@ function parseVerdict(output: unknown): Verdict {
     confidence,
     findings,
     notes: typeof obj["notes"] === "string" ? obj["notes"] : undefined,
+    ...(invariants && invariants.length > 0 ? { invariants_verified: invariants } : {}),
+  };
+}
+
+// Maps the shipping-reviewer's canonical output contract to an internal Verdict.
+// The shipping-reviewer emits { verdict, confidence, named_deferrals,
+// doneAuditDisposition, findings, invariants_verified } — distinct from the
+// pass/fail/inconclusive vocabulary used by other reds.
+export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAuditResult | null): Verdict {
+  const obj = (output ?? {}) as Record<string, unknown>;
+  const srVerdict = obj["verdict"];
+
+  const confidence =
+    typeof obj["confidence"] === "number" && obj["confidence"] >= 0 && obj["confidence"] <= 1
+      ? obj["confidence"]
+      : 0.5;
+
+  const findings: Finding[] = Array.isArray(obj["findings"]) ? (obj["findings"] as Finding[]) : [];
+
+  const invariants = Array.isArray(obj["invariants_verified"])
+    ? (obj["invariants_verified"] as unknown[]).filter((x): x is string => typeof x === "string")
+    : undefined;
+
+  let mappedVerdict: Verdict["verdict"];
+
+  if (srVerdict === "ship") {
+    mappedVerdict = "pass";
+  } else if (srVerdict === "ship_with_named_deferrals") {
+    const deferrals = Array.isArray(obj["named_deferrals"]) ? obj["named_deferrals"] : [];
+    const allValid =
+      deferrals.length > 0 &&
+      deferrals.every(
+        (d) =>
+          typeof d === "object" &&
+          d !== null &&
+          typeof (d as Record<string, unknown>)["description"] === "string" &&
+          (d as Record<string, unknown>)["description"] !== "" &&
+          typeof (d as Record<string, unknown>)["followUpTicketId"] === "string" &&
+          (d as Record<string, unknown>)["followUpTicketId"] !== "",
+      );
+    mappedVerdict = allValid ? "pass" : "fail";
+  } else if (srVerdict === "needs_fix") {
+    mappedVerdict = "fail";
+  } else if (srVerdict === "needs_human") {
+    mappedVerdict = "inconclusive";
+  } else {
+    mappedVerdict = "inconclusive";
+  }
+
+  // GUARDRAIL BACKSTOP: a "pass" over unresolved mechanical checks with no named
+  // exception is not a real pass. Downgrade to fail unless the result explicitly
+  // names an accepted exception or a covering deferral.
+  if (
+    mappedVerdict === "pass" &&
+    doneAudit !== undefined &&
+    doneAudit !== null &&
+    (doneAudit.outcome === "fail" || doneAudit.outcome === "unknown")
+  ) {
+    const disposition = typeof obj["doneAuditDisposition"] === "string" ? obj["doneAuditDisposition"] : "";
+    const isExcepted = disposition.startsWith("accepted_exception") || disposition === "covered_by_deferral";
+    if (!isExcepted) {
+      mappedVerdict = "fail";
+    }
+  }
+
+  return {
+    verdict: mappedVerdict,
+    confidence,
+    findings,
     ...(invariants && invariants.length > 0 ? { invariants_verified: invariants } : {}),
   };
 }
