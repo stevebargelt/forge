@@ -82,9 +82,27 @@ test("collect: missing ticket → ticket null (unknown checks)", () => {
   // (covered by the evaluator; here we verify collect returns null, not throws)
 });
 
-// ── dirty working tree → git.dirty=true ──────────────────────────────────────
+// ── dirty working tree (uncommitted backlog close) → git.dirty=true ──────────
 
-test("collect: dirty working tree → git.dirty=true", () => {
+test("collect: uncommitted backlog close state → git.dirty=true", () => {
+  // Simulate the dirty state caused by a ticket moved from done/ back to stories/
+  // without committing — this is the canonical "uncommitted backlog close" scenario.
+  const doneDir = join(projectDir, "backlog", "done");
+  const storiesDir = join(projectDir, "backlog", "stories");
+  mkdirSync(doneDir, { recursive: true });
+  mkdirSync(storiesDir, { recursive: true });
+
+  const doneFile = join(doneDir, "FG-COLLECT-1-some-title.md");
+  writeFileSync(doneFile, "---\nid: FG-COLLECT-1\ntype: story\nstatus: done\ntitle: Collect Test One\n---\ndone\n");
+
+  // Commit the done/ version so git sees a clean base
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "close ticket"], projectDir);
+
+  // Now move it back to stories/ without committing — dirty working tree
+  const storiesFile = join(storiesDir, "FG-COLLECT-1-some-title.md");
+  writeFileSync(storiesFile, "---\nid: FG-COLLECT-1\ntype: story\nstatus: active\ntitle: Collect Test One\n---\nactive\n");
+
   writeTicket(projectDir, {
     id: "FG-COLLECT-1",
     type: "story",
@@ -94,13 +112,10 @@ test("collect: dirty working tree → git.dirty=true", () => {
     related: [],
   });
 
-  // Create an untracked (dirty) file in the git repo
-  writeFileSync(join(projectDir, "untracked.txt"), "dirty content");
-
   const item = makeItem("FG-COLLECT-1");
   const input = collectDoneAuditInput(projectDir, item);
 
-  assert.equal(input.git.dirty, true, "dirty must be true when working tree has uncommitted changes");
+  assert.equal(input.git.dirty, true, "dirty must be true when backlog close state is uncommitted");
 });
 
 // ── clean working tree → git.dirty=false ──────────────────────────────────────
@@ -252,6 +267,17 @@ test("collect: no runId → containerTestsRun null", () => {
   const input = collectDoneAuditInput(projectDir, item);
 
   assert.equal(input.verification.containerTestsRun, null);
+});
+
+test("collect: runId with task carrying tests_run=0 → containerTestsRun is 0 (not null)", () => {
+  const runId = "run-collect-0";
+  insertRun(makeRun(runId));
+  insertTask(makeTask("task-collect-0a", runId, { status: "complete", tests_run: 0 }));
+
+  const item = makeItem("FG-COLLECT-0", runId);
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.strictEqual(input.verification.containerTestsRun, 0, "tests_run=0 is a numeric contribution — containerTestsRun must be 0, not null");
 });
 
 test("collect: runId with tasks but none carry numeric tests_run → containerTestsRun null", () => {
