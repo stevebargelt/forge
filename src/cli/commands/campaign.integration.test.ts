@@ -1930,3 +1930,126 @@ test("FG-411 integ: forge campaign report exits 0 and shows non-continuable safe
     `nextOperatorAction must advise re-plan, got: ${output.nextOperatorAction}`
   );
 });
+
+// ── FG-413: show/report human output surfaces readiness for readiness-held items ─
+
+test("FG-413 integ: forge campaign show (human) surfaces readiness for a readiness-held item", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set campaign to paused with FG-101 held on readiness
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness', reason = 'held because not ready', requested_human_action = 'refine FG-101 then resume' WHERE campaign_id = ?"
+  ).run(planOutput.campaignId);
+  db.close();
+
+  const showResult = runForge(["campaign", "show", planOutput.campaignId]);
+  assert.equal(showResult.status, 0, `show failed\nstdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+
+  const output = showResult.stdout + showResult.stderr;
+  assert.ok(
+    output.includes("readiness"),
+    `human output must include 'readiness'\nstdout: ${showResult.stdout}`
+  );
+  assert.ok(
+    output.includes("needs_refinement"),
+    `human output must include readiness outcome 'needs_refinement'\nstdout: ${showResult.stdout}`
+  );
+  assert.ok(
+    output.includes("refinement") || output.includes("gaps"),
+    `human output must include gaps or refinement proposal\nstdout: ${showResult.stdout}`
+  );
+  assert.ok(
+    output.includes("refine") && output.includes("FG-101"),
+    `human output next action must mention 'refine FG-101'\nstdout: ${showResult.stdout}`
+  );
+});
+
+test("FG-413 integ: forge campaign report (human) surfaces requestedHumanAction and readiness for readiness-held item", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness', reason = 'held because not ready', requested_human_action = 'refine FG-101 then resume' WHERE campaign_id = ?"
+  ).run(planOutput.campaignId);
+  db.close();
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId]);
+  assert.equal(reportResult.status, 0, `report failed\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  const output = reportResult.stdout + reportResult.stderr;
+  assert.ok(
+    output.includes("refine FG-101 then resume"),
+    `human report output must include requestedHumanAction\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    output.includes("readiness"),
+    `human report output must include 'readiness'\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    output.includes("needs_refinement"),
+    `human report output must include readiness outcome 'needs_refinement'\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    output.includes("refine") && output.includes("FG-101"),
+    `next operator action must mention 'refine FG-101'\nstdout: ${reportResult.stdout}`
+  );
+});
+
+// ── FG-413: start-time readiness-hold message ─────────────────────────────────
+// Note: defect 3 (start-time paused message for readiness-held items) is exercised
+// here via the CLI integration test since FG-101 has an empty body (needs_refinement).
+// The readiness gate holds FG-101 without dispatching, so no real container is invoked.
+
+test("FG-413 integ: forge campaign start emits readiness-hold message for unready items (not generic 'run resume')", () => {
+  // FG-101 has empty body → needs_refinement readiness → held by readiness gate
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  // paused is a success reason (exit 0)
+  assert.equal(startResult.status, 0, `start must exit 0 for paused campaign\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`);
+
+  const combined = startResult.stdout + startResult.stderr;
+  assert.ok(
+    combined.includes("not ready") || combined.includes("refine"),
+    `output must mention 'not ready' or 'refine' for readiness-held items\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-101"),
+    `output must name the readiness-held ticket\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("campaign paused between items"),
+    `output must NOT say 'campaign paused between items' for a readiness-held campaign\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});

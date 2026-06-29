@@ -379,15 +379,45 @@ test("FG-413 consistency (FG-394 shared-helper invariant): readiness-held item �
     "report.nextOperatorAction must NOT be bare 'resume the campaign when ready'"
   );
 
-  // safetyToContinue must not claim can_resume (the operator can't just resume — must refine first)
-  // Note: the readiness-held item doesn't produce an unresolved 'blocked' item (it's pending+held,
-  // not failed+blocked), so campaignBlocker returns null. safetyToContinue is "can_resume".
-  // The shared-helper invariant is that BOTH show and report surface the refine instruction
-  // even when safetyToContinue is technically can_resume.
-  // This test guards against drift between the two action helpers.
+  // safetyToContinue must be needs_resolution — the operator cannot just resume, must refine first
+  assert.equal(
+    report.safetyToContinue,
+    "needs_resolution",
+    "safetyToContinue must be needs_resolution for a readiness-held item — operator must refine before resuming"
+  );
   assert.equal(
     show.nextAction.includes("refine") && report.nextOperatorAction.includes("refine"),
     true,
     "INVARIANT: both show.nextAction and report.nextOperatorAction must mention 'refine' for a readiness-held item"
   );
+});
+
+// ── Pin the other side: genuinely-resumable paused → can_resume ──────────────
+
+test("FG-413 pin: genuinely-resumable paused campaign (no held/blocked items) → safetyToContinue=can_resume", () => {
+  writeTicket(projectDir, {
+    id: "FG-201",
+    type: "story",
+    status: "active",
+    title: "Ready Story",
+    created: "2024-01-01",
+    body: READY_BODY,
+  });
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-201"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Set to paused with all items pending (cooperative pause — no held/blocked items)
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(
+    report.safetyToContinue,
+    "can_resume",
+    "genuinely-resumable paused campaign with no held/blocked items must still be can_resume"
+  );
+  assert.notEqual(report.safetyToContinue, "needs_resolution");
 });

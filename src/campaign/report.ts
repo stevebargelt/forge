@@ -64,6 +64,12 @@ function unresolvedBlockedItem(items: CampaignItem[]): CampaignItem | undefined 
   return items.find((i) => i.lifecycleStatus === "failed" && i.outcome === "blocked");
 }
 
+function unrefinedReadinessItem(items: CampaignItem[]): CampaignItem | undefined {
+  return items.find(
+    (i) => i.lifecycleStatus === "pending" && i.outcome === "held" && i.blockerKind === "readiness"
+  );
+}
+
 function recoveryNeededAction(item: CampaignItem): string {
   const runPart = item.runId ? ` (run ${item.runId})` : "";
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
@@ -133,7 +139,7 @@ function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToConti
   if (blocker === "plan_unresolvable") return "stale";
   if (blocker === null) {
     if (intent === "start") return "can_start";
-    return unresolvedBlockedItem(items) ? "needs_resolution" : "can_resume";
+    return (unresolvedBlockedItem(items) || unrefinedReadinessItem(items)) ? "needs_resolution" : "can_resume";
   }
   // not_planned / not_paused / no_project_dir / invalid_project_dir: treat as non-continuable
   return "terminal";

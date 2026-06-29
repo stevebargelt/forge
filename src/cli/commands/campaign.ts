@@ -245,8 +245,12 @@ export function registerCampaign(program: Command): void {
         } else if (result.stopReason === "abandoned") {
           console.error("campaign was abandoned during execution");
         } else if (result.stopReason === "paused") {
+          const held = result.itemRecords.filter((r) => r.outcome === "held");
           const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
-          if (blocked.length) {
+          if (held.length) {
+            const heldIds = held.map((r) => r.ticketId).join(", ");
+            console.error(`campaign paused — ${held.length} item(s) not ready: refine ${heldIds} then resume`);
+          } else if (blocked.length) {
             console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
           } else {
             console.log("campaign paused between items — run resume to continue");
@@ -422,6 +426,11 @@ export function registerCampaign(program: Command): void {
         console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${blockerStr}${runStr}`);
         if (item.reason) console.log(`    reason: ${item.reason}`);
         if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
+        if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
+          console.log(`    readiness: ${item.readiness.outcome}`);
+          if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);
+          if (item.readiness.refinementProposal) console.log(`    refinement: ${item.readiness.refinementProposal}`);
+        }
       }
       console.log(`Next action: ${result.nextAction}`);
     });
@@ -464,6 +473,12 @@ export function registerCampaign(program: Command): void {
         const runStr = item.runId ? ` [run: ${item.runId}]` : "";
         console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${commitStr}${blockerStr}${runStr}`);
         if (item.reason) console.log(`    reason: ${item.reason}`);
+        if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
+        if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
+          console.log(`    readiness: ${item.readiness.outcome}`);
+          if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);
+          if (item.readiness.refinementProposal) console.log(`    refinement: ${item.readiness.refinementProposal}`);
+        }
       }
       console.log("Groupings:");
       console.log(`  shipped: ${result.groupings.shipped.join(", ") || "(none)"}`);

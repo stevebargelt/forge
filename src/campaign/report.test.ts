@@ -1636,3 +1636,61 @@ test("FG-413: readiness-held item → nextOperatorAction says refine then resume
     `show.nextAction must mention 'refine FG-101', got: ${show.nextAction}`
   );
 });
+
+// ── FG-413 fix: computeSafety consistency — readiness-held → needs_resolution ──
+
+test("FG-413 fix: readiness-held item → safetyToContinue=needs_resolution (not can_resume)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "needs_resolution", "readiness-held item must set safetyToContinue=needs_resolution");
+  assert.notEqual(result.safetyToContinue, "can_resume", "safetyToContinue must NOT be can_resume for readiness-held item");
+});
+
+test("FG-413 fix: no-issue paused → safetyToContinue=can_resume (both sides pinned)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+  // All items remain pending with no outcome or blockerKind
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "can_resume", "genuinely-resumable paused campaign must remain can_resume");
+  assert.notEqual(result.safetyToContinue, "needs_resolution");
+});
+
+test("FG-413 fix: failed+blocked item → safetyToContinue=needs_resolution (unchanged behavior pinned)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare(
+    "SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC"
+  ).all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.safetyToContinue, "needs_resolution", "failed+blocked item must keep safetyToContinue=needs_resolution");
+});
