@@ -246,10 +246,15 @@ export function registerCampaign(program: Command): void {
           console.error("campaign was abandoned during execution");
         } else if (result.stopReason === "paused") {
           const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+          const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
           const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
           if (readinessHeld.length) {
             const heldIds = readinessHeld.map((r) => r.ticketId).join(", ");
             console.error(`campaign paused — ${readinessHeld.length} item(s) not ready: refine ${heldIds} then resume`);
+          } else if (dependencyHeld.length) {
+            const heldIds = dependencyHeld.map((r) => r.ticketId).join(", ");
+            const reasonPart = dependencyHeld.length === 1 && dependencyHeld[0]?.reason ? ` (${dependencyHeld[0].reason})` : "";
+            console.error(`campaign paused — ${dependencyHeld.length} item(s) held pending an unresolved blocker: ${heldIds}${reasonPart}; resolve the blocker (see forge campaign show/report) then resume`);
           } else if (blocked.length) {
             console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
           } else {
@@ -350,10 +355,15 @@ export function registerCampaign(program: Command): void {
           console.error("campaign stopped — an item failed during execution; inspect the failed item and re-plan or abandon");
         } else if (result.stopReason === "paused") {
           const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+          const dependencyHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind !== "readiness");
           const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
           if (readinessHeld.length) {
             const heldIds = readinessHeld.map((r) => r.ticketId).join(", ");
             console.error(`campaign paused — ${readinessHeld.length} item(s) not ready: refine ${heldIds} then resume`);
+          } else if (dependencyHeld.length) {
+            const heldIds = dependencyHeld.map((r) => r.ticketId).join(", ");
+            const reasonPart = dependencyHeld.length === 1 && dependencyHeld[0]?.reason ? ` (${dependencyHeld[0].reason})` : "";
+            console.error(`campaign paused — ${dependencyHeld.length} item(s) held pending an unresolved blocker: ${heldIds}${reasonPart}; resolve the blocker (see forge campaign show/report) then resume`);
           } else if (blocked.length) {
             console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
           } else {

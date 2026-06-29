@@ -2095,3 +2095,116 @@ test("FG-413 integ: forge campaign resume emits readiness-hold message after re-
     `output must NOT say 'campaign paused between items' for a readiness-held campaign\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
   );
 });
+
+// ── FG-416: dependency-held resume message ────────────────────────────────────
+// Repro: paused campaign with FG-101 (failed+blocked, local blocker) and FG-102
+// (pending+held, dependency-held, no blockerKind=readiness). Before fix, resume printed
+// "campaign paused between items — run resume again to continue" because the dependency-held
+// record had no blockerKind and fell through all branches to the generic else.
+
+test("FG-416 integ: forge campaign resume — dependency-held item prints blocker guidance, not 'run resume again'", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+
+  // FG-101: failed+blocked with a LOCAL blocker (scope — not in SHARED_BLOCKER_KINDS)
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', reason = 'gate rejected' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // FG-102: pending+held, dependency-held — NO blocker_kind (not readiness), reason set
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = NULL, reason = 'held because dependency relation is unknown in sequential mode' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  // paused is a success reason → exit 0
+  assert.equal(resumeResult.status, 0, `resume must exit 0\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const combined = resumeResult.stdout + resumeResult.stderr;
+
+  assert.ok(
+    !combined.includes("run resume again"),
+    `output must NOT say 'run resume again'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("paused between items"),
+    `output must NOT say 'paused between items'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-102"),
+    `output must name the dependency-held ticket FG-102\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("blocker") || combined.includes("resolve"),
+    `output must mention 'blocker' or 'resolve'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("show") || combined.includes("report"),
+    `output must mention 'show' or 'report'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+test("FG-416 integ: forge campaign resume — readiness-held pause still prints refine message (regression guard)", () => {
+  // Regression: adding the dependencyHeld branch must not swallow readiness-held items.
+  // This is already covered by FG-413 tests; this test anchors the FG-416 branch order.
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness' WHERE campaign_id = ?"
+  ).run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.equal(resumeResult.status, 0, `resume must exit 0\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const combined = resumeResult.stdout + resumeResult.stderr;
+  assert.ok(
+    combined.includes("not ready") || combined.includes("refine"),
+    `readiness-held must still print 'not ready'/'refine'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("paused between items"),
+    `readiness-held must NOT print generic 'paused between items'\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("unresolved blocker"),
+    `readiness-held must NOT print dependency-held message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+// Note: `forge campaign start` cannot be driven into the dependency-held-pause state via
+// integration test without a live dispatch (the executor requires real item execution to
+// produce a failed+blocked item before the dependency-held hold fires at start-time).
+// The start handler uses identical branch logic to the resume handler (same diff applied);
+// unit-level coverage via executor.test.ts (FG-393 T1/T3) exercises the itemRecord
+// shape that the CLI branches against.

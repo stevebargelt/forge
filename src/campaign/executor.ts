@@ -48,6 +48,7 @@ export type CampaignItemRecord = {
   lifecycleStatus: CampaignItemLifecycleStatus;
   outcome?: CampaignItemOutcome;
   blockerKind?: BlockerKind;
+  reason?: string;
 };
 
 function hasBacklog(dir: string): boolean {
@@ -270,7 +271,7 @@ async function driveRemainingItems(
         if (holdResult.hold) {
           updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
           anyHeld = true;
-          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", reason: holdResult.reason });
           continue;
         }
         // No longer held — clear and fall through to dispatch.
@@ -284,7 +285,7 @@ async function driveRemainingItems(
       if (holdResult.hold) {
         updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
         anyHeld = true;
-        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", reason: holdResult.reason });
         continue;
       }
       // continue_allowed — record reason before dispatch (informational)
