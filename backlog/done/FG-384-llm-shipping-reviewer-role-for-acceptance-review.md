@@ -1,10 +1,12 @@
 ---
 id: FG-384
 type: story
-status: active
-title: "LLM Shipping Reviewer role for acceptance review"
+status: done
+title: LLM Shipping Reviewer role for acceptance review
 epic: FG-372
 created: 2026-06-23
+closed: 2026-06-29
+closed_commit: 6aee160
 ---
 
 ## Problem
