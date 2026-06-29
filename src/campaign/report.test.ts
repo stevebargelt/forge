@@ -1751,35 +1751,33 @@ test("FG-383: outcome=shipped item with done-audit outcome=unknown → verdict=c
   assert.equal(result.verdict, "complete_with_issues", "verdict must be complete_with_issues when done-audit not pass");
 });
 
-test("FG-383: shipped item with all-pass done-audit map (injected) → verdict=all_shipped (positive gate path)", () => {
-  writeTicket(projectDir, {
-    id: "FG-101",
-    type: "story",
-    status: "done",
-    title: "Story One",
-    created: "2024-01-01",
-    body: "## Problem\nDone.\n\n## Goal\nShip it.\n\n## Acceptance Criteria\n- Done\n",
-  });
-
+test("FG-383: complete campaign with shipped items having non-pass done-audit → verdict=complete_with_issues + nextOperatorAction surfaces done-audit gaps", () => {
   const { campaign } = planCampaign(
-    { kind: "list", ticketIds: ["FG-101"] },
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
     { projectDir, mode: "sequential" }
   );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+
   const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
-  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  for (const item of items) {
+    db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(item.id);
+  }
   tryTransitionCampaignToRunning(campaign.id);
   updateCampaignStatus(campaign.id, "complete");
 
-  // Inject an all-pass done-audit map — proves the all_shipped gate is reachable
-  const passMap = new Map<string, DoneAuditResult>([
+  const requestedAction = "run host typecheck + full suite before closing";
+  const auditMap = new Map<string, DoneAuditResult>([
     ["FG-101", { outcome: "pass", checks: [], gaps: [], requestedAction: null }],
+    ["FG-102", { outcome: "unknown", checks: [], gaps: ["missing closedCommit"], requestedAction }],
   ]);
-  setDoneAuditMapForTest(passMap);
+  const prev = setDoneAuditMapForTest(auditMap);
   try {
     const result = assembleCampaignReport(campaign.id)!;
-    assert.equal(result.verdict, "all_shipped", "all-pass done-audit with all-shipped items must yield all_shipped");
+    assert.equal(result.verdict, "complete_with_issues");
+    assert.ok(result.nextOperatorAction.includes("done-audit gaps"), `expected "done-audit gaps" in nextOperatorAction, got: ${result.nextOperatorAction}`);
+    assert.ok(result.nextOperatorAction.includes(requestedAction), `expected requestedAction text in nextOperatorAction, got: ${result.nextOperatorAction}`);
   } finally {
-    setDoneAuditMapForTest(null);
+    setDoneAuditMapForTest(prev);
   }
 });
 

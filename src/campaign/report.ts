@@ -171,7 +171,7 @@ function computeNextOperatorAction(
   campaign: Campaign,
   verdict: CampaignVerdict,
   items: CampaignItem[],
-  doneAuditMap?: Map<string, DoneAuditResult>
+  doneAuditMap: Map<string, DoneAuditResult>
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -181,20 +181,18 @@ function computeNextOperatorAction(
   if (campaign.status === "complete") {
     if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
     // Surface done-audit gaps for shipped items that didn't pass audit
-    if (doneAuditMap) {
-      const unauditedShipped = items.filter(
-        (i) => i.outcome === "shipped" && doneAuditMap.get(i.ticketId)?.outcome !== "pass"
-      );
-      if (unauditedShipped.length > 0) {
-        const actions = unauditedShipped
-          .map((i) => {
-            const audit = doneAuditMap.get(i.ticketId);
-            return audit?.requestedAction ?? `re-audit ${i.ticketId}`;
-          })
-          .filter(Boolean)
-          .join("; ");
-        return `shipped items have unresolved done-audit gaps — ${actions}`;
-      }
+    const unauditedShipped = items.filter(
+      (i) => i.outcome === "shipped" && doneAuditMap.get(i.ticketId)?.outcome !== "pass"
+    );
+    if (unauditedShipped.length > 0) {
+      const actions = unauditedShipped
+        .map((i) => {
+          const audit = doneAuditMap.get(i.ticketId);
+          return audit?.requestedAction ?? `re-audit ${i.ticketId}`;
+        })
+        .filter(Boolean)
+        .join("; ");
+      return `shipped items have unresolved done-audit gaps — ${actions}`;
     }
     return "review blocked/failed/skipped items";
   }
