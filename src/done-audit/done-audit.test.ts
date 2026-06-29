@@ -158,18 +158,28 @@ test("evaluateDoneAudit: deferred scope declared in body with NO linked follow-u
   assert.ok(result.requestedAction?.includes("follow-up ticket"));
 });
 
-test("evaluateDoneAudit: deferred scope declared with a linked follow-up in related → pass", () => {
+test("evaluateDoneAudit: deferred scope with FG-id named in section text → pass (related[] alone is not sufficient)", () => {
   const input = cleanInput();
-  input.ticket!.body = "## Problem\nDone.\n\n## Deferred\nSome future work.\n";
+  input.ticket!.body = "## Problem\nDone.\n\n## Deferred\nFollow-up tracked as FG-500.\n";
   input.ticket!.related = ["FG-500"];
 
   const result = evaluateDoneAudit(input);
-  // deferral_linked must be pass
   const deferralCheck = result.checks.find((c) => c.name === "deferral_linked");
   assert.ok(deferralCheck, "deferral_linked check must exist");
   assert.equal(deferralCheck!.status, "pass");
-  // overall outcome should be pass (all other checks are clean)
   assert.equal(result.outcome, "pass");
+});
+
+test("evaluateDoneAudit: deferred scope with NO FG-id in section text → fail, even when related[] is non-empty", () => {
+  const input = cleanInput();
+  input.ticket!.body = "## Problem\nDone.\n\n## Deferred\nSome future work without a named ticket.\n";
+  input.ticket!.related = ["FG-500"]; // unrelated related[] must NOT satisfy deferral_linked
+
+  const result = evaluateDoneAudit(input);
+  const deferralCheck = result.checks.find((c) => c.name === "deferral_linked");
+  assert.ok(deferralCheck, "deferral_linked check must exist");
+  assert.equal(deferralCheck!.status, "fail", "related[] alone must not satisfy deferral_linked");
+  assert.equal(result.outcome, "fail");
 });
 
 test("evaluateDoneAudit: deferred scope with FG-id in section text (not related) → pass", () => {

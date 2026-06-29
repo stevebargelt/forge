@@ -120,10 +120,10 @@ test("hostVerified=false → host_verification=fail (not unknown), outcome=fail"
 
 // ── deferral_linked: parser edges ─────────────────────────────────────────────
 
-test("deferral_linked: '## Deferred scope' heading variant → pass with related link", () => {
+test("deferral_linked: '## Deferred scope' heading variant → pass when FG-id named in section text", () => {
   const input = cleanInput();
-  input.ticket!.body = "## Problem\nDone.\n\n## Deferred scope\nFollow-up tracked separately.\n";
-  input.ticket!.related = ["FG-700"];
+  input.ticket!.body = "## Problem\nDone.\n\n## Deferred scope\nFollow-up tracked as FG-700.\n";
+  input.ticket!.related = [];
 
   const result = evaluateDoneAudit(input);
   const deferralCheck = result.checks.find((c) => c.name === "deferral_linked");

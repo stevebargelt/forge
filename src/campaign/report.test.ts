@@ -1751,21 +1751,7 @@ test("FG-383: outcome=shipped item with done-audit outcome=unknown → verdict=c
   assert.equal(result.verdict, "complete_with_issues", "verdict must be complete_with_issues when done-audit not pass");
 });
 
-test("FG-383: fully-clean shipped item (done ticket, audit-compatible) → all_shipped when audit would pass", () => {
-  // Write FG-101 as done with a closed commit and git facts all acceptable
-  // NOTE: in unit tests we have no real git repo, so git checks will be null → unknown.
-  // To get outcome=pass we need all required checks to be pass, but git/host will be unknown
-  // without a real repo. Instead, verify: items outcome=shipped but done-audit!=pass
-  // → verdict=complete_with_issues. We can't force audit=pass in a unit test without a real git
-  // repo, so we test the negative: no-done-audit-state item should still produce
-  // complete_with_issues (not all_shipped) if done-audit can't confirm pass.
-
-  // This test verifies that the all_shipped verdict gating is working correctly.
-  // With real git, the audit would pass if: ticket.status=done, closedCommit set, git clean,
-  // commit pushed, host verified. In unit tests we can't achieve all of these.
-  // We verify that the old test "verdict=all_shipped when complete and all items shipped"
-  // now requires done-audit pass — and that an item without a closedCommit cannot pass.
-
+test("FG-383: shipped item with all-pass done-audit map (injected) → verdict=all_shipped (positive gate path)", () => {
   writeTicket(projectDir, {
     id: "FG-101",
     type: "story",
@@ -1773,7 +1759,6 @@ test("FG-383: fully-clean shipped item (done ticket, audit-compatible) → all_s
     title: "Story One",
     created: "2024-01-01",
     body: "## Problem\nDone.\n\n## Goal\nShip it.\n\n## Acceptance Criteria\n- Done\n",
-    // No closedCommit → closed_commit_present=fail → audit outcome=fail
   });
 
   const { campaign } = planCampaign(
@@ -1785,15 +1770,17 @@ test("FG-383: fully-clean shipped item (done ticket, audit-compatible) → all_s
   tryTransitionCampaignToRunning(campaign.id);
   updateCampaignStatus(campaign.id, "complete");
 
-  const result = assembleCampaignReport(campaign.id)!;
-  // item outcome=shipped but done-audit=fail (missing closedCommit) → complete_with_issues
-  assert.equal(result.verdict, "complete_with_issues", "shipped item with done-audit fail must not yield all_shipped");
-
-  // The nextOperatorAction must surface the audit gap
-  assert.ok(
-    result.nextOperatorAction.includes("done-audit") || result.nextOperatorAction.includes("shipped items"),
-    `nextOperatorAction must surface done-audit gap, got: ${result.nextOperatorAction}`
-  );
+  // Inject an all-pass done-audit map — proves the all_shipped gate is reachable
+  const passMap = new Map<string, DoneAuditResult>([
+    ["FG-101", { outcome: "pass", checks: [], gaps: [], requestedAction: null }],
+  ]);
+  setDoneAuditMapForTest(passMap);
+  try {
+    const result = assembleCampaignReport(campaign.id)!;
+    assert.equal(result.verdict, "all_shipped", "all-pass done-audit with all-shipped items must yield all_shipped");
+  } finally {
+    setDoneAuditMapForTest(null);
+  }
 });
 
 test("FG-383: verdict=all_shipped gate requires done-audit outcome=pass (regression guard for old behavior change)", () => {

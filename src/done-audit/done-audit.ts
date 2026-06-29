@@ -58,8 +58,7 @@ function extractDeferralSection(body: string): { found: boolean; sectionText: st
   return { found: false, sectionText: "" };
 }
 
-function hasDeferralLink(sectionText: string, related: string[] | undefined): boolean {
-  if (related && related.length > 0) return true;
+function hasDeferralLink(sectionText: string): boolean {
   return /FG-\d+/i.test(sectionText);
 }
 
@@ -179,7 +178,7 @@ export function evaluateDoneAudit(input: DoneAuditInput): DoneAuditResult {
   const ticketBody = input.ticket?.body ?? "";
   const { found: hasDeferral, sectionText } = extractDeferralSection(ticketBody);
   if (hasDeferral) {
-    if (hasDeferralLink(sectionText, input.ticket?.related)) {
+    if (hasDeferralLink(sectionText)) {
       checks.push({ name: "deferral_linked", status: "pass" });
     } else {
       checks.push({ name: "deferral_linked", status: "fail" });

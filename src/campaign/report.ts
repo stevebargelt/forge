@@ -157,15 +157,13 @@ function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToConti
   return "terminal";
 }
 
-function computeVerdict(campaign: Campaign, items: CampaignItem[], doneAuditMap?: Map<string, DoneAuditResult>): CampaignVerdict {
+function computeVerdict(campaign: Campaign, items: CampaignItem[], doneAuditMap: Map<string, DoneAuditResult>): CampaignVerdict {
   if (campaign.status !== "complete") return "not_complete";
   const allShipped = items.length > 0 && items.every((i) => i.outcome === "shipped");
   if (!allShipped) return "complete_with_issues";
   // All items shipped — require every done-audit to be pass
-  if (doneAuditMap) {
-    const allAuditPass = items.every((i) => doneAuditMap.get(i.ticketId)?.outcome === "pass");
-    if (!allAuditPass) return "complete_with_issues";
-  }
+  const allAuditPass = items.every((i) => doneAuditMap.get(i.ticketId)?.outcome === "pass");
+  if (!allAuditPass) return "complete_with_issues";
   return "all_shipped";
 }
 
