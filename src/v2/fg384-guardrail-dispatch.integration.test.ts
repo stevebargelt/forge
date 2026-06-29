@@ -19,8 +19,13 @@
 //       primary blocked_by_red (NOT inconclusive / not complete)
 //   (fg384-2) invalid ship_with_named_deferrals (missing followUpTicketId) →
 //       recorded fail, primary blocked_by_red
-//   (fg384-3) regression: ship over pass doneAudit → mapper returns pass,
-//       pipeline does NOT degrade it (no synthetic finding, not blocked)
+//   (fg384-3) regression: valid ship with accepted_exception disposition → mapper
+//       returns pass, real pipeline does NOT block (primary completes, not blocked_by_red)
+//   (fg384-4) needs_fix with zero findings → synthetic anchor survives pipeline →
+//       recorded fail, primary blocked_by_red
+//   (fg384-5) needs_fix with all-malformed findings (no summary) → synthetic anchor
+//       survives gradeFindings even though reviewer findings are graded away →
+//       recorded fail, primary blocked_by_red (key regression for unconditional synthetic)
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -32,12 +37,9 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun } from "../store/tasks.js";
 import { verdictsForRun } from "../store/verdicts.js";
 import { startRun } from "./startRun.js";
-import { runNext, mapShippingReviewerVerdict } from "./runNext.js";
-import { validateVerdict } from "./validate-findings.js";
-import { gradeFindings } from "./review-quality.js";
+import { runNext } from "./runNext.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
-import type { DoneAuditResult } from "../types/index.js";
 
 // ─── Workflow fixture ─────────────────────────────────────────────────────────
 
@@ -335,49 +337,263 @@ test(
   },
 );
 
-// ─── (fg384-3) regression: ship over pass doneAudit stays pass ───────────────
+// ─── (fg384-3) regression: valid ship with accepted_exception stays pass ──────
 
 test(
-  "(fg384-3) regression: ship over pass doneAudit stays pass through full pipeline (no synthetic, not blocked)",
-  () => {
-    // Drives the mapper output through the same validateVerdict + gradeFindings +
-    // line-691 logic that the real ingestion path uses, with a passing doneAudit.
-    // Proves the fix does not over-block legitimate ship verdicts.
-    const passDoneAudit: DoneAuditResult = {
-      outcome: "pass",
-      checks: [{ name: "host_verification", status: "pass" }],
-      gaps: [],
-      requestedAction: null,
+  "(fg384-3) regression: ship with accepted_exception disposition passes through real pipeline (not blocked, primary completes)",
+  async () => {
+    // Drives a legitimate ship verdict through the REAL dispatchReds/runNext path.
+    // The reviewer acknowledges the audit via accepted_exception, so the guardrail
+    // backstop condition (isExcepted=true) suppresses the downgrade.
+    // Proves the needs_fix synthetic fix does NOT over-block legitimate ship verdicts.
+    const projectDir = makeTmpDir();
+    writeStructuredTicket(projectDir, {
+      id: "FG-T384-3",
+      title: "FG-384 guardrail test 3",
+      body: "## Acceptance Criteria\n\n- Ship it\n\n",
+    });
+
+    const { runId } = startRun({
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      title: "fg384-3 valid ship regression test",
+      inputs: { ticketId: "FG-T384-3" },
+      projectDir,
+    });
+
+    const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = taskIdFromDockerArgs(args);
+      const dir = dirname(stdoutPath);
+      mkdirSync(dir, { recursive: true });
+
+      let result: unknown;
+      if (taskId.startsWith("task-build-")) {
+        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+      } else {
+        // shipping-reviewer ships with an accepted exception — guardrail sees
+        // accepted_exception disposition so isExcepted=true and ship stays pass.
+        result = {
+          status: "complete",
+          verdict: "ship",
+          doneAuditDisposition: "accepted_exception:testing",
+          confidence: 0.9,
+          findings: [],
+        };
+      }
+
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
     };
 
-    const mapped = mapShippingReviewerVerdict(
-      { verdict: "ship", doneAuditDisposition: "ok", confidence: 0.9, findings: [] },
-      passDoneAudit,
+    const wave = await runNext({
+      runId,
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      dockerExec: exec,
+    });
+
+    // Valid ship must NOT be blocked — primary must complete.
+    assert.ok(
+      wave.completedSteps.includes("build"),
+      "build step must be in completedSteps — valid ship must not be blocked",
     );
 
-    assert.equal(mapped.verdict, "pass", "mapper must return pass for ship over passing doneAudit");
+    const tasks = tasksForRun(runId);
+    const primaryTask = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
     assert.equal(
-      mapped.findings.length,
-      0,
-      "no synthetic findings when guardrail is not triggered (doneAudit.outcome=pass)",
+      primaryTask!.status,
+      "complete",
+      "primary must be complete — valid ship with accepted_exception must not be blocked_by_red",
     );
 
-    const tmpDir = makeTmpDir();
+    const verdicts = verdictsForRun(runId);
+    const reviewerVerdict = verdicts.find((v) => v.redRole === "shipping-reviewer");
+    assert.ok(reviewerVerdict !== undefined, "shipping-reviewer verdict must be recorded");
+    assert.equal(
+      reviewerVerdict!.verdict,
+      "pass",
+      "recorded verdict must be pass — ship with accepted_exception stays pass through full pipeline",
+    );
+    assert.equal(
+      reviewerVerdict!.findings.length,
+      0,
+      "no findings on a valid ship (no synthetic should be added for a passing verdict)",
+    );
+  },
+);
 
-    // Simulate the ingestion pipeline exactly as runNext does at lines 678–699.
-    const { validated, dropped } = validateVerdict(mapped, tmpDir);
-    assert.equal(dropped.length, 0, "no findings should be dropped (no citation to validate)");
+// ─── (fg384-4) needs_fix with zero findings → synthetic anchor survives ───────
 
-    const { graded } = gradeFindings(validated.findings);
-    const gradedFindings = graded.map((g) => g.finding);
+test(
+  "(fg384-4) needs_fix with zero findings: synthetic anchor survives pipeline → recorded fail, primary blocked",
+  async () => {
+    const projectDir = makeTmpDir();
+    writeStructuredTicket(projectDir, {
+      id: "FG-T384-4",
+      title: "FG-384 guardrail test 4",
+      body: "## Acceptance Criteria\n\n- Ship it\n\n",
+    });
 
-    // line-691: fail with no graded findings → inconclusive (but verdict is pass, so no-op)
-    let finalVerdict = validated.verdict;
-    if (finalVerdict === "fail" && gradedFindings.length === 0) {
-      finalVerdict = "inconclusive";
-    }
+    const { runId } = startRun({
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      title: "fg384-4 needs_fix zero findings test",
+      inputs: { ticketId: "FG-T384-4" },
+      projectDir,
+    });
 
-    assert.equal(finalVerdict, "pass", "pipeline must not degrade pass to inconclusive");
-    assert.equal(gradedFindings.length, 0, "no graded findings (expected: pass over passing audit has none)");
+    const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = taskIdFromDockerArgs(args);
+      const dir = dirname(stdoutPath);
+      mkdirSync(dir, { recursive: true });
+
+      let result: unknown;
+      if (taskId.startsWith("task-build-")) {
+        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+      } else {
+        result = {
+          status: "complete",
+          verdict: "needs_fix",
+          confidence: 0.9,
+          findings: [],
+        };
+      }
+
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const wave = await runNext({
+      runId,
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      dockerExec: exec,
+    });
+
+    assert.ok(
+      !wave.completedSteps.includes("build"),
+      "build step must NOT complete — needs_fix must block",
+    );
+
+    const tasks = tasksForRun(runId);
+    const primaryTask = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
+    assert.equal(
+      primaryTask!.status,
+      "blocked_by_red",
+      "primary must be blocked_by_red — needs_fix synthetic anchor survived pipeline",
+    );
+
+    const verdicts = verdictsForRun(runId);
+    const reviewerVerdict = verdicts.find((v) => v.redRole === "shipping-reviewer");
+    assert.ok(reviewerVerdict !== undefined, "shipping-reviewer verdict must be recorded");
+    assert.equal(
+      reviewerVerdict!.verdict,
+      "fail",
+      "recorded verdict must be fail — NOT inconclusive (synthetic anchor carried the fail through line-691)",
+    );
+    assert.ok(
+      reviewerVerdict!.findings.length >= 1,
+      "recorded verdict must carry >= 1 finding (the synthetic anchor)",
+    );
+    assert.equal(
+      reviewerVerdict!.findings[0]!.summary,
+      "shipping-reviewer returned needs_fix",
+      "synthetic anchor summary must match",
+    );
+  },
+);
+
+// ─── (fg384-5) needs_fix with all-malformed findings → synthetic anchor survives
+
+test(
+  "(fg384-5) needs_fix with all-malformed findings: synthetic anchor survives gradeFindings → recorded fail, primary blocked",
+  async () => {
+    // Key regression: needs_fix result where the reviewer's own findings are ALL
+    // malformed (missing summary — gradeFindings rejects them). Without the
+    // unconditional synthetic, gradedFindings.length === 0 → line-691 downgrades
+    // fail to inconclusive → primary NOT blocked. With the unconditional synthetic,
+    // the well-formed synthetic survives grading, fail stays fail, primary blocks.
+    const projectDir = makeTmpDir();
+    writeStructuredTicket(projectDir, {
+      id: "FG-T384-5",
+      title: "FG-384 guardrail test 5",
+      body: "## Acceptance Criteria\n\n- Ship it\n\n",
+    });
+
+    const { runId } = startRun({
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      title: "fg384-5 needs_fix malformed findings test",
+      inputs: { ticketId: "FG-T384-5" },
+      projectDir,
+    });
+
+    const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = taskIdFromDockerArgs(args);
+      const dir = dirname(stdoutPath);
+      mkdirSync(dir, { recursive: true });
+
+      let result: unknown;
+      if (taskId.startsWith("task-build-")) {
+        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+      } else {
+        // All reviewer findings are malformed: severity present but summary absent.
+        // gradeFindings will reject every one of them. The unconditional synthetic
+        // must still survive so the fail blocks rather than degrading to inconclusive.
+        result = {
+          status: "complete",
+          verdict: "needs_fix",
+          confidence: 0.9,
+          findings: [
+            { severity: "high" },
+            { severity: "medium" },
+          ],
+        };
+      }
+
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const wave = await runNext({
+      runId,
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      dockerExec: exec,
+    });
+
+    assert.ok(
+      !wave.completedSteps.includes("build"),
+      "build step must NOT complete — needs_fix with all-malformed findings must still block",
+    );
+
+    const tasks = tasksForRun(runId);
+    const primaryTask = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
+    assert.equal(
+      primaryTask!.status,
+      "blocked_by_red",
+      "primary must be blocked_by_red — unconditional synthetic survived grading even though reviewer findings were rejected",
+    );
+
+    const verdicts = verdictsForRun(runId);
+    const reviewerVerdict = verdicts.find((v) => v.redRole === "shipping-reviewer");
+    assert.ok(reviewerVerdict !== undefined, "shipping-reviewer verdict must be recorded");
+    assert.equal(
+      reviewerVerdict!.verdict,
+      "fail",
+      "recorded verdict must be fail — NOT inconclusive (unconditional synthetic prevented line-691 downgrade)",
+    );
+    assert.ok(
+      reviewerVerdict!.findings.length >= 1,
+      "recorded verdict must carry >= 1 finding — the synthetic anchor must survive even when all reviewer findings are graded away",
+    );
+    assert.equal(
+      reviewerVerdict!.findings[0]!.summary,
+      "shipping-reviewer returned needs_fix",
+      "surviving finding must be the unconditional synthetic anchor",
+    );
   },
 );

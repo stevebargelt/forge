@@ -91,7 +91,8 @@ test("needs_fix -> fail", () => {
   const finding = { severity: "high", summary: "missing check", evidence: "src/x.ts:1", hypothesis: "will break" };
   const v = mapShippingReviewerVerdict({ verdict: "needs_fix", confidence: 0.8, findings: [finding] });
   assert.equal(v.verdict, "fail");
-  assert.equal(v.findings.length, 1);
+  assert.ok(v.findings.length >= 2, "needs_fix must include synthetic anchor + reviewer findings");
+  assert.equal(v.findings[0]!.summary, "shipping-reviewer returned needs_fix");
 });
 
 test("needs_human -> inconclusive", () => {
@@ -328,9 +329,10 @@ test("GOLDEN: green tests but wrong production path -> fail, packet signals all-
 
     const verdict = mapShippingReviewerVerdict(reviewerResult);
     assert.equal(verdict.verdict, "fail", "needs_fix must map to fail");
-    assert.equal(verdict.findings.length, 1);
+    assert.ok(verdict.findings.length >= 2, "must have synthetic anchor + reviewer findings");
+    assert.equal(verdict.findings[0]!.summary, "shipping-reviewer returned needs_fix");
     assert.equal(
-      (verdict.findings[0]! as Record<string, unknown>)["cites"],
+      (verdict.findings[1]! as Record<string, unknown>)["cites"],
       "acceptance_criterion",
     );
   } finally {
@@ -394,8 +396,9 @@ test("GOLDEN: clean diff but missed operator instruction -> fail, packet has ope
 
     const verdict = mapShippingReviewerVerdict(reviewerResult);
     assert.equal(verdict.verdict, "fail", "needs_fix must map to fail");
+    assert.equal(verdict.findings[0]!.summary, "shipping-reviewer returned needs_fix");
     assert.equal(
-      (verdict.findings[0]! as Record<string, unknown>)["cites"],
+      (verdict.findings[1]! as Record<string, unknown>)["cites"],
       "operator_instruction",
     );
   } finally {

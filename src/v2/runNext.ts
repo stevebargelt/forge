@@ -965,14 +965,12 @@ export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAudi
     }
   } else if (srVerdict === "needs_fix") {
     mappedVerdict = "fail";
-    if (findings.length === 0) {
-      syntheticFindings.push({
-        severity: "high",
-        summary: "shipping-reviewer returned needs_fix without any findings",
-        evidence: "shipping-reviewer verdict output: verdict=needs_fix, findings=[]",
-        hypothesis: "a needs_fix verdict without findings cannot substantiate a block; attaching synthetic to ensure it blocks rather than degrading to inconclusive",
-      });
-    }
+    syntheticFindings.push({
+      severity: "high",
+      summary: "shipping-reviewer returned needs_fix",
+      evidence: "shipping-reviewer verdict output: verdict=needs_fix",
+      hypothesis: "synthetic anchor unconditionally attached so the fail survives gradeFindings even when reviewer findings are absent or malformed",
+    });
   } else if (srVerdict === "needs_human") {
     mappedVerdict = "inconclusive";
   } else {
