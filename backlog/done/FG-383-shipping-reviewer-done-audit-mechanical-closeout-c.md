@@ -6,7 +6,7 @@ title: Shipping Reviewer done-audit mechanical closeout checks
 epic: FG-372
 created: 2026-06-23
 closed: 2026-06-29
-closed_commit: 555fee0
+closed_commit: 277b0a0
 ---
 
 ## Problem
