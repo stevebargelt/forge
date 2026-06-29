@@ -935,6 +935,7 @@ export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAudi
     : undefined;
 
   let mappedVerdict: Verdict["verdict"];
+  const syntheticFindings: Finding[] = [];
 
   if (srVerdict === "ship") {
     mappedVerdict = "pass";
@@ -951,9 +952,27 @@ export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAudi
           typeof (d as Record<string, unknown>)["followUpTicketId"] === "string" &&
           (d as Record<string, unknown>)["followUpTicketId"] !== "",
       );
-    mappedVerdict = allValid ? "pass" : "fail";
+    if (!allValid) {
+      mappedVerdict = "fail";
+      syntheticFindings.push({
+        severity: "high",
+        summary: "shipping-reviewer returned ship_with_named_deferrals but a deferral is missing a description or a linked followUpTicketId — not a valid deferral",
+        evidence: "shipping-reviewer verdict output: named_deferrals missing required fields",
+        hypothesis: "an invalid deferral cannot substitute for a real shipping gate; the change must not be accepted",
+      });
+    } else {
+      mappedVerdict = "pass";
+    }
   } else if (srVerdict === "needs_fix") {
     mappedVerdict = "fail";
+    if (findings.length === 0) {
+      syntheticFindings.push({
+        severity: "high",
+        summary: "shipping-reviewer returned needs_fix without any findings",
+        evidence: "shipping-reviewer verdict output: verdict=needs_fix, findings=[]",
+        hypothesis: "a needs_fix verdict without findings cannot substantiate a block; attaching synthetic to ensure it blocks rather than degrading to inconclusive",
+      });
+    }
   } else if (srVerdict === "needs_human") {
     mappedVerdict = "inconclusive";
   } else {
@@ -973,13 +992,19 @@ export function mapShippingReviewerVerdict(output: unknown, doneAudit?: DoneAudi
     const isExcepted = disposition.startsWith("accepted_exception") || disposition === "covered_by_deferral";
     if (!isExcepted) {
       mappedVerdict = "fail";
+      syntheticFindings.push({
+        severity: "high",
+        summary: `shipping-reviewer returned ship over a done-audit outcome=${doneAudit.outcome} with no accepted exception or covering deferral`,
+        evidence: `doneAudit.outcome=${doneAudit.outcome}, doneAuditDisposition=${disposition || "(none)"}`,
+        hypothesis: "the done-audit indicates work is incomplete; accepting a ship verdict over an unresolved audit allows incomplete work to merge",
+      });
     }
   }
 
   return {
     verdict: mappedVerdict,
     confidence,
-    findings,
+    findings: syntheticFindings.length > 0 ? [...syntheticFindings, ...findings] : findings,
     ...(invariants && invariants.length > 0 ? { invariants_verified: invariants } : {}),
   };
 }
