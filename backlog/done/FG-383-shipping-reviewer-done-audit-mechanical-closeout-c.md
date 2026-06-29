@@ -1,10 +1,12 @@
 ---
 id: FG-383
 type: story
-status: active
-title: "Shipping Reviewer done-audit mechanical closeout checks"
+status: done
+title: Shipping Reviewer done-audit mechanical closeout checks
 epic: FG-372
 created: 2026-06-23
+closed: 2026-06-29
+closed_commit: 555fee0
 ---
 
 ## Problem
