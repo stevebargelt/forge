@@ -161,7 +161,7 @@ A mechanical preflight that classifies a backlog item as ready for implementatio
 | `blocked` | Ticket `status` is `blocked`. |
 | `exploratory` | Ticket type is `idea`, or the title or body contains any of: spike, research, explore, exploratory, exploration, investigation. Lighter criteria apply — at least one of Problem or Goal must be present; Acceptance Criteria are not required. If both Problem and Goal are absent the outcome is still `exploratory`, but `gaps` and `refinementProposal` are populated with guidance. |
 
-This is a **cheap structural checklist** — it checks whether the required sections exist and contain content. It is not an LLM reviewer and does not assess whether the content is correct or complete. Semantic quality review and the done audit are later Shipping Reviewer stories (FG-372 epic).
+This is a **cheap structural checklist** — it checks whether the required sections exist and contain content. It is not an LLM reviewer and does not assess whether the content is correct or complete. The mechanical done audit — which checks shipping evidence such as git state, closed commit, and host verification — is a separate evaluator; see [Done audit (mechanical)](#done-audit-mechanical) below. Semantic quality review is a later story (FG-384, the LLM Shipping Reviewer).
 
 **Scope boundary:** the evaluator checks structural completeness only. Whether the latest operator instruction has been reflected in the ticket body is the **orchestrator's responsibility** — the preflight has no access to the operator conversation and cannot verify that reconciliation.
 
@@ -183,6 +183,46 @@ With `--json` the output is a stable object:
 On `forge campaign resume`, items held with `blockerKind: readiness` are re-evaluated against the **current** ticket body. A ticket refined to `ready` or `exploratory` is released and dispatched; a ticket still not ready stays held and the campaign stays paused.
 
 Example: `forge readiness FG-42` on a story that has a Problem section but no Acceptance Criteria returns `outcome: needs_refinement` with a `refinementProposal` explaining what to add.
+
+## Done audit (mechanical)
+
+A pure mechanical evaluator that checks whether a campaign item can truthfully be treated as shipped and done. Run automatically by `forge campaign report` for each campaign item (best-effort; `doneAuditState` is `null` only if collection throws or `projectDir` is missing). Not the LLM Shipping Reviewer (FG-384) — makes no subjective judgment; all evidence arrives as structured input.
+
+**Result shape:**
+
+```json
+{
+  "outcome": "pass" | "fail" | "unknown",
+  "checks": [{ "name": "...", "status": "pass" | "fail" | "unknown", "detail": "..." }],
+  "gaps": ["..."],
+  "requestedAction": "..." | null
+}
+```
+
+**Checks** (run in this order):
+
+| Check | What it verifies |
+|---|---|
+| `ticket_closed` | Ticket `status` is `done` |
+| `closed_commit_present` | Ticket has a `closed_commit` field |
+| `commit_exists` | The closed commit exists in the repository |
+| `clean_git` | Working tree is clean (`git status --porcelain` empty) |
+| `pushed` | The closed commit is reachable from a remote branch |
+| `container_verification` | Container tests ran (INFORMATIONAL — excluded from outcome aggregation) |
+| `host_verification` | Host typecheck + full suite passed and recorded |
+| `deferral_linked` | If the ticket body declares deferred scope, a follow-up ticket is linked |
+
+**Aggregation semantics.** `container_verification` is informational — present in `checks` but excluded from outcome aggregation. All other checks are required.
+
+- `pass` — every required check is `pass`
+- `fail` — at least one required check is a definite `fail`
+- `unknown` — no required check is `fail`, but at least one required check is `unknown`
+
+Missing evidence is always `unknown`, never `pass`. `host_verification` is `unknown` when no per-item host-verification record exists — there is no host-verification recorder yet (out of scope for FG-383). `container_verification` is informational and does **not** satisfy `host_verification`.
+
+**`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
+
+Example: `forge campaign report camp-abc123 --json` — the `doneAuditState` field on each item contains the result of running all eight checks against that item's ticket and git state.
 
 ## Campaign
 
@@ -282,7 +322,7 @@ Reason strings operators will see:
 **Campaign end-state after all items are processed:**
 - Any held items present → campaign transitions to `paused` (awaiting resume). `forge campaign show` and `forge campaign report` surface held items with their reasons and a `Next action` pointing to the blocking item.
 - No held items → campaign transitions to `complete`.
-- A completed campaign with any blocked, held, or skipped items reports `verdict: complete_with_issues`, never `all_shipped`.
+- A completed campaign with any blocked, held, or skipped items, or where any shipped item's done-audit is not `outcome: pass`, reports `verdict: complete_with_issues`, never `all_shipped`.
 
 **Resume reconsiders held items.** When `forge campaign resume` re-enters the dispatch loop it handles held items by kind. Readiness-held items (`blockerKind: readiness`) are re-evaluated against the current ticket body — released to dispatch once the ticket is `ready` or `exploratory`, kept held otherwise. Dependency-held items are re-evaluated against the rebuilt set of still-blocked LOCAL items — released when their blocker is resolved, kept held otherwise. `resume` does not retry the failed/blocked item itself.
 
@@ -386,16 +426,18 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `campaignId`, `status`, `mode`, `approvedPlanHash`, `currentPlanHash` — same semantics as `show`
 - `sourceInput` — the raw source input recorded at plan time (`{kind, ticketIds}` / `{kind, epicId}` / `{kind, epicId, additions, exclusions}`)
 - `goal` — free-text goal from campaign metadata, if set
-- `verdict` — `all_shipped` (complete, every item has `outcome: shipped`), `complete_with_issues` (complete, but blocked, held, or skipped items exist — never `all_shipped` when any item did not ship), or `not_complete`
+- `verdict` — `all_shipped` (campaign status is `complete`, every item has `outcome: shipped`, AND every item's done-audit result is `outcome: pass`; currently not reachable in practice because `host_verification` is always `unknown` until a host-verification recorder ships — `all_shipped` becomes reachable once host-verification evidence can be recorded), `complete_with_issues` (campaign status is `complete`, but one or more items did not ship, or all shipped but at least one done-audit result is not `outcome: pass`), or `not_complete` (campaign is not yet complete)
 - `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means operator intervention is required before the campaign can resume — either a failed/blocked item (`lifecycleStatus: failed`, `outcome: blocked`) must be resolved, or an unrefined readiness-held item (`lifecycleStatus: pending`, `outcome: held`, `blockerKind: readiness`) must be refined; `can_resume` means neither condition is present. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `stale` covers two conditions: the plan hash changed since approval (`stale_plan`), or the plan can no longer be resolved at all because a source ticket was deleted from the backlog since planning (`plan_unresolvable`) — both require re-plan and re-approve. `recovery_needed` is returned when a campaign has an item in a non-terminal, non-pending in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed` (items with `outcome: needs_refinement` are counted in `failed`)
 - `deferredScope` — always `[]` (reserved)
 - `followUpTickets` — always `[]` (reserved)
-- `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a failed/blocked item, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but a readiness-held item remains, prompts `refine <ticketId> then resume`; when blockers are resolved and only dependency-held items remain, prompts `resume — N held items will be reconsidered`.
-- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items) and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, and readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held.
+- `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a failed/blocked item, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but a readiness-held item remains, prompts `refine <ticketId> then resume`; when blockers are resolved and only dependency-held items remain, prompts `resume — N held items will be reconsidered`. On a `complete` campaign where shipped items have unresolved done-audit gaps, names the concrete operator steps (e.g. `shipped items have unresolved done-audit gaps — run host typecheck + full suite, record the result, then re-audit`).
+- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items), `doneAuditState` (see below), and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held, and the done-audit outcome is printed for each item; when outcome is not `pass`, the gaps and `requestedAction` are also printed.
 
-**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, `doneAuditState`, and `reviewerResult` are always `null` — the source systems (worktrees, done-audit, reviewer) are not yet built (FG-383/384). These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
+**`doneAuditState`** is populated best-effort (null only when collection throws or `projectDir` is missing). Shape: `{ outcome: "pass" | "fail" | "unknown", checks: [{ name, status, detail? }], gaps: string[], requestedAction: string | null }`. See [Done audit (mechanical)](#done-audit-mechanical) for full check names and aggregation semantics.
+
+**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, and `reviewerResult` are always `null` — the source systems (worktrees, LLM reviewer) are not yet built. These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
 
 The `--json` shape is stable for future dashboard and orchestrator use.
 
