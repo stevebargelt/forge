@@ -161,7 +161,7 @@ A mechanical preflight that classifies a backlog item as ready for implementatio
 | `blocked` | Ticket `status` is `blocked`. |
 | `exploratory` | Ticket type is `idea`, or the title or body contains any of: spike, research, explore, exploratory, exploration, investigation. Lighter criteria apply — at least one of Problem or Goal must be present; Acceptance Criteria are not required. If both Problem and Goal are absent the outcome is still `exploratory`, but `gaps` and `refinementProposal` are populated with guidance. |
 
-This is a **cheap structural checklist** — it checks whether the required sections exist and contain content. It is not an LLM reviewer and does not assess whether the content is correct or complete. The mechanical done audit — which checks shipping evidence such as git state, closed commit, and host verification — is a separate evaluator; see [Done audit (mechanical)](#done-audit-mechanical) below. Semantic quality review is a later story (FG-384, the LLM Shipping Reviewer).
+This is a **cheap structural checklist** — it checks whether the required sections exist and contain content. It is not an LLM reviewer and does not assess whether the content is correct or complete. The mechanical done audit — which checks shipping evidence such as git state, closed commit, and host verification — is a separate evaluator; see [Done audit (mechanical)](#done-audit-mechanical) below. Semantic quality review is the Shipping Reviewer (FG-384) — a separate opt-in agent; see [Shipping Reviewer](#shipping-reviewer) below.
 
 **Scope boundary:** the evaluator checks structural completeness only. Whether the latest operator instruction has been reflected in the ticket body is the **orchestrator's responsibility** — the preflight has no access to the operator conversation and cannot verify that reconciliation.
 
@@ -223,6 +223,104 @@ Missing evidence is always `unknown`, never `pass`. `container_verification` is 
 **`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
 
 Example: `forge campaign report camp-abc123 --json` — the `doneAuditState` field on each item contains the result of running all eight checks against that item's ticket and git state.
+
+## Shipping Reviewer
+
+An opt-in acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation. It is **not** a universal done gate: no default workflow lists `shipping-reviewer` in its reds, so it only runs where a workflow has been explicitly wired to include it. FG-381, FG-383, and FG-384 shipped the role, the Reviewer Context Packet, and the verdict-mapping; the full surface is available and reachable in the dispatch path but opt-in per workflow, not enforced system-wide.
+
+### Reviewer Context Packet
+
+Before the Shipping Reviewer is dispatched, the orchestrator assembles a `ReviewerContextPacket` from live run state and passes it as `inputs.reviewerContextPacket`. If required context is missing, the agent is pre-failed rather than dispatched with incomplete inputs.
+
+Fields:
+
+| Field | Type | What it carries |
+|---|---|---|
+| `backlog` | `{id, title, type, status, body, acceptanceCriteria, nonGoals, parentEpic}` \| `null` | Structured backlog ticket resolved from `run.metadata.ticketId`. `null` — and a required `missingContext` entry — when the ticket id is absent or the ticket cannot be read |
+| `operatorAsk` | `string` \| `null` | Rationale from the **last** human-advance gate; the operator's stated intent at the time they advanced the run. `null` — and a non-required `missingContext` entry — when no human-advance gate exists (known gap: FG-380) |
+| `architectDecisions` | `unknown` \| `null` | Architecture-advisor task result; `null` when no completed architect task exists for the run |
+| `techLeadPlan` | `unknown` \| `null` | Tech-lead task result; `null` when no completed tech-lead task exists for the run |
+| `requestChangesHistory` | `Array<{taskId, rationale, decidedAt, verdictFindings}>` | Prior request-changes gates and their verdict findings, ordered chronologically by `decidedAt` |
+| `redFindings` | `VerdictRow[]` | Verdicts from non-shipping-reviewer reds on the primary task — provided as context, not re-scored |
+| `engineerSummary` | `unknown` \| `null` | Primary engineer task result |
+| `git` | `{commitSha?, diffRange?, changedFiles, worktreePath?}` | Git state extracted from the engineer result |
+| `verificationCommands` | `Array<{command, context: "host"\|"container"}>` | Commands the engineer ran or recommends for verification |
+| `deferredScope` | `Array<{description, followUpTicketId?}>` | Scope items the engineer explicitly deferred; entries without `followUpTicketId` are unlinked |
+| `doneAudit` | `DoneAuditResult` \| `null` | Mechanical done-audit result — see [`doneAudit` in the packet](#doneaudit-in-the-packet) below |
+| `missingContext` | `Array<{field, reason, required}>` | Gaps the reviewer should account for; entries with `required: true` block dispatch |
+
+**Pre-fail on required missing context.** If any `missingContext` entry has `required: true`, the shipping-reviewer task is pre-failed with a descriptive error and excluded from dispatch — no agent call is made. Currently `backlog` is the only required field. `operatorAsk` is non-required — its absence is surfaced to the agent but does not block dispatch.
+
+### `doneAudit` in the packet
+
+The `doneAudit` field carries the mechanical done-audit result (shape: `{outcome: "pass"|"fail"|"unknown", checks: [...], gaps: [...], requestedAction}`). See [Done audit (mechanical)](#done-audit-mechanical) for check definitions and aggregation semantics.
+
+**Current limitation: `host_verification` is always `unknown` for real items.** The collector always passes `hostVerified: null` because the host-verification recorder is not yet shipped. Consequently `host_verification` is always `unknown` in every assembled done-audit result, and `doneAudit.outcome: "pass"` is **not reachable for real items today**. In practice `doneAudit.outcome` is `"unknown"` (all other checks pass but `host_verification` is unknown) or `"fail"` (another required check is a definite fail). A `"pass"` outcome becomes reachable once a host-verification recorder ships and supplies evidence.
+
+The Shipping Reviewer seed instructs the agent that a failing or unknown done-audit blocks `ship` unless the agent records an explicit exception in `doneAuditDisposition`. The mapper enforces this mechanically via the guardrail backstop (see [Verdict mapping](#verdict-mapping) below).
+
+### Verdict vocabulary
+
+The Shipping Reviewer emits a **rich verdict** — distinct from the `pass / fail / inconclusive` vocabulary used by other reds:
+
+| Verdict | Meaning |
+|---|---|
+| `ship` | Every acceptance criterion is met in the production call path; no unresolved prior findings; done-audit is resolved or explicitly excepted in `doneAuditDisposition` |
+| `ship_with_named_deferrals` | Shippable except for explicitly deferred scope. Each entry in `named_deferrals` **must** have both a non-empty `description` and a non-empty `followUpTicketId` — an unlinked deferral is not a valid deferral; the mapper treats it as `needs_fix` |
+| `needs_fix` | At least one required acceptance criterion is unmet in the production call path, or a prior request-changes finding is unresolved |
+| `needs_human` | The agent cannot decide: ambiguous requirement, conflicting operator intent, or missing context not resolved by the packet |
+
+Full rich-verdict output contract (the agent seed):
+
+```json
+{
+  "status": "complete",
+  "verdict": "ship | ship_with_named_deferrals | needs_fix | needs_human",
+  "confidence": 0.0,
+  "named_deferrals": [{ "description": "...", "followUpTicketId": "FG-123" }],
+  "doneAuditDisposition": "ok | accepted_exception: <reason> | covered_by_deferral",
+  "findings": [
+    {
+      "severity": "high | medium | low",
+      "summary": "...",
+      "cites": "acceptance_criterion | operator_instruction | design_decision | risk_invariant",
+      "evidence": "...",
+      "file": "src/path/to/file.ts",
+      "line": 42
+    }
+  ],
+  "invariants_verified": ["AC 1: met | unmet | deferred"]
+}
+```
+
+### Verdict mapping
+
+`mapShippingReviewerVerdict` translates the agent's rich verdict into forge's internal `pass / fail / inconclusive`:
+
+| Agent verdict | Maps to | Condition |
+|---|---|---|
+| `ship` | `pass` | Subject to guardrail backstop (see below) |
+| `ship_with_named_deferrals` | `pass` | Every `named_deferrals` entry has a non-empty `description` AND a non-empty `followUpTicketId` |
+| `ship_with_named_deferrals` | `fail` | Any deferral is missing `description` or `followUpTicketId` |
+| `needs_fix` | `fail` | Unconditionally |
+| `needs_human` | `inconclusive` | Unconditionally |
+| absent / unrecognized | `inconclusive` | Malformed or missing verdict field |
+
+**Guardrail backstop.** A mapped `pass` (from `ship`) is downgraded to `fail` when the packet contains a done-audit result with `outcome: "fail"` or `"unknown"` AND the agent's `doneAuditDisposition` is neither `"accepted_exception: ..."` nor `"covered_by_deferral"`. This prevents the agent from accepting a ship verdict over unresolved mechanical audit checks without explicitly recording a waiver.
+
+### Fail-loud / missing-context precondition
+
+Forge's red-ingestion pipeline downgrades a `fail` verdict with no surviving well-formed graded finding to `inconclusive` (see [Verdict](#verdict)). A `fail` that carries no real finding has no case — it cannot block the gate.
+
+To prevent this from silently neutralizing a legitimate block, the mapper unconditionally attaches a well-formed synthetic finding to **every mapper-decided `fail`**, regardless of what the agent's own findings contain:
+
+- **`needs_fix` path**: a synthetic high-severity finding anchors the fail so it survives `gradeFindings` even when the agent returned no findings or only malformed ones.
+- **Invalid-deferral path**: a synthetic finding records the specific deferral violation (`ship_with_named_deferrals` with a missing `description` or `followUpTicketId`).
+- **Guardrail backstop path**: a synthetic finding records the done-audit outcome and disposition that triggered the downgrade.
+
+Without this unconditional substantiation, a `needs_fix` from the Shipping Reviewer could silently neutralize to `inconclusive` if the agent's findings were absent or malformed — and the reviewer would fail to block.
+
+Example: a workflow wired to include `shipping-reviewer` in a phase's `reds` dispatches the agent with a `ReviewerContextPacket`. The agent returns `needs_fix` with no findings; the mapper attaches a synthetic high-severity finding before grading, so the fail survives and blocks the gate.
 
 ## Campaign
 

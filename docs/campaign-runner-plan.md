@@ -91,6 +91,11 @@ Dependencies:
 - **FG-382**: readiness preflight for backlog items.
 - **FG-383**: done-audit mechanical closeout checks.
 - **FG-384**: Shipping Reviewer workflow integration.
+- **FG-388**: documentation/contract follow-up to FG-384; covers:
+  - Reviewer Context Packet contract documentation
+  - Shipping Reviewer rich verdict vocabulary
+  - Shipping Reviewer fail-loud / missing-context precondition
+  - `doneAudit` evidence in the packet
 - **FG-367**: branch, commit, push, and PR discipline for Forge-managed projects.
 - **FG-376**: agent worktree dependency parity for real test execution.
 - **FG-357**: post-merge integration gate for merged worktree output.
@@ -100,6 +105,7 @@ Exit criteria:
 - readiness is checked before starting each campaign item;
 - done audit runs before item shipped claims;
 - Shipping Reviewer has the original ask, backlog context, implementation summary, verification commands, and review history;
+- Reviewer Context Packet shape, Shipping Reviewer verdict vocabulary, done-audit evidence, and fail-loud missing-context behavior are documented;
 - host verification requirements are explicit;
 - git/branch/PR policy is visible in the report;
 - unavailable gates force `pilot` mode, pause, or explicit operator override.
@@ -197,6 +203,7 @@ Before trusting unattended overnight work:
 - campaign report is available without inspecting logs;
 - readiness and done-audit gates are integrated or campaign runs in explicit `pilot` mode;
 - Shipping Reviewer is available for final shipped claims;
+- Reviewer Context Packet and Shipping Reviewer fail-loud semantics are documented for operators and future implementers;
 - host test verification is required and visible;
 - git branch/commit/PR policy is enforced or explicitly unavailable;
 - dashboard or CLI status can show active blocker and next action.
