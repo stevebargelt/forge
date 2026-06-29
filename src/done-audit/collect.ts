@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readTicket } from "../backlog/structured.js";
+import { tasksForRun } from "../store/tasks.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
@@ -62,13 +63,34 @@ export function collectDoneAuditInput(projectDir: string, item: CampaignItem): D
     }
   }
 
+  let containerTestsRun: number | null = null;
+  if (item.runId) {
+    try {
+      let sum = 0;
+      let contributed = false;
+      for (const task of tasksForRun(item.runId)) {
+        const r = task.result;
+        if (r !== null && typeof r === "object") {
+          const testsRun = (r as Record<string, unknown>)["tests_run"];
+          if (typeof testsRun === "number") {
+            sum += testsRun;
+            contributed = true;
+          }
+        }
+      }
+      if (contributed) containerTestsRun = sum;
+    } catch {
+      // containerTestsRun stays null
+    }
+  }
+
   return {
     ticket,
     item: { lifecycleStatus: item.lifecycleStatus, outcome: item.outcome },
     git: { dirty, commitExists, pushed },
     verification: {
-      hostVerified: null,        // recorder out of scope for FG-383
-      containerTestsRun: null,   // not cheaply accessible; informational only
+      hostVerified: null,   // recorder out of scope for FG-383
+      containerTestsRun,
       acceptedException: null,
     },
   };

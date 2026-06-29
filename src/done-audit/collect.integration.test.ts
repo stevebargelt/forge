@@ -4,11 +4,17 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import type { Database as DatabaseInstance } from "better-sqlite3";
 import { writeTicket } from "../backlog/structured.js";
+import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
 import { collectDoneAuditInput } from "./collect.js";
-import type { CampaignItem } from "../types/index.js";
+import { evaluateDoneAudit } from "./done-audit.js";
+import type { CampaignItem, Run, Task } from "../types/index.js";
 
 let projectDir: string;
+let prevDb: DatabaseInstance | null = null;
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -19,16 +25,34 @@ function gitExec(args: string[], cwd: string): string {
   });
 }
 
-function makeItem(ticketId: string): CampaignItem {
+function makeItem(ticketId: string, runId?: string): CampaignItem {
   return {
     id: `item-${ticketId}`,
     campaignId: "campaign-test",
     itemOrder: 1,
     ticketId,
+    runId,
     lifecycleStatus: "complete",
     outcome: "shipped",
     createdAt: "2024-01-01T00:00:00Z",
     updatedAt: "2024-01-01T00:00:00Z",
+  };
+}
+
+function makeRun(id: string): Run {
+  return { id, workflow: "feature", title: "Test Run", status: "complete", createdAt: "2024-01-01T00:00:00Z" };
+}
+
+function makeTask(id: string, runId: string, result?: unknown): Task {
+  return {
+    id,
+    runId,
+    phase: "engineer",
+    agentRole: "engineer",
+    status: "complete",
+    taskPackage: { taskId: id, runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    result,
+    createdAt: "2024-01-01T00:00:00Z",
   };
 }
 
@@ -37,9 +61,12 @@ beforeEach(() => {
   gitExec(["init"], projectDir);
   gitExec(["config", "user.email", "t@t.com"], projectDir);
   gitExec(["config", "user.name", "Test"], projectDir);
+  prevDb = setDbForTest(makeInMemoryDb());
 });
 
 afterEach(() => {
+  if (prevDb) setDbForTest(prevDb);
+  prevDb = null;
   rmSync(projectDir, { recursive: true, force: true });
 });
 
@@ -190,6 +217,70 @@ test("collect: hostVerified is always null (recorder not implemented in FG-383)"
   const input = collectDoneAuditInput(projectDir, item);
 
   assert.equal(input.verification.hostVerified, null, "hostVerified must be null — recorder is out of scope for FG-383");
-  assert.equal(input.verification.containerTestsRun, null, "containerTestsRun must be null — not cheaply accessible");
+  assert.equal(input.verification.containerTestsRun, null, "containerTestsRun must be null — item has no runId");
   assert.equal(input.verification.acceptedException, null, "acceptedException must be null");
+});
+
+// ── container evidence: runId with task carrying tests_run → sum ──────────────
+
+test("collect: runId with one completed task with tests_run → containerTestsRun equals that value", () => {
+  const runId = "run-collect-7";
+  insertRun(makeRun(runId));
+  insertTask(makeTask("task-collect-7a", runId, { status: "complete", tests_run: 12, tests_passed: 12 }));
+
+  const item = makeItem("FG-COLLECT-7", runId);
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.verification.containerTestsRun, 12);
+  assert.equal(input.verification.hostVerified, null);
+});
+
+test("collect: runId with multiple tasks → containerTestsRun is the sum across tasks", () => {
+  const runId = "run-collect-8";
+  insertRun(makeRun(runId));
+  insertTask(makeTask("task-collect-8a", runId, { status: "complete", tests_run: 7 }));
+  insertTask(makeTask("task-collect-8b", runId, { status: "complete", tests_run: 5, tests_passed: 5 }));
+
+  const item = makeItem("FG-COLLECT-8", runId);
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.verification.containerTestsRun, 12);
+});
+
+test("collect: no runId → containerTestsRun null", () => {
+  const item = makeItem("FG-COLLECT-9");
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.verification.containerTestsRun, null);
+});
+
+test("collect: runId with tasks but none carry numeric tests_run → containerTestsRun null", () => {
+  const runId = "run-collect-10";
+  insertRun(makeRun(runId));
+  insertTask(makeTask("task-collect-10a", runId, { status: "complete", notes: "no tests_run field" }));
+  insertTask(makeTask("task-collect-10b", runId, { status: "complete", tests_run: "seven" }));
+
+  const item = makeItem("FG-COLLECT-10", runId);
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.verification.containerTestsRun, null);
+});
+
+// ── regression: container evidence does not flip outcome ─────────────────────
+
+test("collect+evaluate: containerTestsRun set but hostVerified null → outcome still unknown", () => {
+  const auditInput = {
+    ticket: { status: "done", closedCommit: "abc123", body: "done", related: [] },
+    item: { lifecycleStatus: "complete", outcome: "shipped" },
+    git: { dirty: false, commitExists: true, pushed: true },
+    verification: { hostVerified: null, containerTestsRun: 42, acceptedException: null },
+  };
+
+  const result = evaluateDoneAudit(auditInput);
+
+  assert.equal(result.outcome, "unknown", "container evidence must not satisfy host_verification");
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "unknown");
+  const containerCheck = result.checks.find((c) => c.name === "container_verification");
+  assert.equal(containerCheck?.status, "pass", "container_verification check should pass (informational)");
 });
