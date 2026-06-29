@@ -4,8 +4,8 @@ type: story
 status: done
 title: Wire readiness preflight into the campaign runner (populate report readiness; hold not-ready items at start)
 created: 2026-06-26
-closed: 2026-06-26
-closed_commit: 75d01f6
+closed: 2026-06-29
+closed_commit: 925967d
 ---
 
 ## Problem
