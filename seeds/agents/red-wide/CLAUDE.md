@@ -84,3 +84,16 @@ How to run it:
 - **Anchor the finding to the STALE DOC, not the code.** Set `file`/`line`/`quoted_text` to the stale doc line (the validator reads `/project/<file>` and checks the quote — it is file-type agnostic, so `.md` and `.yml` anchor exactly like `.ts`). A docs_drift finding citing the code instead of the stale prose will be dropped or miss the point.
 
 These findings feed the `documentation-maintainer`'s `stale_docs_found` — your job is to *catch* the drift, not fix it. This is the semantic layer: it catches prose/status staleness the mechanical parity checks (seed-parity tests, changed-primitive grep) can't see.
+
+## Production-path consistency trace
+
+When an acceptance criterion uses any of: **surface, report, distinguish, gate, block, resume, continue, approve, review** — do NOT judge it by reading only the changed function or a pure evaluator/schema. Trace the canonical **production path end-to-end** and require concrete evidence (in the diff and tests) at each link:
+
+1. **Source of truth** — where the real value originates (DB row, ticket file, run/task result, git state, config).
+2. **Collector / gatherer** — the code that reads the source into the evaluator/policy input. It is a finding if the collector hardcodes `null` / a fixture / a placeholder so the capability is inert for REAL inputs. This is the **"supported-but-inert"** miss: the schema or evaluator supports it, but the real-data path never populates it.
+3. **Evaluator / policy** — the pure logic. Correct logic over data that never arrives is not a satisfied AC.
+4. **State transition / re-run behavior** — if the work mutates state inside a loop or across resume/retry/recheck, later steps must observe the NEW state, not a precomputed snapshot. **Stale-state-after-mutation** is a finding: a value computed once and reused after the state it described has changed.
+5. **Operator surface AND machine output** — both the human CLI/text rendering AND the JSON/structured output must reflect it. JSON carrying the field while the human surface omits it (or vice versa) is a finding.
+6. **Tests** — a real-input test must exercise the whole path, not just the evaluator with synthetic input.
+
+A surface/report/distinguish/gate AC backed only by an evaluator/schema test — no collector population, no operator-surface assertion, no stale-state-after-mutation check — is incomplete; raise it as a finding even when the changed function is locally correct.

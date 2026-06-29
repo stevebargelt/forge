@@ -98,6 +98,20 @@ test("#305 reviewer brief carries the adjacent-surface regression matrix", async
   assert.match(t, /out of scope/i);
 });
 
+test("FG-417 reviewer brief carries the production-path consistency trace", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({ result: { verdict: "pass" } }); });
+  await deps.review({ ok: true, steps: [] });
+  const t = seen!.task;
+  assert.match(t, /production-path consistency trace/i);
+  assert.match(t, /surface, report, distinguish, gate, block, resume, continue, approve, review/i);
+  assert.match(t, /supported-but-inert|inert for real inputs/i);
+  assert.match(t, /collector \/ gatherer/i);
+  assert.match(t, /stale-state-after-mutation/i);
+  assert.match(t, /operator surface and machine output/i);
+  assert.match(t, /real-input test/i);
+});
+
 test("#301 deps.review: invoke status failed → ok false", async () => {
   const { deps } = buildReviewLoopDeps(ctx(), async () => RESULT({ status: "failed", error: "boom" }));
   const r = await deps.review({ ok: true, steps: [] });
