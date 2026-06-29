@@ -498,6 +498,13 @@ export function registerCampaign(program: Command): void {
           if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);
           if (item.readiness.refinementProposal) console.log(`    refinement: ${item.readiness.refinementProposal}`);
         }
+        if (item.doneAuditState) {
+          console.log(`    done-audit: ${item.doneAuditState.outcome}`);
+          if (item.doneAuditState.outcome !== "pass") {
+            if (item.doneAuditState.gaps.length > 0) console.log(`    audit-gaps: ${item.doneAuditState.gaps.join("; ")}`);
+            if (item.doneAuditState.requestedAction) console.log(`    audit-action: ${item.doneAuditState.requestedAction}`);
+          }
+        }
       }
       console.log("Groupings:");
       console.log(`  shipped: ${result.groupings.shipped.join(", ") || "(none)"}`);

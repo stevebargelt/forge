@@ -1465,7 +1465,7 @@ test("integ: resume does not write any file to projectDir", () => {
 
 // ── FG-394: report two-campaign two-verdict integration ───────────────────────
 
-test("integ campaign report --json: two campaigns produce all_shipped and complete_with_issues verdicts", () => {
+test("integ campaign report --json: two campaigns — all-shipped-items and mixed-outcomes — both produce complete_with_issues (FG-383: all_shipped requires done-audit=pass, host recorder out of scope)", () => {
   // Campaign 1: all items shipped
   const plan1 = runForge([
     "campaign", "plan",
@@ -1505,7 +1505,8 @@ test("integ campaign report --json: two campaigns produce all_shipped and comple
   const report1 = runForge(["campaign", "report", out1.campaignId, "--json"]);
   assert.equal(report1.status, 0, `report1 failed\nstdout: ${report1.stdout}\nstderr: ${report1.stderr}`);
   const r1 = JSON.parse(report1.stdout) as Record<string, unknown>;
-  assert.equal(r1["verdict"], "all_shipped", "campaign with all shipped must have verdict=all_shipped");
+  // FG-383: all_shipped requires done-audit=pass; host recorder is out of scope → always complete_with_issues
+  assert.equal(r1["verdict"], "complete_with_issues", "campaign with all shipped items but no host recorder must yield complete_with_issues");
 
   const report2 = runForge(["campaign", "report", out2.campaignId, "--json"]);
   assert.equal(report2.status, 0, `report2 failed\nstdout: ${report2.stdout}\nstderr: ${report2.stderr}`);
@@ -2386,5 +2387,66 @@ test("FG-416 branch-ordering integ: readiness-held wins over dependency-held (re
   assert.ok(
     !combined.includes("run resume again"),
     `output must NOT say 'run resume again' (generic branch must not fire)\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+// ── FG-383: done-audit rendered in forge campaign report ─────────────────────
+
+test("integ FG-383: forge campaign report surfaces done-audit outcome and, for non-pass, gaps + requestedAction", () => {
+  // Plan a campaign and set item to shipped, but ticket is still 'active' (not done)
+  // → done-audit ticket_closed check fails → output should include done-audit info
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Set item to shipped and campaign to complete
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(planOutput.campaignId);
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ?").all(planOutput.campaignId) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.close();
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId]);
+  assert.equal(reportResult.status, 0, `report failed\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  // done-audit outcome must be present in human output
+  assert.ok(
+    reportResult.stdout.includes("done-audit"),
+    `output must include 'done-audit'\nstdout: ${reportResult.stdout}`
+  );
+
+  // Since ticket is active (not done), done-audit is non-pass — gaps and action must appear
+  assert.ok(
+    reportResult.stdout.includes("audit-gaps") || reportResult.stdout.includes("audit-action"),
+    `output must include 'audit-gaps' or 'audit-action' for non-pass audit\nstdout: ${reportResult.stdout}`
+  );
+});
+
+test("integ FG-383: forge campaign report --json includes doneAuditState field on items", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId, "--json"]);
+  assert.equal(reportResult.status, 0, `report --json failed\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  const output = JSON.parse(reportResult.stdout) as { items: Array<Record<string, unknown>> };
+  assert.ok(Array.isArray(output.items), "items must be an array");
+  assert.ok(output.items.length > 0, "items must not be empty");
+  assert.ok(
+    "doneAuditState" in output.items[0]!,
+    "each item must have a doneAuditState field in JSON output"
   );
 });

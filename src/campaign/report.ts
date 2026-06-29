@@ -5,6 +5,18 @@ import { getCampaign, listCampaignItems } from "../store/campaigns.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
 import { evaluateReadiness } from "../readiness/readiness.js";
 import type { ReadinessResult } from "../readiness/readiness.js";
+import { evaluateDoneAudit } from "../done-audit/done-audit.js";
+import type { DoneAuditResult } from "../done-audit/done-audit.js";
+import { collectDoneAuditInput } from "../done-audit/collect.js";
+
+// Test-only override — lets unit tests inject a known done-audit map without
+// a real git repo or host verification recorder. Same pattern as setDbForTest.
+let _testDoneAuditMapOverride: Map<string, DoneAuditResult> | null = null;
+export function setDoneAuditMapForTest(map: Map<string, DoneAuditResult> | null): Map<string, DoneAuditResult> | null {
+  const prev = _testDoneAuditMapOverride;
+  _testDoneAuditMapOverride = map;
+  return prev;
+}
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
@@ -145,16 +157,23 @@ function computeSafety(campaign: Campaign, items: CampaignItem[]): SafetyToConti
   return "terminal";
 }
 
-function computeVerdict(campaign: Campaign, items: CampaignItem[]): CampaignVerdict {
+function computeVerdict(campaign: Campaign, items: CampaignItem[], doneAuditMap?: Map<string, DoneAuditResult>): CampaignVerdict {
   if (campaign.status !== "complete") return "not_complete";
   const allShipped = items.length > 0 && items.every((i) => i.outcome === "shipped");
-  return allShipped ? "all_shipped" : "complete_with_issues";
+  if (!allShipped) return "complete_with_issues";
+  // All items shipped — require every done-audit to be pass
+  if (doneAuditMap) {
+    const allAuditPass = items.every((i) => doneAuditMap.get(i.ticketId)?.outcome === "pass");
+    if (!allAuditPass) return "complete_with_issues";
+  }
+  return "all_shipped";
 }
 
 function computeNextOperatorAction(
   campaign: Campaign,
   verdict: CampaignVerdict,
-  items: CampaignItem[]
+  items: CampaignItem[],
+  doneAuditMap?: Map<string, DoneAuditResult>
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -163,6 +182,22 @@ function computeNextOperatorAction(
   }
   if (campaign.status === "complete") {
     if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
+    // Surface done-audit gaps for shipped items that didn't pass audit
+    if (doneAuditMap) {
+      const unauditedShipped = items.filter(
+        (i) => i.outcome === "shipped" && doneAuditMap.get(i.ticketId)?.outcome !== "pass"
+      );
+      if (unauditedShipped.length > 0) {
+        const actions = unauditedShipped
+          .map((i) => {
+            const audit = doneAuditMap.get(i.ticketId);
+            return audit?.requestedAction ?? `re-audit ${i.ticketId}`;
+          })
+          .filter(Boolean)
+          .join("; ");
+        return `shipped items have unresolved done-audit gaps — ${actions}`;
+      }
+    }
     return "review blocked/failed/skipped items";
   }
   if (campaign.status === "failed") return "investigate failure and re-plan or abandon";
@@ -294,7 +329,7 @@ export type ReportItemRow = ShowItemRow & {
   prUrl: null;
   commit: string | null;
   verificationState: null;
-  doneAuditState: null;
+  doneAuditState: DoneAuditResult | null;
   reviewerResult: null;
 };
 
@@ -364,9 +399,27 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     }
   }
 
+  // Build done-audit map (best-effort, per item). Tests may inject an override map.
+  let doneAuditMap: Map<string, DoneAuditResult>;
+  if (_testDoneAuditMapOverride !== null) {
+    doneAuditMap = _testDoneAuditMapOverride;
+  } else {
+    doneAuditMap = new Map<string, DoneAuditResult>();
+    if (campaign.projectDir && existsSync(campaign.projectDir)) {
+      for (const item of items) {
+        try {
+          const auditInput = collectDoneAuditInput(campaign.projectDir, item);
+          doneAuditMap.set(item.ticketId, evaluateDoneAudit(auditInput));
+        } catch {
+          // leave entry absent (→ doneAuditState: null for this item)
+        }
+      }
+    }
+  }
+
   const safetyToContinue = computeSafety(campaign, items);
-  const verdict = computeVerdict(campaign, items);
-  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items);
+  const verdict = computeVerdict(campaign, items, doneAuditMap);
+  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items, doneAuditMap);
 
   const goal =
     campaign.metadata?.["goal"] !== undefined
@@ -389,7 +442,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     prUrl: null,
     commit: commitMap.get(i.ticketId) ?? null,
     verificationState: null,
-    doneAuditState: null,
+    doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
     reviewerResult: null,
   }));
 
