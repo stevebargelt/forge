@@ -245,7 +245,12 @@ Example: `forge campaign start camp-abc123 --project ~/code/my-app` verifies the
 
 ### Blockers and continuation
 
-**Readiness gate (pre-dispatch).** Before any engineer work is started for a pending item, the runner evaluates the ticket's readiness. If the outcome is `needs_refinement` or `blocked`, the item is held immediately — `lifecycleStatus: pending`, `outcome: held`, `blockerKind: readiness`, `continuePolicy: hold_dependents`. No run is created and no implementation tokens are spent. This is distinct from task-failure blockers below; the campaign transitions to `paused` when all items are processed and held items remain. When `forge campaign start` exits due to held (not-ready) items, the human output names the affected ticket ids: `campaign paused — N item(s) not ready: refine <ids> then resume`. (When the pause is due to blocked items the message reads `campaign paused — N item(s) blocked; resolve and resume`; when no held or blocked items are present — e.g. an operator-requested pause — it reads `campaign paused between items — run resume to continue`.)
+**Readiness gate (pre-dispatch).** Before any engineer work is started for a pending item, the runner evaluates the ticket's readiness. If the outcome is `needs_refinement` or `blocked`, the item is held immediately — `lifecycleStatus: pending`, `outcome: held`, `blockerKind: readiness`, `continuePolicy: hold_dependents`. No run is created and no implementation tokens are spent. This is distinct from task-failure blockers below; the campaign transitions to `paused` when all items are processed and held items remain. When `forge campaign start` exits with `stopReason: paused`, the human output selects a message by item state in this branch order:
+
+1. **Readiness-held** (one or more items have `outcome: held`, `blockerKind: readiness`): `campaign paused — N item(s) not ready: refine <ids> then resume`
+2. **Dependency-held** (one or more items have `outcome: held` with a non-readiness `blockerKind` — held because a `related` LOCAL item is still blocked): `campaign paused — N item(s) held pending an unresolved blocker: <ids> (<reason> when a single item); resolve the blocker (see forge campaign show/report) then resume`
+3. **Blocked** (one or more items have `outcome: blocked`): `campaign paused — N item(s) blocked; resolve and resume`
+4. **Otherwise** (cooperative/operator-requested pause between items, no held or blocked items): `campaign paused between items — run resume to continue`
 
 Reason string operators will see: `"held because not ready: <gaps>"`, e.g. `"held because not ready: Missing Problem section; Missing Acceptance Criteria section"`. The `requestedHumanAction` is: `"refine <ticketId> then resume — <refinementProposal>"`.
 
@@ -427,6 +432,8 @@ Before re-entering the dispatch loop, `resume` runs the same preconditions as `s
 5. `paused → running` transition succeeds via a CAS guard, preventing two concurrent `resume` calls from double-dispatching.
 
 The driver then skips already-terminal items and re-evaluates held items by kind: readiness-held items (`blockerKind: readiness`) are re-evaluated against the **current** ticket body — released when the ticket is now `ready` or `exploratory`, kept held otherwise; dependency-held items are re-evaluated against the current blocked set — released when their blocker is resolved. Remaining `pending` items are dispatched in order.
+
+When `forge campaign resume` exits with `stopReason: paused`, it applies the same four-way paused message as `forge campaign start` — readiness-held takes priority, then dependency-held, then blocked, then the generic between-items case. The only wording difference: the generic case reads `campaign paused between items — run resume again to continue` (vs. `run resume to continue` from `start`).
 
 `--project <dir>` is verify-only: the resolved path must equal the stored `projectDir` or `resume` refuses. It does not override the execution directory.
 
