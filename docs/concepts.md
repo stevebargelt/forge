@@ -208,7 +208,7 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 | `commit_exists` | The closed commit exists in the repository |
 | `clean_git` | Working tree is clean (`git status --porcelain` empty) |
 | `pushed` | The closed commit is reachable from a remote branch |
-| `container_verification` | Container tests ran (INFORMATIONAL — excluded from outcome aggregation) |
+| `container_verification` | Sum of `tests_run` across the campaign item's run tasks (INFORMATIONAL — excluded from outcome aggregation) |
 | `host_verification` | Host typecheck + full suite passed and recorded |
 | `deferral_linked` | If the ticket body declares deferred scope, a follow-up ticket is linked |
 
@@ -218,7 +218,7 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 - `fail` — at least one required check is a definite `fail`
 - `unknown` — no required check is `fail`, but at least one required check is `unknown`
 
-Missing evidence is always `unknown`, never `pass`. `host_verification` is `unknown` when no per-item host-verification record exists — there is no host-verification recorder yet (out of scope for FG-383). `container_verification` is informational and does **not** satisfy `host_verification`.
+Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks and is `unknown` only when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` is `unknown` for every item today — there is no host-verification recorder yet (out of scope for FG-383).
 
 **`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
 
