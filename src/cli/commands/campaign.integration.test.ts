@@ -2053,3 +2053,45 @@ test("FG-413 integ: forge campaign start emits readiness-hold message for unread
     `output must NOT say 'campaign paused between items' for a readiness-held campaign\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
   );
 });
+
+test("FG-413 integ: forge campaign resume emits readiness-hold message after re-pause (not generic 'paused between items')", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+
+  // Simulate a prior start that paused on the readiness gate: campaign is paused,
+  // item is pending with outcome=held, blocker_kind=readiness
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = 'readiness' WHERE campaign_id = ?"
+  ).run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  // paused is a success reason for resume → exit 0
+  assert.equal(resumeResult.status, 0, `resume must exit 0 for readiness-held campaign\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+
+  const combined = resumeResult.stdout + resumeResult.stderr;
+  assert.ok(
+    combined.includes("not ready") || combined.includes("refine"),
+    `output must mention 'not ready' or 'refine' for readiness-held items\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes("FG-101"),
+    `output must name the readiness-held ticket\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    !combined.includes("campaign paused between items"),
+    `output must NOT say 'campaign paused between items' for a readiness-held campaign\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});

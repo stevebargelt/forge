@@ -47,6 +47,7 @@ export type CampaignItemRecord = {
   runId?: string;
   lifecycleStatus: CampaignItemLifecycleStatus;
   outcome?: CampaignItemOutcome;
+  blockerKind?: BlockerKind;
 };
 
 function hasBacklog(dir: string): boolean {
@@ -245,7 +246,7 @@ async function driveRemainingItems(
         if (!currentTicket) {
           // Ticket not in map — keep held conservatively.
           anyHeld = true;
-          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", blockerKind: "readiness" });
           continue;
         }
         const r = evaluateReadiness(currentTicket);
@@ -258,7 +259,7 @@ async function driveRemainingItems(
             requestedHumanAction: `refine ${item.ticketId} then resume${r.refinementProposal ? ` — ${r.refinementProposal}` : ""}`,
           });
           anyHeld = true;
-          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", blockerKind: "readiness" });
           continue;
         }
         // Now ready/exploratory — clear all readiness-hold fields and fall through to dispatch.
@@ -307,7 +308,7 @@ async function driveRemainingItems(
             requestedHumanAction: `refine ${item.ticketId} then resume${r.refinementProposal ? ` — ${r.refinementProposal}` : ""}`,
           });
           anyHeld = true;
-          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held" });
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", blockerKind: "readiness" });
           continue;
         }
       }

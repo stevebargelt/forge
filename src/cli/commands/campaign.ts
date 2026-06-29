@@ -245,11 +245,11 @@ export function registerCampaign(program: Command): void {
         } else if (result.stopReason === "abandoned") {
           console.error("campaign was abandoned during execution");
         } else if (result.stopReason === "paused") {
-          const held = result.itemRecords.filter((r) => r.outcome === "held");
+          const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
           const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
-          if (held.length) {
-            const heldIds = held.map((r) => r.ticketId).join(", ");
-            console.error(`campaign paused — ${held.length} item(s) not ready: refine ${heldIds} then resume`);
+          if (readinessHeld.length) {
+            const heldIds = readinessHeld.map((r) => r.ticketId).join(", ");
+            console.error(`campaign paused — ${readinessHeld.length} item(s) not ready: refine ${heldIds} then resume`);
           } else if (blocked.length) {
             console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
           } else {
@@ -349,7 +349,16 @@ export function registerCampaign(program: Command): void {
         } else if (result.stopReason === "item_failed") {
           console.error("campaign stopped — an item failed during execution; inspect the failed item and re-plan or abandon");
         } else if (result.stopReason === "paused") {
-          console.log("campaign paused between items — run resume again to continue");
+          const readinessHeld = result.itemRecords.filter((r) => r.outcome === "held" && r.blockerKind === "readiness");
+          const blocked = result.itemRecords.filter((r) => r.outcome === "blocked");
+          if (readinessHeld.length) {
+            const heldIds = readinessHeld.map((r) => r.ticketId).join(", ");
+            console.error(`campaign paused — ${readinessHeld.length} item(s) not ready: refine ${heldIds} then resume`);
+          } else if (blocked.length) {
+            console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
+          } else {
+            console.log("campaign paused between items — run resume again to continue");
+          }
         }
       }
 
