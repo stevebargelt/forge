@@ -223,6 +223,30 @@ test("evaluateDoneAudit: acceptedException provided for host verification → ho
 
 // ── pushed check ──────────────────────────────────────────────────────────────
 
+test("evaluateDoneAudit: pushed=null + pushedReason='no_remote' → unknown, detail + requestedAction say 'no remote configured; push/PR unavailable', NOT 'push <sha>'", () => {
+  const input = cleanInput();
+  input.git.pushed = null;
+  input.git.pushedReason = "no_remote";
+
+  const result = evaluateDoneAudit(input);
+  assert.equal(result.outcome, "unknown");
+
+  const pushedCheck = result.checks.find((c) => c.name === "pushed");
+  assert.equal(pushedCheck!.status, "unknown");
+  assert.ok(
+    pushedCheck!.detail?.includes("no remote configured"),
+    `detail must say 'no remote configured; push/PR unavailable'; got: ${pushedCheck!.detail}`,
+  );
+  assert.ok(
+    result.requestedAction?.includes("no remote configured"),
+    `requestedAction must say 'no remote configured; push/PR unavailable'; got: ${result.requestedAction}`,
+  );
+  assert.ok(
+    !result.requestedAction?.includes("push abc123"),
+    `requestedAction must NOT include 'push <sha>' for no_remote case; got: ${result.requestedAction}`,
+  );
+});
+
 test("evaluateDoneAudit: commit not pushed → fail with gap naming the commit", () => {
   const input = cleanInput();
   input.git.pushed = false;

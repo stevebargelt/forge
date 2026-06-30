@@ -52,8 +52,11 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
   }
 
   // git.pushed — is closedCommit reachable from any remote branch?
-  // If no remote is configured, pushed stays null (unknown) rather than false (fail).
+  // pushed=null + pushedReason="no_remote": no remote configured (local-only repo).
+  // pushed=false: remote exists but commit not reachable from any remote branch.
+  // pushed=null + no pushedReason: git error or no closedCommit.
   let pushed: boolean | null = null;
+  let pushedReason: string | null = null;
   if (closedCommit) {
     try {
       const remoteOut = execFileSync("git", ["remote"], {
@@ -68,6 +71,8 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
           timeout: 5000,
         });
         pushed = output.trim().length > 0;
+      } else {
+        pushedReason = "no_remote";
       }
     } catch {
       pushed = null;
@@ -132,7 +137,7 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
   return {
     ticket,
     item: { lifecycleStatus: "complete" },
-    git: { dirty, commitExists, pushed },
+    git: { dirty, commitExists, pushed, pushedReason },
     verification: {
       hostVerified,
       hostVerificationDetail,

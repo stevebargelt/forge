@@ -16,7 +16,14 @@ export type DoneAuditResult = {
 export type DoneAuditInput = {
   ticket: { status: string; closedCommit?: string; body: string; related?: string[] } | null;
   item: { lifecycleStatus: string; outcome?: string };
-  git: { dirty: boolean | null; commitExists: boolean | null; pushed: boolean | null };
+  git: {
+    dirty: boolean | null;
+    commitExists: boolean | null;
+    pushed: boolean | null;
+    // Derived, non-persisted reason for pushed=null. "no_remote" = no remote configured;
+    // absence = git error or no closedCommit. Drives operator-facing text only.
+    pushedReason?: string | null;
+  };
   verification: {
     hostVerified: boolean | null;
     hostVerificationDetail?: string | null;
@@ -63,7 +70,11 @@ function hasDeferralLink(sectionText: string): boolean {
   return /FG-\d+/i.test(sectionText);
 }
 
-function buildRequestedAction(nonPassChecks: DoneAuditCheck[], closedCommit: string | undefined): string {
+function buildRequestedAction(
+  nonPassChecks: DoneAuditCheck[],
+  closedCommit: string | undefined,
+  pushedReason?: string | null,
+): string {
   const actions: string[] = [];
   for (const check of nonPassChecks) {
     switch (check.name) {
@@ -80,7 +91,11 @@ function buildRequestedAction(nonPassChecks: DoneAuditCheck[], closedCommit: str
         actions.push("commit or revert the working tree");
         break;
       case "pushed":
-        actions.push(closedCommit ? `push ${closedCommit}` : "push the commit");
+        if (pushedReason === "no_remote") {
+          actions.push("no remote configured; push/PR unavailable");
+        } else {
+          actions.push(closedCommit ? `push ${closedCommit}` : "push the commit");
+        }
         break;
       case "host_verification":
         actions.push("run host typecheck + full suite, record the result, then re-audit");
@@ -145,6 +160,8 @@ export function evaluateDoneAudit(input: DoneAuditInput): DoneAuditResult {
   } else if (input.git.pushed === false) {
     checks.push({ name: "pushed", status: "fail" });
     gaps.push(closedCommit ? `${closedCommit} not pushed` : "commit not pushed to remote");
+  } else if (input.git.pushedReason === "no_remote") {
+    checks.push({ name: "pushed", status: "unknown", detail: "no remote configured; push/PR unavailable" });
   } else {
     checks.push({ name: "pushed", status: "unknown" });
   }
@@ -209,7 +226,7 @@ export function evaluateDoneAudit(input: DoneAuditInput): DoneAuditResult {
   }
 
   const nonPassRequired = requiredChecks.filter((c) => c.status !== "pass");
-  const requestedAction = outcome === "pass" ? null : buildRequestedAction(nonPassRequired, closedCommit);
+  const requestedAction = outcome === "pass" ? null : buildRequestedAction(nonPassRequired, closedCommit, input.git.pushedReason);
 
   return { outcome, checks, gaps, requestedAction };
 }

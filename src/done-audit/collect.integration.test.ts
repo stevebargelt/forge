@@ -714,9 +714,9 @@ test("collect: remote exists but commit not pushed → pushed=false", () => {
   }
 });
 
-// ── FG-367: no remote configured → pushed=null (not false) ──────────────────
+// ── FG-367: no remote configured → pushed=null, pushedReason="no_remote" ─────
 
-test("collect: no remote configured → pushed=null (not false)", () => {
+test("collect: no remote configured → pushed=null and pushedReason='no_remote'", () => {
   // beforeEach only does git init — no remote is added, so `git remote` returns empty
   writeFileSync(join(projectDir, "no-remote.txt"), "content");
   gitExec(["add", "."], projectDir);
@@ -735,12 +735,120 @@ test("collect: no remote configured → pushed=null (not false)", () => {
 
   const input = collectDoneAuditInputFor(projectDir, "FG-COLLECT-NO-REMOTE");
 
-  assert.equal(
-    input.git.pushed,
-    null,
-    "pushed must be null (unknown) when no remote is configured — not false (fail)"
-  );
+  assert.equal(input.git.pushed, null, "pushed must be null (unknown) when no remote is configured — not false (fail)");
   assert.notEqual(input.git.pushed, false, "pushed must NOT be false — a local-only repo is unknown, not unpushed");
+  assert.equal(input.git.pushedReason, "no_remote", "pushedReason must be 'no_remote' when git remote returns empty");
+});
+
+// ── FG-367 post-close: no-remote truthfulness through collect→evaluate ────────
+
+test("collect+evaluate: no-remote, all other checks pass → outcome unknown AND requestedAction says 'no remote configured; push/PR unavailable' (not 'push <sha>')", () => {
+  // Set up a local-only repo with a real commit, ticket, and host evidence — everything
+  // passes except pushed (no remote). Verifies the no-remote case produces truthful
+  // operator text instead of "push <sha>".
+  writeFileSync(join(projectDir, "README.md"), "init");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "init"], projectDir);
+  const closedSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  writeTicket(projectDir, {
+    id: "FG-NOREMOTE-ALLPASS",
+    type: "story",
+    status: "done",
+    closedCommit: closedSha,
+    title: "No Remote All Pass",
+    body: "no deferred scope",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "close ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-NOREMOTE-ALLPASS",
+    projectDir,
+    commitSha: closedSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T12:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-NOREMOTE-ALLPASS");
+  assert.equal(input.git.pushed, null, "pushed must be null for no-remote repo");
+  assert.equal(input.git.pushedReason, "no_remote", "pushedReason must be 'no_remote'");
+
+  const result = evaluateDoneAudit(input);
+  assert.equal(result.outcome, "unknown", "outcome must be unknown (not fail) for no-remote repo");
+
+  const pushedCheck = result.checks.find((c) => c.name === "pushed");
+  assert.equal(pushedCheck!.status, "unknown", "pushed check must be unknown for no-remote");
+  assert.ok(
+    pushedCheck!.detail?.includes("no remote configured"),
+    `pushed check detail must say 'no remote configured; push/PR unavailable'; got: ${pushedCheck!.detail}`,
+  );
+
+  assert.ok(
+    !result.requestedAction?.includes(`push ${closedSha}`),
+    `requestedAction must NOT include 'push <sha>' for no-remote repo; got: ${result.requestedAction}`,
+  );
+  assert.ok(
+    result.requestedAction?.includes("no remote configured"),
+    `requestedAction must say 'no remote configured; push/PR unavailable'; got: ${result.requestedAction}`,
+  );
+});
+
+test("collect+evaluate: remote exists but commit not pushed → requestedAction includes 'push <sha>'", () => {
+  // Verifies that the genuine remote-but-unpushed case still produces "push <sha>",
+  // distinguishing it from the no-remote case.
+  const remoteDir = mkdtempSync(join(tmpdir(), "collect-remote-ra-"));
+  try {
+    gitExec(["init", "--bare", remoteDir], remoteDir);
+    gitExec(["remote", "add", "origin", remoteDir], projectDir);
+
+    writeFileSync(join(projectDir, "README.md"), "init");
+    gitExec(["add", "."], projectDir);
+    gitExec(["commit", "-m", "init"], projectDir);
+    const closedSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+    writeTicket(projectDir, {
+      id: "FG-REMOTE-UNPUSHED-RA",
+      type: "story",
+      status: "done",
+      closedCommit: closedSha,
+      title: "Remote Unpushed RA",
+      body: "no deferred scope",
+      related: [],
+    });
+    gitExec(["add", "."], projectDir);
+    gitExec(["commit", "-m", "close ticket"], projectDir);
+
+    insertHostVerification({
+      ticketId: "FG-REMOTE-UNPUSHED-RA",
+      projectDir,
+      commitSha: closedSha,
+      gateName: "npm run test:all",
+      command: "npm run test:all",
+      exitCode: 0,
+      recordedAt: "2026-01-01T12:00:00Z",
+    });
+
+    const input = collectDoneAuditInputFor(projectDir, "FG-REMOTE-UNPUSHED-RA");
+    assert.equal(input.git.pushed, false, "pushed must be false when remote exists but commit not pushed");
+    assert.notEqual(input.git.pushedReason, "no_remote", "pushedReason must not be 'no_remote' when a remote exists");
+
+    const result = evaluateDoneAudit(input);
+    assert.equal(result.outcome, "fail", "outcome must be fail for genuinely unpushed commit");
+
+    const pushedCheck = result.checks.find((c) => c.name === "pushed");
+    assert.equal(pushedCheck!.status, "fail");
+
+    assert.ok(
+      result.requestedAction?.includes(`push ${closedSha}`),
+      `requestedAction must include 'push <sha>' for genuinely unpushed commit; got: ${result.requestedAction}`,
+    );
+  } finally {
+    rmSync(remoteDir, { recursive: true, force: true });
+  }
 });
 
 // ── malformed .forge/config.json → falls back to default gate ────────────────

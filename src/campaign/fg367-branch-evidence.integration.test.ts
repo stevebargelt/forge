@@ -1,9 +1,8 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import {
@@ -184,87 +183,64 @@ test("human render emits branch and worktreePath lines", async () => {
 });
 
 test("no git push or PR command invoked during campaign dispatch", async () => {
-  // Verifies that executor.ts does not push or create PRs as part of dispatch.
-  // Conservative v1 policy: git evidence (branch/worktreePath) is local-only;
-  // prUrl must remain unset (no auto-PR).
+  // SOURCE GUARD (import-style-agnostic): reads raw source text of dispatch-path files
+  // and asserts none contains a git push or gh command invocation. Unlike the previous
+  // CJS namespace spy (which reassigned module.exports["execFileSync"] and did NOT
+  // intercept ESM named-import bindings fixed at import time), this check catches
+  // execFileSync("git", ["push"]) regardless of import style.
   //
-  // REGRESSION GUARD: A process-level spy is installed on child_process.execFileSync
-  // via the CJS module cache. Node.js's ESM namespace for built-in modules reads
-  // from module.exports dynamically, so any future addition of execFileSync("git",
-  // ["push", ...]) anywhere in the campaign dispatch path will be intercepted and
-  // cause this test to throw immediately — making it impossible to accidentally ship
-  // a git-push in the executor without breaking this test.
-  const campaign = planAndApproveCampaign();
+  // RUNTIME GUARD: also confirms prUrl is never set during dispatch (no auto-PR in v1).
+  const filesToCheck = [
+    new URL("executor.ts", import.meta.url).pathname,
+    new URL("report.ts", import.meta.url).pathname,
+    new URL("../done-audit/collect.ts", import.meta.url).pathname,
+    new URL("../v2/worktree-lifecycle.ts", import.meta.url).pathname,
+    new URL("../v2/runNext.ts", import.meta.url).pathname,
+    new URL("../cli/commands/campaign.ts", import.meta.url).pathname,
+  ];
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const cp = createRequire(import.meta.url)("node:child_process") as Record<string, unknown>;
-  const execFileSyncCalls: Array<[string, string[]]> = [];
-  const origExecFileSync = cp["execFileSync"] as (...args: unknown[]) => unknown;
-  cp["execFileSync"] = (file: unknown, args: unknown = [], opts?: unknown): unknown => {
-    const fileStr = String(file);
-    const argsArr = Array.isArray(args) ? (args as string[]) : [];
-    execFileSyncCalls.push([fileStr, argsArr]);
-    if (fileStr === "git" && argsArr[0] === "push") {
-      throw new Error(`test-spy: git push must not be called during campaign dispatch (args: ${argsArr.join(" ")})`);
-    }
-    if (fileStr === "gh") {
-      throw new Error(`test-spy: gh command must not be called during campaign dispatch (args: ${argsArr.join(" ")})`);
-    }
-    return origExecFileSync(file, args, opts);
+  // Detects execFileSync/execFile/spawn("git", ["push"...) and exec("git push ...")
+  const gitPushPattern =
+    /(execFile(?:Sync)?|spawn)\s*\(\s*["'`]git["'`]\s*,\s*\[["'`]push["'`]|exec\s*\(\s*["'`]git\s+push/;
+  // Detects any execFileSync/execFile/spawn("gh", ...) invocation
+  const ghCommandPattern = /(execFile(?:Sync)?|spawn)\s*\(\s*["'`]gh["'`]/;
+
+  for (const filePath of filesToCheck) {
+    const source = readFileSync(filePath, "utf8");
+    assert.ok(!gitPushPattern.test(source), `git push must not appear in ${filePath}`);
+    assert.ok(!ghCommandPattern.test(source), `gh command must not appear in ${filePath}`);
+  }
+
+  // Runtime: confirm prUrl is never set and branch stays local
+  const campaign = planAndApproveCampaign();
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    const runId = args.runId!;
+    const taskId = "task-build-nopush001";
+    insertTask({
+      id: taskId,
+      runId,
+      phase: "build",
+      agentRole: "engineer",
+      status: "complete",
+      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
+      createdAt: nowIso(),
+    });
+    return { status: "complete", runId, taskId };
   };
 
-  try {
-    const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-      const runId = args.runId!;
-      const taskId = "task-build-nopush001";
-      insertTask({
-        id: taskId,
-        runId,
-        phase: "build",
-        agentRole: "engineer",
-        status: "complete",
-        taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-        createdAt: nowIso(),
-      });
-      return { status: "complete", runId, taskId };
-    };
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "complete", "campaign must complete normally");
 
-    const result = await startCampaign(campaign.id, { dispatch });
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items.length, 1);
+  const item = items[0]!;
 
-    assert.equal(result.stopReason, "complete", "campaign must complete normally");
+  assert.equal(item.prUrl, undefined, "prUrl must not be set: no auto-PR in v1");
 
-    const items = listCampaignItems(campaign.id);
-    assert.equal(items.length, 1);
-    const item = items[0]!;
-
-    // prUrl must not be set — no auto-PR in v1
-    assert.equal(item.prUrl, undefined, "prUrl must not be set: no auto-PR in v1");
-
-    // branch, if set, must be a local forge/<runId>/<taskId> name — not a remote ref
-    if (item.branch !== undefined) {
-      assert.ok(
-        item.branch.startsWith("forge/"),
-        `branch must be a local forge/ branch name, not a push indicator, got: ${item.branch}`
-      );
-    }
-
-    // Explicit call-log assertions: these fire even if the spy somehow didn't throw,
-    // providing a second layer of enforcement.
-    const gitPushCalls = execFileSyncCalls.filter(([cmd, args]) => cmd === "git" && args[0] === "push");
-    const prCreateCalls = execFileSyncCalls.filter(
-      ([cmd, args]) => cmd === "gh" || (cmd === "git" && args[0] === "pull-request")
+  if (item.branch !== undefined) {
+    assert.ok(
+      item.branch.startsWith("forge/"),
+      `branch must be a local forge/ branch name, not a push indicator, got: ${item.branch}`,
     );
-    assert.equal(
-      gitPushCalls.length,
-      0,
-      `git push must not be called during campaign dispatch; recorded calls: ${JSON.stringify(execFileSyncCalls)}`
-    );
-    assert.equal(
-      prCreateCalls.length,
-      0,
-      `gh / git pull-request must not be called during campaign dispatch; recorded calls: ${JSON.stringify(execFileSyncCalls)}`
-    );
-  } finally {
-    cp["execFileSync"] = origExecFileSync;
   }
 });
