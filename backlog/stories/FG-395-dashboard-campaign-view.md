@@ -18,6 +18,7 @@ Expose campaign state in the dashboard.
 ## Acceptance Criteria
 
 - Add an API endpoint for campaigns and campaign detail.
+- Campaign dashboard data reuses the existing campaign report contract where practical (`assembleCampaignReport` / `ReportResult`) rather than re-implementing done-audit, readiness, verdict, next-action, or git-state derivation in dashboard-only SQL.
 - Show campaign progress, current item, blocked items, shipped items, skipped items, and completed items.
 - Link campaign items to runs/tasks and backlog tickets.
 - Surface blocker reasons and requested human actions.
@@ -30,7 +31,17 @@ Expose campaign state in the dashboard.
   - derived push/PR states — `no_remote`, `not_pushed`, `unavailable` — sourced from done-audit / git facts (no new persisted state; one source of truth);
   - the clear operator action when Forge does not push / open PRs automatically (e.g. "no remote configured; push/PR unavailable", or the push/PR command for the operator to run).
 - Empty/loading/error states are handled.
-- Tests cover API shape and at least one dashboard rendering path.
+- Tests cover API shape for list + detail, project filtering or empty-state behavior, and at least one dashboard rendering path that includes a blocker/action plus git/PR evidence.
+
+## Implementation Notes
+
+- Existing campaign report source of truth: `src/campaign/report.ts` (`assembleCampaignReport`, `ReportResult`, `renderCampaignReportHuman`).
+- Existing dashboard server/query pattern: `dashboard/src/server.ts`, `dashboard/src/queries.ts`.
+- If the dashboard imports campaign report code, add a narrow dashboard path alias rather than duplicating campaign report semantics.
+- Suggested read-only endpoints:
+  - `GET /api/campaigns` — recent/active campaign summaries, optionally filtered by `projectDir`.
+  - `GET /api/campaign/:id` — campaign detail using the same item/report shape as the CLI JSON report.
+- Suggested client surface: add a `campaigns` dashboard tab/route, with a summary list and detail panel. Keep it read-only.
 
 ## Git / PR-state visibility (added post-FG-367)
 

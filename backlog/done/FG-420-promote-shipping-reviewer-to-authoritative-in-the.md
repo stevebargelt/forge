@@ -1,10 +1,12 @@
 ---
 id: FG-420
 type: story
-status: active
+status: done
 title: Promote Shipping Reviewer to authoritative in the default feature workflow
 epic: FG-372
 created: 2026-06-30
+closed: 2026-06-30
+closed_commit: "4484804"
 ---
 
 ## Problem
@@ -45,5 +47,18 @@ Decide and implement the NARROWEST safe promotion of the Shipping Reviewer from 
 - Host-verification evidence: FG-419 (`src/done-audit/collect.ts`, `host_verifications`).
 - Git/push truth: FG-367 (`src/done-audit/collect.ts` no-remote, `src/campaign/*`).
 - Decide how `needs_human` surfaces as a block — confirm whether `inconclusive` currently halts or advances at a verdict gate, and make `needs_human` an explicit stop.
+
+## Decision — needs_human handling (settled at architect gate)
+
+Option (b), confirmed by the user. `awaiting_human_input` is a REMOVED status (FORGE-DEC-020) — do NOT reintroduce it. Treat authoritative Shipping Reviewer `needs_human` as an authoritative block in the existing red path:
+
+- shipping-reviewer `needs_human` maps to the existing `inconclusive` red verdict (mapper unchanged);
+- in `dispatchReds`, alongside the existing authoritativeFail check (~runNext.ts:753), escalate an authoritative shipping-reviewer `inconclusive` (i.e. `agent==='shipping-reviewer' && authority==='authoritative' && gate_on_verdict && verdict==='inconclusive'`) to `authoritativeFail = true` → `blocked_by_red`. This also safely blocks a malformed/unrecognized verdict (which maps to inconclusive). NO `gate.ts` aggregation change (protected invariant — no aggregation ADR).
+- attach a PERSISTED synthetic finding at the escalation point (NOT via `notes`, which is not persisted; NOT in `mapShippingReviewerVerdict`) stating the Shipping Reviewer requires a human decision, so the block is reviewable/diagnosable;
+- operator resolution is the existing `forge gate ... advance --force --rationale ...` path — the force rationale becomes the human decision record. This is acceptable because it is explicit, persisted, reviewable, and never silently passes.
+
+Constraints: no `gate.ts` aggregation change; do not modify `mapShippingReviewerVerdict` unless absolutely necessary (add the finding at the escalation point); update the FG-418 guard tests in the same step (authority/gate expectations flip specialist/false → authoritative/true); update stale `awaiting_human_input` references in `CLAUDE.md`; production-path tests through real `dispatchReds`/runNext, not mapper-only.
+
+Acceptance checks: `ship` passes · valid `ship_with_named_deferrals` passes · `needs_fix` blocks · `needs_human` blocks with a persisted human-decision finding · malformed verdict still fails safely (blocks) · force-advance remains the only operator override and requires rationale.
 
 Related: FG-372 (epic), FG-384, FG-418, FG-419, FG-367.
