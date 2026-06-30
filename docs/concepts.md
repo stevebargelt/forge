@@ -238,7 +238,9 @@ Required flags:
 | `--command <cmd>` | The exact command that was run |
 | `--exit-code <n>` | Exit code of the command (`0` = pass, non-zero = fail) |
 
-Optional: `--gate <name>` (defaults to `npm run test:all`; per-project override via `.forge/config.json` `requiredHostGate`) and `--run-id <id>` (associates the record with a forge run).
+Optional: `--gate <name>` overrides the `gate_name` recorded for this evidence row; when omitted, `gate_name` defaults to the `--command` value. `--run-id <id>` associates the record with a forge run.
+
+**Gate labeling and `host_verification`.** Two distinct defaults — do not conflate them. The **CLI `--gate` default** is the `--command` string. The **collector's required host gate default** is `"npm run test:all"` (per-project override via `.forge/config.json` `requiredHostGate`); `host_verification` passes only when a recorded `gate_name` matches this required gate. Consequence: `--command "npm run test:all"` without `--gate` records `gate_name = "npm run test:all"` and satisfies `host_verification`. A weaker command (e.g. `--command "npm run typecheck"`) without `--gate` records `gate_name = "npm run typecheck"` — supporting evidence only, which does not satisfy `host_verification`. An explicit `--gate "npm run test:all"` is the auditable operator choice to label an evidence row as the required gate; this closes a spoofing hole where a weak command could previously be auto-labeled as the required gate.
 
 **Trust model.** Evidence is an audit trail in a trusted-operator context, not tamper-proof: `--command` and `--exit-code` record what was run and what it returned rather than an unverifiable bare assertion. The threat boundary is the operator — they control the host and could supply any exit code, but the recorder requires an explicit real-command invocation.
 

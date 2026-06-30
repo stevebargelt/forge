@@ -159,7 +159,7 @@ test("integ record-host-verification: --gate override persisted to DB", () => {
   assert.equal(row!.gate_name, "make check");
 });
 
-test("integ record-host-verification: default gate name is 'npm run test:all' when --gate not specified", () => {
+test("integ record-host-verification: gate_name equals command when --gate not specified", () => {
   const result = runForge([
     "record-host-verification",
     "--ticket", "FG-DEFGATE-1",
@@ -179,8 +179,34 @@ test("integ record-host-verification: default gate name is 'npm run test:all' wh
   db.close();
 
   assert.ok(row, "row must be persisted");
-  assert.equal(row!.gate_name, "npm run test:all", "default gate must be 'npm run test:all'");
+  assert.equal(row!.gate_name, "npm run test:all", "gate_name must equal command when --gate not specified");
   assert.equal(row!.run_id, null, "run_id must be null when --run-id not specified");
+});
+
+test("integ record-host-verification: weaker command without --gate records gate_name equal to command (not required gate)", () => {
+  // Regression: before the fix, --gate defaulted to "npm run test:all" unconditionally,
+  // so --command "npm run typecheck" (no --gate) would spoof the required gate.
+  const result = runForge([
+    "record-host-verification",
+    "--ticket", "FG-SPOOF-1",
+    "--project-dir", projectDir,
+    "--commit", "sha-spoof-abc",
+    "--command", "npm run typecheck",
+    "--exit-code", "0",
+  ]);
+
+  assert.equal(result.status, 0, `exit 0 expected\nstderr: ${result.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath, { readonly: true });
+  const row = db.prepare(
+    "SELECT gate_name, command FROM host_verifications WHERE ticket_id = ? AND commit_sha = ?"
+  ).get("FG-SPOOF-1", "sha-spoof-abc") as { gate_name: string; command: string } | undefined;
+  db.close();
+
+  assert.ok(row, "row must be persisted");
+  assert.equal(row!.gate_name, "npm run typecheck", "gate_name must be the command, not the required gate");
+  assert.equal(row!.command, "npm run typecheck", "command must be persisted exactly as given");
 });
 
 test("integ record-host-verification: multiple calls for same ticket/commit produce multiple rows", () => {

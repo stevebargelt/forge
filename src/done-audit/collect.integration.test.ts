@@ -517,6 +517,115 @@ test("collect+evaluate: full done-audit pass via real collect→evaluate with ho
   }
 });
 
+// ── FG-419 gate-label spoofing regression tests ──────────────────────────────
+
+test("collect FG419: weaker command (typecheck) without --gate does NOT satisfy required gate → hostVerified: null", () => {
+  // Regression: recorder previously defaulted gate_name to "npm run test:all" regardless of command,
+  // so --command "npm run typecheck" (no --gate) would spoof host_verification. After the fix,
+  // gate_name = command = "npm run typecheck", which does not match the required gate.
+  const commitSha = makeCommit("hv-spoof-typecheck");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-SPOOF-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Spoof Typecheck",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // Insert a row whose gate_name is "npm run typecheck" (what the recorder now writes
+  // when --command "npm run typecheck" is passed without --gate). The required gate is
+  // "npm run test:all" (default), so this must NOT satisfy host_verification.
+  insertHostVerification({
+    ticketId: "FG-HV-SPOOF-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run typecheck",
+    command: "npm run typecheck",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-SPOOF-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    null,
+    "hostVerified must be null — typecheck gate_name does not match the required gate 'npm run test:all'"
+  );
+});
+
+test("collect FG419: --command 'npm run test:all' without --gate satisfies required gate → hostVerified: true", () => {
+  // Positive case: when command = required gate, gate_name = command = required gate → pass.
+  const commitSha = makeCommit("hv-testall-nogate");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-TESTALL-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV TestAll NoGate",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-TESTALL-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-TESTALL-1");
+
+  assert.equal(input.verification.hostVerified, true, "hostVerified must be true — gate_name matches required gate");
+});
+
+test("collect FG419: explicit --gate override with different command satisfies required gate → hostVerified: true", () => {
+  // Operator explicitly overrides gate name: --command "npm test --workspaces" --gate "npm run test:all".
+  // The gate_name recorded is "npm run test:all" → matches required gate → satisfies host_verification.
+  const commitSha = makeCommit("hv-explicit-gate");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-EXPGATE-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Explicit Gate",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-EXPGATE-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm test --workspaces",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-EXPGATE-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    true,
+    "hostVerified must be true — explicit --gate override of 'npm run test:all' satisfies required gate"
+  );
+});
+
 // ── FIX 2: any-fail-wins detail reflects the FAILING row, not the trailing pass ─
 
 test("collect FIX2: fail row then pass row → hostVerified=false AND detail reflects failure exit_code", () => {

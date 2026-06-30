@@ -20,7 +20,7 @@ export function registerRecordHostVerification(program: Command): void {
       }
       return parseInt(val, 10);
     })
-    .option("--gate <name>", "gate name override (defaults to 'npm run test:all')", "npm run test:all")
+    .option("--gate <name>", "gate name override (defaults to the --command value)")
     .option("--run-id <id>", "optional forge run ID to associate with this record")
     .action(
       (opts: {
@@ -29,17 +29,19 @@ export function registerRecordHostVerification(program: Command): void {
         commit: string;
         command: string;
         exitCode: number;
-        gate: string;
+        gate?: string;
         runId?: string;
       }) => {
         ensureForgeDirs();
         getDb();
 
+        const gateName = opts.gate ?? opts.command;
+
         insertHostVerification({
           ticketId: opts.ticket,
           projectDir: opts.projectDir,
           commitSha: opts.commit,
-          gateName: opts.gate,
+          gateName,
           command: opts.command,
           exitCode: opts.exitCode,
           runId: opts.runId ?? null,
@@ -48,7 +50,7 @@ export function registerRecordHostVerification(program: Command): void {
 
         const outcome = opts.exitCode === 0 ? "pass" : `fail (exit ${opts.exitCode})`;
         console.log(
-          `forge record-host-verification: recorded ${outcome} for ${opts.ticket} @ ${opts.commit.slice(0, 8)} (gate: ${opts.gate})`
+          `forge record-host-verification: recorded ${outcome} for ${opts.ticket} @ ${opts.commit.slice(0, 8)} (gate: ${gateName})`
         );
       }
     );
