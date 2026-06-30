@@ -1,10 +1,12 @@
 ---
 id: FG-421
 type: story
-status: active
+status: done
 title: Shipping Reviewer must verify operator-decision contracts end-to-end
 epic: FG-372
 created: 2026-06-30
+closed: 2026-06-30
+closed_commit: 2f0ff4b
 ---
 
 ## Problem
