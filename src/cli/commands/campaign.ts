@@ -5,7 +5,7 @@ import { planCampaign, resolvePlan } from "../../campaign/planner.js";
 import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
-import { assembleCampaignShow, assembleCampaignReport } from "../../campaign/report.js";
+import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman } from "../../campaign/report.js";
 
 function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
   if (rec) {
@@ -470,49 +470,8 @@ export function registerCampaign(program: Command): void {
         return;
       }
 
-      console.log(`Campaign Report: ${result.campaignId}`);
-      console.log(`Status:          ${result.status}`);
-      console.log(`Mode:            ${result.mode}`);
-      if (result.goal) console.log(`Goal:            ${result.goal}`);
-      console.log(`Verdict:         ${result.verdict}`);
-      console.log(`Safety:          ${result.safetyToContinue}`);
-      console.log(`Approved hash:   ${result.approvedPlanHash ?? "(none)"}`);
-      if (result.currentPlanHash) {
-        console.log(`Current hash:    ${result.currentPlanHash}`);
+      for (const line of renderCampaignReportHuman(result)) {
+        console.log(line);
       }
-      if (result.dirtyGitState) {
-        console.log(`Dirty git state:\n${result.dirtyGitState}`);
-      }
-      console.log("Items:");
-      for (const item of result.items) {
-        const titleStr = item.title ? ` — ${item.title}` : "";
-        const outcomeStr = item.outcome ? ` outcome=${item.outcome}` : "";
-        const commitStr = item.commit ? ` commit=${item.commit}` : "";
-        const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
-        const runStr = item.runId ? ` [run: ${item.runId}]` : "";
-        console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${commitStr}${blockerStr}${runStr}`);
-        if (item.reason) console.log(`    reason: ${item.reason}`);
-        if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
-        if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
-          console.log(`    readiness: ${item.readiness.outcome}`);
-          if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);
-          if (item.readiness.refinementProposal) console.log(`    refinement: ${item.readiness.refinementProposal}`);
-        }
-        if (item.doneAuditState) {
-          console.log(`    done-audit: ${item.doneAuditState.outcome}`);
-          if (item.hostVerificationDetail) console.log(`    host-verification: ${item.hostVerificationDetail}`);
-          if (item.doneAuditState.outcome !== "pass") {
-            if (item.doneAuditState.gaps.length > 0) console.log(`    audit-gaps: ${item.doneAuditState.gaps.join("; ")}`);
-            if (item.doneAuditState.requestedAction) console.log(`    audit-action: ${item.doneAuditState.requestedAction}`);
-          }
-        }
-      }
-      console.log("Groupings:");
-      console.log(`  shipped: ${result.groupings.shipped.join(", ") || "(none)"}`);
-      console.log(`  blocked: ${result.groupings.blocked.join(", ") || "(none)"}`);
-      console.log(`  held:    ${result.groupings.held.join(", ") || "(none)"}`);
-      console.log(`  skipped: ${result.groupings.skipped.join(", ") || "(none)"}`);
-      console.log(`  failed:  ${result.groupings.failed.join(", ") || "(none)"}`);
-      console.log(`Next operator action: ${result.nextOperatorAction}`);
     });
 }

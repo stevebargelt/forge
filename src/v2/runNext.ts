@@ -15,6 +15,7 @@
 // See DECISIONS.md for the architectural calls made here.
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ import {
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
+import { fillClosedCommit } from "../backlog/structured.js";
 import { requiresStructuredResult } from "./role-capabilities.js";
 // FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
 // FG-353: integration worktree helpers added.
@@ -499,6 +501,23 @@ async function dispatchSingleStep(args: {
     }
     // FG-357 seam: post-merge build+test integration gate goes here
     // (after merge, before markTaskComplete / reds dispatch / phase advance).
+
+    // FG-367: best-effort gap-fill — record the merge-HEAD SHA on the ticket
+    // when the agent did not capture it at close time. Swallowed entirely so
+    // a git or backlog error never fails the run.
+    try {
+      const headSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: args.projectDir,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      const ticketId = getRun(args.runId)?.title;
+      if (ticketId) {
+        fillClosedCommit(args.projectDir, ticketId, headSha.trim());
+      }
+    } catch {
+      // swallow — gap-fill is advisory, must not fail the run
+    }
   }
 
   // Reds: spawn after primary completes. Each red is a child task.

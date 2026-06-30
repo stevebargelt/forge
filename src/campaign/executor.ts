@@ -10,6 +10,7 @@ import {
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
+import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
 import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
@@ -395,6 +396,17 @@ async function driveRemainingItems(
         // ticket not found after run — leave outcome undefined
       }
       updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
+
+      // Record worktree evidence if any task in the run has a worktreePath set.
+      const runTasks = tasksForRun(runId);
+      const worktreeTask = runTasks.find((t) => t.worktreePath != null);
+      if (worktreeTask) {
+        updateCampaignItem(item.id, {
+          branch: `forge/${runId}/${worktreeTask.id}`,
+          worktreePath: worktreeTask.worktreePath,
+        });
+      }
+
       itemRecords.push({
         itemId: item.id,
         ticketId: item.ticketId,

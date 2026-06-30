@@ -218,7 +218,7 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 - `fail` — at least one required check is a definite `fail`
 - `unknown` — no required check is `fail`, but at least one required check is `unknown`
 
-Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks: `pass` when the sum is greater than zero, `fail` when the sum is exactly zero (zero container tests recorded), and `unknown` when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` resolves from the host-verification store: `pass` when matching pass evidence exists (any-fail-wins across multiple rows), `fail` when matching fail evidence exists, `unknown` when no matching evidence exists. The matching key is `(ticketId, projectDir, commitSha, gateName)`; evidence for a different commit, gate, project, or ticket is treated as absent. See [Recording host-verification evidence](#recording-host-verification-evidence) below.
+Missing evidence is always `unknown`, never `pass`. The `pushed` check follows this same principle when no remote is configured: `git remote` is checked first; if no remote exists, `pushed` resolves to `unknown` (not `fail`) — the commit's push status is unknowable without a remote. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks: `pass` when the sum is greater than zero, `fail` when the sum is exactly zero (zero container tests recorded), and `unknown` when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` resolves from the host-verification store: `pass` when matching pass evidence exists (any-fail-wins across multiple rows), `fail` when matching fail evidence exists, `unknown` when no matching evidence exists. The matching key is `(ticketId, projectDir, commitSha, gateName)`; evidence for a different commit, gate, project, or ticket is treated as absent. See [Recording host-verification evidence](#recording-host-verification-evidence) below.
 
 **`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
 
@@ -570,15 +570,34 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `deferredScope` — always `[]` (reserved)
 - `followUpTickets` — always `[]` (reserved)
 - `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a failed/blocked item, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but a readiness-held item remains, prompts `refine <ticketId> then resume`; when blockers are resolved and only dependency-held items remain, prompts `resume — N held items will be reconsidered`. On a `complete` campaign where shipped items have unresolved done-audit gaps, names the concrete operator steps (e.g. `shipped items have unresolved done-audit gaps — run host typecheck + full suite, record the result, then re-audit`).
-- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items), `doneAuditState` (see below), `hostVerificationDetail` (the `detail` string from the `host_verification` check in `doneAuditState` when evidence was recorded, `null` otherwise), and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held, and the done-audit outcome is printed for each item; when outcome is not `pass`, the gaps and `requestedAction` are also printed.
+- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items), `doneAuditState` (see below), `hostVerificationDetail` (the `detail` string from the `host_verification` check in `doneAuditState` when evidence was recorded, `null` otherwise), `branch` and `worktreePath` (populated when the campaign item ran in a Forge-managed worktree — see [Git discipline (v1)](#git-discipline-v1); `null` otherwise), and null placeholders for `prUrl`, `verificationState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held, the done-audit outcome is printed for each item (when outcome is not `pass`, gaps and `requestedAction` are also printed), and `branch=` and `worktree=` are appended to the item line when set.
 
 **`doneAuditState`** is populated best-effort (null only when collection throws or `projectDir` is missing). Shape: `{ outcome: "pass" | "fail" | "unknown", checks: [{ name, status, detail? }], gaps: string[], requestedAction: string | null }`. See [Done audit (mechanical)](#done-audit-mechanical) for full check names and aggregation semantics.
 
-**Fields not yet populated:** `branch`, `worktreePath`, `prUrl`, `verificationState`, and `reviewerResult` are always `null` — the source systems (worktrees, LLM reviewer) are not yet built. These fields are present in the JSON shape now so dashboards and orchestrators can consume a stable schema from day one. A shipped item's `commit` is populated from the ticket's `closed_commit`.
+**Fields not yet populated:** `prUrl`, `verificationState`, and `reviewerResult` are always `null` — no auto-push, no auto-PR, and the LLM reviewer result is not yet wired to campaign report items. `branch` and `worktreePath` are populated when a Forge-managed worktree was used for the item; see [Git discipline (v1)](#git-discipline-v1). A shipped item's `commit` is populated from the ticket's `closed_commit`.
 
 The `--json` shape is stable for future dashboard and orchestrator use.
 
 Example: `forge campaign report camp-abc123` after a completed campaign prints groupings and a verdict of `all_shipped` or `complete_with_issues`.
+
+### Git discipline (v1)
+
+Forge records git state it actually managed rather than claiming it managed state it did not. The v1 policy is conservative — truthful surfacing of local evidence, no automation that changes remote state.
+
+**Branch and worktree recording.** When a campaign item runs in a Forge-managed worktree (enabled by the `FORGE_WORKTREES=1` environment variable), the executor records:
+
+- `branch` — the worktree branch name, formatted as `forge/{runId}/{taskId}`.
+- `worktreePath` — the absolute filesystem path of the worktree.
+
+Both fields are `null` when the item ran without a worktree. Forge never sets these fields to imply it managed a branch it did not create.
+
+**No auto-push, no auto-PR.** Forge does not run `git push` or open pull requests automatically in v1. The `prUrl` field on campaign report items is always `null`. Push and PR creation remain the operator's responsibility. Auto-push/PR is a later explicit opt-in and will never be hidden behavior.
+
+**No-remote handling.** When no git remote is configured for the project, Forge cannot know whether the closed commit has been pushed. In this case the `pushed` done-audit check resolves to `unknown` rather than `fail` — the absence of a remote is not a failure, it is the correct state for a local-only project. The collector checks `git remote` before attempting `git branch -r --contains`; if no remote is listed, `pushed` stays `null` and the done-audit outcome follows the conservative unknown-means-not-pass rule.
+
+**No destructive git operations.** Forge never force-pushes, rewrites history, or deletes branches that contain work. All git operations performed by Forge are additive or read-only.
+
+**Policy escape hatch.** Projects that never use worktrees (the default) are not affected — `branch` and `worktreePath` remain `null` and Forge makes no claim about the current branch. Dashboard and report output always reflects only what Forge directly observed.
 
 ### Pause
 

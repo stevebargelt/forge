@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   closeTicket,
+  fillClosedCommit,
   generateSlug,
   readTicket,
   writeTicket,
@@ -569,4 +570,51 @@ test("moveTicket idempotent re-move does not reintroduce close fields", () => {
   const raw = readFileSync(join(storiesDir, files[0]!), "utf8");
   assert.ok(!raw.includes("closed:"), "raw file must not contain closed: after re-move");
   assert.ok(!raw.includes("closed_commit:"), "raw file must not contain closed_commit: after re-move");
+});
+
+// ----- fillClosedCommit (FG-367) -----
+
+test("fillClosedCommit: writes closedCommit without changing closed date", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-500", type: "story", status: "done", closed: "2026-06-15" }));
+  const fakeSha = "aabbccdd1122";
+
+  const doneDir = join(dir, "backlog", "done");
+  const filesBefore = readdirSync(doneDir).filter((f) => f.startsWith("FG-500-"));
+  assert.equal(filesBefore.length, 1, "setup: exactly one FG-500 file must be in done/ before fillClosedCommit");
+
+  fillClosedCommit(dir, "FG-500", fakeSha);
+
+  const result = readTicket(dir, "FG-500");
+  assert.equal(result.closedCommit, fakeSha, "closedCommit must be written");
+  assert.equal(result.closed, "2026-06-15", "closed date must be unchanged");
+
+  // Verify fillClosedCommit writes in-place: same file, same location, no duplication or move.
+  const filesAfter = readdirSync(doneDir).filter((f) => f.startsWith("FG-500-"));
+  assert.equal(filesAfter.length, 1, "ticket must remain as exactly one file in backlog/done/ after fillClosedCommit");
+  assert.equal(filesAfter[0], filesBefore[0], "ticket filename in backlog/done/ must be unchanged — fillClosedCommit must write in-place");
+});
+
+test("fillClosedCommit: no-op when closedCommit already present (agent SHA wins)", () => {
+  const dir = makeTmpDir();
+  const originalSha = "original1234";
+  writeTicket(dir, makeTicket({ id: "FG-501", type: "story", status: "done", closed: "2026-06-15", closedCommit: originalSha }));
+  fillClosedCommit(dir, "FG-501", "different5678");
+  const result = readTicket(dir, "FG-501");
+  assert.equal(result.closedCommit, originalSha, "existing SHA must not be overwritten");
+});
+
+test("fillClosedCommit: no-op when ticket status is not done", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-502", type: "story", status: "active" }));
+  fillClosedCommit(dir, "FG-502", "shouldnotappear");
+  const result = readTicket(dir, "FG-502");
+  assert.equal(result.closedCommit, undefined, "active ticket must not have closedCommit written");
+  assert.equal(result.status, "active", "ticket status must remain active");
+});
+
+test("fillClosedCommit: silently ignores missing ticket", () => {
+  const dir = makeTmpDir();
+  // Must not throw even when the ticket does not exist
+  assert.doesNotThrow(() => fillClosedCommit(dir, "FG-NONEXISTENT", "anysha"));
 });

@@ -320,8 +320,8 @@ export function assembleCampaignShow(id: string): ShowResult | null {
 }
 
 export type ReportItemRow = ShowItemRow & {
-  branch: null;
-  worktreePath: null;
+  branch: string | null;
+  worktreePath: string | null;
   prUrl: null;
   commit: string | null;
   verificationState: null;
@@ -434,8 +434,8 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     reason: i.reason ?? null,
     requestedHumanAction: i.requestedHumanAction ?? null,
     readiness: readinessMap.get(i.ticketId) ?? null,
-    branch: null,
-    worktreePath: null,
+    branch: i.branch ?? null,
+    worktreePath: i.worktreePath ?? null,
     prUrl: null,
     commit: commitMap.get(i.ticketId) ?? null,
     verificationState: null,
@@ -475,4 +475,51 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     followUpTickets: [],
     nextOperatorAction,
   };
+}
+
+export function renderCampaignReportHuman(result: ReportResult): string[] {
+  const lines: string[] = [];
+  lines.push(`Campaign Report: ${result.campaignId}`);
+  lines.push(`Status:          ${result.status}`);
+  lines.push(`Mode:            ${result.mode}`);
+  if (result.goal) lines.push(`Goal:            ${result.goal}`);
+  lines.push(`Verdict:         ${result.verdict}`);
+  lines.push(`Safety:          ${result.safetyToContinue}`);
+  lines.push(`Approved hash:   ${result.approvedPlanHash ?? "(none)"}`);
+  if (result.currentPlanHash) lines.push(`Current hash:    ${result.currentPlanHash}`);
+  if (result.dirtyGitState) lines.push(`Dirty git state:\n${result.dirtyGitState}`);
+  lines.push("Items:");
+  for (const item of result.items) {
+    const titleStr = item.title ? ` — ${item.title}` : "";
+    const outcomeStr = item.outcome ? ` outcome=${item.outcome}` : "";
+    const commitStr = item.commit ? ` commit=${item.commit}` : "";
+    const branchStr = item.branch ? ` branch=${item.branch}` : "";
+    const worktreeStr = item.worktreePath ? ` worktree=${item.worktreePath}` : "";
+    const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
+    const runStr = item.runId ? ` [run: ${item.runId}]` : "";
+    lines.push(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${commitStr}${branchStr}${worktreeStr}${blockerStr}${runStr}`);
+    if (item.reason) lines.push(`    reason: ${item.reason}`);
+    if (item.requestedHumanAction) lines.push(`    action: ${item.requestedHumanAction}`);
+    if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
+      lines.push(`    readiness: ${item.readiness.outcome}`);
+      if (item.readiness.gaps.length > 0) lines.push(`    gaps: ${item.readiness.gaps.join("; ")}`);
+      if (item.readiness.refinementProposal) lines.push(`    refinement: ${item.readiness.refinementProposal}`);
+    }
+    if (item.doneAuditState) {
+      lines.push(`    done-audit: ${item.doneAuditState.outcome}`);
+      if (item.hostVerificationDetail) lines.push(`    host-verification: ${item.hostVerificationDetail}`);
+      if (item.doneAuditState.outcome !== "pass") {
+        if (item.doneAuditState.gaps.length > 0) lines.push(`    audit-gaps: ${item.doneAuditState.gaps.join("; ")}`);
+        if (item.doneAuditState.requestedAction) lines.push(`    audit-action: ${item.doneAuditState.requestedAction}`);
+      }
+    }
+  }
+  lines.push("Groupings:");
+  lines.push(`  shipped: ${result.groupings.shipped.join(", ") || "(none)"}`);
+  lines.push(`  blocked: ${result.groupings.blocked.join(", ") || "(none)"}`);
+  lines.push(`  held:    ${result.groupings.held.join(", ") || "(none)"}`);
+  lines.push(`  skipped: ${result.groupings.skipped.join(", ") || "(none)"}`);
+  lines.push(`  failed:  ${result.groupings.failed.join(", ") || "(none)"}`);
+  lines.push(`Next operator action: ${result.nextOperatorAction}`);
+  return lines;
 }

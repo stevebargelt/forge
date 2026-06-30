@@ -52,15 +52,23 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
   }
 
   // git.pushed — is closedCommit reachable from any remote branch?
+  // If no remote is configured, pushed stays null (unknown) rather than false (fail).
   let pushed: boolean | null = null;
   if (closedCommit) {
     try {
-      const output = execFileSync("git", ["branch", "-r", "--contains", closedCommit], {
+      const remoteOut = execFileSync("git", ["remote"], {
         cwd: projectDir,
         encoding: "utf8",
         timeout: 5000,
       });
-      pushed = output.trim().length > 0;
+      if (remoteOut.trim().length > 0) {
+        const output = execFileSync("git", ["branch", "-r", "--contains", closedCommit], {
+          cwd: projectDir,
+          encoding: "utf8",
+          timeout: 5000,
+        });
+        pushed = output.trim().length > 0;
+      }
     } catch {
       pushed = null;
     }

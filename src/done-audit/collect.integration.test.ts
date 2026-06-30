@@ -677,6 +677,72 @@ test("collect FIX2: fail row then pass row → hostVerified=false AND detail ref
   );
 });
 
+// ── FG-367: remote exists but commit not pushed → pushed=false ──────────────
+
+test("collect: remote exists but commit not pushed → pushed=false", () => {
+  // Add a bare remote but do NOT push the commit to it — `git branch -r --contains` returns empty
+  const remoteDir = mkdtempSync(join(tmpdir(), "collect-remote-nopush-"));
+  try {
+    gitExec(["init", "--bare", remoteDir], remoteDir);
+    gitExec(["remote", "add", "origin", remoteDir], projectDir);
+
+    writeFileSync(join(projectDir, "unpushed.txt"), "content");
+    gitExec(["add", "."], projectDir);
+    gitExec(["commit", "-m", "unpushed commit"], projectDir);
+    const commitSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+    writeTicket(projectDir, {
+      id: "FG-COLLECT-UNPUSHED",
+      type: "story",
+      status: "done",
+      closedCommit: commitSha,
+      title: "Unpushed Remote Test",
+      body: "done",
+      related: [],
+    });
+
+    const input = collectDoneAuditInputFor(projectDir, "FG-COLLECT-UNPUSHED");
+
+    assert.equal(
+      input.git.pushed,
+      false,
+      "pushed must be false when a remote exists but the commit has not been pushed to it"
+    );
+    assert.notEqual(input.git.pushed, null, "pushed must be false (not null) — a remote exists, the commit simply isn't there");
+  } finally {
+    rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+// ── FG-367: no remote configured → pushed=null (not false) ──────────────────
+
+test("collect: no remote configured → pushed=null (not false)", () => {
+  // beforeEach only does git init — no remote is added, so `git remote` returns empty
+  writeFileSync(join(projectDir, "no-remote.txt"), "content");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "no-remote commit"], projectDir);
+  const commitSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  writeTicket(projectDir, {
+    id: "FG-COLLECT-NO-REMOTE",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "No Remote Test",
+    body: "done",
+    related: [],
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-COLLECT-NO-REMOTE");
+
+  assert.equal(
+    input.git.pushed,
+    null,
+    "pushed must be null (unknown) when no remote is configured — not false (fail)"
+  );
+  assert.notEqual(input.git.pushed, false, "pushed must NOT be false — a local-only repo is unknown, not unpushed");
+});
+
 // ── malformed .forge/config.json → falls back to default gate ────────────────
 
 test("collect: malformed .forge/config.json → falls back to default gate and resolves hostVerified", () => {

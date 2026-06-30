@@ -342,6 +342,24 @@ export function withBacklogLock<T>(projectDir: string, fn: () => T): T {
   }
 }
 
+// Additive, best-effort gap-fill: writes closedCommit to an already-done ticket
+// when the agent did not record it at close time. Never overwrites an existing
+// SHA (agent SHA wins), never changes the file's status or closed date, never
+// moves the file. Silently no-ops on missing ticket, non-done ticket, or any error.
+export function fillClosedCommit(projectDir: string, id: string, commit: string): void {
+  const found = findTicketFile(projectDir, id);
+  if (!found) return;
+
+  const content = readFileSync(found.path, "utf8");
+  const { frontmatter, body } = parseTicketFile(content);
+
+  if (frontmatter.status !== "done") return;
+  if (frontmatter.closedCommit) return;
+
+  const updated: TicketFrontmatter = { ...frontmatter, closedCommit: commit };
+  writeFileSync(found.path, serializeTicket(updated, body));
+}
+
 export function moveTicket(projectDir: string, id: string, newType: TicketType): void {
   const found = findTicketFile(projectDir, id);
   if (!found) throw new Error(`Ticket ${id} not found`);

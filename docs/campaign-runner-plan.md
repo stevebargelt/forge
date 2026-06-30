@@ -97,7 +97,8 @@ Dependencies:
   - Shipping Reviewer fail-loud / missing-context precondition
   - `doneAudit` evidence in the packet
 - **FG-418**: wire the Shipping Reviewer into the default `feature` workflow (advisory: `authority: specialist`, `gate_on_verdict: false`) and fix the Reviewer Context Packet so the reviewer receives real engineer evidence (changed files, commit, verification commands, deferred scope, engineer summary) at review time; for the fanout build phase, evidence is aggregated from fanout child tasks.
-- **FG-367**: branch, commit, push, and PR discipline for Forge-managed projects.
+- **FG-419**: host-verification recorder for done-audit; records durable required-gate evidence, matches it by ticket, project, shipped commit, and gate, and keeps missing, stale, failed, or supporting-only host evidence conservative.
+- **FG-367**: git-evidence surfacing for Forge-managed projects: `branch` and `worktreePath` recorded on campaign report items when a Forge-managed worktree is used (naming scheme `forge/{runId}/{taskId}`); `pushed` correctly resolves to unknown (not fail) when no remote is configured; no auto-push or auto-PR in v1. Policy documented in [Git discipline (v1)](concepts.md#git-discipline-v1).
 - **FG-376**: agent worktree dependency parity for real test execution.
 - **FG-357**: post-merge integration gate for merged worktree output.
 
@@ -107,7 +108,8 @@ Exit criteria:
 - done audit runs before item shipped claims;
 - Shipping Reviewer has the original ask, backlog context, implementation summary, verification commands, and review history;
 - Reviewer Context Packet shape, Shipping Reviewer verdict vocabulary, done-audit evidence, and fail-loud missing-context behavior are documented;
-- host verification requirements are explicit;
+- host verification requirements are explicit, recorded as durable required-gate evidence, and visible in reports;
+- missing, stale, failed, or supporting-only host evidence cannot satisfy shipped claims;
 - git/branch/PR policy is visible in the report;
 - unavailable gates force `pilot` mode, pause, or explicit operator override.
 
@@ -205,7 +207,7 @@ Before trusting unattended overnight work:
 - readiness and done-audit gates are integrated or campaign runs in explicit `pilot` mode;
 - Shipping Reviewer is available for final shipped claims;
 - Reviewer Context Packet and Shipping Reviewer fail-loud semantics are documented for operators and future implementers;
-- host test verification is required and visible;
+- host test verification is required, recorded, matched to the shipped commit, and visible;
 - git branch/commit/PR policy is enforced or explicitly unavailable;
 - dashboard or CLI status can show active blocker and next action.
 
