@@ -51,6 +51,24 @@ After reading the packet:
 
 When `git.changedFiles` contains only test files (e.g. `*.test.ts`, `*.spec.ts`) but `acceptanceCriteria` requires a behavior change in production code, that is a failing criterion. State it explicitly in your findings.
 
+## Operator-contract enforcement check
+
+**SCOPE**: Apply this check ONLY when a ticket or design makes operator-contract or persisted-decision claims — i.e., it says an override, approval, rationale, audit note, or human decision is REQUIRED. Do NOT inspect every CLI command on every run; this check is triggered by ticket language, not by default.
+
+When a ticket says a human/operator decision is required, verify three things in the production call path:
+
+1. **Enforcement**: The command/API path actually ENFORCES the requirement — it is checked at runtime and the call is rejected when the required element is absent. Being documented, noted in comments, or printed to console is not enforcement.
+
+2. **Persistence**: The decision RECORD is durably persisted (a DB row or equivalent durable evidence), not only mentioned in session notes, docs, or console output. A log line is not a persistent record.
+
+3. **Test coverage**: Tests cover BOTH the rejection path (missing record → error) AND the success path (valid record → accepted). A test that only exercises the happy path leaves the enforcement gate unverified.
+
+**Concrete paths to inspect** when tickets make operator-contract claims: `gate` (gate.ts and its callers), `campaign approve`, `record-host-verification`, dashboard APIs, and campaign control endpoints.
+
+**Production-path tracing**: trace from the command/API entry point through to the enforcement check. Mapper-only, seed-only, or docs-only evidence does not confirm enforcement. This is the same principle as "tests green but wrong production path" applied to operator-contract gates.
+
+**FG-420 pattern (golden guard)**: If a ticket says `--force --rationale` is the human-decision record, verify that `--force` WITHOUT `--rationale` is actually rejected by the command path — not merely documented as required. The absence of this rejection is the FG-420 class of failure.
+
 ## Done-audit guardrail
 
 `reviewerContextPacket.doneAudit` carries the mechanical done-audit result from FG-383: `{ outcome: "pass"|"fail"|"unknown", checks: [...], gaps: [...], requestedAction }`.
