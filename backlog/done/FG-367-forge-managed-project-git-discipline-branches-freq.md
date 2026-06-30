@@ -6,7 +6,7 @@ title: "Forge-managed project git discipline: branches, frequent commits, and PR
 epic: FG-291
 created: 2026-06-22
 closed: 2026-06-30
-closed_commit: bb1f1b8
+closed_commit: 7240c3a
 ---
 
 ## Problem
@@ -79,3 +79,11 @@ Key principle: one source of truth for push status, no automation that changes r
 - When no upstream remote exists, Forge clearly explains that PR creation is not available and still preserves branch/commit discipline.
 - Dashboard users can understand branch, commit, and PR state without running git commands.
 - Policy escape hatches are explicit, recorded, and visible in the run/control-plane receipts.
+
+## Reopened — no-remote truthfulness gap + overstated no-push guard (post-close)
+
+Closed at bb1f1b8 but reopened for two real gaps:
+
+1. **No-remote requestedAction is wrong/misleading (AC #3 + docs violation).** `collect.ts` sets `pushed=null` identically for no-remote, git-probe-error, and no-commit — the reason is lost. `done-audit.ts` then renders a non-pass `pushed` check as `requestedAction: "push <sha>"`. For a local-only repo (all other checks pass, `pushed=null`) the operator is told to "push abc123" with no remote to push to — contradicting the v1 promise ("no remote configured; push/PR unavailable") and the shipped docs. Fix: carry a non-persisted, git-derived reason (`no_remote` | `not_pushed` | `unavailable`) so the pushed check detail + requestedAction say "no remote configured; push/PR unavailable" instead of "push <sha>". Derived only — no persisted column (option 1).
+
+2. **No-push regression guard overstates coverage.** `fg367-branch-evidence.integration.test.ts` patches the CommonJS `child_process.execFileSync` namespace property, but the codebase calls git via NAMED `import { execFileSync }` (collect.ts:1, worktree-lifecycle.ts:20), whose bindings are fixed at import time and are NOT intercepted by the namespace patch. So a future `execFileSync("git", ["push", ...])` via a named import would NOT fail the test. Fix: make the guard genuinely catch a named-import git push (e.g. a source-level static assertion that no campaign/dispatch/git module invokes `git push`, or a real injectable git-exec seam), or honestly re-scope the test claim. Prefer a guard that actually fails when a push is added.
