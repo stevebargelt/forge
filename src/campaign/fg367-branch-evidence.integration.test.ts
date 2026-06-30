@@ -10,12 +10,60 @@ import {
   approveCampaign,
 } from "../store/campaigns.js";
 import { insertTask, setTaskWorktreePath } from "../store/tasks.js";
+import { insertRun, updateRunStatus } from "../store/runs.js";
+import { insertVerdict } from "../store/verdicts.js";
 import { writeTicket } from "../backlog/structured.js";
 import { planCampaign } from "./planner.js";
-import { startCampaign } from "./executor.js";
+import { startCampaign, setExecutorDoneAuditMapForTest } from "./executor.js";
 import { assembleCampaignReport, setDoneAuditMapForTest, renderCampaignReportHuman } from "./report.js";
-import { nowIso } from "../util/ids.js";
-import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
+import { nowIso, newRunId } from "../util/ids.js";
+import type { Workflow } from "../v2/schema.js";
+import type { LoadContext } from "../v2/loader.js";
+import type { StartRunArgs } from "../v2/startRun.js";
+import type { RunNextResult } from "../v2/runNext.js";
+
+// Builds workflow-path stubs that simulate a completed run for branch-evidence tests.
+// runNextFn inserts a task (optionally with worktreePath) and a passing verdict,
+// then marks the run complete so driveWorkflowItem exits and branch evidence can be
+// recorded. This exercises the real workflow dispatch path in executor.ts without
+// needing a workflow YAML on disk or running containers.
+function makeWorkflowStubs(taskId: string, worktreePath?: string): {
+  loadWorkflowFn: (name: string, ctx: LoadContext) => Workflow;
+  startRunFn: (args: StartRunArgs) => { runId: string };
+  runNextFn: (args: { runId: string; workflow: Workflow }) => Promise<RunNextResult>;
+} {
+  return {
+    loadWorkflowFn: (_name: string, _ctx: LoadContext): Workflow =>
+      ({
+        name: "feature",
+        description: "stub",
+        inputs: [],
+        steps: [{ id: "build", agent: "engineer", gate: "none" as const, depends_on: [], reds: [], runtime: "claude", manual: false }],
+      }) as Workflow,
+    startRunFn: (args: StartRunArgs): { runId: string } => {
+      const runId = newRunId(args.title);
+      insertRun({ id: runId, workflow: args.workflow.name, title: args.title, status: "active", createdAt: nowIso(), projectDir: args.projectDir });
+      return { runId };
+    },
+    runNextFn: async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+      insertTask({
+        id: taskId,
+        runId,
+        phase: "build",
+        agentRole: "engineer",
+        status: "complete",
+        taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
+        createdAt: nowIso(),
+      });
+      if (worktreePath) {
+        setTaskWorktreePath(taskId, worktreePath);
+      }
+      insertVerdict({ id: `verdict-${taskId}`, taskId, redTaskId: taskId, redRole: "red-wide", verdict: "pass", confidence: 0.9, authority: "authoritative", findings: [], createdAt: nowIso() });
+      updateRunStatus(runId, "complete");
+      return { dispatchedSteps: [], completedSteps: ["build"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    },
+  };
+}
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -35,11 +83,15 @@ beforeEach(() => {
     body: "## Problem\nTest branch evidence.\n\n## Goal\nEvidence is captured.\n\n## Acceptance Criteria\n- Branch is recorded\n",
   });
 
-  // Inject an empty done-audit map so report tests don't need a real git repo
+  // Inject passing done-audit for both executor and report so tests don't need a real git repo
+  setExecutorDoneAuditMapForTest(new Map([
+    ["FG-200", { outcome: "pass" as const, checks: [], gaps: [], requestedAction: null }],
+  ]));
   setDoneAuditMapForTest(new Map());
 });
 
 afterEach(() => {
+  setExecutorDoneAuditMapForTest(null);
   setDoneAuditMapForTest(null);
   setDbForTest(prev as DatabaseInstance);
   db.close();
@@ -58,23 +110,7 @@ function planAndApproveCampaign() {
 test("worktree run: executor writes branch and worktreePath to campaign item", async () => {
   const campaign = planAndApproveCampaign();
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-    const runId = args.runId!;
-    const taskId = "task-build-wt001";
-    insertTask({
-      id: taskId,
-      runId,
-      phase: "build",
-      agentRole: "engineer",
-      status: "complete",
-      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-      createdAt: nowIso(),
-    });
-    setTaskWorktreePath(taskId, "/tmp/fake-wt");
-    return { status: "complete", runId, taskId };
-  };
-
-  await startCampaign(campaign.id, { dispatch });
+  await startCampaign(campaign.id, makeWorkflowStubs("task-build-wt001", "/tmp/fake-wt"));
 
   const items = listCampaignItems(campaign.id);
   assert.equal(items.length, 1);
@@ -88,23 +124,8 @@ test("worktree run: executor writes branch and worktreePath to campaign item", a
 test("non-worktree run: executor leaves branch and worktreePath null", async () => {
   const campaign = planAndApproveCampaign();
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-    const runId = args.runId!;
-    const taskId = "task-build-nowt001";
-    insertTask({
-      id: taskId,
-      runId,
-      phase: "build",
-      agentRole: "engineer",
-      status: "complete",
-      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-      createdAt: nowIso(),
-    });
-    // No setTaskWorktreePath call — simulates a non-worktree run
-    return { status: "complete", runId, taskId };
-  };
-
-  await startCampaign(campaign.id, { dispatch });
+  // No worktreePath argument — simulates a run whose task has no worktree
+  await startCampaign(campaign.id, makeWorkflowStubs("task-build-nowt001"));
 
   const items = listCampaignItems(campaign.id);
   assert.equal(items.length, 1);
@@ -116,23 +137,7 @@ test("non-worktree run: executor leaves branch and worktreePath null", async () 
 test("assembleCampaignReport JSON includes populated branch and worktreePath", async () => {
   const campaign = planAndApproveCampaign();
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-    const runId = args.runId!;
-    const taskId = "task-build-wt002";
-    insertTask({
-      id: taskId,
-      runId,
-      phase: "build",
-      agentRole: "engineer",
-      status: "complete",
-      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-      createdAt: nowIso(),
-    });
-    setTaskWorktreePath(taskId, "/tmp/fake-wt-report");
-    return { status: "complete", runId, taskId };
-  };
-
-  await startCampaign(campaign.id, { dispatch });
+  await startCampaign(campaign.id, makeWorkflowStubs("task-build-wt002", "/tmp/fake-wt-report"));
 
   const report = assembleCampaignReport(campaign.id)!;
   assert.ok(report, "report must not be null");
@@ -147,23 +152,7 @@ test("assembleCampaignReport JSON includes populated branch and worktreePath", a
 test("human render emits branch and worktreePath lines", async () => {
   const campaign = planAndApproveCampaign();
 
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-    const runId = args.runId!;
-    const taskId = "task-build-wt003";
-    insertTask({
-      id: taskId,
-      runId,
-      phase: "build",
-      agentRole: "engineer",
-      status: "complete",
-      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-      createdAt: nowIso(),
-    });
-    setTaskWorktreePath(taskId, "/tmp/fake-wt-render");
-    return { status: "complete", runId, taskId };
-  };
-
-  await startCampaign(campaign.id, { dispatch });
+  await startCampaign(campaign.id, makeWorkflowStubs("task-build-wt003", "/tmp/fake-wt-render"));
 
   const report = assembleCampaignReport(campaign.id)!;
   assert.ok(report, "report must not be null");
@@ -213,22 +202,7 @@ test("no git push or PR command invoked during campaign dispatch", async () => {
 
   // Runtime: confirm prUrl is never set and branch stays local
   const campaign = planAndApproveCampaign();
-  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
-    const runId = args.runId!;
-    const taskId = "task-build-nopush001";
-    insertTask({
-      id: taskId,
-      runId,
-      phase: "build",
-      agentRole: "engineer",
-      status: "complete",
-      taskPackage: { taskId, runId, phase: "build", role: "engineer", inputs: { task: "test" }, composedSystemPrompt: "" },
-      createdAt: nowIso(),
-    });
-    return { status: "complete", runId, taskId };
-  };
-
-  const result = await startCampaign(campaign.id, { dispatch });
+  const result = await startCampaign(campaign.id, makeWorkflowStubs("task-build-nopush001"));
   assert.equal(result.stopReason, "complete", "campaign must complete normally");
 
   const items = listCampaignItems(campaign.id);

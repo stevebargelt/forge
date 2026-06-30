@@ -279,7 +279,7 @@ export async function gate(
   return { task: getTask(taskId)!, nextTasks };
 }
 
-function findStep(workflow: Workflow, stepId: string): Step | undefined {
+export function findStep(workflow: Workflow, stepId: string): Step | undefined {
   return workflow.steps.find((s) => s.id === stepId);
 }
 

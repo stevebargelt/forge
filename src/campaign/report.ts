@@ -2,6 +2,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getCampaign, listCampaignItems } from "../store/campaigns.js";
+import { getRun } from "../store/runs.js";
+import { tasksForRun } from "../store/tasks.js";
+import { verdictsForRun } from "../store/verdicts.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
 import { evaluateReadiness } from "../readiness/readiness.js";
 import type { ReadinessResult } from "../readiness/readiness.js";
@@ -21,6 +24,44 @@ import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
 import { campaignBlocker } from "./executor.js";
+
+// Local — not exported; flows through DB as a plain string, never as a TS import
+type ItemExecutionMode = "workflow" | "invoke";
+
+type ItemExecutionConfig = {
+  executionMode: ItemExecutionMode;
+  workflowName: string;
+  agentRole: string | undefined;
+};
+
+function getItemExecutionConfig(
+  planContent: Record<string, unknown> | undefined,
+  ticketId: string
+): ItemExecutionConfig {
+  const DEFAULT: ItemExecutionConfig = { executionMode: "workflow", workflowName: "feature", agentRole: undefined };
+  if (!planContent) return DEFAULT;
+
+  // Step 1 (planner.ts) adds executionMode/workflowName per item in canonicalContent.
+  // Try orderedItems array first (most likely shape), then fall back to defaults.
+  const orderedItems = planContent["orderedItems"];
+  if (Array.isArray(orderedItems)) {
+    const found = (orderedItems as unknown[]).find(
+      (it) => typeof it === "object" && it !== null && (it as Record<string, unknown>)["ticketId"] === ticketId
+    ) as Record<string, unknown> | undefined;
+    if (found) {
+      const rawMode = found["executionMode"];
+      const mode: ItemExecutionMode = rawMode === "invoke" ? "invoke" : "workflow";
+      if (mode === "invoke") {
+        const ar = found["agentRole"];
+        return { executionMode: "invoke", workflowName: "", agentRole: typeof ar === "string" ? ar : undefined };
+      }
+      const wf = found["workflowName"];
+      return { executionMode: "workflow", workflowName: typeof wf === "string" ? wf : "feature", agentRole: undefined };
+    }
+  }
+
+  return DEFAULT;
+}
 
 function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
   const kind = sourceInput["kind"] as string;
@@ -103,6 +144,8 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
     if (intent === "start") return "start";
     const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+    const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
+    if (gateParkedItem?.requestedHumanAction) return gateParkedItem.requestedHumanAction;
     const readinessHeld = items.find((i) => i.outcome === "held" && i.blockerKind === "readiness");
     if (readinessHeld) return `refine ${readinessHeld.ticketId} then resume`;
     return "resume";
@@ -208,6 +251,9 @@ function computeNextOperatorAction(
     if (blockedItem) {
       return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
     }
+    // Parked at a human gate or red block: surface the specific gate/block action.
+    const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
+    if (gateParkedItem?.requestedHumanAction) return gateParkedItem.requestedHumanAction;
     // Blockers resolved but held items remain: resume will reconsider them.
     const heldItems = items.filter((i) => i.outcome === "held");
     if (heldItems.length > 0) {
@@ -319,6 +365,20 @@ export function assembleCampaignShow(id: string): ShowResult | null {
   };
 }
 
+export type TaskSummary = {
+  phase: string;
+  agentRole: string;
+  status: string;
+};
+
+export type VerdictSummary = {
+  taskId: string;
+  phase: string;
+  verdict: string;
+  authority: string;
+  findingsCount: number;
+};
+
 export type ReportItemRow = ShowItemRow & {
   branch: string | null;
   worktreePath: string | null;
@@ -328,6 +388,12 @@ export type ReportItemRow = ShowItemRow & {
   doneAuditState: DoneAuditResult | null;
   hostVerificationDetail: string | null;
   reviewerResult: null;
+  // Workflow execution traceability (FG-423)
+  executionMode: string;
+  workflowName: string | null;
+  agentRole: string | null;
+  taskSummaries: TaskSummary[];
+  verdictSummaries: VerdictSummary[];
 };
 
 export type ReportGroupings = {
@@ -423,27 +489,74 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       ? String(campaign.metadata["goal"])
       : null;
 
-  const itemRows: ReportItemRow[] = items.map((i) => ({
-    ticketId: i.ticketId,
-    title: titleMap.get(i.ticketId) ?? null,
-    lifecycleStatus: i.lifecycleStatus,
-    outcome: i.outcome ?? null,
-    blockerKind: i.blockerKind ?? null,
-    continuePolicy: i.continuePolicy ?? null,
-    runId: i.runId ?? null,
-    reason: i.reason ?? null,
-    requestedHumanAction: i.requestedHumanAction ?? null,
-    readiness: readinessMap.get(i.ticketId) ?? null,
-    branch: i.branch ?? null,
-    worktreePath: i.worktreePath ?? null,
-    prUrl: null,
-    commit: commitMap.get(i.ticketId) ?? null,
-    verificationState: null,
-    doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
-    hostVerificationDetail:
-      doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
-    reviewerResult: null,
-  }));
+  const planContent = campaign.metadata?.["planContent"] as Record<string, unknown> | undefined;
+
+  const itemRows: ReportItemRow[] = items.map((i) => {
+    const execConfig = getItemExecutionConfig(planContent, i.ticketId);
+    const executionMode = execConfig.executionMode === "invoke" ? "invoke (escape hatch)" : "workflow";
+    const agentRole = execConfig.executionMode === "invoke" ? (execConfig.agentRole ?? null) : null;
+
+    let workflowName: string | null = execConfig.executionMode === "workflow" ? execConfig.workflowName : null;
+    let taskSummaries: TaskSummary[] = [];
+    let verdictSummaries: VerdictSummary[] = [];
+
+    if (i.runId) {
+      // workflowName from run record is authoritative over canonicalContent
+      try {
+        const run = getRun(i.runId);
+        if (run && execConfig.executionMode === "workflow") {
+          workflowName = run.workflow;
+        }
+      } catch {
+        // best-effort — log omit, leave workflowName from canonicalContent
+      }
+
+      // Task and verdict summaries — follow best-effort pattern from doneAuditState
+      try {
+        const tasks = tasksForRun(i.runId);
+        taskSummaries = tasks.map((t) => ({ phase: t.phase, agentRole: t.agentRole, status: t.status }));
+
+        const taskPhaseMap = new Map(tasks.map((t) => [t.id, t.phase]));
+        const verdicts = verdictsForRun(i.runId);
+        verdictSummaries = verdicts.map((v) => ({
+          taskId: v.taskId,
+          phase: taskPhaseMap.get(v.taskId) ?? "",
+          verdict: v.verdict,
+          authority: v.authority,
+          findingsCount: v.findings.length,
+        }));
+      } catch {
+        // best-effort — leave summaries empty if run record not yet present
+      }
+    }
+
+    return {
+      ticketId: i.ticketId,
+      title: titleMap.get(i.ticketId) ?? null,
+      lifecycleStatus: i.lifecycleStatus,
+      outcome: i.outcome ?? null,
+      blockerKind: i.blockerKind ?? null,
+      continuePolicy: i.continuePolicy ?? null,
+      runId: i.runId ?? null,
+      reason: i.reason ?? null,
+      requestedHumanAction: i.requestedHumanAction ?? null,
+      readiness: readinessMap.get(i.ticketId) ?? null,
+      branch: i.branch ?? null,
+      worktreePath: i.worktreePath ?? null,
+      prUrl: null,
+      commit: commitMap.get(i.ticketId) ?? null,
+      verificationState: null,
+      doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
+      hostVerificationDetail:
+        doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
+      reviewerResult: null,
+      executionMode,
+      workflowName,
+      agentRole,
+      taskSummaries,
+      verdictSummaries,
+    };
+  });
 
   const groupings: ReportGroupings = {
     shipped: items.filter((i) => i.outcome === "shipped").map((i) => i.ticketId),
@@ -511,6 +624,23 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
       if (item.doneAuditState.outcome !== "pass") {
         if (item.doneAuditState.gaps.length > 0) lines.push(`    audit-gaps: ${item.doneAuditState.gaps.join("; ")}`);
         if (item.doneAuditState.requestedAction) lines.push(`    audit-action: ${item.doneAuditState.requestedAction}`);
+      }
+    }
+    // Execution mode and workflow traceability
+    if (item.executionMode === "invoke (escape hatch)") {
+      lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);
+    } else {
+      const wfLabel = item.workflowName ? ` [workflow=${item.workflowName}]` : "";
+      lines.push(`    execution: workflow${wfLabel}`);
+      if (item.taskSummaries.length > 0) {
+        const taskStr = item.taskSummaries.map((t) => `${t.phase}(${t.status})`).join(", ");
+        lines.push(`    tasks: ${taskStr}`);
+      }
+      if (item.verdictSummaries.length > 0) {
+        const vStr = item.verdictSummaries
+          .map((v) => `${v.verdict}/${v.authority}${v.findingsCount > 0 ? ` (${v.findingsCount} finding${v.findingsCount === 1 ? "" : "s"})` : ""}`)
+          .join(", ");
+        lines.push(`    verdicts: ${vStr}`);
       }
     }
   }

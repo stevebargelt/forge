@@ -13,13 +13,31 @@ import type { StructuredTicket } from "../backlog/structured.js";
 export type PlanMode = "dry_run" | "pilot" | "sequential";
 export type PlannerRecommendation = "sequential" | "held" | "needs_refinement" | "later_parallel_candidate";
 
-export type ExplicitListInput = { kind: "list"; ticketIds: string[] };
-export type EpicInput = { kind: "epic"; epicId: string };
+// Local alias — NOT exported; consumers read executionMode as a string from canonicalContent JSON.
+type ItemExecutionMode = "workflow" | "invoke";
+
+// Local type — NOT exported.
+type CanonicalItemEntry = {
+  ticketId: string;
+  executionMode: ItemExecutionMode;
+  workflowName?: string;
+  agentRole?: string;
+};
+
+// Per-item override for the execution mode escape hatch. Use executionMode:'invoke' only
+// with an explicit agentRole; omitting it is a validation error in resolvePlan.
+export type ItemModeOverride =
+  | { executionMode: "workflow"; workflowName?: string }
+  | { executionMode: "invoke"; agentRole: string };
+
+export type ExplicitListInput = { kind: "list"; ticketIds: string[]; itemOverrides?: Record<string, ItemModeOverride> };
+export type EpicInput = { kind: "epic"; epicId: string; itemOverrides?: Record<string, ItemModeOverride> };
 export type MixedInput = {
   kind: "mixed";
   epicId: string;
   additions?: string[];
   exclusions?: string[];
+  itemOverrides?: Record<string, ItemModeOverride>;
 };
 
 export type PlannerInput = ExplicitListInput | EpicInput | MixedInput;
@@ -31,6 +49,7 @@ export type CanonicalPlanContent = {
   dependencyDecisions: Record<string, unknown>;
   itemRecommendations: Record<string, PlannerRecommendation>;
   mode: string;
+  orderedItems?: CanonicalItemEntry[];
   plannerAssumptions: string[];
   readinessGateAvailability: string;
   resolvedItemIds: string[];
@@ -167,13 +186,17 @@ function resolveMixed(
 }
 
 function buildNormalizedSourceInput(input: PlannerInput): Record<string, unknown> {
-  if (input.kind === "list") return { kind: "list", ticketIds: [...input.ticketIds] };
-  if (input.kind === "epic") return { kind: "epic", epicId: input.epicId };
+  const overrides = input.itemOverrides && Object.keys(input.itemOverrides).length > 0
+    ? { itemOverrides: input.itemOverrides }
+    : {};
+  if (input.kind === "list") return { kind: "list", ticketIds: [...input.ticketIds], ...overrides };
+  if (input.kind === "epic") return { kind: "epic", epicId: input.epicId, ...overrides };
   return {
     kind: "mixed",
     epicId: input.epicId,
     additions: [...(input.additions ?? [])],
     exclusions: [...(input.exclusions ?? [])],
+    ...overrides,
   };
 }
 
@@ -227,6 +250,28 @@ export function resolvePlan(
     itemRecommendations[id] = "sequential";
   }
 
+  // Build per-item execution mode entries. Default is workflow/feature; per-item overrides
+  // require an explicit opt-in. Invoke mode is an escape hatch and must name an agentRole.
+  const overrides = input.itemOverrides ?? {};
+  const invokeWithoutRole = Object.entries(overrides).filter(
+    ([, ov]) => ov.executionMode === "invoke" && !("agentRole" in ov && (ov as { agentRole?: string }).agentRole)
+  );
+  if (invokeWithoutRole.length > 0) {
+    throw new Error(
+      `executionMode='invoke' requires an explicit agentRole for: ${invokeWithoutRole.map(([id]) => id).join(", ")}`
+    );
+  }
+
+  const orderedItems: CanonicalItemEntry[] = resolvedIds.map((ticketId) => {
+    const ov = overrides[ticketId];
+    if (ov && ov.executionMode === "invoke") {
+      return { ticketId, executionMode: "invoke", agentRole: ov.agentRole };
+    }
+    const workflowName =
+      ov && ov.executionMode === "workflow" && ov.workflowName ? ov.workflowName : "feature";
+    return { ticketId, executionMode: "workflow", workflowName };
+  });
+
   const canonicalContent: CanonicalPlanContent = {
     advisoryAgentsUsed: false,
     advisoryRecommendationSummary: null,
@@ -234,6 +279,7 @@ export function resolvePlan(
     dependencyDecisions: {},
     itemRecommendations,
     mode,
+    orderedItems,
     plannerAssumptions: [
       "items executed sequentially unless mode overridden",
       "readiness preflight skipped (FG-382 unavailable)",

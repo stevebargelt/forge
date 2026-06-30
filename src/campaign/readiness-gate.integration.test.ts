@@ -11,10 +11,26 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { getCampaign, approveCampaign } from "../store/campaigns.js";
 import { writeTicket } from "../backlog/structured.js";
-import { planCampaign } from "./planner.js";
+import { planCampaign as _planCampaign } from "./planner.js";
+import type { PlannerInput, PlanMode } from "./planner.js";
 import { startCampaign, resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { assembleCampaignShow, assembleCampaignReport } from "./report.js";
+
+// Pin all campaigns to the invoke path so readiness-gate/hold/next-action logic
+// is exercised without needing workflow YAML or container infrastructure.
+// The readiness evaluator and hold/continue policy are shared across execution
+// modes; invoke is a valid and stable path for testing them (same approach used
+// in executor.test.ts).
+function planCampaign(input: PlannerInput, opts: { projectDir: string; mode?: PlanMode }) {
+  if (input.kind === "list" && !input.itemOverrides) {
+    const overrides = Object.fromEntries(
+      input.ticketIds.map((id) => [id, { executionMode: "invoke" as const, agentRole: "engineer" }])
+    );
+    return _planCampaign({ ...input, itemOverrides: overrides }, opts);
+  }
+  return _planCampaign(input, opts);
+}
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;

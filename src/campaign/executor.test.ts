@@ -16,10 +16,24 @@ import {
   setPlanHash,
 } from "../store/campaigns.js";
 import { writeTicket } from "../backlog/structured.js";
-import { planCampaign, computePlanHash, resolvePlan } from "./planner.js";
+import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
+import type { PlannerInput, PlanMode } from "./planner.js";
 import { startCampaign, resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
+
+// All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
+// The wrapper forces executionMode:'invoke' for every list-type campaign without
+// an explicit override so existing tests don't need per-call changes.
+function planCampaign(input: PlannerInput, opts: { projectDir: string; mode?: PlanMode }) {
+  if (input.kind === "list" && !input.itemOverrides) {
+    const overrides = Object.fromEntries(
+      input.ticketIds.map((id) => [id, { executionMode: "invoke" as const, agentRole: "engineer" }])
+    );
+    return _planCampaign({ ...input, itemOverrides: overrides }, opts);
+  }
+  return _planCampaign(input, opts);
+}
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
