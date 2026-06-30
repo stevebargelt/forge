@@ -1,9 +1,11 @@
 ---
 id: FG-418
 type: story
-status: active
+status: done
 title: Decide and wire default Shipping Reviewer adoption path
 created: 2026-06-30
+closed: 2026-06-30
+closed_commit: "9254168"
 ---
 
 ## Problem
