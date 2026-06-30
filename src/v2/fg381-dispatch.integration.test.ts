@@ -641,8 +641,8 @@ test(
         });
         result = { status: "complete", files_modified: [], commitSha: "cafebabe" };
       } else {
-        // shipping-reviewer returns a pass verdict (authoritative).
-        result = { status: "complete", verdict: "pass", confidence: 0.95, findings: [] };
+        // doneAuditDisposition needed: FG-555 is status:active so doneAudit.outcome=fail; without it FG-384 backstop downgrades ship→fail.
+        result = { status: "complete", verdict: "ship", doneAuditDisposition: "accepted_exception: contrast-case test fixture", confidence: 0.95, findings: [] };
       }
 
       writeFileSync(join(dir, "result.json"), JSON.stringify(result));

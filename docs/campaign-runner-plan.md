@@ -98,6 +98,7 @@ Dependencies:
   - `doneAudit` evidence in the packet
 - **FG-418**: wire the Shipping Reviewer into the default `feature` workflow (advisory: `authority: specialist`, `gate_on_verdict: false`) and fix the Reviewer Context Packet so the reviewer receives real engineer evidence (changed files, commit, verification commands, deferred scope, engineer summary) at review time; for the fanout build phase, evidence is aggregated from fanout child tasks.
 - **FG-419**: host-verification recorder for done-audit; records durable required-gate evidence, matches it by ticket, project, shipped commit, and gate, and keeps missing, stale, failed, or supporting-only host evidence conservative.
+- **FG-420**: promote the Shipping Reviewer from advisory to authoritative in the default `feature` workflow once FG-418/FG-419/FG-367 evidence is real; `needs_fix` blocks, `needs_human` requires explicit human handling, valid named deferrals can pass, and failing/unknown done-audit blocks unless an accepted exception is recorded.
 - **FG-367**: git-evidence surfacing for Forge-managed projects: `branch` and `worktreePath` recorded on campaign report items when a Forge-managed worktree is used (naming scheme `forge/{runId}/{taskId}`); `pushed` correctly resolves to unknown (not fail) when no remote is configured; no auto-push or auto-PR in v1. Policy documented in [Git discipline (v1)](concepts.md#git-discipline-v1).
 - **FG-376**: agent worktree dependency parity for real test execution.
 - **FG-357**: post-merge integration gate for merged worktree output.
@@ -106,7 +107,7 @@ Exit criteria:
 
 - readiness is checked before starting each campaign item;
 - done audit runs before item shipped claims;
-- Shipping Reviewer has the original ask, backlog context, implementation summary, verification commands, and review history;
+- Shipping Reviewer has the original ask, backlog context, implementation summary, verification commands, review history, done-audit evidence, and authoritative blocking authority in the default `feature` workflow;
 - Reviewer Context Packet shape, Shipping Reviewer verdict vocabulary, done-audit evidence, and fail-loud missing-context behavior are documented;
 - host verification requirements are explicit, recorded as durable required-gate evidence, and visible in reports;
 - missing, stale, failed, or supporting-only host evidence cannot satisfy shipped claims;

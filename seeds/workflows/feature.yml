@@ -108,8 +108,8 @@ steps:
         gate_on_verdict: true
       - agent: shipping-reviewer
         activity: fast-orchestrator
-        authority: specialist
-        gate_on_verdict: false
+        authority: authoritative
+        gate_on_verdict: true
 
   # ----- verify -----
   - id: verify

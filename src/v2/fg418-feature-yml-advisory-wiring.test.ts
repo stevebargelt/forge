@@ -64,7 +64,7 @@ test(
 );
 
 test(
-  "(fg418-yml-3) shipping-reviewer red has authority:specialist (anti-accidental-authoritative guard)",
+  "(fg418-yml-3) shipping-reviewer red has authority:authoritative (FG-420 promotion — prerequisites FG-418/FG-419/FG-367 are now real)",
   () => {
     const wf = loadWorkflow("feature");
     const buildStep = wf.steps.find((s) => s.id === "build");
@@ -76,14 +76,14 @@ test(
 
     assert.equal(
       shippingReviewerRed!.authority,
-      "specialist",
-      "shipping-reviewer authority must be 'specialist' — flipping to 'authoritative' would block all builds while host_verification is unknown",
+      "authoritative",
+      "shipping-reviewer authority must be 'authoritative' after FG-420 promotion — reverting to 'specialist' would silently drop blocking coverage",
     );
   },
 );
 
 test(
-  "(fg418-yml-4) shipping-reviewer red has gate_on_verdict:false (advisory — must not block the build gate)",
+  "(fg418-yml-4) shipping-reviewer red has gate_on_verdict:true (FG-420 promotion — needs_fix must block the build gate)",
   () => {
     const wf = loadWorkflow("feature");
     const buildStep = wf.steps.find((s) => s.id === "build");
@@ -95,8 +95,8 @@ test(
 
     assert.equal(
       shippingReviewerRed!.gate_on_verdict,
-      false,
-      "shipping-reviewer gate_on_verdict must be false — a true here would block the build gate on every reviewer fail",
+      true,
+      "shipping-reviewer gate_on_verdict must be true after FG-420 promotion — reverting to false would silently allow needs_fix to advance past the build gate",
     );
   },
 );

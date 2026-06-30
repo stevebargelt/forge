@@ -74,7 +74,7 @@ Example: the research-synthesis workflow has four steps — `frame`, `research-p
 
 ## Gate
 
-A decision point at the end of a phase. Three kinds: `human` (waits for `forge gate <task-id> advance`), `verdict` (passes if all reds pass; fails on any authoritative-red fail), and `auto` (advances on completion with no human input).
+A decision point at the end of a phase. Three kinds: `human` (waits for `forge gate <task-id> advance`), `verdict` (passes if all reds pass; blocks on any authoritative-red fail; an authoritative shipping-reviewer that returns inconclusive also blocks — see [Blocked by red](#blocked-by-red)), and `auto` (advances on completion with no human input).
 
 Example: the `frame` phase has a `human` gate. After framer completes, the run parks at `awaiting_gate` until `forge gate task-frame-f68eb8 advance` runs.
 
@@ -118,7 +118,12 @@ Example: `atlas-stack-rn.md` is a force-level constraint that locks the frontend
 
 ## Blocked by red
 
-A status that means: a red came back authoritative-fail and the phase had `gateOnVerdict: true`. The CLI surfaces a `BLOCKED` state with the red's findings; the human cannot advance through the normal gate. Override requires `forge gate <task-id> advance --force --rationale "..."`.
+A task status signaling that a phase cannot advance without explicit human override. Two conditions set it:
+
+1. **Authoritative-fail**: an authoritative red returned `fail` and the phase had `gate_on_verdict: true`.
+2. **Shipping-reviewer inconclusive (FG-420)**: the authoritative shipping-reviewer returned `inconclusive` — from a `needs_human` verdict, an unrecognized verdict field, or a reviewer that failed to produce a verdict (pre-fail on required missing context). Forge persists a synthetic high-severity human-decision finding so the block reason is durable in the verdict record.
+
+The CLI surfaces a `BLOCKED` state with the red's findings; the human cannot advance through the normal gate. Override requires `forge gate <task-id> advance --force --rationale "..."`. The shipping-reviewer inconclusive block is applied during red ingestion (not by the gate.ts aggregation, which is unchanged) and can only be resolved via explicit operator override.
 
 Example: a build phase whose red detected a stack violation would set the build task to `blocked_by_red` automatically.
 
@@ -261,9 +266,9 @@ forge record-host-verification \
 
 An acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation.
 
-**Default-workflow adoption (FG-418).** The `feature` workflow's `build` phase now lists `shipping-reviewer` in its reds as advisory: `authority: specialist`, `gate_on_verdict: false`. It runs on every `feature` build — it warns, it does not block the gate. Advisory is the deliberate conservative first adoption. Promotion to authoritative (`authority: authoritative`, `gate_on_verdict: true`) is a separate ticket — the host-verification recorder now ships (see [Recording host-verification evidence](#recording-host-verification-evidence) above), but the reviewer's authority is not changed by FG-419. Other workflows still do not list `shipping-reviewer` in their reds.
+**Default-workflow adoption (FG-418 → FG-420).** The `feature` workflow's `build` phase lists `shipping-reviewer` as `authority: authoritative`, `gate_on_verdict: true`. It runs on every `feature` build and its verdict gates the phase: a `needs_fix` or an inconclusive result (`needs_human`, an unrecognized verdict, or a reviewer that failed to produce a verdict) blocks the gate (`blocked_by_red`); a clean `ship` or a fully-linked `ship_with_named_deferrals` advances it. FG-418 introduced the wiring as advisory (`authority: specialist`, `gate_on_verdict: false`); FG-420 promoted it to authoritative once FG-419 host-verification evidence and FG-367 git/push truth were real prerequisites. Other workflows still do not list `shipping-reviewer` in their reds.
 
-FG-381, FG-383, FG-384, and FG-418 shipped the role, the Reviewer Context Packet, the verdict-mapping, and the default-workflow wiring.
+FG-381, FG-383, FG-384, FG-418, and FG-420 shipped the role, the Reviewer Context Packet, the verdict-mapping, the default-workflow wiring, and the authoritative promotion.
 
 ### Reviewer Context Packet
 
@@ -356,6 +361,7 @@ To prevent this from silently neutralizing a legitimate block, the mapper uncond
 - **`needs_fix` path**: a synthetic high-severity finding anchors the fail so it survives `gradeFindings` even when the agent returned no findings or only malformed ones.
 - **Invalid-deferral path**: a synthetic finding records the specific deferral violation (`ship_with_named_deferrals` with a missing `description` or `followUpTicketId`).
 - **Guardrail backstop path**: a synthetic finding records the done-audit outcome and disposition that triggered the downgrade.
+- **Authoritative `needs_human` / unrecognized path (FG-420)**: when the shipping-reviewer runs as `authority: authoritative` with `gate_on_verdict: true` and the mapped verdict is `inconclusive` (from `needs_human` or an unrecognized verdict field), a synthetic high-severity finding is prepended before the verdict is persisted. The stored verdict remains `inconclusive` — distinguishing a human-gate block from a genuine failure — but `authoritativeFail` is set, so the primary task transitions to `blocked_by_red`. The operator must run `forge gate --force --rationale` to override.
 
 Without this unconditional substantiation, a `needs_fix` from the Shipping Reviewer could silently neutralize to `inconclusive` if the agent's findings were absent or malformed — and the reviewer would fail to block.
 

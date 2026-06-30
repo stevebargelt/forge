@@ -732,6 +732,31 @@ async function dispatchReds(args: {
         },
       });
     }
+    // FG-420: authoritative shipping-reviewer inconclusive is a hard block.
+    // needs_human and unrecognized verdicts both map to inconclusive; under
+    // authoritative authority with gate_on_verdict, they must not silently advance.
+    // Prepend synthetic finding BEFORE insertVerdict so it is persisted to the DB.
+    let shippingReviewerInconclusiveBlock = false;
+    if (
+      r.red.agent === "shipping-reviewer" &&
+      r.red.authority === "authoritative" &&
+      r.red.gate_on_verdict &&
+      finalVerdict.verdict === "inconclusive"
+    ) {
+      shippingReviewerInconclusiveBlock = true;
+      finalVerdict = {
+        ...finalVerdict,
+        findings: [
+          {
+            severity: "high",
+            summary: "shipping-reviewer did not return a shippable verdict — this authoritative gate is blocked pending human review",
+            evidence: "shipping-reviewer verdict is inconclusive (needs_human, an unrecognized verdict, or the reviewer failed to produce a result) under authoritative authority",
+            hypothesis: "operator must run forge gate --force --rationale to explicitly override this block",
+          },
+          ...finalVerdict.findings,
+        ],
+      };
+    }
     verdicts.push(finalVerdict);
     insertVerdict({
       id: newVerdictId(),
@@ -751,6 +776,10 @@ async function dispatchReds(args: {
     });
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
     if (r.red.authority === "authoritative" && r.red.gate_on_verdict && finalVerdict.verdict === "fail") {
+      authoritativeFail = true;
+    }
+    // FG-420: authoritative shipping-reviewer inconclusive (needs_human / unrecognized) also blocks.
+    if (shippingReviewerInconclusiveBlock) {
       authoritativeFail = true;
     }
   }
@@ -887,7 +916,9 @@ async function runOneRed(args: {
   if (result.kind === "failed") {
     // A red that fails to produce a verdict counts as inconclusive — don't let
     // a broken container block the gate. runContainer already marked the task
-    // failed.
+    // failed. FG-420 EXCEPTION: an authoritative shipping-reviewer that crashed
+    // still triggers authoritativeFail (fail-safe) — dispatchReds detects the
+    // inconclusive and blocks. Other reds' broken-container inconclusive is non-blocking.
     return {
       red: args.red,
       redTaskId,

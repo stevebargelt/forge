@@ -75,7 +75,7 @@ learnings/          ADRs and patterns for forge itself
 
 ## What not to touch without a learnings entry
 
-- The state-machine status values in `tasks.status` (`pending|running|awaiting_gate|awaiting_human_input|awaiting_red|complete|failed|blocked_by_red`). Adding a new status is a schema change and an ADR.
+- The state-machine status values in `tasks.status` (`pending|running|awaiting_gate|awaiting_red|complete|failed|blocked_by_red`). Adding a new status is a schema change and an ADR.
 - The verdict aggregation rule in `gate.ts`: pass if all reds pass; fail if any authoritative; inconclusive otherwise. Specialist fails warn but don't block without rationale.
 - The Docker invocation pattern in `spawn.ts`. Read DEC-004 (orchestrator on host, agents in containers), DEC-005 (Ubuntu base), DEC-006 (OAuth file mount), DEC-009 (UID 1000) before changing any of it.
 - **Don't add a designer agent that runs Pencil headlessly.** FORGE-DEC-014 documents three independent reasons this fails in Pencil 0.2.5. Design runs via `forge design` — a tracked host-side session the user drives interactively with Pencil MCP. Revisit only if Pencil ships auto-save AND a headless persistence path.
