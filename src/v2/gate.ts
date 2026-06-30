@@ -81,6 +81,11 @@ export async function gate(
       `Task ${taskId} is blocked_by_red. Re-run with --force --rationale "..." to override.`,
     );
   }
+  if (blocked && opts.force && (!rationale || rationale.trim() === "")) {
+    throw new Error(
+      `Cannot force-advance blocked_by_red task ${taskId}: --rationale is required (it is the human decision record).`,
+    );
+  }
   if (task.status !== "awaiting_gate" && !blocked) {
     throw new Error(
       `Task ${taskId} is in status '${task.status}', not awaiting_gate. Cannot gate.`,

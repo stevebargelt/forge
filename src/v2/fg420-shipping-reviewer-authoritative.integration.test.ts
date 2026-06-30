@@ -29,6 +29,7 @@ import { runNext } from "./runNext.js";
 import { gate } from "./gate.js";
 import type { DockerExecFn } from "./runNext.js";
 import type { Workflow } from "./schema.js";
+import { gatesForTask } from "../store/gates.js";
 
 // ─── Workflow fixture ─────────────────────────────────────────────────────────
 
@@ -76,6 +77,7 @@ beforeEach(() => {
   }
   process.env.ANTHROPIC_API_KEY = "sk-stub";
   ensureRuntime("fg420-dispatch-test");
+  ensureWorkflow("fg420-dispatch-test");
 });
 
 afterEach(() => {
@@ -127,6 +129,30 @@ container:
   remove_on_exit: true
 result:
   file: /task/result.json
+`,
+  );
+}
+
+function ensureWorkflow(name: string): void {
+  const forgeHome = process.env.FORGE_HOME!;
+  const workflowPath = join(forgeHome, "workflows", `${name}.yml`);
+  mkdirSync(dirname(workflowPath), { recursive: true });
+  writeFileSync(
+    workflowPath,
+    `name: ${name}
+description: FG-420 dispatch test workflow stub
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: ${name}
+    reds:
+      - agent: shipping-reviewer
+        authority: authoritative
+        gate_on_verdict: true
 `,
   );
 }
@@ -703,6 +729,131 @@ test(
         return true;
       },
       "gate() without --force on a blocked_by_red task must throw",
+    );
+  },
+);
+
+// ─── (fg420-8) force-advance without rationale → throws, no gate row ─────────
+
+test(
+  "(fg420-8) gate() --force on blocked_by_red task WITHOUT rationale throws and writes no gate row",
+  async () => {
+    const projectDir = makeTmpDir();
+    writeStructuredTicket(projectDir, {
+      id: "FG-T420-8",
+      title: "FG-420 test 8 force no rationale",
+      body: "## Acceptance Criteria\n\n- Force rationale required\n\n",
+    });
+
+    const { runId } = startRun({
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      title: "fg420-8 force without rationale",
+      inputs: { ticketId: "FG-T420-8" },
+      projectDir,
+    });
+
+    const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = taskIdFromDockerArgs(args);
+      const dir = dirname(stdoutPath);
+      mkdirSync(dir, { recursive: true });
+      let result: unknown;
+      if (taskId.startsWith("task-build-")) {
+        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+      } else {
+        result = { status: "complete", verdict: "needs_human", confidence: 0.5, findings: [] };
+      }
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    await runNext({ runId, workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER, dockerExec: exec });
+
+    const tasks = tasksForRun(runId);
+    const primaryTask = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
+    assert.equal(primaryTask!.status, "blocked_by_red", "primary must be blocked_by_red before test");
+
+    const gatesBefore = gatesForTask(primaryTask!.id);
+
+    await assert.rejects(
+      gate(primaryTask!.id, "advance", undefined, { force: true }),
+      (err: unknown) => {
+        assert.ok(err instanceof Error, "gate() must throw an Error");
+        assert.ok(
+          err.message.includes("--rationale is required"),
+          `error must mention --rationale is required; got: ${err.message}`,
+        );
+        return true;
+      },
+      "gate() --force without rationale on blocked_by_red must throw",
+    );
+
+    const gatesAfter = gatesForTask(primaryTask!.id);
+    assert.equal(
+      gatesAfter.length,
+      gatesBefore.length,
+      "no gate row must be inserted when force-advance without rationale throws",
+    );
+  },
+);
+
+// ─── (fg420-9) force-advance with rationale → succeeds, gate row written ─────
+
+test(
+  "(fg420-9) gate() --force on blocked_by_red task WITH rationale succeeds and writes gate row with rationale",
+  async () => {
+    const projectDir = makeTmpDir();
+    writeStructuredTicket(projectDir, {
+      id: "FG-T420-9",
+      title: "FG-420 test 9 force with rationale",
+      body: "## Acceptance Criteria\n\n- Force with rationale succeeds\n\n",
+    });
+
+    const { runId } = startRun({
+      workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER,
+      title: "fg420-9 force with rationale",
+      inputs: { ticketId: "FG-T420-9" },
+      projectDir,
+    });
+
+    const exec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+      const taskId = taskIdFromDockerArgs(args);
+      const dir = dirname(stdoutPath);
+      mkdirSync(dir, { recursive: true });
+      let result: unknown;
+      if (taskId.startsWith("task-build-")) {
+        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+      } else {
+        result = { status: "complete", verdict: "needs_human", confidence: 0.5, findings: [] };
+      }
+      writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    await runNext({ runId, workflow: WORKFLOW_AUTH_SHIPPING_REVIEWER, dockerExec: exec });
+
+    const tasks = tasksForRun(runId);
+    const primaryTask = tasks.find((t) => t.agentRole === "engineer" && t.parentId === undefined);
+    assert.ok(primaryTask !== undefined, "primary engineer task must exist");
+    assert.equal(primaryTask!.status, "blocked_by_red", "primary must be blocked_by_red before test");
+
+    const HUMAN_RATIONALE = "Reviewed needs_human finding; ship approved by product owner.";
+    await gate(primaryTask!.id, "advance", HUMAN_RATIONALE, { force: true });
+
+    const gatesAfter = gatesForTask(primaryTask!.id);
+    assert.equal(gatesAfter.length, 1, "exactly one gate row must be written");
+    assert.equal(gatesAfter[0]!.rationale, HUMAN_RATIONALE, "gate row must carry the provided rationale");
+    assert.equal(gatesAfter[0]!.decision, "advance", "gate row decision must be advance");
+
+    const taskAfter = tasksForRun(runId).find((t) => t.id === primaryTask!.id);
+    assert.ok(taskAfter !== undefined, "task must still exist");
+    assert.ok(
+      taskAfter!.status === "complete" || taskAfter!.status === "pending",
+      `task must have advanced past blocked_by_red; got: ${taskAfter!.status}`,
     );
   },
 );
