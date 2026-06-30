@@ -1,10 +1,12 @@
 ---
 id: FG-423
 type: story
-status: active
+status: done
 title: Campaign items must execute workflows, not hardcoded engineer invoke
 epic: FG-370
 created: 2026-06-30
+closed: 2026-06-30
+closed_commit: 3c64075
 ---
 
 ## Problem
