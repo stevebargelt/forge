@@ -6,7 +6,7 @@ title: Promote Shipping Reviewer to authoritative in the default feature workflo
 epic: FG-372
 created: 2026-06-30
 closed: 2026-06-30
-closed_commit: "4484804"
+closed_commit: 9f60b53
 ---
 
 ## Problem
@@ -62,3 +62,7 @@ Constraints: no `gate.ts` aggregation change; do not modify `mapShippingReviewer
 Acceptance checks: `ship` passes · valid `ship_with_named_deferrals` passes · `needs_fix` blocks · `needs_human` blocks with a persisted human-decision finding · malformed verdict still fails safely (blocks) · force-advance remains the only operator override and requires rationale.
 
 Related: FG-372 (epic), FG-384, FG-418, FG-419, FG-367.
+
+## Reopened — force-override does not enforce a rationale (AC #6)
+
+Closed at 4484804 but reopened: AC #6 ("force-advance remains the only operator override AND requires rationale") and the decision ("the force rationale becomes the human decision record") are NOT enforced. In `src/v2/gate.ts`, the rationale-requiring checks are gated on `!opts.force` (the verdict re-check + specialist-rationale block), so a `--force` advance skips them entirely; the `blocked_by_red && !opts.force` guard never checks rationale. So `forge gate <task> advance --force` (no `--rationale`) overrides a `blocked_by_red` task with `rationale: undefined` — no human-decision record. The shipped fg420-6 tested only that force is REQUIRED, not that rationale is required. Fix: require a NON-EMPTY rationale when force-advancing a `blocked_by_red` task (the human decision record). Add tests: force without rationale on a blocked task is REJECTED; force WITH rationale succeeds. Keep gate.ts aggregation semantics unchanged (this is a force-path rationale guard, not an aggregation change).
