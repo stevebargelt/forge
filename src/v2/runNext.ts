@@ -617,7 +617,7 @@ async function dispatchReds(args: {
   let reviewerContextPacket: ReviewerContextPacket | undefined;
   let shippingReviewerPreFailed = false;
   if (shippingReviewerRed) {
-    const packet = assembleReviewerContextPacket(args.runId, args.primaryTaskId, args.projectDir);
+    const packet = assembleReviewerContextPacket(args.runId, args.primaryTaskId, args.projectDir, args.primaryResult);
     const requiredMissing = packet.missingContext.filter((m) => m.required);
     if (requiredMissing.length > 0) {
       const reviewerTaskId = newTaskId(`red-${args.step.id}`);

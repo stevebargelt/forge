@@ -226,7 +226,11 @@ Example: `forge campaign report camp-abc123 --json` — the `doneAuditState` fie
 
 ## Shipping Reviewer
 
-An opt-in acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation. It is **not** a universal done gate: no default workflow lists `shipping-reviewer` in its reds, so it only runs where a workflow has been explicitly wired to include it. FG-381, FG-383, and FG-384 shipped the role, the Reviewer Context Packet, and the verdict-mapping; the full surface is available and reachable in the dispatch path but opt-in per workflow, not enforced system-wide.
+An acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation.
+
+**Default-workflow adoption (FG-418).** The `feature` workflow's `build` phase now lists `shipping-reviewer` in its reds as advisory: `authority: specialist`, `gate_on_verdict: false`. It runs on every `feature` build — it warns, it does not block the gate. Advisory is the deliberate conservative first adoption: `host_verification` is always `unknown` for real items today (no host-verification recorder), so a gating reviewer would block all real work. Promotion to authoritative waits on a host-verification recorder or an explicit accepted-exception policy. Other workflows still do not list `shipping-reviewer` in their reds.
+
+FG-381, FG-383, FG-384, and FG-418 shipped the role, the Reviewer Context Packet, the verdict-mapping, and the default-workflow wiring.
 
 ### Reviewer Context Packet
 
@@ -249,6 +253,8 @@ Fields:
 | `doneAudit` | `DoneAuditResult` \| `null` | Mechanical done-audit result — see [`doneAudit` in the packet](#doneaudit-in-the-packet) below |
 | `missingContext` | `Array<{field, reason, required}>` | Gaps the reviewer should account for; entries with `required: true` block dispatch |
 
+**Engineer evidence at review time.** The `engineerSummary`, `git`, `verificationCommands`, and `deferredScope` fields populate at review time from the in-hand primary task result (FG-418) — previously they were hollow because the DB `task.result` is `null` until after reds have run. For a fanout `build` phase, the evidence is aggregated from the fanout child tasks: `git.changedFiles` is the union of all children's `files_modified`; `verificationCommands` and `deferredScope` are accumulated across all children; `engineerSummary` contains the array of child results; `git.commitSha` and `git.diffRange` are taken from the last completed child that provided them.
+
 **Pre-fail on required missing context.** If any `missingContext` entry has `required: true`, the shipping-reviewer task is pre-failed with a descriptive error and excluded from dispatch — no agent call is made. Currently `backlog` is the only required field. `operatorAsk` is non-required — its absence is surfaced to the agent but does not block dispatch.
 
 ### `doneAudit` in the packet
@@ -266,7 +272,7 @@ The Shipping Reviewer emits a **rich verdict** — distinct from the `pass / fai
 | Verdict | Meaning |
 |---|---|
 | `ship` | Every acceptance criterion is met in the production call path; no unresolved prior findings; done-audit is resolved or explicitly excepted in `doneAuditDisposition` |
-| `ship_with_named_deferrals` | Shippable except for explicitly deferred scope. Each entry in `named_deferrals` **must** have both a non-empty `description` and a non-empty `followUpTicketId` — an unlinked deferral is not a valid deferral; the mapper treats it as `needs_fix` |
+| `ship_with_named_deferrals` | Shippable except for explicitly deferred scope. `named_deferrals` **must** contain at least one entry, and every entry **must** have both a non-empty `description` and a non-empty `followUpTicketId` — an empty array or any unlinked deferral is not valid; the mapper treats it as `needs_fix` |
 | `needs_fix` | At least one required acceptance criterion is unmet in the production call path, or a prior request-changes finding is unresolved |
 | `needs_human` | The agent cannot decide: ambiguous requirement, conflicting operator intent, or missing context not resolved by the packet |
 
@@ -300,8 +306,8 @@ Full rich-verdict output contract (the agent seed):
 | Agent verdict | Maps to | Condition |
 |---|---|---|
 | `ship` | `pass` | Subject to guardrail backstop (see below) |
-| `ship_with_named_deferrals` | `pass` | Every `named_deferrals` entry has a non-empty `description` AND a non-empty `followUpTicketId` |
-| `ship_with_named_deferrals` | `fail` | Any deferral is missing `description` or `followUpTicketId` |
+| `ship_with_named_deferrals` | `pass` | `named_deferrals` has at least one entry AND every entry has a non-empty `description` AND a non-empty `followUpTicketId` |
+| `ship_with_named_deferrals` | `fail` | `named_deferrals` is empty, or any entry is missing `description` or `followUpTicketId` |
 | `needs_fix` | `fail` | Unconditionally |
 | `needs_human` | `inconclusive` | Unconditionally |
 | absent / unrecognized | `inconclusive` | Malformed or missing verdict field |

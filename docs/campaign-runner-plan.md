@@ -96,6 +96,7 @@ Dependencies:
   - Shipping Reviewer rich verdict vocabulary
   - Shipping Reviewer fail-loud / missing-context precondition
   - `doneAudit` evidence in the packet
+- **FG-418**: wire the Shipping Reviewer into the default `feature` workflow (advisory: `authority: specialist`, `gate_on_verdict: false`) and fix the Reviewer Context Packet so the reviewer receives real engineer evidence (changed files, commit, verification commands, deferred scope, engineer summary) at review time; for the fanout build phase, evidence is aggregated from fanout child tasks.
 - **FG-367**: branch, commit, push, and PR discipline for Forge-managed projects.
 - **FG-376**: agent worktree dependency parity for real test execution.
 - **FG-357**: post-merge integration gate for merged worktree output.

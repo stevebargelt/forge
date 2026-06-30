@@ -17,10 +17,15 @@ function extractSection(body: string, heading: string): string {
   return rest.slice(0, nextMatch ? nextMatch.index : rest.length).trim();
 }
 
+function hasFanoutChildren(r: unknown): boolean {
+  return typeof r === "object" && r !== null && Array.isArray((r as Record<string, unknown>)["children"]);
+}
+
 export function assembleReviewerContextPacket(
   runId: string,
   primaryTaskId: string,
   projectDir: string,
+  primaryResultOverride?: unknown,
 ): ReviewerContextPacket {
   const run = getRun(runId);
   if (!run) throw new Error(`assembleReviewerContextPacket: run not found: ${runId}`);
@@ -40,8 +45,6 @@ export function assembleReviewerContextPacket(
 
   const architectDecisions: unknown = architectTask?.result ?? null;
   const techLeadPlan: unknown = techLeadTask?.result ?? null;
-  const engineerSummary: unknown = primaryTask?.result ?? null;
-
   const missingContext: MissingContextItem[] = [];
   let backlogData: ReviewerContextPacket["backlog"] = null;
 
@@ -114,7 +117,52 @@ export function assembleReviewerContextPacket(
     (v) => v.taskId === primaryTaskId && v.redRole !== "shipping-reviewer",
   );
 
-  const engineerResult = (primaryTask?.result ?? {}) as Record<string, unknown>;
+  // Prefer the in-hand override over DB task.result (null at reds-dispatch time — FG-418).
+  const rawOverride = primaryResultOverride !== undefined ? primaryResultOverride : (primaryTask?.result ?? null);
+
+  let engineerSummary: unknown;
+  let engineerResult: Record<string, unknown>;
+
+  if (hasFanoutChildren(rawOverride)) {
+    // Fanout aggregate: extract reviewer evidence from child results, not the hollow parent.
+    const children = (rawOverride as { children: Array<{ index: number; status: string; childTaskId: string; result: unknown }> }).children;
+    engineerSummary = { children: children.map((c) => c.result) };
+    const seenFiles = new Set<string>();
+    const files: string[] = [];
+    let lastCommitSha = "";
+    let lastDiffRange = "";
+    const verCmds: unknown[] = [];
+    const defScope: unknown[] = [];
+    for (const child of children) {
+      if (child.status !== "complete") continue;
+      const cr = (child.result ?? {}) as Record<string, unknown>;
+      if (Array.isArray(cr["files_modified"])) {
+        for (const f of cr["files_modified"] as unknown[]) {
+          if (typeof f === "string" && !seenFiles.has(f)) {
+            seenFiles.add(f);
+            files.push(f);
+          }
+        }
+      }
+      // Use the last non-empty commitSha/diffRange from completed children; the
+      // integration commit is not threaded here, so last-child approximates it.
+      if (typeof cr["commitSha"] === "string" && cr["commitSha"]) lastCommitSha = cr["commitSha"];
+      if (typeof cr["diffRange"] === "string" && cr["diffRange"]) lastDiffRange = cr["diffRange"];
+      if (Array.isArray(cr["verificationCommands"])) verCmds.push(...(cr["verificationCommands"] as unknown[]));
+      if (Array.isArray(cr["deferredScope"])) defScope.push(...(cr["deferredScope"] as unknown[]));
+    }
+    engineerResult = {
+      files_modified: files,
+      ...(lastCommitSha ? { commitSha: lastCommitSha } : {}),
+      ...(lastDiffRange ? { diffRange: lastDiffRange } : {}),
+      verificationCommands: verCmds,
+      deferredScope: defScope,
+    };
+  } else {
+    engineerSummary = rawOverride;
+    engineerResult = (rawOverride ?? {}) as Record<string, unknown>;
+  }
+
   const changedFiles = Array.isArray(engineerResult["files_modified"])
     ? (engineerResult["files_modified"] as unknown[]).filter(
         (f): f is string => typeof f === "string",
