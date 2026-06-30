@@ -142,4 +142,21 @@ CREATE TABLE IF NOT EXISTS campaign_items (
 );
 CREATE INDEX IF NOT EXISTS idx_campaign_items_campaign ON campaign_items(campaign_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_items_status ON campaign_items(lifecycle_status);
+
+-- FG-419: host-side verification evidence, recorded after real host commands complete.
+-- run_id is nullable (TEXT to match runs.id type); gate_name is the logical gate being
+-- verified (default "npm run test:all", overridable via .forge/config.json).
+CREATE TABLE IF NOT EXISTS host_verifications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id   TEXT NOT NULL,
+  project_dir TEXT NOT NULL,
+  commit_sha  TEXT NOT NULL,
+  gate_name   TEXT NOT NULL,
+  command     TEXT NOT NULL,
+  exit_code   INTEGER NOT NULL,
+  run_id      TEXT REFERENCES runs(id),
+  recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_verifications_lookup
+  ON host_verifications(ticket_id, project_dir, commit_sha, gate_name);
 `;

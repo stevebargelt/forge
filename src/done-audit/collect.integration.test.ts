@@ -9,7 +9,8 @@ import { writeTicket } from "../backlog/structured.js";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
-import { collectDoneAuditInput } from "./collect.js";
+import { insertHostVerification } from "../store/host-verifications.js";
+import { collectDoneAuditInput, collectDoneAuditInputFor } from "./collect.js";
 import { evaluateDoneAudit } from "./done-audit.js";
 import type { CampaignItem, Run, Task } from "../types/index.js";
 
@@ -216,9 +217,9 @@ test("collect: ticket fields (status, body, related) passed through from backlog
   assert.deepEqual(input.ticket!.related, ["FG-999"]);
 });
 
-// ── verification fields: host always null in current scope ────────────────────
+// ── verification fields: host null when no evidence rows exist ────────────────
 
-test("collect: hostVerified is always null (recorder not implemented in FG-383)", () => {
+test("collect: hostVerified is null when no evidence rows exist", () => {
   writeTicket(projectDir, {
     id: "FG-COLLECT-6",
     type: "story",
@@ -231,7 +232,7 @@ test("collect: hostVerified is always null (recorder not implemented in FG-383)"
   const item = makeItem("FG-COLLECT-6");
   const input = collectDoneAuditInput(projectDir, item);
 
-  assert.equal(input.verification.hostVerified, null, "hostVerified must be null — recorder is out of scope for FG-383");
+  assert.equal(input.verification.hostVerified, null, "hostVerified must be null when no evidence rows exist");
   assert.equal(input.verification.containerTestsRun, null, "containerTestsRun must be null — item has no runId");
   assert.equal(input.verification.acceptedException, null, "acceptedException must be null");
 });
@@ -299,7 +300,7 @@ test("collect+evaluate: containerTestsRun set but hostVerified null → outcome 
     ticket: { status: "done", closedCommit: "abc123", body: "done", related: [] },
     item: { lifecycleStatus: "complete", outcome: "shipped" },
     git: { dirty: false, commitExists: true, pushed: true },
-    verification: { hostVerified: null, containerTestsRun: 42, acceptedException: null },
+    verification: { hostVerified: null, hostVerificationDetail: null, containerTestsRun: 42, acceptedException: null },
   };
 
   const result = evaluateDoneAudit(auditInput);
@@ -309,4 +310,302 @@ test("collect+evaluate: containerTestsRun set but hostVerified null → outcome 
   assert.equal(hostCheck?.status, "unknown");
   const containerCheck = result.checks.find((c) => c.name === "container_verification");
   assert.equal(containerCheck?.status, "pass", "container_verification check should pass (informational)");
+});
+
+// ── host verification recorder evidence ───────────────────────────────────────
+
+// Helper: create a real commit in the test git repo and return its SHA
+function makeCommit(label: string): string {
+  writeFileSync(join(projectDir, `${label}.txt`), label);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", label], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+test("collect: required-gate pass row → hostVerified: true", () => {
+  const commitSha = makeCommit("hv-pass");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-PASS-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Pass",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-PASS-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-PASS-1");
+
+  assert.equal(input.verification.hostVerified, true, "hostVerified must be true when required-gate row has exit_code=0");
+  assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
+  assert.ok(input.verification.hostVerificationDetail!.includes("npm run test:all"), "detail must include gate/command");
+  assert.ok(input.verification.hostVerificationDetail!.includes("exit_code: 0"), "detail must include exit_code");
+});
+
+test("collect: required-gate fail row → hostVerified: false → outcome: fail", () => {
+  const commitSha = makeCommit("hv-fail");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-FAIL-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Fail",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-FAIL-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-FAIL-1");
+
+  assert.equal(input.verification.hostVerified, false, "hostVerified must be false when required-gate row has exit_code != 0");
+
+  const result = evaluateDoneAudit(input);
+  assert.equal(result.outcome, "fail", "outcome must be fail when host verification failed");
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "fail");
+});
+
+test("collect: no matching rows → hostVerified: null → outcome: unknown", () => {
+  const commitSha = makeCommit("hv-none");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-NONE-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV None",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // No host verification rows inserted
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-NONE-1");
+
+  assert.equal(input.verification.hostVerified, null, "hostVerified must be null when no evidence rows exist");
+
+  const result = evaluateDoneAudit(input);
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "unknown", "host_verification check must be unknown");
+  assert.notEqual(result.outcome, "pass", "outcome must not be pass with unknown host verification");
+});
+
+test("collect: only non-required-gate rows → hostVerified: null → outcome: unknown", () => {
+  const commitSha = makeCommit("hv-wrong-gate");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-GATE-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Wrong Gate",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // Insert a row for a DIFFERENT gate name — must not count as required-gate evidence
+  insertHostVerification({
+    ticketId: "FG-HV-GATE-1",
+    projectDir,
+    commitSha,
+    gateName: "make check",
+    command: "make check",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-GATE-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    null,
+    "hostVerified must be null when only non-required-gate rows exist"
+  );
+
+  const result = evaluateDoneAudit(input);
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "unknown", "non-required-gate evidence must not satisfy host_verification");
+});
+
+// Criterion 8: real collect→evaluate path with all checks satisfied produces outcome: pass
+test("collect+evaluate: full done-audit pass via real collect→evaluate with host evidence (criterion 8)", () => {
+  // Set up a bare remote OUTSIDE projectDir so it doesn't dirty the working tree
+  const remoteDir = mkdtempSync(join(tmpdir(), "collect-remote-"));
+  try {
+  gitExec(["init", "--bare", remoteDir], remoteDir);
+  gitExec(["remote", "add", "origin", remoteDir], projectDir);
+
+  // Initial commit (SHA_A = the commit that will be the closedCommit)
+  writeFileSync(join(projectDir, "README.md"), "init");
+  gitExec(["add", "README.md"], projectDir);
+  gitExec(["commit", "-m", "init"], projectDir);
+  const closedSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // Write the ticket with closedCommit pointing at closedSha
+  writeTicket(projectDir, {
+    id: "FG-HV-FULLPASS-1",
+    type: "story",
+    status: "done",
+    closedCommit: closedSha,
+    title: "Full done-audit pass",
+    body: "no deferred scope",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "close ticket"], projectDir);
+
+  // Push both commits to origin — closedSha is now reachable from origin/main
+  gitExec(["push", "origin", "HEAD:refs/heads/main"], projectDir);
+
+  // Insert matching pass evidence for closedSha
+  insertHostVerification({
+    ticketId: "FG-HV-FULLPASS-1",
+    projectDir,
+    commitSha: closedSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T12:00:00Z",
+  });
+
+  // Real collect path
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-FULLPASS-1");
+
+  assert.equal(input.verification.hostVerified, true, "hostVerified must be true after recording pass evidence");
+  assert.equal(input.git.commitExists, true, "closedCommit must exist in the repo");
+  assert.equal(input.git.pushed, true, "closedCommit must be reachable from origin");
+  assert.equal(input.git.dirty, false, "working tree must be clean");
+
+  // Real evaluate path
+  const result = evaluateDoneAudit(input);
+
+  assert.equal(result.outcome, "pass", "done-audit outcome must be pass when all required checks pass");
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "pass");
+  assert.ok(hostCheck?.detail?.includes("npm run test:all"), "detail must include gate/command");
+  } finally {
+    rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+// ── FIX 2: any-fail-wins detail reflects the FAILING row, not the trailing pass ─
+
+test("collect FIX2: fail row then pass row → hostVerified=false AND detail reflects failure exit_code", () => {
+  const commitSha = makeCommit("hv-fail-then-pass");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-FIX2-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Fix2",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // Insert fail row first, then a pass row for the same gate
+  insertHostVerification({
+    ticketId: "FG-HV-FIX2-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-FIX2-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T01:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-FIX2-1");
+
+  assert.equal(input.verification.hostVerified, false, "any-fail-wins: hostVerified must be false when a fail row exists");
+  assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("exit_code: 1"),
+    `detail must reflect the FAILING row's exit_code, not the trailing pass\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+  assert.ok(
+    !input.verification.hostVerificationDetail!.includes("exit_code: 0"),
+    `detail must NOT show exit_code: 0 when hostVerified=false\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+});
+
+// ── malformed .forge/config.json → falls back to default gate ────────────────
+
+test("collect: malformed .forge/config.json → falls back to default gate and resolves hostVerified", () => {
+  const commitSha = makeCommit("hv-malformed-config");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-MALFORMED-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV Malformed Config",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // Write a malformed .forge/config.json — exercises the JSON-parse-error fallback path
+  const forgeConfigDir = join(projectDir, ".forge");
+  mkdirSync(forgeConfigDir, { recursive: true });
+  writeFileSync(join(forgeConfigDir, "config.json"), "{ this is not valid JSON }");
+
+  // Record pass evidence under the DEFAULT required gate (malformed config must not override it)
+  insertHostVerification({
+    ticketId: "FG-HV-MALFORMED-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-MALFORMED-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    true,
+    "hostVerified must be true — malformed config falls back to default gate and matches pass evidence"
+  );
 });

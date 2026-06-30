@@ -1,6 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
 import { tasksForRun } from "../store/tasks.js";
+import { queryHostVerificationRows } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
@@ -84,12 +87,47 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
     }
   }
 
+  // host verification — read matching evidence from the store
+  // projectDir is the operator-supplied project path stored on the campaign — not arbitrary
+  // end-user input — so path traversal via projectDir is outside the threat model here.
+  let hostVerified: boolean | null = null;
+  let hostVerificationDetail: string | null = null;
+  if (closedCommit) {
+    try {
+      let requiredGate = "npm run test:all";
+      try {
+        const configRaw = readFileSync(join(projectDir, ".forge", "config.json"), "utf8");
+        const config = JSON.parse(configRaw) as Record<string, unknown>;
+        if (typeof config["requiredHostGate"] === "string") {
+          requiredGate = config["requiredHostGate"];
+        }
+      } catch {
+        // missing or malformed config — default stands
+      }
+
+      const rows = queryHostVerificationRows(ticketId, projectDir, closedCommit, requiredGate);
+      if (rows.length > 0) {
+        const anyFail = rows.some((r) => r.exitCode !== 0);
+        hostVerified = !anyFail;
+        // When any row fails (any-fail-wins), use the first failing row so the displayed
+        // evidence matches the verdict — the trailing pass row must not overwrite it.
+        const detailRow = anyFail ? rows.find((r) => r.exitCode !== 0)! : rows[rows.length - 1]!;
+        hostVerificationDetail =
+          `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
+          `commit: ${closedCommit}; recorded_at: ${detailRow.recordedAt}`;
+      }
+    } catch {
+      // hostVerified stays null on any store error
+    }
+  }
+
   return {
     ticket,
     item: { lifecycleStatus: "complete" },
     git: { dirty, commitExists, pushed },
     verification: {
-      hostVerified: null,   // recorder out of scope for FG-383
+      hostVerified,
+      hostVerificationDetail,
       containerTestsRun,
       acceptedException: null,
     },

@@ -218,17 +218,48 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 - `fail` — at least one required check is a definite `fail`
 - `unknown` — no required check is `fail`, but at least one required check is `unknown`
 
-Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks: `pass` when the sum is greater than zero, `fail` when the sum is exactly zero (zero container tests recorded), and `unknown` when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` is `unknown` for every item today — there is no host-verification recorder yet (out of scope for FG-383).
+Missing evidence is always `unknown`, never `pass`. `container_verification` is populated from the campaign item's run task results — it sums `tests_run` across those tasks: `pass` when the sum is greater than zero, `fail` when the sum is exactly zero (zero container tests recorded), and `unknown` when the item has no run or no task recorded a numeric `tests_run`. It is informational and does **not** satisfy `host_verification`. `host_verification` resolves from the host-verification store: `pass` when matching pass evidence exists (any-fail-wins across multiple rows), `fail` when matching fail evidence exists, `unknown` when no matching evidence exists. The matching key is `(ticketId, projectDir, commitSha, gateName)`; evidence for a different commit, gate, project, or ticket is treated as absent. See [Recording host-verification evidence](#recording-host-verification-evidence) below.
 
 **`requestedAction`** is `null` only when `outcome: pass`. Otherwise it names the concrete operator step(s) for each non-pass required check, joined with `"; "` — for example: `"run host typecheck + full suite, record the result, then re-audit"`, `"commit or revert the working tree"`, `"push <commit>"`, `"file a follow-up ticket and link it"`.
 
 Example: `forge campaign report camp-abc123 --json` — the `doneAuditState` field on each item contains the result of running all eight checks against that item's ticket and git state.
 
+### Recording host-verification evidence
+
+`forge record-host-verification --ticket <id> --project-dir <path> --commit <sha> --command <cmd> --exit-code <n>` records a real host-command result in the host-verification store (`~/.forge/forge.db`). The collector reads this store when assembling done-audit input for `forge campaign report`.
+
+Required flags:
+
+| Flag | Description |
+|---|---|
+| `--ticket <ticketId>` | Ticket ID (e.g. `FG-419`) |
+| `--project-dir <path>` | Absolute path to the project directory |
+| `--commit <sha>` | Commit SHA that was verified (must match the ticket's `closedCommit`) |
+| `--command <cmd>` | The exact command that was run |
+| `--exit-code <n>` | Exit code of the command (`0` = pass, non-zero = fail) |
+
+Optional: `--gate <name>` (defaults to `npm run test:all`; per-project override via `.forge/config.json` `requiredHostGate`) and `--run-id <id>` (associates the record with a forge run).
+
+**Trust model.** Evidence is an audit trail in a trusted-operator context, not tamper-proof: `--command` and `--exit-code` record what was run and what it returned rather than an unverifiable bare assertion. The threat boundary is the operator — they control the host and could supply any exit code, but the recorder requires an explicit real-command invocation.
+
+**Matching semantics.** The collector matches on all four dimensions: `ticketId`, `projectDir`, `commitSha`, and `gateName`. Evidence for a different commit, gate, project, or ticket does not satisfy `host_verification` — stale evidence resolves to `unknown`, never `pass`.
+
+Example: after `npm run test:all` exits 0 on commit `abc1234` for ticket `FG-419`:
+
+```shell
+forge record-host-verification \
+  --ticket FG-419 \
+  --project-dir /code/forge \
+  --commit abc1234 \
+  --command "npm run test:all" \
+  --exit-code 0
+```
+
 ## Shipping Reviewer
 
 An acceptance reviewer (agent role `shipping-reviewer`) that runs as a red at the end of a workflow phase when the workflow explicitly lists it in `reds`. The Shipping Reviewer evaluates whether the engineer's implementation satisfies the original product and technical requirements — acceptance in the production call path, not style, lint, or tests in isolation.
 
-**Default-workflow adoption (FG-418).** The `feature` workflow's `build` phase now lists `shipping-reviewer` in its reds as advisory: `authority: specialist`, `gate_on_verdict: false`. It runs on every `feature` build — it warns, it does not block the gate. Advisory is the deliberate conservative first adoption: `host_verification` is always `unknown` for real items today (no host-verification recorder), so a gating reviewer would block all real work. Promotion to authoritative waits on a host-verification recorder or an explicit accepted-exception policy. Other workflows still do not list `shipping-reviewer` in their reds.
+**Default-workflow adoption (FG-418).** The `feature` workflow's `build` phase now lists `shipping-reviewer` in its reds as advisory: `authority: specialist`, `gate_on_verdict: false`. It runs on every `feature` build — it warns, it does not block the gate. Advisory is the deliberate conservative first adoption. Promotion to authoritative (`authority: authoritative`, `gate_on_verdict: true`) is a separate ticket — the host-verification recorder now ships (see [Recording host-verification evidence](#recording-host-verification-evidence) above), but the reviewer's authority is not changed by FG-419. Other workflows still do not list `shipping-reviewer` in their reds.
 
 FG-381, FG-383, FG-384, and FG-418 shipped the role, the Reviewer Context Packet, the verdict-mapping, and the default-workflow wiring.
 
@@ -261,7 +292,7 @@ Fields:
 
 The `doneAudit` field carries the mechanical done-audit result (shape: `{outcome: "pass"|"fail"|"unknown", checks: [...], gaps: [...], requestedAction}`). See [Done audit (mechanical)](#done-audit-mechanical) for check definitions and aggregation semantics.
 
-**Current limitation: `host_verification` is always `unknown` for real items.** The collector always passes `hostVerified: null` because the host-verification recorder is not yet shipped. Consequently `host_verification` is always `unknown` in every assembled done-audit result, and `doneAudit.outcome: "pass"` is **not reachable for real items today**. In practice `doneAudit.outcome` is `"unknown"` (all other checks pass but `host_verification` is unknown) or `"fail"` (another required check is a definite fail). A `"pass"` outcome becomes reachable once a host-verification recorder ships and supplies evidence.
+**`host_verification` in the packet.** The collector reads matching evidence from the host-verification store when the ticket has a `closedCommit`. Matching pass evidence → `hostVerified: true`; matching fail evidence → `hostVerified: false`; no matching evidence → `hostVerified: null` (unknown). The `host_verification` check's `detail` field carries `gate`, `command`, `exit_code`, `commit`, and `recorded_at` from the evidence row. `doneAudit.outcome: "pass"` is reachable for real items once matching host-verification evidence has been recorded via `forge record-host-verification` (see [Recording host-verification evidence](#recording-host-verification-evidence)).
 
 The Shipping Reviewer seed instructs the agent that a failing or unknown done-audit blocks `ship` unless the agent records an explicit exception in `doneAuditDisposition`. The mapper enforces this mechanically via the guardrail backstop (see [Verdict mapping](#verdict-mapping) below).
 
@@ -530,14 +561,14 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `campaignId`, `status`, `mode`, `approvedPlanHash`, `currentPlanHash` — same semantics as `show`
 - `sourceInput` — the raw source input recorded at plan time (`{kind, ticketIds}` / `{kind, epicId}` / `{kind, epicId, additions, exclusions}`)
 - `goal` — free-text goal from campaign metadata, if set
-- `verdict` — `all_shipped` (campaign status is `complete`, every item has `outcome: shipped`, AND every item's done-audit result is `outcome: pass`; currently not reachable in practice because `host_verification` is always `unknown` until a host-verification recorder ships — `all_shipped` becomes reachable once host-verification evidence can be recorded), `complete_with_issues` (campaign status is `complete`, but one or more items did not ship, or all shipped but at least one done-audit result is not `outcome: pass`), or `not_complete` (campaign is not yet complete)
+- `verdict` — `all_shipped` (campaign status is `complete`, every item has `outcome: shipped`, AND every item's done-audit result is `outcome: pass`; requires matching host-verification evidence recorded via `forge record-host-verification` for each shipped item), `complete_with_issues` (campaign status is `complete`, but one or more items did not ship, or all shipped but at least one done-audit result is not `outcome: pass`), or `not_complete` (campaign is not yet complete)
 - `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means operator intervention is required before the campaign can resume — either a failed/blocked item (`lifecycleStatus: failed`, `outcome: blocked`) must be resolved, or an unrefined readiness-held item (`lifecycleStatus: pending`, `outcome: held`, `blockerKind: readiness`) must be refined; `can_resume` means neither condition is present. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `stale` covers two conditions: the plan hash changed since approval (`stale_plan`), or the plan can no longer be resolved at all because a source ticket was deleted from the backlog since planning (`plan_unresolvable`) — both require re-plan and re-approve. `recovery_needed` is returned when a campaign has an item in a non-terminal, non-pending in-flight state; `forge campaign resume` will refuse until the item is reset manually.
 - `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed` (items with `outcome: needs_refinement` are counted in `failed`)
 - `deferredScope` — always `[]` (reserved)
 - `followUpTickets` — always `[]` (reserved)
 - `nextOperatorAction` — narrative next step for the operator. On a `paused` campaign with a failed/blocked item, names the blocking ticket and its `blockerKind` (e.g. `resolve blocker FG-5 (git_state) then resume`); when blockers are resolved but a readiness-held item remains, prompts `refine <ticketId> then resume`; when blockers are resolved and only dependency-held items remain, prompts `resume — N held items will be reconsidered`. On a `complete` campaign where shipped items have unresolved done-audit gaps, names the concrete operator steps (e.g. `shipped items have unresolved done-audit gaps — run host typecheck + full suite, record the result, then re-audit`).
-- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items), `doneAuditState` (see below), and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held, and the done-audit outcome is printed for each item; when outcome is not `pass`, the gaps and `requestedAction` are also printed.
+- Per-item: all show item fields (including `readiness` — see Show above), plus a `commit` field (the ticket's `closed_commit` for shipped items), `doneAuditState` (see below), `hostVerificationDetail` (the `detail` string from the `host_verification` check in `doneAuditState` when evidence was recorded, `null` otherwise), and null placeholders for `branch`, `worktreePath`, `prUrl`, `verificationState`, `reviewerResult`. The human text rendering matches show: per item, `requestedHumanAction` is rendered as `action: <text>` when set, readiness outcome/gaps/refinementProposal are printed for items whose readiness is `needs_refinement` or `blocked` or that are readiness-held, and the done-audit outcome is printed for each item; when outcome is not `pass`, the gaps and `requestedAction` are also printed.
 
 **`doneAuditState`** is populated best-effort (null only when collection throws or `projectDir` is missing). Shape: `{ outcome: "pass" | "fail" | "unknown", checks: [{ name, status, detail? }], gaps: string[], requestedAction: string | null }`. See [Done audit (mechanical)](#done-audit-mechanical) for full check names and aggregation semantics.
 

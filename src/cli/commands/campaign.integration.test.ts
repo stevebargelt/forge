@@ -2450,3 +2450,86 @@ test("integ FG-383: forge campaign report --json includes doneAuditState field o
     "each item must have a doneAuditState field in JSON output"
   );
 });
+
+// ── FG-419 FIX 1: hostVerificationDetail rendered in human-readable report ────
+
+test("integ FG-419 FIX1: forge campaign report (human) renders host-verification detail in text output", () => {
+  const fakeCommit = "aabbccddeeff00112233445566778899aabbccdd";
+
+  // Re-write FG-101 with a closedCommit so collectDoneAuditInputFor queries host_verifications
+  writeTicket(projectDir, {
+    id: "FG-101",
+    type: "story",
+    status: "active",
+    title: "Story One",
+    body: "",
+    closedCommit: fakeCommit,
+  });
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  // Insert host_verifications row directly into the forge DB
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare(
+    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run("FG-101", projectDir, fakeCommit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T12:00:00Z");
+
+  // Set item to shipped and campaign to complete
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
+  db.prepare("UPDATE campaigns SET status = 'complete' WHERE id = ?").run(planOutput.campaignId);
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ?").all(planOutput.campaignId) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  db.close();
+
+  const reportResult = runForge(["campaign", "report", planOutput.campaignId]);
+  assert.equal(reportResult.status, 0, `report failed\nstdout: ${reportResult.stdout}\nstderr: ${reportResult.stderr}`);
+
+  assert.ok(
+    reportResult.stdout.includes("host-verification:"),
+    `human-readable output must include 'host-verification:'\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    reportResult.stdout.includes("npm run test:all"),
+    `human-readable output must include the gate/command name\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    reportResult.stdout.includes("exit_code: 0"),
+    `human-readable output must include the exit_code\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    reportResult.stdout.includes(fakeCommit.slice(0, 8)),
+    `human-readable output must include the commit SHA\nstdout: ${reportResult.stdout}`
+  );
+  assert.ok(
+    reportResult.stdout.includes("recorded_at"),
+    `human-readable output must include 'recorded_at'\nstdout: ${reportResult.stdout}`
+  );
+});
+
+// ── FG-419 FIX 3: non-numeric --exit-code rejected ────────────────────────────
+
+test("integ FG-419 FIX3: record-host-verification rejects non-numeric --exit-code", () => {
+  const result = runForge([
+    "record-host-verification",
+    "--ticket", "FG-999",
+    "--project-dir", projectDir,
+    "--commit", "aabbccddeeff00112233445566778899aabbccdd",
+    "--command", "npm run test:all",
+    "--exit-code", "abc",
+  ]);
+  assert.notEqual(result.status, 0, "must exit non-zero for non-numeric --exit-code");
+  const combined = result.stderr + result.stdout;
+  assert.ok(
+    combined.includes("integer") || combined.includes("exit-code") || combined.includes("abc"),
+    `error output must mention the invalid value\ncombined: ${combined}`
+  );
+});

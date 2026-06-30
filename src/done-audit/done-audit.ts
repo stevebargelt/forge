@@ -19,6 +19,7 @@ export type DoneAuditInput = {
   git: { dirty: boolean | null; commitExists: boolean | null; pushed: boolean | null };
   verification: {
     hostVerified: boolean | null;
+    hostVerificationDetail?: string | null;
     containerTestsRun: number | null;
     acceptedException?: string | null;
   };
@@ -165,9 +166,17 @@ export function evaluateDoneAudit(input: DoneAuditInput): DoneAuditResult {
       detail: `waiver: ${input.verification.acceptedException}`,
     });
   } else if (input.verification.hostVerified === true) {
-    checks.push({ name: "host_verification", status: "pass" });
+    checks.push({
+      name: "host_verification",
+      status: "pass",
+      detail: input.verification.hostVerificationDetail ?? undefined,
+    });
   } else if (input.verification.hostVerified === false) {
-    checks.push({ name: "host_verification", status: "fail" });
+    checks.push({
+      name: "host_verification",
+      status: "fail",
+      detail: input.verification.hostVerificationDetail ?? undefined,
+    });
     gaps.push("host verification failed");
   } else {
     checks.push({ name: "host_verification", status: "unknown" });

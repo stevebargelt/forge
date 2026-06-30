@@ -1807,3 +1807,105 @@ test("FG-383: verdict=all_shipped gate requires done-audit outcome=pass (regress
   // So verdict must be complete_with_issues despite all items being outcome=shipped
   assert.equal(result.verdict, "complete_with_issues", "all-shipped items with failed done-audit must not yield all_shipped");
 });
+
+// ── FG-419: hostVerificationDetail in report items ────────────────────────────
+
+test("FG-419: assembleCampaignReport item row has hostVerificationDetail field (null when no host_verification check)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  // Inject a done-audit result with no host_verification check
+  const auditWithoutHostCheck: DoneAuditResult = {
+    outcome: "unknown",
+    checks: [{ name: "ticket_closed", status: "unknown" }],
+    gaps: [],
+    requestedAction: null,
+  };
+  const prev = setDoneAuditMapForTest(new Map([["FG-101", auditWithoutHostCheck]]));
+  try {
+    const result = assembleCampaignReport(campaign.id)!;
+    const item = result.items[0]!;
+    assert.ok("hostVerificationDetail" in item, "ReportItemRow must have hostVerificationDetail field");
+    assert.equal(item.hostVerificationDetail, null, "hostVerificationDetail must be null when no host_verification check exists");
+  } finally {
+    setDoneAuditMapForTest(prev);
+  }
+});
+
+test("FG-419: assembleCampaignReport item row hostVerificationDetail null when host_verification check has no detail", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  // Inject a done-audit result with host_verification check but no detail
+  const auditWithHostCheckNoDetail: DoneAuditResult = {
+    outcome: "unknown",
+    checks: [{ name: "host_verification", status: "unknown" }],
+    gaps: [],
+    requestedAction: null,
+  };
+  const prev = setDoneAuditMapForTest(new Map([["FG-101", auditWithHostCheckNoDetail]]));
+  try {
+    const result = assembleCampaignReport(campaign.id)!;
+    const item = result.items[0]!;
+    assert.equal(item.hostVerificationDetail, null, "hostVerificationDetail must be null when host_verification check has no detail");
+  } finally {
+    setDoneAuditMapForTest(prev);
+  }
+});
+
+test("FG-419: assembleCampaignReport item row hostVerificationDetail populated from host_verification check detail", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  const evidenceDetail = "gate: npm run test:all; command: npm run test:all; exit_code: 0; commit: abc123; recorded_at: 2026-01-01T00:00:00Z";
+  const auditWithDetail: DoneAuditResult = {
+    outcome: "pass",
+    checks: [
+      { name: "ticket_closed", status: "pass" },
+      { name: "host_verification", status: "pass", detail: evidenceDetail },
+    ],
+    gaps: [],
+    requestedAction: null,
+  };
+  const prev = setDoneAuditMapForTest(new Map([["FG-101", auditWithDetail]]));
+  try {
+    const result = assembleCampaignReport(campaign.id)!;
+    const item = result.items[0]!;
+    assert.equal(item.hostVerificationDetail, evidenceDetail, "hostVerificationDetail must match the host_verification check detail");
+  } finally {
+    setDoneAuditMapForTest(prev);
+  }
+});
+
+test("FG-419: assembleCampaignReport hostVerificationDetail populated for fail host_verification check", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  const failDetail = "gate: npm run test:all; command: npm run test:all; exit_code: 1; commit: deadbeef; recorded_at: 2026-01-02T00:00:00Z";
+  const auditFail: DoneAuditResult = {
+    outcome: "fail",
+    checks: [
+      { name: "host_verification", status: "fail", detail: failDetail },
+    ],
+    gaps: ["host verification failed"],
+    requestedAction: "run host typecheck + full suite, record the result, then re-audit",
+  };
+  const prev = setDoneAuditMapForTest(new Map([["FG-101", auditFail]]));
+  try {
+    const result = assembleCampaignReport(campaign.id)!;
+    const item = result.items[0]!;
+    assert.equal(item.hostVerificationDetail, failDetail, "hostVerificationDetail must be populated even for a fail host_verification check");
+    assert.ok(item.doneAuditState !== null, "doneAuditState must be set");
+    assert.equal(item.doneAuditState!.outcome, "fail");
+  } finally {
+    setDoneAuditMapForTest(prev);
+  }
+});

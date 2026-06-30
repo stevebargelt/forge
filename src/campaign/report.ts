@@ -326,6 +326,7 @@ export type ReportItemRow = ShowItemRow & {
   commit: string | null;
   verificationState: null;
   doneAuditState: DoneAuditResult | null;
+  hostVerificationDetail: string | null;
   reviewerResult: null;
 };
 
@@ -439,6 +440,8 @@ export function assembleCampaignReport(id: string): ReportResult | null {
     commit: commitMap.get(i.ticketId) ?? null,
     verificationState: null,
     doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
+    hostVerificationDetail:
+      doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
     reviewerResult: null,
   }));
 
