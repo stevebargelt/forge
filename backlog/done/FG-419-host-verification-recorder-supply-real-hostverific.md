@@ -5,7 +5,7 @@ status: done
 title: "Host-verification recorder: supply real host_verification evidence to done-audit (unblocks Shipping Reviewer authoritative promotion)"
 created: 2026-06-30
 closed: 2026-06-30
-closed_commit: 3ee71d9
+closed_commit: 45d59aa
 ---
 
 ## Problem
@@ -58,3 +58,9 @@ Required-gate model, v1 deliberately narrow. Distinguish "recorded host command 
 Store/trust/matching mechanics per the architect: `host_verifications` table in `forge.db` via `CREATE TABLE IF NOT EXISTS` in SCHEMA_SQL (additive, not an applyMigrations ALTER); glass-box trust (record actual command string + exit code, reject bare assertions, surface the command); any-fail-wins aggregation; `evaluateDoneAudit` stays pure. Projects can grow richer required-gate lists later; v1 ships one canonical required gate.
 
 Docs must say: `host_verification` means the required host gate passed (not merely that some host command passed); the recorded command/result is surfaced for glass-box trust; richer required-gate lists are a later slice.
+
+## Reopened — gate-label spoofing defect (post-close, HIGH)
+
+Closed at 3ee71d9 but reopened: a weaker command can falsely satisfy the required gate, directly violating the Decision above ("Extra passing commands like typecheck ... MUST NOT satisfy host_verification by themselves"). In `src/cli/commands/record-host-verification.ts:23`, `--gate` defaults to `"npm run test:all"` UNCONDITIONALLY, decoupled from `--command`. So `record-host-verification --command "npm run typecheck" --exit-code 0` (no `--gate`) records `gate_name="npm run test:all"`, which the collector (`collect.ts` matching on `gate_name`) treats as required-gate pass evidence → false `host_verification: pass`. The glass-box `--command` is decorative when the matched `gate_name` is auto-set to the required gate.
+
+Fix: do NOT auto-label arbitrary commands as the required gate. Default `gate_name` to the `--command` string (so a typecheck records as gate `npm run typecheck`, which does not match the required `npm run test:all` and is supporting-only); keep `--gate` as an EXPLICIT override for when the command and canonical gate name legitimately differ. Regression test: `--command "npm run typecheck" --exit-code 0` with no `--gate` must NOT satisfy default `host_verification`. Update the concepts.md flag description (it currently says `--gate` defaults to `npm run test:all`).
