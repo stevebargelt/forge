@@ -1,9 +1,11 @@
 ---
 id: FG-357
 type: story
-status: active
+status: done
 title: "Post-merge integration gate (FG-345 follow-up): build+test the MERGED result to catch semantic cross-file breakage"
 created: 2026-06-22
+closed: 2026-07-01
+closed_commit: b12b764
 ---
 
 **Parent:** FG-345. **FOLLOW-UP — explicitly excluded from the first cut.** **Depends on:** FG-352 + FG-353 (a merged result must exist to gate).
