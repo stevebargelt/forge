@@ -13,6 +13,7 @@ export type FailureKind =
   | "result_malformed"
   | "work_not_persisted"  // result claims files_modified but none landed on the host project mount (#254)
   | "merge_conflict"      // FG-352: worktree branch could not be fast-forwarded into run.projectDir
+  | "integration_failed"  // FG-357: clean merge, but build+test of the merged tree failed
   | "auth_missing"
   | "auth_expired"
   | "auth_injection_failed"
