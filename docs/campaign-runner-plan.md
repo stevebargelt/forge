@@ -102,7 +102,7 @@ Dependencies:
 - **FG-420**: promote the Shipping Reviewer from advisory to authoritative in the default `feature` workflow once FG-418/FG-419/FG-367 evidence is real; `needs_fix` blocks, `needs_human` requires explicit human handling, valid named deferrals can pass, and failing/unknown done-audit blocks unless an accepted exception is recorded.
 - **FG-367**: git-evidence surfacing for Forge-managed projects: `branch` and `worktreePath` recorded on campaign report items when a Forge-managed worktree is used (naming scheme `forge/{runId}/{taskId}`); `pushed` correctly resolves to unknown (not fail) when no remote is configured; no auto-push or auto-PR in v1. Policy documented in [Git discipline (v1)](concepts.md#git-discipline-v1).
 - **FG-376**: agent worktree dependency parity for real test execution.
-- **FG-357**: post-merge integration gate for merged worktree output.
+- **FG-357**: post-merge integration gate — after a worktree merge lands (single-step merge-to-HEAD, FG-352, or fan-out integration-branch merge-to-HEAD, FG-353), forge runs the project's own `test:unit` script against the merged tree on the host before the step is done; a project with no `test:unit` script is skipped rather than blocked. Failure is a new terminal `failure_kind: integration_failed` (distinct from `merge_conflict`, non-retryable, merged worktree/branch retained for inspection). Default 10-minute timeout, overridable via `FORGE_INTEGRATION_GATE_TIMEOUT_MS`. Documented in [Post-merge integration gate](concepts.md#post-merge-integration-gate).
 
 Exit criteria:
 

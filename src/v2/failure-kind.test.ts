@@ -149,7 +149,7 @@ test("failTask: covers all FailureKind values in payload", () => {
   const kinds: FailureKind[] = [
     "cancelled", "container_crash", "idle_timeout", "result_missing", "result_malformed",
     "auth_missing", "auth_expired", "auth_injection_failed", "model_error", "tool_error",
-    "red_blocked", "gate_rejected", "unknown",
+    "red_blocked", "gate_rejected", "integration_failed", "unknown",
   ];
   for (const kind of kinds) {
     const runId = newRunId(`test-fk-${kind}`);

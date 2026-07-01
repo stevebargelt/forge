@@ -38,6 +38,7 @@ import { taskDir, integrationWorktreeDir } from "../util/paths.js";
 import { computeReadyQueue } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
+import { runIntegrationGate } from "./integration-gate.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
@@ -499,8 +500,21 @@ async function dispatchSingleStep(args: {
       // Retain worktree and branch for inspection — do NOT call removeWorktreeIfSafe.
       return "failed";
     }
-    // FG-357 seam: post-merge build+test integration gate goes here
-    // (after merge, before markTaskComplete / reds dispatch / phase advance).
+    // FG-357: post-merge integration gate. The merge above only proves the
+    // worktree branch fast-forwarded cleanly — it does NOT prove the merged
+    // tree still builds+tests. Gate here, before reds dispatch / phase advance,
+    // and return BEFORE any cleanup so the worktree/branch stay available for
+    // inspection (mirrors the merge_conflict no-discard contract above).
+    const gate = runIntegrationGate(args.projectDir);
+    if (!gate.ok) {
+      failTask(taskId, {
+        runId: args.runId,
+        kind: "integration_failed",
+        error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+        result,
+      });
+      return "failed";
+    }
 
     // FG-367: best-effort gap-fill — record the merge-HEAD SHA on the ticket
     // when the agent did not capture it at close time. Swallowed entirely so
@@ -1173,7 +1187,19 @@ async function dispatchFanoutStep(args: {
           });
           return "failed";
         }
-        // FG-357 seam: post-merge build+test integration gate goes here
+        // FG-357: post-merge integration gate. Return BEFORE any cleanup on
+        // failure so the integration/child worktrees and branches stay
+        // available for inspection (no-discard, same as merge_conflict above).
+        const gate = runIntegrationGate(args.projectDir);
+        if (!gate.ok) {
+          failTask(existingParent.id, {
+            runId: args.runId,
+            kind: "integration_failed",
+            error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+            result: savedResult,
+          });
+          return "failed";
+        }
         // Only proven-merged (completed) children may be cleaned up; failed children
         // were never integrated and must retain their worktree/branch (no-discard).
         const childTasksForCleanup = allTasks.filter(
@@ -1479,8 +1505,19 @@ async function dispatchFanoutStep(args: {
         });
         return "failed";
       }
-      // FG-357 seam: post-merge build+test integration gate goes here
-      // (after integration->HEAD merge, before markTaskComplete / phase advance).
+      // FG-357: post-merge integration gate. Return BEFORE any cleanup on
+      // failure so the integration/child worktrees and branches stay
+      // available for inspection (no-discard, same as merge_conflict above).
+      const gate = runIntegrationGate(args.projectDir);
+      if (!gate.ok) {
+        failTask(parentId, {
+          runId: args.runId,
+          kind: "integration_failed",
+          error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+          result: parentResult,
+        });
+        return "failed";
+      }
       // Only proven-merged (completed) children may be cleaned up; failed children
       // were never integrated and must retain their worktree/branch (no-discard).
       for (const child of childOutcomes.filter((c) => c.status === "complete")) {
@@ -1514,7 +1551,19 @@ async function dispatchFanoutStep(args: {
       });
       return "failed";
     }
-    // FG-357 seam: post-merge build+test integration gate goes here
+    // FG-357: post-merge integration gate. Return BEFORE any cleanup on
+    // failure so the integration/child worktrees and branches stay available
+    // for inspection (no-discard, same as merge_conflict above).
+    const gate = runIntegrationGate(args.projectDir);
+    if (!gate.ok) {
+      failTask(parentId, {
+        runId: args.runId,
+        kind: "integration_failed",
+        error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
+        result: parentResult,
+      });
+      return "failed";
+    }
     // Only proven-merged (completed) children may be cleaned up; failed children
     // were never integrated and must retain their worktree/branch (no-discard).
     for (const child of childOutcomes.filter((c) => c.status === "complete")) {

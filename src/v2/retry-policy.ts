@@ -32,6 +32,7 @@ const POLICY: Record<string, RetryDisposition> = {
 
   gate_rejected:        { retryable: false, reason: "a human rejected this at the gate; retry would re-run identical inputs", advice: "use `forge gate <task> request-changes` to send fix guidance, or address the rejection" },
   red_blocked:          { retryable: false, reason: "a red review blocked this; retry re-runs the same work unchanged", advice: "fix the finding (or override with `forge gate <task> advance --force`), then advance" },
+  integration_failed:   { retryable: false, reason: "the merge was clean but build+test of the merged tree failed; retry would re-dispatch against the same broken merge", advice: "fix the break in code, or run `git reset --hard HEAD~1` in run.projectDir to undo the merge, then retry" },
 };
 
 const NO_KIND: RetryDisposition = { retryable: true, reason: "no recorded failure kind; re-dispatch" };
