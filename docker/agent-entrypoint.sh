@@ -63,4 +63,42 @@ if [ -n "${FORGE_NM_SHADOW:-}" ] && [ -d "${FORGE_NM_SHADOW}" ]; then
   sudo chown agent:agent "${FORGE_NM_SHADOW}" 2>/dev/null || true
 fi
 
+# FG-376: worktree mode shadows one node_modules volume per workspace member
+# (repo root plus every npm workspace), not just the single legacy path above.
+# spawn.ts passes them as a colon-separated FORGE_NM_SHADOW_PATHS list; chown
+# each one to agent for the same root-owned-volume reason as FORGE_NM_SHADOW.
+if [ -n "${FORGE_NM_SHADOW_PATHS:-}" ]; then
+  IFS=':' read -r -a _forge_nm_shadow_path_list <<<"${FORGE_NM_SHADOW_PATHS}"
+  for _forge_nm_shadow_path in "${_forge_nm_shadow_path_list[@]}"; do
+    if [ -n "${_forge_nm_shadow_path}" ] && [ -d "${_forge_nm_shadow_path}" ]; then
+      sudo chown agent:agent "${_forge_nm_shadow_path}" 2>/dev/null || true
+    fi
+  done
+  unset _forge_nm_shadow_path_list _forge_nm_shadow_path
+fi
+
+# FG-376: when spawn.ts provisions a dependency install root (worktree mode),
+# install real dependencies from there before handing off to the agent so npm
+# workspace linking and @forge/* aliases resolve the same way they do on the
+# host. `npm ci` when a lockfile is present (matches host installs exactly and
+# fails fast on a stale lockfile), `npm install` otherwise. A failed install is
+# an environment problem, not a test failure: exit with the shared
+# DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE (123 — must match
+# src/v2/dependency-provisioning.ts) before exec, so invoke.ts/runNext.ts
+# classify it as verification_environment_unavailable instead of a generic
+# container crash. The install's own stderr is left un-redirected so it lands
+# on the container's stderr stream for those handlers to scrape.
+if [ -n "${FORGE_NM_INSTALL_ROOT:-}" ]; then
+  if [ -f "${FORGE_NM_INSTALL_ROOT}/package-lock.json" ]; then
+    _forge_nm_install_cmd=(npm ci)
+  else
+    _forge_nm_install_cmd=(npm install)
+  fi
+  if ! (cd "${FORGE_NM_INSTALL_ROOT}" && "${_forge_nm_install_cmd[@]}"); then
+    echo "forge: dependency install failed in ${FORGE_NM_INSTALL_ROOT}" >&2
+    exit 123
+  fi
+  unset _forge_nm_install_cmd
+fi
+
 exec "$@"

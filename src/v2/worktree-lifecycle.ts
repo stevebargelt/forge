@@ -190,6 +190,15 @@ export function removeWorktreeIfSafe(
 
   const branch = worktreeBranchName(runId, taskId);
 
+  // FIX3 (FG-376 review): dependency-cache volumes are SHARED by cache key
+  // (lockfile hash), not owned by this worktree — a volume this task's install
+  // populated may still be the one another concurrent/later task is reusing
+  // (dependency-provisioning.ts FIX2). Individual worktree disposal must never
+  // remove it; that used to tear a shared volume down as soon as ANY one task
+  // using it finished. Cache pruning is now a deliberate, separate operation —
+  // see dependency-provisioning.ts:removeDependencyVolumes for the explicit
+  // prune entry point (not auto-invoked from here).
+
   try {
     execFileSync("git", ["worktree", "remove", "--force", worktreePath], {
       cwd: projectDir,
@@ -304,6 +313,9 @@ export function cleanupFailedWorktreeSetup(
 ): void {
   const path = worktreeDir(runId, taskId);
   if (!existsSync(path)) return;
+  // FIX3 (FG-376 review): no dependency-volume cleanup here — see
+  // removeWorktreeIfSafe above for why a shared cache volume must not be
+  // removed at individual worktree disposal.
   try {
     execFileSync("git", ["worktree", "remove", "--force", path], {
       cwd: projectDir,
@@ -503,6 +515,9 @@ export function cleanupIntegrationWorktree(
 ): void {
   const path = integrationWorktreeDir(runId, parentTaskId);
   const branch = integrationBranchName(runId, parentTaskId);
+  // FIX3 (FG-376 review): no dependency-volume cleanup here — see
+  // removeWorktreeIfSafe above for why a shared cache volume must not be
+  // removed at individual worktree disposal.
   try {
     execFileSync("git", ["worktree", "remove", "--force", path], {
       cwd: projectDir,

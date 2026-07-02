@@ -21,6 +21,7 @@ export type FailureKind =
   | "tool_error"
   | "red_blocked"
   | "gate_rejected"
+  | "verification_environment_unavailable"  // FG-376: dependency provisioning failed before tests could run
   | "unknown";
 
 export type FailureContext = {
