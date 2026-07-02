@@ -6,6 +6,7 @@ import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman } from "../../campaign/report.js";
+import { reconcileCampaign } from "../../campaign/reconcile.js";
 
 function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
   if (rec) {
@@ -405,6 +406,36 @@ export function registerCampaign(program: Command): void {
         console.log(JSON.stringify({ campaignId, status: "abandoned" }, null, 2));
       } else {
         console.log(`Campaign ${campaignId} abandoned.`);
+      }
+    });
+
+  campaign
+    .command("reconcile <campaign-id>")
+    .description(
+      "Operator recovery: re-derive outcomes for scope-blocked items from durable evidence (ticket/git/host-verification/event records) and ship them if all facts hold — no evidence override; only a paused campaign is eligible"
+    )
+    .option("--by <operator>", "operator identifier (attribution only, not evidence)")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, opts: { by?: string; json?: boolean }) => {
+      const result = reconcileCampaign(campaignId, { decidedBy: opts.by });
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (!result.ok) {
+        process.stderr.write(`Error: ${result.reason}\n`);
+      } else {
+        console.log(`Campaign: ${campaignId}`);
+        for (const item of result.items) {
+          const missingStr = item.missing && item.missing.length ? ` missing: ${item.missing.join(", ")}` : "";
+          console.log(`  ${item.ticketId}: ${item.status}${missingStr}`);
+        }
+        if (result.items.every((i) => i.status === "not_applicable")) {
+          console.log("No scope-blocked items eligible for reconciliation.");
+        }
+      }
+
+      if (!result.ok) {
+        process.exit(1);
       }
     });
 

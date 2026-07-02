@@ -219,7 +219,7 @@ A pure mechanical evaluator that checks whether a campaign item can truthfully b
 | `ticket_closed` | Ticket `status` is `done` |
 | `closed_commit_present` | Ticket has a `closed_commit` field |
 | `commit_exists` | The closed commit exists in the repository |
-| `clean_git` | Working tree is clean (`git status --porcelain` empty) |
+| `clean_git` | Working tree is clean, ignoring host-local operational noise (`git status --porcelain` empty after filtering out `backlog/notes.md` and `.forge-scratch/`) |
 | `pushed` | The closed commit is reachable from a remote branch |
 | `container_verification` | Sum of `tests_run` across the campaign item's run tasks (INFORMATIONAL — excluded from outcome aggregation) |
 | `host_verification` | Host typecheck + full suite passed and recorded |
@@ -485,6 +485,8 @@ Reason strings operators will see:
 
 **Resume reconsiders held items.** When `forge campaign resume` re-enters the dispatch loop it handles held items by kind. Readiness-held items (`blockerKind: readiness`) are re-evaluated against the current ticket body — released to dispatch once the ticket is `ready` or `exploratory`, kept held otherwise. Dependency-held items are re-evaluated against the rebuilt set of still-blocked LOCAL items — released when their blocker is resolved, kept held otherwise. `resume` does not retry the failed/blocked item itself.
 
+**Wedged on a stale historical fail.** `resume` never retries a `blockerKind: scope` item — a fresh failure requires new work, or the operator to confirm the existing work already ships. If durable evidence (closed ticket, reachable commit, host verification, a later authoritative pass or a recorded force-advance) shows the item is actually shipped, use `forge campaign reconcile <campaign-id>` (see [Reconcile](#reconcile)) rather than editing the database — it re-derives the outcome from those records and unholds anything downstream that was waiting on it.
+
 ### Crash recovery (MVP limitation)
 
 `forge campaign start` holds its process for the campaign's entire duration, which may span several hours or overnight. **Crash recovery is not automated in this MVP.** If the `start` process dies mid-run (crash, SIGKILL, power loss):
@@ -589,7 +591,7 @@ The report JSON has a distinct shape from `show`: it omits `planStale`, `project
 - `goal` — free-text goal from campaign metadata, if set
 - `verdict` — `all_shipped` (campaign status is `complete`, every item has `outcome: shipped`, AND every item's done-audit result is `outcome: pass`; requires matching host-verification evidence recorded via `forge record-host-verification` for each shipped item), `complete_with_issues` (campaign status is `complete`, but one or more items did not ship, or all shipped but at least one done-audit result is not `outcome: pass`), or `not_complete` (campaign is not yet complete)
 - `safetyToContinue` — `can_start`, `can_resume`, `needs_resolution`, `dry_run_not_executable`, `running`, `needs_approval`, `stale`, `recovery_needed`, or `terminal`. `needs_resolution` means operator intervention is required before the campaign can resume — either a failed/blocked item (`lifecycleStatus: failed`, `outcome: blocked`) must be resolved, or an unrefined readiness-held item (`lifecycleStatus: pending`, `outcome: held`, `blockerKind: readiness`) must be refined; `can_resume` means neither condition is present. `dry_run_not_executable` means the campaign is in `dry_run` mode and cannot be started. `stale` covers two conditions: the plan hash changed since approval (`stale_plan`), or the plan can no longer be resolved at all because a source ticket was deleted from the backlog since planning (`plan_unresolvable`) — both require re-plan and re-approve. `recovery_needed` is returned when a campaign has an item in a genuinely stuck in-flight state (e.g. `running`, `awaiting_red`); items with `lifecycleStatus: awaiting_gate` or `blocked_by_red` are valid parked workflow states and do not trigger `recovery_needed` — the campaign can be resumed and the driver reattaches to the parked item. `forge campaign resume` refuses with `recovery_needed` only for genuinely stuck items that must be reset manually.
-- `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir`, or `null` if clean
+- `dirtyGitState` — `git status --porcelain` output from the campaign's `projectDir` with host-local operational noise lines (`backlog/notes.md`, `.forge-scratch/`) removed, or `null` if nothing remains after filtering
 - `groupings` — items bucketed by outcome: `shipped`, `blocked`, `held`, `skipped`, `failed` (items with `outcome: needs_refinement` are counted in `failed`)
 - `deferredScope` — always `[]` (reserved)
 - `followUpTickets` — always `[]` (reserved)
@@ -690,3 +692,41 @@ With `--json`:
 ```json
 { "campaignId": "camp-abc123", "status": "abandoned" }
 ```
+
+### Reconcile
+
+`forge campaign reconcile <campaign-id> [--by <operator>] [--json]` is an on-demand, non-destructive operator recovery command for a campaign item wedged on a stale historical authoritative red-fail — for example, a `fail/authoritative` verdict that was later fixed, re-reviewed with a `pass/authoritative`, force-advanced with rationale, merged, host-verified, and closed, but the item still shows `outcome: blocked, blockerKind: scope` because outcome reconciliation on the normal path aggregated the earliest fail rather than the effective latest state. Not the same as [Crash recovery](#crash-recovery-mvp-limitation), which repairs genuinely stuck in-flight items (`running`, `awaiting_red`) via manual SQL — reconcile is for items already parked at `failed`/`blocked_by_red` that durable evidence shows are actually shipped.
+
+**Eligibility.** Reconcile only acts on items with `blockerKind: scope` and `lifecycleStatus` of `failed` or `blocked_by_red`; every other item is reported `not_applicable` and left untouched. The campaign itself must be `paused` — reconcile refuses immediately (`ok: false`, non-zero exit, zero items processed) if the campaign is in any other status.
+
+**Evidence is re-derived only — there is no operator-supplied override.** Reconcile takes no evidence argument of any kind; `--by` is attribution only and is never treated as evidence. Every fact is re-read from durable Forge/git/backlog/host-verification records. An item is marked shipped only when ALL of the following hold; otherwise reconcile refuses that item and reports exactly which facts are missing:
+
+| Missing-evidence code | Fact required |
+|---|---|
+| `ticket_status_not_done` | Ticket status (backlog record) is `done` |
+| `ticket_closed_commit_missing` | Ticket has a `closedCommit` recorded |
+| `closed_commit_not_reachable_on_base_branch` | `closedCommit` is reachable on the base branch (`git merge-base --is-ancestor`) |
+| `host_verification_missing_or_not_all_exit_zero` | Host verification is recorded for that commit, and every recorded run for it exited 0 |
+| `no_authoritative_verdict_or_force_advance_event` | The item's run has at least one authoritative verdict or qualifying force-advance gate decision |
+| `latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance` | Among those, the highest-id one is an authoritative `pass` or a force-advance (`decision: advance, force: true`, non-empty rationale) — i.e. it supersedes an earlier `fail/authoritative` |
+
+The `closedCommit` value and the configured base branch are validated against a strict sha/ref pattern before being passed to `git`, so a hand-edited ticket field can never be used to inject a git option. The host-verification lookup is bound to that same `closedCommit`, so a verification row recorded against a different commit does not count.
+
+**On success**, the item's `lifecycleStatus` moves to `complete`, `outcome` to `shipped`, and its blocker fields clear. A `campaign_item.evidence_reconciled` audit event is recorded (evidence found, `--by` attribution if given, timestamp) — this supersedes the stale history without erasing it. Downstream items whose only blocker was the reconciled item are freed to dispatch on the next resume. Reconcile does not resume the campaign itself; run `forge campaign resume <campaign-id>` afterward.
+
+**Idempotent and race-safe.** Re-running reconcile against an already-shipped item reports it `not_applicable` and logs no additional audit event. The campaign-paused check and each item's write happen in one atomic transaction, so a concurrent `resume`/`start` that flips the campaign out of `paused` mid-reconcile stops further item mutation rather than racing it.
+
+With `--json`:
+
+```json
+{
+  "ok": true,
+  "items": [
+    { "ticketId": "FG-357", "status": "shipped" },
+    { "ticketId": "FG-9", "status": "not_applicable" },
+    { "ticketId": "FG-12", "status": "refused", "missing": ["host_verification_missing_or_not_all_exit_zero"] }
+  ]
+}
+```
+
+Example: `forge campaign reconcile camp-922c83b7c577 --by steve` re-derives outcomes for every scope-blocked item, ships FG-357 once its closed commit, host verification, and superseding pass/force-advance all check out, then `forge campaign resume camp-922c83b7c577` continues the campaign past it.

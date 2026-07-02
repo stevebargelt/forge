@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { SCHEMA_SQL } from "../../store/schema.js";
 import { applyMigrations } from "../../store/db.js";
-import { writeTicket } from "../../backlog/structured.js";
+import { writeTicket, closeTicket } from "../../backlog/structured.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = resolve(here, "..", "index.ts");
@@ -2532,4 +2532,325 @@ test("integ FG-419 FIX3: record-host-verification rejects non-numeric --exit-cod
     combined.includes("integer") || combined.includes("exit-code") || combined.includes("abc"),
     `error output must mention the invalid value\ncombined: ${combined}`
   );
+});
+
+// ── FG-428: campaign reconcile ──────────────────────────────────────────────────
+
+function gitExec(args: string[], cwd: string): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 10000,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "t@t.com",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "t@t.com",
+    },
+  });
+}
+
+function makeCommitIn(dir: string, label: string): string {
+  writeFileSync(join(dir, `${label}.txt`), label);
+  gitExec(["add", "."], dir);
+  gitExec(["commit", "-m", label], dir);
+  return gitExec(["rev-parse", "HEAD"], dir).trim();
+}
+
+// Plans + approves a paused campaign over two fresh tickets: the first ships (all
+// durable evidence present), the second refuses (no host verification recorded).
+// Returns the campaign id so the caller can invoke `campaign reconcile` exactly
+// once against it (a second reconcile of the same campaign would see the first
+// item as already-reconciled/not_applicable, not shipped again).
+function setupReconcileCliCampaign(eligibleTicketId: string, ineligibleTicketId: string): { campaignId: string } {
+  writeTicket(projectDir, { id: eligibleTicketId, type: "story", status: "active", title: "Eligible", body: "" });
+  writeTicket(projectDir, { id: ineligibleTicketId, type: "story", status: "active", title: "Ineligible", body: "" });
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", `${eligibleTicketId},${ineligibleTicketId}`,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "approved"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+  const eligibleItem = items.find((i) => i.ticket_id === eligibleTicketId)!;
+  const ineligibleItem = items.find((i) => i.ticket_id === ineligibleTicketId)!;
+
+  // Eligible item: scope-blocked with ALL durable evidence present.
+  const commit = makeCommitIn(projectDir, `impl-${eligibleTicketId}`);
+  closeTicket(projectDir, eligibleTicketId, commit);
+  const runId = `run-${eligibleItem.id}`;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
+  ).run(runId, eligibleItem.id);
+  db.prepare(
+    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(eligibleTicketId, projectDir, commit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "fail", authority: "authoritative" }), "2026-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "pass", authority: "authoritative" }), "2026-01-01T00:00:01Z");
+
+  // Ineligible item: scope-blocked but with NO host verification recorded → refused.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'blocked_by_red', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
+  ).run(`run-${ineligibleItem.id}`, ineligibleItem.id);
+
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  return { campaignId: planOutput.campaignId };
+}
+
+test("integ campaign reconcile --json: paused campaign — ships an eligible scope-blocked item, refuses an ineligible one, exits 0", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupReconcileCliCampaign("FG-301", "FG-302");
+
+  const jsonResult = runForge(["campaign", "reconcile", campaignId, "--json", "--by", "steve"]);
+  assert.equal(jsonResult.status, 0, `reconcile must exit 0 even with a refused item\nstdout: ${jsonResult.stdout}\nstderr: ${jsonResult.stderr}`);
+
+  const output = JSON.parse(jsonResult.stdout) as {
+    ok: boolean;
+    items: { ticketId: string; status: string; missing?: string[] }[];
+  };
+  assert.equal(output.ok, true);
+  const eligible = output.items.find((i) => i.ticketId === "FG-301")!;
+  const ineligible = output.items.find((i) => i.ticketId === "FG-302")!;
+  assert.equal(eligible.status, "shipped");
+  assert.equal(ineligible.status, "refused");
+  assert.ok(ineligible.missing && ineligible.missing.length > 0, "refused item must report missing facts");
+
+  // Verify DB mutation for the shipped item and the audit event.
+  const dbPath = join(forgeHome, "forge.db");
+  const db2 = new Database(dbPath, { readonly: true });
+  const shippedRow = db2
+    .prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE campaign_id = ? AND ticket_id = 'FG-301'")
+    .get(campaignId) as { lifecycle_status: string; outcome: string; blocker_kind: string | null };
+  assert.equal(shippedRow.lifecycle_status, "complete");
+  assert.equal(shippedRow.outcome, "shipped");
+  assert.equal(shippedRow.blocker_kind, null);
+
+  const refusedRow = db2
+    .prepare("SELECT lifecycle_status FROM campaign_items WHERE campaign_id = ? AND ticket_id = 'FG-302'")
+    .get(campaignId) as { lifecycle_status: string };
+  assert.equal(refusedRow.lifecycle_status, "blocked_by_red", "refused item must be untouched");
+
+  const auditEvent = db2
+    .prepare("SELECT payload FROM events WHERE event_type = 'campaign_item.evidence_reconciled'")
+    .get() as { payload: string } | undefined;
+  assert.ok(auditEvent, "an evidence_reconciled event must be recorded for the shipped item");
+  const payload = JSON.parse(auditEvent!.payload) as { decidedBy: string };
+  assert.equal(payload.decidedBy, "steve");
+  db2.close();
+});
+
+test("integ campaign reconcile (human): prints each item's ticketId + status, missing facts for the refused item", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupReconcileCliCampaign("FG-303", "FG-304");
+
+  const humanResult = runForge(["campaign", "reconcile", campaignId]);
+  assert.equal(humanResult.status, 0, `stdout: ${humanResult.stdout}\nstderr: ${humanResult.stderr}`);
+  assert.ok(humanResult.stdout.includes("FG-303") && humanResult.stdout.includes("shipped"));
+  assert.ok(humanResult.stdout.includes("FG-304") && humanResult.stdout.includes("refused"));
+  assert.ok(
+    humanResult.stdout.includes("missing:"),
+    `refused item must print its missing facts\nstdout: ${humanResult.stdout}`
+  );
+});
+
+test("integ campaign reconcile: refuses a non-paused campaign, exits non-zero, zero items processed", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  // Campaign is still 'planned' — not paused.
+
+  const result = runForge(["campaign", "reconcile", planOutput.campaignId, "--json"]);
+  assert.notEqual(result.status, 0, "reconcile must exit non-zero for a non-paused campaign");
+
+  const output = JSON.parse(result.stdout) as { ok: boolean; items: unknown[] };
+  assert.equal(output.ok, false);
+  assert.deepEqual(output.items, []);
+});
+
+test("integ campaign reconcile: refuses an unknown campaign id, exits non-zero", () => {
+  const result = runForge(["campaign", "reconcile", "campaign-does-not-exist"]);
+  assert.notEqual(result.status, 0);
+  const combined = result.stderr + result.stdout;
+  assert.ok(combined.toLowerCase().includes("not found"), `expected a not-found message\ncombined: ${combined}`);
+});
+
+test("integ campaign reconcile --help: no --evidence/--force/free-text override option exists", () => {
+  const result = runForge(["campaign", "reconcile", "--help"]);
+  assert.equal(result.status, 0, `--help must exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.ok(!result.stdout.includes("--evidence"), "reconcile must not accept an --evidence override flag");
+  assert.ok(!result.stdout.includes("--force"), "reconcile must not accept a --force override flag");
+  assert.ok(result.stdout.includes("--json"), "reconcile must accept --json");
+  assert.ok(result.stdout.includes("--by"), "reconcile must accept --by for attribution");
+});
+
+// Plans + approves a single-item paused campaign with a scope-blocked item carrying
+// ALL durable evidence (ships on reconcile). Unlike setupReconcileCliCampaign, there
+// is no second item — this isolates the real two-command operator chain (reconcile
+// then resume) from any dispatch requirement, since after reconcile there is nothing
+// left for resume to drive.
+function setupSingleItemReconcileCliCampaign(ticketId: string): { campaignId: string; itemId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: "Solo", body: "" });
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", ticketId,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "approved"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const item = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .get(planOutput.campaignId) as { id: string; ticket_id: string };
+
+  const commit = makeCommitIn(projectDir, `impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  const runId = `run-${item.id}`;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
+  ).run(runId, item.id);
+  db.prepare(
+    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(ticketId, projectDir, commit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "fail", authority: "authoritative" }), "2026-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "pass", authority: "authoritative" }), "2026-01-01T00:00:01Z");
+
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  return { campaignId: planOutput.campaignId, itemId: item.id };
+}
+
+test("integ campaign reconcile then resume (real CLI-to-CLI chain): reconciled item lets the campaign actually complete", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupSingleItemReconcileCliCampaign("FG-310");
+
+  const reconcileResult = runForge(["campaign", "reconcile", campaignId, "--json"]);
+  assert.equal(reconcileResult.status, 0, `reconcile failed\nstdout: ${reconcileResult.stdout}\nstderr: ${reconcileResult.stderr}`);
+  const reconcileOutput = JSON.parse(reconcileResult.stdout) as { ok: boolean; items: { ticketId: string; status: string }[] };
+  assert.equal(reconcileOutput.items[0]?.status, "shipped");
+
+  // The operator's next real command, spawned as an entirely separate process against
+  // the same on-disk forge.db — proves the reconciled state actually persists and is
+  // honored by a fresh `resume` invocation, not just by re-reading in-process state.
+  const resumeResult = runForge(["campaign", "resume", campaignId, "--json"]);
+  assert.equal(resumeResult.status, 0, `resume failed\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+  const resumeOutput = JSON.parse(resumeResult.stdout) as { stopReason: string; itemRecords: { ticketId: string; lifecycleStatus: string; outcome?: string }[] };
+  assert.equal(resumeOutput.stopReason, "complete", "campaign must reach 'complete' once its only blocker was reconciled");
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db2 = new Database(dbPath, { readonly: true });
+  const finalCampaign = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(campaignId) as { status: string };
+  assert.equal(finalCampaign.status, "complete");
+  const finalItem = db2
+    .prepare("SELECT lifecycle_status, outcome FROM campaign_items WHERE campaign_id = ? AND ticket_id = 'FG-310'")
+    .get(campaignId) as { lifecycle_status: string; outcome: string };
+  assert.equal(finalItem.lifecycle_status, "complete");
+  assert.equal(finalItem.outcome, "shipped");
+  db2.close();
+});
+
+test("integ campaign reconcile is idempotent under re-run: second invocation reports not_applicable, logs zero additional audit events", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupSingleItemReconcileCliCampaign("FG-311");
+
+  const first = runForge(["campaign", "reconcile", campaignId, "--json"]);
+  assert.equal(first.status, 0);
+  const firstOutput = JSON.parse(first.stdout) as { items: { ticketId: string; status: string }[] };
+  assert.equal(firstOutput.items[0]?.status, "shipped");
+
+  const dbPath = join(forgeHome, "forge.db");
+  const dbAfterFirst = new Database(dbPath, { readonly: true });
+  const eventsAfterFirst = (
+    dbAfterFirst.prepare("SELECT COUNT(*) as n FROM events WHERE event_type = 'campaign_item.evidence_reconciled'").get() as { n: number }
+  ).n;
+  assert.equal(eventsAfterFirst, 1);
+  dbAfterFirst.close();
+
+  // Operator accidentally (or deliberately, to double-check) re-runs reconcile against
+  // the same already-shipped campaign. The item is no longer blockerKind='scope', so it
+  // must be reported not_applicable and left untouched — no re-shipping, no duplicate audit event.
+  const second = runForge(["campaign", "reconcile", campaignId, "--json"]);
+  assert.equal(second.status, 0, `second reconcile must still exit 0\nstdout: ${second.stdout}\nstderr: ${second.stderr}`);
+  const secondOutput = JSON.parse(second.stdout) as { ok: boolean; items: { ticketId: string; status: string }[] };
+  assert.equal(secondOutput.ok, true);
+  assert.equal(secondOutput.items[0]?.status, "not_applicable", "an already-shipped item must not be re-evaluated as scope-blocked");
+
+  const dbAfterSecond = new Database(dbPath, { readonly: true });
+  const eventsAfterSecond = (
+    dbAfterSecond.prepare("SELECT COUNT(*) as n FROM events WHERE event_type = 'campaign_item.evidence_reconciled'").get() as { n: number }
+  ).n;
+  assert.equal(eventsAfterSecond, 1, "re-running reconcile on an already-shipped item must not log a second audit event");
+  dbAfterSecond.close();
+});
+
+test("integ campaign show --json (real CLI, after reconcile): reflects the reconciled item as shipped with no blocker, and surfaces the audit trail", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupSingleItemReconcileCliCampaign("FG-312");
+
+  const reconcileResult = runForge(["campaign", "reconcile", campaignId, "--json", "--by", "steve"]);
+  assert.equal(reconcileResult.status, 0);
+
+  // The operator's normal read-only inspection command must reflect the reconciliation —
+  // a shipped item with its blocker cleared — through the same path used for every other
+  // campaign item, not a special-cased reconcile-only view.
+  const showResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(showResult.status, 0, `show failed\nstdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+  const showOutput = JSON.parse(showResult.stdout) as {
+    items: { ticketId: string; lifecycleStatus: string; outcome: string | null; blockerKind: string | null }[];
+  };
+  const item = showOutput.items.find((i) => i.ticketId === "FG-312")!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, null, "blocker must be cleared once reconciled");
 });

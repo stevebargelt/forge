@@ -44,7 +44,11 @@ export type EventType =
   // FG-353: worktree integration git mutation events for forge show / dashboard.
   | "integration.worktree_created"
   | "integration.child_merged"
-  | "integration.merged_to_head";
+  | "integration.merged_to_head"
+  // FG-428: operator-triggered `campaign reconcile` shipped a wedged item after
+  // re-deriving its outcome from durable evidence. Distinct from run.reconciled /
+  // task.reconciled (crash-recovery) — this is a trust-gate write, not a crash repair.
+  | "campaign_item.evidence_reconciled";
 
 export type Event = {
   id: number;

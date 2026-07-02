@@ -11,6 +11,7 @@ import {
   getCampaignItem,
   listCampaignItems,
   updateCampaignItem,
+  updateCampaignItemIfCampaignPaused,
 } from "./campaigns.js";
 import {
   isCampaignTransitionAllowed,
@@ -255,6 +256,44 @@ test("campaign items are scoped by campaign_id", () => {
   assert.equal(listCampaignItems(c1.id)[0]?.ticketId, "FG-001");
   assert.equal(listCampaignItems(c2.id).length, 1);
   assert.equal(listCampaignItems(c2.id)[0]?.ticketId, "FG-002");
+});
+
+// ── updateCampaignItemIfCampaignPaused: CAS ownership + pause guard ────────
+
+test("updateCampaignItemIfCampaignPaused: applies the write when the item belongs to the paused campaign", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaign.id, "running");
+  updateCampaignStatus(campaign.id, "paused");
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+
+  const applied = updateCampaignItemIfCampaignPaused(item.id, campaign.id, {
+    lifecycleStatus: "complete",
+    outcome: "shipped",
+  });
+
+  assert.equal(applied, true);
+  const loaded = getCampaignItem(item.id);
+  assert.equal(loaded?.lifecycleStatus, "complete");
+  assert.equal(loaded?.outcome, "shipped");
+});
+
+test("updateCampaignItemIfCampaignPaused: refuses and mutates nothing when campaignId names a different (even paused) campaign", () => {
+  const campaignA = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  const campaignB = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  updateCampaignStatus(campaignA.id, "running");
+  updateCampaignStatus(campaignA.id, "paused");
+  updateCampaignStatus(campaignB.id, "running");
+  updateCampaignStatus(campaignB.id, "paused");
+  const item = addCampaignItem({ campaignId: campaignA.id, itemOrder: 0, ticketId: "FG-001" });
+  const before = getCampaignItem(item.id);
+
+  const applied = updateCampaignItemIfCampaignPaused(item.id, campaignB.id, {
+    lifecycleStatus: "complete",
+    outcome: "shipped",
+  });
+
+  assert.equal(applied, false, "campaignB being paused must not authorize a write to campaignA's item");
+  assert.deepEqual(getCampaignItem(item.id), before, "item row must be byte-identical — zero mutation");
 });
 
 // ── Transition legality ────────────────────────────────────────────────────

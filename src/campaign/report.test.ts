@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -61,6 +62,15 @@ afterEach(() => {
   db.close();
   rmSync(projectDir, { recursive: true, force: true });
 });
+
+function gitExec(args: string[], cwd: string): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 10000,
+    env: { ...process.env, GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "t@t.com" },
+  });
+}
 
 // Snapshot all files in a directory tree
 function snapshotDir(dir: string): Set<string> {
@@ -563,6 +573,70 @@ test("assembleCampaignReport: commit=null for non-shipped item, commit set for s
 
   assert.equal(item1.commit, "deadbeef123", "shipped item must have commit from ticket");
   assert.equal(item2.commit, null, "non-shipped item must have null commit");
+});
+
+// ── FG-428: dirtyGitState must ignore host-local operational noise ───────────
+
+test("assembleCampaignReport: only backlog/notes.md + untracked .forge-scratch/ file dirty → dirtyGitState=null", () => {
+  gitExec(["init"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  writeFileSync(join(projectDir, "backlog", "notes.md"), "operator scratch notes\n");
+  const scratchDir = join(projectDir, ".forge-scratch");
+  mkdirSync(scratchDir, { recursive: true });
+  writeFileSync(join(scratchDir, "temp.txt"), "scratch\n");
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.dirtyGitState, null, "backlog/notes.md and .forge-scratch/ noise must not count as dirty");
+});
+
+test("assembleCampaignReport: real tracked source file modified alongside noise → dirtyGitState is set (regression)", () => {
+  gitExec(["init"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "src.ts"), "export const a = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  writeFileSync(join(projectDir, "backlog", "notes.md"), "operator scratch notes\n");
+  const scratchDir = join(projectDir, ".forge-scratch");
+  mkdirSync(scratchDir, { recursive: true });
+  writeFileSync(join(scratchDir, "temp.txt"), "scratch\n");
+  writeFileSync(join(projectDir, "src.ts"), "export const a = 2;\n");
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.ok(result.dirtyGitState !== null, "a genuinely dirty tracked file must still surface as dirty even alongside noise");
+  assert.ok(result.dirtyGitState!.includes("src.ts"), `dirtyGitState must include the genuinely-dirty file; got: ${result.dirtyGitState}`);
+  assert.ok(!result.dirtyGitState!.includes("notes.md"), `dirtyGitState must not include filtered noise; got: ${result.dirtyGitState}`);
+});
+
+test("assembleCampaignReport: clean tree → dirtyGitState=null", () => {
+  gitExec(["init"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+
+  const result = assembleCampaignReport(campaign.id)!;
+  assert.equal(result.dirtyGitState, null, "clean tree must report dirtyGitState=null");
 });
 
 // ── FG-394-fix: show/report surface recovery-needed condition ─────────────────
