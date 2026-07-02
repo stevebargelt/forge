@@ -1,10 +1,12 @@
 ---
 id: FG-422
 type: story
-status: active
+status: done
 title: Forge workflow skills for campaign, deep review, backlog, and deep research
 epic: FG-291
 created: 2026-06-30
+closed: 2026-07-02
+closed_commit: 53784a4
 ---
 
 ## Problem
