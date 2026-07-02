@@ -1,25 +1,27 @@
-**Last session ended 2026-06-30.**
+**Last session ended 2026-07-02.**
 
-**Where we left off:** Just merged FG-423 (PR #2 — campaign items now execute real workflows, not a hardcoded engineer invoke). Offered the user three loose-end follow-ups and was awaiting their pick when the session ended.
+**Where we left off:** Wrapped campaign-922c83b7c577 end-to-end (FG-357, FG-376, FG-422 all shipped) and — on the user's explicit direction — left it PAUSED (not abandoned) as preserved live evidence for the campaign-enhancement work. FG-422's item sits at awaiting_gate because its real deliverable (skills authoring) was re-routed to the docs lane, out of the feature pipeline.
 
 **Picked up next:**
-1. **Abandon the stale planned campaign `campaign-35b6361975ec`** (non-ticket cleanup, not a backlog item). It bundled FG-421 (now shipped) + FG-357/FG-376, and FG-357's readiness was never resolved. Run `forge campaign abandon campaign-35b6361975ec` (terminal — confirm with user first; abandon is irreversible).
-2. **Re-plan the FG-357 + FG-376 sequential campaign** — now VIABLE because FG-423 makes campaign items run the full feature workflow (architect/planning/reds/Shipping-Reviewer). BLOCKER first: FG-357's body uses `**Scope**`/`**Acceptance**` bold markers, so the readiness gate flags it `needs_refinement`; reformat it to `## Problem` / `## Goal` / `## Acceptance Criteria` (content already maps; no AC change) before it will dispatch. Then `forge campaign plan --tickets FG-357,FG-376 --mode sequential` -> approve -> start. Do NOT parallelize; FG-376 strictly after FG-357.
-3. **FG-422** (forge workflow skills: campaign / deep-review / backlog / deep-research) — filed this session, unstarted.
+1. Campaign-enhancement tickets, mining campaign-922c83b7c577 as the live reference case. Priority order: FG-443 (COMPLETE an out-of-band/re-routed item + first-class docs/authoring lane — most directly unblocking the stuck FG-422 item) → FG-440 (auto post-merge host-verification capture so reconcile doesn't need a manual record) → FG-441 (resume should reconcile manually-driven item runs after merge/close) → FG-442 (planner routes each item into an execution lane instead of defaulting to full feature). FG-427 (honor recorded force-advance / later pass over stale red-fails) underpins the reconcile behavior these depend on.
+2. FG-435 — profile-scoped STS staleness detection + profile-named message. This bit the user on their WORK LAPTOP this session (multi-profile false positive: global detection flagged the wrong profile). Design is understood; fix is scoped.
+3. Remaining FG-376/FG-428 follow-ups: FG-434 (operator prune command for shared dependency-cache volumes), FG-437 (AWN-1 crash reconciler for the provisioning phase), FG-431 (reconcile low-sev polish: inconclusive-supersession label + project_dir canonicalization), FG-433 (populate run.metadata.ticketId so shipping-reviewer preflight can run).
 
 **External state to remember:**
-- **Workflow reversed to branch+PR (2026-06-30):** forge-on-forge now lands on a feature branch + PR, NEVER direct-to-main; user merges; still no CI/squash unless asked. (Memory feedback_no_ci_pr_direct_to_main updated.) OPEN QUESTION for the user: backlog-only ticket-filing commits were still made direct-to-main as a judgment call — confirm whether even those should go through a PR.
-- **Campaigns now pause at human gates per item.** A campaign of feature-workflow items pauses on every gate:human (architect, tech-lead) and on blocked_by_red — it is a resumable stepper, not fire-and-forget. Expect manual gate-advances when running the FG-357/FG-376 campaign unattended.
-- `.forge-scratch/` accumulated brief files this session (untracked, not gitignored) — safe to delete.
+- campaign-922c83b7c577 is INTENTIONALLY paused as evidence — do NOT abandon or clean it up (project memory project_campaign_922_preserved_evidence records why). It demonstrates the FG-440/FG-441/FG-443 gaps concretely: FG-357 recovered via reconcile; FG-376 only reconcilable after a MANUAL `forge record-host-verification`; FG-422 stuck at awaiting_gate with no clean "complete" path.
+- Work-laptop STS false positive (bedrock/SSO): immediate unblock is `aws sts get-caller-identity --profile <the-specific-stale-profile>` — with MULTIPLE aws profiles, forge's detection is global and names the wrong profile. Real fix is FG-435. (Note: for a pure-SSO profile that never writes ~/.aws/cli/cache, deleting ~/.aws/cli/cache also clears the false positive.)
+- install-seeds.sh now ALSO installs the forge-* workflow skills to the user-global Claude skills dir (~/.claude/skills, override CLAUDE_SKILLS_DEST/CLAUDE_CONFIG_DIR) — a single install makes them available in every project.
+- Docker Desktop went down mid-session and was restarted; agent invokes (forge invoke/new) need it running.
 
 **Decisions worth not relitigating:**
-- FG-423 outcome gating: `shipped` requires a passing authoritative verdict AND a passing done-audit (real evaluateDoneAudit); failing/unknown done-audit, abandoned/failed run, or empty/inconclusive verdicts -> `blocked`. This was a user-caught P1 (AC required "plus done-audit"); do not revert to verdict-only.
-- FG-423 drive loop distinguishes GATE TYPE: auto-advance gate:auto and gate:verdict-all-pass; park ONLY on gate:human and blocked_by_red; campaign-item lifecycleStatus=awaiting_gate is reserved for a real human decision. Do not reintroduce "park on any awaiting_gate".
-- Single-agent invoke is the EXPLICIT, plan/report-visible escape hatch (executionMode:invoke); workflow:feature is the default.
-- Build-fanout test-step trap: a dedicated build step that tests the other steps' code idles in isolation (FG-423 step 4 idle-timeout) — fold tests into their impl step or leave integration tests to the verify-phase test-engineer. (Memory updated.)
-- Skipped an independent red pass on FG-423 by design — the user's own deep production-path review WAS the adversarial pass (caught 3 findings, 2 P1).
+- FG-376 shared dependency cache = TWO-PHASE provision-then-run: a dedicated short-lived provisioner container (repo ro, volumes rw) installs under a short host lock and writes a ready marker atomically; the real agent/reviewer then mounts the volumes READ-ONLY. Lock scoped to the provisioner only; a dead-pid lock is stolen ONLY after the recorded provisioner container is CONFIRMED gone (kill returns killed/not_found, never on an unconfirmed error). Do not revert to a whole-run lock or time-based stale-lock theft. Crash-recovery of the provisioning phase is deferred to FG-437.
+- FG-422 skills authored via documentation-maintainer (durable-docs lane), NOT engineer/test-engineer — re-routed after the architect gate; the campaign runner can't express a docs-only lane (that's FG-442/FG-443). Distributed via seeds/skills → ~/.claude/skills; NO plugin (deferred, "maybe one day"). forge-review-loop points to the shipping-reviewer seed as source of truth rather than forking reviewer discipline.
+- FG-376 campaign item was recovered by MANUAL `forge record-host-verification` (genuine `npm run test:all` green on the merge commit) then `forge campaign reconcile` — this is the sanctioned evidence path, not hand-patching. The missing auto-capture is FG-440.
+- install-seeds.sh idempotency: macOS BSD `cp -n` exits 1 when it skips existing files, so under `set -euo pipefail` every RE-RUN aborted; fixed with a copy-if-absent helper (preserves local edits, FORCE=1 overwrites, real errors still surface).
+- Blocked-by-red fix flow used repeatedly: single non-fanout `forge invoke engineer --run <run>` fixer (NOT request-changes, which re-runs the fanout), then advance --force with documenting rationale, then a focused red-wide re-check before close. "Work not persisted" on these fixers was consistently the FG-377 macOS false positive — work verified on disk each time.
 
 **Shipped (for reference):**
-- FG-421 — shipping-reviewer operator-contract enforcement rubric + seed guard (PR #1).
-- FG-423 — campaign items execute configured workflows; gate-type auto-advance, done-audit-gated outcome, report traceability, brief-supplied startRun with clean failure containment (PR #2).
-- Filed FG-422 (workflow skills) — still active, not started.
+- FG-357 — recovered from a stale-red-fail campaign wedge via evidence-gated reconcile.
+- FG-428 — evidence-gated, non-destructive campaign reconcile command (PR #4, merge 6a9c713).
+- FG-376 — agent worktree dependency parity / shared lockfile-keyed cache with two-phase provisioner (PR #5, merge 7211a47).
+- FG-422 — four forge workflow skills (forge-campaign/review-loop/backlog/research-synthesis) + ~/.claude/skills distribution + install-seeds idempotency fix (PR #6, merge 53784a4).
