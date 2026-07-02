@@ -141,6 +141,65 @@ test("collect: clean working tree → git.dirty=false", () => {
   assert.equal(input.git.dirty, false, "dirty must be false when working tree is clean");
 });
 
+// ── FG-428: host-local operational noise must not block shipped work ─────────
+
+test("collect: only backlog/notes.md + untracked .forge-scratch/ file dirty → git.dirty=false", () => {
+  writeTicket(projectDir, {
+    id: "FG-COLLECT-NOISE-1",
+    type: "story",
+    status: "done",
+    title: "Collect Noise One",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial"], projectDir);
+
+  // Modify backlog/notes.md (tracked, host-local operator scratch)
+  const notesPath = join(projectDir, "backlog", "notes.md");
+  mkdirSync(join(projectDir, "backlog"), { recursive: true });
+  writeFileSync(notesPath, "operator scratch notes\n");
+
+  // Untracked file under .forge-scratch/
+  const scratchDir = join(projectDir, ".forge-scratch");
+  mkdirSync(scratchDir, { recursive: true });
+  writeFileSync(join(scratchDir, "temp.txt"), "scratch\n");
+
+  const item = makeItem("FG-COLLECT-NOISE-1");
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.git.dirty, false, "backlog/notes.md and .forge-scratch/ noise must not count as dirty");
+});
+
+test("collect: real tracked source file modified alongside noise → git.dirty=true (regression)", () => {
+  writeTicket(projectDir, {
+    id: "FG-COLLECT-NOISE-2",
+    type: "story",
+    status: "done",
+    title: "Collect Noise Two",
+    body: "done",
+    related: [],
+  });
+  writeFileSync(join(projectDir, "src.ts"), "export const a = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "initial"], projectDir);
+
+  // Noise: backlog/notes.md + .forge-scratch/
+  mkdirSync(join(projectDir, "backlog"), { recursive: true });
+  writeFileSync(join(projectDir, "backlog", "notes.md"), "operator scratch notes\n");
+  const scratchDir = join(projectDir, ".forge-scratch");
+  mkdirSync(scratchDir, { recursive: true });
+  writeFileSync(join(scratchDir, "temp.txt"), "scratch\n");
+
+  // Genuine dirty change: modify a real tracked source file
+  writeFileSync(join(projectDir, "src.ts"), "export const a = 2;\n");
+
+  const item = makeItem("FG-COLLECT-NOISE-2");
+  const input = collectDoneAuditInput(projectDir, item);
+
+  assert.equal(input.git.dirty, true, "a genuinely dirty tracked file must still report dirty=true even alongside noise");
+});
+
 // ── non-existent closedCommit → commitExists=false ───────────────────────────
 
 test("collect: non-existent closedCommit → commitExists=false (not null)", () => {

@@ -7,6 +7,21 @@ import { queryHostVerificationRows } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
+// Host-local operational state (operator notes, scratch dirs) that must not block
+// shipped-work audits — done-audit cares about the merge/closed commit + ticket
+// state, not transient workspace files. Duplicated in campaign/report.ts on purpose:
+// both call sites parse `git status --porcelain` independently and must not disagree.
+function isHostLocalNoisePath(path: string): boolean {
+  return path === "backlog/notes.md" || path.startsWith(".forge-scratch/");
+}
+
+function filterDirtyPorcelainLines(output: string): string[] {
+  return output
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !isHostLocalNoisePath(line.slice(3)));
+}
+
 export function collectDoneAuditInputFor(projectDir: string, ticketId: string, runId?: string): DoneAuditInput {
   // ticket — best-effort
   let ticket: DoneAuditInput["ticket"] = null;
@@ -24,7 +39,8 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
 
   const closedCommit = ticket?.closedCommit;
 
-  // git.dirty — reuse pattern from report.ts computeDirtyGitState
+  // git.dirty — reuse pattern from report.ts computeDirtyGitState. Ignore host-local
+  // operational noise (backlog/notes.md, .forge-scratch/) — see isHostLocalNoisePath.
   let dirty: boolean | null = null;
   try {
     const output = execFileSync("git", ["status", "--porcelain"], {
@@ -32,7 +48,7 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
       encoding: "utf8",
       timeout: 5000,
     });
-    dirty = output.trim().length > 0;
+    dirty = filterDirtyPorcelainLines(output).length > 0;
   } catch {
     // dirty = null
   }

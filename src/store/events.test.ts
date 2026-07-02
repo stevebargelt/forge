@@ -157,3 +157,17 @@ test("logEvent accepts new #194 event types without throwing", () => {
   assert.ok(types.includes("auth.profile_applied"));
   assert.ok(types.includes("auth.profile_failed"));
 });
+
+// FG-428: campaign_item.evidence_reconciled is distinct from run.reconciled/task.reconciled
+test("logEvent accepts campaign_item.evidence_reconciled and round-trips its payload", () => {
+  logEvent("campaign_item.evidence_reconciled", {
+    runId: RUN.id,
+    payload: { campaignId: "campaign-1", itemId: "citem-1", ticketId: "FG-1", decidedBy: "operator" },
+  });
+  const events = eventsForRun(RUN.id);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.eventType, "campaign_item.evidence_reconciled");
+  const payload = events[0]!.payload as { ticketId: string; decidedBy: string };
+  assert.equal(payload.ticketId, "FG-1");
+  assert.equal(payload.decidedBy, "operator");
+});

@@ -94,6 +94,20 @@ function computeCurrentPlanHash(campaign: Campaign): string | null {
   }
 }
 
+// Host-local operational state (operator notes, scratch dirs) that must not block
+// shipped-work reporting. Duplicated in done-audit/collect.ts on purpose: both call
+// sites parse `git status --porcelain` independently and must not disagree.
+function isHostLocalNoisePath(path: string): boolean {
+  return path === "backlog/notes.md" || path.startsWith(".forge-scratch/");
+}
+
+function filterDirtyPorcelainLines(output: string): string[] {
+  return output
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .filter((line) => !isHostLocalNoisePath(line.slice(3)));
+}
+
 function computeDirtyGitState(projectDir: string): string | null {
   try {
     const output = execFileSync("git", ["status", "--porcelain"], {
@@ -101,7 +115,8 @@ function computeDirtyGitState(projectDir: string): string | null {
       encoding: "utf8",
       timeout: 5000,
     });
-    return output.trim() || null;
+    const lines = filterDirtyPorcelainLines(output);
+    return lines.length > 0 ? lines.join("\n") : null;
   } catch {
     return null;
   }

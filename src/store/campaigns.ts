@@ -261,6 +261,54 @@ export function tryTransitionCampaignToRunning(id: string): boolean {
   return tryTransitionCampaign(id, "planned", "running");
 }
 
+// FG-428: guarded write for `campaign reconcile` — the campaign-status check and
+// the item mutation must be a single atomic operation, or a concurrent
+// resume/start could flip the campaign out of 'paused' between a plain read and
+// this write. The subquery reads campaigns.status as part of the same UPDATE
+// statement/transaction, so it can never observe a stale snapshot: if the
+// campaign is no longer 'paused' when this statement executes, zero rows change.
+// The `campaign_id = ?` clause additionally enforces that id actually belongs to
+// campaignId, so a caller cannot mutate one campaign's item by naming a different
+// (paused) campaignId.
+// Returns true iff the item belonged to campaignId, that campaign was still
+// 'paused', and the write landed.
+export function updateCampaignItemIfCampaignPaused(
+  id: string,
+  campaignId: string,
+  update: CampaignItemUpdate
+): boolean {
+  const existing = getCampaignItem(id);
+  if (!existing) return false;
+  const next = { ...existing, ...update };
+  const result = getDb()
+    .prepare(
+      `UPDATE campaign_items SET
+         lifecycle_status = ?, outcome = ?, blocker_kind = ?, continue_policy = ?,
+         reason = ?, requested_human_action = ?, run_id = ?, branch = ?,
+         worktree_path = ?, pr_url = ?, updated_at = ?
+       WHERE id = ?
+         AND campaign_id = ?
+         AND (SELECT status FROM campaigns WHERE id = ?) = 'paused'`
+    )
+    .run(
+      next.lifecycleStatus,
+      next.outcome ?? null,
+      next.blockerKind ?? null,
+      next.continuePolicy ?? null,
+      next.reason ?? null,
+      next.requestedHumanAction ?? null,
+      next.runId ?? null,
+      next.branch ?? null,
+      next.worktreePath ?? null,
+      next.prUrl ?? null,
+      nowIso(),
+      id,
+      campaignId,
+      campaignId
+    );
+  return (result.changes ?? 0) > 0;
+}
+
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
   const existing = getCampaignItem(id);
   if (!existing) return;
