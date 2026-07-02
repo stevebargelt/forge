@@ -1,10 +1,12 @@
 ---
 id: FG-376
 type: story
-status: active
+status: done
 title: "Agent worktree dependency parity: real node_modules in disposable worktrees so agents/reviewers can run normal tests"
 epic: FG-291
 created: 2026-06-23
+closed: 2026-07-02
+closed_commit: 7211a47
 ---
 
 ## Problem
