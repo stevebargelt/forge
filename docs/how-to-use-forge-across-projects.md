@@ -15,6 +15,8 @@ forge auth login                 # personal Mac only
 
 After `npm link`, `which forge` resolves and `forge --help` runs from any directory. Source files in `~/code/forge/src/` are live (no rebuild needed) since the bin entry runs through `tsx`.
 
+`install-seeds.sh` also installs the `forge-*` workflow skills (`forge-campaign`, `forge-review-loop`, `forge-backlog`, `forge-research-synthesis`) into the user-global Claude skills dir (`~/.claude/skills` by default; override with `CLAUDE_SKILLS_DEST` or `CLAUDE_CONFIG_DIR`). Because that's a Claude Code user setting rather than a forge project setting, the skills become available in **every** project on the machine after a single install — no per-project step needed. These are host/orchestrator skills; container agents don't see them (they use the separate container-only skill mount in `src/v2/spawn.ts`).
+
 To remove: `cd ~/code/forge && npm unlink`.
 
 ## Per-project setup
@@ -74,6 +76,7 @@ Both modes write to the same `~/.forge/forge.db` and the same `~/.forge/runs/<ru
 | `~/.forge/constraints/*.md` | Suggest- and force-level constraints | Host-global |
 | `~/.forge/workflows/*.yml` | Default workflow definitions | Host-global |
 | `~/.forge/forge-raci.md` | RACI table the orchestrator uses to route work | Host-global |
+| `~/.claude/skills/forge-*/` | Host/orchestrator workflow skills | Host-global; not seen by container agents |
 | `<project>/CLAUDE.md` | Orchestrator block (installed by `forge init`) | Per-project |
 | `<project>/.forge/workflows/*.yml` | Per-project workflow override | Per-project |
 
