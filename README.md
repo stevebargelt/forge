@@ -18,7 +18,7 @@ Node 20+, Docker, and one of three auth modes (FORGE-DEC-007). Forge auto-select
 cd ~/code/forge
 npm install
 npm link                         # puts `forge` on $PATH
-./scripts/install-seeds.sh       # populates ~/.forge/agents, constraints, runtimes, workflows
+./scripts/install-seeds.sh       # populates ~/.forge/agents, constraints, runtimes, workflows; installs forge-* skills into ~/.claude/skills
 ./docker/build.sh                # one-time agent image build
 forge auth login                 # one-time, personal Mac only (skip if using Bedrock)
 ```

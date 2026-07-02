@@ -12,7 +12,7 @@ npm link                    # puts `forge` on $PATH
 ./docker/build.sh           # one-time, ~5–10 min
 ```
 
-`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000). `npm link` symlinks `./bin/forge` into a directory on your `$PATH` (typically `/usr/local/bin`), so `forge <cmd>` works from any cwd.
+`install-seeds.sh` copies the default agent role directories, constraints, runtimes, and workflow YAML into `~/.forge/`, and installs the `forge-*` workflow skills into the user-global Claude skills dir (`~/.claude/skills` by default), so they're available to any Claude Code session on the machine. `docker/build.sh` builds the `agent-dev-worker` image (Ubuntu 22.04 + Node 20 + Claude Code CLI + git/jq/playwright + agent UID 1000). `npm link` symlinks `./bin/forge` into a directory on your `$PATH` (typically `/usr/local/bin`), so `forge <cmd>` works from any cwd.
 
 Verify: `which forge` should print a path; `forge --help` should list the commands.
 
