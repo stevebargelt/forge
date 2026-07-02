@@ -42,3 +42,11 @@ For genuine provider-level independence (not just role-level), pin `research-pri
 ## Roles, not policy
 
 The researcher and synthesizer behavior itself lives in `seeds/agents/research-specialist/`, `seeds/agents/research-primary/`, `seeds/agents/research-skeptic/`, `seeds/agents/research-framer/`, and `seeds/agents/synthesizer/` — this skill points to the workflow shape and when to invoke it, not to the agents' internal instructions.
+
+## Research discipline
+
+- **Primary over secondary.** Favor primary sources (code, docs, observed behavior) over secondary summaries when a primary source is practically reachable — this is the researcher's own standing discipline, not new policy; see `seeds/agents/research-specialist/CLAUDE.md`.
+- **Fact vs. inference.** State plainly which findings are directly observed versus inferred — don't let an inference read with the same confidence as an observation. The per-claim `verdict`/`conclusion` fields already carry this distinction (`supported`/`refuted`/`inconclusive`); carry it into whatever you tell the user too.
+- **End with a decision.** Don't let a research pass land as an open-ended summary. Close it out with either concrete recommended backlog items (`forge backlog file "<title>" --body <text>`) or an explicit "no action" conclusion.
+
+This section is about how you use the output, not a separate research rubric — the researcher/synthesizer discipline itself is owned by the seeds above (`research-specialist`, and sibling `research-primary`/`research-skeptic`/`research-framer`/`synthesizer`).

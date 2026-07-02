@@ -36,6 +36,14 @@ forge campaign report  <campaign-id>       # read-only
 
 A campaign pauses between items rather than mid-item — the in-flight item finishes (or parks at a gate/verdict) before the pause takes effect. When it pauses, it's always for a specific, inspectable reason (readiness-held ticket, dependency-held item, blocked item, human gate, or a cooperative operator pause) — `forge campaign show` names the item and the action needed. Treat a paused campaign as the normal steady state of a long-running campaign, not an error condition.
 
+## Stop/hold discipline
+
+- **Prefer `--mode sequential`** when the planned items touch shared verification, worktree state, dependency provisioning, the reviewer, or campaign semantics itself — anything one item's failure could leave broken for the next. `sequential` holds on an unknown ticket relation; `pilot` continues past it as a visible risk. Use `pilot` only when items are known-independent.
+- **Stop and inspect rather than push through** on: a stale or unresolvable plan (`stale_plan` — the plan hash no longer matches what was approved — or `plan_unresolvable` — a source ticket was deleted since planning), an unresolved dependency hold (an item held because its relation to a blocked item is unknown), or a `scope` blocker (a failing or inconclusive/empty aggregate verdict). None of these are safe to paper over by re-running `start`/`resume` blindly.
+- **Don't silently continue when campaign safety is unclear.** Run `forge campaign show <id>` or `forge campaign report <id>` first — both name the blocking item and the concrete next action — and resolve what they surface before deciding to `resume`, `reconcile`, or `abandon`.
+
+Full precondition tables, blocker kinds, and stop-reason semantics live in `docs/concepts.md` (search "## Campaign") — this section is the discipline for when to hold, not a restatement of those tables.
+
 ## When to reach for this vs a single run
 
 Use `forge campaign` when you have more than one ticket to work in a defined order and want durable plan/approval/resume state. For a single ticket, drive it directly with `forge new`/`forge next`/`forge gate` (see `docs/quick-start.md`) rather than wrapping it in a one-item campaign.

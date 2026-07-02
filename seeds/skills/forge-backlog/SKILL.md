@@ -38,3 +38,12 @@ All subcommands accept `--project <dir>` (default: cwd) to target a backlog outs
 ## When to use it
 
 Prefer `forge backlog` over directly reading/writing files under `backlog/` — it enforces ticket ID allocation, locking on creation, and consistent status/type semantics. Reach for `forge campaign` (see the `forge-campaign` skill) when you need to actually execute a ticket's implementation, not just inspect or file it.
+
+## Discipline
+
+- **Reopen vs. follow-up.** Reopen a ticket to finish its own unmet acceptance criteria (`forge backlog move <id> story`, then strip the stale `closed:`/`closed_commit:` frontmatter the move leaves behind). File a follow-up ticket only for genuinely *new* scope discovered later — never for the original ticket's own unmet AC.
+- **Never close-and-defer.** Do not close a ticket by pushing its own unmet AC into a vague follow-up — that launders incomplete work past the gate. An AC line with no evidence is not met; the ticket stays open until it is.
+- **Real scope change → a named ticket.** If work genuinely changes scope mid-flight, move the affected AC into an explicit ticket (`forge backlog file` / `move`) rather than dropping or hand-waving it.
+- **Preserve unrelated changes.** `edit` replaces a ticket's body wholesale — use it (and any other step) only on the ticket's own scope; never revert or clobber user/agent edits outside that ticket's scope.
+
+This is a summary, not a fork: the source of truth is CLAUDE.md's "Before closing a backlog ticket" section. If the two ever disagree, CLAUDE.md wins.
