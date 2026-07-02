@@ -3,11 +3,12 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
-import { buildDockerArgs, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, type SpawnContext } from "./spawn.js";
+import { lockfileHash, planDependencyVolumes } from "./dependency-provisioning.js";
 
 // A browser-tools dir that actually contains the auth injector (#181 pin check).
 const BT_DIR_WITH_INJECTOR = mkdtempSync(join(tmpdir(), "forge-bt-"));
@@ -199,6 +200,235 @@ test("buildDockerArgs: #245 FORGE_NO_NM_SHADOW=1 disables the node_modules shado
     assert.ok(!args.includes("/project/node_modules"), "escape hatch must disable the shadow volume");
   } finally {
     delete process.env.FORGE_NO_NM_SHADOW;
+  }
+});
+
+// ── FG-376: named, lockfile-keyed dependency volumes ──────────────────────────
+// These force process.platform="darwin" so the (darwin-only) named-volume path
+// is exercised on any host, including Linux CI.
+
+function setPlatform(p: string): void {
+  Object.defineProperty(process, "platform", { value: p, configurable: true });
+}
+
+function pickAllVolumeArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-v") out.push(args[i + 1]!);
+  }
+  return out;
+}
+
+// buildDockerArgs builds AGENT/reviewer containers ONLY. It never installs and
+// never mounts a named dependency volume read-write — that's exclusively
+// buildProvisionerDockerArgs's job (see the "provisioner" tests further down).
+// By the time buildDockerArgs runs for a worktree-rw primary, the caller
+// (runNext.ts) has already confirmed the cache is ready and sets
+// DEPENDENCY_CACHE_MOUNT_RO="1" — so these tests exercise that post-provisioning
+// state directly, the only state buildDockerArgs itself ever needs to handle.
+
+test("buildDockerArgs: FG-376 worktree-mode + DEPENDENCY_CACHE_MOUNT_RO → named per-workspace-member volumes mounted READ-ONLY, never installs", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-spawn-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  try {
+    // FIX1: IS_WORKTREE_DISPATCH is what gates the named-volume path — set here
+    // to mirror runNext.ts's worktree-mode dispatch (see the FIX1 test below for
+    // the non-worktree case). DEPENDENCY_CACHE_MOUNT_RO is what the caller sets
+    // once dependency-provisioning.ts confirms the cache key is ready.
+    const { args } = buildDockerArgs(BASE_RUNTIME, {
+      ...BASE_CTX,
+      PROJECT_DIR: repo,
+      IS_WORKTREE_DISPATCH: "1",
+      DEPENDENCY_CACHE_MOUNT_RO: "1",
+    });
+    const volumeArgs = pickAllVolumeArgs(args);
+    const nmVolumes = volumeArgs.filter((v) => v.includes("node_modules"));
+    assert.equal(nmVolumes.length, 2, `expected 2 node_modules volumes, got: ${JSON.stringify(nmVolumes)}`);
+    assert.ok(nmVolumes.every((v) => v.endsWith(":ro")), `agent container must never mount the shared cache read-write, got: ${JSON.stringify(nmVolumes)}`);
+    assert.ok(!volumeArgs.includes("/project/node_modules"), "must not fall back to the legacy anonymous volume when a lockfile is present");
+
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "the agent container must never install — that's the provisioner's job");
+    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules");
+    assert.equal(env.FORGE_NM_LOCKFILE_HASH, lockfileHash(repo));
+    const shadowPaths = env.FORGE_NM_SHADOW_PATHS!.split(":").sort();
+    assert.deepEqual(shadowPaths, ["/project/dashboard/node_modules", "/project/node_modules"].sort());
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+test("buildDockerArgs: FG-376 worktree-mode WITHOUT DEPENDENCY_CACHE_MOUNT_RO (cache not yet confirmed ready) → legacy anonymous volume only, no named volumes at all", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-spawn-unready-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  try {
+    // IS_WORKTREE_DISPATCH alone, no DEPENDENCY_CACHE_MOUNT_RO — in real
+    // dispatch this state should never reach buildDockerArgs (runNext.ts fails
+    // the task before building agent args if provisioning didn't succeed), but
+    // the fallback must still be safe: no named volume, and definitely no rw one.
+    const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo, IS_WORKTREE_DISPATCH: "1" });
+    const volumeArgs = pickAllVolumeArgs(args);
+    assert.equal(volumeArgs.filter((v) => v.includes("forge-deps-")).length, 0, "no named dependency-cache volume without a confirmed-ready cache");
+    assert.ok(volumeArgs.includes("/project/node_modules"), "falls back to the legacy anonymous shadow volume");
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined);
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+// FIX1 (FG-376 review): the named-volume path used to fire on EVERY macOS rw
+// dispatch. It must now be worktree-mode ONLY — a plain rw dispatch (no
+// IS_WORKTREE_DISPATCH) must behave byte-for-byte like pre-FG-376: legacy
+// anonymous shadow volume only, none of the FG-376 provisioning env vars, no
+// named forge-deps-* volumes — even when a real lockfile+workspaces repo is
+// mounted.
+test("buildDockerArgs: FIX1 non-worktree rw dispatch never takes the named-volume/auto-install path, even with a real lockfile (byte-for-byte legacy behavior)", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-nonworktree-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  try {
+    // No IS_WORKTREE_DISPATCH field at all — mirrors a normal `forge invoke` /
+    // non-worktree runNext dispatch.
+    const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo });
+    const volumeArgs = pickAllVolumeArgs(args);
+    assert.ok(volumeArgs.includes("/project/node_modules"), "non-worktree rw dispatch must still shadow via the legacy anonymous volume");
+    assert.equal(
+      volumeArgs.filter((v) => v.includes("forge-deps-")).length,
+      0,
+      "non-worktree rw dispatch must mount no named dependency-cache volumes",
+    );
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules", "legacy FORGE_NM_SHADOW is still emitted (pre-FG-376 behavior)");
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "non-worktree dispatch must never emit FORGE_NM_INSTALL_ROOT");
+    assert.equal(env.FORGE_NM_SHADOW_PATHS, undefined, "non-worktree dispatch must never emit FORGE_NM_SHADOW_PATHS");
+    assert.equal(env.FORGE_NM_LOCKFILE_HASH, undefined, "non-worktree dispatch must never emit FORGE_NM_LOCKFILE_HASH");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+// FIX4: a read-only reviewer/red dispatch reuses an already-populated cache,
+// mounted read-only, and never installs.
+test("buildDockerArgs: FIX4 DEPENDENCY_CACHE_MOUNT_RO mounts named volumes read-only on a ro (reviewer) dispatch, never installs", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-reviewer-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, {
+      ...BASE_CTX,
+      PROJECT_DIR: repo,
+      PROJECT_MODE: "ro",
+      DEPENDENCY_CACHE_MOUNT_RO: "1",
+    });
+    const volumeArgs = pickAllVolumeArgs(args);
+    const nmVolumes = volumeArgs.filter((v) => v.includes("node_modules"));
+    assert.equal(nmVolumes.length, 2, `expected 2 read-only node_modules volumes, got: ${JSON.stringify(nmVolumes)}`);
+    assert.ok(nmVolumes.every((v) => v.endsWith(":ro")), `reviewer volumes must be mounted read-only, got: ${JSON.stringify(nmVolumes)}`);
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "reviewers never install");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+test("buildDockerArgs: FIX4 a ro dispatch WITHOUT DEPENDENCY_CACHE_MOUNT_RO mounts nothing (reviewer proceeds without a cache mount, no blocking)", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-reviewer-unready-"));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo, PROJECT_MODE: "ro" });
+    const volumeArgs = pickAllVolumeArgs(args);
+    assert.equal(volumeArgs.filter((v) => v.includes("node_modules")).length, 0, "no cache mount when the cache isn't marked ready");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+// FIX5: a crafted workspaces entry must never reach a mount destination.
+test("buildDockerArgs: FIX5 a traversal/absolute workspaces entry is excluded — never becomes a volume mount destination", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-unsafe-ws-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["../../etc", "/etc/passwd", "dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  const warnings: string[] = [];
+  const origError = console.error;
+  console.error = (msg?: unknown) => { warnings.push(String(msg)); };
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, {
+      ...BASE_CTX,
+      PROJECT_DIR: repo,
+      IS_WORKTREE_DISPATCH: "1",
+      DEPENDENCY_CACHE_MOUNT_RO: "1",
+    });
+    const volumeArgs = pickAllVolumeArgs(args);
+    assert.ok(!volumeArgs.some((v) => v.includes("etc")), `an unsafe workspaces entry must never reach a mount destination, got: ${JSON.stringify(volumeArgs)}`);
+    const nmVolumes = volumeArgs.filter((v) => v.includes("node_modules"));
+    assert.equal(nmVolumes.length, 2, "only the root + the safe 'dashboard' member are mounted");
+    assert.ok(nmVolumes.every((v) => v.endsWith(":ro")), "still read-only even on the worktree-primary path");
+    assert.ok(warnings.some((w) => w.includes("../../etc")), "the rejection must be logged, not silent");
+  } finally {
+    console.error = origError;
+    setPlatform(realPlatform);
+  }
+});
+
+test("buildDockerArgs: FG-376 no package-lock.json → falls back to the legacy anonymous shadow volume", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-nolock-"));
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo, IS_WORKTREE_DISPATCH: "1" });
+    assert.ok(args.includes("/project/node_modules"), "non-npm / lockfile-less project must fall back to the legacy anonymous volume");
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_SHADOW, "/project/node_modules");
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined, "no plan → no FORGE_NM_INSTALL_ROOT emitted");
+    assert.equal(env.FORGE_NM_LOCKFILE_HASH, undefined, "no plan → no FORGE_NM_LOCKFILE_HASH emitted");
+  } finally {
+    setPlatform(realPlatform);
+  }
+});
+
+test("buildDockerArgs: FG-376 FORGE_NO_NM_SHADOW=1 disables even when a real lockfile is present", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.FORGE_NO_NM_SHADOW = "1";
+  const realPlatform = process.platform;
+  setPlatform("darwin");
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-disabled-"));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  try {
+    const { args } = buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, PROJECT_DIR: repo, IS_WORKTREE_DISPATCH: "1" });
+    const volumeArgs = pickAllVolumeArgs(args);
+    assert.equal(volumeArgs.filter((v) => v.includes("node_modules")).length, 0, "escape hatch must disable all dependency-volume mounts");
+    const env = pickEnv(args);
+    assert.equal(env.FORGE_NM_INSTALL_ROOT, undefined);
+  } finally {
+    delete process.env.FORGE_NO_NM_SHADOW;
+    setPlatform(realPlatform);
   }
 });
 
@@ -586,4 +816,68 @@ test("regression: agent containers isolate from host project settings via --sett
   // have --setting-sources — pi CLI does not accept it.
   const { args: piArgs } = buildDockerArgs(PI_RUNTIME, BASE_CTX);
   assert.equal(piArgs.indexOf("--setting-sources"), -1, "non-claude-code runtime (pi) must not have --setting-sources");
+});
+
+// ── FG-376: buildProvisionerDockerArgs — the dedicated short-lived install container ──
+
+test("resolveProjectContainerPath: reads the ${PROJECT_DIR} mount's container path from the runtime", () => {
+  assert.equal(resolveProjectContainerPath(BASE_RUNTIME), "/project");
+});
+
+test("resolveProjectContainerPath: undefined when the runtime declares no project mount", () => {
+  const noMountRuntime: Runtime = { ...BASE_RUNTIME, mounts: [] };
+  assert.equal(resolveProjectContainerPath(noMountRuntime), undefined);
+});
+
+function pickProvisionerVolumeArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-v") out.push(args[i + 1]!);
+  }
+  return out;
+}
+
+function pickProvisionerEnv(args: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-e") {
+      const pair = args[i + 1]!;
+      const eq = pair.indexOf("=");
+      if (eq > 0) out[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+  }
+  return out;
+}
+
+test("buildProvisionerDockerArgs: mounts the repo READ-ONLY, mounts every plan volume READ-WRITE, sets the install env, and execs a trivial no-op (not the agent)", () => {
+  const repo = mkdtempSync(join(tmpdir(), "forge-fg376-provisioner-"));
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", workspaces: ["dashboard"] }));
+  writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3}');
+  mkdirSync(join(repo, "dashboard"), { recursive: true });
+  const plan = planDependencyVolumes(repo, "/project");
+
+  const args = buildProvisionerDockerArgs(BASE_RUNTIME, { TASK_ID: "task-provision-x", PROJECT_DIR: repo }, plan);
+
+  assert.deepEqual(args.slice(0, 3), ["run", "--rm", "-i"]);
+  const nameIdx = args.indexOf("--name");
+  assert.equal(args[nameIdx + 1], `forge-provision-${plan.lockfileHash}`, "named by cache key, not taskId (FIX1) — matches the provisioning lock's own grain");
+
+  const volumeArgs = pickProvisionerVolumeArgs(args);
+  const repoMount = volumeArgs.find((v) => v.startsWith(`${repo}:`));
+  assert.ok(repoMount, `expected the repo itself to be mounted, got: ${JSON.stringify(volumeArgs)}`);
+  assert.ok(repoMount!.endsWith(":ro"), "the provisioner must mount the repo source read-only — npm ci never writes to it");
+
+  const rwVolumes = volumeArgs.filter((v) => v.includes("forge-deps-"));
+  assert.equal(rwVolumes.length, 2, `expected 2 named dependency volumes, got: ${JSON.stringify(rwVolumes)}`);
+  assert.ok(rwVolumes.every((v) => !v.endsWith(":ro")), `the provisioner is the ONLY container allowed to mount these read-write, got: ${JSON.stringify(rwVolumes)}`);
+
+  const env = pickProvisionerEnv(args);
+  assert.equal(env.FORGE_NM_INSTALL_ROOT, "/project");
+  const shadowPaths = env.FORGE_NM_SHADOW_PATHS!.split(":").sort();
+  assert.deepEqual(shadowPaths, ["/project/dashboard/node_modules", "/project/node_modules"].sort());
+  assert.equal(env.FORGE_NO_BROWSER, "1", "no chromium bootstrap needed for a bare install container");
+
+  assert.equal(args[args.length - 2], BASE_RUNTIME.image, "runs the SAME agent image (has node/npm) — not a different provisioner-only image");
+  assert.equal(args[args.length - 1], "true", "execs a trivial no-op after install — never the agent invocation/command");
+  assert.ok(!args.includes(BASE_RUNTIME.invocation.command), "must never carry the agent's own invocation command");
 });

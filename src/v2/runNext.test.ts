@@ -18,6 +18,7 @@ import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow, Step, FanoutDef } from "./schema.js";
 import type { TaskManifest } from "./task-manifest.js";
@@ -324,6 +325,37 @@ test("runNext: idle-timeout exit code marks the pipeline task failed with idle_t
   assert.ok(first);
   assert.equal(first!.status, "failed");
   assert.match(first!.error ?? "", /idle_timeout/);
+});
+
+test("runNext: FG-376 dependency-provisioning exit code marks the pipeline task failed with verification_environment_unavailable, not container_crash", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "provisioning-failure test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Mimic the entrypoint's `npm ci` failing before it could exec the agent:
+  // no result.json, exit DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE.
+  const provisioningFailed: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "npm ci failed: EACCES");
+    return DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE;
+  };
+
+  const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: provisioningFailed });
+  assert.deepEqual(wave.failedSteps, ["first"]);
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first");
+  assert.ok(first);
+  assert.equal(first!.status, "failed");
+  assert.match(first!.error ?? "", /verification_environment_unavailable/);
+  assert.match(first!.error ?? "", /npm ci failed: EACCES/);
+  assert.doesNotMatch(first!.error ?? "", /container_crash/);
+  assert.equal(failureKindForTask(first!.id), "verification_environment_unavailable");
 });
 
 // Finding 1: runNext guard — non-active run returns empty dispatch

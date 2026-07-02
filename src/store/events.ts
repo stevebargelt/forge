@@ -28,6 +28,7 @@ export type EventType =
   | "container.exited"
   | "container.killed"
   | "container.idle_timeout"
+  | "container.dependency_provisioning_failed"
   | "auth.profile_applied"
   | "auth.profile_failed"
   // AWN-7 model resolution (policy mode). profile_resolved: a task resolved to a

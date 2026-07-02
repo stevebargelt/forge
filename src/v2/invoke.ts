@@ -34,6 +34,7 @@ import { taskDir } from "../util/paths.js";
 import { resolvePolicyPath } from "../raci/project.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
@@ -445,6 +446,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
   const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
+  const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${taskId}`;
   logEvent("container.started", { runId, taskId, payload: { containerName } });
   let exitCode: number;
@@ -453,7 +455,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
       stdoutPath,
-      stderrPath: join(dir, "container.stderr.log"),
+      stderrPath,
       idleTimeoutMs,
     });
   } catch (e) {
@@ -486,6 +488,21 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     failTask(taskId, { runId, kind: classify({ exitCode }), error });
+    closeRunIfIdle(false);
+    return { runId, taskId, status: "failed", error };
+  }
+
+  // FG-376: the entrypoint's dependency install (npm ci/install from
+  // FORGE_NM_INSTALL_ROOT) failed before it could exec the agent command.
+  // Recognized ahead of the generic container_crash branch below so a broken
+  // worktree/volume dependency graph is reported as
+  // verification_environment_unavailable, not misread as a test failure or a
+  // generic crash.
+  if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
+    const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+    logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode } });
+    const error = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
+    failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }

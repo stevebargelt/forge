@@ -17,6 +17,15 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import {
+  DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE,
+  DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+  safeLockfileHash,
+  isDependencyCacheReady,
+  provisionDependencyCache,
+  planDependencyVolumes,
+  type DependencyVolumePlan,
+} from "./dependency-provisioning.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
@@ -42,7 +51,7 @@ import { runIntegrationGate } from "./integration-gate.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
-import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { resolveAuthStateForContainer, AuthProfileError, roleUsesBrowser, cleanupStagedAuth } from "./auth-state.js";
 import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthError } from "./project-auth.js";
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
@@ -2015,6 +2024,83 @@ async function runContainer(args: {
     ...(controlPlane ? { controlPlane } : {}),
   });
 
+  // FG-376: resolve the dependency-cache decision BEFORE building docker args
+  // for the AGENT/reviewer container. FIX1 gates the named-volume path to
+  // worktree-mode rw dispatches only (repoRootForMount mirrors the
+  // PROJECT_DIR the container will actually see, below).
+  //
+  // Provisioning (installing into the shared cache) now runs as a SEPARATE,
+  // short-lived container to completion HERE — before the agent/reviewer
+  // container is built at all — via provisionDependencyCache, which holds the
+  // cache-key host lock for only that provisioner's lifetime, never for this
+  // task's full dispatch. A concurrent dispatch for the same cache key blocks
+  // inside provisionDependencyCache until the first either marks the cache
+  // ready or fails without a marker; either way, by the time buildDockerArgs
+  // runs below the cache is either ready (mounted read-only) or this function
+  // has already returned failed. A read-only reviewer/red never provisions —
+  // it only reuses an already-ready cache (no lock, no install, no block; an
+  // unpopulated cache just leaves it unmounted).
+  const repoRootForMount = args.worktreePath ?? args.projectDir;
+  const isWorktreeRwDispatch = args.projectMode === "rw" && args.worktreePath !== undefined;
+  const dependencyCacheEligible = process.platform === "darwin" && process.env.FORGE_NO_NM_SHADOW !== "1";
+  const depSpawnFields: Pick<SpawnContext, "IS_WORKTREE_DISPATCH" | "DEPENDENCY_CACHE_MOUNT_RO"> = {};
+
+  const exec = args.dockerExec ?? defaultDockerExec;
+
+  if (dependencyCacheEligible && isWorktreeRwDispatch) {
+    depSpawnFields.IS_WORKTREE_DISPATCH = "1";
+    const projectContainerPath = resolveProjectContainerPath(runtime);
+    let plan: DependencyVolumePlan | undefined;
+    if (projectContainerPath) {
+      try {
+        plan = planDependencyVolumes(repoRootForMount, projectContainerPath);
+      } catch {
+        plan = undefined; // no lockfile — spawn.ts falls back to the legacy anonymous shadow
+      }
+    }
+    if (plan) {
+      let provisionerExitCode = -1;
+      const provision = await provisionDependencyCache(plan.lockfileHash, async () => {
+        const provisionerArgs = buildProvisionerDockerArgs(
+          runtime,
+          { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
+          plan!,
+        );
+        const provisionStdoutPath = join(dir, "container.provision.stdout.log");
+        const provisionStderrPath = join(dir, "container.provision.stderr.log");
+        provisionerExitCode = await exec({
+          args: provisionerArgs,
+          stdin: undefined,
+          stdoutPath: provisionStdoutPath,
+          stderrPath: provisionStderrPath,
+          idleTimeoutMs: DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+        });
+        const stderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
+        return { exitCode: provisionerExitCode, stderrTail };
+      });
+      if (provision.outcome === "failed") {
+        logEvent("container.dependency_provisioning_failed", {
+          runId: args.runId,
+          taskId: args.taskId,
+          payload: { containerName: `forge-provision-${args.taskId}`, exitCode: provisionerExitCode },
+        });
+        cleanupStagedAuth(dir); // AWN-8
+        failTask(args.taskId, {
+          runId: args.runId,
+          kind: classify({ source: "verification_environment_unavailable" }),
+          error: provision.error,
+        });
+        return { kind: "failed", error: provision.error };
+      }
+      depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
+    }
+  } else if (dependencyCacheEligible && args.projectMode === "ro") {
+    const cacheKey = safeLockfileHash(repoRootForMount);
+    if (cacheKey && isDependencyCacheReady(cacheKey)) {
+      depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
+    }
+  }
+
   const spawnCtx: SpawnContext = {
     TASK_ID: args.taskId,
     TASK_DIR: dir,
@@ -2022,7 +2108,7 @@ async function runContainer(args: {
     // use the task-scoped worktree path; otherwise use the original projectDir.
     // This is the ONLY place the worktree substitution enters spawn processing.
     // The shadow-volume trigger (spawn.ts:247-259) is NOT affected.
-    PROJECT_DIR: args.worktreePath ?? args.projectDir,
+    PROJECT_DIR: repoRootForMount,
     PROJECT_MODE: args.projectMode,
     MODEL: args.resolution.model,
     UPSTREAM_PROVIDER: args.resolution.provider ?? "",
@@ -2030,6 +2116,7 @@ async function runContainer(args: {
     TASK_PACKAGE_MARKDOWN: renderTaskPackage(args.taskPackage),
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
+    ...depSpawnFields,
   };
 
   let dockerArgs;
@@ -2053,8 +2140,8 @@ async function runContainer(args: {
     return { kind: "failed", error: msg };
   }
 
-  const exec = args.dockerExec ?? defaultDockerExec;
   const stdoutPath = join(dir, "container.stdout.log");
+  const stderrPath = join(dir, "container.stderr.log");
   const containerName = `forge-${args.taskId}`;
   logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
   let exitCode: number;
@@ -2063,7 +2150,7 @@ async function runContainer(args: {
       args: dockerArgs.args,
       stdin: dockerArgs.stdin,
       stdoutPath,
-      stderrPath: join(dir, "container.stderr.log"),
+      stderrPath,
       idleTimeoutMs,
     });
   } catch (e) {
@@ -2091,6 +2178,20 @@ async function runContainer(args: {
     logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
     const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ exitCode }), error: msg });
+    return { kind: "failed", error: msg };
+  }
+
+  // FG-376 defensive backstop: this AGENT container never sets
+  // FORGE_NM_INSTALL_ROOT (only the short-lived provisioner above does, and
+  // its failure is already handled well before this container is spawned) —
+  // but if this sentinel exit code is ever seen here anyway, classify it the
+  // same way rather than letting it fall into the generic container_crash
+  // branch below.
+  if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
+    const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
+    logEvent("container.dependency_provisioning_failed", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+    const msg = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
+    failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     return { kind: "failed", error: msg };
   }
 

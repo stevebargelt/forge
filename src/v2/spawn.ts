@@ -31,6 +31,7 @@ import {
   knownApiKeyProviders,
 } from "../util/creds.js";
 import { substitute, substituteOptional, expandTilde, type SubstContext } from "./resolve.js";
+import { planDependencyVolumes, provisionerContainerName, type DependencyVolumePlan } from "./dependency-provisioning.js";
 
 export type SpawnContext = SubstContext & {
   TASK_ID: string;
@@ -54,6 +55,25 @@ export type SpawnContext = SubstContext & {
   // browser-tools injector at it so the agent operates authenticated without
   // ever seeing the credential. Undefined = no auth profile for this task.
   AUTH_STATE_HOST_PATH?: string;
+  // FG-376 FIX1: true only when this dispatch's PROJECT_DIR is a task-scoped
+  // git worktree (runNext.ts sets this when a worktree was created for this
+  // task). Gates the named lockfile-keyed dependency-volume path so a normal
+  // (non-worktree) rw dispatch — which shares the live host project directory
+  // across concurrent tasks — keeps its pre-FG-376 legacy single anonymous
+  // shadow-volume behavior byte-for-byte. invoke.ts never creates worktrees
+  // and never sets this, so `forge invoke` is unaffected.
+  // String "1" (not boolean) — SpawnContext extends SubstContext, whose index
+  // signature is Record<string, string | undefined>.
+  IS_WORKTREE_DISPATCH?: string;
+  // FG-376: set by the caller once it has confirmed (host-side, via
+  // dependency-provisioning.ts:isDependencyCacheReady / provisionDependencyCache)
+  // that this lockfile-hash cache key is populated — "1" mounts the SAME
+  // lockfile-keyed volume(s) READ-ONLY for both a worktree-rw primary and a
+  // ro reviewer/red dispatch. Installing is exclusively the short-lived
+  // provisioner container's job (see buildProvisionerDockerArgs below) — an
+  // agent/reviewer container built by buildDockerArgs NEVER installs and
+  // NEVER mounts these volumes read-write, regardless of PROJECT_MODE.
+  DEPENDENCY_CACHE_MOUNT_RO?: string;
 };
 
 // Fixed in-container path for the mounted auth-profile state. A top-level path
@@ -232,30 +252,93 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     args.push("-e", `BROWSER_TOOLS_STORAGE_STATE=${AUTH_STATE_CONTAINER_PATH}`);
   }
 
-  // #245: shadow the project's node_modules with a container-local anonymous
-  // volume on macOS rw mounts (supersedes FORGE-DEC-011). Docker Desktop's
+  // #245/FG-376: shadow the project's node_modules with container-local named
+  // volumes on macOS rw mounts (supersedes FORGE-DEC-011). Docker Desktop's
   // grpcfuse stamps a `com.docker.grpcfuse.ownership` xattr on native binaries
   // the container writes (e.g. better-sqlite3.node); CyberArk-class EDR then
-  // silently SIGKILLs the HOST node processes that load them. The anonymous
-  // volume keeps every node_modules write inside the container (never written
-  // back through grpcfuse) AND hides the host's wrong-platform (macOS-arm64)
-  // modules so the agent installs correct linux ones instead of hand-patching.
-  // --rm auto-removes the volume on exit. Scoped to:
+  // silently SIGKILLs the HOST node processes that load them. The volumes keep
+  // every node_modules write inside the container (never written back through
+  // grpcfuse) AND hide the host's wrong-platform (macOS-arm64) modules so the
+  // agent gets correct linux ones instead of hand-patching. Scoped to:
   //   - darwin only: Linux hosts have no grpcfuse and matching-arch modules.
-  //   - rw mounts only: reds (ro) never write, so they can't corrupt anything.
   //   - escape hatch FORGE_NO_NM_SHADOW=1 to disable without a code change.
+  //
+  // FG-376: one NAMED volume per workspace member (repo root + every npm
+  // `workspaces` entry), keyed by a hash of package-lock.json, instead of a
+  // single anonymous volume — so a task with an unchanged lockfile reuses an
+  // already-populated volume instead of reinstalling (e.g. the Shipping
+  // Reviewer reusing the engineer's install, FG-372). A project with no
+  // package-lock.json (non-npm project, bare test fixture) falls back to the
+  // original anonymous single-volume shadow — still correct, just not reusable.
+  //
+  // buildDockerArgs builds AGENT/reviewer containers ONLY — it never installs
+  // and never mounts a named dependency volume read-write. Installing is
+  // exclusively buildProvisionerDockerArgs's short-lived container's job
+  // (below); by the time this function runs, the caller (runNext.ts) has
+  // already confirmed the cache key is populated and sets
+  // DEPENDENCY_CACHE_MOUNT_RO accordingly. FORGE_NM_INSTALL_ROOT is never
+  // emitted here — an agent/reviewer container has no reason to write into
+  // the shared cache, ever.
   if (
     projectContainerPath &&
-    projectMode === "rw" &&
     process.platform === "darwin" &&
     process.env.FORGE_NO_NM_SHADOW !== "1"
   ) {
-    const shadowPath = `${projectContainerPath}/node_modules`;
-    args.push("-v", shadowPath);
-    // Docker creates the anonymous volume root-owned, but the agent runs as
-    // UID 1000 and must `npm install` into it. Signal the path so the entrypoint
-    // chowns it to agent (NOPASSWD sudo) before exec'ing the agent command.
-    args.push("-e", `FORGE_NM_SHADOW=${shadowPath}`);
+    const legacyShadowPath = `${projectContainerPath}/node_modules`;
+
+    if (projectMode === "rw" && ctx.IS_WORKTREE_DISPATCH === "1" && ctx.DEPENDENCY_CACHE_MOUNT_RO === "1") {
+      // Worktree-mode primary, cache already provisioned host-side (the
+      // caller never sets DEPENDENCY_CACHE_MOUNT_RO otherwise) — mount the
+      // named lockfile-keyed volumes READ-ONLY, same as a reviewer below.
+      let plan;
+      try {
+        plan = planDependencyVolumes(ctx.PROJECT_DIR, projectContainerPath);
+      } catch {
+        plan = undefined;
+      }
+      if (plan) {
+        for (const v of plan.volumes) {
+          args.push("-v", `${v.name}:${v.containerPath}:ro`);
+        }
+        // Diagnostic env only (no chown/install trigger here — the
+        // provisioner already chowned + installed these volumes). Kept for
+        // parity with the legacy single-path var and for `forge show`/manifest
+        // visibility into which cache key this dispatch used.
+        args.push("-e", `FORGE_NM_SHADOW=${legacyShadowPath}`);
+        args.push("-e", `FORGE_NM_SHADOW_PATHS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
+        args.push("-e", `FORGE_NM_LOCKFILE_HASH=${plan.lockfileHash}`);
+      } else {
+        args.push("-v", legacyShadowPath);
+        args.push("-e", `FORGE_NM_SHADOW=${legacyShadowPath}`);
+      }
+    } else if (projectMode === "rw") {
+      // FIX1 (FG-376 review): the named, lockfile-keyed multi-volume path is
+      // worktree-mode ONLY. A normal rw bind-mount dispatch shares the live
+      // host project directory across concurrent tasks — a container-local
+      // shared-cache mount here would BE the race this review exists to fix.
+      // Also covers the (should-not-happen) case of a worktree dispatch whose
+      // caller never resolved a cache key (no lockfile) — same legacy fallback.
+      args.push("-v", legacyShadowPath);
+      args.push("-e", `FORGE_NM_SHADOW=${legacyShadowPath}`);
+    } else if (projectMode === "ro" && ctx.DEPENDENCY_CACHE_MOUNT_RO === "1") {
+      // Reviewers/reds (including the Shipping-Reviewer) never provision —
+      // they only reuse an ALREADY-populated cache, mounted read-only, so
+      // review containers never race an install and never write into it.
+      let plan;
+      try {
+        plan = planDependencyVolumes(ctx.PROJECT_DIR, projectContainerPath);
+      } catch {
+        plan = undefined;
+      }
+      if (plan) {
+        for (const v of plan.volumes) {
+          args.push("-v", `${v.name}:${v.containerPath}:ro`);
+        }
+      }
+    }
+    // projectMode === "ro" without DEPENDENCY_CACHE_MOUNT_RO: cache isn't
+    // ready yet — proceed with no dependency-cache mount at all (never block,
+    // never install; matches pre-existing reviewer behavior).
   }
 
   // Working directory = the persistent project bind mount (not the image's
@@ -292,6 +375,57 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
     : undefined;
 
   return { args, stdin };
+}
+
+/** The in-container path the runtime's project mount lands at (e.g.
+ *  "/project"). Shared by buildDockerArgs's own mount loop and by
+ *  buildProvisionerDockerArgs below, which needs the SAME path so a
+ *  DependencyVolumePlan computed against it lines up between the provisioner
+ *  and the agent container that reuses it read-only. */
+export function resolveProjectContainerPath(runtime: Runtime): string | undefined {
+  return runtime.mounts.find((m) => m.host === "${PROJECT_DIR}")?.container;
+}
+
+/** Docker args for the FG-376 short-lived dependency-cache provisioner: a
+ *  DEDICATED install container, not the agent. Mounts the repo READ-ONLY
+ *  (npm ci never writes to project source — planDependencyVolumes only
+ *  produces a plan when a package-lock.json exists, so the entrypoint's
+ *  install branch always runs `npm ci`, never `npm install`) plus every
+ *  plan volume READ-WRITE (the only place these volumes are ever writable),
+ *  runs the SAME agent-entrypoint.sh install contract
+ *  (FORGE_NM_INSTALL_ROOT / FORGE_NM_SHADOW_PATHS / exit
+ *  DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE on failure) against a trivial
+ *  no-op command, and exits — no agent invocation, no auth, no browser-tools.
+ *  Caller (runNext.ts, via dependency-provisioning.ts:provisionDependencyCache)
+ *  runs this under the short cache-key lock and is responsible for the exit
+ *  code / marker decision; this function only builds the argv.
+ *
+ *  Named via provisionerContainerName(plan.lockfileHash) — by CACHE KEY, not
+ *  ctx.TASK_ID (FG-376 FIX1). That matches the provisioning lock's own grain
+ *  (one provisioner per lockfile hash) so dependency-provisioning.ts's
+ *  onDeadHolder can identify/kill the exact orphaned container from LockInfo
+ *  alone, without needing a taskId. It also gets a free second guard:
+ *  `docker run --name` refuses to start a second container under a name
+ *  that's still running. */
+export function buildProvisionerDockerArgs(
+  runtime: Runtime,
+  ctx: { TASK_ID: string; PROJECT_DIR: string },
+  plan: DependencyVolumePlan,
+): string[] {
+  const projectContainerPath = resolveProjectContainerPath(runtime) ?? "/project";
+  const args: string[] = ["run", "--rm", "-i"];
+  args.push("--name", provisionerContainerName(plan.lockfileHash));
+  args.push("-e", "FORGE_NO_BROWSER=1");
+  args.push("-v", `${ctx.PROJECT_DIR}:${projectContainerPath}:ro`);
+  for (const v of plan.volumes) {
+    args.push("-v", `${v.name}:${v.containerPath}`); // rw — the ONLY container allowed to write here
+  }
+  args.push("-e", `FORGE_NM_SHADOW_PATHS=${plan.volumes.map((v) => v.containerPath).join(":")}`);
+  args.push("-e", `FORGE_NM_INSTALL_ROOT=${plan.installRoot}`);
+  args.push("-w", projectContainerPath);
+  args.push(runtime.image);
+  args.push("true"); // entrypoint installs, then execs this trivial no-op and exits 0
+  return args;
 }
 
 // FG-374: verify that the resolved projectDir is mountable before exec'ing.

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
+import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
@@ -367,6 +368,37 @@ test("invoke: failed exit + empty result.json marks task failed and returns fail
 
   const task = getTask(r.taskId);
   assert.equal(task!.status, "failed");
+});
+
+test("invoke: FG-376 dependency-provisioning exit code marks task failed with verification_environment_unavailable, not container_crash", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Mimic the entrypoint's `npm ci` failing before it could exec the agent:
+  // no result.json, exit DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE, stderr carries the cause.
+  const provisioningFailed: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "npm ci failed: EACCES");
+    return DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do thing",
+    projectDir: "/tmp/x",
+    dockerExec: provisioningFailed,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /verification_environment_unavailable/);
+  assert.match(r.error ?? "", /npm ci failed: EACCES/);
+  assert.doesNotMatch(r.error ?? "", /container_crash/);
+
+  const task = getTask(r.taskId);
+  assert.equal(task!.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "verification_environment_unavailable");
 });
 
 test("invoke: idle-timeout exit code marks task failed with idle_timeout", async () => {
