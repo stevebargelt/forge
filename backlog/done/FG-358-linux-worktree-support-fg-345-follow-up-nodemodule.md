@@ -1,9 +1,10 @@
 ---
 id: FG-358
 type: story
-status: active
+status: done
 title: "Linux worktree support (FG-345 follow-up): node_modules provisioning without the macOS shadow volume"
 created: 2026-06-22
+closed: 2026-07-02
 ---
 
 **Parent:** FG-345. **FOLLOW-UP — first cut is macOS-only (FG-351 hard-fails Linux).** **Depends on:** FG-351.
