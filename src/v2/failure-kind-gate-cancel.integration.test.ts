@@ -26,6 +26,7 @@ import { eventsForTask } from "../store/events.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { gate } from "./gate.js";
+import { gatesForTask } from "../store/gates.js";
 import { performCancel } from "../cli/commands/cancel.js";
 import { invoke } from "./invoke.js";
 import { writeProfile } from "../util/auth-profiles.js";
@@ -276,6 +277,82 @@ test("integ failure_kind: gate reject task.failed is readable via eventsForTask 
   const gateEv = events.find((e) => e.eventType === "gate.decided");
   assert.ok(gateEv, "gate.decided must be in the eventsForTask timeline");
   assert.equal((gateEv!.payload as Record<string, unknown>).decision, "reject");
+});
+
+// ─── 4b. gate.decided write-path atomicity (FG-427) ─────────────────────────
+// FG-427 makes the events table the sole source for outcome derivation, so
+// insertGate + logEvent("gate.decided") must commit as one transaction: a
+// crash between the two statements must not leave an orphaned gates row
+// with no matching event. Forces the SECOND write to fail via a trigger on
+// the events table (keyed off a marker embedded in the rationale, which
+// flows straight into the event payload) and asserts the FIRST write was
+// rolled back too.
+
+function installForceFailTrigger(): void {
+  db.exec(`
+    CREATE TRIGGER force_fail_gate_decided
+    BEFORE INSERT ON events
+    WHEN NEW.event_type = 'gate.decided' AND NEW.payload LIKE '%FORCE_FAIL_MARKER%'
+    BEGIN
+      SELECT RAISE(ABORT, 'forced failure for atomicity test');
+    END;
+  `);
+}
+
+test("integ FG-427 atomicity: gate.decided logEvent failure rolls back insertGate (no orphaned gate row)", async () => {
+  const wfName = "fk-gate-atomicity-wf";
+  ensureGatedWorkflow(wfName);
+  const runId = newRunId("fk-gate-atomicity");
+  const taskId = newTaskId("engineer");
+  seedRun(runId, wfName);
+  seedAwaitingGateTask(taskId, runId);
+  installForceFailTrigger();
+
+  await assert.rejects(
+    () => gate(taskId, "reject", "FORCE_FAIL_MARKER: forced failure for atomicity test"),
+    /forced failure for atomicity test/,
+    "gate() must propagate the forced logEvent failure",
+  );
+
+  assert.deepEqual(
+    gatesForTask(taskId),
+    [],
+    "insertGate must be rolled back when the paired logEvent throws — no orphaned gate row",
+  );
+  const events = eventsForTask(taskId);
+  assert.equal(
+    events.filter((e) => e.eventType === "gate.decided").length,
+    0,
+    "no gate.decided event must be recorded when the write failed",
+  );
+  assert.equal(
+    events.filter((e) => e.eventType === "task.failed").length,
+    0,
+    "downstream failTask() must not have run — the transaction failure must short-circuit gate() before decision handling",
+  );
+  const task = getTask(taskId)!;
+  assert.equal(task.status, "awaiting_gate", "task status must be untouched — the whole write pair rolled back");
+});
+
+test("integ FG-427 atomicity: gate.decided happy path still writes both insertGate and logEvent", async () => {
+  const wfName = "fk-gate-atomicity-happy-wf";
+  ensureGatedWorkflow(wfName);
+  const runId = newRunId("fk-gate-atomicity-happy");
+  const taskId = newTaskId("engineer");
+  seedRun(runId, wfName);
+  seedAwaitingGateTask(taskId, runId);
+  installForceFailTrigger();
+
+  await gate(taskId, "reject", "no marker here, this rationale is unrelated to the trigger");
+
+  const gates = gatesForTask(taskId);
+  assert.equal(gates.length, 1, "insertGate must have written exactly one row on the happy path");
+  assert.equal(gates[0]!.decision, "reject");
+
+  const events = eventsForTask(taskId);
+  const gateEvents = events.filter((e) => e.eventType === "gate.decided");
+  assert.equal(gateEvents.length, 1, "logEvent must have written exactly one gate.decided event on the happy path");
+  assert.equal((gateEvents[0]!.payload as Record<string, unknown>).decision, "reject");
 });
 
 // ─── 5. cancelled via performCancel — task-id form ───────────────────────────

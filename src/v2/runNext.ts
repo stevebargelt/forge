@@ -39,6 +39,7 @@ import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitin
 import { failTask, classify } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
+import { getDb } from "../store/db.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
@@ -781,22 +782,27 @@ async function dispatchReds(args: {
       };
     }
     verdicts.push(finalVerdict);
-    insertVerdict({
-      id: newVerdictId(),
-      taskId: args.primaryTaskId,
-      redTaskId: r.redTaskId,
-      redRole: r.red.agent,
-      verdict: finalVerdict.verdict,
-      confidence: finalVerdict.confidence,
-      authority: r.red.authority as RedAuthority,
-      findings: finalVerdict.findings,
-      createdAt: nowIso(),
-    });
-    logEvent("verdict.received", {
-      runId: args.runId,
-      taskId: args.primaryTaskId,
-      payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
-    });
+    // Atomic: both writes must succeed together so a crash cannot leave the
+    // verdicts table with a row that has no matching events-table entry —
+    // FG-427 makes the events table the sole source for outcome derivation.
+    getDb().transaction(() => {
+      insertVerdict({
+        id: newVerdictId(),
+        taskId: args.primaryTaskId,
+        redTaskId: r.redTaskId,
+        redRole: r.red.agent,
+        verdict: finalVerdict.verdict,
+        confidence: finalVerdict.confidence,
+        authority: r.red.authority as RedAuthority,
+        findings: finalVerdict.findings,
+        createdAt: nowIso(),
+      });
+      logEvent("verdict.received", {
+        runId: args.runId,
+        taskId: args.primaryTaskId,
+        payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
+      });
+    })();
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
     if (r.red.authority === "authoritative" && r.red.gate_on_verdict && finalVerdict.verdict === "fail") {
       authoritativeFail = true;

@@ -118,19 +118,24 @@ export async function gate(
     }
   }
 
-  insertGate({
-    id: newGateId(),
-    taskId,
-    decision,
-    rationale,
-    decidedAt: nowIso(),
-    decidedBy: opts.decidedBy ?? "steven",
-  });
-  logEvent("gate.decided", {
-    runId: run.id,
-    taskId,
-    payload: { decision, rationale, force: opts.force ?? false },
-  });
+  // Atomic: both writes must succeed together so a crash cannot leave the
+  // gates table with a row that has no matching events-table entry —
+  // FG-427 makes the events table the sole source for outcome derivation.
+  getDb().transaction(() => {
+    insertGate({
+      id: newGateId(),
+      taskId,
+      decision,
+      rationale,
+      decidedAt: nowIso(),
+      decidedBy: opts.decidedBy ?? "steven",
+    });
+    logEvent("gate.decided", {
+      runId: run.id,
+      taskId,
+      payload: { decision, rationale, force: opts.force ?? false },
+    });
+  })();
 
   let nextTasks: Task[] = [];
 

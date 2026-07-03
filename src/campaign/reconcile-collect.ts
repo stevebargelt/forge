@@ -99,6 +99,36 @@ function checkClosedCommitCoveredByTestedSha(
   return checkClosedCommitReachableOnBase(projectDir, testedSha, baseBranch) === true;
 }
 
+// FG-427: the SINGLE events->ReconcileRunEvent[] translation, shared by
+// collectReconcileEvidence (the `forge campaign reconcile` command) and by
+// executor.ts's drive-path reconciliation — one source of truth for how a
+// store Event becomes a ReconcileRunEvent, so the two paths cannot drift.
+export function collectAuthoritativeEvents(runId: string): ReconcileRunEvent[] {
+  return eventsForRun(runId)
+    .filter((e) => e.eventType === "verdict.received" || e.eventType === "gate.decided")
+    .map((e): ReconcileRunEvent => {
+      if (e.eventType === "verdict.received") {
+        const payload = e.payload as { verdict?: string; authority?: string } | null;
+        return {
+          id: e.id,
+          kind: "verdict",
+          verdict: (payload?.verdict as "pass" | "fail" | "inconclusive") ?? "inconclusive",
+          authority: (payload?.authority as "authoritative" | "specialist") ?? "specialist",
+          taskId: e.taskId ?? undefined,
+        };
+      }
+      const payload = e.payload as { decision?: string; rationale?: string; force?: boolean } | null;
+      return {
+        id: e.id,
+        kind: "gate",
+        decision: (payload?.decision as GateDecision) ?? "advance",
+        rationale: payload?.rationale,
+        force: payload?.force ?? false,
+        taskId: e.taskId ?? undefined,
+      };
+    });
+}
+
 export function collectReconcileEvidence(projectDir: string, item: CampaignItem): ReconcileEvidenceInput {
   let ticketStatus: string | undefined;
   let ticketClosedCommit: string | undefined;
@@ -142,30 +172,7 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
     }
   }
 
-  let events: ReconcileRunEvent[] = [];
-  if (item.runId) {
-    events = eventsForRun(item.runId)
-      .filter((e) => e.eventType === "verdict.received" || e.eventType === "gate.decided")
-      .map((e): ReconcileRunEvent => {
-        if (e.eventType === "verdict.received") {
-          const payload = e.payload as { verdict?: string; authority?: string } | null;
-          return {
-            id: e.id,
-            kind: "verdict",
-            verdict: (payload?.verdict as "pass" | "fail" | "inconclusive") ?? "inconclusive",
-            authority: (payload?.authority as "authoritative" | "specialist") ?? "specialist",
-          };
-        }
-        const payload = e.payload as { decision?: string; rationale?: string; force?: boolean } | null;
-        return {
-          id: e.id,
-          kind: "gate",
-          decision: (payload?.decision as GateDecision) ?? "advance",
-          rationale: payload?.rationale,
-          force: payload?.force ?? false,
-        };
-      });
-  }
+  const events: ReconcileRunEvent[] = item.runId ? collectAuthoritativeEvents(item.runId) : [];
 
   return {
     ticketStatus,

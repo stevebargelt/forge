@@ -18,6 +18,12 @@ export type ReconcileVerdictEvent = {
   kind: "verdict";
   verdict: "pass" | "fail" | "inconclusive";
   authority: "authoritative" | "specialist";
+  // FG-427: which reviewing task this verdict belongs to. Optional for backward
+  // compatibility with callers/fixtures that predate per-task grouping — every
+  // event missing taskId is bucketed together under one shared "no task" bucket
+  // (see evaluateAuthoritativeOutcome below), never merged with any real taskId's
+  // bucket.
+  taskId?: string;
 };
 
 export type ReconcileGateEvent = {
@@ -26,6 +32,8 @@ export type ReconcileGateEvent = {
   decision: GateDecision;
   rationale?: string;
   force: boolean;
+  // FG-427: see ReconcileVerdictEvent.taskId above.
+  taskId?: string;
 };
 
 export type ReconcileRunEvent = ReconcileVerdictEvent | ReconcileGateEvent;
@@ -93,6 +101,87 @@ function isQualifyingForceAdvance(e: ReconcileGateEvent): boolean {
   return e.decision === "advance" && e.force === true && !!e.rationale && e.rationale.trim().length > 0;
 }
 
+// Events missing taskId (pre-FG-427 callers/fixtures) all fall into this one
+// shared bucket — grouped with each other exactly as before, but never merged
+// with any bucket keyed by a real taskId.
+const NO_TASK_BUCKET = "__no_task__";
+
+function taskBucketKey(e: ReconcileRunEvent): string {
+  return e.taskId ?? NO_TASK_BUCKET;
+}
+
+export type AuthoritativeOutcome = "pass" | "fail" | "unresolved";
+
+export type AuthoritativeOutcomeResult = {
+  outcome: AuthoritativeOutcome;
+  supersedingEventsByTask: Map<string, ReconcileRunEvent>;
+};
+
+// FG-427: the SINGLE shared evaluator for "did this item's authoritative
+// review pass" — used by both the `forge campaign reconcile` command (Fact 5,
+// below) and the drive/resume-path reconciliation in executor.ts, so the two
+// paths cannot drift.
+//
+// Resolved PER REVIEWING TASK, not by a single run-wide MAX(id): a later
+// authoritative pass on one task must never be masked by — nor mask — an
+// unresolved authoritative fail on a different task in the same run. Within a
+// task's bucket, the highest-id event among {authoritative verdicts} ∪
+// {qualifying force-advances} wins (MAX(id), never array order — event arrays
+// are sorted by created_at first, id only a tiebreak, so a later event can
+// carry an earlier-or-equal timestamp).
+//
+// A qualifying force-advance can only ever supersede an EXISTING authoritative
+// verdict on the same task — a task with zero authoritative verdicts on record
+// gets no credit from a force-advance alone (closes the abuse gap where an
+// operator could force-advance a task that was never actually reviewed).
+export function evaluateAuthoritativeOutcome(events: ReconcileRunEvent[]): AuthoritativeOutcomeResult {
+  const byTask = new Map<string, ReconcileRunEvent[]>();
+  for (const e of events) {
+    const isAuthoritativeVerdict = e.kind === "verdict" && e.authority === "authoritative";
+    const isQualifyingGate = e.kind === "gate" && isQualifyingForceAdvance(e);
+    if (!isAuthoritativeVerdict && !isQualifyingGate) continue;
+    const key = taskBucketKey(e);
+    const bucket = byTask.get(key);
+    if (bucket) {
+      bucket.push(e);
+    } else {
+      byTask.set(key, [e]);
+    }
+  }
+
+  const supersedingEventsByTask = new Map<string, ReconcileRunEvent>();
+  let anyTaskWithAuthoritativeVerdict = false;
+  let anyTaskFailed = false;
+
+  for (const [key, bucket] of byTask) {
+    const hasAuthoritativeVerdict = bucket.some((e) => e.kind === "verdict" && e.authority === "authoritative");
+    if (!hasAuthoritativeVerdict) {
+      // Force-advance(s) only, no authoritative verdict recorded for this task —
+      // contributes nothing to resolution.
+      continue;
+    }
+    anyTaskWithAuthoritativeVerdict = true;
+    const highest = bucket.reduce((a, b) => (b.id > a.id ? b : a));
+    const resolvesPass = highest.kind === "gate" || (highest.kind === "verdict" && highest.verdict === "pass");
+    if (resolvesPass) {
+      supersedingEventsByTask.set(key, highest);
+    } else {
+      anyTaskFailed = true;
+    }
+  }
+
+  let outcome: AuthoritativeOutcome;
+  if (!anyTaskWithAuthoritativeVerdict) {
+    outcome = "unresolved";
+  } else if (anyTaskFailed) {
+    outcome = "fail";
+  } else {
+    outcome = "pass";
+  }
+
+  return { outcome, supersedingEventsByTask };
+}
+
 export function evaluateReconcileEvidence(input: ReconcileEvidenceInput): ReconcileEvidenceResult {
   const missing: string[] = [];
 
@@ -120,27 +209,21 @@ export function evaluateReconcileEvidence(input: ReconcileEvidenceInput): Reconc
     missing.push("host_verification_recorded_but_failed");
   }
 
-  // Fact 5 — supersession: among authoritative verdicts and qualifying force-advance
-  // gate decisions, the highest-id one must be either an authoritative pass or a
-  // qualifying force-advance. Selected by explicit MAX(id) comparison below, never
-  // by taking the last array element — the caller's array order is not trusted.
-  const qualifying = input.events.filter(
-    (e): e is ReconcileVerdictEvent | ReconcileGateEvent =>
-      (e.kind === "verdict" && e.authority === "authoritative") ||
-      (e.kind === "gate" && isQualifyingForceAdvance(e))
-  );
+  // Fact 5 — supersession, evaluated per reviewing task by the shared
+  // evaluateAuthoritativeOutcome (see above) — the same function the drive-path
+  // reconciliation in executor.ts uses, so the two paths cannot drift.
+  const { outcome, supersedingEventsByTask } = evaluateAuthoritativeOutcome(input.events);
 
   let supersedingEvent: ReconcileRunEvent | null = null;
-  if (qualifying.length === 0) {
+  if (outcome === "unresolved") {
     missing.push("no_authoritative_verdict_or_force_advance_event");
+  } else if (outcome === "fail") {
+    missing.push("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance");
   } else {
-    const highest = qualifying.reduce((a, b) => (b.id > a.id ? b : a));
-    const supersedes = highest.kind === "gate" || (highest.kind === "verdict" && highest.verdict === "pass");
-    if (supersedes) {
-      supersedingEvent = highest;
-    } else {
-      missing.push("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance");
-    }
+    // Representative superseding event for existing consumers of
+    // evidence.supersedingEvent — the highest-id winner across all
+    // resolved-pass tasks.
+    supersedingEvent = [...supersedingEventsByTask.values()].reduce((a, b) => (b.id > a.id ? b : a));
   }
 
   return {

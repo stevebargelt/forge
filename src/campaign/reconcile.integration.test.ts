@@ -980,6 +980,92 @@ test("FG-440: an infra error thrown by the gate invocation does not crash reconc
   assert.equal(r2.status, "shipped", "FG-616 never needed capture and ships normally, proving the loop reached it after FG-615's error");
 });
 
+// ── FG-427: per-task supersession proven through the REAL reconcileCampaign
+// command (not the unit-level evaluateReconcileEvidence/evaluateAuthoritativeOutcome
+// tests in reconcile-evidence.test.ts) — real logEvent-written events, real taskId
+// threading through collectReconcileEvidence -> collectAuthoritativeEvents, so the
+// wiring the ticket calls out ("via the drive path AND via the reconcile command")
+// is exercised end to end on this path too, not just at the drive path
+// (executor.workflow.test.ts) and in isolation.
+
+// Same shape as seedAllEvidence but withholds the verdict/gate events — callers
+// seed those themselves so they can attach taskId and exercise supersession.
+function seedEvidenceExceptSupersession(ticketId: string): string {
+  const commit = makeCommit(`impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  return commit;
+}
+
+test("FG-427: fail/authoritative then later pass/authoritative on the SAME task ships via the real reconcileCampaign command", () => {
+  const ticketId = "FG-901";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+  seedEvidenceExceptSupersession(ticketId);
+  logEvent("verdict.received", { runId, taskId: "task-fg427-901", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, taskId: "task-fg427-901", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  const result = reconcileCampaign(campaignId);
+
+  assert.equal(result.items[0]!.status, "shipped");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-427: fail/authoritative then later qualifying force-advance on the SAME task ships via the real reconcileCampaign command", () => {
+  const ticketId = "FG-902";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+  seedEvidenceExceptSupersession(ticketId);
+  logEvent("verdict.received", { runId, taskId: "task-fg427-902", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("gate.decided", { runId, taskId: "task-fg427-902", payload: { decision: "advance", rationale: "operator override: verified out of band", force: true } });
+
+  const result = reconcileCampaign(campaignId);
+
+  assert.equal(result.items[0]!.status, "shipped");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-427: masking regression via the real reconcileCampaign command — task A's later pass never masks task B's unresolved fail in the same run", () => {
+  const ticketId = "FG-903";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+  seedEvidenceExceptSupersession(ticketId);
+  logEvent("verdict.received", { runId, taskId: "task-fg427-903-a", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, taskId: "task-fg427-903-a", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, taskId: "task-fg427-903-b", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const result = reconcileCampaign(campaignId);
+
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"]);
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "task A's pass must not launder task B's unresolved fail — zero mutation");
+});
+
+test("FG-427: a force-advance without rationale on a task with a prior authoritative fail does not supersede it via the real reconcileCampaign command", () => {
+  const ticketId = "FG-904";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+  seedEvidenceExceptSupersession(ticketId);
+  logEvent("verdict.received", { runId, taskId: "task-fg427-904", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("gate.decided", { runId, taskId: "task-fg427-904", payload: { decision: "advance", rationale: "", force: true } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const result = reconcileCampaign(campaignId);
+
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"]);
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+});
+
 test("FG-440: report.ts AND campaign show render distinct host-verification hints for not_recorded vs recorded_but_failed scope-blocked items", () => {
   const notRecordedTicket = "FG-620";
   const { campaignId: campaignIdA, runId: runIdA } = setupBlockedCampaign(notRecordedTicket);

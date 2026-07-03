@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateReconcileEvidence, describeMissingReason } from "./reconcile-evidence.js";
+import { evaluateReconcileEvidence, describeMissingReason, evaluateAuthoritativeOutcome } from "./reconcile-evidence.js";
 import type { ReconcileEvidenceInput, ReconcileRunEvent } from "./reconcile-evidence.js";
 
 // All-facts-satisfied baseline: a stale authoritative fail (id 1) superseded by a
@@ -213,6 +213,134 @@ test("reject/request-changes gate decisions never qualify as supersession even w
     events: [
       { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative" },
       { id: 2, kind: "gate", decision: "reject", force: true, rationale: "still rejecting" },
+    ],
+  });
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.missing, ["latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"]);
+});
+
+// ── FG-427: evaluateAuthoritativeOutcome — per-reviewing-task supersession ────
+//
+// The shared evaluator behind both the drive path (executor.ts) and this
+// file's Fact 5. Resolution happens PER TASK (grouped by taskId), never by a
+// single run-wide MAX(id) — a fail on one task must never be masked by a pass
+// on another, and vice versa.
+
+test("evaluateAuthoritativeOutcome: fail/authoritative then later pass/authoritative on the SAME task -> pass", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+    { id: 2, kind: "verdict", verdict: "pass", authority: "authoritative", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "pass");
+  assert.equal(result.supersedingEventsByTask.get("task-a")?.id, 2);
+});
+
+test("evaluateAuthoritativeOutcome: fail/authoritative then later qualifying force-advance on the SAME task -> pass", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+    { id: 2, kind: "gate", decision: "advance", force: true, rationale: "operator override: verified out of band", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "pass");
+  assert.equal(result.supersedingEventsByTask.get("task-a")?.id, 2);
+});
+
+test("evaluateAuthoritativeOutcome: unresolved, un-overridden fail/authoritative on a task -> fail (regression)", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "fail");
+  assert.equal(result.supersedingEventsByTask.size, 0);
+});
+
+test("evaluateAuthoritativeOutcome: no authoritative verdict at all (empty / only specialist) -> unresolved", () => {
+  assert.equal(evaluateAuthoritativeOutcome([]).outcome, "unresolved");
+  assert.equal(
+    evaluateAuthoritativeOutcome([
+      { id: 1, kind: "verdict", verdict: "fail", authority: "specialist", taskId: "task-a" },
+    ]).outcome,
+    "unresolved"
+  );
+});
+
+test("evaluateAuthoritativeOutcome: a task with ZERO authoritative verdicts but a qualifying force-advance -> does not resolve pass, standalone force-advance abuse gap closed", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "gate", decision: "advance", force: true, rationale: "trust me", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "unresolved", "a force-advance can never stand in for authoritative review on its own");
+  assert.equal(result.supersedingEventsByTask.size, 0);
+});
+
+test("evaluateAuthoritativeOutcome: force-advance without rationale on a task with a prior authoritative fail -> still fails that task", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+    { id: 2, kind: "gate", decision: "advance", force: true, rationale: "", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "fail");
+});
+
+test("evaluateAuthoritativeOutcome: non-force advance on a task with a prior authoritative fail -> still fails that task", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+    { id: 2, kind: "gate", decision: "advance", force: false, rationale: "human said ok, but forgot --force", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "fail");
+});
+
+test("evaluateAuthoritativeOutcome: run-wide masking regression — task A later authoritative pass, task B unresolved un-overridden authoritative fail in the SAME run -> overall fail, never masked by A's pass", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+    { id: 2, kind: "verdict", verdict: "pass", authority: "authoritative", taskId: "task-a" },
+    { id: 3, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-b" },
+  ]);
+  assert.equal(result.outcome, "fail", "task B's unresolved fail must not be masked by task A's pass");
+  assert.equal(result.supersedingEventsByTask.get("task-a")?.id, 2, "task A itself still resolves pass");
+  assert.equal(result.supersedingEventsByTask.has("task-b"), false);
+});
+
+// ── FG-427: evaluateReconcileEvidence (Fact 5) driven through the shared per-task evaluator ──
+
+test("evaluateReconcileEvidence: fail/authoritative then later pass/authoritative on the SAME taskId -> eligible", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [
+      { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+      { id: 2, kind: "verdict", verdict: "pass", authority: "authoritative", taskId: "task-a" },
+    ],
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.evidence.supersedingEvent?.id, 2);
+});
+
+test("evaluateReconcileEvidence: fail/authoritative then later qualifying force-advance on the SAME taskId -> eligible", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [
+      { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+      { id: 2, kind: "gate", decision: "advance", force: true, rationale: "operator override", taskId: "task-a" },
+    ],
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.evidence.supersedingEvent?.id, 2);
+});
+
+test("evaluateReconcileEvidence: standalone force-advance with rationale but ZERO authoritative verdicts on that task -> ineligible, no_authoritative_verdict_or_force_advance_event", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [
+      { id: 1, kind: "gate", decision: "advance", force: true, rationale: "trust me", taskId: "task-a" },
+    ],
+  });
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.missing, ["no_authoritative_verdict_or_force_advance_event"]);
+});
+
+test("evaluateReconcileEvidence: masking regression — task A pass, task B unresolved fail in the same run -> ineligible, never masked", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [
+      { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+      { id: 2, kind: "verdict", verdict: "pass", authority: "authoritative", taskId: "task-a" },
+      { id: 3, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-b" },
     ],
   });
   assert.equal(result.eligible, false);

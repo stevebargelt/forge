@@ -13,7 +13,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
 import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import { logEvent } from "../store/events.js";
-import { collectReconcileEvidence, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
+import { collectReconcileEvidence, collectAuthoritativeEvents, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
 import type { CampaignItem } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -301,6 +301,47 @@ test("events: ordered verdict.received and gate.decided events mapped by ascendi
 test("events: empty when the item has no runId", () => {
   const result = collectReconcileEvidence(projectDir, item({ runId: undefined }));
   assert.deepEqual(result.events, []);
+});
+
+// FG-427: collectAuthoritativeEvents is the single events->ReconcileRunEvent[]
+// translation shared by collectReconcileEvidence and executor.ts's drive-path
+// reconciliation — verify it carries taskId through from the store Event.
+test("collectAuthoritativeEvents: taskId is carried through from the store event onto both verdict and gate events", () => {
+  const runId = "run-collect-taskid";
+  logEvent("verdict.received", {
+    runId,
+    taskId: "task-a",
+    payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" },
+  });
+  logEvent("gate.decided", {
+    runId,
+    taskId: "task-a",
+    payload: { decision: "advance", rationale: "override", force: true },
+  });
+  logEvent("verdict.received", {
+    runId,
+    taskId: "task-b",
+    payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" },
+  });
+
+  const events = collectAuthoritativeEvents(runId);
+  assert.equal(events.length, 3);
+  assert.equal(events[0]!.taskId, "task-a");
+  assert.equal(events[1]!.taskId, "task-a");
+  assert.equal(events[2]!.taskId, "task-b");
+
+  // collectReconcileEvidence must delegate to the exact same translation.
+  const evidence = collectReconcileEvidence(projectDir, item({ runId }));
+  assert.deepEqual(evidence.events, events);
+});
+
+test("collectAuthoritativeEvents: taskId is undefined when the underlying event has no task_id", () => {
+  const runId = "run-collect-no-taskid";
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  const events = collectAuthoritativeEvents(runId);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.taskId, undefined);
 });
 
 test("ticket unreadable: ticketStatus/ticketClosedCommit undefined, no throw", () => {

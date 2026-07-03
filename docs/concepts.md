@@ -438,10 +438,11 @@ If all preconditions pass, the campaign transitions to `running` via a compare-a
 
 **Outcome semantics (workflow path — default).** After the workflow run completes:
 
-- `outcome: shipped` requires both a passing aggregate authoritative reviewer verdict AND a passing done-audit (`outcome: pass`). A completed workflow run alone is never treated as shipped.
+- `outcome: shipped` requires both a passing authoritative outcome AND a passing done-audit (`outcome: pass`). A completed workflow run alone is never treated as shipped.
+- The authoritative outcome (FG-427) is resolved per reviewing task from the effective latest state, not a naive aggregate over every verdict the run ever recorded: within a task, a later authoritative `pass`, or a recorded qualifying force-advance (`decision: advance`, `force: true`, non-empty rationale) at the gate, supersedes an earlier authoritative `fail` on that same task — a historical fail that was legitimately fixed, re-reviewed, or force-advanced no longer wedges the item forever. A force-advance can only supersede an existing authoritative verdict on its task; it never substitutes for authoritative review on a task that has none. This is the same evaluator `forge campaign reconcile`'s shape-1 evidence uses (Fact 5, see [Reconcile](#reconcile)), so the drive path and reconcile cannot drift.
 - A passing verdict with a failing or unknown done-audit maps to `outcome: blocked` (`blockerKind: campaign_system`).
-- A failing aggregate verdict maps to `outcome: blocked` (`blockerKind: scope`).
-- An inconclusive or empty verdict maps to `outcome: blocked` (`blockerKind: campaign_system`).
+- An unresolved authoritative fail (no later pass or qualifying force-advance superseding it on that task) maps to `outcome: blocked` (`blockerKind: scope`).
+- No authoritative verdict recorded for any task maps to `outcome: blocked` (`blockerKind: campaign_system`).
 - An abandoned or non-complete run maps to `outcome: blocked`.
 
 **Outcome semantics (invoke escape-hatch path).** When a per-item override selects `executionMode: 'invoke'`:
@@ -715,7 +716,7 @@ With `--json`:
 
 `forge campaign reconcile <campaign-id> [--by <operator>] [--json]` is an on-demand, non-destructive operator recovery command covering two distinct wedged-item shapes. Not the same as [Crash recovery](#crash-recovery-mvp-limitation), which repairs genuinely stuck in-flight items (`running`, `awaiting_red`) via manual SQL — reconcile is for items already parked in a terminal-ish shape that durable evidence shows are actually shipped. Reconcile takes no evidence argument of any kind in either shape; `--by` is attribution only and is never treated as evidence — every fact is re-read from durable Forge/git/backlog/host-verification records.
 
-**Shape 1 — stale historical red-fail** (`blockerKind: scope`, `lifecycleStatus` of `failed` or `blocked_by_red`): for example, a `fail/authoritative` verdict that was later fixed, re-reviewed with a `pass/authoritative`, force-advanced with rationale, merged, host-verified, and closed, but the item still shows `outcome: blocked, blockerKind: scope` because outcome reconciliation on the normal path aggregated the earliest fail rather than the effective latest state.
+**Shape 1 — stale historical red-fail** (`blockerKind: scope`, `lifecycleStatus` of `failed` or `blocked_by_red`): for example, a `fail/authoritative` verdict that was later fixed, re-reviewed with a `pass/authoritative`, force-advanced with rationale, merged, host-verified, and closed, but the item still shows `outcome: blocked, blockerKind: scope`. Since FG-427 the drive path's own terminal-outcome reconciliation resolves the same effective-latest-state-per-task via the shared evaluator this shape's Fact 5 uses (below), so a run driven to completion no longer gets wedged this way in the first place. Shape 1 remains the recovery path for an item already wedged — from before that fix, or any other cause — since `resume` never retries a `blockerKind: scope` item on its own (see "Wedged on a stale historical fail" under [Start (sequential execution)](#start-sequential-execution), above).
 
 **Shape 2 — delivered outside the feature pipeline** (`lifecycleStatus: awaiting_gate`, no `blockerKind`): the item's ticket was re-routed to a non-pipeline lane (e.g. documentation-only work) and its feature run was intentionally parked at a human gate rather than driven through engineer+test-engineer. `executor.ts`'s `gate:human` path is the only producer of `awaiting_gate`, and it never sets `blockerKind` — that absence is exactly what routes an item to this shape instead of shape 1.
 
@@ -730,8 +731,8 @@ Every other item is reported `not_applicable` and left untouched. The campaign i
 | `closed_commit_not_reachable_on_base_branch` | `closedCommit` is reachable on the base branch (`git merge-base --is-ancestor`) |
 | `host_verification_not_recorded` | No host-verification row covering `closedCommit` (see automatic capture below) exists yet for the required gate |
 | `host_verification_recorded_but_failed` | At least one covering row exists, but none of them exited 0 |
-| `no_authoritative_verdict_or_force_advance_event` | The item's run has at least one authoritative verdict or qualifying force-advance gate decision |
-| `latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance` | Among those, the highest-id one is an authoritative `pass` or a force-advance (`decision: advance, force: true`, non-empty rationale) — i.e. it supersedes an earlier `fail/authoritative` |
+| `no_authoritative_verdict_or_force_advance_event` | The item's run has at least one authoritative verdict or qualifying force-advance gate decision, on some reviewing task |
+| `latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance` | Resolved per reviewing task (FG-427), not by a single run-wide highest-id: within each task that has an authoritative verdict, the highest-id event among {authoritative verdicts} ∪ {qualifying force-advances} is a `pass` or a qualifying force-advance (`decision: advance, force: true`, non-empty rationale) — an unresolved fail on any one task still blocks even when another task's latest state is a pass or force-advance |
 
 `host_verification_not_recorded` and `host_verification_recorded_but_failed` are deliberately distinct codes (FG-440): the first means no real gate run has happened yet and one will be attempted automatically (see below); the second means the required gate already ran for real and failed — a genuine failure that must never be rendered as something to wait out. `forge campaign reconcile`'s human output and `forge campaign show`/`report` (`host-verification-status:` line, see [Show](#show) and [Report](#report)) render each code with this distinction; raw `--json` output always carries the unrewritten code.
 
