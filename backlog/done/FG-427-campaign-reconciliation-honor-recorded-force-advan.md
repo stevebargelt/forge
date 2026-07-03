@@ -1,9 +1,11 @@
 ---
 id: FG-427
 type: story
-status: active
+status: done
 title: "Campaign reconciliation: honor recorded force-advance / later authoritative pass instead of aggregating stale historical red-fails forever"
 created: 2026-07-01
+closed: 2026-07-03
+closed_commit: d4e5562
 ---
 
 ## Problem
