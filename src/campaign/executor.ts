@@ -67,7 +67,8 @@ export type CampaignStopReason =
   | "abandoned"
   | "item_failed"
   | "complete"
-  | "recovery_needed";
+  | "recovery_needed"
+  | "lane_escalation_unresolved";
 
 export type CampaignItemRecord = {
   itemId: string;
@@ -144,8 +145,24 @@ export function campaignBlocker(
       return "plan_unresolvable";
     }
     if (resumeHash !== campaign.approvedPlanHash) return "stale_plan";
+    // A bare resume (no escalate, no re-approve) must never silently continue
+    // dispatching later items past an item that outgrew its lane — the ONLY
+    // way to clear this pause is escalateCampaignItemLane + re-approval.
+    if (hasUnresolvedLaneEscalation(items)) return "lane_escalation_unresolved";
     return null;
   }
+}
+
+// FG-442 fix: the ONLY way to clear a lane_escalation pause is a genuine
+// escalateCampaignItemLane call, which resets the item to 'pending' (clearing
+// blockerKind) in the SAME write that mints the fresh plan_hash — so an item
+// still sitting failed/blocked with blockerKind 'lane_escalation' means no
+// escalate has happened yet, regardless of what a bare resume's stale-plan
+// check sees (sourceInput/plan_hash are untouched by a no-op resume attempt).
+export function hasUnresolvedLaneEscalation(items: CampaignItem[]): boolean {
+  return items.some(
+    (item) => item.lifecycleStatus === "failed" && item.outcome === "blocked" && item.blockerKind === "lane_escalation"
+  );
 }
 
 type BlockedItemEntry = {
@@ -1326,6 +1343,14 @@ export function escalateCampaignItemLane(
     return { ok: false, reason: `campaign must be paused to escalate a lane (status: ${campaign.status})` };
   }
   if (!campaign.projectDir) return { ok: false, reason: "campaign has no projectDir" };
+
+  // A genuine escalation must change what actually dispatches — a rationale-only
+  // tweak that keeps the SAME lane must not be allowed to mint a "fresh" plan_hash
+  // and satisfy the re-approval gate without any real change (RED-WIDE LOW finding).
+  const currentLane = getItemPlanEntry(campaign.metadata?.["planContent"], ticketId).lane;
+  if (currentLane === opts.newLane) {
+    return { ok: false, reason: `newLane '${opts.newLane}' is the same as the item's current lane — escalation requires an actual lane change` };
+  }
 
   const sourceInput: Record<string, unknown> = { ...campaign.sourceInput };
   const existingOverrides = (sourceInput["itemOverrides"] as Record<string, ItemModeOverride> | undefined) ?? {};

@@ -473,15 +473,26 @@ export function getItemPlanEntry(canonicalContent: unknown, ticketId: string): I
       const materialLaneAssumptions = Array.isArray(found["materialLaneAssumptions"])
         ? (found["materialLaneAssumptions"] as unknown[]).filter((x): x is string => typeof x === "string")
         : [];
+      const executionMode = typeof found["executionMode"] === "string" ? found["executionMode"] : "workflow";
+      const hasLane = typeof found["lane"] === "string";
+      // Pre-FG-442 entries predate the 'lane' field entirely (see foldItemEntry's
+      // own legacy mapping above) — fall back on executionMode the SAME way
+      // foldItemEntry does, instead of defaulting every lane-less entry to
+      // full_feature, or an already-approved single-invoke item gets dispatched
+      // via the full workflow/startRun path it was never approved for.
+      const lane = (hasLane ? found["lane"] : executionMode === "invoke" ? "review_only" : "full_feature") as ExecutionLane;
+      const laneRationale =
+        typeof found["laneRationale"] === "string"
+          ? found["laneRationale"]
+          : !hasLane && executionMode === "invoke"
+            ? "executionMode='invoke' override supplied without a lane — mapped to review_only (single-role invoke escape hatch)"
+            : "no lane override supplied — defaulting to full_feature";
       return {
         ticketId,
-        lane: (typeof found["lane"] === "string" ? found["lane"] : "full_feature") as ExecutionLane,
-        laneRationale:
-          typeof found["laneRationale"] === "string"
-            ? found["laneRationale"]
-            : "no lane override supplied — defaulting to full_feature",
+        lane,
+        laneRationale,
         materialLaneAssumptions,
-        executionMode: typeof found["executionMode"] === "string" ? found["executionMode"] : "workflow",
+        executionMode,
         workflowName: typeof found["workflowName"] === "string" ? found["workflowName"] : undefined,
         agentRole: typeof found["agentRole"] === "string" ? found["agentRole"] : undefined,
       };

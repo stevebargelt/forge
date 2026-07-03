@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
 import {
   createCampaign,
   getCampaign,
@@ -2816,4 +2816,129 @@ test("FG-442 escalateCampaignItemLane: mutates plan_hash + resets the item; requ
   assert.equal(loadWorkflowCalled, true, "resume must dispatch the escalated item via the full_feature workflow path");
   assert.equal(dispatchCalledAfterEscalation, false, "full_feature dispatch must never call opts.dispatch (invoke escape hatch)");
   assert.notEqual(result.stopReason, "recovery_needed");
+});
+
+test("RED-WIDE fix 1: bare resume after a lane_escalation pause (no escalate, no approve) refuses with lane_escalation_unresolved, never dispatches item2", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+    "FG-102": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-bypass",
+    taskId: "task-bypass",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  let item2Dispatched = false;
+  const resumeResult = await resumeCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      item2Dispatched = true;
+      return { runId: args.runId ?? "run-item2", taskId: "task-item2", status: "complete", result: {} };
+    },
+  });
+
+  assert.equal(resumeResult.stopReason, "lane_escalation_unresolved");
+  assert.equal(item2Dispatched, false, "resume must never dispatch past a still-unresolved lane_escalation item");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "a refused resume must not silently transition the campaign");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "lane_escalation", "the escalated item must remain unresolved");
+  assert.equal(items[1]!.lifecycleStatus, "pending", "item2 must remain untouched by the refused resume");
+});
+
+test("RED-WIDE fix 4: escalateCampaignItemLane rejects a no-op lane change (rationale-only tweak, same lane)", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-noop",
+    taskId: "task-noop",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+  await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  const planHashBefore = getCampaign(campaign.id)!.planHash;
+
+  const result = escalateCampaignItemLane(campaign.id, "FG-101", {
+    newLane: "docs_only", // same lane the item is already on
+    laneRationale: "just tweaking the rationale text, no real change",
+    agentRole: "documentation-maintainer",
+  });
+
+  assert.equal(result.ok, false, "a no-op lane change must be rejected");
+  assert.equal(getCampaign(campaign.id)!.planHash, planHashBefore, "plan_hash must not change on a rejected no-op escalation");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "lane_escalation", "item must remain in its escalated blocked state — no silent clear");
+  assert.equal(items[0]!.lifecycleStatus, "failed");
+});
+
+test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field) dispatches via single invoke, not the full_feature workflow path", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { executionMode: "invoke", agentRole: "engineer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Simulate a campaign whose metadata.planContent was persisted BEFORE the
+  // 'lane' field existed on CanonicalItemEntry — strip it from the stored
+  // display/dispatch copy without touching plan_hash/approved_plan_hash.
+  // campaignBlocker's staleness check re-derives its hash from sourceInput, never
+  // from this stored blob, so this does not trip stale_plan.
+  const stored = getCampaign(campaign.id)!;
+  const legacyPlanContent = JSON.parse(JSON.stringify(stored.metadata!["planContent"])) as {
+    orderedItems: Array<Record<string, unknown>>;
+  };
+  for (const entry of legacyPlanContent.orderedItems) {
+    delete entry["lane"];
+    delete entry["laneRationale"];
+    delete entry["materialLaneAssumptions"];
+  }
+  getDb()
+    .prepare("UPDATE campaigns SET metadata = ? WHERE id = ?")
+    .run(JSON.stringify({ ...stored.metadata, planContent: legacyPlanContent }), campaign.id);
+
+  let loadWorkflowCalled = false;
+  let dispatchCalled = false;
+  const result = await startCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      dispatchCalled = true;
+      return { runId: args.runId ?? "run-legacy", taskId: "task-legacy", status: "complete", result: {} };
+    },
+    loadWorkflowFn: () => {
+      loadWorkflowCalled = true;
+      return {
+        name: "feature",
+        description: "",
+        inputs: [],
+        steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
+      };
+    },
+  });
+
+  assert.notEqual(result.stopReason, "stale_plan", "stripping the display-only planContent copy must not trip the staleness check");
+  assert.equal(loadWorkflowCalled, false, "legacy invoke entry must NOT dispatch via the full_feature workflow path");
+  assert.equal(dispatchCalled, true, "legacy invoke entry must dispatch via the single-invoke path it was actually approved for");
 });

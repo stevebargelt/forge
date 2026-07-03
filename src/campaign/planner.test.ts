@@ -901,3 +901,25 @@ test("getItemPlanEntry: reads lane fields for a known ticket, defaults full_feat
   assert.equal(unknown.lane, "full_feature");
   assert.equal(unknown.executionMode, "workflow");
 });
+
+test("getItemPlanEntry: pre-FG-442 legacy orderedItems entry (executionMode:'invoke', agentRole, NO lane field) dispatches as review_only single-invoke, not full_feature", () => {
+  // Simulates an already-planned/approved campaign whose canonical entry was
+  // persisted before the 'lane' field existed on CanonicalItemEntry — the exact
+  // pre-FG-442 shape, not something foldItemEntry would produce today.
+  const legacyCanonicalContent = {
+    orderedItems: [{ ticketId: "FG-922", executionMode: "invoke", agentRole: "engineer" }],
+  };
+  const entry = getItemPlanEntry(legacyCanonicalContent, "FG-922");
+  assert.equal(entry.lane, "review_only", "must mirror foldItemEntry's own legacy mapping, not default to full_feature");
+  assert.equal(entry.executionMode, "invoke");
+  assert.equal(entry.agentRole, "engineer");
+});
+
+test("getItemPlanEntry: pre-FG-442 legacy orderedItems entry with executionMode:'workflow' (no lane) still defaults full_feature", () => {
+  const legacyCanonicalContent = {
+    orderedItems: [{ ticketId: "FG-923", executionMode: "workflow", workflowName: "feature" }],
+  };
+  const entry = getItemPlanEntry(legacyCanonicalContent, "FG-923");
+  assert.equal(entry.lane, "full_feature");
+  assert.equal(entry.executionMode, "workflow");
+});

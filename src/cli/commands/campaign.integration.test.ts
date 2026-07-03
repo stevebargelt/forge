@@ -3486,3 +3486,105 @@ test("integ campaign approve: restates the lane basis being recorded (human + --
   const laneEntry = approveJson.laneBasis.find((e) => e.ticketId === "FG-101")!;
   assert.equal(laneEntry.lane, "quick_implementation");
 });
+
+// ── RED-WIDE FG-442 follow-on fixes: escalation lifecycle integrity ──────────
+
+test("integ RED-WIDE fix 1: campaign resume after a lane_escalation pause (no escalate) refuses, item2 never dispatched", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Simulate the campaign having already paused on a lane_escalation blocker for
+  // item1 — the state escalateCampaignItemLane/finalizeInvokeDispatch produce,
+  // without needing a real dispatch to outgrow a lane.
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation', requested_human_action = 'escalate the lane and re-approve before resuming' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, "resume after an unresolved lane_escalation pause must exit non-zero");
+  const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("lane") && combined.includes("escalat"),
+    `expected a lane-escalation-specific refusal message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath);
+  const item2After = db2.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[1]!.id) as {
+    lifecycle_status: string;
+  };
+  const campaignAfter = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(item2After.lifecycle_status, "pending", "item2 must never be dispatched past the unresolved lane_escalation item");
+  assert.equal(campaignAfter.status, "paused", "a refused resume must not silently transition the campaign");
+});
+
+test("integ RED-WIDE fix 2: campaign approve refuses a paused campaign with an unresolved lane_escalation blocker and unchanged plan_hash", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const rubberStampResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "rubber stamp attempt",
+  ]);
+  assert.notEqual(rubberStampResult.status, 0, "approve must refuse a rubber-stamp on an unresolved lane_escalation pause");
+  const combined = (rubberStampResult.stderr + rubberStampResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("lane") && combined.includes("escalat"),
+    `expected a lane-escalation-specific refusal message\nstdout: ${rubberStampResult.stdout}\nstderr: ${rubberStampResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath);
+  const campaignAfter = db2.prepare("SELECT approval_rationale FROM campaigns WHERE id = ?").get(planOutput.campaignId) as {
+    approval_rationale: string | null;
+  };
+  db2.close();
+  assert.equal(
+    campaignAfter.approval_rationale,
+    "LGTM",
+    "the refused rubber-stamp attempt must not have overwritten the original approval record"
+  );
+});

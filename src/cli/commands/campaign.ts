@@ -2,11 +2,11 @@ import type { Command } from "commander";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { planCampaign, resolvePlan, sourceInputToPlannerInput } from "../../campaign/planner.js";
-import type { PlannerInput, PlanMode, ItemModeOverride } from "../../campaign/planner.js";
+import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "../../campaign/planner.js";
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
-import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
@@ -176,6 +176,22 @@ export function registerCampaign(program: Command): void {
       if (existing.status !== "planned" && existing.status !== "paused") {
         process.stderr.write(`Error: campaign ${campaignId} is not in a state that can be approved (status: ${existing.status})\n`);
         process.exit(1);
+      }
+
+      // FG-442: refuse to rubber-stamp a paused-for-lane_escalation campaign whose
+      // plan_hash hasn't actually changed — that would record a false "approved"
+      // signal without a genuine escalateCampaignItemLane fix having happened. The
+      // normal planned-campaign approve path and re-approval AFTER a real escalate
+      // (which always produces a fresh plan_hash) are both unaffected.
+      if (existing.status === "paused" && existing.planHash === existing.approvedPlanHash) {
+        const items = listCampaignItems(campaignId);
+        if (hasUnresolvedLaneEscalation(items)) {
+          process.stderr.write(
+            `Error: campaign ${campaignId} is paused on an unresolved lane escalation and its plan hash has not changed since the last approval — ` +
+            `run forge campaign escalate-lane ${campaignId} <ticket-id> --new-lane <lane> --rationale <text> first, then approve\n`
+          );
+          process.exit(1);
+        }
       }
 
       // Validate projectDir
@@ -400,6 +416,11 @@ export function registerCampaign(program: Command): void {
 
         if (result.stopReason === "recovery_needed") {
           console.error(recoveryGuidanceMessage(result.itemRecords[0]));
+        } else if (result.stopReason === "lane_escalation_unresolved") {
+          console.error(
+            `campaign paused on an item that outgrew its lane — resume refused. ` +
+            `Run forge campaign escalate-lane ${campaignId} <ticket-id> --new-lane <lane> --rationale <text>, then forge campaign approve, before resuming.`
+          );
         } else if (result.stopReason === "not_paused") {
           console.error("campaign is not paused; only a paused campaign can be resumed");
         } else if (result.stopReason === "abandoned") {
@@ -439,6 +460,54 @@ export function registerCampaign(program: Command): void {
 
       if (!resumeSuccessReasons.has(result.stopReason)) {
         process.exit(1);
+      }
+    });
+
+  campaign
+    .command("escalate-lane <campaign-id> <ticket-id>")
+    .description(
+      "Escalate a paused campaign item to a stronger lane after it outgrew its assigned lane — mints a fresh unapproved plan hash; `campaign approve` then `campaign resume` are required afterward"
+    )
+    .requiredOption(
+      "--new-lane <lane>",
+      "the item's new execution lane: full_feature|quick_implementation|docs_only|test_only|review_only|research_only|ticketing_only|manual"
+    )
+    .requiredOption("--rationale <text>", "escalation rationale")
+    .option("--agent-role <role>", "agent role for the new lane, required by docs_only/test_only/review_only/research_only")
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, ticketId: string, opts: { newLane: string; rationale: string; agentRole?: string; json?: boolean }) => {
+      const VALID_LANES = [
+        "full_feature",
+        "quick_implementation",
+        "docs_only",
+        "test_only",
+        "review_only",
+        "research_only",
+        "ticketing_only",
+        "manual",
+      ] as const;
+      if (!(VALID_LANES as readonly string[]).includes(opts.newLane)) {
+        process.stderr.write(`Error: invalid --new-lane "${opts.newLane}": must be one of ${VALID_LANES.join(", ")}\n`);
+        process.exit(1);
+      }
+
+      const result = escalateCampaignItemLane(campaignId, ticketId, {
+        newLane: opts.newLane as ExecutionLane,
+        laneRationale: opts.rationale,
+        agentRole: opts.agentRole,
+      });
+
+      if (!result.ok) {
+        process.stderr.write(`Error: ${result.reason}\n`);
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ campaignId, ticketId, newLane: opts.newLane, planHash: result.planHash }, null, 2));
+      } else {
+        console.log(`Escalated ${ticketId} in campaign ${campaignId} to lane '${opts.newLane}'.`);
+        console.log(`Fresh plan hash: ${result.planHash}`);
+        console.log(`Run: forge campaign approve ${campaignId} --rationale <text>  (then forge campaign resume ${campaignId})`);
       }
     });
 
