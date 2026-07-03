@@ -3359,3 +3359,130 @@ test("integ campaign show (human, FG-452): prints a host-verification-status lin
   const item = jsonOutput.items.find((i) => i.ticketId === "FG-625")!;
   assert.match(item.hostVerificationReconcileHint ?? "", /forge campaign reconcile/);
 });
+
+// ── FG-442: execution lanes ───────────────────────────────────────────────────
+
+function writeProjectRoutingPolicy(): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  const policy = {
+    version: 1,
+    governance: { accountable: "human" },
+    routes: {
+      implementation_full: {
+        responsible: "engineer", path: "workflow",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+      implementation_quick: {
+        responsible: "engineer", path: "invoke_chain",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+      documentation_durable: {
+        responsible: "documentation-maintainer", path: "invoke",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+    },
+  };
+  // Hand-rolled YAML — avoids adding a yaml-package dependency to a CLI-only test.
+  const yaml =
+    "version: 1\n" +
+    "governance:\n  accountable: human\n" +
+    "routes:\n" +
+    Object.entries(policy.routes)
+      .map(
+        ([key, route]) =>
+          `  ${key}:\n` +
+          `    responsible: ${route.responsible}\n` +
+          `    path: ${route.path}\n` +
+          `    consulted: []\n` +
+          `    required_followups: []\n` +
+          `    informed: []\n` +
+          `    force_rules: []\n`
+      )
+      .join("");
+  writeFileSync(join(projectDir, ".forge", "routing-policy.yml"), yaml);
+}
+
+test("integ campaign plan --routes: classifies each item's lane and prints lane + rationale (human + --json)", () => {
+  writeProjectRoutingPolicy();
+
+  const routes = JSON.stringify({ "FG-101": "implementation_quick", "FG-102": "documentation_durable" });
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--routes", routes,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+
+  const output = JSON.parse(result.stdout) as {
+    orderedItems: { ticketId: string; lane: string; laneRationale: string }[];
+    canonicalContent: { orderedItems: { ticketId: string; lane: string; agentRole?: string }[] };
+  };
+  const fg101 = output.orderedItems.find((i) => i.ticketId === "FG-101")!;
+  const fg102 = output.orderedItems.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(fg101.lane, "quick_implementation");
+  assert.ok(fg101.laneRationale.length > 0);
+  assert.equal(fg102.lane, "docs_only");
+
+  const canonicalFg102 = output.canonicalContent.orderedItems.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(canonicalFg102.agentRole, "documentation-maintainer");
+
+  const humanResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--routes", routes,
+    "--project", projectDir,
+  ]);
+  assert.equal(humanResult.status, 0);
+  assert.match(humanResult.stdout, /lane=quick_implementation/);
+  assert.match(humanResult.stdout, /lane=docs_only/);
+});
+
+test("integ campaign plan without --routes: every item shows the full_feature default lane, not a bare workflow default", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+  ]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /lane=full_feature — no lane override supplied — defaulting to full_feature/);
+});
+
+test("integ campaign approve: restates the lane basis being recorded (human + --json)", () => {
+  writeProjectRoutingPolicy();
+
+  const routes = JSON.stringify({ "FG-101": "implementation_quick" });
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--routes", routes,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+  assert.match(approveResult.stdout, /Lane basis being recorded:/);
+  assert.match(approveResult.stdout, /FG-101: lane=quick_implementation/);
+
+  const approveJsonResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "already approved, re-check json shape",
+    "--json",
+  ]);
+  // Second approve call: campaign is now 'planned' still (approve doesn't transition status),
+  // so this remains a valid re-approval — asserts the JSON laneBasis shape independent of the
+  // human-output assertions above.
+  assert.equal(approveJsonResult.status, 0, `stdout: ${approveJsonResult.stdout}\nstderr: ${approveJsonResult.stderr}`);
+  const approveJson = JSON.parse(approveJsonResult.stdout) as {
+    laneBasis: { ticketId: string; lane: string; laneRationale: string }[];
+  };
+  const laneEntry = approveJson.laneBasis.find((e) => e.ticketId === "FG-101")!;
+  assert.equal(laneEntry.lane, "quick_implementation");
+});

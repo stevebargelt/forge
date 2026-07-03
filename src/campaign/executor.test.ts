@@ -17,10 +17,12 @@ import {
 } from "../store/campaigns.js";
 import { writeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
-import type { PlannerInput, PlanMode } from "./planner.js";
-import { startCampaign, resumeCampaign } from "./executor.js";
+import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
+import { listCampaignItems } from "../store/campaigns.js";
+import { updateRunStatus } from "../store/runs.js";
 
 // All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
 // The wrapper forces executionMode:'invoke' for every list-type campaign without
@@ -2563,4 +2565,255 @@ test("FG-416: startCampaign cooperative-pause — itemRecords has no held/blocke
   assert.equal(readinessHeld.length, 0, "no readiness-held items after cooperative pause");
   assert.equal(dependencyHeld.length, 0, "no dependency-held items after cooperative pause");
   assert.equal(blocked.length, 0, "no blocked items after cooperative pause — generic branch fires in CLI");
+});
+
+// ── FG-442: execution lanes — dispatch, escalation, and re-approval ──────────
+
+test("FG-442 docs_only: single invoke dispatch to the stored agentRole; ships when the ticket is closed", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  writeTicket(projectDir, {
+    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
+    created: "2024-01-01", closedCommit: "abc123",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+
+  let calledWithRole: string | undefined;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    calledWithRole = args.agentRole;
+    return { runId: args.runId ?? "run-docs", taskId: "task-docs", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(calledWithRole, "documentation-maintainer", "must dispatch to the lane's stored agentRole");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-442 quick_implementation: dispatches engineer then test-engineer on the SAME run; ships when both succeed", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  writeTicket(projectDir, {
+    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
+    created: "2024-01-01", closedCommit: "abc123",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+
+  const rolesCalled: string[] = [];
+  const runIdsSeen = new Set<string>();
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    rolesCalled.push(args.agentRole);
+    if (args.runId) runIdsSeen.add(args.runId);
+    return { runId: args.runId ?? "run-quick", taskId: `task-${args.agentRole}`, status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.deepEqual(rolesCalled, ["engineer", "test-engineer"], "must dispatch engineer then test-engineer, in order");
+  assert.equal(runIdsSeen.size, 1, "both invokes must attach to the SAME run");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-442 quick_implementation: test-engineer failure blocks the item, does not silently ship", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    if (args.agentRole === "test-engineer") {
+      return { runId: args.runId ?? "run-quick-fail", taskId: "task-te", status: "failed", error: "tests failed" };
+    }
+    return { runId: args.runId ?? "run-quick-fail", taskId: "task-eng", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "failed");
+  assert.equal(result.itemRecords[0]!.outcome, "blocked");
+});
+
+test("FG-442 ticketing_only: no run/task dispatched; item reaches a terminal 'skipped' outcome with a human action", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "ticketing_only", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  let dispatchCalled = false;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCalled = true;
+    return { runId: "should-not-happen", taskId: "should-not-happen", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(dispatchCalled, false, "ticketing_only must never call opts.dispatch");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "skipped");
+  assert.equal(result.itemRecords[0]!.runId, undefined, "no run must be created for ticketing_only");
+
+  const items = listCampaignItems(campaign.id);
+  assert.ok(items[0]!.requestedHumanAction?.includes("ticketing_only"));
+});
+
+test("FG-442 escalation: an explicit laneEscalation signal sets blockerKind lane_escalation and pauses the whole campaign", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-escalate",
+    taskId: "task-escalate",
+    status: "complete",
+    result: { laneEscalation: { reason: "this needs a full implementation, not docs", suggestedLane: "full_feature" } },
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(result.itemRecords[0]!.blockerKind, "lane_escalation");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "failed");
+  assert.equal(result.itemRecords[0]!.outcome, "blocked");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused");
+
+  const items = listCampaignItems(campaign.id);
+  assert.ok(items[0]!.requestedHumanAction?.includes("outgrew lane"));
+});
+
+test("FG-442 escalation: a generic dispatch failure (no laneEscalation field) is classified normally, NOT as an escalation", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+  seedLocalFailure("task-generic-fail");
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-generic-fail",
+    taskId: "task-generic-fail",
+    status: "failed",
+    error: "generic model error",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.notEqual(result.itemRecords[0]!.blockerKind, "lane_escalation", "a generic failure must never be inferred as an escalation");
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "scope");
+});
+
+test("FG-442 escalateCampaignItemLane: mutates plan_hash + resets the item; requires re-approval before resume dispatches under the new lane", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const approvedHashBefore = getCampaign(campaign.id)!.approvedPlanHash;
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-escalate2",
+    taskId: "task-escalate2",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  // escalateCampaignItemLane refuses a non-paused campaign
+  const wrongStateResult = escalateCampaignItemLane("nonexistent-campaign-id", "FG-101", {
+    newLane: "full_feature",
+    laneRationale: "test",
+  });
+  assert.equal(wrongStateResult.ok, false);
+
+  const escalateResult = escalateCampaignItemLane(campaign.id, "FG-101", {
+    newLane: "full_feature",
+    laneRationale: "escalated: agent reported outgrowing docs_only",
+  });
+  assert.equal(escalateResult.ok, true);
+  if (!escalateResult.ok) return;
+
+  const afterEscalate = getCampaign(campaign.id)!;
+  assert.equal(afterEscalate.status, "paused", "escalation must not change campaign status by itself");
+  assert.notEqual(afterEscalate.planHash, approvedHashBefore, "escalation must produce a FRESH plan_hash");
+  assert.equal(afterEscalate.approvedPlanHash, approvedHashBefore, "approved_plan_hash must NOT silently follow — re-approval is required");
+
+  const resetItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(resetItem.lifecycleStatus, "pending", "the escalated item must be reset to pending for a fresh dispatch");
+  assert.equal(resetItem.blockerKind, undefined);
+
+  // No silent continue: resume without re-approving is refused as stale.
+  const resumeBeforeApprove = await resumeCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(resumeBeforeApprove.stopReason, "stale_plan", "resume must refuse until the fresh plan is re-approved");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "refused resume must not silently transition the campaign");
+
+  // approveCampaign now accepts re-approving a paused campaign — same confirm/override point.
+  const reApproved = approveCampaign(campaign.id, { rationale: "re-approved after escalation" });
+  assert.equal(reApproved, true, "approveCampaign must accept a paused campaign for re-approval");
+  assert.equal(getCampaign(campaign.id)!.approvedPlanHash, afterEscalate.planHash);
+
+  // No silent downgrade: resume now dispatches the item via the NEW lane (full_feature ->
+  // loadWorkflow path), never falling back to the outgrown docs_only invoke path.
+  let loadWorkflowCalled = false;
+  let dispatchCalledAfterEscalation = false;
+  const result = await resumeCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      dispatchCalledAfterEscalation = true;
+      return escalatingDispatch(args);
+    },
+    loadWorkflowFn: () => {
+      loadWorkflowCalled = true;
+      return {
+        name: "feature",
+        description: "",
+        inputs: [],
+        steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
+      };
+    },
+    runNextFn: async ({ runId }) => {
+      updateRunStatus(runId, "complete");
+      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    },
+  });
+
+  assert.equal(loadWorkflowCalled, true, "resume must dispatch the escalated item via the full_feature workflow path");
+  assert.equal(dispatchCalledAfterEscalation, false, "full_feature dispatch must never call opts.dispatch (invoke escape hatch)");
+  assert.notEqual(result.stopReason, "recovery_needed");
 });

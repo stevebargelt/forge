@@ -52,14 +52,29 @@ test("classifyFailureKind: unknown future string → campaign_system (conservati
 
 // ── SHARED_BLOCKER_KINDS set ──────────────────────────────────────────────────
 
-test("SHARED_BLOCKER_KINDS contains exactly the six shared kinds", () => {
+test("SHARED_BLOCKER_KINDS contains exactly the seven shared kinds", () => {
   assert.ok(SHARED_BLOCKER_KINDS.has("auth"));
   assert.ok(SHARED_BLOCKER_KINDS.has("infrastructure"));
   assert.ok(SHARED_BLOCKER_KINDS.has("git_state"));
   assert.ok(SHARED_BLOCKER_KINDS.has("dependency"));
   assert.ok(SHARED_BLOCKER_KINDS.has("merge_conflict"));
   assert.ok(SHARED_BLOCKER_KINDS.has("campaign_system"));
-  assert.equal(SHARED_BLOCKER_KINDS.size, 6);
+  assert.ok(SHARED_BLOCKER_KINDS.has("lane_escalation"));
+  assert.equal(SHARED_BLOCKER_KINDS.size, 7);
+});
+
+// FG-442: an item outgrowing its lane invalidates the approved plan basis for
+// the whole campaign — scoping this hold-dependents-only would under-pause.
+test("FG-442: lane_escalation is a SHARED blocker (isSharedBlocker true)", () => {
+  assert.equal(isSharedBlocker("lane_escalation"), true);
+});
+
+test("FG-442: evaluateContinuePolicy('lane_escalation', ...) is always hold_campaign, regardless of relation/mode", () => {
+  for (const rel of ["dependent", "independent", "unknown"] as const) {
+    for (const mode of ["pilot", "sequential"]) {
+      assert.equal(evaluateContinuePolicy("lane_escalation", rel, mode), "hold_campaign");
+    }
+  }
 });
 
 test("isSharedBlocker: scope and other LOCAL kinds return false", () => {
@@ -116,7 +131,7 @@ test("relationToBlocked: later.related includes blocked.id → DEPENDENT (but bl
 
 // ── evaluateContinuePolicy — full table ──────────────────────────────────────
 
-const SHARED_KINDS: BlockerKind[] = ["auth", "infrastructure", "git_state", "dependency", "merge_conflict", "campaign_system"];
+const SHARED_KINDS: BlockerKind[] = ["auth", "infrastructure", "git_state", "dependency", "merge_conflict", "campaign_system", "lane_escalation"];
 const LOCAL_KINDS: BlockerKind[] = ["scope", "readiness", "tests", "human_decision"];
 
 test("evaluateContinuePolicy: ALL SHARED kinds → hold_campaign (regardless of relation/mode)", () => {

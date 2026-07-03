@@ -7,8 +7,8 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { listCampaignItems } from "../store/campaigns.js";
 import { writeTicket } from "../backlog/structured.js";
-import { computePlanHash, planCampaign } from "./planner.js";
-import type { CanonicalPlanContent } from "./planner.js";
+import { computePlanHash, planCampaign, resolvePlan, getItemPlanEntry } from "./planner.js";
+import type { CanonicalPlanContent, ItemModeOverride } from "./planner.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -751,4 +751,153 @@ test("plan_hash sensitivity: itemRecommendations populated vs empty changes hash
     computePlanHash(withoutRecs),
     "including itemRecommendations must change the plan_hash"
   );
+});
+
+// ── FG-442: execution lanes ─────────────────────────────────────────────────
+
+test("lane: defaults to full_feature with the default rationale when no override is supplied", () => {
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir });
+  const entry = result.canonicalContent.orderedItems!.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(entry.lane, "full_feature");
+  assert.equal(entry.laneRationale, "no lane override supplied — defaulting to full_feature");
+  assert.deepEqual(entry.materialLaneAssumptions, []);
+  assert.equal(entry.executionMode, "workflow");
+  assert.equal(entry.workflowName, "feature");
+  assert.equal(entry.agentRole, undefined);
+});
+
+test("lane: an explicit lane override folds lane/laneRationale/materialLaneAssumptions/agentRole into canonicalContent", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": {
+      lane: "docs_only",
+      laneRationale: "policy route 'documentation_durable' -> lane 'docs_only'",
+      materialLaneAssumptions: ["routing policy source: host"],
+      agentRole: "documentation-maintainer",
+    },
+  };
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+  const entry = result.canonicalContent.orderedItems!.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(entry.lane, "docs_only");
+  assert.equal(entry.laneRationale, "policy route 'documentation_durable' -> lane 'docs_only'");
+  assert.deepEqual(entry.materialLaneAssumptions, ["routing policy source: host"]);
+  assert.equal(entry.executionMode, "invoke");
+  assert.equal(entry.agentRole, "documentation-maintainer");
+});
+
+test("lane: quick_implementation folds to executionMode invoke_chain with no agentRole/workflowName", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+  const entry = result.canonicalContent.orderedItems!.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(entry.executionMode, "invoke_chain");
+  assert.equal(entry.agentRole, undefined);
+  assert.equal(entry.workflowName, undefined);
+});
+
+test("lane: ticketing_only and manual fold to executionMode 'none' — no dispatch mechanism recorded", () => {
+  for (const lane of ["ticketing_only", "manual"] as const) {
+    const itemOverrides: Record<string, ItemModeOverride> = { "FG-101": { lane, laneRationale: "test" } };
+    const result = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+    const entry = result.canonicalContent.orderedItems!.find((i) => i.ticketId === "FG-101")!;
+    assert.equal(entry.executionMode, "none", `${lane} must fold to executionMode 'none'`);
+  }
+});
+
+test("lane validation: full_feature and quick_implementation reject an agentRole", () => {
+  for (const lane of ["full_feature", "quick_implementation"] as const) {
+    const itemOverrides: Record<string, ItemModeOverride> = {
+      "FG-101": { lane, laneRationale: "test", agentRole: "engineer" },
+    };
+    assert.throws(
+      () => planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir }),
+      /does not take an agentRole/,
+      `${lane} must reject an agentRole`
+    );
+  }
+});
+
+test("lane validation: ticketing_only and manual reject an agentRole", () => {
+  for (const lane of ["ticketing_only", "manual"] as const) {
+    const itemOverrides: Record<string, ItemModeOverride> = {
+      "FG-101": { lane, laneRationale: "test", agentRole: "engineer" },
+    };
+    assert.throws(
+      () => planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir }),
+      /does not take an agentRole/,
+      `${lane} must reject an agentRole`
+    );
+  }
+});
+
+test("lane validation: docs_only/test_only/research_only/review_only require an agentRole", () => {
+  for (const lane of ["docs_only", "test_only", "research_only", "review_only"] as const) {
+    const itemOverrides: Record<string, ItemModeOverride> = { "FG-101": { lane, laneRationale: "test" } };
+    assert.throws(
+      () => planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir }),
+      /requires an explicit agentRole/,
+      `${lane} must require an agentRole`
+    );
+  }
+});
+
+test("lane: legacy executionMode:'invoke' override with no lane maps to review_only (preserves the pre-FG-442 escape hatch)", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { executionMode: "invoke", agentRole: "engineer" },
+  };
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+  const entry = result.canonicalContent.orderedItems!.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(entry.lane, "review_only");
+  assert.equal(entry.executionMode, "invoke");
+  assert.equal(entry.agentRole, "engineer");
+});
+
+test("lane: plan_hash CHANGES when an item's lane is swapped post-approval (quick_implementation <-> full_feature)", () => {
+  const quickOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const fullOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", laneRationale: "test" },
+  };
+  const { planHash: quickHash } = resolvePlan(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides: quickOverrides },
+    { projectDir }
+  );
+  const { planHash: fullHash } = resolvePlan(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides: fullOverrides },
+    { projectDir }
+  );
+  assert.notEqual(quickHash, fullHash, "swapping lane quick_implementation <-> full_feature must change plan_hash");
+});
+
+test("lane: advisoryAgentsUsed/advisoryRecommendationSummary stay false/null when no item carries an explicit lane", () => {
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101", "FG-102"] }, { projectDir });
+  assert.equal(result.canonicalContent.advisoryAgentsUsed, false);
+  assert.equal(result.canonicalContent.advisoryRecommendationSummary, null);
+});
+
+test("lane: advisoryAgentsUsed/advisoryRecommendationSummary summarize lane distribution when the classifier was used", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+    "FG-102": { lane: "full_feature", laneRationale: "test" },
+  };
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101", "FG-102"], itemOverrides }, { projectDir });
+  assert.equal(result.canonicalContent.advisoryAgentsUsed, true);
+  assert.match(result.canonicalContent.advisoryRecommendationSummary ?? "", /docs_only=1/);
+  assert.match(result.canonicalContent.advisoryRecommendationSummary ?? "", /full_feature=1/);
+});
+
+test("getItemPlanEntry: reads lane fields for a known ticket, defaults full_feature for an unknown one", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "test_only", laneRationale: "test", agentRole: "test-engineer" },
+  };
+  const result = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+
+  const known = getItemPlanEntry(result.canonicalContent, "FG-101");
+  assert.equal(known.lane, "test_only");
+  assert.equal(known.agentRole, "test-engineer");
+
+  const unknown = getItemPlanEntry(result.canonicalContent, "FG-999");
+  assert.equal(unknown.lane, "full_feature");
+  assert.equal(unknown.executionMode, "workflow");
 });

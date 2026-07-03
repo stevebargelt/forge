@@ -1,13 +1,27 @@
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { planCampaign, resolvePlan } from "../../campaign/planner.js";
-import type { PlannerInput, PlanMode } from "../../campaign/planner.js";
+import { planCampaign, resolvePlan, sourceInputToPlannerInput } from "../../campaign/planner.js";
+import type { PlannerInput, PlanMode, ItemModeOverride } from "../../campaign/planner.js";
+import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
+import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
+import { listTickets } from "../../backlog/structured.js";
+
+// FG-442: builds the injectable classifyTicket judgment for `forge campaign
+// plan --routes`. The judgment itself (ticketId -> routeKey) is supplied by the
+// caller — an operator or orchestrator who has already read the ticket and
+// decided its route (e.g. via `forge route explain`) — never inferred here by
+// keyword-matching ticket content (the RACI invariant). Tickets absent from the
+// map classify as an unmatched route key, which lane-classifier.ts's
+// projectRouteToLane deterministically projects to lane 'manual'.
+function makeRouteLookupClassifier(routes: Record<string, string>): ClassifyTicketFn {
+  return (ticket) => routes[ticket.id] ?? "unclassified";
+}
 
 function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
   if (rec) {
@@ -31,6 +45,10 @@ export function registerCampaign(program: Command): void {
     .option("--exclude <ids>", "comma-separated ticket ids to exclude, only valid with --epic")
     .option("--mode <mode>", "dry_run|pilot|sequential", "dry_run")
     .option("--project <dir>", "project directory (default: cwd)")
+    .option(
+      "--routes <json>",
+      "JSON map of ticketId -> compiled routing-policy route key (e.g. implementation_quick), supplying the FG-442 lane judgment for each ticket. Tickets omitted here are unclassified (lane 'manual'). Omit --routes entirely to skip classification and keep every item on the full_feature default."
+    )
     .option("--json", "machine-readable JSON output")
     .action((opts: {
       tickets?: string;
@@ -39,6 +57,7 @@ export function registerCampaign(program: Command): void {
       exclude?: string;
       mode?: string;
       project?: string;
+      routes?: string;
       json?: boolean;
     }) => {
       const hasTickets = opts.tickets !== undefined;
@@ -80,14 +99,43 @@ export function registerCampaign(program: Command): void {
         input = { kind: "epic", epicId: opts.epic! };
       }
 
+      // FG-442: run the lane classifier OUTSIDE resolvePlan/planCampaign, at
+      // plan-authoring time — the one-time cost per plan. Only when --routes
+      // supplies a real ticket->route judgment; otherwise every item keeps the
+      // full_feature default (planner.ts's own fold logic), preserving current
+      // behavior when no judgment source is wired in.
+      if (opts.routes) {
+        let routes: Record<string, string>;
+        try {
+          routes = JSON.parse(opts.routes) as Record<string, string>;
+        } catch {
+          throw new Error("--routes must be valid JSON: a map of ticketId -> route key");
+        }
+        const { resolvedIds } = resolvePlan(input, { projectDir, mode });
+        const tickets = listTickets(projectDir).filter((t) => resolvedIds.includes(t.id));
+        const classified = classifyItemsForPlan(tickets, {
+          projectDir,
+          classifyTicket: makeRouteLookupClassifier(routes),
+        });
+        input = { ...input, itemOverrides: { ...(input.itemOverrides ?? {}), ...classified.itemOverrides } };
+      }
+
       const result = planCampaign(input, { projectDir, mode });
       const items = listCampaignItems(result.campaign.id);
+      const laneByTicketId = new Map(
+        (result.canonicalContent.orderedItems ?? []).map((entry) => [entry.ticketId, entry])
+      );
 
-      const orderedItems = items.map((item) => ({
-        order: item.itemOrder,
-        ticketId: item.ticketId,
-        lifecycleStatus: item.lifecycleStatus,
-      }));
+      const orderedItems = items.map((item) => {
+        const laneEntry = laneByTicketId.get(item.ticketId);
+        return {
+          order: item.itemOrder,
+          ticketId: item.ticketId,
+          lifecycleStatus: item.lifecycleStatus,
+          lane: laneEntry?.lane ?? "full_feature",
+          laneRationale: laneEntry?.laneRationale ?? "no lane override supplied — defaulting to full_feature",
+        };
+      });
 
       if (opts.json) {
         console.log(JSON.stringify({
@@ -102,7 +150,7 @@ export function registerCampaign(program: Command): void {
         console.log(`Mode: ${result.campaign.mode}`);
         console.log("Items:");
         for (const item of orderedItems) {
-          console.log(`  ${item.order}: ${item.ticketId} [${item.lifecycleStatus}]`);
+          console.log(`  ${item.order}: ${item.ticketId} [${item.lifecycleStatus}] lane=${item.lane} — ${item.laneRationale}`);
         }
         console.log("Canonical content:");
         console.log(JSON.stringify(result.canonicalContent, null, 2));
@@ -121,8 +169,12 @@ export function registerCampaign(program: Command): void {
         process.stderr.write(`Error: campaign ${campaignId} not found\n`);
         process.exit(1);
       }
-      if (existing.status !== "planned") {
-        process.stderr.write(`Error: campaign ${campaignId} is not in planned state (status: ${existing.status})\n`);
+      // FG-442: 'paused' is also a valid pre-approve state — the escalation path
+      // (escalateCampaignItemLane) produces a fresh unapproved plan_hash on a
+      // paused campaign, and this is the SAME confirm/override point used at
+      // first approval, not a new command.
+      if (existing.status !== "planned" && existing.status !== "paused") {
+        process.stderr.write(`Error: campaign ${campaignId} is not in a state that can be approved (status: ${existing.status})\n`);
         process.exit(1);
       }
 
@@ -142,15 +194,7 @@ export function registerCampaign(program: Command): void {
       // Non-fatal staleness warning
       if (existing.planHash) {
         try {
-          const sourceInput = existing.sourceInput as { kind: string; ticketIds?: string[]; epicId?: string; additions?: string[]; exclusions?: string[] };
-          let plannerInput: PlannerInput;
-          if (sourceInput["kind"] === "list") {
-            plannerInput = { kind: "list", ticketIds: (sourceInput["ticketIds"] ?? []) };
-          } else if (sourceInput["kind"] === "epic") {
-            plannerInput = { kind: "epic", epicId: sourceInput["epicId"] as string };
-          } else {
-            plannerInput = { kind: "mixed", epicId: sourceInput["epicId"] as string, additions: sourceInput["additions"], exclusions: sourceInput["exclusions"] };
-          }
+          const plannerInput = sourceInputToPlannerInput(existing.sourceInput);
           const { planHash: currentHash } = resolvePlan(plannerInput, {
             projectDir,
             mode: existing.mode as PlanMode,
@@ -163,6 +207,20 @@ export function registerCampaign(program: Command): void {
           }
         } catch {
           // Non-fatal: warn if we can detect staleness, skip if backlog resolution fails
+        }
+      }
+
+      // FG-442: restate the lane basis being recorded — the approve gate is the
+      // confirm/override point for lanes too, whether this is the first
+      // approval or a re-approval after a lane escalation.
+      const planContent = existing.metadata?.["planContent"] as Record<string, unknown> | undefined;
+      const orderedItemsForApproval = Array.isArray(planContent?.["orderedItems"])
+        ? (planContent!["orderedItems"] as Array<Record<string, unknown>>)
+        : [];
+      if (!opts.json && orderedItemsForApproval.length > 0) {
+        console.log("Lane basis being recorded:");
+        for (const entry of orderedItemsForApproval) {
+          console.log(`  ${entry["ticketId"]}: lane=${entry["lane"] ?? "full_feature"} — ${entry["laneRationale"] ?? "no lane override supplied — defaulting to full_feature"}`);
         }
       }
 
@@ -179,6 +237,11 @@ export function registerCampaign(program: Command): void {
           approvedBy: approved.approvedBy ?? null,
           approvedAt: approved.approvedAt,
           approvedPlanHash: approved.approvedPlanHash,
+          laneBasis: orderedItemsForApproval.map((entry) => ({
+            ticketId: entry["ticketId"],
+            lane: entry["lane"] ?? "full_feature",
+            laneRationale: entry["laneRationale"] ?? "no lane override supplied — defaulting to full_feature",
+          })),
         }, null, 2));
       } else {
         console.log(`Campaign ${campaignId} approved.`);
@@ -478,6 +541,10 @@ export function registerCampaign(program: Command): void {
         const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
         const runStr = item.runId ? ` [run: ${item.runId}]` : "";
         console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${blockerStr}${runStr}`);
+        console.log(`    lane: ${item.lane} — ${item.laneRationale}`);
+        if (item.blockerKind === "lane_escalation") {
+          console.log(`    LANE ESCALATION: item outgrew its approved lane — the whole campaign is paused pending re-approval of a new plan basis`);
+        }
         if (item.reason) console.log(`    reason: ${item.reason}`);
         if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
         if (item.hostVerificationReconcileHint) console.log(`    host-verification-status: ${item.hostVerificationReconcileHint}`);

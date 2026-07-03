@@ -275,7 +275,9 @@ export type BlockerKind =
   | "git_state"
   | "infrastructure"
   | "campaign_system"
-  | "human_decision";
+  | "human_decision"
+  // FG-442: an item's agent reported outgrowing its approved execution lane.
+  | "lane_escalation";
 
 export type ContinuePolicy = "continue_allowed" | "hold_dependents" | "hold_campaign";
 

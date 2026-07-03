@@ -15,8 +15,9 @@ import {
   updateCampaignItem,
 } from "../store/campaigns.js";
 import { planCampaign } from "./planner.js";
+import type { ItemModeOverride } from "./planner.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
-import { assembleCampaignShow, assembleCampaignReport, setDoneAuditMapForTest } from "./report.js";
+import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, setDoneAuditMapForTest } from "./report.js";
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { campaignBlocker } from "./executor.js";
 
@@ -197,10 +198,14 @@ test("assembleCampaignShow: item rows have all required fields", () => {
   assert.ok("runId" in item);
   assert.ok("reason" in item);
   assert.ok("requestedHumanAction" in item);
+  assert.ok("lane" in item);
+  assert.ok("laneRationale" in item);
+  assert.ok("materialLaneAssumptions" in item);
 
   assert.equal(item.ticketId, "FG-101");
   assert.equal(item.title, "Story One");
   assert.equal(item.lifecycleStatus, "pending");
+  assert.equal(item.lane, "full_feature", "lane defaults to full_feature when unplanned with an override");
 });
 
 // ── show: activeItem detection ────────────────────────────────────────────────
@@ -2088,4 +2093,83 @@ test("assembleCampaignShow: awaiting_gate item WITH a blockerKind is never treat
 
   const show = assembleCampaignShow(campaign.id)!;
   assert.equal(show.nextAction, "Human gate required at step review", "blockerKind present — must not be treated as out-of-band-eligible");
+});
+
+// ── FG-442: execution lanes surfaced in show/report ──────────────────────────
+
+test("FG-442: assembleCampaignShow surfaces lane/laneRationale/materialLaneAssumptions per item", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": {
+      lane: "docs_only",
+      laneRationale: "policy route 'documentation_durable' -> lane 'docs_only'",
+      materialLaneAssumptions: ["routing policy source: host"],
+      agentRole: "documentation-maintainer",
+    },
+  };
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const row = show.items[0]!;
+  assert.equal(row.lane, "docs_only");
+  assert.equal(row.laneRationale, "policy route 'documentation_durable' -> lane 'docs_only'");
+  assert.deepEqual(row.materialLaneAssumptions, ["routing policy source: host"]);
+});
+
+test("FG-442: assembleCampaignReport surfaces lane fields AND still surfaces executionMode/agentRole ('invoke (escape hatch)') underlying the lane", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "test_only", laneRationale: "test", agentRole: "test-engineer" },
+  };
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const row = report.items[0]!;
+  assert.equal(row.lane, "test_only");
+  assert.equal(row.executionMode, "invoke (escape hatch)");
+  assert.equal(row.agentRole, "test-engineer");
+  assert.equal(row.workflowName, null);
+});
+
+test("FG-442: assembleCampaignReport labels quick_implementation and ticketing_only/manual distinctly (not workflow, not invoke escape hatch)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir }
+  );
+  const campaignData = getCampaign(campaign.id)!;
+  const updatedPlanContent = {
+    ...(campaignData.metadata?.["planContent"] ?? {}),
+    orderedItems: [
+      { ticketId: "FG-101", executionMode: "invoke_chain", lane: "quick_implementation", laneRationale: "test", materialLaneAssumptions: [] },
+      { ticketId: "FG-102", executionMode: "none", lane: "ticketing_only", laneRationale: "test", materialLaneAssumptions: [] },
+    ],
+  };
+  db.prepare("UPDATE campaigns SET metadata = ? WHERE id = ?").run(
+    JSON.stringify({ ...campaignData.metadata, planContent: updatedPlanContent }),
+    campaign.id
+  );
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const row1 = report.items.find((i) => i.ticketId === "FG-101")!;
+  const row2 = report.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(row1.executionMode, "invoke chain (engineer -> test-engineer)");
+  assert.equal(row2.executionMode, "no dispatch");
+});
+
+test("FG-442: renderCampaignReportHuman includes lane + rationale, and distinctly flags a lane_escalation blocker", () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test rationale for docs_only", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"], itemOverrides }, { projectDir });
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ?").all(campaign.id) as { id: string }[];
+  updateCampaignItem(items[0]!.id, {
+    lifecycleStatus: "failed",
+    outcome: "blocked",
+    blockerKind: "lane_escalation",
+    requestedHumanAction: "item FG-101 outgrew lane 'docs_only' — escalate and re-approve",
+  });
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const lines = renderCampaignReportHuman(report);
+
+  assert.ok(lines.some((l) => l.includes("lane: docs_only") && l.includes("test rationale for docs_only")));
+  assert.ok(lines.some((l) => l.includes("LANE ESCALATION")), "a lane_escalation blocker must read distinctly from a scope block");
 });
