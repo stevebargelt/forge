@@ -1,9 +1,11 @@
 ---
 id: FG-440
 type: story
-status: active
+status: done
 title: Campaign items force-advanced/manually-driven get no post-merge host-verification, so evidence-gated reconcile refuses a legitimately-merged+green item
 created: 2026-07-02
+closed: 2026-07-03
+closed_commit: "8515199"
 ---
 
 ## Problem
