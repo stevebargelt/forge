@@ -3125,3 +3125,205 @@ test("integ campaign show (human): a genuinely unfinished gate (ticket not yet c
   );
   assert.ok(!humanResult.stdout.includes("delivered out-of-band"), `must not claim out-of-band eligibility\nstdout: ${humanResult.stdout}`);
 });
+
+// ── FG-440: automatic host-verification capture — real CLI-subprocess coverage ──
+//
+// Everything above exercises reconcileCampaign()/collectReconcileEvidence() as
+// directly-imported functions (reconcile.integration.test.ts) or the CLI with a
+// PRE-SEEDED host_verifications row (setupReconcileCliCampaign above). Neither
+// proves the actual operator entrypoint — `forge campaign reconcile`, spawned as
+// a real child process — performs the REAL gate run itself: writes package.json
+// into the real (temp) projectDir, spawns `forge campaign reconcile` as a
+// separate process, and lets it invoke `npm run test:all` for real. This is the
+// FG-440 anti-spoofing proof end-to-end, not just at the function seam. It also
+// proves the two-way reason-code split (host_verification_not_recorded vs
+// host_verification_recorded_but_failed) renders correctly on both the raw JSON
+// path (campaign.ts's `--json` branch, which must NOT run codes through
+// describeMissingReason) and the human path (which must).
+
+function commitGateScriptIn(dir: string, label: string, scriptBody: string): string {
+  writeFileSync(
+    join(dir, "package.json"),
+    JSON.stringify({ name: "synthetic", version: "0.0.0", scripts: { "test:all": scriptBody } }, null, 2)
+  );
+  writeFileSync(join(dir, `${label}.txt`), label);
+  gitExec(["add", "."], dir);
+  gitExec(["commit", "-m", label], dir);
+  return gitExec(["rev-parse", "HEAD"], dir).trim();
+}
+
+function commitPendingChangesIn(dir: string, message: string): string {
+  gitExec(["add", "."], dir);
+  gitExec(["commit", "-m", message], dir);
+  return gitExec(["rev-parse", "HEAD"], dir).trim();
+}
+
+// Plans + approves a single-item paused campaign whose item is scope-blocked with
+// the fact-5 supersession events present (fail then authoritative pass) but
+// DELIBERATELY no host_verifications row — the precondition for FG-440's
+// automatic capture to fire on the next `campaign reconcile` invocation.
+function setupHostGateCaptureCliCampaign(ticketId: string): { campaignId: string; itemId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: "Capture", body: "" });
+
+  const planResult = runForge(["campaign", "plan", "--tickets", ticketId, "--project", projectDir, "--json"]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "approved"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const item = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .get(planOutput.campaignId) as { id: string };
+  const runId = `run-${item.id}`;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ? WHERE id = ?"
+  ).run(runId, item.id);
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "fail", authority: "authoritative" }), "2026-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, NULL, ?, ?, ?)`
+  ).run(runId, "verdict.received", JSON.stringify({ redRole: "r", verdict: "pass", authority: "authoritative" }), "2026-01-01T00:00:01Z");
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  return { campaignId: planOutput.campaignId, itemId: item.id };
+}
+
+test("integ campaign reconcile --json (FG-440): a real `npm run test:all` PASS is captured automatically — writes a real host_verifications row and ships the item, all within one CLI invocation", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupHostGateCaptureCliCampaign("FG-620");
+  const closedCommit = commitGateScriptIn(projectDir, "impl-FG-620", "exit 0");
+  closeTicket(projectDir, "FG-620", closedCommit);
+  const testedHead = commitPendingChangesIn(projectDir, "close FG-620");
+
+  const dbPath = join(forgeHome, "forge.db");
+  const dbBefore = new Database(dbPath, { readonly: true });
+  const before = (
+    dbBefore.prepare("SELECT COUNT(*) as n FROM host_verifications WHERE ticket_id = ?").get("FG-620") as { n: number }
+  ).n;
+  dbBefore.close();
+  assert.equal(before, 0, "precondition: no host_verifications row exists before reconcile runs");
+
+  const result = runForge(["campaign", "reconcile", campaignId, "--json"]);
+  assert.equal(result.status, 0, `reconcile failed\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as { ok: boolean; items: { ticketId: string; status: string }[] };
+  assert.equal(output.ok, true);
+  assert.equal(output.items[0]?.status, "shipped", "the real gate ran and passed within this same reconcile call");
+
+  const db2 = new Database(dbPath, { readonly: true });
+  const rows = db2
+    .prepare("SELECT exit_code, gate_name, command, commit_sha FROM host_verifications WHERE ticket_id = ?")
+    .all("FG-620") as { exit_code: number; gate_name: string; command: string; commit_sha: string }[];
+  db2.close();
+  assert.equal(rows.length, 1, "exactly one real row written by the actual `npm run test:all` invocation");
+  assert.equal(rows[0]!.exit_code, 0);
+  assert.equal(rows[0]!.gate_name, "npm run test:all", "gate_name is the configured requiredHostGate string, never the executed argv");
+  assert.equal(rows[0]!.command, "npm run test:all");
+  assert.equal(rows[0]!.commit_sha, testedHead, "recorded commit_sha is the real tested HEAD, not closedCommit");
+});
+
+test("integ campaign reconcile --json (FG-440): a real `npm run test:all` FAILURE is captured with its actual exit code — item stays refused with the distinct 'recorded_but_failed' code, never conflated with 'not_recorded'", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupHostGateCaptureCliCampaign("FG-621");
+  const closedCommit = commitGateScriptIn(projectDir, "impl-FG-621", "exit 4");
+  closeTicket(projectDir, "FG-621", closedCommit);
+  const testedHead = commitPendingChangesIn(projectDir, "close FG-621");
+
+  const result = runForge(["campaign", "reconcile", campaignId, "--json"]);
+  assert.equal(result.status, 0, `reconcile failed\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as { items: { ticketId: string; status: string; missing?: string[] }[] };
+  assert.equal(output.items[0]?.status, "refused");
+  assert.deepEqual(
+    output.items[0]?.missing,
+    ["host_verification_recorded_but_failed"],
+    "raw JSON must carry the un-rewritten reason code, distinct from host_verification_not_recorded"
+  );
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath, { readonly: true });
+  const rows = db
+    .prepare("SELECT exit_code, commit_sha FROM host_verifications WHERE ticket_id = ?")
+    .all("FG-621") as { exit_code: number; commit_sha: string }[];
+  db.close();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exit_code, 4, "the actual non-zero exit code must be recorded, never fabricated as 0 or 1");
+  assert.equal(rows[0]!.commit_sha, testedHead);
+});
+
+test("integ campaign reconcile (human, FG-440): renders distinct operator-facing text for not_recorded vs recorded_but_failed — never describes a real failure as pending automatic capture", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  // FG-622: no package.json at all in projectDir yet → the gate is unrunnable →
+  // skip → not_recorded.
+  const { campaignId: notRecordedCampaignId } = setupHostGateCaptureCliCampaign("FG-622");
+  const closedCommitA = makeCommitIn(projectDir, "impl-FG-622");
+  closeTicket(projectDir, "FG-622", closedCommitA);
+  commitPendingChangesIn(projectDir, "close FG-622");
+
+  const notRecordedResult = runForge(["campaign", "reconcile", notRecordedCampaignId]);
+  assert.equal(notRecordedResult.status, 0, `stdout: ${notRecordedResult.stdout}\nstderr: ${notRecordedResult.stderr}`);
+  assert.ok(
+    notRecordedResult.stdout.includes("host_verification_not_recorded") &&
+      notRecordedResult.stdout.includes("will be captured automatically"),
+    `not_recorded hint must point at automatic capture on the next reconcile/drive run\nstdout: ${notRecordedResult.stdout}`
+  );
+  assert.ok(
+    !notRecordedResult.stdout.includes("genuine failure"),
+    `a not-yet-run gate must never be described as a genuine failure\nstdout: ${notRecordedResult.stdout}`
+  );
+
+  // FG-623: same projectDir now has the FG-620/FG-621 package.json from earlier
+  // in this suite's git history — force it to a real, real failure for THIS commit.
+  const { campaignId: failedCampaignId } = setupHostGateCaptureCliCampaign("FG-623");
+  const closedCommitB = commitGateScriptIn(projectDir, "impl-FG-623", "exit 9");
+  closeTicket(projectDir, "FG-623", closedCommitB);
+  commitPendingChangesIn(projectDir, "close FG-623");
+
+  const failedResult = runForge(["campaign", "reconcile", failedCampaignId]);
+  assert.equal(failedResult.status, 0, `stdout: ${failedResult.stdout}\nstderr: ${failedResult.stderr}`);
+  assert.ok(
+    failedResult.stdout.includes("host_verification_recorded_but_failed") &&
+      failedResult.stdout.includes("genuine failure"),
+    `recorded_but_failed hint must state the gate ran for real and failed\nstdout: ${failedResult.stdout}`
+  );
+  assert.ok(
+    !failedResult.stdout.includes("will be captured automatically"),
+    `a genuine gate failure must never be rendered as something pending automatic capture\nstdout: ${failedResult.stdout}`
+  );
+});
+
+test("integ campaign show (human, FG-440): prints a host-verification-status line for a scope-blocked item awaiting automatic capture", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupHostGateCaptureCliCampaign("FG-624");
+  const closedCommit = makeCommitIn(projectDir, "impl-FG-624"); // no package.json → stays not_recorded
+  closeTicket(projectDir, "FG-624", closedCommit);
+  commitPendingChangesIn(projectDir, "close FG-624");
+
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(showResult.status, 0, `stdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+  assert.ok(
+    showResult.stdout.includes("host-verification-status:") && showResult.stdout.includes("host_verification_not_recorded"),
+    `campaign show must surface the host-verification hint for a scope-blocked item\nstdout: ${showResult.stdout}`
+  );
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as { items: { ticketId: string; hostVerificationReconcileHint: string | null }[] };
+  const item = jsonOutput.items.find((i) => i.ticketId === "FG-624")!;
+  assert.ok(item.hostVerificationReconcileHint?.includes("host_verification_not_recorded"));
+});

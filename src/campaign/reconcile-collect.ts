@@ -6,8 +6,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
-import { queryHostVerificationRows } from "../store/host-verifications.js";
+import { queryHostVerificationRowsForGate, insertHostVerification } from "../store/host-verifications.js";
 import { eventsForRun } from "../store/events.js";
+import { nowIso } from "../util/ids.js";
 import type { CampaignItem, GateDecision } from "../types/index.js";
 import type { ReconcileEvidenceInput, ReconcileRunEvent } from "./reconcile-evidence.js";
 
@@ -29,16 +30,20 @@ function readConfigString(projectDir: string, key: string, fallback: string): st
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
-export function checkClosedCommitReachableOnBase(
-  projectDir: string,
-  closedCommit: string,
-  baseBranch: string
-): boolean | null {
-  if (!SHA_PATTERN.test(closedCommit) || !REF_PATTERN.test(baseBranch)) {
-    return null;
-  }
+// FG-440: single source of truth for the required host gate command — used both
+// by evidence collection (below) and by the reconcile-time capture writer, so
+// the command recorded and the command matched against are always the same string.
+export function getRequiredHostGate(projectDir: string): string {
+  return readConfigString(projectDir, "requiredHostGate", "npm run test:all");
+}
+
+// Shared low-level ancestry check: true if `ancestor` is reachable from
+// `descendant`, false if git determined it definitively is not (exit 1), null
+// on any other git failure (safe-deny — callers must never treat a git error
+// as proof of ancestry).
+function gitIsAncestor(projectDir: string, ancestor: string, descendant: string): boolean | null {
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", "--", closedCommit, baseBranch], {
+    execFileSync("git", ["merge-base", "--is-ancestor", "--", ancestor, descendant], {
       cwd: projectDir,
       timeout: 5000,
     });
@@ -47,6 +52,51 @@ export function checkClosedCommitReachableOnBase(
     const status = (err as { status?: number | null }).status;
     return status === 1 ? false : null;
   }
+}
+
+export function checkClosedCommitReachableOnBase(
+  projectDir: string,
+  closedCommit: string,
+  baseBranch: string
+): boolean | null {
+  if (!SHA_PATTERN.test(closedCommit) || !REF_PATTERN.test(baseBranch)) {
+    return null;
+  }
+  return gitIsAncestor(projectDir, closedCommit, baseBranch);
+}
+
+// FG-440: coverage check for the reconcile-time host-verification capture.
+// A host_verifications row covers a campaign item ONLY IF, together:
+//   - closedCommit (ticket frontmatter) is an ancestor of the row's
+//     testedSha — proves the ticket's actual close point is INCLUDED in
+//     whatever was tested (testedSha may be a later HEAD than closedCommit —
+//     that's expected, since the gate runs at projectDir's current HEAD, not
+//     a checkout of closedCommit itself);
+//   - the row's testedSha is ITSELF reachable on the configured base branch —
+//     proves testedSha is the base line, not a never-merged off-branch build
+//     that happens to descend from closedCommit (a feature branch cut from
+//     closedCommit satisfies the ancestry check above forever without this,
+//     which would let a single stale off-branch run permanently vouch for the
+//     ticket even though the base branch was never actually tested);
+//   - gateName equals the configured requiredHostGate string (enforced by the
+//     caller via queryHostVerificationRowsForGate);
+//   - exitCode === 0 (enforced by the caller — this function only proves
+//     ancestry + base-reachability, not exit status).
+// Every sub-check is proven by git, never asserted — a git error on either
+// ancestry check is treated as NOT covered (safe-deny), never as covered.
+function checkClosedCommitCoveredByTestedSha(
+  projectDir: string,
+  closedCommit: string,
+  testedSha: string,
+  baseBranch: string
+): boolean {
+  if (!SHA_PATTERN.test(closedCommit) || !SHA_PATTERN.test(testedSha)) {
+    return false;
+  }
+  if (gitIsAncestor(projectDir, closedCommit, testedSha) !== true) {
+    return false;
+  }
+  return checkClosedCommitReachableOnBase(projectDir, testedSha, baseBranch) === true;
 }
 
 export function collectReconcileEvidence(projectDir: string, item: CampaignItem): ReconcileEvidenceInput {
@@ -65,14 +115,28 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
     ? checkClosedCommitReachableOnBase(projectDir, ticketClosedCommit, baseBranch)
     : null;
 
-  const requiredGate = readConfigString(projectDir, "requiredHostGate", "npm run test:all");
+  const requiredGate = getRequiredHostGate(projectDir);
   let hostVerification: ReconcileEvidenceInput["hostVerification"] = null;
   if (ticketClosedCommit) {
     // Bound to the SAME ticketClosedCommit asserted above (facts 1-2) — an operator
-    // cannot plant a verification row under a different sha and have it count.
+    // cannot plant a verification row for an unrelated commit and have it count.
+    // "Covers" is ancestry (+ base-reachability), not exact-sha equality — see
+    // checkClosedCommitCoveredByTestedSha's header for the full rule: the gate runs
+    // at projectDir's current HEAD, not a checkout of closedCommit, so the row's
+    // commit_sha is the tested base HEAD, which closedCommit merely needs to be an
+    // ancestor of, and which must itself be on the base branch.
     try {
-      const rows = queryHostVerificationRows(item.ticketId, projectDir, ticketClosedCommit, requiredGate);
-      hostVerification = { recorded: rows.length > 0, allExitZero: rows.length > 0 && rows.every((r) => r.exitCode === 0) };
+      const rows = queryHostVerificationRowsForGate(item.ticketId, projectDir, requiredGate);
+      const covering = rows.filter((r) =>
+        checkClosedCommitCoveredByTestedSha(projectDir, ticketClosedCommit!, r.commitSha, baseBranch)
+      );
+      // FG-440: a passing-row model — one real green covering row is enough to
+      // ship, regardless of how many earlier covering rows failed. A historical
+      // failure must never permanently outrank a later real pass.
+      hostVerification = {
+        recorded: covering.length > 0,
+        passed: covering.some((r) => r.exitCode === 0),
+      };
     } catch {
       hostVerification = null;
     }
@@ -110,4 +174,197 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
     hostVerification,
     events,
   };
+}
+
+// ── FG-440: reconcile-time host-verification capture ───────────────────────────
+//
+// A trust-token writer: every field written to host_verifications must be
+// causally derived from one real command execution against projectDir's ACTUAL
+// current HEAD — never asserted, defaulted, or read from events (a
+// force-advance gate.decided event is a DIFFERENT, independent fact — see
+// reconcile-evidence.ts's fact-4/fact-5 separation — and must never be read
+// here).
+//
+// Earlier design checked out closedCommit into a throwaway detached worktree.
+// That's wrong: a detached checkout has no node_modules, so any npm-based
+// requiredHostGate (including the project default "npm run test:all") is
+// guaranteed to false-fail on missing dependencies — and that false failure
+// got recorded as a real recorded_but_failed row. Instead we run the gate in
+// projectDir itself, where dependencies already exist, at whatever commit
+// projectDir's HEAD actually is — and we record THAT sha, never closedCommit.
+// See checkClosedCommitCoveredByTestedSha above for how a recorded row still
+// gets matched back to a ticket's closedCommit (via ancestry, not equality).
+//
+// Result is a skip/recorded split, never a fabricated pass:
+//   - "skipped": the gate did not run for a real reason — a dirty/untracked
+//     working tree (never test an operator's uncommitted state), a git
+//     failure reading HEAD, HEAD not reachable on the configured base branch
+//     (an operator sitting on a feature branch — testing it would let an
+//     off-branch build stand in for the base line), no matching script for
+//     the required gate, or the working tree/HEAD moved during the run (see
+//     the post-run re-verification below). Writes NO row.
+//   - "recorded": the gate command actually ran to completion (or was
+//     killed/timed out) against projectDir's real HEAD, and that HEAD was
+//     confirmed unchanged and the tree still clean immediately afterward.
+//     Writes exactly one row with the REAL exit code and the REAL tested sha
+//     — a timeout/crash is recorded as a non-zero sentinel, never fabricated
+//     as 0.
+
+export type HostVerificationCaptureResult =
+  | { status: "skipped"; reason: string }
+  | { status: "recorded"; exitCode: number; commitSha: string };
+
+const HOST_GATE_TIMEOUT_MS_DEFAULT = 10 * 60 * 1000;
+// A timed-out or signal-killed gate must still record a real non-zero exit —
+// this sentinel (matching the conventional shell "killed by timeout" code) is
+// never confused with a genuine 0 pass.
+const TIMEOUT_OR_SIGNAL_EXIT_SENTINEL = 124;
+
+function hostGateTimeoutMs(): number {
+  const envTimeout = Number(process.env.FORGE_HOST_GATE_TIMEOUT_MS);
+  return Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : HOST_GATE_TIMEOUT_MS_DEFAULT;
+}
+
+// Mirrors integration-gate.ts's hasTestUnitScript, generalized to the
+// configured requiredHostGate command. A missing script is a project-config
+// gap, not a merge defect — it must skip, never fabricate a pass.
+// Non-"npm run <script>" commands are attempted as-is; a command that
+// genuinely doesn't exist surfaces as a real (non-zero) execution failure
+// below, not a skip — only "no matching npm script" is a skip per FG-440's
+// contract.
+function checkGateRunnable(dir: string, requiredGate: string): { runnable: boolean; reason?: string } {
+  const argv = requiredGate.trim().split(/\s+/).filter(Boolean);
+  if (argv[0] === "npm" && argv[1] === "run" && argv[2]) {
+    const script = argv[2];
+    try {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+      if (typeof pkg.scripts?.[script] !== "string") {
+        return { runnable: false, reason: `no "${script}" script in package.json — required gate skipped` };
+      }
+    } catch {
+      return { runnable: false, reason: "package.json missing or malformed — required gate skipped" };
+    }
+  }
+  return { runnable: true };
+}
+
+// Post-run TOCTOU guard: the gate can take up to hostGateTimeoutMs() to run,
+// during which projectDir is not otherwise locked. If HEAD moved or the tree
+// became dirty while the gate was running, the exit code we just observed no
+// longer corresponds to a stable committed sha — discard it rather than
+// record a result for a state that no longer exists.
+function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string): boolean {
+  try {
+    const status = execFileSync("git", ["status", "--porcelain"], { cwd: projectDir, encoding: "utf8", timeout: 10000 });
+    if (status.trim().length > 0) return false;
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectDir, encoding: "utf8", timeout: 10000 }).trim();
+    return head === expectedHeadSha;
+  } catch {
+    return false;
+  }
+}
+
+/** Run the project's requiredHostGate command in projectDir at its current
+ *  HEAD — never a checkout of any other commit — and record the real result
+ *  under the sha actually tested. gateName/command are always the configured
+ *  requiredHostGate string, never the executed argv — so a lesser command can
+ *  never wear the required gate's label (the FG-419 gate_name spoofing
+ *  vector). Refuses to run (and writes no row) against a dirty or untracked
+ *  working tree, against a HEAD not reachable on the configured base branch,
+ *  or if the tree/HEAD changed out from under the run before the result is
+ *  written — an operator's uncommitted or off-branch state must never be
+ *  recorded as the tested result for a base HEAD sha. */
+export function runAndRecordHostVerification(
+  projectDir: string,
+  ticketId: string,
+  opts: { runId?: string | null } = {}
+): HostVerificationCaptureResult {
+  let statusOutput: string;
+  try {
+    statusOutput = execFileSync("git", ["status", "--porcelain"], {
+      cwd: projectDir,
+      encoding: "utf8",
+      timeout: 10000,
+    });
+  } catch (e) {
+    const err = e as { message?: string };
+    return { status: "skipped", reason: `git status --porcelain failed: ${err.message ?? String(e)}` };
+  }
+  if (statusOutput.trim().length > 0) {
+    return {
+      status: "skipped",
+      reason: "working tree is not clean (uncommitted or untracked changes) — refusing to test an operator's dirty working state",
+    };
+  }
+
+  let headSha: string;
+  try {
+    headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectDir, encoding: "utf8", timeout: 10000 }).trim();
+  } catch (e) {
+    const err = e as { message?: string };
+    return { status: "skipped", reason: `git rev-parse HEAD failed: ${err.message ?? String(e)}` };
+  }
+  if (!SHA_PATTERN.test(headSha)) {
+    return { status: "skipped", reason: `HEAD did not resolve to a plausible sha: ${headSha}` };
+  }
+
+  // FIX 1 (FG-440 follow-up): a clean, committed HEAD can still be a
+  // never-merged feature branch — ancestry from closedCommit alone doesn't
+  // prove the base line was tested. Require HEAD itself to be on the base
+  // branch before running (or recording) anything.
+  const baseBranch = readConfigString(projectDir, "baseBranch", "main");
+  if (checkClosedCommitReachableOnBase(projectDir, headSha, baseBranch) !== true) {
+    return {
+      status: "skipped",
+      reason: `HEAD (${headSha}) is not reachable on base branch '${baseBranch}' — refusing to test an off-branch build as though it were the base line`,
+    };
+  }
+
+  const requiredGate = getRequiredHostGate(projectDir);
+  const runnable = checkGateRunnable(projectDir, requiredGate);
+  if (!runnable.runnable) {
+    return { status: "skipped", reason: runnable.reason ?? "required gate not runnable in projectDir" };
+  }
+
+  const argv = requiredGate.trim().split(/\s+/).filter(Boolean);
+  const [cmd, ...args] = argv;
+  let exitCode: number;
+  try {
+    execFileSync(cmd!, args, {
+      cwd: projectDir,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: hostGateTimeoutMs(),
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    exitCode = 0;
+  } catch (e) {
+    const err = e as { status?: number | null };
+    exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
+  }
+
+  // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
+  // running — re-confirm projectDir is still exactly the sha/state we
+  // snapshotted before the run. If it moved, the exit code above no longer
+  // corresponds to any stable committed sha; discard rather than record it.
+  if (!projectSnapshotStillValid(projectDir, headSha)) {
+    return {
+      status: "skipped",
+      reason: "projectDir HEAD or working tree changed during the gate run — discarding the result rather than recording it against a sha that may no longer reflect what was tested",
+    };
+  }
+
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: headSha,
+    gateName: requiredGate,
+    command: requiredGate,
+    exitCode,
+    runId: opts.runId ?? null,
+    recordedAt: nowIso(),
+  });
+
+  return { status: "recorded", exitCode, commitSha: headSha };
 }
