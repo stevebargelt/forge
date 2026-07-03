@@ -59,7 +59,7 @@ function makeTask(id: string, runId: string, result?: unknown): Task {
 
 beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), "collect-integ-"));
-  gitExec(["init"], projectDir);
+  gitExec(["init", "-b", "main"], projectDir);
   gitExec(["config", "user.email", "t@t.com"], projectDir);
   gitExec(["config", "user.name", "Test"], projectDir);
   prevDb = setDbForTest(makeInMemoryDb());
@@ -452,6 +452,44 @@ test("collect FG-452: a row recorded at a later commit than closedCommit still c
     "hostVerified must be true — closedCommit is an ancestor of the row's tested commit, even though the shas differ"
   );
   assert.ok(input.verification.hostVerificationDetail!.includes(testedHead));
+});
+
+test("collect FG-452 round 2: a row whose tested sha descends from closedCommit but is NOT itself reachable on base does not count as covering — hostVerified stays null, not true", () => {
+  const closedCommit = makeCommit("hv-offbranch-closed");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-OFFBRANCH-1",
+    type: "story",
+    status: "done",
+    closedCommit,
+    title: "HV Off Branch",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  gitExec(["checkout", "-b", "off-branch-verify"], projectDir);
+  const offBranchHead = makeCommit("hv-offbranch-tested");
+  gitExec(["checkout", "main"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-OFFBRANCH-1",
+    projectDir,
+    commitSha: offBranchHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-OFFBRANCH-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    null,
+    "closedCommit IS an ancestor of offBranchHead, but offBranchHead itself was never merged to base — must not count as covering"
+  );
 });
 
 test("collect: required-gate fail row → hostVerified: false → outcome: fail", () => {
