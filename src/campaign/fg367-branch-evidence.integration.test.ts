@@ -12,6 +12,7 @@ import {
 import { insertTask, setTaskWorktreePath } from "../store/tasks.js";
 import { insertRun, updateRunStatus } from "../store/runs.js";
 import { insertVerdict } from "../store/verdicts.js";
+import { logEvent } from "../store/events.js";
 import { writeTicket } from "../backlog/structured.js";
 import { planCampaign } from "./planner.js";
 import { startCampaign, setExecutorDoneAuditMapForTest } from "./executor.js";
@@ -59,6 +60,7 @@ function makeWorkflowStubs(taskId: string, worktreePath?: string): {
         setTaskWorktreePath(taskId, worktreePath);
       }
       insertVerdict({ id: `verdict-${taskId}`, taskId, redTaskId: taskId, redRole: "red-wide", verdict: "pass", confidence: 0.9, authority: "authoritative", findings: [], createdAt: nowIso() });
+      logEvent("verdict.received", { runId, taskId, payload: { redRole: "red-wide", verdict: "pass", authority: "authoritative" } });
       updateRunStatus(runId, "complete");
       return { dispatchedSteps: [], completedSteps: ["build"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
     },

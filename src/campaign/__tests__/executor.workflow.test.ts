@@ -15,6 +15,7 @@ import { approveCampaign, getCampaign, listCampaignItems } from "../../store/cam
 import { startCampaign, setExecutorDoneAuditMapForTest } from "../executor.js";
 import { insertTask, getTask, markTaskComplete } from "../../store/tasks.js";
 import { insertVerdict } from "../../store/verdicts.js";
+import { logEvent } from "../../store/events.js";
 import { updateRunStatus } from "../../store/runs.js";
 import { nowIso } from "../../util/ids.js";
 import { writeTicket } from "../../backlog/structured.js";
@@ -172,6 +173,7 @@ test("workflow item ships when run completes with passing authoritative verdict"
         verdict: "pass", confidence: 0.95, authority: "authoritative",
         findings: [], createdAt: nowIso(),
       });
+      logEvent("verdict.received", { runId, taskId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
@@ -220,6 +222,7 @@ test("gate:verdict auto-advance — passing verdict advances gate, item ships wi
         verdict: "pass", confidence: 0.9, authority: "authoritative",
         findings: [], createdAt: nowIso(),
       });
+      logEvent("verdict.received", { runId, taskId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
     return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: runRow?.status ?? "active" };
@@ -420,6 +423,7 @@ test("workflow requiring 'brief' input — executor derives brief from ticket an
         verdict: "pass", confidence: 0.95, authority: "authoritative",
         findings: [], createdAt: nowIso(),
       });
+      logEvent("verdict.received", { runId, taskId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
@@ -503,6 +507,7 @@ test("passing verdict with failing done-audit — outcome is blocked, not shippe
         verdict: "pass", confidence: 0.95, authority: "authoritative",
         findings: [], createdAt: nowIso(),
       });
+      logEvent("verdict.received", { runId, taskId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
       updateRunStatus(runId, "complete");
     }
     const runRow = db.prepare("SELECT status FROM runs WHERE id = ?").get(runId) as { status: string } | undefined;
@@ -524,4 +529,133 @@ test("passing verdict with failing done-audit — outcome is blocked, not shippe
 
   const campaignRow = getCampaign(campaign.id);
   assert.equal(campaignRow?.status, "paused");
+});
+
+// ── FG-427: drive-path reconciliation honors per-task supersession ───────────
+// reconcileTerminalOutcome now derives its outcome from evaluateAuthoritativeOutcome
+// over the run's verdict.received/gate.decided events (collectAuthoritativeEvents),
+// instead of a naive aggregateVerdicts(verdictsForRun(...)) over every verdict ever
+// recorded — so a later authoritative pass, or a qualifying force-advance, on the
+// SAME reviewing task can supersede an earlier authoritative fail.
+
+test("FG-427: fail/authoritative then later pass/authoritative on the same task reconciles to shipped (drive path)", async () => {
+  const campaign = setupCampaign();
+
+  const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-a", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    logEvent("verdict.received", { runId, taskId: "task-fg427-a", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
+
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-427: fail/authoritative then later qualifying force-advance on the same task reconciles to shipped (drive path)", async () => {
+  const campaign = setupCampaign();
+
+  const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-b", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    logEvent("gate.decided", { runId, taskId: "task-fg427-b", payload: { decision: "advance", rationale: "operator override: verified out of band", force: true } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
+
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-427: unresolved, un-overridden authoritative fail still blocks with blockerKind scope (regression, drive path)", async () => {
+  const campaign = setupCampaign();
+
+  const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-c", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
+
+  // blockerKind 'scope' is not a shared blocker (see policy.ts SHARED_BLOCKER_KINDS)
+  // — with a single item and nothing depending on it, the campaign itself still
+  // completes; the regression assertion is on the ITEM's outcome, not the campaign's.
+  const itemRecord = result.itemRecords[0]!;
+  assert.equal(itemRecord.outcome, "blocked");
+  assert.equal(itemRecord.lifecycleStatus, "failed");
+  assert.equal(itemRecord.blockerKind, "scope");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.requestedHumanAction, "workflow completed but authoritative reviewer verdict failed");
+});
+
+test("FG-427: a force-advance without rationale, or a non-force advance, does NOT supersede a prior authoritative fail — still blocks", async () => {
+  const campaignNoRationale = setupCampaign();
+  const runNextFnNoRationale = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-d1", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    logEvent("gate.decided", { runId, taskId: "task-fg427-d1", payload: { decision: "advance", rationale: "", force: true } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+  const resultNoRationale = await startCampaign(campaignNoRationale.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn: runNextFnNoRationale });
+  assert.equal(resultNoRationale.itemRecords[0]!.outcome, "blocked", "force-advance without rationale must not supersede a fail");
+  assert.equal(resultNoRationale.itemRecords[0]!.blockerKind, "scope");
+
+  const campaignNonForce = setupCampaign();
+  const runNextFnNonForce = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-d2", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    logEvent("gate.decided", { runId, taskId: "task-fg427-d2", payload: { decision: "advance", rationale: "human said ok, but forgot --force", force: false } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+  const resultNonForce = await startCampaign(campaignNonForce.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn: runNextFnNonForce });
+  assert.equal(resultNonForce.itemRecords[0]!.outcome, "blocked", "a non-force advance must not supersede a fail");
+  assert.equal(resultNonForce.itemRecords[0]!.blockerKind, "scope");
+});
+
+test("FG-427: standalone force-advance with rationale but ZERO authoritative verdicts still blocks (abuse gap closed, drive path)", async () => {
+  const campaign = setupCampaign();
+
+  const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("gate.decided", { runId, taskId: "task-fg427-e", payload: { decision: "advance", rationale: "trust me", force: true } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
+
+  assert.equal(result.stopReason, "paused");
+  const itemRecord = result.itemRecords[0]!;
+  assert.equal(itemRecord.outcome, "blocked");
+  assert.equal(itemRecord.blockerKind, "campaign_system", "a force-advance alone can never substitute for authoritative review");
+
+  const items = listCampaignItems(campaign.id);
+  assert.ok(
+    items[0]!.requestedHumanAction?.includes("no authoritative reviewer verdicts found"),
+    "must read as 'no authoritative reviewer verdicts', not a scope fail"
+  );
+});
+
+test("FG-427: run-wide masking regression — task A later authoritative pass, task B unresolved un-overridden authoritative fail in the SAME run -> overall blocked, never masked (drive path)", async () => {
+  const campaign = setupCampaign();
+
+  const runNextFn = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
+    logEvent("verdict.received", { runId, taskId: "task-fg427-f-a", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    logEvent("verdict.received", { runId, taskId: "task-fg427-f-a", payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+    logEvent("verdict.received", { runId, taskId: "task-fg427-f-b", payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+    updateRunStatus(runId, "complete");
+    return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { loadWorkflowFn: () => SIMPLE_WORKFLOW, runNextFn });
+
+  const itemRecord = result.itemRecords[0]!;
+  assert.equal(itemRecord.outcome, "blocked", "task A's later pass must never mask task B's unresolved fail");
+  assert.equal(itemRecord.blockerKind, "scope");
 });

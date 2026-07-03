@@ -34,10 +34,12 @@ import { loadWorkflow } from "../v2/loader.js";
 import type { LoadContext } from "../v2/loader.js";
 import { aggregateVerdicts, gate, findStep } from "../v2/gate.js";
 import type { Workflow } from "../v2/schema.js";
-import { verdictsForTask, verdictsForRun } from "../store/verdicts.js";
+import { verdictsForTask } from "../store/verdicts.js";
 import { evaluateDoneAudit } from "../done-audit/done-audit.js";
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
+import { collectAuthoritativeEvents } from "./reconcile-collect.js";
+import { evaluateAuthoritativeOutcome } from "./reconcile-evidence.js";
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
 // Lets unit tests inject known results without real git/filesystem access.
@@ -261,7 +263,18 @@ function getItemExecutionConfig(
 
 // Derive terminal campaign item outcome from a completed/abandoned workflow run.
 // Updates the item's lifecycleStatus and outcome in the DB.
-// outcome='shipped' requires BOTH a passing aggregate verdict AND a passing done-audit.
+// outcome='shipped' requires BOTH a passing authoritative outcome AND a passing done-audit.
+//
+// FG-427: the authoritative outcome is derived from the EFFECTIVE LATEST state
+// PER REVIEWING TASK via the shared evaluateAuthoritativeOutcome (also used by
+// the `forge campaign reconcile` command's Fact 5 — see reconcile-evidence.ts)
+// rather than a naive aggregateVerdicts(verdictsForRun(...)) over every verdict
+// ever recorded. This lets a later authoritative pass, or a recorded qualifying
+// force-advance (decision:advance + force + non-empty rationale) at the gate,
+// supersede an earlier authoritative fail on the SAME task — instead of any
+// historical fail wedging the item forever — while still requiring at least
+// one task to have an actual authoritative verdict on record (a force-advance
+// alone can never substitute for authoritative review).
 function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string): void {
   if (run.status !== "complete") {
     updateCampaignItem(itemId, {
@@ -272,8 +285,8 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
     });
     return;
   }
-  const agg = aggregateVerdicts(verdictsForRun(run.id));
-  if (agg.verdict === "pass") {
+  const { outcome } = evaluateAuthoritativeOutcome(collectAuthoritativeEvents(run.id));
+  if (outcome === "pass") {
     const item = getCampaignItem(itemId);
     const ticketId = item?.ticketId;
     let auditResult: DoneAuditResult | undefined;
@@ -298,7 +311,7 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
         requestedHumanAction: `verdict passed but done-audit ${auditResult?.outcome ?? "unknown"}: ${auditGap}`,
       });
     }
-  } else if (agg.verdict === "fail") {
+  } else if (outcome === "fail") {
     updateCampaignItem(itemId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
@@ -306,7 +319,8 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
       requestedHumanAction: "workflow completed but authoritative reviewer verdict failed",
     });
   } else {
-    // inconclusive — includes aggregateVerdicts([]) === 'inconclusive' (empty verdicts)
+    // unresolved — no authoritative verdict (and no qualifying force-advance
+    // superseding one) recorded for any task in this run.
     updateCampaignItem(itemId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
