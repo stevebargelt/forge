@@ -3588,3 +3588,142 @@ test("integ RED-WIDE fix 2: campaign approve refuses a paused campaign with an u
     "the refused rubber-stamp attempt must not have overwritten the original approval record"
   );
 });
+
+test("integ RED-WIDE follow-on: real `campaign escalate-lane` + approve + resume proceeds only after the genuine escalate", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const escalateResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-101",
+    "--new-lane", "quick_implementation",
+    "--rationale", "agent reported outgrowing full_feature",
+    "--json",
+  ]);
+  assert.equal(escalateResult.status, 0, `escalate-lane failed\nstdout: ${escalateResult.stdout}\nstderr: ${escalateResult.stderr}`);
+  const escalateOutput = JSON.parse(escalateResult.stdout) as { planHash: string };
+
+  const dbAfterEscalate = new Database(dbPath, { readonly: true });
+  const itemAfterEscalate = dbAfterEscalate.prepare("SELECT lifecycle_status, blocker_kind FROM campaign_items WHERE id = ?").get(items[0]!.id) as {
+    lifecycle_status: string;
+    blocker_kind: string | null;
+  };
+  const campaignAfterEscalate = dbAfterEscalate.prepare("SELECT plan_hash, approved_plan_hash FROM campaigns WHERE id = ?").get(campaignId) as {
+    plan_hash: string;
+    approved_plan_hash: string;
+  };
+  dbAfterEscalate.close();
+  assert.equal(itemAfterEscalate.lifecycle_status, "pending", "a genuine escalate must reset the escalated item to pending");
+  assert.equal(itemAfterEscalate.blocker_kind, null, "a genuine escalate must clear the lane_escalation blocker");
+  assert.equal(campaignAfterEscalate.plan_hash, escalateOutput.planHash);
+  assert.notEqual(campaignAfterEscalate.plan_hash, campaignAfterEscalate.approved_plan_hash, "escalate must mint a fresh unapproved plan hash");
+
+  const reapproveResult = runForge(["campaign", "approve", campaignId, "--rationale", "re-approved after genuine escalate"]);
+  assert.equal(reapproveResult.status, 0, `re-approve after a genuine escalate must succeed\nstdout: ${reapproveResult.stdout}\nstderr: ${reapproveResult.stderr}`);
+
+  // Simulate the re-dispatched item completing under its new lane (no real agent dispatch in this test).
+  const dbComplete = new Database(dbPath);
+  dbComplete.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  dbComplete.close();
+
+  const resumeResult = runForge(["campaign", "resume", campaignId, "--json"]);
+  assert.equal(resumeResult.status, 0, `resume failed\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+  const resumeOutput = JSON.parse(resumeResult.stdout) as Record<string, unknown>;
+  assert.equal(resumeOutput["stopReason"], "complete", "resume must proceed to complete only after the real escalate+approve");
+
+  const dbFinal = new Database(dbPath, { readonly: true });
+  const finalCampaign = dbFinal.prepare("SELECT status FROM campaigns WHERE id = ?").get(campaignId) as { status: string };
+  dbFinal.close();
+  assert.equal(finalCampaign.status, "complete");
+});
+
+test("integ RED-WIDE follow-on: `campaign escalate-lane` with an unrelated/unknown ticket id is rejected and mints no approvable plan hash", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaignId) as { id: string; ticket_id: string }[];
+  // FG-101 (items[0]) is the REAL item blocked on lane_escalation; FG-102 (items[1]) is unrelated and still pending.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  const planHashBefore = (db.prepare("SELECT plan_hash FROM campaigns WHERE id = ?").get(campaignId) as { plan_hash: string }).plan_hash;
+  db.close();
+
+  // Escalate the WRONG ticket: FG-102 is not the item blocked on lane_escalation.
+  const wrongTicketResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-102",
+    "--new-lane", "quick_implementation",
+    "--rationale", "attempted escalate of an unrelated ticket",
+  ]);
+  assert.notEqual(wrongTicketResult.status, 0, "escalate-lane on a ticket not blocked on lane_escalation must be rejected");
+  const wrongTicketCombined = (wrongTicketResult.stderr + wrongTicketResult.stdout).toLowerCase();
+  assert.ok(
+    wrongTicketCombined.includes("lane_escalation") || wrongTicketCombined.includes("lane escalation") || wrongTicketCombined.includes("blocked"),
+    `expected a lane_escalation-specific refusal\nstdout: ${wrongTicketResult.stdout}\nstderr: ${wrongTicketResult.stderr}`
+  );
+
+  // Escalate an UNKNOWN ticket id entirely.
+  const unknownTicketResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-999-does-not-exist",
+    "--new-lane", "quick_implementation",
+    "--rationale", "attempted escalate of a nonexistent ticket",
+  ]);
+  assert.notEqual(unknownTicketResult.status, 0, "escalate-lane on an unknown ticket id must be rejected");
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const campaignAfter = dbAfter.prepare("SELECT plan_hash, approved_plan_hash FROM campaigns WHERE id = ?").get(campaignId) as {
+    plan_hash: string;
+    approved_plan_hash: string;
+  };
+  const item2After = dbAfter.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[1]!.id) as { lifecycle_status: string };
+  dbAfter.close();
+  assert.equal(campaignAfter.plan_hash, planHashBefore, "a rejected escalate must not mint any new plan hash");
+  assert.equal(item2After.lifecycle_status, "pending", "the unrelated ticket must not be reset/touched by the rejected escalate");
+
+  // A subsequent approve must still be refused: the REAL escalated item (FG-101) is still unresolved.
+  const approveAfterResult = runForge(["campaign", "approve", campaignId, "--rationale", "attempted rubber stamp"]);
+  assert.notEqual(approveAfterResult.status, 0, "approve must still refuse while the real lane_escalation item remains unresolved");
+  const approveCombined = (approveAfterResult.stderr + approveAfterResult.stdout).toLowerCase();
+  assert.ok(
+    approveCombined.includes("lane") && approveCombined.includes("escalat"),
+    `expected a lane-escalation-specific refusal\nstdout: ${approveAfterResult.stdout}\nstderr: ${approveAfterResult.stderr}`
+  );
+  assert.equal(campaignAfter.approved_plan_hash, planHashBefore, "approved_plan_hash must be unchanged since the rejected escalate never re-approved anything");
+});

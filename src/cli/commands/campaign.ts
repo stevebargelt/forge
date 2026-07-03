@@ -178,16 +178,18 @@ export function registerCampaign(program: Command): void {
         process.exit(1);
       }
 
-      // FG-442: refuse to rubber-stamp a paused-for-lane_escalation campaign whose
-      // plan_hash hasn't actually changed — that would record a false "approved"
-      // signal without a genuine escalateCampaignItemLane fix having happened. The
-      // normal planned-campaign approve path and re-approval AFTER a real escalate
-      // (which always produces a fresh plan_hash) are both unaffected.
-      if (existing.status === "paused" && existing.planHash === existing.approvedPlanHash) {
+      // FG-442 / RED-WIDE: refuse ANY paused campaign with an unresolved lane
+      // escalation, regardless of whether plan_hash has moved — a fresh hash
+      // minted for the WRONG ticket (escalateCampaignItemLane validates ticketId
+      // itself now, but this is defense in depth) must not let approve through
+      // while the REAL escalated item is still unresolved. Re-approval after a
+      // genuine escalate is unaffected: a real escalate clears the escalated
+      // item's lane_escalation blocker, so hasUnresolvedLaneEscalation is false.
+      if (existing.status === "paused") {
         const items = listCampaignItems(campaignId);
         if (hasUnresolvedLaneEscalation(items)) {
           process.stderr.write(
-            `Error: campaign ${campaignId} is paused on an unresolved lane escalation and its plan hash has not changed since the last approval — ` +
+            `Error: campaign ${campaignId} is paused on an unresolved lane escalation — ` +
             `run forge campaign escalate-lane ${campaignId} <ticket-id> --new-lane <lane> --rationale <text> first, then approve\n`
           );
           process.exit(1);

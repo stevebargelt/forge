@@ -1344,6 +1344,22 @@ export function escalateCampaignItemLane(
   }
   if (!campaign.projectDir) return { ok: false, reason: "campaign has no projectDir" };
 
+  // RED-WIDE fix: ticketId must name a real campaign item that is actually
+  // blocked on lane_escalation — otherwise an operator could escalate an
+  // unrelated (or nonexistent) ticket, mint a fresh plan_hash, and let
+  // `campaign approve` pass while the REAL escalated item stays unresolved.
+  const items = listCampaignItems(campaignId);
+  const targetItem = items.find((i) => i.ticketId === ticketId);
+  if (!targetItem) {
+    return { ok: false, reason: `ticket ${ticketId} is not a campaign item in campaign ${campaignId}` };
+  }
+  if (!(targetItem.lifecycleStatus === "failed" && targetItem.outcome === "blocked" && targetItem.blockerKind === "lane_escalation")) {
+    return {
+      ok: false,
+      reason: `ticket ${ticketId} is not currently blocked on lane_escalation (lifecycleStatus: ${targetItem.lifecycleStatus}, blockerKind: ${targetItem.blockerKind ?? "none"})`,
+    };
+  }
+
   // A genuine escalation must change what actually dispatches — a rationale-only
   // tweak that keeps the SAME lane must not be allowed to mint a "fresh" plan_hash
   // and satisfy the re-approval gate without any real change (RED-WIDE LOW finding).
@@ -1377,17 +1393,14 @@ export function escalateCampaignItemLane(
   const wrote = updateCampaignPlanForReapproval(campaignId, { sourceInput, metadata, planHash });
   if (!wrote) return { ok: false, reason: "campaign is no longer paused (concurrent state change)" };
 
-  const escalatedItem = listCampaignItems(campaignId).find((i) => i.ticketId === ticketId);
-  if (escalatedItem) {
-    updateCampaignItemIfCampaignPaused(escalatedItem.id, campaignId, {
-      lifecycleStatus: "pending",
-      outcome: undefined,
-      blockerKind: undefined,
-      continuePolicy: undefined,
-      reason: undefined,
-      requestedHumanAction: undefined,
-    });
-  }
+  updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
+    lifecycleStatus: "pending",
+    outcome: undefined,
+    blockerKind: undefined,
+    continuePolicy: undefined,
+    reason: undefined,
+    requestedHumanAction: undefined,
+  });
 
   return { ok: true, planHash };
 }
