@@ -414,6 +414,46 @@ test("collect: required-gate pass row → hostVerified: true", () => {
   assert.ok(input.verification.hostVerificationDetail!.includes("exit_code: 0"), "detail must include exit_code");
 });
 
+test("collect FG-452: a row recorded at a later commit than closedCommit still covers it — ancestry, not exact-sha equality", () => {
+  const closedCommit = makeCommit("hv-ancestry-closed");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-ANCESTRY-1",
+    type: "story",
+    status: "done",
+    closedCommit,
+    title: "HV Ancestry",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // The gate ran at whatever projectDir's HEAD was AFTER the ticket was closed —
+  // exactly the out-of-band code-touching shape (FG-452): the row's commit_sha
+  // is a descendant of closedCommit, never equal to it.
+  const testedHead = makeCommit("hv-ancestry-tested");
+
+  insertHostVerification({
+    ticketId: "FG-HV-ANCESTRY-1",
+    projectDir,
+    commitSha: testedHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-ANCESTRY-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    true,
+    "hostVerified must be true — closedCommit is an ancestor of the row's tested commit, even though the shas differ"
+  );
+  assert.ok(input.verification.hostVerificationDetail!.includes(testedHead));
+});
+
 test("collect: required-gate fail row → hostVerified: false → outcome: fail", () => {
   const commitSha = makeCommit("hv-fail");
 

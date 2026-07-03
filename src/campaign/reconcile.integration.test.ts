@@ -1136,7 +1136,7 @@ test("FG-440: report.ts AND campaign show render distinct host-verification hint
 // live-repro shape (AC6): out-of-band, code-touching, closedCommit reachable on
 // base, no prior passing row — exactly what wedged campaign-922c83b7c577.
 
-test("FG-452 AC1/AC6 (FG-422 live-repro shape): out-of-band code-touching item with no covering row gets captured for real in projectDir at HEAD and ships within one reconcileCampaign call", () => {
+test("FG-452 AC1/AC6 (FG-422 live-repro shape): out-of-band code-touching item with no covering row gets captured for real in projectDir at HEAD and ships within one reconcileCampaign call", async () => {
   const ticketId = "FG-700";
   const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
 
@@ -1168,6 +1168,40 @@ test("FG-452 AC1/AC6 (FG-422 live-repro shape): out-of-band code-touching item w
   const item = getCampaignItem(itemId)!;
   assert.equal(item.lifecycleStatus, "complete");
   assert.equal(item.outcome, "shipped");
+
+  // Drive the campaign itself to 'complete' (same mechanism as the out-of-band
+  // end-to-end test above — reconcileCampaign never transitions the campaign
+  // itself; only resumeCampaign's bottom-of-loop check does) and prove the
+  // done-audit surface built on the SAME captured row agrees the item's host
+  // verification is satisfied. src/done-audit/collect.ts's host-verification
+  // lookup used to match rows by EXACT commit_sha === closedCommit — the row
+  // above is recorded at testedHead, one commit past closedCommit, so an
+  // exact-sha lookup would find nothing and report host_verification as
+  // "unknown" even though it shipped on a real passing gate. (pushed/
+  // container_verification are independently "unknown" in this fixture — no
+  // remote, no container run — that's unrelated to this check and expected.)
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "complete",
+  });
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+  assert.equal(resumeResult.stopReason, "complete");
+  assert.equal(getCampaign(campaignId)!.status, "complete");
+
+  const report = assembleCampaignReport(campaignId)!;
+  const reportItem = report.items.find((i) => i.ticketId === ticketId)!;
+  const hostCheck = reportItem.doneAuditState?.checks.find((c) => c.name === "host_verification");
+  assert.equal(
+    hostCheck?.status,
+    "pass",
+    `the captured host-verification row must be found via ancestry, not exact-sha: ${JSON.stringify(reportItem.doneAuditState)}`
+  );
+  assert.match(
+    hostCheck?.detail ?? "",
+    /exit_code: 0/,
+    `host_verification detail must reflect the real captured row: ${hostCheck?.detail}`
+  );
 });
 
 test("FG-452 AC1: capture SKIP (no requiredHostGate script in projectDir) writes no row — out-of-band item stays refused with lane_evidence_missing", () => {

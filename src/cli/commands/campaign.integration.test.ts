@@ -3327,3 +3327,34 @@ test("integ campaign show (human, FG-440): prints a host-verification-status lin
   const item = jsonOutput.items.find((i) => i.ticketId === "FG-624")!;
   assert.ok(item.hostVerificationReconcileHint?.includes("host_verification_not_recorded"));
 });
+
+// FG-452 AC5 parity: the FG-440 test above proves the human `forge campaign show`
+// surface for the scope-blocked lane. This is its out-of-band code-touching
+// counterpart — reconcile.integration.test.ts:1313 only asserted the JSON-shaped
+// hostVerificationReconcileHint field and renderCampaignReportHuman directly; it
+// never spawned a real `forge campaign show` subprocess and read its stdout.
+test("integ campaign show (human, FG-452): prints a host-verification-status line for an out-of-band code-touching item awaiting automatic capture", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupOutOfBandCliCampaign("FG-625");
+  makeCommitIn(projectDir, "base-FG-625");
+  const commit = commitFileIn(projectDir, "src/FG-625.ts", "export const x = 1;\n", "feat: FG-625");
+  closeTicket(projectDir, "FG-625", commit);
+  // Deliberately no host_verifications row inserted for this commit — the item
+  // stays awaiting_gate, which is the precondition for the hint to appear.
+
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(showResult.status, 0, `stdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+  assert.ok(
+    showResult.stdout.includes("host-verification-status:") && showResult.stdout.includes("forge campaign reconcile"),
+    `campaign show must surface the host-verification hint for an out-of-band code-touching item\nstdout: ${showResult.stdout}`
+  );
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as { items: { ticketId: string; hostVerificationReconcileHint: string | null }[] };
+  const item = jsonOutput.items.find((i) => i.ticketId === "FG-625")!;
+  assert.match(item.hostVerificationReconcileHint ?? "", /forge campaign reconcile/);
+});

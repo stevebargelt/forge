@@ -3,9 +3,31 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
 import { tasksForRun } from "../store/tasks.js";
-import { queryHostVerificationRows } from "../store/host-verifications.js";
+import { queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
+
+const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
+
+// FG-452: a host_verifications row covers closedCommit if closedCommit is an
+// ancestor of the row's tested commit — the gate runs at projectDir's current
+// HEAD, which may be a later commit than closedCommit (exactly the out-of-band
+// code-touching shape). Exact-sha matching alone leaves those rows invisible to
+// this done-audit surface even though reconcile already shipped the item via
+// this same ancestry rule (reconcile-collect.ts's checkClosedCommitCoveredByTestedSha).
+function isCoveringCommit(projectDir: string, closedCommit: string, testedSha: string): boolean {
+  if (closedCommit === testedSha) return true;
+  if (!SHA_PATTERN.test(closedCommit) || !SHA_PATTERN.test(testedSha)) return false;
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", "--", closedCommit, testedSha], {
+      cwd: projectDir,
+      timeout: 5000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // Host-local operational state (operator notes, scratch dirs) that must not block
 // shipped-work audits — done-audit cares about the merge/closed commit + ticket
@@ -134,16 +156,17 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
         // missing or malformed config — default stands
       }
 
-      const rows = queryHostVerificationRows(ticketId, projectDir, closedCommit, requiredGate);
-      if (rows.length > 0) {
-        const anyFail = rows.some((r) => r.exitCode !== 0);
+      const rows = queryHostVerificationRowsForGate(ticketId, projectDir, requiredGate);
+      const covering = rows.filter((r) => isCoveringCommit(projectDir, closedCommit, r.commitSha));
+      if (covering.length > 0) {
+        const anyFail = covering.some((r) => r.exitCode !== 0);
         hostVerified = !anyFail;
         // When any row fails (any-fail-wins), use the first failing row so the displayed
         // evidence matches the verdict — the trailing pass row must not overwrite it.
-        const detailRow = anyFail ? rows.find((r) => r.exitCode !== 0)! : rows[rows.length - 1]!;
+        const detailRow = anyFail ? covering.find((r) => r.exitCode !== 0)! : covering[covering.length - 1]!;
         hostVerificationDetail =
           `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${closedCommit}; recorded_at: ${detailRow.recordedAt}`;
+          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}`;
       }
     } catch {
       // hostVerified stays null on any store error
