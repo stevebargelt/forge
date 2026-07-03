@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertHostVerification, queryHostVerificationRows } from "./host-verifications.js";
+import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "./host-verifications.js";
 import { insertRun } from "./runs.js";
 import type { Run } from "../types/index.js";
 
@@ -223,4 +223,85 @@ test("queryHostVerificationRows: non-zero exit code persisted and retrieved corr
   const rows = queryHostVerificationRows("FG-010", "/home/test/project", "abc123", "npm run test:all");
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.exitCode, 2);
+});
+
+// ── FG-440: narrowed insertHostVerification retry (dangling run_id FK only) ────
+
+test("insertHostVerification: a dangling run_id FK is retried once with run_id nulled — the real result is still recorded", () => {
+  insertHostVerification({
+    ticketId: "FG-011",
+    projectDir: "/home/test/project",
+    commitSha: "abc123",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    runId: "run-does-not-exist",
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRows("FG-011", "/home/test/project", "abc123", "npm run test:all");
+  assert.equal(rows.length, 1, "the real gate result must still be recorded despite the dangling run_id FK");
+  assert.equal(rows[0]!.runId, null, "retried with run_id nulled");
+  assert.equal(rows[0]!.exitCode, 0);
+});
+
+test("insertHostVerification: a non-FK DB error surfaces (is thrown), not silently retried or swallowed", () => {
+  assert.throws(() => {
+    insertHostVerification({
+      // A NOT NULL column forced null via an intentional type violation —
+      // a DB error that is NOT the dangling run_id FK case the retry exists for.
+      ticketId: null as unknown as string,
+      projectDir: "/home/test/project",
+      commitSha: "abc123",
+      gateName: "npm run test:all",
+      command: "npm run test:all",
+      exitCode: 0,
+      recordedAt: "2026-01-01T00:00:00Z",
+    });
+  }, "a non-FK DB error must surface as a real error, not be assumed to be the dangling-run_id case and retried away");
+
+  const rows = queryHostVerificationRowsForGate("FG-012", "/home/test/project", "npm run test:all");
+  assert.equal(rows.length, 0, "the failed insert must not have silently landed a row under some other key");
+});
+
+// ── FG-440: queryHostVerificationRowsForGate (unfiltered by commit_sha) ────────
+
+test("queryHostVerificationRowsForGate: returns rows across different commit shas for the same ticket+project+gate", () => {
+  insertHostVerification({
+    ticketId: "FG-013",
+    projectDir: "/home/test/project",
+    commitSha: "sha-early",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-013",
+    projectDir: "/home/test/project",
+    commitSha: "sha-later",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T01:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-013", "/home/test/project", "npm run test:all");
+  assert.equal(rows.length, 2, "unfiltered by commit_sha — both rows for this ticket+project+gate are returned");
+  assert.deepEqual(rows.map((r) => r.commitSha).sort(), ["sha-early", "sha-later"]);
+});
+
+test("queryHostVerificationRowsForGate: excludes rows for a different gate_name", () => {
+  insertHostVerification({
+    ticketId: "FG-014",
+    projectDir: "/home/test/project",
+    commitSha: "sha-a",
+    gateName: "npm run verify",
+    command: "npm run verify",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-014", "/home/test/project", "npm run test:all");
+  assert.equal(rows.length, 0);
 });

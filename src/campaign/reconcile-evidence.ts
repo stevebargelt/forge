@@ -31,8 +31,13 @@ export type ReconcileGateEvent = {
 export type ReconcileRunEvent = ReconcileVerdictEvent | ReconcileGateEvent;
 
 export type ReconcileHostVerificationSummary = {
+  // At least one row covers this item (ancestry + base-reachable + gateName
+  // match), regardless of its exit code.
   recorded: boolean;
-  allExitZero: boolean;
+  // At least one COVERING row has exitCode 0. A historical covering failure
+  // does not clear this — but it also does not prevent a later covering pass
+  // from setting it: existence of a pass is what ships, not unanimity.
+  passed: boolean;
 };
 
 export type ReconcileEvidenceInput = {
@@ -61,6 +66,29 @@ export type ReconcileEvidenceResult = {
   evidence: ReconcileEvidence;
 };
 
+// FG-440: human-readable text for a `missing` reason code, shared by the
+// `forge campaign reconcile` CLI output (campaign.ts) and the campaign report
+// (report.ts) so both surfaces render the same distinction — "not yet recorded,
+// will be captured automatically" is fundamentally different from "ran for real
+// and failed," and the latter must never read as something to wait out or
+// override. Unrecognized codes pass through unchanged.
+export function describeMissingReason(reason: string): string {
+  switch (reason) {
+    case "host_verification_not_recorded":
+      return (
+        "host_verification_not_recorded (no real host gate run recorded yet — " +
+        "will be captured automatically on the next `forge campaign reconcile` / drive run)"
+      );
+    case "host_verification_recorded_but_failed":
+      return (
+        "host_verification_recorded_but_failed (the required gate ran for real and failed — " +
+        "fix the failure and re-merge; this is a genuine failure, not something to wait out or override)"
+      );
+    default:
+      return reason;
+  }
+}
+
 function isQualifyingForceAdvance(e: ReconcileGateEvent): boolean {
   return e.decision === "advance" && e.force === true && !!e.rationale && e.rationale.trim().length > 0;
 }
@@ -77,8 +105,19 @@ export function evaluateReconcileEvidence(input: ReconcileEvidenceInput): Reconc
   if (input.closedCommitReachableOnBase !== true) {
     missing.push("closed_commit_not_reachable_on_base_branch");
   }
-  if (!input.hostVerification || !input.hostVerification.recorded || !input.hostVerification.allExitZero) {
-    missing.push("host_verification_missing_or_not_all_exit_zero");
+  // FG-440: split into two reason codes so an operator (and the reconcile-time
+  // capture writer) can tell "no real gate run recorded yet — will be captured
+  // automatically" apart from "the gate ran for real and failed" — the latter
+  // is a genuine failure that must never be rendered as something pending or
+  // overridable. This is a passing-row model: `passed` reflects whether ANY
+  // covering row is green, not whether every covering row ever recorded is
+  // green — a historical failure must never permanently outrank a later real
+  // pass (see reconcile.ts's needsCapture, which re-runs the gate exactly
+  // when `passed` is false).
+  if (!input.hostVerification || !input.hostVerification.recorded) {
+    missing.push("host_verification_not_recorded");
+  } else if (!input.hostVerification.passed) {
+    missing.push("host_verification_recorded_but_failed");
   }
 
   // Fact 5 — supersession: among authoritative verdicts and qualifying force-advance

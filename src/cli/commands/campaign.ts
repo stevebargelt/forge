@@ -7,6 +7,7 @@ import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign 
 import { startCampaign, resumeCampaign } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
+import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
 
 function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
   if (rec) {
@@ -426,7 +427,10 @@ export function registerCampaign(program: Command): void {
       } else {
         console.log(`Campaign: ${campaignId}`);
         for (const item of result.items) {
-          const missingStr = item.missing && item.missing.length ? ` missing: ${item.missing.join(", ")}` : "";
+          const missingStr =
+            item.missing && item.missing.length
+              ? ` missing: ${item.missing.map(describeMissingReason).join(", ")}`
+              : "";
           console.log(`  ${item.ticketId}: ${item.status}${missingStr}`);
         }
         if (result.items.every((i) => i.status === "not_applicable")) {
@@ -476,6 +480,7 @@ export function registerCampaign(program: Command): void {
         console.log(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${blockerStr}${runStr}`);
         if (item.reason) console.log(`    reason: ${item.reason}`);
         if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
+        if (item.hostVerificationReconcileHint) console.log(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
         if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
           console.log(`    readiness: ${item.readiness.outcome}`);
           if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);

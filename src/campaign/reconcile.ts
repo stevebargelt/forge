@@ -26,7 +26,7 @@ import { getCampaign, listCampaignItems, updateCampaignItemIfCampaignPaused } fr
 import { logEvent } from "../store/events.js";
 import type { EventType } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
-import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { collectReconcileEvidence, runAndRecordHostVerification } from "./reconcile-collect.js";
 import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
@@ -60,6 +60,7 @@ export function reconcileCampaign(
     decidedBy?: string;
     collectEvidence?: typeof collectReconcileEvidence;
     collectOutOfBandEvidence?: typeof collectOutOfBandEvidence;
+    runAndRecordHostVerification?: typeof runAndRecordHostVerification;
   } = {}
 ): ReconcileCampaignResult {
   const campaign = getCampaign(campaignId);
@@ -84,6 +85,7 @@ export function reconcileCampaign(
   const projectDir = campaign.projectDir;
   const collect = opts.collectEvidence ?? collectReconcileEvidence;
   const collectOutOfBand = opts.collectOutOfBandEvidence ?? collectOutOfBandEvidence;
+  const runGate = opts.runAndRecordHostVerification ?? runAndRecordHostVerification;
   const items = listCampaignItems(campaignId);
   const results: ReconcileItemResult[] = [];
 
@@ -107,7 +109,37 @@ export function reconcileCampaign(
     let eventType: EventType;
 
     if (isScopeBlocked) {
-      const evaluated = evaluateReconcileEvidence(collect(projectDir, item));
+      let collected = collect(projectDir, item);
+      // FG-440: an item merged THROUGH forge with no PASSING host-verification
+      // row covering its actual closedCommit gets a real gate run captured here,
+      // in projectDir at its current HEAD — never a checkout of closedCommit.
+      // Only fires when closedCommit is a known, reachable commit. This is a
+      // passing-row model, not a once-ever model: a covering row that FAILED
+      // does not block a re-run — a failed/false-fail result must not
+      // permanently wedge the item, since a later real green run supersedes it.
+      // Only a covering PASSING row stops further capture attempts. This never
+      // reads gate.decided/force-advance events — host-verification stays an
+      // independent fact from force-advance.
+      const needsCapture =
+        !!collected.ticketClosedCommit &&
+        collected.closedCommitReachableOnBase === true &&
+        !(collected.hostVerification && collected.hostVerification.passed);
+      if (needsCapture) {
+        // An infra error here (git failure, unexpected throw from an injected
+        // gate stub) must degrade only THIS item to its normal not_recorded
+        // refusal path below — never crash the whole reconcile loop and take
+        // every other item down with it. A gate that runs to completion still
+        // has its real exit recorded as-is; this only guards the invocation.
+        try {
+          runGate(projectDir, item.ticketId, { runId: item.runId ?? null });
+        } catch (err) {
+          console.error(
+            `reconcile: host-verification capture failed for ${item.ticketId} — item degrades to not_recorded: ${(err as Error).message ?? String(err)}`
+          );
+        }
+        collected = collect(projectDir, item);
+      }
+      const evaluated = evaluateReconcileEvidence(collected);
       eligible = evaluated.eligible;
       missing = evaluated.missing;
       evidence = evaluated.evidence;

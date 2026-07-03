@@ -11,9 +11,9 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
-import { insertHostVerification } from "../store/host-verifications.js";
+import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import { logEvent } from "../store/events.js";
-import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { collectReconcileEvidence, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
 import type { CampaignItem } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -175,7 +175,7 @@ test("closedCommitReachableOnBase is null when there is no closedCommit", () => 
   assert.equal(result.closedCommitReachableOnBase, null);
 });
 
-test("hostVerification: recorded true + allExitZero true when all rows for the actual closedCommit exit 0", () => {
+test("hostVerification: recorded true + passed true when a row for the actual closedCommit exits 0", () => {
   const commit = makeCommit("verified");
   writeTicket(projectDir, {
     id: "FG-200",
@@ -196,10 +196,10 @@ test("hostVerification: recorded true + allExitZero true when all rows for the a
   });
 
   const result = collectReconcileEvidence(projectDir, item());
-  assert.deepEqual(result.hostVerification, { recorded: true, allExitZero: true });
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
 });
 
-test("hostVerification: allExitZero false when any row for the closedCommit is non-zero", () => {
+test("hostVerification: passed false when the only covering row for the closedCommit is non-zero", () => {
   const commit = makeCommit("mixed-verify");
   writeTicket(projectDir, {
     id: "FG-200",
@@ -220,7 +220,7 @@ test("hostVerification: allExitZero false when any row for the closedCommit is n
   });
 
   const result = collectReconcileEvidence(projectDir, item());
-  assert.deepEqual(result.hostVerification, { recorded: true, allExitZero: false });
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: false });
 });
 
 test("hostVerification: null when no rows recorded for the closedCommit", () => {
@@ -235,7 +235,7 @@ test("hostVerification: null when no rows recorded for the closedCommit", () => 
   });
 
   const result = collectReconcileEvidence(projectDir, item());
-  assert.deepEqual(result.hostVerification, { recorded: false, allExitZero: false });
+  assert.deepEqual(result.hostVerification, { recorded: false, passed: false });
 });
 
 test("hostVerification respects a configured requiredHostGate", () => {
@@ -262,7 +262,7 @@ test("hostVerification respects a configured requiredHostGate", () => {
     recordedAt: "2026-01-01T00:00:00Z",
   });
   const wrongGate = collectReconcileEvidence(projectDir, item());
-  assert.deepEqual(wrongGate.hostVerification, { recorded: false, allExitZero: false });
+  assert.deepEqual(wrongGate.hostVerification, { recorded: false, passed: false });
 
   insertHostVerification({
     ticketId: "FG-200",
@@ -274,7 +274,7 @@ test("hostVerification respects a configured requiredHostGate", () => {
     recordedAt: "2026-01-01T00:00:01Z",
   });
   const rightGate = collectReconcileEvidence(projectDir, item());
-  assert.deepEqual(rightGate.hostVerification, { recorded: true, allExitZero: true });
+  assert.deepEqual(rightGate.hostVerification, { recorded: true, passed: true });
 });
 
 test("events: ordered verdict.received and gate.decided events mapped by ascending event id", () => {
@@ -308,4 +308,276 @@ test("ticket unreadable: ticketStatus/ticketClosedCommit undefined, no throw", (
   assert.equal(result.ticketStatus, undefined);
   assert.equal(result.ticketClosedCommit, undefined);
   assert.equal(result.closedCommitReachableOnBase, null);
+});
+
+// ── FG-440: getRequiredHostGate + runAndRecordHostVerification ─────────────────
+//
+// The gate now runs in projectDir itself (which has node_modules, since it's
+// the real project checkout) at whatever HEAD currently is — never a detached
+// checkout of some other commit (that earlier design guaranteed npm-based
+// gates would false-fail on missing dependencies). Recorded commitSha is
+// always the real tested HEAD.
+
+function writePackageJsonWithGateScript(scriptBody: string): void {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", version: "0.0.0", scripts: { "test:all": scriptBody } }, null, 2)
+  );
+}
+
+function commitAll(label: string): string {
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", label], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+function headSha(): string {
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+test("getRequiredHostGate: project default when unconfigured, configured value when set", () => {
+  assert.equal(getRequiredHostGate(projectDir), "npm run test:all");
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  assert.equal(getRequiredHostGate(projectDir), "npm run verify");
+});
+
+test("runAndRecordHostVerification: real pass — runs in projectDir at HEAD, records exitCode 0, commitSha equal to the REAL HEAD sha, gateName/command equal to the configured requiredHostGate string", () => {
+  writePackageJsonWithGateScript("exit 0");
+  const commit = commitAll("add passing gate script");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-600");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 0);
+  assert.equal((result as { commitSha: string }).commitSha, commit, "commitSha must equal rev-parse HEAD, not any closedCommit value");
+  assert.equal((result as { commitSha: string }).commitSha, headSha());
+
+  const rows = queryHostVerificationRowsForGate("FG-600", projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exitCode, 0);
+  assert.equal(rows[0]!.gateName, "npm run test:all", "gateName must be the configured gate string, never the executed argv");
+  assert.equal(rows[0]!.command, "npm run test:all");
+  assert.equal(rows[0]!.commitSha, commit);
+});
+
+test("runAndRecordHostVerification: real failure — records the ACTUAL non-zero exit code, never a fabricated 0", () => {
+  writePackageJsonWithGateScript("exit 7");
+  const commit = commitAll("add failing gate script");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-601");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 7);
+
+  const rows = queryHostVerificationRows("FG-601", projectDir, commit, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exitCode, 7);
+});
+
+test("runAndRecordHostVerification: skip when the required gate's script is absent in projectDir — writes NO row", () => {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", scripts: { lint: "exit 0" } }, null, 2)
+  );
+  commitAll("package.json without the required gate script");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-602");
+  assert.equal(result.status, "skipped");
+  assert.equal(
+    queryHostVerificationRowsForGate("FG-602", projectDir, "npm run test:all").length,
+    0,
+    "a skipped gate must never write a synthetic pass row"
+  );
+});
+
+test("runAndRecordHostVerification: skip when there is no package.json at all in projectDir — writes NO row", () => {
+  makeCommit("no-package-json");
+  const result = runAndRecordHostVerification(projectDir, "FG-603");
+  assert.equal(result.status, "skipped");
+  assert.equal(queryHostVerificationRowsForGate("FG-603", projectDir, "npm run test:all").length, 0);
+});
+
+test("runAndRecordHostVerification: dirty working tree (uncommitted change) — writes NO row, does not run the gate", () => {
+  writePackageJsonWithGateScript("exit 0");
+  commitAll("add passing gate script");
+  // Uncommitted modification — the working tree is no longer clean.
+  writeFileSync(join(projectDir, "uncommitted-change.txt"), "uncommitted change");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-608");
+  assert.equal(result.status, "skipped");
+  assert.match(result.reason, /not clean/, "reason must explain the dirty-tree refusal");
+  assert.equal(
+    queryHostVerificationRowsForGate("FG-608", projectDir, "npm run test:all").length,
+    0,
+    "an operator's dirty working state must never be recorded as a tested result"
+  );
+});
+
+test("runAndRecordHostVerification: dirty working tree (untracked file) — writes NO row", () => {
+  writePackageJsonWithGateScript("exit 0");
+  commitAll("add passing gate script");
+  writeFileSync(join(projectDir, "untracked.txt"), "not added or committed");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-609");
+  assert.equal(result.status, "skipped");
+  assert.equal(queryHostVerificationRowsForGate("FG-609", projectDir, "npm run test:all").length, 0);
+});
+
+test("runAndRecordHostVerification: a gate that times out records a real non-zero sentinel, never exit 0", () => {
+  writePackageJsonWithGateScript("sleep 2 && exit 0");
+  commitAll("add slow gate script");
+
+  const prevTimeout = process.env["FORGE_HOST_GATE_TIMEOUT_MS"];
+  process.env["FORGE_HOST_GATE_TIMEOUT_MS"] = "200";
+  try {
+    const result = runAndRecordHostVerification(projectDir, "FG-606");
+    assert.equal(result.status, "recorded");
+    assert.notEqual((result as { exitCode: number }).exitCode, 0, "a timeout must never be recorded as a pass");
+  } finally {
+    if (prevTimeout === undefined) delete process.env["FORGE_HOST_GATE_TIMEOUT_MS"];
+    else process.env["FORGE_HOST_GATE_TIMEOUT_MS"] = prevTimeout;
+  }
+});
+
+// ── FG-440: ancestry-based coverage (checkClosedCommitCoveredByTestedSha via collectReconcileEvidence) ──
+
+test("hostVerification: ancestry — an item whose closedCommit is an ANCESTOR of a recorded row's tested HEAD is covered", () => {
+  writePackageJsonWithGateScript("exit 0");
+  const closedCommit = commitAll("closedCommit for FG-630");
+  writeTicket(projectDir, { id: "FG-630", type: "story", status: "done", closedCommit, title: "Ancestor coverage", body: "" });
+
+  // HEAD advances beyond closedCommit before the gate runs — the recorded row's
+  // commitSha will be this later HEAD, not closedCommit itself.
+  const testedHead = commitAll("HEAD advances past closedCommit");
+
+  const captured = runAndRecordHostVerification(projectDir, "FG-630");
+  assert.equal(captured.status, "recorded");
+  assert.equal((captured as { commitSha: string }).commitSha, testedHead);
+
+  const result = collectReconcileEvidence(projectDir, item({ ticketId: "FG-630" }));
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: true, passed: true },
+    "closedCommit is an ancestor of the tested HEAD — covered, even though the row's commitSha != closedCommit"
+  );
+});
+
+test("hostVerification: ancestry — an item whose closedCommit is NOT an ancestor of any recorded row's commitSha is NOT covered", () => {
+  writePackageJsonWithGateScript("exit 0");
+  makeCommit("main-base-631");
+  gitExec(["checkout", "-b", "feature/off-main-631"], projectDir);
+  const offMainCommit = makeCommit("off-main-631-closed-commit");
+  gitExec(["checkout", "main"], projectDir);
+
+  // A row is recorded for main's HEAD (tree still clean — the ticket write below
+  // happens after), which never includes the off-main commit.
+  const captured = runAndRecordHostVerification(projectDir, "FG-631");
+  assert.equal(captured.status, "recorded");
+
+  writeTicket(projectDir, { id: "FG-631", type: "story", status: "done", closedCommit: offMainCommit, title: "Non-ancestor coverage", body: "" });
+
+  const result = collectReconcileEvidence(projectDir, item({ ticketId: "FG-631" }));
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: false, passed: false },
+    "closedCommit is not reachable from the tested row's commitSha — must not be covered"
+  );
+});
+
+// ── FIX 1 (FG-440 follow-up): testedSha must itself be reachable on the base branch ──
+
+test("hostVerification: MATCH-time base-reachability — a row whose testedSha is off the base branch does NOT cover, even though closedCommit IS an ancestor of testedSha", () => {
+  const closedCommit = makeCommit("closedCommit-for-off-branch-632");
+
+  // A feature branch cut AFTER closedCommit: closedCommit is its ancestor, but
+  // the branch itself is never merged to main. The ticket write happens AFTER
+  // returning to main — writing it before the checkout would let `makeCommit`'s
+  // `git add .` on the feature branch sweep up the uncommitted ticket file and
+  // commit it there instead, which `checkout main` would then delete.
+  gitExec(["checkout", "-b", "feature/off-branch-632"], projectDir);
+  const offBranchTestedSha = makeCommit("off-branch-tested-head-632");
+  gitExec(["checkout", "main"], projectDir);
+
+  writeTicket(projectDir, { id: "FG-632", type: "story", status: "done", closedCommit, title: "Off-branch tested sha", body: "" });
+
+  insertHostVerification({
+    ticketId: "FG-632",
+    projectDir,
+    commitSha: offBranchTestedSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item({ ticketId: "FG-632" }));
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: false, passed: false },
+    "a never-merged off-branch build must never permanently cover the ticket, even though closedCommit is its ancestor"
+  );
+});
+
+test("hostVerification: a row whose testedSha IS on the base branch covers (positive control for the base-reachability check above)", () => {
+  const closedCommit = makeCommit("closedCommit-for-on-branch-633");
+  writeTicket(projectDir, { id: "FG-633", type: "story", status: "done", closedCommit, title: "On-branch tested sha", body: "" });
+  const onBranchTestedSha = makeCommit("on-branch-tested-head-633");
+
+  insertHostVerification({
+    ticketId: "FG-633",
+    projectDir,
+    commitSha: onBranchTestedSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item({ ticketId: "FG-633" }));
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});
+
+test("runAndRecordHostVerification: CAPTURE-time — HEAD not reachable on the base branch SKIPS, never runs the gate, writes NO row", () => {
+  writePackageJsonWithGateScript("exit 0");
+  commitAll("add gate script on main");
+  gitExec(["checkout", "-b", "feature/off-main-634"], projectDir);
+  makeCommit("feature-commit-634");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-634");
+  assert.equal(result.status, "skipped");
+  assert.match(result.reason, /not reachable on base branch/, "reason must explain the off-branch refusal");
+  assert.equal(
+    queryHostVerificationRowsForGate("FG-634", projectDir, "npm run test:all").length,
+    0,
+    "an operator sitting on a feature branch must never have that build recorded as the tested base line"
+  );
+});
+
+// ── FIX 3 (FG-440 follow-up): capture-window TOCTOU ─────────────────────────────
+
+test("runAndRecordHostVerification: TOCTOU — the working tree becomes dirty DURING the gate run itself — discards the result, writes NO row", () => {
+  writePackageJsonWithGateScript("echo dirty > mid-run-dirty.txt && exit 0");
+  commitAll("add gate script that dirties the tree while running");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-640");
+  assert.equal(result.status, "skipped");
+  assert.match(result.reason, /changed during the gate run/, "reason must explain the discarded unstable result");
+  assert.equal(
+    queryHostVerificationRowsForGate("FG-640", projectDir, "npm run test:all").length,
+    0,
+    "a gate result observed against a tree that changed mid-run must never be recorded"
+  );
+});
+
+test("runAndRecordHostVerification: TOCTOU — HEAD moves DURING the gate run itself — discards the result, writes NO row", () => {
+  writePackageJsonWithGateScript('git commit --allow-empty -m "sneaky-commit-during-gate" && exit 0');
+  commitAll("add gate script that advances HEAD while running");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-641");
+  assert.equal(result.status, "skipped");
+  assert.match(result.reason, /changed during the gate run/, "reason must explain the discarded unstable result");
+  assert.equal(
+    queryHostVerificationRowsForGate("FG-641", projectDir, "npm run test:all").length,
+    0,
+    "a gate result observed against a HEAD that moved mid-run must never be recorded against the stale pre-run sha"
+  );
 });

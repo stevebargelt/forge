@@ -18,7 +18,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
-import { insertHostVerification } from "../store/host-verifications.js";
+import { insertHostVerification, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import { logEvent } from "../store/events.js";
 import {
   approveCampaign,
@@ -31,8 +31,9 @@ import type { PlannerInput, PlanMode } from "./planner.js";
 import { resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { reconcileCampaign } from "./reconcile.js";
-import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { collectReconcileEvidence, runAndRecordHostVerification } from "./reconcile-collect.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
+import { assembleCampaignReport, assembleCampaignShow } from "./report.js";
 
 // Same wrapper as executor.test.ts: forces executionMode:'invoke' for list-type
 // campaigns so resumeCampaign's dispatch path is trivially mockable.
@@ -320,7 +321,10 @@ test("refuses when closedCommit is not reachable on the base branch — no state
 
   const result = reconcileCampaign(campaignId);
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["closed_commit_not_reachable_on_base_branch"]);
+  // FG-440 FIX1: closedCommit unreachable on base makes host-verification coverage
+  // unreachable too — any row keyed to the same off-branch commit can never have a
+  // testedSha that is itself on the base branch, so both facts fail together here.
+  assert.deepEqual(result.items[0]!.missing, ["closed_commit_not_reachable_on_base_branch", "host_verification_not_recorded"]);
 
   assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
   assert.equal(countEvents(), beforeEvents);
@@ -340,7 +344,7 @@ test("refuses when host-verification is missing — no state mutated", () => {
 
   const result = reconcileCampaign(campaignId);
   assert.equal(result.items[0]!.status, "refused");
-  assert.deepEqual(result.items[0]!.missing, ["host_verification_missing_or_not_all_exit_zero"]);
+  assert.deepEqual(result.items[0]!.missing, ["host_verification_not_recorded"]);
 
   assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
   assert.equal(countEvents(), beforeEvents);
@@ -392,7 +396,7 @@ test("spoofing guard: a host_verifications row for the WRONG commit sha does not
   const result = reconcileCampaign(campaignId);
 
   assert.equal(result.items[0]!.status, "refused", "the query is keyed on the ticket's actual closedCommit, not any planted row");
-  assert.deepEqual(result.items[0]!.missing, ["host_verification_missing_or_not_all_exit_zero"]);
+  assert.deepEqual(result.items[0]!.missing, ["host_verification_not_recorded"]);
   assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
 });
 
@@ -727,4 +731,314 @@ test("out-of-band: an awaiting_gate item that DOES carry a blockerKind is report
   assert.equal(result.items.length, 1);
   assert.equal(result.items[0]!.status, "not_applicable");
   assert.deepEqual(getCampaignItem(items[0]!.id)!, beforeItem);
+});
+
+// ── FG-440: reconcile-time host-verification capture ───────────────────────────
+//
+// A forge-observed merge (campaign-driven, or force-advanced then merged through
+// forge) leaves closedCommit reachable on base but no PASSING host_verifications
+// row that covers it. reconcileCampaign must run the required gate in projectDir
+// at its current, CLEAN HEAD, itself reachable on the base branch — never a
+// checkout of closedCommit, which would have no node_modules and false-fail every
+// npm-based gate — and record + re-evaluate in the SAME call. The recorded
+// commitSha is whatever HEAD actually was (often one commit later than
+// closedCommit, e.g. the commit that closed the ticket itself); ancestry PLUS
+// base-branch-reachability of that commitSha, not equality to closedCommit, is
+// what makes it count as covering evidence. This is a passing-row model: a
+// covering row that failed does not block a later re-run, and coexists
+// alongside a later covering row that passes — existence of a pass is what
+// ships, not unanimity across every row ever recorded.
+
+function commitGateScript(label: string, scriptBody: string): string {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", version: "0.0.0", scripts: { "test:all": scriptBody } }, null, 2)
+  );
+  writeFileSync(join(projectDir, `${label}.txt`), label);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", label], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+// closeTicket only writes/moves the ticket file — it never commits. In real
+// usage a ticket's close lands in the same commit history as the code it
+// closed; these fixtures mirror that by committing the pending ticket-file
+// change so projectDir's working tree is CLEAN before reconcileCampaign
+// triggers a real gate capture (the capture refuses to run against a dirty tree).
+function commitPendingChanges(message: string): string {
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", message], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+test("FG-440: item merged-but-unverified (closedCommit reachable, no covering row) gets captured for real in projectDir at HEAD and ships within one reconcileCampaign call", () => {
+  const ticketId = "FG-610";
+  const { campaignId, runId } = setupBlockedCampaign(ticketId);
+
+  const commit = commitGateScript(`impl-${ticketId}`, "exit 0");
+  closeTicket(projectDir, ticketId, commit);
+  const testedHead = commitPendingChanges(`close ${ticketId}`);
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  assert.equal(
+    queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length,
+    0,
+    "precondition: no row exists yet"
+  );
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped", "the captured gate passed for real, in the same reconcileCampaign call");
+
+  const rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 1, "exactly one real row written from the actual gate run");
+  assert.equal(rows[0]!.exitCode, 0);
+  assert.equal(rows[0]!.gateName, "npm run test:all", "gateName is the configured requiredHostGate string, never the executed argv");
+  assert.equal(rows[0]!.commitSha, testedHead, "recorded commitSha is the REAL tested HEAD");
+  assert.notEqual(rows[0]!.commitSha, commit, "the tested HEAD advanced one commit past closedCommit (the ticket-close commit) — never record closedCommit itself as though it were tested");
+});
+
+test("FG-440: capture SKIP (no requiredHostGate script in projectDir) writes no row — item stays refused with host_verification_not_recorded", () => {
+  const ticketId = "FG-611";
+  const { campaignId, runId } = setupBlockedCampaign(ticketId);
+
+  const commit = makeCommit(`impl-${ticketId}`); // no package.json at all
+  closeTicket(projectDir, ticketId, commit);
+  commitPendingChanges(`close ${ticketId}`); // tree clean — the skip is due to the missing script, not a dirty tree
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["host_verification_not_recorded"]);
+  assert.equal(
+    queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length,
+    0,
+    "a skip must never write a synthetic pass row"
+  );
+});
+
+test("FG-440: capture runs the gate for real and it FAILS — records the failing row at the real tested HEAD; item stays refused with host_verification_recorded_but_failed (distinct from not_recorded)", () => {
+  const ticketId = "FG-612";
+  const { campaignId, runId } = setupBlockedCampaign(ticketId);
+
+  const commit = commitGateScript(`impl-${ticketId}`, "exit 3");
+  closeTicket(projectDir, ticketId, commit);
+  const testedHead = commitPendingChanges(`close ${ticketId}`);
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["host_verification_recorded_but_failed"]);
+
+  const rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exitCode, 3, "the actual non-zero exit code must be recorded, never a fabricated pass");
+  assert.equal(rows[0]!.commitSha, testedHead);
+});
+
+test("FG-440: a force-advance gate.decided event does not cause a host-verification row to be written or a skip to be treated as a pass", () => {
+  const ticketId = "FG-613";
+  const { campaignId, runId } = setupBlockedCampaign(ticketId);
+
+  const commit = makeCommit(`impl-${ticketId}`); // no package.json → skip
+  closeTicket(projectDir, ticketId, commit);
+  commitPendingChanges(`close ${ticketId}`);
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("gate.decided", { runId, payload: { decision: "advance", rationale: "operator override: verified out of band", force: true } });
+
+  const result = reconcileCampaign(campaignId);
+  // Force-advance satisfies fact 5 (supersession) but host-verification is an
+  // INDEPENDENT fact — the item must still refuse on the host-verification gap.
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["host_verification_not_recorded"]);
+  assert.equal(queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length, 0);
+});
+
+test("FG-440: a row that already covers closedCommit (pass or fail) is never re-run — the injected writer is not invoked", () => {
+  const ticketId = "FG-614";
+  const { campaignId, runId } = setupBlockedCampaign(ticketId);
+
+  const commit = makeCommit(`impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  let invoked = false;
+  const spyRunGate: typeof runAndRecordHostVerification = (dir, ticket, opts) => {
+    invoked = true;
+    return runAndRecordHostVerification(dir, ticket, opts);
+  };
+
+  const result = reconcileCampaign(campaignId, { runAndRecordHostVerification: spyRunGate });
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(invoked, false, "an already-covering row (real pass) must never trigger a re-run of the gate");
+});
+
+test("FG-440 FIX2: a failing covering row does not permanently wedge the item — a subsequent reconcileCampaign call re-runs the gate, and a later real green ships it (a passing row coexisting with an older failing row still ships)", () => {
+  const ticketId = "FG-650";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+
+  const failingCommit = commitGateScript(`impl-${ticketId}`, "exit 5");
+  closeTicket(projectDir, ticketId, failingCommit);
+  const failingTestedHead = commitPendingChanges(`close ${ticketId}`);
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  const firstResult = reconcileCampaign(campaignId);
+  assert.equal(firstResult.items[0]!.status, "refused", "the gate ran for real and failed");
+  assert.deepEqual(firstResult.items[0]!.missing, ["host_verification_recorded_but_failed"]);
+
+  let rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exitCode, 5);
+  assert.equal(rows[0]!.commitSha, failingTestedHead);
+
+  // Operator fixes the gate and advances HEAD further — no new evidence needed,
+  // reconcile re-derives everything.
+  const passingTestedHead = commitGateScript(`fix-${ticketId}`, "exit 0");
+
+  const secondResult = reconcileCampaign(campaignId);
+  assert.equal(
+    secondResult.items[0]!.status,
+    "shipped",
+    "the earlier failing row must not permanently wedge the item — a later real green must ship it"
+  );
+
+  rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 2, "the old failing row is never overwritten — it coexists alongside the new passing row");
+  const failing = rows.find((r) => r.exitCode === 5)!;
+  const passing = rows.find((r) => r.exitCode === 0)!;
+  assert.equal(failing.commitSha, failingTestedHead);
+  assert.equal(passing.commitSha, passingTestedHead);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-440: an infra error thrown by the gate invocation does not crash reconcileCampaign — that item degrades to not_recorded and OTHER items in the same call still process", () => {
+  writeTicket(projectDir, { id: "FG-615", type: "story", status: "active", title: "t1", body: "" });
+  writeTicket(projectDir, { id: "FG-616", type: "story", status: "active", title: "t2", body: "" });
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-615", "FG-616"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved" });
+
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaign.id) as { id: string; ticket_id: string }[];
+  const item1 = items.find((i) => i.ticket_id === "FG-615")!;
+  const item2 = items.find((i) => i.ticket_id === "FG-616")!;
+  const run1 = `run-${item1.id}`;
+  const run2 = `run-${item2.id}`;
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ?, reason = 'stale red fail' WHERE id = ?"
+  ).run(run1, item1.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ?, reason = 'stale red fail' WHERE id = ?"
+  ).run(run2, item2.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  // FG-615: closedCommit reachable, no covering row — capture will be attempted
+  // and the injected stub throws for exactly this ticket.
+  const commit1 = makeCommit("impl-FG-615");
+  closeTicket(projectDir, "FG-615", commit1);
+  commitPendingChanges("close FG-615");
+  logEvent("verdict.received", { runId: run1, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId: run1, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+
+  // FG-616: all evidence already seeded directly — capture is never attempted
+  // for it, so the throwing stub is never invoked on its behalf either.
+  seedAllEvidence("FG-616", run2);
+
+  const throwingRunGate: typeof runAndRecordHostVerification = (dir, ticketId, opts) => {
+    if (ticketId === "FG-615") throw new Error("simulated infra failure (e.g. git unreachable)");
+    return runAndRecordHostVerification(dir, ticketId, opts);
+  };
+
+  const result = reconcileCampaign(campaign.id, { runAndRecordHostVerification: throwingRunGate });
+  assert.equal(result.ok, true, "reconcileCampaign must not crash on an infra error thrown by the gate invocation");
+  assert.equal(result.items.length, 2, "both items are still processed — the throw degrades only FG-615, never the loop");
+
+  const r1 = result.items.find((i) => i.ticketId === "FG-615")!;
+  const r2 = result.items.find((i) => i.ticketId === "FG-616")!;
+  assert.equal(r1.status, "refused", "FG-615's capture threw — it degrades to its normal not_recorded refusal, never a crash");
+  assert.deepEqual(r1.missing, ["host_verification_not_recorded"]);
+  assert.equal(r2.status, "shipped", "FG-616 never needed capture and ships normally, proving the loop reached it after FG-615's error");
+});
+
+test("FG-440: report.ts AND campaign show render distinct host-verification hints for not_recorded vs recorded_but_failed scope-blocked items", () => {
+  const notRecordedTicket = "FG-620";
+  const { campaignId: campaignIdA, runId: runIdA } = setupBlockedCampaign(notRecordedTicket);
+  const commitA = makeCommit(`impl-${notRecordedTicket}`); // no package.json → skip → not_recorded
+  closeTicket(projectDir, notRecordedTicket, commitA);
+  commitPendingChanges(`close ${notRecordedTicket}`);
+  logEvent("verdict.received", { runId: runIdA, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId: runIdA, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+  reconcileCampaign(campaignIdA);
+
+  const reportA = assembleCampaignReport(campaignIdA)!;
+  const rowA = reportA.items.find((i) => i.ticketId === notRecordedTicket)!;
+  assert.match(
+    rowA.hostVerificationReconcileHint ?? "",
+    /forge campaign reconcile/,
+    "not_recorded hint must point at the automatic capture on the next reconcile/drive run"
+  );
+
+  const showA = assembleCampaignShow(campaignIdA)!;
+  const showRowA = showA.items.find((i) => i.ticketId === notRecordedTicket)!;
+  assert.equal(
+    showRowA.hostVerificationReconcileHint,
+    rowA.hostVerificationReconcileHint,
+    "campaign show must render the SAME operator-facing text as campaign report for not_recorded"
+  );
+
+  const failedTicket = "FG-621";
+  const { campaignId: campaignIdB, runId: runIdB } = setupBlockedCampaign(failedTicket);
+  const commitB = commitGateScript(`impl-${failedTicket}`, "exit 9");
+  closeTicket(projectDir, failedTicket, commitB);
+  commitPendingChanges(`close ${failedTicket}`);
+  logEvent("verdict.received", { runId: runIdB, payload: { redRole: "r", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId: runIdB, payload: { redRole: "r", verdict: "pass", authority: "authoritative" } });
+  reconcileCampaign(campaignIdB);
+
+  const reportB = assembleCampaignReport(campaignIdB)!;
+  const rowB = reportB.items.find((i) => i.ticketId === failedTicket)!;
+  assert.ok(rowB.hostVerificationReconcileHint, "recorded_but_failed hint must be present");
+  assert.notEqual(
+    rowB.hostVerificationReconcileHint,
+    rowA.hostVerificationReconcileHint,
+    "the two reason codes must render distinct operator-facing text"
+  );
+  assert.doesNotMatch(
+    rowB.hostVerificationReconcileHint!,
+    /will be captured/i,
+    "a genuine gate failure must never be rendered as something pending automatic capture"
+  );
+
+  const showB = assembleCampaignShow(campaignIdB)!;
+  const showRowB = showB.items.find((i) => i.ticketId === failedTicket)!;
+  assert.equal(
+    showRowB.hostVerificationReconcileHint,
+    rowB.hostVerificationReconcileHint,
+    "campaign show must render the SAME operator-facing text as campaign report for recorded_but_failed"
+  );
+  assert.notEqual(
+    showRowB.hostVerificationReconcileHint,
+    showRowA.hostVerificationReconcileHint,
+    "campaign show itself must distinguish the two reason codes, not just report"
+  );
 });

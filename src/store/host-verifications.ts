@@ -38,22 +38,35 @@ function rowToVerification(row: DbRow): HostVerificationRow {
   };
 }
 
-export function insertHostVerification(v: Omit<HostVerificationRow, "id">): void {
+function runInsert(v: Omit<HostVerificationRow, "id">, runId: string | null): void {
   getDb()
     .prepare(
       `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(
-      v.ticketId,
-      v.projectDir,
-      v.commitSha,
-      v.gateName,
-      v.command,
-      v.exitCode,
-      v.runId ?? null,
-      v.recordedAt
-    );
+    .run(v.ticketId, v.projectDir, v.commitSha, v.gateName, v.command, v.exitCode, runId, v.recordedAt);
+}
+
+// run_id references runs(id) — a run row pruned between dispatch and this write
+// leaves run_id dangling, and that must not cost us a REAL gate result. Retry
+// exactly once, with run_id nulled, but ONLY when the failure is specifically
+// that FK violation; any other DB error (bad column, disk full, etc.) is a real
+// error and must surface, not be silently assumed away.
+function isDanglingRunIdForeignKeyError(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "SQLITE_CONSTRAINT_FOREIGNKEY";
+}
+
+export function insertHostVerification(v: Omit<HostVerificationRow, "id">): void {
+  try {
+    runInsert(v, v.runId ?? null);
+  } catch (err) {
+    if (v.runId && isDanglingRunIdForeignKeyError(err)) {
+      runInsert(v, null);
+      return;
+    }
+    throw err;
+  }
 }
 
 export function queryHostVerificationRows(
@@ -69,5 +82,23 @@ export function queryHostVerificationRows(
        ORDER BY recorded_at ASC`
     )
     .all(ticketId, projectDir, commitSha, gateName) as DbRow[];
+  return rows.map(rowToVerification);
+}
+
+// FG-440: unfiltered by commit_sha — reconcile-collect.ts's ancestry-based
+// coverage check needs every recorded row for this ticket+project+gate so it
+// can test each row's commit_sha for ancestry, not just an exact-sha match.
+export function queryHostVerificationRowsForGate(
+  ticketId: string,
+  projectDir: string,
+  gateName: string
+): HostVerificationRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM host_verifications
+       WHERE ticket_id = ? AND project_dir = ? AND gate_name = ?
+       ORDER BY recorded_at ASC`
+    )
+    .all(ticketId, projectDir, gateName) as DbRow[];
   return rows.map(rowToVerification);
 }

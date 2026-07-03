@@ -26,6 +26,8 @@ import type { Campaign, CampaignItem } from "../types/index.js";
 import { campaignBlocker } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
+import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { evaluateReconcileEvidence, describeMissingReason } from "./reconcile-evidence.js";
 
 // Local — not exported; flows through DB as a plain string, never as a TS import
 type ItemExecutionMode = "workflow" | "invoke";
@@ -163,6 +165,26 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
     // best-effort — fall through to the generic gate text
   }
   return null;
+}
+
+// FG-440: distinguishes "the required host gate hasn't run yet — will be
+// captured automatically on the next reconcile/drive run" from "the gate ran
+// for real and failed" for a scope-blocked item, so the report never renders a
+// genuine failure as something pending or overridable. Only meaningful for
+// blockerKind==='scope' items (out-of-band items use their own lane-evidence
+// path above); best-effort — any collection/evaluation error yields no hint.
+function scopeBlockedHostVerificationHint(campaign: Campaign, item: CampaignItem): string | null {
+  if (item.blockerKind !== "scope") return null;
+  if (!campaign.projectDir) return null;
+  try {
+    const evaluated = evaluateReconcileEvidence(collectReconcileEvidence(campaign.projectDir, item));
+    const hostReason = evaluated.missing.find(
+      (m) => m === "host_verification_not_recorded" || m === "host_verification_recorded_but_failed"
+    );
+    return hostReason ? describeMissingReason(hostReason) : null;
+  } catch {
+    return null;
+  }
 }
 
 function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): string {
@@ -331,6 +353,7 @@ export type ShowItemRow = {
   reason: string | null;
   requestedHumanAction: string | null;
   readiness: ReadinessResult | null;
+  hostVerificationReconcileHint: string | null;
 };
 
 export type ShowResult = {
@@ -390,6 +413,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     reason: i.reason ?? null,
     requestedHumanAction: i.requestedHumanAction ?? null,
     readiness: readinessMap.get(i.ticketId) ?? null,
+    hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i),
   }));
 
   const nextAction = computeNextShowAction(campaign, items);
@@ -594,6 +618,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
       hostVerificationDetail:
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
+      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i),
       reviewerResult: null,
       executionMode,
       workflowName,
@@ -671,6 +696,7 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
         if (item.doneAuditState.requestedAction) lines.push(`    audit-action: ${item.doneAuditState.requestedAction}`);
       }
     }
+    if (item.hostVerificationReconcileHint) lines.push(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
     // Execution mode and workflow traceability
     if (item.executionMode === "invoke (escape hatch)") {
       lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);

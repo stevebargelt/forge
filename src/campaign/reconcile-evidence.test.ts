@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
+import { evaluateReconcileEvidence, describeMissingReason } from "./reconcile-evidence.js";
 import type { ReconcileEvidenceInput, ReconcileRunEvent } from "./reconcile-evidence.js";
 
 // All-facts-satisfied baseline: a stale authoritative fail (id 1) superseded by a
@@ -10,7 +10,7 @@ function baseInput(): ReconcileEvidenceInput {
     ticketStatus: "done",
     ticketClosedCommit: "abc123",
     closedCommitReachableOnBase: true,
-    hostVerification: { recorded: true, allExitZero: true },
+    hostVerification: { recorded: true, passed: true },
     events: [
       { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative" },
       { id: 2, kind: "verdict", verdict: "pass", authority: "authoritative" },
@@ -53,17 +53,43 @@ test("fact 3 missing: closedCommitReachableOnBase !== true → ineligible with c
   assert.deepEqual(nullCase.missing, ["closed_commit_not_reachable_on_base_branch"]);
 });
 
-test("fact 4 missing: host-verification not recorded → ineligible with host_verification_missing_or_not_all_exit_zero", () => {
+// FG-440: fact 4 splits into two distinct reason codes — "not yet recorded"
+// (nothing has run, eligible for reconcile-time capture) vs "recorded but the
+// real run failed" (a genuine failure, never conflated with the former).
+test("fact 4a missing: no host-verification rows at all → ineligible with host_verification_not_recorded", () => {
   const notRecorded = evaluateReconcileEvidence({ ...baseInput(), hostVerification: null });
   assert.equal(notRecorded.eligible, false);
-  assert.deepEqual(notRecorded.missing, ["host_verification_missing_or_not_all_exit_zero"]);
+  assert.deepEqual(notRecorded.missing, ["host_verification_not_recorded"]);
 
+  const recordedFalse = evaluateReconcileEvidence({
+    ...baseInput(),
+    hostVerification: { recorded: false, passed: false },
+  });
+  assert.equal(recordedFalse.eligible, false);
+  assert.deepEqual(recordedFalse.missing, ["host_verification_not_recorded"]);
+});
+
+test("fact 4b missing: rows recorded but none passing → ineligible with host_verification_recorded_but_failed, distinct from not_recorded", () => {
   const recordedButFailing = evaluateReconcileEvidence({
     ...baseInput(),
-    hostVerification: { recorded: true, allExitZero: false },
+    hostVerification: { recorded: true, passed: false },
   });
   assert.equal(recordedButFailing.eligible, false);
-  assert.deepEqual(recordedButFailing.missing, ["host_verification_missing_or_not_all_exit_zero"]);
+  assert.deepEqual(recordedButFailing.missing, ["host_verification_recorded_but_failed"]);
+});
+
+test("describeMissingReason: not_recorded and recorded_but_failed render distinct operator-facing text", () => {
+  const notRecordedText = describeMissingReason("host_verification_not_recorded");
+  const recordedFailedText = describeMissingReason("host_verification_recorded_but_failed");
+
+  assert.notEqual(notRecordedText, recordedFailedText);
+  assert.match(notRecordedText, /forge campaign reconcile/, "not_recorded must point at the automatic capture path");
+  assert.match(recordedFailedText, /ran for real and failed/, "recorded_but_failed must read as a genuine failure");
+  assert.doesNotMatch(recordedFailedText, /will be captured/i, "a real failure must never suggest waiting for automatic capture");
+});
+
+test("describeMissingReason: unrecognized codes pass through unchanged", () => {
+  assert.equal(describeMissingReason("ticket_status_not_done"), "ticket_status_not_done");
 });
 
 test("fact 5 missing: no authoritative verdict or force-advance event at all → ineligible with no_authoritative_verdict_or_force_advance_event", () => {
