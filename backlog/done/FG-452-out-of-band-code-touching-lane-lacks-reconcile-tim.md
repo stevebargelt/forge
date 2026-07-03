@@ -1,9 +1,11 @@
 ---
 id: FG-452
 type: story
-status: active
+status: done
 title: Out-of-band code-touching lane lacks reconcile-time host-verification capture + ancestry matching (FG-443×FG-440 seam; wedges FG-422 in campaign-922)
 created: 2026-07-03
+closed: 2026-07-03
+closed_commit: e50941e
 ---
 
 ## Problem
