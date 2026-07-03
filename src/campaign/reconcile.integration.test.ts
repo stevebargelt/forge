@@ -1,12 +1,17 @@
-// FG-428: integration coverage for reconcileCampaign against a real store DB.
-// Covers: each of the 5 missing-evidence facts refuses with zero mutation, the
-// all-evidence-present positive case (both starting lifecycle shapes), the
-// spoofing guard, the not-paused guard, and an end-to-end unhold+resume proving
-// the existing executor blockedItems rebuild picks up reconciled state for free.
+// FG-428/FG-443: integration coverage for reconcileCampaign against a real store
+// DB. Covers: each of the 5 scope-blocked missing-evidence facts refuses with
+// zero mutation, the all-evidence-present positive case (both starting
+// lifecycle shapes), the spoofing guard, the not-paused guard, an end-to-end
+// unhold+resume proving the existing executor blockedItems rebuild picks up
+// reconciled state for free — plus (FG-443) the parallel out-of-band eligibility
+// branch for awaiting_gate/non-pipeline items: its own negative paths, its
+// positive path reaching 'complete' via the unmodified driveRemainingItems
+// transition, coexistence with a scope-blocked item in the same call, and its
+// own paused-guard race.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +32,7 @@ import { resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { reconcileCampaign } from "./reconcile.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 
 // Same wrapper as executor.test.ts: forces executionMode:'invoke' for list-type
 // campaigns so resumeCampaign's dispatch path is trivially mockable.
@@ -124,6 +130,76 @@ function seedAllEvidence(ticketId: string, runId: string): string {
   });
   logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
   logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  return commit;
+}
+
+// ── FG-443: out-of-band (awaiting_gate/non-pipeline) helpers ───────────────────
+
+// Builds a single-item paused campaign whose item is parked at the ONLY shape
+// executor.ts:451-460's gate:human path produces: lifecycleStatus='awaiting_gate',
+// no blockerKind. Distinct from setupBlockedCampaign, which always sets
+// blocker_kind='scope' — that field's absence is exactly what routes an item to
+// the out-of-band branch instead of the scope-blocked one.
+function setupAwaitingGateCampaign(ticketId: string): { campaignId: string; itemId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "approved" });
+  const items = listCampaignItems(campaign.id);
+  const itemId = items[0]!.id;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(itemId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  return { campaignId: campaign.id, itemId };
+}
+
+function makeBaseCommit(label: string): void {
+  writeFileSync(join(projectDir, `${label}.txt`), label);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", label], projectDir);
+}
+
+function commitDocsFile(relPath: string, content: string, message: string): string {
+  const full = join(projectDir, relPath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  writeFileSync(full, content);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", message], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+// Delivers a ticket entirely via a docs-only commit (the non_code_diff lane) —
+// requires a preceding base commit so the delivering commit has exactly one
+// parent (a root commit is ambiguous and safe-denies in commitTouchesOnlyNonCodePaths).
+function seedOutOfBandDocsEvidence(ticketId: string): string {
+  makeBaseCommit(`base-${ticketId}`);
+  const commit = commitDocsFile(`docs/${ticketId}.md`, `docs for ${ticketId}`, `docs: ${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  return commit;
+}
+
+// Delivers a ticket via a commit that touches code — requires the host-verification
+// fallback lane to be satisfied.
+function seedOutOfBandCodeEvidence(ticketId: string, opts: { recordVerification?: boolean } = {}): string {
+  makeBaseCommit(`base-${ticketId}`);
+  const srcPath = join(projectDir, "src", `${ticketId}.ts`);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(srcPath, `export const ${ticketId.replace(/-/g, "_")} = 1;\n`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", `feat: ${ticketId}`], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, ticketId, commit);
+  if (opts.recordVerification !== false) {
+    insertHostVerification({
+      ticketId,
+      projectDir,
+      commitSha: commit,
+      gateName: "npm run test:all",
+      command: "npm run test:all",
+      exitCode: 0,
+      recordedAt: "2026-01-01T00:00:00Z",
+    });
+  }
   return commit;
 }
 
@@ -419,4 +495,236 @@ test("end-to-end: reconciling a scope-blocked item unholds a downstream item and
 
   const finalItem2 = getCampaignItem(item2.id)!;
   assert.notEqual(finalItem2.outcome, "held", "downstream item must no longer be held");
+});
+
+// ── FG-443: out-of-band (awaiting_gate/non-pipeline) eligibility branch ────────
+
+// ── negative paths, each in isolation, zero mutation ────────────────────────────
+
+test("out-of-band: refuses when ticket.status !== 'done' — no state mutated", () => {
+  const ticketId = "FG-500";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+
+  makeBaseCommit(`base-${ticketId}`);
+  const commit = commitDocsFile(`docs/${ticketId}.md`, "docs", `docs: ${ticketId}`);
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", closedCommit: commit, title: ticketId, body: "" });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.ok(result.items[0]!.missing!.includes("ticket_status_not_done"));
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refusal");
+  assert.equal(countEvents(), beforeEvents, "no event row written on refusal");
+});
+
+test("out-of-band: refuses when closedCommit is not reachable on the base branch — no state mutated", () => {
+  const ticketId = "FG-501";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+
+  makeBaseCommit(`base-${ticketId}`);
+  gitExec(["checkout", "-b", "feature/off-main-oob-501"], projectDir);
+  const offMainCommit = commitDocsFile(`docs/${ticketId}.md`, "docs off main", "docs change off main");
+  gitExec(["checkout", "main"], projectDir);
+  closeTicket(projectDir, ticketId, offMainCommit);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["closed_commit_not_reachable_on_base_branch"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+test("out-of-band: refuses (lane evidence missing) — docs-only content still safe-denies on an ambiguous root commit", () => {
+  const ticketId = "FG-502";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+
+  // No base commit first — the closing commit is the repo's very first (root)
+  // commit: zero parents is ambiguous for commitTouchesOnlyNonCodePaths, which
+  // safe-denies regardless of the content being plain docs/*.md.
+  const rootCommit = commitDocsFile(`docs/${ticketId}.md`, "docs", "root docs commit");
+  closeTicket(projectDir, ticketId, rootCommit);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+test("out-of-band: refuses (lane evidence missing) — commit touches code and no host verification is recorded", () => {
+  const ticketId = "FG-503";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId, { recordVerification: false });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+// ── positive path: docs lane, reaches 'complete' via unmodified driveRemainingItems ──
+
+test("out-of-band: all-evidence-present (docs lane) ships via reconcileCampaign and the campaign reaches complete via the existing driveRemainingItems transition", async () => {
+  const ticketId = "FG-510";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const beforeEvents = countEvents();
+  const reconcileResult = reconcileCampaign(campaignId, { decidedBy: "steve" });
+
+  assert.equal(reconcileResult.ok, true);
+  assert.equal(reconcileResult.items.length, 1);
+  assert.equal(reconcileResult.items[0]!.status, "shipped");
+  assert.equal(reconcileResult.items[0]!.missing, undefined);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, undefined);
+  assert.equal(item.requestedHumanAction, undefined);
+
+  assert.equal(countEvents(), beforeEvents + 1, "exactly one new event row");
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string; payload: string };
+  assert.equal(evRow.event_type, "campaign_item.out_of_band_reconciled");
+  const payload = JSON.parse(evRow.payload) as { ticketId: string; decidedBy: string; evidence: unknown };
+  assert.equal(payload.ticketId, ticketId);
+  assert.equal(payload.decidedBy, "steve");
+  assert.ok(payload.evidence, "evidence must be embedded in the audit payload");
+
+  // Campaign-level completion happens exclusively via the SAME unmodified
+  // driveRemainingItems bottom-of-loop transition the scope-blocked end-to-end
+  // test above exercises — reconcileCampaign's out-of-band branch never calls
+  // tryTransitionCampaign itself.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "complete",
+  });
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+  assert.equal(resumeResult.stopReason, "complete");
+  assert.equal(getCampaign(campaignId)!.status, "complete", "campaign reaches complete once its only item is terminal");
+});
+
+test("out-of-band: all-evidence-present (host-verification lane) ships via reconcileCampaign", () => {
+  const ticketId = "FG-511";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped");
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+// ── coexistence: an out-of-band item and a scope-blocked item in the same call ──
+
+test("out-of-band: coexists with a scope-blocked item in the same reconcileCampaign call, each routed to its own evaluator", () => {
+  writeTicket(projectDir, { id: "FG-520", type: "story", status: "active", title: "t1", body: "" });
+  writeTicket(projectDir, { id: "FG-521", type: "story", status: "active", title: "t2", body: "" });
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-520", "FG-521"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved" });
+
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaign.id) as { id: string; ticket_id: string }[];
+  const scopeItem = items.find((i) => i.ticket_id === "FG-520")!;
+  const oobItem = items.find((i) => i.ticket_id === "FG-521")!;
+  const scopeRunId = `run-${scopeItem.id}`;
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ?, reason = 'stale red fail' WHERE id = ?"
+  ).run(scopeRunId, scopeItem.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required' WHERE id = ?"
+  ).run(oobItem.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  seedAllEvidence("FG-520", scopeRunId);
+  seedOutOfBandDocsEvidence("FG-521");
+
+  const result = reconcileCampaign(campaign.id);
+  assert.equal(result.items.length, 2);
+
+  const scopeResult = result.items.find((i) => i.ticketId === "FG-520")!;
+  const oobResult = result.items.find((i) => i.ticketId === "FG-521")!;
+  assert.equal(scopeResult.status, "shipped");
+  assert.equal(oobResult.status, "shipped");
+
+  const scopeEvent = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(scopeRunId) as { event_type: string };
+  assert.equal(scopeEvent.event_type, "campaign_item.evidence_reconciled", "scope-blocked item routes through the unchanged evidence-reconciled path");
+
+  const oobEvent = db
+    .prepare("SELECT event_type FROM events WHERE run_id IS NULL ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string };
+  assert.equal(oobEvent.event_type, "campaign_item.out_of_band_reconciled", "out-of-band item routes through the distinct out-of-band-reconciled path");
+});
+
+// ── paused-guard race, for the out-of-band branch specifically ─────────────────
+
+test("out-of-band: concurrent flip — campaign leaves 'paused' between the up-front check and the atomic write — item is NOT mutated", () => {
+  const ticketId = "FG-530";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const collectOutOfBand: typeof collectOutOfBandEvidence = (dir, item) => {
+    db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(campaignId);
+    return collectOutOfBandEvidence(dir, item);
+  };
+
+  const result = reconcileCampaign(campaignId, { collectOutOfBandEvidence: collectOutOfBand });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason ?? "", /left 'paused'/);
+  assert.deepEqual(result.items, [], "the item that lost the race must not be reported as shipped");
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical — zero mutation");
+  assert.equal(countEvents(), beforeEvents, "no audit event logged for a write that never landed");
+});
+
+// ── not_applicable: awaiting_gate items WITH a blockerKind are not out-of-band candidates ──
+
+test("out-of-band: an awaiting_gate item that DOES carry a blockerKind is reported not_applicable (not out-of-band-eligible)", () => {
+  writeTicket(projectDir, { id: "FG-540", type: "story", status: "active", title: "t", body: "" });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-540"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "approved" });
+  const items = listCampaignItems(campaign.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = 'campaign_system', requested_human_action = 'inspect' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  const beforeItem = getCampaignItem(items[0]!.id)!;
+  const result = reconcileCampaign(campaign.id);
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0]!.status, "not_applicable");
+  assert.deepEqual(getCampaignItem(items[0]!.id)!, beforeItem);
 });

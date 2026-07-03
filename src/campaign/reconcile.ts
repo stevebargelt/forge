@@ -1,24 +1,35 @@
-// FG-428: `forge campaign reconcile <campaign-id>` — on-demand operator recovery
-// for a campaign item wedged on a stale historical authoritative red-fail.
+// FG-428/FG-443: `forge campaign reconcile <campaign-id>` — on-demand operator
+// recovery for a campaign item wedged on a stale historical authoritative
+// red-fail (FG-428), or parked at a human gate because its ticket was delivered
+// through a re-routed, non-pipeline lane rather than the feature run itself
+// (FG-443).
 //
-// This is a TRUST-GATE WRITE PATH: it can mark an item shipped. It accepts no
-// operator-supplied evidence ARGUMENT of any kind — every fact is re-derived from
-// durable Forge/git/backlog/host-verification records via reconcile-collect.ts +
-// reconcile-evidence.ts (see reconcile-evidence.ts's header for how the two
-// frontmatter-derived facts are still cross-checked against non-editable
-// evidence). An item is mutated ONLY when all five facts hold AND the campaign
-// is still 'paused' at write time; every refusal leaves state untouched.
+// This is a TRUST-GATE WRITE PATH: it can mark an item shipped/complete. It
+// accepts no operator-supplied evidence ARGUMENT of any kind — every fact is
+// re-derived from durable Forge/git/backlog/host-verification records via
+// reconcile-collect.ts + reconcile-evidence.ts for the scope-blocked shape, or
+// reconcile-outofband-collect.ts + reconcile-outofband-evidence.ts for the
+// awaiting_gate/non-pipeline shape (see each evidence module's header for what
+// it requires). An item is mutated ONLY when its branch's facts all hold AND
+// the campaign is still 'paused' at write time; every refusal leaves state
+// untouched.
 //
 // This is NOT the automatic reconciliation on the normal outcome path (FG-427) —
 // that runs during driveWorkflowItem; this is the operator-triggered recovery
-// command, sharing the same evidence-derivation logic.
+// command, sharing the same evidence-derivation logic. Neither branch calls
+// tryTransitionCampaign — campaign-level completion happens exclusively via
+// driveRemainingItems's existing bottom-of-loop transition once every item
+// lands in a terminal lifecycle status.
 
 import { getDb } from "../store/db.js";
 import { getCampaign, listCampaignItems, updateCampaignItemIfCampaignPaused } from "../store/campaigns.js";
 import { logEvent } from "../store/events.js";
+import type { EventType } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
 import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
+import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
+import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import type { CampaignItemLifecycleStatus } from "../types/index.js";
 
 export type ReconcileItemStatus = "shipped" | "refused" | "not_applicable";
@@ -45,7 +56,11 @@ const RECONCILABLE_LIFECYCLE_STATUSES: ReadonlySet<CampaignItemLifecycleStatus> 
 
 export function reconcileCampaign(
   campaignId: string,
-  opts: { decidedBy?: string; collectEvidence?: typeof collectReconcileEvidence } = {}
+  opts: {
+    decidedBy?: string;
+    collectEvidence?: typeof collectReconcileEvidence;
+    collectOutOfBandEvidence?: typeof collectOutOfBandEvidence;
+  } = {}
 ): ReconcileCampaignResult {
   const campaign = getCampaign(campaignId);
   if (!campaign) {
@@ -68,20 +83,45 @@ export function reconcileCampaign(
 
   const projectDir = campaign.projectDir;
   const collect = opts.collectEvidence ?? collectReconcileEvidence;
+  const collectOutOfBand = opts.collectOutOfBandEvidence ?? collectOutOfBandEvidence;
   const items = listCampaignItems(campaignId);
   const results: ReconcileItemResult[] = [];
 
   for (const item of items) {
-    if (item.blockerKind !== "scope" || !RECONCILABLE_LIFECYCLE_STATUSES.has(item.lifecycleStatus)) {
+    const isScopeBlocked =
+      item.blockerKind === "scope" && RECONCILABLE_LIFECYCLE_STATUSES.has(item.lifecycleStatus);
+    // executor.ts:451-460's gate:human path is the ONLY producer of 'awaiting_gate'
+    // and it never sets blockerKind — that absence is exactly what distinguishes an
+    // out-of-band-eligible item from a scope-blocked one (which always carries
+    // blockerKind: 'scope').
+    const isOutOfBand = item.lifecycleStatus === "awaiting_gate" && !item.blockerKind;
+
+    if (!isScopeBlocked && !isOutOfBand) {
       results.push({ ticketId: item.ticketId, status: "not_applicable" });
       continue;
     }
 
-    const collected = collect(projectDir, item);
-    const evaluated = evaluateReconcileEvidence(collected);
+    let eligible: boolean;
+    let missing: string[];
+    let evidence: unknown;
+    let eventType: EventType;
 
-    if (!evaluated.eligible) {
-      results.push({ ticketId: item.ticketId, status: "refused", missing: evaluated.missing });
+    if (isScopeBlocked) {
+      const evaluated = evaluateReconcileEvidence(collect(projectDir, item));
+      eligible = evaluated.eligible;
+      missing = evaluated.missing;
+      evidence = evaluated.evidence;
+      eventType = "campaign_item.evidence_reconciled";
+    } else {
+      const evaluated = evaluateOutOfBandEvidence(collectOutOfBand(projectDir, item));
+      eligible = evaluated.eligible;
+      missing = evaluated.missing;
+      evidence = evaluated.evidence;
+      eventType = "campaign_item.out_of_band_reconciled";
+    }
+
+    if (!eligible) {
+      results.push({ ticketId: item.ticketId, status: "refused", missing });
       continue;
     }
 
@@ -100,13 +140,13 @@ export function reconcileCampaign(
         requestedHumanAction: undefined,
       });
       if (!applied) return false;
-      logEvent("campaign_item.evidence_reconciled", {
+      logEvent(eventType, {
         runId: item.runId,
         payload: {
           campaignId,
           itemId: item.id,
           ticketId: item.ticketId,
-          evidence: evaluated.evidence,
+          evidence,
           decidedBy: opts.decidedBy ?? "operator",
           decidedAt: nowIso(),
         },

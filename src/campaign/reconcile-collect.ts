@@ -29,7 +29,7 @@ function readConfigString(projectDir: string, key: string, fallback: string): st
 const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
-function checkClosedCommitReachableOnBase(
+export function checkClosedCommitReachableOnBase(
   projectDir: string,
   closedCommit: string,
   baseBranch: string

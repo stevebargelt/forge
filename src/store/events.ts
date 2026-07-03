@@ -49,7 +49,13 @@ export type EventType =
   // FG-428: operator-triggered `campaign reconcile` shipped a wedged item after
   // re-deriving its outcome from durable evidence. Distinct from run.reconciled /
   // task.reconciled (crash-recovery) — this is a trust-gate write, not a crash repair.
-  | "campaign_item.evidence_reconciled";
+  | "campaign_item.evidence_reconciled"
+  // FG-443: operator-triggered `campaign reconcile` shipped an awaiting_gate item
+  // that was delivered outside the feature pipeline (re-routed lane), after
+  // re-deriving delivery from durable evidence. Distinct from
+  // campaign_item.evidence_reconciled — that event covers the scope-blocked
+  // stale-red-fail shape; this one covers the non-pipeline/awaiting_gate shape.
+  | "campaign_item.out_of_band_reconciled";
 
 export type Event = {
   id: number;

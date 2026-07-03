@@ -24,6 +24,8 @@ import { resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
 import { campaignBlocker } from "./executor.js";
+import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
+import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 
 // Local — not exported; flows through DB as a plain string, never as a TS import
 type ItemExecutionMode = "workflow" | "invoke";
@@ -143,6 +145,26 @@ function recoveryNeededAction(item: CampaignItem): string {
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
 }
 
+// FG-443: distinguishes an awaiting_gate item that was actually delivered outside
+// the feature pipeline (re-routed lane) — and is therefore completable via the
+// evidence-gated `forge campaign reconcile` out-of-band path — from a genuine
+// unfinished human gate. Only awaiting_gate items with no blockerKind are ever
+// out-of-band candidates (see reconcile.ts's isOutOfBand routing); best-effort —
+// any collection/evaluation error falls through to the generic gate text.
+function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): string | null {
+  if (item.lifecycleStatus !== "awaiting_gate" || item.blockerKind) return null;
+  if (!campaign.projectDir) return null;
+  try {
+    const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
+    if (evaluated.eligible) {
+      return `${item.ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
+    }
+  } catch {
+    // best-effort — fall through to the generic gate text
+  }
+  return null;
+}
+
 function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -160,7 +182,11 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
     const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
-    if (gateParkedItem?.requestedHumanAction) return gateParkedItem.requestedHumanAction;
+    if (gateParkedItem) {
+      const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
+      if (outOfBand) return outOfBand;
+      if (gateParkedItem.requestedHumanAction) return gateParkedItem.requestedHumanAction;
+    }
     const readinessHeld = items.find((i) => i.outcome === "held" && i.blockerKind === "readiness");
     if (readinessHeld) return `refine ${readinessHeld.ticketId} then resume`;
     return "resume";
@@ -268,7 +294,11 @@ function computeNextOperatorAction(
     }
     // Parked at a human gate or red block: surface the specific gate/block action.
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
-    if (gateParkedItem?.requestedHumanAction) return gateParkedItem.requestedHumanAction;
+    if (gateParkedItem) {
+      const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
+      if (outOfBand) return outOfBand;
+      if (gateParkedItem.requestedHumanAction) return gateParkedItem.requestedHumanAction;
+    }
     // Blockers resolved but held items remain: resume will reconsider them.
     const heldItems = items.filter((i) => i.outcome === "held");
     if (heldItems.length > 0) {
