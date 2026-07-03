@@ -15,7 +15,7 @@ import {
   updateCampaignItem,
 } from "../store/campaigns.js";
 import { planCampaign } from "./planner.js";
-import { writeTicket } from "../backlog/structured.js";
+import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { assembleCampaignShow, assembleCampaignReport, setDoneAuditMapForTest } from "./report.js";
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { campaignBlocker } from "./executor.js";
@@ -1982,4 +1982,110 @@ test("FG-419: assembleCampaignReport hostVerificationDetail populated for fail h
   } finally {
     setDoneAuditMapForTest(prev);
   }
+});
+
+// ── FG-443: out-of-band completable distinction on the operator surface ────────
+
+test("assembleCampaignShow/assembleCampaignReport: awaiting_gate item delivered out-of-band (docs lane) → next action names the completable path, not the generic gate text", () => {
+  // -b main: reachability is checked against the configured baseBranch (default
+  // 'main') — the container's global git default branch name isn't guaranteed to
+  // be 'main', so this must be explicit rather than relying on `git init` defaults.
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(
+    show.nextAction.includes("delivered out-of-band"),
+    `show.nextAction must name the out-of-band completable path, got: ${show.nextAction}`
+  );
+  assert.ok(show.nextAction.includes("FG-101"), `show.nextAction must name the ticket, got: ${show.nextAction}`);
+  assert.notEqual(show.nextAction, "Human gate required at step review", "must not fall back to the generic gate text when eligible");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(
+    report.nextOperatorAction.includes("delivered out-of-band"),
+    `nextOperatorAction must name the out-of-band completable path, got: ${report.nextOperatorAction}`
+  );
+  assert.notEqual(report.nextOperatorAction, "Human gate required at step review");
+});
+
+test("assembleCampaignShow/assembleCampaignReport: awaiting_gate item NOT out-of-band-eligible → falls back to the generic gate action text (unchanged)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+  // FG-101 stays 'active' — never closed, so out-of-band evidence can never be satisfied.
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.nextAction, "Human gate required at step review", "not eligible for out-of-band completion — falls back to the generic gate text");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.nextOperatorAction, "Human gate required at step review");
+});
+
+test("assembleCampaignShow: awaiting_gate item WITH a blockerKind is never treated as out-of-band-eligible, even with delivered evidence lying around", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  // blockerKind set — this is the scope-blocked-ish/campaign_system shape, not the
+  // gate:human shape (which never sets blockerKind). Must never be routed through
+  // the out-of-band evaluator regardless of ticket state.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = 'campaign_system', requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.nextAction, "Human gate required at step review", "blockerKind present — must not be treated as out-of-band-eligible");
 });

@@ -149,17 +149,18 @@ Prerequisites already filed: **FG-410** (`updateCampaignItem`'s read-merge-write
 
 ### Phase 6: Campaign Completion & Reconciliation Honesty
 
-Dogfooding a campaign end-to-end (campaign-922c83b7c577) surfaced a cluster of reconciliation and completion gaps this plan did not anticipate. That campaign is deliberately preserved in a paused state as the live evidence case: FG-357 only reconciled after recognizing a force-advanced gate and a later authoritative pass superseded a stale historical red-fail; FG-376 was only reconcilable after a MANUAL `forge record-host-verification` call because force-advanced/manually-driven items get no automatic post-merge host-verification; and FG-422 — correctly re-routed to a documentation-authoring lane and genuinely shipped — is stuck at `awaiting_gate` with no clean path to `complete` other than `abandon`, which would mislabel a fully-successful campaign.
+Dogfooding a campaign end-to-end (campaign-922c83b7c577) surfaced a cluster of reconciliation and completion gaps this plan did not anticipate. That campaign is deliberately preserved in a paused state as the live evidence case (left unmutated even after FG-443 shipped, so the original gap remains inspectable): FG-357 only reconciled after recognizing a force-advanced gate and a later authoritative pass superseded a stale historical red-fail; FG-376 was only reconcilable after a MANUAL `forge record-host-verification` call because force-advanced/manually-driven items get no automatic post-merge host-verification; and FG-422 — correctly re-routed to a documentation-authoring lane and genuinely shipped — is stuck at `awaiting_gate` with no clean path to `complete` other than `abandon` in that specific (frozen) campaign, a gap that `forge campaign reconcile`'s out-of-band path (see [Reconcile](concepts.md#reconcile)) now closes for any campaign going forward.
 
 - **FG-427**: campaign reconciliation honors a recorded force-advance or later authoritative pass instead of aggregating stale historical red-fails forever (underpins FG-440/FG-441).
 - **FG-440**: force-advanced/manually-driven campaign items get no post-merge host-verification, so evidence-gated reconcile refuses a legitimately merged-and-green item.
 - **FG-441**: campaign resume should reconcile manually-driven campaign item runs after merge/close.
 - **FG-442**: campaign planner should route each item into an execution lane instead of defaulting to full feature.
-- **FG-443**: campaign cannot cleanly COMPLETE an item legitimately delivered outside its feature pipeline (re-routed lane / out-of-band); the item stalls at `awaiting_gate` and only abandon remains.
+- **FG-443** — delivered: campaign cannot cleanly COMPLETE an item legitimately delivered outside its feature pipeline (re-routed lane / out-of-band); the item stalls at `awaiting_gate` and only abandon remains. `forge campaign reconcile` now also covers this `awaiting_gate`/no-`blockerKind` shape via the same evidence-gated model (ticket closed + `closedCommit` reachable on base + lane evidence), and `forge campaign show`/`report` name the completable path explicitly on the human-readable surface instead of the generic gate text. Documented in [Reconcile](concepts.md#reconcile).
+- **FG-444** (filed, not yet fixed): `forge campaign show`/`report`'s `Next action` line only evaluates FG-443's out-of-band eligibility for the first parked item it finds — a paused campaign with more than one concurrently-parked item hides the distinction for the rest.
 
 Exit criteria:
 
-- a legitimately-delivered out-of-band item (re-routed lane, docs-only, etc.) can be marked COMPLETE without resorting to `abandon`;
+- a legitimately-delivered out-of-band item (re-routed lane, docs-only, etc.) can be marked COMPLETE without resorting to `abandon` — done (FG-443);
 - force-advanced or manually-driven items automatically capture post-merge host-verification instead of requiring a manual `forge record-host-verification`;
 - campaign resume reconciles manually-driven campaign item runs after merge/close instead of staying wedged on stale campaign-item state;
 - the campaign planner assigns an explicit execution lane per item instead of silently defaulting every item to full feature;
