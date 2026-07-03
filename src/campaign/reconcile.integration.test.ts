@@ -1357,6 +1357,11 @@ test("FG-452 AC5: forge campaign show / report surface a host-verification-speci
     "campaign show must point the operator at reconcile for host-verification capture, not the generic architect-gate text"
   );
   assert.equal(showRow.requestedHumanAction, "Human gate required at step review", "the generic gate text is still present alongside the new hint, not replaced by it");
+  assert.match(
+    show.nextAction,
+    /forge campaign reconcile/,
+    "the top-level campaign show next-action must also point at reconcile, not the generic gate text"
+  );
 
   const report = assembleCampaignReport(campaignId)!;
   const reportRow = report.items.find((i) => i.ticketId === ticketId)!;
@@ -1364,6 +1369,16 @@ test("FG-452 AC5: forge campaign show / report surface a host-verification-speci
     reportRow.hostVerificationReconcileHint,
     showRow.hostVerificationReconcileHint,
     "campaign report must render the SAME operator-facing text as campaign show"
+  );
+  assert.match(
+    report.nextOperatorAction,
+    /forge campaign reconcile/,
+    "the top-level campaign report next-operator-action must also point at reconcile, not the generic gate text"
+  );
+  assert.equal(
+    report.nextOperatorAction,
+    show.nextAction,
+    "the two top-level next-action surfaces must agree word-for-word"
   );
 
   const humanLines = renderCampaignReportHuman(report);

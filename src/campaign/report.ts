@@ -236,6 +236,8 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
     if (gateParkedItem) {
       const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
+      const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
+      if (reconcileHint) return `run \`forge campaign reconcile\` to capture host verification for ${gateParkedItem.ticketId} and complete it`;
       if (gateParkedItem.requestedHumanAction) return gateParkedItem.requestedHumanAction;
     }
     const readinessHeld = items.find((i) => i.outcome === "held" && i.blockerKind === "readiness");
@@ -348,6 +350,8 @@ function computeNextOperatorAction(
     if (gateParkedItem) {
       const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
+      const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
+      if (reconcileHint) return `run \`forge campaign reconcile\` to capture host verification for ${gateParkedItem.ticketId} and complete it`;
       if (gateParkedItem.requestedHumanAction) return gateParkedItem.requestedHumanAction;
     }
     // Blockers resolved but held items remain: resume will reconsider them.
