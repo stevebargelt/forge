@@ -1,9 +1,11 @@
 ---
 id: FG-443
 type: story
-status: active
+status: done
 title: Campaign cannot cleanly COMPLETE an item legitimately delivered outside its feature pipeline (re-routed lane / out-of-band); item stalls at awaiting_gate and only abandon remains
 created: 2026-07-02
+closed: 2026-07-03
+closed_commit: 4bdd875
 ---
 
 ## Problem
