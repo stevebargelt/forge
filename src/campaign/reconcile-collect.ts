@@ -84,7 +84,7 @@ export function checkClosedCommitReachableOnBase(
 //     ancestry + base-reachability, not exit status).
 // Every sub-check is proven by git, never asserted — a git error on either
 // ancestry check is treated as NOT covered (safe-deny), never as covered.
-function checkClosedCommitCoveredByTestedSha(
+export function checkClosedCommitCoveredByTestedSha(
   projectDir: string,
   closedCommit: string,
   testedSha: string,

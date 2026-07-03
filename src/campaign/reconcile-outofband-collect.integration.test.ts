@@ -422,3 +422,125 @@ test("collectOutOfBandEvidence: closedCommitReachableOnBase respects a configure
   const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-408" }));
   assert.equal(result.closedCommitReachableOnBase, true, "reachable on the configured 'release' base, not main");
 });
+
+// ── FG-452: ancestry + base-reachability coverage replaces exact-sha (AC2/AC3) ──
+//
+// FG-440 records the tested CURRENT BASE HEAD, not closedCommit — a real
+// reconcile-captured row's commit_sha is almost always a later commit than the
+// ticket's closedCommit. The pre-FG-452 exact-sha query could never match such a
+// row (that was the FG-422 wedge); collectOutOfBandEvidence must now match by
+// ancestry (closedCommit is an ancestor of the row's tested sha) AND
+// base-reachability (that tested sha is itself on the configured base branch).
+
+test("collectOutOfBandEvidence: FG-452 AC2 — a row recorded at a LATER base HEAD than closedCommit (not an exact-sha match) still satisfies the host_verification lane", () => {
+  commitFile("README.md", "root", "root");
+  const closedCommit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-450");
+  writeTicket(projectDir, { id: "FG-450", type: "story", status: "done", closedCommit, title: "t", body: "" });
+  // Mirrors FG-440's reconcile-time capture: the row is recorded at the CURRENT
+  // base HEAD (one commit later than closedCommit), never at closedCommit itself.
+  const testedHead = commitFile("later.txt", "later", "close FG-450");
+  insertHostVerification({
+    ticketId: "FG-450",
+    projectDir,
+    commitSha: testedHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-450" }));
+  assert.notEqual(testedHead, closedCommit, "precondition: the row's tested sha is NOT the exact closedCommit");
+  assert.deepEqual(result.laneEvidence, { kind: "host_verification", recorded: true, allExitZero: true });
+});
+
+test("collectOutOfBandEvidence: FG-452 AC2 — passing-row model preserved: a failing covering row does not satisfy the lane, but a later passing covering row does, and both coexist", () => {
+  commitFile("README.md", "root", "root");
+  const closedCommit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-460");
+  writeTicket(projectDir, { id: "FG-460", type: "story", status: "done", closedCommit, title: "t", body: "" });
+
+  const failingTestedHead = commitFile("close-1.txt", "close 1", "close FG-460 (attempt 1)");
+  insertHostVerification({
+    ticketId: "FG-460",
+    projectDir,
+    commitSha: failingTestedHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 3,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  let result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-460" }));
+  assert.equal(result.laneEvidence, null, "a covering row that failed must not satisfy the lane");
+
+  const passingTestedHead = commitFile("close-2.txt", "close 2", "close FG-460 (attempt 2, fixed)");
+  insertHostVerification({
+    ticketId: "FG-460",
+    projectDir,
+    commitSha: passingTestedHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-02T00:00:00Z",
+  });
+
+  result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-460" }));
+  assert.deepEqual(
+    result.laneEvidence,
+    { kind: "host_verification", recorded: true, allExitZero: true },
+    "a later real green must satisfy the lane even though an earlier covering row failed"
+  );
+});
+
+test("collectOutOfBandEvidence: FG-452 AC3 (negative) — a row whose commit_sha closedCommit is NOT an ancestor of does not satisfy the lane", () => {
+  const earlierCommit = commitFile("early.txt", "early", "early base commit");
+  commitFile("README.md", "root readme", "root");
+  const closedCommit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-451");
+  writeTicket(projectDir, { id: "FG-451", type: "story", status: "done", closedCommit, title: "t", body: "" });
+
+  // earlierCommit predates closedCommit in history — closedCommit cannot be an
+  // ancestor of a commit that came before it.
+  insertHostVerification({
+    ticketId: "FG-451",
+    projectDir,
+    commitSha: earlierCommit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-451" }));
+  assert.equal(
+    result.laneEvidence,
+    null,
+    "a row whose tested sha does not descend from closedCommit must not satisfy the lane"
+  );
+});
+
+test("collectOutOfBandEvidence: FG-452 AC3 (negative) — a row whose tested sha descends from closedCommit but is NOT itself reachable on base does not satisfy the lane", () => {
+  commitFile("README.md", "root readme", "root");
+  const closedCommit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-452a");
+  writeTicket(projectDir, { id: "FG-452a", type: "story", status: "done", closedCommit, title: "t", body: "" });
+
+  gitExec(["checkout", "-b", "off-branch-verify"], projectDir);
+  const offBranchHead = commitFile("off-branch.txt", "off branch", "off-branch build, never merged");
+  gitExec(["checkout", "main"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-452a",
+    projectDir,
+    commitSha: offBranchHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-452a" }));
+  assert.equal(
+    result.laneEvidence,
+    null,
+    "closedCommit IS an ancestor of offBranchHead, but offBranchHead itself was never merged to base — must not satisfy the lane"
+  );
+});

@@ -145,7 +145,34 @@ export function reconcileCampaign(
       evidence = evaluated.evidence;
       eventType = "campaign_item.evidence_reconciled";
     } else {
-      const evaluated = evaluateOutOfBandEvidence(collectOutOfBand(projectDir, item));
+      let collected = collectOutOfBand(projectDir, item);
+      // FG-452: parity with the scope-blocked needsCapture above — capture only
+      // for the CODE-TOUCHING sub-lane. collectOutOfBandEvidence's laneEvidence is
+      // {kind:"non_code_diff"} whenever the closing commit touches only non-code
+      // paths (that sub-lane needs no host verification at all — see AC4), and
+      // {kind:"host_verification", ...} only once a covering PASSING row already
+      // exists (see reconcile-outofband-collect.ts's passing-row model). So
+      // laneEvidence === null, with ticketClosedCommit present, means exactly
+      // "code-touching and not yet covered by a passing row" — the same gate
+      // shape as the scope-blocked branch's needsCapture.
+      const needsCapture =
+        !!collected.ticketClosedCommit &&
+        collected.closedCommitReachableOnBase === true &&
+        collected.laneEvidence === null;
+      if (needsCapture) {
+        // Same infra-error isolation as the scope-blocked branch above: a throw
+        // here degrades only THIS item to its normal lane_evidence_missing
+        // refusal path — never crashes the reconcile loop for other items.
+        try {
+          runGate(projectDir, item.ticketId, { runId: item.runId ?? null });
+        } catch (err) {
+          console.error(
+            `reconcile: host-verification capture failed for ${item.ticketId} — item degrades to its normal refusal path: ${(err as Error).message ?? String(err)}`
+          );
+        }
+        collected = collectOutOfBand(projectDir, item);
+      }
+      const evaluated = evaluateOutOfBandEvidence(collected);
       eligible = evaluated.eligible;
       missing = evaluated.missing;
       evidence = evaluated.evidence;

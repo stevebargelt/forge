@@ -171,8 +171,8 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
 // captured automatically on the next reconcile/drive run" from "the gate ran
 // for real and failed" for a scope-blocked item, so the report never renders a
 // genuine failure as something pending or overridable. Only meaningful for
-// blockerKind==='scope' items (out-of-band items use their own lane-evidence
-// path above); best-effort — any collection/evaluation error yields no hint.
+// blockerKind==='scope' items (out-of-band items use their own hint below);
+// best-effort — any collection/evaluation error yields no hint.
 function scopeBlockedHostVerificationHint(campaign: Campaign, item: CampaignItem): string | null {
   if (item.blockerKind !== "scope") return null;
   if (!campaign.projectDir) return null;
@@ -185,6 +185,35 @@ function scopeBlockedHostVerificationHint(campaign: Campaign, item: CampaignItem
   } catch {
     return null;
   }
+}
+
+// FG-452: the out-of-band counterpart to scopeBlockedHostVerificationHint above —
+// an out-of-band code-touching item that isn't eligible yet SOLELY because it has
+// no covering passing host-verification row must point the operator at
+// `forge campaign reconcile` (which captures that gate — see reconcile.ts's
+// out-of-band needsCapture), not the generic architect-gate text that
+// outOfBandCompletableAction / requestedHumanAction would otherwise surface.
+// missing === ["lane_evidence_missing"] alone is exactly the shape reconcile's
+// needsCapture gate acts on: ticket done, closedCommit present and reachable on
+// base, only the lane evidence (host verification for a code-touching commit, or
+// the non_code_diff classification) still unresolved. Best-effort — any
+// collection/evaluation error yields no hint.
+function outOfBandHostVerificationHint(campaign: Campaign, item: CampaignItem): string | null {
+  if (item.lifecycleStatus !== "awaiting_gate" || item.blockerKind) return null;
+  if (!campaign.projectDir) return null;
+  try {
+    const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
+    if (evaluated.eligible) return null;
+    if (evaluated.missing.length === 1 && evaluated.missing[0] === "lane_evidence_missing") {
+      return (
+        "lane_evidence_missing (no covering passing host-verification row recorded yet for this out-of-band " +
+        "delivery — run `forge campaign reconcile` to capture a real host-verification gate and re-check)"
+      );
+    }
+  } catch {
+    // best-effort — fall through to no hint
+  }
+  return null;
 }
 
 function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): string {
@@ -413,7 +442,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     reason: i.reason ?? null,
     requestedHumanAction: i.requestedHumanAction ?? null,
     readiness: readinessMap.get(i.ticketId) ?? null,
-    hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i),
+    hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
   }));
 
   const nextAction = computeNextShowAction(campaign, items);
@@ -618,7 +647,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
       hostVerificationDetail:
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
-      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i),
+      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
       reviewerResult: null,
       executionMode,
       workflowName,
