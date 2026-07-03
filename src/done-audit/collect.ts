@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
 import { tasksForRun } from "../store/tasks.js";
-import { queryHostVerificationRows } from "../store/host-verifications.js";
+import { queryHostVerificationRowsForGate } from "../store/host-verifications.js";
+import { checkClosedCommitCoveredByTestedSha } from "../campaign/reconcile-collect.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
@@ -124,26 +125,33 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
   if (closedCommit) {
     try {
       let requiredGate = "npm run test:all";
+      let baseBranch = "main";
       try {
         const configRaw = readFileSync(join(projectDir, ".forge", "config.json"), "utf8");
         const config = JSON.parse(configRaw) as Record<string, unknown>;
         if (typeof config["requiredHostGate"] === "string") {
           requiredGate = config["requiredHostGate"];
         }
+        if (typeof config["baseBranch"] === "string") {
+          baseBranch = config["baseBranch"];
+        }
       } catch {
-        // missing or malformed config — default stands
+        // missing or malformed config — defaults stand
       }
 
-      const rows = queryHostVerificationRows(ticketId, projectDir, closedCommit, requiredGate);
-      if (rows.length > 0) {
-        const anyFail = rows.some((r) => r.exitCode !== 0);
+      const rows = queryHostVerificationRowsForGate(ticketId, projectDir, requiredGate);
+      const covering = rows.filter((r) =>
+        checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch)
+      );
+      if (covering.length > 0) {
+        const anyFail = covering.some((r) => r.exitCode !== 0);
         hostVerified = !anyFail;
         // When any row fails (any-fail-wins), use the first failing row so the displayed
         // evidence matches the verdict — the trailing pass row must not overwrite it.
-        const detailRow = anyFail ? rows.find((r) => r.exitCode !== 0)! : rows[rows.length - 1]!;
+        const detailRow = anyFail ? covering.find((r) => r.exitCode !== 0)! : covering[covering.length - 1]!;
         hostVerificationDetail =
           `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${closedCommit}; recorded_at: ${detailRow.recordedAt}`;
+          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}`;
       }
     } catch {
       // hostVerified stays null on any store error

@@ -33,7 +33,7 @@ import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { reconcileCampaign } from "./reconcile.js";
 import { collectReconcileEvidence, runAndRecordHostVerification } from "./reconcile-collect.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
-import { assembleCampaignReport, assembleCampaignShow } from "./report.js";
+import { assembleCampaignReport, assembleCampaignShow, renderCampaignReportHuman } from "./report.js";
 
 // Same wrapper as executor.test.ts: forces executionMode:'invoke' for list-type
 // campaigns so resumeCampaign's dispatch path is trivially mockable.
@@ -1126,5 +1126,290 @@ test("FG-440: report.ts AND campaign show render distinct host-verification hint
     showRowB.hostVerificationReconcileHint,
     showRowA.hostVerificationReconcileHint,
     "campaign show itself must distinguish the two reason codes, not just report"
+  );
+});
+
+// ── FG-452: out-of-band CODE-TOUCHING lane brought to parity with the
+// scope-blocked lane — reconcile-time host-verification capture (AC1), ancestry
+// + base-reachability matching in place of exact-sha (AC2, negative in AC3),
+// non_code_diff untouched (AC4), operator-surface hint (AC5), and the FG-422
+// live-repro shape (AC6): out-of-band, code-touching, closedCommit reachable on
+// base, no prior passing row — exactly what wedged campaign-922c83b7c577.
+
+test("FG-452 AC1/AC6 (FG-422 live-repro shape): out-of-band code-touching item with no covering row gets captured for real in projectDir at HEAD and ships within one reconcileCampaign call", async () => {
+  const ticketId = "FG-700";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+
+  const commit = commitGateScript(`impl-${ticketId}`, "exit 0");
+  closeTicket(projectDir, ticketId, commit);
+  // Mirrors FG-422: the ticket-close commit lands one commit behind projectDir's
+  // actual current HEAD by the time reconcile runs.
+  const testedHead = commitPendingChanges(`close ${ticketId}`);
+
+  assert.equal(
+    queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length,
+    0,
+    "precondition: no row exists yet — exactly FG-422's wedge shape (merged and closed, but no host-verification row)"
+  );
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped", "the captured gate passed for real, in the same reconcileCampaign call");
+
+  const rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 1, "exactly one real row written from the actual gate run");
+  assert.equal(rows[0]!.exitCode, 0);
+  assert.equal(rows[0]!.commitSha, testedHead, "recorded commitSha is the REAL tested HEAD");
+  assert.notEqual(
+    rows[0]!.commitSha,
+    commit,
+    "the tested HEAD advanced one commit past closedCommit — an exact-sha match against closedCommit could never have found this row (the FG-452 bug)"
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+
+  // Drive the campaign itself to 'complete' (same mechanism as the out-of-band
+  // end-to-end test above — reconcileCampaign never transitions the campaign
+  // itself; only resumeCampaign's bottom-of-loop check does) and prove the
+  // done-audit surface built on the SAME captured row agrees the item's host
+  // verification is satisfied. src/done-audit/collect.ts's host-verification
+  // lookup used to match rows by EXACT commit_sha === closedCommit — the row
+  // above is recorded at testedHead, one commit past closedCommit, so an
+  // exact-sha lookup would find nothing and report host_verification as
+  // "unknown" even though it shipped on a real passing gate. (pushed/
+  // container_verification are independently "unknown" in this fixture — no
+  // remote, no container run — that's unrelated to this check and expected.)
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-fake",
+    taskId: "task-fake",
+    status: "complete",
+  });
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+  assert.equal(resumeResult.stopReason, "complete");
+  assert.equal(getCampaign(campaignId)!.status, "complete");
+
+  const report = assembleCampaignReport(campaignId)!;
+  const reportItem = report.items.find((i) => i.ticketId === ticketId)!;
+  const hostCheck = reportItem.doneAuditState?.checks.find((c) => c.name === "host_verification");
+  assert.equal(
+    hostCheck?.status,
+    "pass",
+    `the captured host-verification row must be found via ancestry, not exact-sha: ${JSON.stringify(reportItem.doneAuditState)}`
+  );
+  assert.match(
+    hostCheck?.detail ?? "",
+    /exit_code: 0/,
+    `host_verification detail must reflect the real captured row: ${hostCheck?.detail}`
+  );
+});
+
+test("FG-452 AC1: capture SKIP (no requiredHostGate script in projectDir) writes no row — out-of-band item stays refused with lane_evidence_missing", () => {
+  const ticketId = "FG-701";
+  const { campaignId } = setupAwaitingGateCampaign(ticketId);
+
+  const commit = makeCommit(`impl-${ticketId}`); // no package.json at all
+  closeTicket(projectDir, ticketId, commit);
+  commitPendingChanges(`close ${ticketId}`); // tree clean — the skip is due to the missing script, not a dirty tree
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+  assert.equal(
+    queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length,
+    0,
+    "a skip must never write a synthetic pass row"
+  );
+});
+
+test("FG-452 AC1: an already-covering PASSING row is never re-run — the injected gate writer is not invoked", () => {
+  const ticketId = "FG-702";
+  const { campaignId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId); // records verification at the exact closedCommit — trivially self-covering
+
+  let invoked = false;
+  const spyRunGate: typeof runAndRecordHostVerification = (dir, ticket, opts) => {
+    invoked = true;
+    return runAndRecordHostVerification(dir, ticket, opts);
+  };
+
+  const result = reconcileCampaign(campaignId, { runAndRecordHostVerification: spyRunGate });
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(invoked, false, "an already-covering row (real pass) must never trigger a re-run of the gate");
+});
+
+test("FG-452 AC1: an infra error thrown by the gate invocation in the OUT-OF-BAND branch does not crash reconcileCampaign — that item degrades to its normal refusal and OTHER items in the same call still process", () => {
+  writeTicket(projectDir, { id: "FG-703", type: "story", status: "active", title: "t1", body: "" });
+  writeTicket(projectDir, { id: "FG-704", type: "story", status: "active", title: "t2", body: "" });
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-703", "FG-704"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved" });
+
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaign.id) as { id: string; ticket_id: string }[];
+  const item1 = items.find((i) => i.ticket_id === "FG-703")!;
+  const item2 = items.find((i) => i.ticket_id === "FG-704")!;
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required' WHERE id = ?"
+  ).run(item1.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required' WHERE id = ?"
+  ).run(item2.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  // FG-703: code-touching, no covering row — capture will be attempted, and the
+  // injected stub throws for exactly this ticket.
+  seedOutOfBandCodeEvidence("FG-703", { recordVerification: false });
+  // FG-704: docs lane already satisfied — capture is never attempted for it (AC4),
+  // so the throwing stub is never invoked on its behalf either.
+  seedOutOfBandDocsEvidence("FG-704");
+
+  const throwingRunGate: typeof runAndRecordHostVerification = (dir, ticketId, opts) => {
+    if (ticketId === "FG-703") throw new Error("simulated infra failure (e.g. git unreachable)");
+    return runAndRecordHostVerification(dir, ticketId, opts);
+  };
+
+  const result = reconcileCampaign(campaign.id, { runAndRecordHostVerification: throwingRunGate });
+  assert.equal(result.ok, true, "reconcileCampaign must not crash on an infra error thrown by the out-of-band gate invocation");
+  assert.equal(result.items.length, 2, "both items are still processed — the throw degrades only FG-703, never the loop");
+
+  const r1 = result.items.find((i) => i.ticketId === "FG-703")!;
+  const r2 = result.items.find((i) => i.ticketId === "FG-704")!;
+  assert.equal(r1.status, "refused", "FG-703's capture threw — it degrades to its normal lane_evidence_missing refusal, never a crash");
+  assert.deepEqual(r1.missing, ["lane_evidence_missing"]);
+  assert.equal(r2.status, "shipped", "FG-704 never needed capture and ships normally, proving the loop reached it after FG-703's error");
+});
+
+test("FG-452 FIX2 parity: a failing covering row does not permanently wedge an out-of-band code-touching item — a subsequent reconcileCampaign call re-runs the gate, and a later real green ships it", () => {
+  const ticketId = "FG-705";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+
+  const failingCommit = commitGateScript(`impl-${ticketId}`, "exit 5");
+  closeTicket(projectDir, ticketId, failingCommit);
+  const failingTestedHead = commitPendingChanges(`close ${ticketId}`);
+
+  const firstResult = reconcileCampaign(campaignId);
+  assert.equal(firstResult.items[0]!.status, "refused", "the gate ran for real and failed");
+  assert.deepEqual(firstResult.items[0]!.missing, ["lane_evidence_missing"]);
+
+  let rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.exitCode, 5);
+  assert.equal(rows[0]!.commitSha, failingTestedHead);
+
+  // Operator fixes the gate and advances HEAD further — no new evidence needed,
+  // reconcile re-derives everything.
+  const passingTestedHead = commitGateScript(`fix-${ticketId}`, "exit 0");
+
+  const secondResult = reconcileCampaign(campaignId);
+  assert.equal(
+    secondResult.items[0]!.status,
+    "shipped",
+    "the earlier failing row must not permanently wedge the out-of-band item — a later real green must ship it"
+  );
+
+  rows = queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all");
+  assert.equal(rows.length, 2, "the old failing row is never overwritten — it coexists alongside the new passing row");
+  const failing = rows.find((r) => r.exitCode === 5)!;
+  const passing = rows.find((r) => r.exitCode === 0)!;
+  assert.equal(failing.commitSha, failingTestedHead);
+  assert.equal(passing.commitSha, passingTestedHead);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-452 AC4: out-of-band non_code_diff sub-lane never triggers capture — the injected gate writer is not invoked, and it still completes on lane evidence alone", () => {
+  const ticketId = "FG-706";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandDocsEvidence(ticketId);
+
+  let invoked = false;
+  const spyRunGate: typeof runAndRecordHostVerification = (dir, ticket, opts) => {
+    invoked = true;
+    return runAndRecordHostVerification(dir, ticket, opts);
+  };
+
+  const result = reconcileCampaign(campaignId, { runAndRecordHostVerification: spyRunGate });
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(invoked, false, "the non_code_diff lane needs no host verification — capture must never be attempted for it");
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-452 AC5: forge campaign show / report surface a host-verification-specific hint (not generic architect-gate text) for an out-of-band code-touching item not yet verified", () => {
+  const ticketId = "FG-707";
+  const { campaignId } = setupAwaitingGateCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId, { recordVerification: false });
+
+  const show = assembleCampaignShow(campaignId)!;
+  const showRow = show.items.find((i) => i.ticketId === ticketId)!;
+  assert.match(
+    showRow.hostVerificationReconcileHint ?? "",
+    /forge campaign reconcile/,
+    "campaign show must point the operator at reconcile for host-verification capture, not the generic architect-gate text"
+  );
+  assert.equal(showRow.requestedHumanAction, "Human gate required at step review", "the generic gate text is still present alongside the new hint, not replaced by it");
+  assert.match(
+    show.nextAction,
+    /forge campaign reconcile/,
+    "the top-level campaign show next-action must also point at reconcile, not the generic gate text"
+  );
+
+  const report = assembleCampaignReport(campaignId)!;
+  const reportRow = report.items.find((i) => i.ticketId === ticketId)!;
+  assert.equal(
+    reportRow.hostVerificationReconcileHint,
+    showRow.hostVerificationReconcileHint,
+    "campaign report must render the SAME operator-facing text as campaign show"
+  );
+  assert.match(
+    report.nextOperatorAction,
+    /forge campaign reconcile/,
+    "the top-level campaign report next-operator-action must also point at reconcile, not the generic gate text"
+  );
+  assert.equal(
+    report.nextOperatorAction,
+    show.nextAction,
+    "the two top-level next-action surfaces must agree word-for-word"
+  );
+
+  const humanLines = renderCampaignReportHuman(report);
+  const hintLine = humanLines.find((l) => l.includes("host-verification-status:"));
+  assert.ok(hintLine, "the human-rendered report must include a host-verification-status line for this item");
+  assert.match(hintLine!, /forge campaign reconcile/);
+});
+
+test("FG-452 AC5: the hint disappears once the item ships via reconcile — it must not linger and mislead after the gap it names is closed", () => {
+  const ticketId = "FG-708";
+  const { campaignId } = setupAwaitingGateCampaign(ticketId);
+
+  const commit = commitGateScript(`impl-${ticketId}`, "exit 0");
+  closeTicket(projectDir, ticketId, commit);
+  commitPendingChanges(`close ${ticketId}`);
+
+  const beforeShow = assembleCampaignShow(campaignId)!;
+  assert.match(
+    beforeShow.items.find((i) => i.ticketId === ticketId)!.hostVerificationReconcileHint ?? "",
+    /forge campaign reconcile/
+  );
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped");
+
+  const afterShow = assembleCampaignShow(campaignId)!;
+  const afterRow = afterShow.items.find((i) => i.ticketId === ticketId)!;
+  assert.equal(afterRow.lifecycleStatus, "complete");
+  assert.equal(
+    afterRow.hostVerificationReconcileHint,
+    null,
+    "once shipped the item is no longer awaiting_gate — the hint's guard clause returns null"
   );
 });

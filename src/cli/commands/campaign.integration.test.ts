@@ -2454,7 +2454,8 @@ test("integ FG-383: forge campaign report --json includes doneAuditState field o
 // ── FG-419 FIX 1: hostVerificationDetail rendered in human-readable report ────
 
 test("integ FG-419 FIX1: forge campaign report (human) renders host-verification detail in text output", () => {
-  const fakeCommit = "aabbccddeeff00112233445566778899aabbccdd";
+  gitExec(["init", "-b", "main"], projectDir);
+  const realCommit = makeCommitIn(projectDir, "impl-FG-101");
 
   // Re-write FG-101 with a closedCommit so collectDoneAuditInputFor queries host_verifications
   writeTicket(projectDir, {
@@ -2463,7 +2464,7 @@ test("integ FG-419 FIX1: forge campaign report (human) renders host-verification
     status: "active",
     title: "Story One",
     body: "",
-    closedCommit: fakeCommit,
+    closedCommit: realCommit,
   });
 
   const planResult = runForge([
@@ -2481,7 +2482,7 @@ test("integ FG-419 FIX1: forge campaign report (human) renders host-verification
   db.prepare(
     `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run("FG-101", projectDir, fakeCommit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T12:00:00Z");
+  ).run("FG-101", projectDir, realCommit, "npm run test:all", "npm run test:all", 0, null, "2026-01-01T12:00:00Z");
 
   // Set item to shipped and campaign to complete
   db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(planOutput.campaignId);
@@ -2506,7 +2507,7 @@ test("integ FG-419 FIX1: forge campaign report (human) renders host-verification
     `human-readable output must include the exit_code\nstdout: ${reportResult.stdout}`
   );
   assert.ok(
-    reportResult.stdout.includes(fakeCommit.slice(0, 8)),
+    reportResult.stdout.includes(realCommit.slice(0, 8)),
     `human-readable output must include the commit SHA\nstdout: ${reportResult.stdout}`
   );
   assert.ok(
@@ -3326,4 +3327,35 @@ test("integ campaign show (human, FG-440): prints a host-verification-status lin
   const jsonOutput = JSON.parse(jsonResult.stdout) as { items: { ticketId: string; hostVerificationReconcileHint: string | null }[] };
   const item = jsonOutput.items.find((i) => i.ticketId === "FG-624")!;
   assert.ok(item.hostVerificationReconcileHint?.includes("host_verification_not_recorded"));
+});
+
+// FG-452 AC5 parity: the FG-440 test above proves the human `forge campaign show`
+// surface for the scope-blocked lane. This is its out-of-band code-touching
+// counterpart — reconcile.integration.test.ts:1313 only asserted the JSON-shaped
+// hostVerificationReconcileHint field and renderCampaignReportHuman directly; it
+// never spawned a real `forge campaign show` subprocess and read its stdout.
+test("integ campaign show (human, FG-452): prints a host-verification-status line for an out-of-band code-touching item awaiting automatic capture", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupOutOfBandCliCampaign("FG-625");
+  makeCommitIn(projectDir, "base-FG-625");
+  const commit = commitFileIn(projectDir, "src/FG-625.ts", "export const x = 1;\n", "feat: FG-625");
+  closeTicket(projectDir, "FG-625", commit);
+  // Deliberately no host_verifications row inserted for this commit — the item
+  // stays awaiting_gate, which is the precondition for the hint to appear.
+
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(showResult.status, 0, `stdout: ${showResult.stdout}\nstderr: ${showResult.stderr}`);
+  assert.ok(
+    showResult.stdout.includes("host-verification-status:") && showResult.stdout.includes("forge campaign reconcile"),
+    `campaign show must surface the host-verification hint for an out-of-band code-touching item\nstdout: ${showResult.stdout}`
+  );
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as { items: { ticketId: string; hostVerificationReconcileHint: string | null }[] };
+  const item = jsonOutput.items.find((i) => i.ticketId === "FG-625")!;
+  assert.match(item.hostVerificationReconcileHint ?? "", /forge campaign reconcile/);
 });
