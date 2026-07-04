@@ -15,7 +15,7 @@ import {
   updateCampaignStatus,
   setPlanHash,
 } from "../store/campaigns.js";
-import { writeTicket } from "../backlog/structured.js";
+import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./executor.js";
@@ -220,6 +220,9 @@ test("happy path two-item: sequential ordering, items dispatched one at a time",
     const items = db.prepare("SELECT ticket_id, lifecycle_status FROM campaign_items ORDER BY item_order ASC").all() as { ticket_id: string; lifecycle_status: string }[];
     const snapshot = JSON.stringify(items.map((i) => `${i.ticket_id}:${i.lifecycle_status}`));
     dispatchLog.push({ ticketId: args.runTitle ?? "", itemSnapshotBefore: snapshot });
+    // Simulate the agent shipping the ticket as part of completing the dispatch —
+    // required for the item to reach lifecycleStatus 'complete' (FG-442 review Finding 1).
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -300,7 +303,7 @@ test("first-item failure (FG-393): item2 held (unknown relation, sequential), ca
 
 // ── start: shipped evidence ───────────────────────────────────────────────────
 
-test("shipped only with evidence: complete but ticket not done → outcome undefined", async () => {
+test("FG-442 review Finding 1: complete but ticket not done → outcome undefined, item parks awaiting_gate, campaign pauses (not complete)", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -308,7 +311,8 @@ test("shipped only with evidence: complete but ticket not done → outcome undef
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(result.stopReason, "complete");
+  assert.equal(result.stopReason, "paused", "campaign must not report complete when the ticket was never shipped");
+  assert.equal(result.itemRecords[0]?.lifecycleStatus, "awaiting_gate");
   assert.equal(result.itemRecords[0]?.outcome, undefined, "outcome must be undefined when ticket is not done");
 });
 
@@ -494,6 +498,7 @@ test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn i
       dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
         firstDispatchCount++;
         await Promise.resolve(); // yield so second call's sync section can run
+        closeTicket(projectDir, "FG-101", "abc123");
         return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
       },
     }),
@@ -589,6 +594,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 
     // startCampaign has no projectDirOverride — it always uses campaign.projectDir.
     // Mutating otherDir does NOT make the plan stale for the original projectDir.
+    closeTicket(projectDir, "FG-101", "abc123");
     const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
     assert.equal(
       result.stopReason,
@@ -602,7 +608,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 
 // ── shipped: done ticket without closedCommit ─────────────────────────────────
 
-test("shipped: ticket done but no closedCommit → outcome undefined (not shipped)", async () => {
+test("FG-442 review Finding 1: ticket done but no closedCommit → outcome undefined, item parks awaiting_gate, campaign pauses (not complete)", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -622,7 +628,8 @@ test("shipped: ticket done but no closedCommit → outcome undefined (not shippe
   });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(result.stopReason, "complete");
+  assert.equal(result.stopReason, "paused", "campaign must not report complete when the ticket has no closedCommit");
+  assert.equal(result.itemRecords[0]?.lifecycleStatus, "awaiting_gate");
   assert.equal(
     result.itemRecords[0]?.outcome,
     undefined,
@@ -773,6 +780,7 @@ test("driver skips terminal items: item1 complete, item2 pending — only item2 
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -837,6 +845,7 @@ test("resumeCampaign: transitions paused->running, skips completed item1, dispat
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1088,6 +1097,7 @@ test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1120,6 +1130,7 @@ test("edge: pause after last item — campaign stays paused, subsequent resume t
   // landing exactly after the last item's execution)
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1335,6 +1346,7 @@ test("last-item pause boundary: pause lands after final item completes — drive
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1482,6 +1494,7 @@ test("FG-394-fix: clean paused campaign (some complete, rest pending, no in-flig
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1788,6 +1801,7 @@ test("FG-393 T4: unknown relation CONTINUES in PILOT (later item dispatches)", a
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1827,6 +1841,7 @@ test("FG-393 T5: explicit INDEPENDENT relation continues (reason is exact string
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1946,6 +1961,7 @@ test("FG-393 T8: resume after blocker resolution reconsiders held items, dispatc
   const dispatchLog: string[] = [];
   const phase3Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2073,6 +2089,7 @@ test("FG-393 T4-reason: pilot-continued item has exact reason string 'continued 
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2120,6 +2137,7 @@ test("FG-393 multi-blocker v2: two local blocks; item dependent on first held; i
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2194,11 +2212,14 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    // FG-302 must actually ship (FG-442 review Finding 1) for the campaign to reach
+    // 'complete' — otherwise it would park at awaiting_gate and the campaign would pause.
+    closeTicket(projectDir, "FG-302", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
   const runResult = await startCampaign(campaign.id, { dispatch });
-  assert.equal(runResult.stopReason, "complete", "campaign must complete (FG-302 independent, no held items)");
+  assert.equal(runResult.stopReason, "complete", "campaign must complete (FG-302 independent, shipped; no held items)");
 
   const report = assembleCampaignReport(campaign.id)!;
   assert.equal(
@@ -2216,10 +2237,9 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
     0,
     "no held items in a completed campaign"
   );
-  assert.equal(
-    report.groupings.shipped.length,
-    0,
-    "FG-302 not shipped (ticket not done+closedCommit); FG-301 blocked — neither is in shipped grouping"
+  assert.ok(
+    report.groupings.shipped.includes("FG-302"),
+    "FG-302 shipped (ticket done+closedCommit) must appear in the shipped grouping"
   );
 });
 
@@ -2288,6 +2308,7 @@ test("FG-413: ready ticket → dispatched normally (readiness gate does not inte
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2316,6 +2337,7 @@ test("FG-413: exploratory ticket (spike marker in title) → dispatched without 
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
+    closeTicket(projectDir, "FG-802", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2344,6 +2366,7 @@ test("FG-413: resume — readiness-held item refined to ready → re-dispatched 
   let dispatchCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCount++;
+    closeTicket(projectDir, "FG-811", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2598,6 +2621,40 @@ test("FG-442 docs_only: single invoke dispatch to the stored agentRole; ships wh
   assert.equal(result.itemRecords[0]!.outcome, "shipped");
 });
 
+test("FG-442 review Finding 1: docs_only agent completes but ticket is NOT closed (no closedCommit) → item parks awaiting_gate, campaign pauses, never reports complete", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Ticket left active (not done, no closedCommit) — the agent "finished" without shipping.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-docs-noship",
+    taskId: "task-docs-noship",
+    status: "complete",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "campaign must pause, never report complete, when the item did not ship");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "awaiting_gate", "item must park at awaiting_gate, not complete");
+  assert.equal(result.itemRecords[0]!.outcome, undefined, "outcome must not be 'shipped' when the ticket was never closed");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused", "campaign must be paused, not complete/complete_with_issues");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.lifecycleStatus, "awaiting_gate");
+  assert.equal(items[0]!.blockerKind, undefined, "no blockerKind — this is the out-of-band shape `forge campaign reconcile` expects");
+  assert.ok(
+    items[0]!.requestedHumanAction?.includes("FG-101") && items[0]!.requestedHumanAction?.includes("reconcile"),
+    `requestedHumanAction must name the ticket and point at reconcile\ngot: ${items[0]!.requestedHumanAction}`
+  );
+});
+
 test("FG-442 quick_implementation: dispatches engineer then test-engineer on the SAME run; ships when both succeed", async () => {
   const itemOverrides: Record<string, ItemModeOverride> = {
     "FG-101": { lane: "quick_implementation", laneRationale: "test" },
@@ -2628,6 +2685,40 @@ test("FG-442 quick_implementation: dispatches engineer then test-engineer on the
   assert.equal(result.stopReason, "complete");
   assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
   assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-442 review Finding 1: quick_implementation both invokes complete but ticket is NOT closed (no closedCommit) → item parks awaiting_gate, campaign pauses, never reports complete", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Ticket left active (not done, no closedCommit) — both agents "finished" without shipping.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-quick-noship",
+    taskId: `task-${args.agentRole}-noship`,
+    status: "complete",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "campaign must pause, never report complete, when the item did not ship");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "awaiting_gate", "item must park at awaiting_gate, not complete");
+  assert.equal(result.itemRecords[0]!.outcome, undefined, "outcome must not be 'shipped' when the ticket was never closed");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused", "campaign must be paused, not complete/complete_with_issues");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.lifecycleStatus, "awaiting_gate");
+  assert.equal(items[0]!.blockerKind, undefined, "no blockerKind — this is the out-of-band shape `forge campaign reconcile` expects");
+  assert.ok(
+    items[0]!.requestedHumanAction?.includes("FG-101") && items[0]!.requestedHumanAction?.includes("reconcile"),
+    `requestedHumanAction must name the ticket and point at reconcile\ngot: ${items[0]!.requestedHumanAction}`
+  );
 });
 
 test("FG-442 quick_implementation: test-engineer failure blocks the item, does not silently ship", async () => {

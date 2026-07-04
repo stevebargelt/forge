@@ -92,10 +92,11 @@ export function reconcileCampaign(
   for (const item of items) {
     const isScopeBlocked =
       item.blockerKind === "scope" && RECONCILABLE_LIFECYCLE_STATUSES.has(item.lifecycleStatus);
-    // executor.ts:451-460's gate:human path is the ONLY producer of 'awaiting_gate'
-    // and it never sets blockerKind — that absence is exactly what distinguishes an
-    // out-of-band-eligible item from a scope-blocked one (which always carries
-    // blockerKind: 'scope').
+    // executor.ts's gate:human path and its invoke-lane finalize sites (FG-442
+    // review: a non-shipped invoke-lane outcome parks rather than completes) are the
+    // only producers of 'awaiting_gate', and neither sets blockerKind — that absence
+    // is exactly what distinguishes an out-of-band-eligible item from a scope-blocked
+    // one (which always carries blockerKind: 'scope').
     const isOutOfBand = item.lifecycleStatus === "awaiting_gate" && !item.blockerKind;
 
     if (!isScopeBlocked && !isOutOfBand) {

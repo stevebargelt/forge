@@ -489,6 +489,7 @@ test("end-to-end: reconciling a scope-blocked item unholds a downstream item and
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 

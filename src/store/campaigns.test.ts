@@ -12,6 +12,8 @@ import {
   listCampaignItems,
   updateCampaignItem,
   updateCampaignItemIfCampaignPaused,
+  approveCampaign,
+  setPlanHash,
 } from "./campaigns.js";
 import {
   isCampaignTransitionAllowed,
@@ -505,4 +507,42 @@ test("updateCampaignStatus: throws if campaign does not exist", () => {
     () => updateCampaignStatus("campaign-doesnotexist", "running"),
     /not found/
   );
+});
+
+// ── FG-442 (PR #11 follow-up, Finding 2): approveCampaign paused re-approve scoping ──
+
+test("approveCampaign: refuses a paused campaign whose plan_hash already equals approved_plan_hash (no genuine change to approve)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  setPlanHash(campaign.id, "hash-1");
+  assert.equal(approveCampaign(campaign.id, { approvedBy: "alice", rationale: "initial approval" }), true);
+
+  // Force the campaign into 'paused' for a reason unrelated to the plan (e.g. an
+  // invoke-lane item parked at awaiting_gate) — the plan itself never changed.
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  const before = getCampaign(campaign.id)!;
+  assert.equal(before.planHash, before.approvedPlanHash);
+
+  const reapproved = approveCampaign(campaign.id, { approvedBy: "bob", rationale: "re-approve attempt" });
+  assert.equal(reapproved, false, "must refuse when plan_hash === approved_plan_hash on a paused campaign");
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.approvedBy, "alice", "approved_by must not be rewritten by the refused re-approve");
+  assert.equal(after.approvedAt, before.approvedAt, "approved_at must not be rewritten by the refused re-approve");
+});
+
+test("approveCampaign: allows a genuine escalate->approve re-approval on a paused campaign with a fresh plan_hash", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  setPlanHash(campaign.id, "hash-1");
+  assert.equal(approveCampaign(campaign.id, { approvedBy: "alice", rationale: "initial approval" }), true);
+
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  // Simulate escalate-lane minting a fresh, as-yet-unapproved plan_hash.
+  setPlanHash(campaign.id, "hash-2");
+
+  const reapproved = approveCampaign(campaign.id, { approvedBy: "bob", rationale: "post-escalate re-approve" });
+  assert.equal(reapproved, true, "must allow re-approval when plan_hash differs from approved_plan_hash");
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.approvedBy, "bob");
+  assert.equal(after.approvedPlanHash, "hash-2");
 });

@@ -244,6 +244,13 @@ export function approveCampaign(
 ): boolean {
   const campaign = getCampaign(id);
   if (!campaign || (campaign.status !== "planned" && campaign.status !== "paused")) return false;
+  // FG-442 (PR #11 follow-up, Finding 2): a paused campaign only has something
+  // genuinely new to approve when a fresh plan_hash is awaiting approval (minted by
+  // the escalate-lane path). A paused campaign whose plan_hash already equals its
+  // approved_plan_hash — e.g. one paused at awaiting_gate with no plan change —
+  // has nothing to re-approve; letting it through would only rewrite
+  // approved_by/approved_at/approved_plan_hash on a preserved paused campaign.
+  if (campaign.status === "paused" && campaign.planHash === campaign.approvedPlanHash) return false;
   const result = getDb()
     .prepare(
       `UPDATE campaigns

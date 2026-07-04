@@ -574,7 +574,10 @@ async function driveWorkflowItem(
           break;
         }
       } else {
-        // gate:human — this is the ONLY path that sets item lifecycleStatus to 'awaiting_gate'.
+        // gate:human — one of two producers of 'awaiting_gate' (the other being an
+        // invoke-lane item that finished without shipping; see the invoke-lane finalize
+        // sites below). Both set no blockerKind, which is what marks them as the
+        // out-of-band shape `forge campaign reconcile` looks for.
         updateCampaignItem(itemId, {
           lifecycleStatus: "awaiting_gate",
           requestedHumanAction: `Human gate required at step ${step?.id ?? awaitingTask.phase} in workflow ${currentRun.workflow}`,
@@ -1072,8 +1075,11 @@ async function driveRemainingItems(
         continue;
       }
 
-      // Both invokes completed — finalize the item.
-      const postCheck = getCampaign(campaignId);
+      // Both invokes completed — finalize the item. Only outcome==='shipped' (ticket
+      // done + closedCommit) may complete the item; anything else means the agent(s)
+      // finished without actually shipping, so the item parks at awaiting_gate for
+      // `forge campaign reconcile` (or manual resolution) instead of reporting
+      // complete (FG-442 review: invoke lanes had no gate on a non-shipped outcome).
       let outcome: CampaignItemOutcome | undefined;
       try {
         const freshTicket = readTicket(opts.projectDir, item.ticketId);
@@ -1085,9 +1091,16 @@ async function driveRemainingItems(
       // FG-442: docs-impact resolution — advisory only, mirrors milestone.ts's
       // ship-time check. quick_implementation has no docs phase of its own
       // (unlike full_feature's pipeline, which always runs documentation-maintainer).
-      const docsWarning = formatDocsImpactWarning(assessRunDocsImpact(runId), runId);
+      const docsWarning = outcome === "shipped" ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
 
-      updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome, reason: docsWarning ?? undefined });
+      if (outcome === "shipped") {
+        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome, reason: docsWarning ?? undefined });
+      } else {
+        updateCampaignItem(item.id, {
+          lifecycleStatus: "awaiting_gate",
+          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
+        });
+      }
 
       const runTasks = tasksForRun(runId);
       const worktreeTask = runTasks.find((t) => t.worktreePath != null);
@@ -1102,11 +1115,20 @@ async function driveRemainingItems(
         itemId: item.id,
         ticketId: item.ticketId,
         runId,
-        lifecycleStatus: "complete",
+        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
         outcome,
         ...(docsWarning ? { reason: docsWarning } : {}),
       });
 
+      if (outcome !== "shipped") {
+        if (tryTransitionCampaign(campaignId, "running", "paused")) {
+          return { stopReason: "paused", itemRecords };
+        }
+        const post = getCampaign(campaignId);
+        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+
+      const postCheck = getCampaign(campaignId);
       if (!postCheck || postCheck.status !== "running") {
         return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
       }
@@ -1155,7 +1177,10 @@ async function driveRemainingItems(
         continue;
       }
 
-      const postCheck = getCampaign(campaignId);
+      // Only outcome==='shipped' (ticket done + closedCommit) may complete the item;
+      // anything else means the agent finished without actually shipping, so the item
+      // parks at awaiting_gate for `forge campaign reconcile` (or manual resolution)
+      // instead of reporting complete (FG-442 review).
       let outcome: CampaignItemOutcome | undefined;
       try {
         const freshTicket = readTicket(opts.projectDir, item.ticketId);
@@ -1165,7 +1190,15 @@ async function driveRemainingItems(
       } catch {
         // ticket not found after run — leave outcome undefined
       }
-      updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
+
+      if (outcome === "shipped") {
+        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
+      } else {
+        updateCampaignItem(item.id, {
+          lifecycleStatus: "awaiting_gate",
+          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
+        });
+      }
 
       const runTasks = tasksForRun(runId);
       const worktreeTask = runTasks.find((t) => t.worktreePath != null);
@@ -1180,10 +1213,19 @@ async function driveRemainingItems(
         itemId: item.id,
         ticketId: item.ticketId,
         runId,
-        lifecycleStatus: "complete",
+        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
         outcome,
       });
 
+      if (outcome !== "shipped") {
+        if (tryTransitionCampaign(campaignId, "running", "paused")) {
+          return { stopReason: "paused", itemRecords };
+        }
+        const post = getCampaign(campaignId);
+        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+
+      const postCheck = getCampaign(campaignId);
       if (!postCheck || postCheck.status !== "running") {
         return {
           stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",

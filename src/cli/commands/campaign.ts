@@ -194,6 +194,20 @@ export function registerCampaign(program: Command): void {
           );
           process.exit(1);
         }
+
+        // FG-442 (PR #11 follow-up, Finding 2): a paused campaign only has something
+        // genuinely new to approve when escalate-lane minted a fresh plan_hash. A
+        // paused campaign whose plan hasn't changed since its last approval (e.g. one
+        // paused at awaiting_gate for an unrelated reason) has nothing to re-approve —
+        // approving it would only rewrite approval metadata on a preserved campaign.
+        if (existing.planHash === existing.approvedPlanHash) {
+          process.stderr.write(
+            `Error: campaign ${campaignId} is paused but its plan hash is unchanged since it was last approved — ` +
+            `there is nothing new to approve. If it's paused for a reason other than a lane escalation, resolve it ` +
+            `via forge campaign reconcile or resume, not approve.\n`
+          );
+          process.exit(1);
+        }
       }
 
       // Validate projectDir
