@@ -112,6 +112,14 @@ test("FG-417 reviewer brief carries the production-path consistency trace", asyn
   assert.match(t, /real-input test/i);
 });
 
+test("FG-457 reviewer brief accepts the RED vocabulary and states its mapping", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({ result: { verdict: "pass" } }); });
+  await deps.review({ ok: true, steps: [] });
+  assert.match(seen!.task, /"fail" is mapped to needs_fix/i);
+  assert.match(seen!.task, /"inconclusive" is mapped to blocked/i);
+});
+
 test("#301 deps.review: invoke status failed → ok false", async () => {
   const { deps } = buildReviewLoopDeps(ctx(), async () => RESULT({ status: "failed", error: "boom" }));
   const r = await deps.review({ ok: true, steps: [] });
