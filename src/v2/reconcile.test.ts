@@ -12,6 +12,7 @@ import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { reconcileRun, reconcileRuns } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
+import { orphanRecoveryMessage } from "../cli/commands/show.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -146,6 +147,7 @@ test("FG-455: container gone, empty result, no recoverable stdout, but a dirty w
     assert.equal(evidence.recoverableStdoutResult, false);
     assert.equal(evidence.worktreePathChecked, gitDir);
     assert.deepEqual(evidence.changedFiles, ["?? changed-file.txt"]);
+    assert.equal(evidence.source, "worktree", "a dedicated worktree_path is task-exclusive, confident evidence");
 
     // The reconciled event carries the same evidence, for any consumer walking events only.
     const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
@@ -175,6 +177,37 @@ test("FG-455: worktree_path takes precedence over run.projectDir when both are s
   }
 });
 
+// ----- FG-455 red-review finding 2: honest evidence source on the projectDir fallback -----
+
+test("FG-455 finding2: no worktree_path, dirty run.projectDir → orphaned_work_may_persist, but evidence/message disclose SHARED-projectDir ambiguity (not task-exclusive)", () => {
+  const gitDir = makeDirtyGitRepo(); // stands in for the operator's shared project checkout
+  try {
+    insertRun({ id: "run-rec-shared", workflow: "invoke", title: "shared", status: "active", createdAt: "2026-05-30T00:00:00Z", projectDir: gitDir });
+    const taskId = "t-no-worktree-shared";
+    insertContainerized(mkTask(taskId, { runId: "run-rec-shared", status: "running" })); // no worktreePath
+
+    const r = reconcileRun("run-rec-shared", GONE);
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_worktree_dirty" }]);
+
+    const t = getTask(taskId)!;
+    assert.equal(t.status, "failed");
+    assert.match(t.error ?? "", /orphaned_work_may_persist/);
+    assert.match(t.error ?? "", /SHARED project directory/i, "the stored error must disclose the shared-projectDir ambiguity");
+
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const evidence = (failed.payload as Record<string, unknown>).evidence as OrphanEvidence;
+    assert.equal(evidence.worktreePathChecked, gitDir);
+    assert.equal(evidence.source, "project_dir_shared", "no dedicated worktree → the fallback source must be recorded, not claimed task-exclusive");
+
+    const message = orphanRecoveryMessage("run-rec-shared", taskId, evidence);
+    assert.match(message, /SHARED project directory/i);
+    assert.match(message, /unrelated uncommitted changes/i);
+    assert.match(message, /evidence to inspect, not proof of task work/i);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
 test("FG-455 NEGATIVE: non-empty stdout with no recoverable result AND no changed files → ordinary orphaned (stdout alone is not proof of persisted work)", () => {
   const taskId = "t-stdout-not-proof";
   insertContainerized(mkTask(taskId, { status: "running" })); // agentRole: "engineer" — requires structured result
@@ -195,6 +228,27 @@ test("FG-455 NEGATIVE: non-empty stdout with no recoverable result AND no change
   const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
   assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned", "ordinary orphaned — unchanged classification/shape");
   assert.equal((failed.payload as Record<string, unknown>).evidence, undefined, "ordinary orphaned carries no evidence payload (happy path unchanged)");
+});
+
+// ----- FG-455 red-review finding 1: never-throw on unreadable result.json -----
+
+test("FG-455 finding1: result.json path is a directory (TOCTOU/unreadable-file stand-in) → reconcileRun completes without throwing, classifies orphaned", () => {
+  const taskId = "t-result-is-dir";
+  insertContainerized(mkTask(taskId, { status: "running" }));
+  const dir = taskDir(RUN.id, taskId);
+  // A directory where result.json is expected: readFileSync throws EISDIR,
+  // simulating "the file vanished / became unreadable between existsSync and
+  // readFileSync" without needing an actual race.
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "gracefully classified, not crashed");
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned");
 });
 
 test("reconcile: a host-side session task (no container.started) is NEVER reconciled (regression)", () => {

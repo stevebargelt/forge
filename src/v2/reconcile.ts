@@ -57,21 +57,34 @@ export function defaultContainerAlive(name: string): boolean {
   }
 }
 
+// FG-455 finding 1: never gate a read on existsSync — the file can vanish (or
+// become unreadable) between the check and the read (TOCTOU), and reconcileRun
+// must NEVER throw. Read directly and treat ANY error (ENOENT, EACCES, EISDIR,
+// ...) as "no result".
 function readResult(runId: string, taskId: string): unknown | undefined {
   const p = join(taskDir(runId, taskId), "result.json");
-  if (!existsSync(p)) return undefined;
-  const raw = readFileSync(p, "utf8").trim();
+  let raw: string;
+  try {
+    raw = readFileSync(p, "utf8").trim();
+  } catch {
+    return undefined;
+  }
   if (raw.length === 0) return undefined;
   try { return JSON.parse(raw); } catch { return undefined; }
 }
 
 /** Diagnostic-only classification of the on-disk result.json state — recorded
  *  in the container-gone evidence, never used to drive markTaskComplete/Failed
- *  (that still goes through readResult's strict parse). */
+ *  (that still goes through readResult's strict parse). Same TOCTOU guard as
+ *  readResult above: any read error collapses to "absent". */
 function resultFileState(runId: string, taskId: string): "absent" | "empty" | "malformed" {
   const p = join(taskDir(runId, taskId), "result.json");
-  if (!existsSync(p)) return "absent";
-  const raw = readFileSync(p, "utf8").trim();
+  let raw: string;
+  try {
+    raw = readFileSync(p, "utf8").trim();
+  } catch {
+    return "absent";
+  }
   if (raw.length === 0) return "empty";
   return "malformed"; // non-empty but readResult() above already returned undefined for this branch
 }
@@ -133,14 +146,24 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
       //   3. only then, the ordinary orphaned/no-result classification.
       const dir = taskDir(t.runId, t.id);
       const containerName = `forge-${t.id}`;
-      const runtimeMeta = getManifestRuntime(dir);
-      const stdoutRaw = readStdoutLog(t.runId, t.id);
-      const analysis = analyzeProviderFailure({
-        logFormat: runtimeMeta?.logFormat,
-        runtimeKind: runtimeMeta?.kind,
-        stdoutRaw,
-      });
-      const inferred = inferredResultFrom(analysis, t.agentRole);
+      // FG-455 finding 1: this whole attempt is best-effort recovery over
+      // container.stdout.log — a malformed manifest, an unreadable log, or an
+      // unexpected shape in the stdout analysis must never propagate out of
+      // reconcileRun. Any error here safe-denies to "no recoverable result",
+      // falling through to the worktree-dirty / ordinary-orphaned path below.
+      let inferred: ReturnType<typeof inferredResultFrom>;
+      try {
+        const runtimeMeta = getManifestRuntime(dir);
+        const stdoutRaw = readStdoutLog(t.runId, t.id);
+        const analysis = analyzeProviderFailure({
+          logFormat: runtimeMeta?.logFormat,
+          runtimeKind: runtimeMeta?.kind,
+          stdoutRaw,
+        });
+        inferred = inferredResultFrom(analysis, t.agentRole);
+      } catch {
+        inferred = undefined;
+      }
 
       if (inferred) {
         writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
@@ -150,7 +173,15 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
           taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
         }
       } else {
+        // FG-455 finding 2: a dedicated worktree_path is this task's alone — any
+        // changed files found there are confident, task-exclusive evidence. The
+        // run.projectDir fallback (no-worktree tasks, the core FG-455 case) is
+        // SHARED with the operator's cwd and any other no-worktree task in the
+        // run — a dirty status there may just be unrelated in-progress work, not
+        // proof this task persisted anything. Record which one it was so every
+        // consumer (show/status/ops-check) can render the honest confidence level.
         const worktreePathChecked = t.worktreePath ?? run.projectDir;
+        const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
         const changedFiles = changedWorktreeFiles(worktreePathChecked);
         const evidence: OrphanEvidence = {
           containerName,
@@ -159,11 +190,15 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
           recoverableStdoutResult: false,
           worktreePathChecked: worktreePathChecked ?? null,
           changedFiles,
+          source,
         };
 
         if (changedFiles.length > 0) {
           const error =
             `orphaned_work_may_persist: container gone with no recoverable result, but ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
+            (source === "project_dir_shared"
+              ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
+              : "") +
             "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
           markTaskFailed(t.id, error);
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });

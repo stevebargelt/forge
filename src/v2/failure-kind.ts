@@ -101,6 +101,13 @@ export type OrphanEvidence = {
   recoverableStdoutResult: boolean;
   worktreePathChecked: string | null;
   changedFiles: string[];
+  // FG-455 finding 2: where changedFiles came from. "worktree" = a dedicated
+  // worktree_path — task-exclusive, confident evidence. "project_dir_shared" =
+  // the no-worktree fallback onto run.projectDir, which the operator (and any
+  // other no-worktree task in the run) may also be touching — evidence to
+  // inspect, not proof of this task's work. Optional: events recorded before
+  // this field existed omit it.
+  source?: "worktree" | "project_dir_shared";
 };
 
 /** Recover the orphaned_work_may_persist evidence from a task's event stream,

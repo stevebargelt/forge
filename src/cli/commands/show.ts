@@ -420,8 +420,17 @@ export function orphanRecoveryMessage(runId: string, taskId: string, evidence: O
   const files = evidence.changedFiles.length > 0
     ? evidence.changedFiles.join(", ")
     : "(none listed)";
+  // FG-455 finding 2: a shared-projectDir diff is NOT task-exclusive — disclose
+  // that up front so an operator doesn't mistake it for confirmed persisted work.
+  // Evidence recorded before `source` existed omits it; say nothing rather than guess.
+  const sourceLine = evidence.source === "project_dir_shared"
+    ? "    source:        SHARED project directory (no dedicated worktree for this task) — may include unrelated uncommitted changes; evidence to inspect, not proof of task work.\n"
+    : evidence.source === "worktree"
+      ? "    source:        dedicated worktree (task-exclusive)\n"
+      : "";
   return (
     `work may have persisted — container gone, no recoverable result, but changed files were found.\n` +
+    sourceLine +
     `    task dir:      ${dir}\n` +
     `    worktree path: ${evidence.worktreePathChecked ?? "(none — no worktree_path or run.projectDir recorded)"}\n` +
     `    changed files: ${files}\n` +

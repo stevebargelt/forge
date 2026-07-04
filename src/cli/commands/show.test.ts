@@ -275,6 +275,37 @@ test("orphanRecoveryMessage: handles a null worktree path (neither worktree_path
   assert.match(msg, /none/i);
 });
 
+// ── orphanRecoveryMessage: FG-455 finding 2 source disclosure ───────────────
+
+test("orphanRecoveryMessage: source=project_dir_shared discloses the shared-projectDir ambiguity", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-shared", {
+    containerName: "forge-task-shared", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/proj", changedFiles: ["M foo.ts"],
+    source: "project_dir_shared",
+  });
+  assert.match(msg, /SHARED project directory/i);
+  assert.match(msg, /unrelated uncommitted changes/i);
+  assert.match(msg, /evidence to inspect, not proof of task work/i);
+});
+
+test("orphanRecoveryMessage: source=worktree is stated as task-exclusive, no ambiguity disclosure", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-exclusive", {
+    containerName: "forge-task-exclusive", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/proj/.worktrees/task-exclusive", changedFiles: ["M foo.ts"],
+    source: "worktree",
+  });
+  assert.match(msg, /dedicated worktree \(task-exclusive\)/i);
+  assert.doesNotMatch(msg, /unrelated uncommitted changes/i);
+});
+
+test("orphanRecoveryMessage: omits the source line when evidence predates the `source` field (legacy events)", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-legacy", {
+    containerName: "forge-task-legacy", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/proj", changedFiles: ["M foo.ts"],
+  });
+  assert.doesNotMatch(msg, /source:/i);
+});
+
 // ─── classifyResultFile ──────────────────────────────────────────────────────
 
 test("classifyResultFile: missing when file does not exist", () => {

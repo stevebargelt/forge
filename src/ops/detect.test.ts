@@ -126,6 +126,46 @@ test("detectOrphanedWorkMayPersist: ignores ordinary orphaned and non-failed tas
   assert.deepEqual(detectOrphanedWorkMayPersist(db), []);
 });
 
+test("detectOrphanedWorkMayPersist: discloses source=project_dir_shared in the rendered evidence", () => {
+  insertRun(mkRun("run-shared", "active"));
+  insertTask(mkTask("task-shared", "run-shared", "failed"));
+  const evidence = {
+    containerName: "forge-task-shared",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/some/project",
+    changedFiles: ["M foo.ts"],
+    source: "project_dir_shared",
+  };
+  logEvent("task.failed", {
+    runId: "run-shared", taskId: "task-shared",
+    payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.match(incidents[0]!.evidence.join(" "), /SHARED project directory/i);
+});
+
+test("detectOrphanedWorkMayPersist: only reads the LATEST task.failed event — a superseded earlier failure's evidence is ignored", () => {
+  insertRun(mkRun("run-retry", "active"));
+  insertTask(mkTask("task-retry", "run-retry", "failed"));
+  // An earlier attempt failed as ordinary orphaned...
+  logEvent("task.failed", { runId: "run-retry", taskId: "task-retry", payload: { failure_kind: "orphaned", error: "first" } });
+  // ...retried, and the SECOND attempt is the one classified orphaned_work_may_persist.
+  logEvent("task.retried", { runId: "run-retry", taskId: "task-retry" });
+  const evidence = {
+    containerName: "forge-task-retry", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/wt", changedFiles: ["?? f.txt"], source: "worktree",
+  };
+  logEvent("task.failed", { runId: "run-retry", taskId: "task-retry", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0]!.taskId, "task-retry");
+});
+
 test("detectOrphanedWorkMayPersist: project scoping", () => {
   insertRun(mkRun("run-owmp-a", "active", "/projects/alpha"));
   insertTask(mkTask("task-owmp-a", "run-owmp-a", "failed"));

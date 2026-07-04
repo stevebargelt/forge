@@ -20,8 +20,7 @@ import type { Incident } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
-import { eventsForTask } from "../store/events.js";
-import { failureKindFromEvents, getOrphanEvidenceFromEvents } from "../v2/failure-kind.js";
+import type { OrphanEvidence } from "../v2/failure-kind.js";
 import { taskDir } from "../util/paths.js";
 
 export type OpsCheckOptions = {
@@ -146,7 +145,7 @@ export function detectReconcileCandidate(
     });
 }
 
-type FailedRow = { taskId: string; runId: string; phase: string };
+type FailedRow = { taskId: string; runId: string; phase: string; payload: string | null };
 
 /** A FAILED task classified `orphaned_work_may_persist` (FG-455): reconcile
  *  found the container gone with no recoverable result, but changed files sat
@@ -154,12 +153,31 @@ type FailedRow = { taskId: string; runId: string; phase: string };
  *  discarded. db-confirmed: the classification + evidence already live on the
  *  task's own task.failed event, no external probe needed. Never a `repair` —
  *  a human must inspect the diff first; retry-policy.ts already blocks a blind
- *  `forge retry` on this kind (needs --force). */
+ *  `forge retry` on this kind (needs --force).
+ *
+ *  Reads only the LATEST task.failed event's payload per failed task (a
+ *  correlated subquery, one round trip) instead of pulling each task's full
+ *  event history via eventsForTask — every ops-check pass otherwise re-fetched
+ *  and re-walked the whole event stream (created/started/progress/artifact/...)
+ *  of every failed task just to re-derive a classification/evidence that
+ *  already sits on that one event. A task with status='failed' always has a
+ *  matching task.failed event (markTaskFailed is never called without one —
+ *  see reconcile.ts/failure-kind.ts/runNext.ts/ops/repair.ts), and since the
+ *  row is currently 'failed' there's no later task.completed to supersede it,
+ *  so the latest task.failed IS the current classification — same result as
+ *  the old failureKindFromEvents/getOrphanEvidenceFromEvents newest-first walk. */
 export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
   const rows = db
     .prepare(
-      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase
-       FROM tasks t JOIN runs r ON r.id = t.run_id
+      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase, e.payload AS payload
+       FROM tasks t
+       JOIN runs r ON r.id = t.run_id
+       JOIN events e ON e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = t.id AND e2.event_type = 'task.failed'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )
        WHERE t.status = 'failed'
          AND (? IS NULL OR r.project_dir = ?)`
     )
@@ -167,9 +185,9 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
 
   const incidents: Incident[] = [];
   for (const row of rows) {
-    const events = eventsForTask(row.taskId);
-    if (failureKindFromEvents(events) !== "orphaned_work_may_persist") continue;
-    const evidence = getOrphanEvidenceFromEvents(events);
+    const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
+    if (payload?.["failure_kind"] !== "orphaned_work_may_persist") continue;
+    const evidence = payload["evidence"] as OrphanEvidence | undefined;
     const dir = taskDir(row.runId, row.taskId);
     incidents.push(
       makeIncident({
@@ -181,7 +199,10 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
         evidence: [
           `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`,
           evidence
-            ? `${evidence.changedFiles.length} changed file(s) found at ${evidence.worktreePathChecked ?? "(no worktree path recorded)"}`
+            ? `${evidence.changedFiles.length} changed file(s) found at ${evidence.worktreePathChecked ?? "(no worktree path recorded)"}` +
+              (evidence.source === "project_dir_shared"
+                ? " — SHARED project directory (no dedicated worktree); may include unrelated uncommitted changes, evidence to inspect, not proof of task work"
+                : "")
             : "changed-file evidence not recorded on this task.failed event",
           `task dir: ${dir}`,
         ],
