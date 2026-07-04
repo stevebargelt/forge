@@ -238,25 +238,40 @@ export type CampaignItemUpdate = {
 // plan_hash on a paused campaign, and this is the SAME confirm/override point
 // used at first approval, not a new command. 'planned' stays supported for the
 // original pre-execution approval.
+//
+// FG-442 re-review: the paused-reapproval guard lives entirely in this UPDATE's
+// WHERE clause (compare-and-swap), not in a separate SELECT check, so a
+// concurrent write can't slip through between a read and this write. It is also
+// kept symmetric with the CLI guard (campaign.ts's approve command): a paused
+// campaign is only approvable when its plan_hash has actually moved AND no item
+// is still blocked on an unresolved lane_escalation — calling this store
+// primitive directly must not be a weaker path than going through the CLI.
 export function approveCampaign(
   id: string,
   opts: { approvedBy?: string; rationale: string }
 ): boolean {
   const campaign = getCampaign(id);
   if (!campaign || (campaign.status !== "planned" && campaign.status !== "paused")) return false;
-  // FG-442 (PR #11 follow-up, Finding 2): a paused campaign only has something
-  // genuinely new to approve when a fresh plan_hash is awaiting approval (minted by
-  // the escalate-lane path). A paused campaign whose plan_hash already equals its
-  // approved_plan_hash — e.g. one paused at awaiting_gate with no plan change —
-  // has nothing to re-approve; letting it through would only rewrite
-  // approved_by/approved_at/approved_plan_hash on a preserved paused campaign.
-  if (campaign.status === "paused" && campaign.planHash === campaign.approvedPlanHash) return false;
   const result = getDb()
     .prepare(
       `UPDATE campaigns
           SET approved_by = ?, approved_at = ?, approval_rationale = ?,
               approved_plan_hash = plan_hash, updated_at = ?
-        WHERE id = ? AND (status = 'planned' OR status = 'paused')`
+        WHERE id = ?
+          AND (
+            status = 'planned'
+            OR (
+              status = 'paused'
+              AND plan_hash IS NOT approved_plan_hash
+              AND NOT EXISTS (
+                SELECT 1 FROM campaign_items
+                WHERE campaign_id = campaigns.id
+                  AND lifecycle_status = 'failed'
+                  AND outcome = 'blocked'
+                  AND blocker_kind = 'lane_escalation'
+              )
+            )
+          )`
     )
     .run(opts.approvedBy ?? null, nowIso(), opts.rationale, nowIso(), id);
   return (result.changes ?? 0) > 0;

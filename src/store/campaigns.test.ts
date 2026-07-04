@@ -511,6 +511,19 @@ test("updateCampaignStatus: throws if campaign does not exist", () => {
 
 // ── FG-442 (PR #11 follow-up, Finding 2): approveCampaign paused re-approve scoping ──
 
+test("approveCampaign: approves a 'planned' campaign (regression)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  setPlanHash(campaign.id, "hash-1");
+
+  const approved = approveCampaign(campaign.id, { approvedBy: "alice", rationale: "initial approval" });
+  assert.equal(approved, true);
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.approvedBy, "alice");
+  assert.equal(after.approvalRationale, "initial approval");
+  assert.equal(after.approvedPlanHash, "hash-1");
+});
+
 test("approveCampaign: refuses a paused campaign whose plan_hash already equals approved_plan_hash (no genuine change to approve)", () => {
   const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
   setPlanHash(campaign.id, "hash-1");
@@ -545,4 +558,49 @@ test("approveCampaign: allows a genuine escalate->approve re-approval on a pause
   const after = getCampaign(campaign.id)!;
   assert.equal(after.approvedBy, "bob");
   assert.equal(after.approvedPlanHash, "hash-2");
+});
+
+test("approveCampaign: refuses a paused campaign with a fresh plan_hash but an unresolved lane_escalation item (symmetric with the CLI guard)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  setPlanHash(campaign.id, "hash-1");
+  assert.equal(approveCampaign(campaign.id, { approvedBy: "alice", rationale: "initial approval" }), true);
+
+  const item = addCampaignItem({ campaignId: campaign.id, itemOrder: 0, ticketId: "FG-001" });
+  updateCampaignItem(item.id, {
+    lifecycleStatus: "failed",
+    outcome: "blocked",
+    blockerKind: "lane_escalation",
+  });
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  // A fresh plan_hash alone (e.g. minted for the wrong ticket) must not bypass
+  // the still-unresolved escalation on this item.
+  setPlanHash(campaign.id, "hash-2");
+  const before = getCampaign(campaign.id)!;
+
+  const reapproved = approveCampaign(campaign.id, { approvedBy: "bob", rationale: "re-approve attempt" });
+  assert.equal(reapproved, false, "must refuse while an item is still blocked on an unresolved lane_escalation");
+
+  const after = getCampaign(campaign.id)!;
+  assert.equal(after.approvedBy, before.approvedBy);
+  assert.equal(after.approvedAt, before.approvedAt);
+  assert.equal(after.approvedPlanHash, before.approvedPlanHash);
+});
+
+test("approveCampaign: atomic WHERE leaves approved_* columns untouched when the guard refuses (paused, unchanged plan_hash)", () => {
+  const campaign = createCampaign({ sourceKind: "list", sourceInput: {}, mode: "serial" });
+  setPlanHash(campaign.id, "hash-1");
+  assert.equal(approveCampaign(campaign.id, { approvedBy: "alice", rationale: "initial approval" }), true);
+
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  const before = getCampaign(campaign.id)!;
+
+  const reapproved = approveCampaign(campaign.id, { approvedBy: "bob", rationale: "re-approve attempt" });
+  assert.equal(reapproved, false);
+
+  const after = getCampaign(campaign.id)!;
+  assert.deepEqual(
+    { approvedBy: after.approvedBy, approvedAt: after.approvedAt, approvalRationale: after.approvalRationale, approvedPlanHash: after.approvedPlanHash, updatedAt: after.updatedAt },
+    { approvedBy: before.approvedBy, approvedAt: before.approvedAt, approvalRationale: before.approvalRationale, approvedPlanHash: before.approvedPlanHash, updatedAt: before.updatedAt },
+    "a refused UPDATE must be a true no-op — no partial column writes from the compare-and-swap WHERE"
+  );
 });
