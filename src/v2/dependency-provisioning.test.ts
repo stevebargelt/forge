@@ -20,6 +20,8 @@ import {
   acquireDependencyCacheLock,
   provisionDependencyCache,
   provisionerContainerName,
+  pruneDependencyCache,
+  type VolumeRemovalOutcome,
 } from "./dependency-provisioning.js";
 
 function makeRepo(opts: { lockContent?: string; workspaces?: string[] } = {}): string {
@@ -629,4 +631,128 @@ test("FIX3: markDependencyCacheReady leaves no leftover .tmp file after a succes
   markDependencyCacheReady(key);
   assert.equal(isDependencyCacheReady(key), true);
   assert.equal(existsSync(tmpPath), false, "rename must consume the temp file, not copy it");
+});
+
+// ── FG-434: pruneDependencyCache (global operator prune) ─────────────────────
+
+function fakeRemoveVolume(outcomes: Record<string, VolumeRemovalOutcome>) {
+  const calls: string[] = [];
+  return {
+    calls,
+    fn: (name: string): VolumeRemovalOutcome => {
+      calls.push(name);
+      return outcomes[name] ?? "removed";
+    },
+  };
+}
+
+test("pruneDependencyCache: removes clean volumes, skips an in-use volume as skipped (not removed)", () => {
+  const remove = fakeRemoveVolume({ "forge-deps-aaa1111111111111-root": "in_use" });
+  const result = pruneDependencyCache(
+    {},
+    {
+      listVolumeNames: () => ["forge-deps-bbb2222222222222-root", "forge-deps-aaa1111111111111-root"],
+      removeVolume: remove.fn,
+      listMarkerFiles: () => [],
+      removeMarkerFile: () => {},
+    },
+  );
+  assert.deepEqual(result.volumesRemoved, ["forge-deps-bbb2222222222222-root"]);
+  assert.deepEqual(result.volumesSkippedInUse, ["forge-deps-aaa1111111111111-root"]);
+  assert.deepEqual(result.volumesError, []);
+  assert.equal(result.dryRun, false);
+});
+
+test("pruneDependencyCache: a docker-rm error is reported separately from in-use, and never thrown", () => {
+  const remove = fakeRemoveVolume({ "forge-deps-ccc3333333333333-root": "error" });
+  const result = pruneDependencyCache(
+    {},
+    {
+      listVolumeNames: () => ["forge-deps-ccc3333333333333-root"],
+      removeVolume: remove.fn,
+      listMarkerFiles: () => [],
+      removeMarkerFile: () => {},
+    },
+  );
+  assert.deepEqual(result.volumesRemoved, []);
+  assert.deepEqual(result.volumesSkippedInUse, []);
+  assert.deepEqual(result.volumesError, ["forge-deps-ccc3333333333333-root"]);
+});
+
+test("pruneDependencyCache: a docker volume-ls failure is best-effort — empty result, never throws", () => {
+  const result = pruneDependencyCache(
+    {},
+    {
+      listVolumeNames: () => {
+        throw new Error("docker daemon unreachable");
+      },
+      listMarkerFiles: () => [],
+    },
+  );
+  assert.deepEqual(result.volumesRemoved, []);
+  assert.deepEqual(result.volumesSkippedInUse, []);
+  assert.deepEqual(result.volumesError, []);
+});
+
+test("pruneDependencyCache: markers are removed for a removed volume's cache key, left for a skipped-in-use one", () => {
+  const removed: string[] = [];
+  const remove = fakeRemoveVolume({ "forge-deps-inuse0000000000-root": "in_use" });
+  const result = pruneDependencyCache(
+    {},
+    {
+      listVolumeNames: () => ["forge-deps-clean0000000000-root", "forge-deps-inuse0000000000-root"],
+      removeVolume: remove.fn,
+      listMarkerFiles: () => [
+        "/forge-home/dependency-cache/clean0000000000.ready",
+        "/forge-home/dependency-cache/inuse0000000000.ready",
+        "/forge-home/dependency-cache/inuse0000000000.lock",
+      ],
+      removeMarkerFile: (p) => removed.push(p),
+    },
+  );
+  assert.deepEqual(result.volumesRemoved, ["forge-deps-clean0000000000-root"]);
+  assert.deepEqual(result.volumesSkippedInUse, ["forge-deps-inuse0000000000-root"]);
+  assert.deepEqual(result.markersRemoved, ["/forge-home/dependency-cache/clean0000000000.ready"]);
+  assert.deepEqual(removed, ["/forge-home/dependency-cache/clean0000000000.ready"]);
+});
+
+test("pruneDependencyCache: dry-run removes nothing but reports the full candidate set", () => {
+  let volumeRmCalled = false;
+  let markerRmCalled = false;
+  const result = pruneDependencyCache(
+    { dryRun: true },
+    {
+      listVolumeNames: () => ["forge-deps-dry0000000000000-root", "forge-deps-dry0000000000001-root"],
+      removeVolume: () => {
+        volumeRmCalled = true;
+        return "removed";
+      },
+      listMarkerFiles: () => ["/forge-home/dependency-cache/dry0000000000000.ready"],
+      removeMarkerFile: () => {
+        markerRmCalled = true;
+      },
+    },
+  );
+  assert.equal(volumeRmCalled, false, "dry-run must never call removeVolume");
+  assert.equal(markerRmCalled, false, "dry-run must never call removeMarkerFile");
+  assert.deepEqual(result.volumesRemoved, ["forge-deps-dry0000000000000-root", "forge-deps-dry0000000000001-root"]);
+  assert.deepEqual(result.volumesSkippedInUse, []);
+  assert.deepEqual(result.markersRemoved, ["/forge-home/dependency-cache/dry0000000000000.ready"]);
+  assert.equal(result.dryRun, true);
+});
+
+test("pruneDependencyCache: real dependencyCacheDir marker enumeration finds .ready/.lock files, ignores others", () => {
+  const dir = join(process.env.FORGE_HOME!, "dependency-cache");
+  mkdirSync(dir, { recursive: true });
+  const key = "prune-marker-real-" + Math.random().toString(36).slice(2);
+  writeFileSync(join(dir, `${key}.ready`), "x");
+  writeFileSync(join(dir, `${key}.lock`), "x");
+  writeFileSync(join(dir, `${key}.tmp`), "x"); // not a marker/lock — must be ignored
+
+  const result = pruneDependencyCache({}, { listVolumeNames: () => [] });
+  assert.ok(result.markersRemoved.includes(join(dir, `${key}.ready`)));
+  assert.ok(result.markersRemoved.includes(join(dir, `${key}.lock`)));
+  assert.ok(!result.markersRemoved.includes(join(dir, `${key}.tmp`)));
+  assert.equal(existsSync(join(dir, `${key}.ready`)), false);
+  assert.equal(existsSync(join(dir, `${key}.tmp`)), true, "non-marker files must be left alone");
 });
