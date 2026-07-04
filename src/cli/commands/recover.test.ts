@@ -47,6 +47,12 @@ function makeDirtyGitRepo(): string {
   return dir;
 }
 
+function makeCleanGitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-recover-worktree-clean-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  return dir;
+}
+
 function piCleanEndStdout(text: string): string {
   return (
     JSON.stringify({ type: "agent_start" }) + "\n" +
@@ -64,6 +70,12 @@ function writePiManifest(dir: string): void {
 const tmpDirs: string[] = [];
 function trackedDirtyGitRepo(): string {
   const d = makeDirtyGitRepo();
+  tmpDirs.push(d);
+  return d;
+}
+
+function trackedCleanGitRepo(): string {
+  const d = makeCleanGitRepo();
   tmpDirs.push(d);
   return d;
 }
@@ -143,6 +155,29 @@ test("recover inspect: run id includes an oom_killed task among recoverable task
   assert.equal(outcome.kind, "inspect-run");
   if (outcome.kind !== "inspect-run") return;
   assert.ok(outcome.tasks.some((t) => t.taskId === "t-run-oom"), "oom_killed must not be filtered out of the run-level recoverable list");
+});
+
+// FG-455 p4 re-review: a clean-worktree oom_killed task (no result, no
+// stdout-recoverable, no changed files) fell through to the generic "no
+// persisted work found — safe to re-dispatch" bare `forge retry` fallback,
+// but retry-policy.ts refuses a bare retry for oom_killed (retryable:false) —
+// recommendationFor's final fallback must consult retryPolicy() too.
+test("recover inspect: clean-worktree oom_killed task recommends --force, not the bare 'safe to re-dispatch' retry", () => {
+  const gitDir = trackedCleanGitRepo();
+  const taskId = "t-inspect-oom-clean";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+  reconcileRun(RUN.id, () => false, undefined, () => ({ oomKilled: true, exitCode: 137 }));
+  assert.equal(getTask(taskId)!.status, "failed", "sanity: reconcile produced the fixture we want to inspect");
+
+  const outcome = performInspect(taskId);
+  assert.equal(outcome.kind, "inspect-task");
+  if (outcome.kind !== "inspect-task") return;
+  assert.equal(outcome.task.failureKind, "oom_killed");
+  assert.deepEqual(outcome.task.changedFiles, [], "clean worktree: no changed files");
+  assert.equal(outcome.task.hasValidResult, false);
+  assert.equal(outcome.task.hasStdoutRecoverableResult, false);
+  assert.match(outcome.task.recommendation, /--force/);
+  assert.doesNotMatch(outcome.task.recommendation, /safe to re-dispatch from scratch/, "must not recommend the bare unguarded retry for a non-retryable kind");
 });
 
 // FG-455 p4 review finding 2: recommendationFor must not suggest a --continue

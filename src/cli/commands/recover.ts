@@ -116,6 +116,9 @@ function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: stri
     }
     return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue; evidence found but not adopted — inspect the diff first)`;
   }
+  if (!retryPolicy(failureKind).retryable) {
+    return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} requires --force to re-dispatch)`;
+  }
   return `forge retry ${task.id}  (no persisted work found — safe to re-dispatch from scratch)`;
 }
 

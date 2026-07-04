@@ -413,9 +413,11 @@ export function deriveNextCommandForTask(
     }
     // FG-455 p4: a positively-identified OOM/SIGKILL death — distinct from the
     // generic orphaned kinds above, surfaced so the operator knows a bigger
-    // memory allowance (not just a re-dispatch) may be needed.
+    // memory allowance (not just a re-dispatch) may be needed. Same posture as
+    // orphaned_work_may_persist above: retry-policy.ts refuses a bare `forge
+    // retry` for this kind, so point at inspect-then-force instead.
     if (failureKind === "oom_killed") {
-      return `forge retry ${taskId}  # container killed (exit 137 — possibly OOM or an external kill) — if OOM, consider more memory or a smaller task before retrying`;
+      return `forge show ${taskId} --json  # inspect the worktree diff, then \`forge retry ${taskId} --force\` once verified — container killed (exit 137, possibly OOM or external kill); if OOM, consider more memory or a smaller task`;
     }
     return `forge retry ${taskId}`;
   }
@@ -452,11 +454,22 @@ export function orphanRecoveryMessage(
     : evidence.source === "worktree"
       ? "    source:        dedicated worktree (task-exclusive)\n"
       : "";
+  // FG-455 p4 review: oom_killed evidence is recorded for both dirty AND clean
+  // worktrees — unlike orphaned_work_may_persist, which is only ever emitted
+  // dirty. The headline must not claim changed files were found when there
+  // are none (it would contradict the "(none listed)" changed-files line below).
+  const foundChangedFiles = evidence.changedFiles.length > 0;
   const headline = kind === "oom_killed"
     ? evidence.oomKilled === true
-      ? "container killed (OOM) — no recoverable result, but changed files were found."
-      : "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result, but changed files were found."
-    : "work may have persisted — container gone, no recoverable result, but changed files were found.";
+      ? foundChangedFiles
+        ? "container killed (OOM) — no recoverable result, but changed files were found."
+        : "container killed (OOM) — no recoverable result and no changed files on the worktree."
+      : foundChangedFiles
+        ? "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result, but changed files were found."
+        : "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result and no changed files on the worktree."
+    : foundChangedFiles
+      ? "work may have persisted — container gone, no recoverable result, but changed files were found."
+      : "work may have persisted — container gone, no recoverable result and no changed files on the worktree.";
   return (
     `${headline}\n` +
     sourceLine +

@@ -38,6 +38,11 @@ export function classifyFailureKind(failureKind: string | undefined): BlockerKin
     case "cancelled":
     case "unknown":
       return "campaign_system";
+    // FG-455 p4: mirrors orphaned_work_may_persist's may-hold-work SHARED
+    // treatment — a blind campaign-retry could clobber persisted work, so
+    // pause the campaign for human inspection instead of continuing blind.
+    case "oom_killed":
+      return "campaign_system";
     case "model_error":
     case "tool_error":
     case "red_blocked":
