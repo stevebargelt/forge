@@ -24,6 +24,7 @@ import {
   isDependencyCacheReady,
   provisionDependencyCache,
   planDependencyVolumes,
+  provisionerContainerName,
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
 import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
@@ -2066,7 +2067,21 @@ async function runContainer(args: {
     }
     if (plan) {
       let provisionerExitCode = -1;
+      // FG-437: the real, durable provisioner container name/cacheKey — logged
+      // independently of the worktree (which may be gone by the time reconcile
+      // runs) so a mid-provision crash is recoverable.
+      const provisionContainerName = provisionerContainerName(plan.lockfileHash);
+      const provisionEventPayload = {
+        containerName: provisionContainerName,
+        cacheKey: plan.lockfileHash,
+        phase: "dependency_provisioning" as const,
+      };
       const provision = await provisionDependencyCache(plan.lockfileHash, async () => {
+        logEvent("container.provision_started", {
+          runId: args.runId,
+          taskId: args.taskId,
+          payload: provisionEventPayload,
+        });
         const provisionerArgs = buildProvisionerDockerArgs(
           runtime,
           { TASK_ID: args.taskId, PROJECT_DIR: repoRootForMount },
@@ -2097,6 +2112,14 @@ async function runContainer(args: {
           error: provision.error,
         });
         return { kind: "failed", error: provision.error };
+      } else if (provisionerExitCode !== -1) {
+        // We actually ran the provisioner (as opposed to reusing an
+        // already-ready cache) and it succeeded.
+        logEvent("container.provision_succeeded", {
+          runId: args.runId,
+          taskId: args.taskId,
+          payload: provisionEventPayload,
+        });
       }
       depSpawnFields.DEPENDENCY_CACHE_MOUNT_RO = "1";
     }

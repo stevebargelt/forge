@@ -491,3 +491,153 @@ test("FG-455 p2: a running task with NO children at all is never treated as a fa
   assert.equal(r.taskChanges.filter((c) => c.taskId === "plain-running").length, 0);
   assert.equal(getTask("plain-running")!.status, "running");
 });
+
+// ----- FG-437: reconciler recovers a task crashed mid dependency-provisioning -----
+
+const PROVISION_PAYLOAD = { containerName: "forge-provision-abc123", cacheKey: "abc123", phase: "dependency_provisioning" };
+
+// Insert a task that crashed after task.started but before container.started —
+// while its (separately-named, forge-provision-<cacheKey>) dependency
+// provisioner was running. No container.started event exists for this task.
+function insertProvisioning(t: Task) {
+  insertTask(t);
+  logEvent("container.provision_started", { runId: t.runId, taskId: t.id, payload: PROVISION_PAYLOAD });
+}
+
+test("FG-437: crashed mid-provision, provisioner gone → task recovered to failed + provisioner reaped", () => {
+  insertProvisioning(mkTask("t-provision-crash", { status: "running" }));
+  const reaped: string[] = [];
+  const reap = (name: string) => { reaped.push(name); return "killed" as const; };
+  const containerAliveFn = (name: string) => {
+    assert.equal(name, "forge-provision-abc123", "liveness is checked against the REAL provisioner container name, not forge-<taskId>");
+    return false; // confirmed gone
+  };
+
+  const r = reconcileRun(RUN.id, containerAliveFn, reap);
+
+  assert.deepEqual(r.taskChanges, [{ taskId: "t-provision-crash", from: "running", to: "failed", reason: "provisioning_phase_crash" }]);
+  assert.equal(getTask("t-provision-crash")!.status, "failed");
+  assert.deepEqual(reaped, ["forge-provision-abc123"], "the orphaned provisioner container was reaped");
+
+  const failed = eventsForTask("t-provision-crash").find((e) => e.eventType === "task.failed")!;
+  const failedPayload = failed.payload as Record<string, unknown>;
+  assert.equal(failedPayload.failure_kind, "verification_environment_unavailable");
+  assert.match(failedPayload.error as string, /forge retry t-provision-crash/, "reason points at recovery");
+
+  const reconciled = eventsForTask("t-provision-crash").find((e) => e.eventType === "task.reconciled")!;
+  const reconciledPayload = reconciled.payload as Record<string, unknown>;
+  assert.equal(reconciledPayload.reason, "provisioning_phase_crash");
+  const evidence = reconciledPayload.evidence as Record<string, unknown>;
+  assert.equal(evidence.containerName, "forge-provision-abc123", "evidence carries the containerName");
+  assert.equal(evidence.cacheKey, "abc123", "evidence carries the cacheKey");
+  assert.equal(evidence.provisionerLiveness, "gone");
+});
+
+test("FG-437: provisioner still ALIVE → task left running, NOT reaped, NOT failed (FG-376 don't-kill-a-live-install rule)", () => {
+  insertProvisioning(mkTask("t-provision-live", { status: "running" }));
+  let reapCalled = false;
+  const reap = (): "killed" => { reapCalled = true; return "killed"; };
+
+  const r = reconcileRun(RUN.id, ALIVE, reap); // ALIVE: provisioner still alive
+
+  assert.equal(r.taskChanges.filter((c) => c.taskId === "t-provision-live").length, 0);
+  assert.equal(getTask("t-provision-live")!.status, "running", "install may still be in flight — never touched");
+  assert.equal(reapCalled, false, "a live provisioner container is never reaped");
+});
+
+test("FG-437: not a false positive — a running task WITH container.started reaches the existing agent-container logic unaffected", () => {
+  // Provisioning succeeded and the agent container launched normally: BOTH
+  // provision_started and container.started exist. The new branch must not
+  // intercept this — it should fall through to the pre-existing container-gone
+  // handling exactly as before FG-437.
+  insertTask(mkTask("t-normal-agent", { status: "running" }));
+  logEvent("container.provision_started", { runId: RUN.id, taskId: "t-normal-agent", payload: PROVISION_PAYLOAD });
+  logEvent("container.started", { runId: RUN.id, taskId: "t-normal-agent", payload: { containerName: "forge-t-normal-agent" } });
+
+  const r = reconcileRun(RUN.id, GONE);
+
+  const change = r.taskChanges.find((c) => c.taskId === "t-normal-agent");
+  assert.equal(change?.reason, "container_gone_no_result", "handled by the existing agent-container path, not the FG-437 provisioning branch");
+});
+
+test("FG-437: not a false positive — a running task with NEITHER provision_started nor container.started is still skipped as today", () => {
+  insertTask(mkTask("t-session-y", { status: "running", phase: "session", agentRole: "orchestrator" }));
+  const r = reconcileRun(RUN.id, GONE);
+  assert.equal(r.taskChanges.length, 0, "no signal at all → left alone, exactly as before FG-437");
+  assert.equal(getTask("t-session-y")!.status, "running");
+});
+
+test("FG-437 red-review fix1: provision_succeeded fired but container.started has NOT — healthy mid-dispatch task is NOT claimed by the provisioning-crash branch", () => {
+  // Between provision_succeeded and container.started the provisioner has
+  // already --rm-removed itself and the agent container simply hasn't started
+  // yet — this is a HEALTHY task, not a crash, and must not be false-failed.
+  insertProvisioning(mkTask("t-mid-dispatch", { status: "running" }));
+  logEvent("container.provision_succeeded", { runId: RUN.id, taskId: "t-mid-dispatch", payload: PROVISION_PAYLOAD });
+
+  const reap = (): never => { throw new Error("must not be called — task is healthy, not crashed"); };
+  const r = reconcileRun(RUN.id, GONE, reap); // GONE: even if a naive check asked, the provisioner container is gone (expected — it already exited)
+
+  assert.equal(r.taskChanges.filter((c) => c.taskId === "t-mid-dispatch").length, 0, "not claimed by the provisioning-crash branch");
+  assert.equal(getTask("t-mid-dispatch")!.status, "running", "left running — mid-dispatch, not a crash");
+});
+
+test("FG-437 fix2: reap failure ('error') never blocks the task transition — task still fails, reconcileRun does not throw, evidence.reapResult='error'", () => {
+  insertProvisioning(mkTask("t-provision-reap-error", { status: "running" }));
+  const reap = (): "error" => "error";
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE, reap); });
+
+  assert.deepEqual(r!.taskChanges, [{ taskId: "t-provision-reap-error", from: "running", to: "failed", reason: "provisioning_phase_crash" }]);
+  assert.equal(getTask("t-provision-reap-error")!.status, "failed", "a reap failure never blocks the task transition");
+
+  const failed = eventsForTask("t-provision-reap-error").find((e) => e.eventType === "task.failed")!;
+  const evidence = (failed.payload as Record<string, unknown>).evidence as Record<string, unknown>;
+  assert.equal(evidence.reapResult, "error");
+
+  const reconciled = eventsForTask("t-provision-reap-error").find((e) => e.eventType === "task.reconciled")!;
+  const reconciledEvidence = (reconciled.payload as Record<string, unknown>).evidence as Record<string, unknown>;
+  assert.equal(reconciledEvidence.reapResult, "error");
+});
+
+test("FG-437 fix2: reap THROWS — is caught, treated as 'error', task still fails, reconcileRun does not throw", () => {
+  insertProvisioning(mkTask("t-provision-reap-throws", { status: "running" }));
+  const reap = (): never => { throw new Error("docker daemon unreachable"); };
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE, reap); });
+
+  assert.deepEqual(r!.taskChanges, [{ taskId: "t-provision-reap-throws", from: "running", to: "failed", reason: "provisioning_phase_crash" }]);
+  assert.equal(getTask("t-provision-reap-throws")!.status, "failed");
+
+  const failed = eventsForTask("t-provision-reap-throws").find((e) => e.eventType === "task.failed")!;
+  const evidence = (failed.payload as Record<string, unknown>).evidence as Record<string, unknown>;
+  assert.equal(evidence.reapResult, "error", "a thrown reap is caught and recorded as 'error', not propagated");
+});
+
+test("FG-437 fix2: gone→recovered — evidence.reapResult matches the injected reaper's return value, and the reaper is called with the exact forge-provision-<cacheKey> name", () => {
+  const calledWith: string[] = [];
+  const reap = (name: string): "not_found" => { calledWith.push(name); return "not_found"; };
+  insertProvisioning(mkTask("t-provision-not-found", { status: "running" }));
+
+  const r = reconcileRun(RUN.id, GONE, reap);
+
+  assert.deepEqual(r.taskChanges, [{ taskId: "t-provision-not-found", from: "running", to: "failed", reason: "provisioning_phase_crash" }]);
+  assert.deepEqual(calledWith, ["forge-provision-abc123"], "reaper called with the exact provisioner name from the provision_started payload");
+
+  const reconciled = eventsForTask("t-provision-not-found").find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as Record<string, unknown>;
+  assert.equal(evidence.reapResult, "not_found", "evidence records exactly what the injected reaper returned");
+});
+
+test("reconcileRuns: forwards an injected reapContainer through to reconcileRun for the FG-437 provisioning-crash branch", () => {
+  insertProvisioning(mkTask("t-plural-reap", { status: "running" }));
+  const calledWith: string[] = [];
+  const reap = (name: string): "killed" => { calledWith.push(name); return "killed"; };
+
+  const changed = reconcileRuns([RUN.id], GONE, reap);
+
+  assert.deepEqual(calledWith, ["forge-provision-abc123"], "reconcileRuns forwarded the injected reaper into reconcileRun");
+  assert.equal(getTask("t-plural-reap")!.status, "failed");
+  assert.ok(changed.some((c) => c.runId === RUN.id));
+});
