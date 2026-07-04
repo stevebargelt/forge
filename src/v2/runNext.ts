@@ -2103,7 +2103,7 @@ async function runContainer(args: {
         logEvent("container.dependency_provisioning_failed", {
           runId: args.runId,
           taskId: args.taskId,
-          payload: { containerName: `forge-provision-${args.taskId}`, exitCode: provisionerExitCode },
+          payload: { containerName: provisionContainerName, exitCode: provisionerExitCode },
         });
         cleanupStagedAuth(dir); // AWN-8
         failTask(args.taskId, {
