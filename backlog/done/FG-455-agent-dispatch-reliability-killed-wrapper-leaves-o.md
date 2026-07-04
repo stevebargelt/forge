@@ -1,9 +1,11 @@
 ---
 id: FG-455
 type: story
-status: active
+status: done
 title: "Agent dispatch reliability: killed wrapper leaves orphaned task with persisted work and no result"
 created: 2026-07-03
+closed: 2026-07-04
+closed_commit: 4b663fd
 ---
 
 ## Problem
