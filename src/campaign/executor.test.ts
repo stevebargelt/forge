@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
 import {
   createCampaign,
   getCampaign,
@@ -15,12 +15,14 @@ import {
   updateCampaignStatus,
   setPlanHash,
 } from "../store/campaigns.js";
-import { writeTicket } from "../backlog/structured.js";
+import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
-import type { PlannerInput, PlanMode } from "./planner.js";
-import { startCampaign, resumeCampaign } from "./executor.js";
+import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
+import { listCampaignItems } from "../store/campaigns.js";
+import { updateRunStatus } from "../store/runs.js";
 
 // All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
 // The wrapper forces executionMode:'invoke' for every list-type campaign without
@@ -218,6 +220,9 @@ test("happy path two-item: sequential ordering, items dispatched one at a time",
     const items = db.prepare("SELECT ticket_id, lifecycle_status FROM campaign_items ORDER BY item_order ASC").all() as { ticket_id: string; lifecycle_status: string }[];
     const snapshot = JSON.stringify(items.map((i) => `${i.ticket_id}:${i.lifecycle_status}`));
     dispatchLog.push({ ticketId: args.runTitle ?? "", itemSnapshotBefore: snapshot });
+    // Simulate the agent shipping the ticket as part of completing the dispatch —
+    // required for the item to reach lifecycleStatus 'complete' (FG-442 review Finding 1).
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -298,7 +303,7 @@ test("first-item failure (FG-393): item2 held (unknown relation, sequential), ca
 
 // ── start: shipped evidence ───────────────────────────────────────────────────
 
-test("shipped only with evidence: complete but ticket not done → outcome undefined", async () => {
+test("FG-442 review Finding 1: complete but ticket not done → outcome undefined, item parks awaiting_gate, campaign pauses (not complete)", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -306,7 +311,8 @@ test("shipped only with evidence: complete but ticket not done → outcome undef
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(result.stopReason, "complete");
+  assert.equal(result.stopReason, "paused", "campaign must not report complete when the ticket was never shipped");
+  assert.equal(result.itemRecords[0]?.lifecycleStatus, "awaiting_gate");
   assert.equal(result.itemRecords[0]?.outcome, undefined, "outcome must be undefined when ticket is not done");
 });
 
@@ -492,6 +498,7 @@ test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn i
       dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
         firstDispatchCount++;
         await Promise.resolve(); // yield so second call's sync section can run
+        closeTicket(projectDir, "FG-101", "abc123");
         return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
       },
     }),
@@ -587,6 +594,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 
     // startCampaign has no projectDirOverride — it always uses campaign.projectDir.
     // Mutating otherDir does NOT make the plan stale for the original projectDir.
+    closeTicket(projectDir, "FG-101", "abc123");
     const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
     assert.equal(
       result.stopReason,
@@ -600,7 +608,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 
 // ── shipped: done ticket without closedCommit ─────────────────────────────────
 
-test("shipped: ticket done but no closedCommit → outcome undefined (not shipped)", async () => {
+test("FG-442 review Finding 1: ticket done but no closedCommit → outcome undefined, item parks awaiting_gate, campaign pauses (not complete)", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -620,7 +628,8 @@ test("shipped: ticket done but no closedCommit → outcome undefined (not shippe
   });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(result.stopReason, "complete");
+  assert.equal(result.stopReason, "paused", "campaign must not report complete when the ticket has no closedCommit");
+  assert.equal(result.itemRecords[0]?.lifecycleStatus, "awaiting_gate");
   assert.equal(
     result.itemRecords[0]?.outcome,
     undefined,
@@ -771,6 +780,7 @@ test("driver skips terminal items: item1 complete, item2 pending — only item2 
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -835,6 +845,7 @@ test("resumeCampaign: transitions paused->running, skips completed item1, dispat
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1086,6 +1097,7 @@ test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1118,6 +1130,7 @@ test("edge: pause after last item — campaign stays paused, subsequent resume t
   // landing exactly after the last item's execution)
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1333,6 +1346,7 @@ test("last-item pause boundary: pause lands after final item completes — drive
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1480,6 +1494,7 @@ test("FG-394-fix: clean paused campaign (some complete, rest pending, no in-flig
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1786,6 +1801,7 @@ test("FG-393 T4: unknown relation CONTINUES in PILOT (later item dispatches)", a
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1825,6 +1841,7 @@ test("FG-393 T5: explicit INDEPENDENT relation continues (reason is exact string
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1944,6 +1961,7 @@ test("FG-393 T8: resume after blocker resolution reconsiders held items, dispatc
   const dispatchLog: string[] = [];
   const phase3Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2071,6 +2089,7 @@ test("FG-393 T4-reason: pilot-continued item has exact reason string 'continued 
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2118,6 +2137,7 @@ test("FG-393 multi-blocker v2: two local blocks; item dependent on first held; i
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    closeTicket(projectDir, ticketId, "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2192,11 +2212,14 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
+    // FG-302 must actually ship (FG-442 review Finding 1) for the campaign to reach
+    // 'complete' — otherwise it would park at awaiting_gate and the campaign would pause.
+    closeTicket(projectDir, "FG-302", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
   const runResult = await startCampaign(campaign.id, { dispatch });
-  assert.equal(runResult.stopReason, "complete", "campaign must complete (FG-302 independent, no held items)");
+  assert.equal(runResult.stopReason, "complete", "campaign must complete (FG-302 independent, shipped; no held items)");
 
   const report = assembleCampaignReport(campaign.id)!;
   assert.equal(
@@ -2214,10 +2237,9 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
     0,
     "no held items in a completed campaign"
   );
-  assert.equal(
-    report.groupings.shipped.length,
-    0,
-    "FG-302 not shipped (ticket not done+closedCommit); FG-301 blocked — neither is in shipped grouping"
+  assert.ok(
+    report.groupings.shipped.includes("FG-302"),
+    "FG-302 shipped (ticket done+closedCommit) must appear in the shipped grouping"
   );
 });
 
@@ -2286,6 +2308,7 @@ test("FG-413: ready ticket → dispatched normally (readiness gate does not inte
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
+    closeTicket(projectDir, "FG-101", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2314,6 +2337,7 @@ test("FG-413: exploratory ticket (spike marker in title) → dispatched without 
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
+    closeTicket(projectDir, "FG-802", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2342,6 +2366,7 @@ test("FG-413: resume — readiness-held item refined to ready → re-dispatched 
   let dispatchCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCount++;
+    closeTicket(projectDir, "FG-811", "abc123");
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2563,4 +2588,448 @@ test("FG-416: startCampaign cooperative-pause — itemRecords has no held/blocke
   assert.equal(readinessHeld.length, 0, "no readiness-held items after cooperative pause");
   assert.equal(dependencyHeld.length, 0, "no dependency-held items after cooperative pause");
   assert.equal(blocked.length, 0, "no blocked items after cooperative pause — generic branch fires in CLI");
+});
+
+// ── FG-442: execution lanes — dispatch, escalation, and re-approval ──────────
+
+test("FG-442 docs_only: single invoke dispatch to the stored agentRole; ships when the ticket is closed", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  writeTicket(projectDir, {
+    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
+    created: "2024-01-01", closedCommit: "abc123",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+
+  let calledWithRole: string | undefined;
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    calledWithRole = args.agentRole;
+    return { runId: args.runId ?? "run-docs", taskId: "task-docs", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(calledWithRole, "documentation-maintainer", "must dispatch to the lane's stored agentRole");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-442 review Finding 1: docs_only agent completes but ticket is NOT closed (no closedCommit) → item parks awaiting_gate, campaign pauses, never reports complete", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Ticket left active (not done, no closedCommit) — the agent "finished" without shipping.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-docs-noship",
+    taskId: "task-docs-noship",
+    status: "complete",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "campaign must pause, never report complete, when the item did not ship");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "awaiting_gate", "item must park at awaiting_gate, not complete");
+  assert.equal(result.itemRecords[0]!.outcome, undefined, "outcome must not be 'shipped' when the ticket was never closed");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused", "campaign must be paused, not complete/complete_with_issues");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.lifecycleStatus, "awaiting_gate");
+  assert.equal(items[0]!.blockerKind, undefined, "no blockerKind — this is the out-of-band shape `forge campaign reconcile` expects");
+  assert.ok(
+    items[0]!.requestedHumanAction?.includes("FG-101") && items[0]!.requestedHumanAction?.includes("reconcile"),
+    `requestedHumanAction must name the ticket and point at reconcile\ngot: ${items[0]!.requestedHumanAction}`
+  );
+});
+
+test("FG-442 quick_implementation: dispatches engineer then test-engineer on the SAME run; ships when both succeed", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  writeTicket(projectDir, {
+    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
+    created: "2024-01-01", closedCommit: "abc123",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+
+  const rolesCalled: string[] = [];
+  const runIdsSeen = new Set<string>();
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    rolesCalled.push(args.agentRole);
+    if (args.runId) runIdsSeen.add(args.runId);
+    return { runId: args.runId ?? "run-quick", taskId: `task-${args.agentRole}`, status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.deepEqual(rolesCalled, ["engineer", "test-engineer"], "must dispatch engineer then test-engineer, in order");
+  assert.equal(runIdsSeen.size, 1, "both invokes must attach to the SAME run");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-442 review Finding 1: quick_implementation both invokes complete but ticket is NOT closed (no closedCommit) → item parks awaiting_gate, campaign pauses, never reports complete", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Ticket left active (not done, no closedCommit) — both agents "finished" without shipping.
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-quick-noship",
+    taskId: `task-${args.agentRole}-noship`,
+    status: "complete",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused", "campaign must pause, never report complete, when the item did not ship");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "awaiting_gate", "item must park at awaiting_gate, not complete");
+  assert.equal(result.itemRecords[0]!.outcome, undefined, "outcome must not be 'shipped' when the ticket was never closed");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused", "campaign must be paused, not complete/complete_with_issues");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.lifecycleStatus, "awaiting_gate");
+  assert.equal(items[0]!.blockerKind, undefined, "no blockerKind — this is the out-of-band shape `forge campaign reconcile` expects");
+  assert.ok(
+    items[0]!.requestedHumanAction?.includes("FG-101") && items[0]!.requestedHumanAction?.includes("reconcile"),
+    `requestedHumanAction must name the ticket and point at reconcile\ngot: ${items[0]!.requestedHumanAction}`
+  );
+});
+
+test("FG-442 quick_implementation: test-engineer failure blocks the item, does not silently ship", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    if (args.agentRole === "test-engineer") {
+      return { runId: args.runId ?? "run-quick-fail", taskId: "task-te", status: "failed", error: "tests failed" };
+    }
+    return { runId: args.runId ?? "run-quick-fail", taskId: "task-eng", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "failed");
+  assert.equal(result.itemRecords[0]!.outcome, "blocked");
+});
+
+test("FG-442 ticketing_only: no run/task dispatched; item reaches a terminal 'skipped' outcome with a human action", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "ticketing_only", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  let dispatchCalled = false;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCalled = true;
+    return { runId: "should-not-happen", taskId: "should-not-happen", status: "complete" };
+  };
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(dispatchCalled, false, "ticketing_only must never call opts.dispatch");
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
+  assert.equal(result.itemRecords[0]!.outcome, "skipped");
+  assert.equal(result.itemRecords[0]!.runId, undefined, "no run must be created for ticketing_only");
+
+  const items = listCampaignItems(campaign.id);
+  assert.ok(items[0]!.requestedHumanAction?.includes("ticketing_only"));
+});
+
+test("FG-442 escalation: an explicit laneEscalation signal sets blockerKind lane_escalation and pauses the whole campaign", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-escalate",
+    taskId: "task-escalate",
+    status: "complete",
+    result: { laneEscalation: { reason: "this needs a full implementation, not docs", suggestedLane: "full_feature" } },
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.equal(result.stopReason, "paused");
+  assert.equal(result.itemRecords[0]!.blockerKind, "lane_escalation");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "failed");
+  assert.equal(result.itemRecords[0]!.outcome, "blocked");
+
+  const campaignRow = getCampaign(campaign.id);
+  assert.equal(campaignRow?.status, "paused");
+
+  const items = listCampaignItems(campaign.id);
+  assert.ok(items[0]!.requestedHumanAction?.includes("outgrew lane"));
+});
+
+test("FG-442 escalation: a generic dispatch failure (no laneEscalation field) is classified normally, NOT as an escalation", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+  seedLocalFailure("task-generic-fail");
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-generic-fail",
+    taskId: "task-generic-fail",
+    status: "failed",
+    error: "generic model error",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.notEqual(result.itemRecords[0]!.blockerKind, "lane_escalation", "a generic failure must never be inferred as an escalation");
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "scope");
+});
+
+test("FG-442 escalateCampaignItemLane: mutates plan_hash + resets the item; requires re-approval before resume dispatches under the new lane", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+  const approvedHashBefore = getCampaign(campaign.id)!.approvedPlanHash;
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-escalate2",
+    taskId: "task-escalate2",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  // escalateCampaignItemLane refuses a non-paused campaign
+  const wrongStateResult = escalateCampaignItemLane("nonexistent-campaign-id", "FG-101", {
+    newLane: "full_feature",
+    laneRationale: "test",
+  });
+  assert.equal(wrongStateResult.ok, false);
+
+  const escalateResult = escalateCampaignItemLane(campaign.id, "FG-101", {
+    newLane: "full_feature",
+    laneRationale: "escalated: agent reported outgrowing docs_only",
+  });
+  assert.equal(escalateResult.ok, true);
+  if (!escalateResult.ok) return;
+
+  const afterEscalate = getCampaign(campaign.id)!;
+  assert.equal(afterEscalate.status, "paused", "escalation must not change campaign status by itself");
+  assert.notEqual(afterEscalate.planHash, approvedHashBefore, "escalation must produce a FRESH plan_hash");
+  assert.equal(afterEscalate.approvedPlanHash, approvedHashBefore, "approved_plan_hash must NOT silently follow — re-approval is required");
+
+  const resetItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(resetItem.lifecycleStatus, "pending", "the escalated item must be reset to pending for a fresh dispatch");
+  assert.equal(resetItem.blockerKind, undefined);
+
+  // No silent continue: resume without re-approving is refused as stale.
+  const resumeBeforeApprove = await resumeCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(resumeBeforeApprove.stopReason, "stale_plan", "resume must refuse until the fresh plan is re-approved");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "refused resume must not silently transition the campaign");
+
+  // approveCampaign now accepts re-approving a paused campaign — same confirm/override point.
+  const reApproved = approveCampaign(campaign.id, { rationale: "re-approved after escalation" });
+  assert.equal(reApproved, true, "approveCampaign must accept a paused campaign for re-approval");
+  assert.equal(getCampaign(campaign.id)!.approvedPlanHash, afterEscalate.planHash);
+
+  // No silent downgrade: resume now dispatches the item via the NEW lane (full_feature ->
+  // loadWorkflow path), never falling back to the outgrown docs_only invoke path.
+  let loadWorkflowCalled = false;
+  let dispatchCalledAfterEscalation = false;
+  const result = await resumeCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      dispatchCalledAfterEscalation = true;
+      return escalatingDispatch(args);
+    },
+    loadWorkflowFn: () => {
+      loadWorkflowCalled = true;
+      return {
+        name: "feature",
+        description: "",
+        inputs: [],
+        steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
+      };
+    },
+    runNextFn: async ({ runId }) => {
+      updateRunStatus(runId, "complete");
+      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    },
+  });
+
+  assert.equal(loadWorkflowCalled, true, "resume must dispatch the escalated item via the full_feature workflow path");
+  assert.equal(dispatchCalledAfterEscalation, false, "full_feature dispatch must never call opts.dispatch (invoke escape hatch)");
+  assert.notEqual(result.stopReason, "recovery_needed");
+});
+
+test("RED-WIDE fix 1: bare resume after a lane_escalation pause (no escalate, no approve) refuses with lane_escalation_unresolved, never dispatches item2", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+    "FG-102": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-bypass",
+    taskId: "task-bypass",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  let item2Dispatched = false;
+  const resumeResult = await resumeCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      item2Dispatched = true;
+      return { runId: args.runId ?? "run-item2", taskId: "task-item2", status: "complete", result: {} };
+    },
+  });
+
+  assert.equal(resumeResult.stopReason, "lane_escalation_unresolved");
+  assert.equal(item2Dispatched, false, "resume must never dispatch past a still-unresolved lane_escalation item");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "a refused resume must not silently transition the campaign");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "lane_escalation", "the escalated item must remain unresolved");
+  assert.equal(items[1]!.lifecycleStatus, "pending", "item2 must remain untouched by the refused resume");
+});
+
+test("RED-WIDE fix 4: escalateCampaignItemLane rejects a no-op lane change (rationale-only tweak, same lane)", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "docs_only", laneRationale: "test", agentRole: "documentation-maintainer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  const escalatingDispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-noop",
+    taskId: "task-noop",
+    status: "complete",
+    result: { laneEscalation: { reason: "outgrew docs_only" } },
+  });
+  await startCampaign(campaign.id, { dispatch: escalatingDispatch });
+  assert.equal(getCampaign(campaign.id)!.status, "paused");
+
+  const planHashBefore = getCampaign(campaign.id)!.planHash;
+
+  const result = escalateCampaignItemLane(campaign.id, "FG-101", {
+    newLane: "docs_only", // same lane the item is already on
+    laneRationale: "just tweaking the rationale text, no real change",
+    agentRole: "documentation-maintainer",
+  });
+
+  assert.equal(result.ok, false, "a no-op lane change must be rejected");
+  assert.equal(getCampaign(campaign.id)!.planHash, planHashBefore, "plan_hash must not change on a rejected no-op escalation");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.blockerKind, "lane_escalation", "item must remain in its escalated blocked state — no silent clear");
+  assert.equal(items[0]!.lifecycleStatus, "failed");
+});
+
+test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field) dispatches via single invoke, not the full_feature workflow path", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { executionMode: "invoke", agentRole: "engineer" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Simulate a campaign whose metadata.planContent was persisted BEFORE the
+  // 'lane' field existed on CanonicalItemEntry — strip it from the stored
+  // display/dispatch copy without touching plan_hash/approved_plan_hash.
+  // campaignBlocker's staleness check re-derives its hash from sourceInput, never
+  // from this stored blob, so this does not trip stale_plan.
+  const stored = getCampaign(campaign.id)!;
+  const legacyPlanContent = JSON.parse(JSON.stringify(stored.metadata!["planContent"])) as {
+    orderedItems: Array<Record<string, unknown>>;
+  };
+  for (const entry of legacyPlanContent.orderedItems) {
+    delete entry["lane"];
+    delete entry["laneRationale"];
+    delete entry["materialLaneAssumptions"];
+  }
+  getDb()
+    .prepare("UPDATE campaigns SET metadata = ? WHERE id = ?")
+    .run(JSON.stringify({ ...stored.metadata, planContent: legacyPlanContent }), campaign.id);
+
+  let loadWorkflowCalled = false;
+  let dispatchCalled = false;
+  const result = await startCampaign(campaign.id, {
+    dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
+      dispatchCalled = true;
+      return { runId: args.runId ?? "run-legacy", taskId: "task-legacy", status: "complete", result: {} };
+    },
+    loadWorkflowFn: () => {
+      loadWorkflowCalled = true;
+      return {
+        name: "feature",
+        description: "",
+        inputs: [],
+        steps: [{ id: "engineer", agent: "engineer", runtime: "claude", depends_on: [], gate: "auto", reds: [], manual: false }],
+      };
+    },
+  });
+
+  assert.notEqual(result.stopReason, "stale_plan", "stripping the display-only planContent copy must not trip the staleness check");
+  assert.equal(loadWorkflowCalled, false, "legacy invoke entry must NOT dispatch via the full_feature workflow path");
+  assert.equal(dispatchCalled, true, "legacy invoke entry must dispatch via the single-invoke path it was actually approved for");
 });

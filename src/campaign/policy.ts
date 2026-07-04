@@ -7,6 +7,11 @@ export const SHARED_BLOCKER_KINDS = new Set<BlockerKind>([
   "dependency",
   "merge_conflict",
   "campaign_system",
+  // FG-442: an item outgrowing its approved lane invalidates the approved plan
+  // basis (the item can no longer be trusted to finish in the lane the operator
+  // approved) — scoping this hold-dependents-only would under-pause, so it must
+  // pause the WHOLE campaign like the other SHARED kinds.
+  "lane_escalation",
 ]);
 
 export function isSharedBlocker(kind: BlockerKind): boolean {

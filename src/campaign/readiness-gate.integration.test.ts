@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { getCampaign, approveCampaign } from "../store/campaigns.js";
-import { writeTicket } from "../backlog/structured.js";
+import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import { startCampaign, resumeCampaign } from "./executor.js";
@@ -73,6 +73,9 @@ function makeDispatchSpy(): {
     calls,
     spy: async (args: InvokeArgs): Promise<InvokeResult> => {
       calls.push(args.runTitle ?? "");
+      // Simulate the agent shipping the ticket as part of completing the dispatch —
+      // required for the item to reach lifecycleStatus 'complete' (FG-442 review Finding 1).
+      if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
     },
   };

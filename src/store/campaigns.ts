@@ -233,20 +233,70 @@ export type CampaignItemUpdate = {
   prUrl?: string;
 };
 
+// FG-442: a campaign may also be re-approved while 'paused' — the escalation
+// path (updateCampaignPlanForReapproval below) produces a fresh unapproved
+// plan_hash on a paused campaign, and this is the SAME confirm/override point
+// used at first approval, not a new command. 'planned' stays supported for the
+// original pre-execution approval.
+//
+// FG-442 re-review: the paused-reapproval guard lives entirely in this UPDATE's
+// WHERE clause (compare-and-swap), not in a separate SELECT check, so a
+// concurrent write can't slip through between a read and this write. It is also
+// kept symmetric with the CLI guard (campaign.ts's approve command): a paused
+// campaign is only approvable when its plan_hash has actually moved AND no item
+// is still blocked on an unresolved lane_escalation — calling this store
+// primitive directly must not be a weaker path than going through the CLI.
 export function approveCampaign(
   id: string,
   opts: { approvedBy?: string; rationale: string }
 ): boolean {
   const campaign = getCampaign(id);
-  if (!campaign || campaign.status !== "planned") return false;
+  if (!campaign || (campaign.status !== "planned" && campaign.status !== "paused")) return false;
   const result = getDb()
     .prepare(
       `UPDATE campaigns
           SET approved_by = ?, approved_at = ?, approval_rationale = ?,
               approved_plan_hash = plan_hash, updated_at = ?
-        WHERE id = ? AND status = 'planned'`
+        WHERE id = ?
+          AND (
+            status = 'planned'
+            OR (
+              status = 'paused'
+              AND plan_hash IS NOT approved_plan_hash
+              AND NOT EXISTS (
+                SELECT 1 FROM campaign_items
+                WHERE campaign_id = campaigns.id
+                  AND lifecycle_status = 'failed'
+                  AND outcome = 'blocked'
+                  AND blocker_kind = 'lane_escalation'
+              )
+            )
+          )`
     )
     .run(opts.approvedBy ?? null, nowIso(), opts.rationale, nowIso(), id);
+  return (result.changes ?? 0) > 0;
+}
+
+// FG-442: escalation store primitive. Mutates an EXISTING paused campaign's
+// sourceInput + planContent + plan_hash in place, producing a fresh UNAPPROVED
+// baseline — there was no prior way to mutate a campaign's planContent or
+// re-approve anything but a 'planned' campaign, so 'reuse the approve state
+// machine' was not implementable for an outgrown-lane item. Pure DB write; the
+// caller (campaign/executor.ts) is responsible for re-resolving the plan via
+// resolvePlan so canonicalContent/planHash stay consistent with sourceInput —
+// this function does not import campaign/planner.ts to avoid a store->business
+// logic circular dependency.
+export function updateCampaignPlanForReapproval(
+  id: string,
+  opts: { sourceInput: Record<string, unknown>; metadata: Record<string, unknown>; planHash: string }
+): boolean {
+  const result = getDb()
+    .prepare(
+      `UPDATE campaigns
+          SET source_input = ?, metadata = ?, plan_hash = ?, updated_at = ?
+        WHERE id = ? AND status = 'paused'`
+    )
+    .run(JSON.stringify(opts.sourceInput), JSON.stringify(opts.metadata), opts.planHash, nowIso(), id);
   return (result.changes ?? 0) > 0;
 }
 

@@ -8,13 +8,15 @@ import {
   getCampaignItem,
   listCampaignItems,
   updateCampaignItem,
+  updateCampaignItemIfCampaignPaused,
+  updateCampaignPlanForReapproval,
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
 import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
-import { resolvePlan } from "./planner.js";
-import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
+import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
+import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./planner.js";
 import { listTickets, readTicket } from "../backlog/structured.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, updateRunStatus } from "../store/runs.js";
@@ -40,6 +42,7 @@ import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
 import { collectAuthoritativeEvents } from "./reconcile-collect.js";
 import { evaluateAuthoritativeOutcome } from "./reconcile-evidence.js";
+import { assessRunDocsImpact, formatDocsImpactWarning } from "../v2/docs-impact.js";
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
 // Lets unit tests inject known results without real git/filesystem access.
@@ -49,9 +52,6 @@ export function setExecutorDoneAuditMapForTest(map: Map<string, DoneAuditResult>
   _testDoneAuditMapOverride = map;
   return prev;
 }
-
-// Local alias — not exported. Flows through the DB as a string in canonicalContent.
-type ItemExecutionMode = "workflow" | "invoke";
 
 export type CampaignStopReason =
   | "not_planned"
@@ -67,7 +67,8 @@ export type CampaignStopReason =
   | "abandoned"
   | "item_failed"
   | "complete"
-  | "recovery_needed";
+  | "recovery_needed"
+  | "lane_escalation_unresolved";
 
 export type CampaignItemRecord = {
   itemId: string;
@@ -83,24 +84,11 @@ function hasBacklog(dir: string): boolean {
   return existsSync(join(dir, "backlog"));
 }
 
-
-export function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
-  const kind = sourceInput["kind"] as string;
-  const itemOverrides = sourceInput["itemOverrides"] as Record<string, ItemModeOverride> | undefined;
-  if (kind === "list") {
-    return { kind: "list", ticketIds: (sourceInput["ticketIds"] as string[]) ?? [], ...(itemOverrides ? { itemOverrides } : {}) };
-  }
-  if (kind === "epic") {
-    return { kind: "epic", epicId: sourceInput["epicId"] as string, ...(itemOverrides ? { itemOverrides } : {}) };
-  }
-  return {
-    kind: "mixed",
-    epicId: sourceInput["epicId"] as string,
-    additions: sourceInput["additions"] as string[] | undefined,
-    exclusions: sourceInput["exclusions"] as string[] | undefined,
-    ...(itemOverrides ? { itemOverrides } : {}),
-  };
-}
+// Re-exported for existing external callers — now a single shared implementation
+// (see planner.ts). Previously executor.ts and report.ts each held their own
+// copy; report.ts's silently dropped itemOverrides, which is exactly the drift
+// the FG-442 lane data can't tolerate.
+export { sourceInputToPlannerInput };
 
 // Pure precondition evaluator — no DB writes. Returns the first blocking stop reason or null.
 // In-flight check is status-agnostic and always runs first.
@@ -157,8 +145,24 @@ export function campaignBlocker(
       return "plan_unresolvable";
     }
     if (resumeHash !== campaign.approvedPlanHash) return "stale_plan";
+    // A bare resume (no escalate, no re-approve) must never silently continue
+    // dispatching later items past an item that outgrew its lane — the ONLY
+    // way to clear this pause is escalateCampaignItemLane + re-approval.
+    if (hasUnresolvedLaneEscalation(items)) return "lane_escalation_unresolved";
     return null;
   }
+}
+
+// FG-442 fix: the ONLY way to clear a lane_escalation pause is a genuine
+// escalateCampaignItemLane call, which resets the item to 'pending' (clearing
+// blockerKind) in the SAME write that mints the fresh plan_hash — so an item
+// still sitting failed/blocked with blockerKind 'lane_escalation' means no
+// escalate has happened yet, regardless of what a bare resume's stale-plan
+// check sees (sourceInput/plan_hash are untouched by a no-op resume attempt).
+export function hasUnresolvedLaneEscalation(items: CampaignItem[]): boolean {
+  return items.some(
+    (item) => item.lifecycleStatus === "failed" && item.outcome === "blocked" && item.blockerKind === "lane_escalation"
+  );
 }
 
 type BlockedItemEntry = {
@@ -224,41 +228,148 @@ export type CampaignRunResult = {
   itemRecords: CampaignItemRecord[];
 };
 
-// Read per-item execution config from canonicalContent (stored in campaign.metadata.planContent).
-// Returns { executionMode: 'workflow', workflowName: 'feature' } as default when not found.
-function getItemExecutionConfig(
-  canonicalContent: unknown,
-  ticketId: string,
-): { executionMode: ItemExecutionMode; workflowName: string; agentRole?: string } {
-  const cc = canonicalContent as Record<string, unknown> | null | undefined;
-  if (cc) {
-    const orderedItems = cc["orderedItems"];
-    if (Array.isArray(orderedItems)) {
-      const entry = orderedItems.find(
-        (it) =>
-          typeof it === "object" &&
-          it !== null &&
-          (it as Record<string, unknown>)["ticketId"] === ticketId,
-      ) as Record<string, unknown> | undefined;
-      if (entry) {
-        if (entry["executionMode"] === "invoke") {
-          return {
-            executionMode: "invoke",
-            workflowName: "feature",
-            agentRole: typeof entry["agentRole"] === "string" ? entry["agentRole"] : "engineer",
-          };
-        }
-        return {
-          executionMode: "workflow",
-          workflowName:
-            typeof entry["workflowName"] === "string" ? entry["workflowName"] : "feature",
-        };
-      }
-    }
+// FG-442: the explicit, well-known "outgrew my lane" signal an agent's
+// structured result.json may carry. Checked for a NAMED field only — never
+// inferred from a generic failure (a model/tool error is scope, not escalation).
+type LaneEscalationSignal = { reason: string; suggestedLane?: ExecutionLane };
+
+function extractLaneEscalationSignal(result: unknown): LaneEscalationSignal | null {
+  if (typeof result !== "object" || result === null) return null;
+  const r = result as Record<string, unknown>;
+  const le = r["laneEscalation"];
+  if (typeof le !== "object" || le === null) return null;
+  const lo = le as Record<string, unknown>;
+  const reason = typeof lo["reason"] === "string" ? lo["reason"] : "agent reported outgrowing its assigned lane";
+  const suggestedLane = typeof lo["suggestedLane"] === "string" ? (lo["suggestedLane"] as ExecutionLane) : undefined;
+  return { reason, ...(suggestedLane ? { suggestedLane } : {}) };
+}
+
+// One opts.dispatch call, shared by every single-invoke-style lane (docs_only/
+// test_only/review_only/research_only, and each half of quick_implementation's
+// engineer->test-engineer chain). Detects the lane-escalation signal BEFORE the
+// normal complete/failed branching — escalation is a distinct outcome, never
+// inferred from a generic failure.
+type LaneDispatchOutcome =
+  | { status: "escalated"; signal: LaneEscalationSignal }
+  | { status: "dispatch_threw"; error: string }
+  | { status: "complete"; result: InvokeResult }
+  | { status: "failed"; result: InvokeResult };
+
+async function dispatchLaneInvoke(
+  dispatch: (args: InvokeArgs) => Promise<InvokeResult>,
+  args: InvokeArgs
+): Promise<LaneDispatchOutcome> {
+  let result: InvokeResult;
+  try {
+    result = await dispatch(args);
+  } catch (err) {
+    return { status: "dispatch_threw", error: err instanceof Error ? err.message : String(err) };
   }
-  // Default to invoke for backward compatibility — items without explicit workflow
-  // configuration fall through to the original dispatch path.
-  return { executionMode: "invoke", workflowName: "feature" };
+  const signal = extractLaneEscalationSignal(result.result);
+  if (signal) return { status: "escalated", signal };
+  return result.status === "complete" ? { status: "complete", result } : { status: "failed", result };
+}
+
+// Finalizes a non-'complete' dispatch outcome (escalated/dispatch_threw/failed):
+// updates the item, records it, and decides pause-vs-continue. Returns a
+// CampaignRunResult when the caller must stop (shared blocker/escalation);
+// null when a LOCAL blocker was recorded and the outer loop may continue (the
+// caller still owns the cooperative-pause check before doing so).
+async function finalizeInvokeDispatch(
+  ctx: {
+    campaignId: string;
+    item: CampaignItem;
+    runId: string;
+    lane: ExecutionLane;
+    laterTicket: StructuredTicket | undefined;
+    itemRecords: CampaignItemRecord[];
+    blockedItems: BlockedItemEntry[];
+  },
+  outcome: Exclude<LaneDispatchOutcome, { status: "complete" }>
+): Promise<CampaignRunResult | null> {
+  const { campaignId, item, runId, lane, laterTicket, itemRecords, blockedItems } = ctx;
+
+  if (outcome.status === "escalated") {
+    const suggestion = outcome.signal.suggestedLane ? ` — agent suggests lane '${outcome.signal.suggestedLane}'` : "";
+    updateCampaignItem(item.id, {
+      lifecycleStatus: "failed",
+      outcome: "blocked",
+      blockerKind: "lane_escalation",
+      reason: outcome.signal.reason,
+      requestedHumanAction: `item ${item.ticketId} outgrew lane '${lane}'${suggestion} — escalate the lane and re-approve before resuming`,
+      continuePolicy: "hold_campaign",
+    });
+    itemRecords.push({
+      itemId: item.id,
+      ticketId: item.ticketId,
+      runId,
+      lifecycleStatus: "failed",
+      outcome: "blocked",
+      blockerKind: "lane_escalation",
+    });
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      return { stopReason: "paused", itemRecords };
+    }
+    const post = getCampaign(campaignId);
+    return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+  }
+
+  if (outcome.status === "dispatch_threw") {
+    const blockerKind: BlockerKind = "infrastructure";
+    updateRunStatus(runId, "abandoned");
+    updateCampaignItem(item.id, {
+      lifecycleStatus: "failed",
+      outcome: "blocked",
+      blockerKind,
+      reason: outcome.error,
+      requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
+      continuePolicy: "hold_campaign",
+    });
+    itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      return { stopReason: "paused", itemRecords };
+    }
+    const post = getCampaign(campaignId);
+    return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+  }
+
+  // status === "failed" — dispatch returned, classify and apply FG-393 policy.
+  const reason = outcome.result.error ?? "invoke failed";
+  const failureKind = failureKindForTask(outcome.result.taskId);
+  const blockerKind = classifyFailureKind(failureKind);
+  const shared = isSharedBlocker(blockerKind);
+
+  updateCampaignItem(item.id, {
+    lifecycleStatus: "failed",
+    outcome: "blocked",
+    blockerKind,
+    reason,
+    requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
+    continuePolicy: shared ? "hold_campaign" : "hold_dependents",
+  });
+  itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
+
+  if (shared) {
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      return { stopReason: "paused", itemRecords };
+    }
+    const post = getCampaign(campaignId);
+    return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+  }
+
+  // LOCAL blocker — continue. Add to blockedItems so subsequent items can be evaluated.
+  if (laterTicket) {
+    blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind });
+  } else {
+    // Ticket not in ticketMap (deleted?). Use a synthetic entry with no related field
+    // so downstream items get "unknown" relation and are conservatively held.
+    blockedItems.push({
+      id: item.ticketId,
+      ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
+      blockerKind,
+    });
+  }
+  return null;
 }
 
 // Derive terminal campaign item outcome from a completed/abandoned workflow run.
@@ -463,7 +574,10 @@ async function driveWorkflowItem(
           break;
         }
       } else {
-        // gate:human — this is the ONLY path that sets item lifecycleStatus to 'awaiting_gate'.
+        // gate:human — one of two producers of 'awaiting_gate' (the other being an
+        // invoke-lane item that finished without shipping; see the invoke-lane finalize
+        // sites below). Both set no blockerKind, which is what marks them as the
+        // out-of-band shape `forge campaign reconcile` looks for.
         updateCampaignItem(itemId, {
           lifecycleStatus: "awaiting_gate",
           requestedHumanAction: `Human gate required at step ${step?.id ?? awaitingTask.phase} in workflow ${currentRun.workflow}`,
@@ -716,22 +830,23 @@ async function driveRemainingItems(
       };
     }
 
-    // ── DISPATCH BRANCH ────────────────────────────────────────────────────────
-    const itemConfig = getItemExecutionConfig(canonicalContent, item.ticketId);
+    // ── DISPATCH BRANCH — strictly by the approved lane, no re-derivation ──────
+    const itemConfig = getItemPlanEntry(canonicalContent, item.ticketId);
 
-    if (itemConfig.executionMode === "workflow") {
-      // ── WORKFLOW DISPATCH PATH ─────────────────────────────────────────────
+    if (itemConfig.lane === "full_feature") {
+      // ── FULL_FEATURE: existing loadWorkflow/startRun/runNext path, UNCHANGED ─
+      const workflowName = itemConfig.workflowName ?? "feature";
 
       // Load the workflow — failure containment mirrors the existing throw-catch pattern.
       let loadedWorkflow: Workflow;
       try {
-        loadedWorkflow = doLoadWorkflow(itemConfig.workflowName, { projectDir: opts.projectDir });
+        loadedWorkflow = doLoadWorkflow(workflowName, { projectDir: opts.projectDir });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         const runId = newRunId(item.ticketId);
         insertRun({
           id: runId,
-          workflow: itemConfig.workflowName,
+          workflow: workflowName,
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
@@ -742,7 +857,7 @@ async function driveRemainingItems(
           lifecycleStatus: "failed",
           outcome: "blocked",
           blockerKind: "campaign_system",
-          requestedHumanAction: `workflow YAML missing or invalid: ${itemConfig.workflowName} — ${reason}`,
+          requestedHumanAction: `workflow YAML missing or invalid: ${workflowName} — ${reason}`,
         });
         itemRecords.push({
           itemId: item.id,
@@ -792,7 +907,7 @@ async function driveRemainingItems(
         const failRunId = newRunId(item.ticketId);
         insertRun({
           id: failRunId,
-          workflow: itemConfig.workflowName,
+          workflow: workflowName,
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
@@ -880,20 +995,160 @@ async function driveRemainingItems(
         };
       }
 
-    } else {
-      // ── INVOKE DISPATCH PATH (escape hatch — explicit opt-in only) ─────────
+    } else if (itemConfig.lane === "ticketing_only" || itemConfig.lane === "manual") {
+      // ── TICKETING_ONLY / MANUAL: no-dispatch path — no run/task, ever ────────
+      const requestedHumanAction =
+        itemConfig.lane === "ticketing_only"
+          ? `file/update the backlog ticket for ${item.ticketId} — lane 'ticketing_only' does not dispatch an agent`
+          : `handle ${item.ticketId} manually — lane 'manual' does not dispatch an agent`;
+      updateCampaignItem(item.id, {
+        lifecycleStatus: "complete",
+        outcome: "skipped",
+        requestedHumanAction,
+      });
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        lifecycleStatus: "complete",
+        outcome: "skipped",
+      });
 
+      const postCheck = getCampaign(campaignId);
+      if (!postCheck || postCheck.status !== "running") {
+        return {
+          stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
+          itemRecords,
+        };
+      }
+    } else if (itemConfig.lane === "quick_implementation") {
+      // ── QUICK_IMPLEMENTATION: engineer invoke -> test-engineer invoke, one run ─
       const runId = newRunId(item.ticketId);
-      const run: Run = {
+      insertRun({
+        id: runId,
+        workflow: "invoke_chain",
+        title: item.ticketId,
+        status: "active",
+        createdAt: nowIso(),
+        metadata: { invokeChain: ["engineer", "test-engineer"] },
+        projectDir: opts.projectDir,
+      });
+      updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });
+
+      const cachedTicket = ticketMap.get(item.ticketId);
+      const taskText = cachedTicket
+        ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
+        : item.ticketId;
+      const finalizeCtx = { campaignId, item, runId, lane: itemConfig.lane, laterTicket, itemRecords, blockedItems };
+
+      const engineerOutcome = await dispatchLaneInvoke(opts.dispatch, {
+        agentRole: "engineer",
+        task: taskText,
+        projectDir: opts.projectDir,
+        runId,
+        runTitle: item.ticketId,
+      });
+      if (engineerOutcome.status !== "complete") {
+        const stop = await finalizeInvokeDispatch(finalizeCtx, engineerOutcome);
+        if (stop) return stop;
+        const postCheck = getCampaign(campaignId);
+        if (!postCheck || postCheck.status !== "running") {
+          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        }
+        continue;
+      }
+
+      const testEngineerTask = `${taskText}\n\n## Prior step\nengineer completed implementation for this item under run ${runId}; verify and add/adjust tests as needed.`;
+      const testEngineerOutcome = await dispatchLaneInvoke(opts.dispatch, {
+        agentRole: "test-engineer",
+        task: testEngineerTask,
+        projectDir: opts.projectDir,
+        runId,
+        runTitle: item.ticketId,
+      });
+      if (testEngineerOutcome.status !== "complete") {
+        const stop = await finalizeInvokeDispatch(finalizeCtx, testEngineerOutcome);
+        if (stop) return stop;
+        const postCheck = getCampaign(campaignId);
+        if (!postCheck || postCheck.status !== "running") {
+          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        }
+        continue;
+      }
+
+      // Both invokes completed — finalize the item. Only outcome==='shipped' (ticket
+      // done + closedCommit) may complete the item; anything else means the agent(s)
+      // finished without actually shipping, so the item parks at awaiting_gate for
+      // `forge campaign reconcile` (or manual resolution) instead of reporting
+      // complete (FG-442 review: invoke lanes had no gate on a non-shipped outcome).
+      let outcome: CampaignItemOutcome | undefined;
+      try {
+        const freshTicket = readTicket(opts.projectDir, item.ticketId);
+        if (freshTicket.status === "done" && !!freshTicket.closedCommit) outcome = "shipped";
+      } catch {
+        // ticket not found after run — leave outcome undefined
+      }
+
+      // FG-442: docs-impact resolution — advisory only, mirrors milestone.ts's
+      // ship-time check. quick_implementation has no docs phase of its own
+      // (unlike full_feature's pipeline, which always runs documentation-maintainer).
+      const docsWarning = outcome === "shipped" ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
+
+      if (outcome === "shipped") {
+        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome, reason: docsWarning ?? undefined });
+      } else {
+        updateCampaignItem(item.id, {
+          lifecycleStatus: "awaiting_gate",
+          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
+        });
+      }
+
+      const runTasks = tasksForRun(runId);
+      const worktreeTask = runTasks.find((t) => t.worktreePath != null);
+      if (worktreeTask) {
+        updateCampaignItem(item.id, {
+          branch: `forge/${runId}/${worktreeTask.id}`,
+          worktreePath: worktreeTask.worktreePath,
+        });
+      }
+
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        runId,
+        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
+        outcome,
+        ...(docsWarning ? { reason: docsWarning } : {}),
+      });
+
+      if (outcome !== "shipped") {
+        if (tryTransitionCampaign(campaignId, "running", "paused")) {
+          return { stopReason: "paused", itemRecords };
+        }
+        const post = getCampaign(campaignId);
+        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+
+      const postCheck = getCampaign(campaignId);
+      if (!postCheck || postCheck.status !== "running") {
+        return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+      }
+    } else {
+      // ── docs_only | test_only | review_only | research_only ─────────────────
+      // Single opts.dispatch invoke to the item's stored agentRole — the SAME
+      // mechanism the pre-FG-442 executionMode:'invoke' escape hatch always used
+      // (see planner.ts foldItemEntry), which is why report.ts still labels it
+      // "invoke (escape hatch)".
+      const agentRole = itemConfig.agentRole!; // guaranteed by planner validation
+      const runId = newRunId(item.ticketId);
+      insertRun({
         id: runId,
         workflow: "invoke",
         title: item.ticketId,
         status: "active",
         createdAt: nowIso(),
-        metadata: { invokeAgent: itemConfig.agentRole ?? "engineer" },
+        metadata: { invokeAgent: agentRole },
         projectDir: opts.projectDir,
-      };
-      insertRun(run);
+      });
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });
 
       const cachedTicket = ticketMap.get(item.ticketId);
@@ -901,140 +1156,81 @@ async function driveRemainingItems(
         ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
         : item.ticketId;
 
-      let dispatchResult: InvokeResult;
+      const dispatchOutcome = await dispatchLaneInvoke(opts.dispatch, {
+        agentRole,
+        task: taskText,
+        projectDir: opts.projectDir,
+        runId,
+        runTitle: item.ticketId,
+      });
+
+      if (dispatchOutcome.status !== "complete") {
+        const stop = await finalizeInvokeDispatch(
+          { campaignId, item, runId, lane: itemConfig.lane, laterTicket, itemRecords, blockedItems },
+          dispatchOutcome
+        );
+        if (stop) return stop;
+        const postCheck = getCampaign(campaignId);
+        if (!postCheck || postCheck.status !== "running") {
+          return { stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
+        }
+        continue;
+      }
+
+      // Only outcome==='shipped' (ticket done + closedCommit) may complete the item;
+      // anything else means the agent finished without actually shipping, so the item
+      // parks at awaiting_gate for `forge campaign reconcile` (or manual resolution)
+      // instead of reporting complete (FG-442 review).
+      let outcome: CampaignItemOutcome | undefined;
       try {
-        dispatchResult = await opts.dispatch({
-          agentRole: itemConfig.agentRole ?? "engineer",
-          task: taskText,
-          projectDir: opts.projectDir,
-          runId,
-          runTitle: item.ticketId,
-        });
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        // Throws are infrastructure-level failures (SHARED).
-        const blockerKind: BlockerKind = "infrastructure";
-        updateRunStatus(runId, "abandoned");
+        const freshTicket = readTicket(opts.projectDir, item.ticketId);
+        if (freshTicket.status === "done" && !!freshTicket.closedCommit) {
+          outcome = "shipped";
+        }
+      } catch {
+        // ticket not found after run — leave outcome undefined
+      }
+
+      if (outcome === "shipped") {
+        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
+      } else {
         updateCampaignItem(item.id, {
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-          blockerKind,
-          reason,
-          requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
-          continuePolicy: "hold_campaign",
+          lifecycleStatus: "awaiting_gate",
+          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
         });
-        itemRecords.push({
-          itemId: item.id,
-          ticketId: item.ticketId,
-          runId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
+      }
+
+      const runTasks = tasksForRun(runId);
+      const worktreeTask = runTasks.find((t) => t.worktreePath != null);
+      if (worktreeTask) {
+        updateCampaignItem(item.id, {
+          branch: `forge/${runId}/${worktreeTask.id}`,
+          worktreePath: worktreeTask.worktreePath,
         });
+      }
+
+      itemRecords.push({
+        itemId: item.id,
+        ticketId: item.ticketId,
+        runId,
+        lifecycleStatus: outcome === "shipped" ? "complete" : "awaiting_gate",
+        outcome,
+      });
+
+      if (outcome !== "shipped") {
         if (tryTransitionCampaign(campaignId, "running", "paused")) {
           return { stopReason: "paused", itemRecords };
         }
-        const throwPostFail = getCampaign(campaignId);
-        return {
-          stopReason: throwPostFail?.status === "abandoned" ? "abandoned" : "paused",
-          itemRecords,
-        };
+        const post = getCampaign(campaignId);
+        return { stopReason: post?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
       }
 
-      // Re-read campaign status after item completes
       const postCheck = getCampaign(campaignId);
-
-      if (dispatchResult.status === "complete") {
-        let outcome: CampaignItemOutcome | undefined;
-        try {
-          const freshTicket = readTicket(opts.projectDir, item.ticketId);
-          if (freshTicket.status === "done" && !!freshTicket.closedCommit) {
-            outcome = "shipped";
-          }
-        } catch {
-          // ticket not found after run — leave outcome undefined
-        }
-        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
-
-        // Record worktree evidence if any task in the run has a worktreePath set.
-        const runTasks = tasksForRun(runId);
-        const worktreeTask = runTasks.find((t) => t.worktreePath != null);
-        if (worktreeTask) {
-          updateCampaignItem(item.id, {
-            branch: `forge/${runId}/${worktreeTask.id}`,
-            worktreePath: worktreeTask.worktreePath,
-          });
-        }
-
-        itemRecords.push({
-          itemId: item.id,
-          ticketId: item.ticketId,
-          runId,
-          lifecycleStatus: "complete",
-          outcome,
-        });
-
-        // Cooperative pause: if campaign was paused during this item, stop without transition
-        if (!postCheck || postCheck.status !== "running") {
-          return {
-            stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
-            itemRecords,
-          };
-        }
-      } else {
-        // Dispatch returned failed — classify and apply FG-393 policy.
-        const reason = dispatchResult.error ?? "invoke failed";
-        const failureKind = failureKindForTask(dispatchResult.taskId);
-        const blockerKind = classifyFailureKind(failureKind);
-        const shared = isSharedBlocker(blockerKind);
-
-        updateCampaignItem(item.id, {
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-          blockerKind,
-          reason,
-          requestedHumanAction: `resolve ${blockerKind} for ${item.ticketId} then resume`,
-          continuePolicy: shared ? "hold_campaign" : "hold_dependents",
-        });
-        itemRecords.push({
-          itemId: item.id,
-          ticketId: item.ticketId,
-          runId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-        });
-
-        if (shared) {
-          // Hold the whole campaign — remaining pending items stay pending.
-          if (tryTransitionCampaign(campaignId, "running", "paused")) {
-            return { stopReason: "paused", itemRecords };
-          }
-          const resultPostFail = getCampaign(campaignId);
-          return {
-            stopReason: resultPostFail?.status === "abandoned" ? "abandoned" : "paused",
-            itemRecords,
-          };
-        }
-
-        // LOCAL blocker — continue. Add to blockedItems so subsequent items can be evaluated.
-        if (laterTicket) {
-          blockedItems.push({ id: item.ticketId, ticket: laterTicket, blockerKind });
-        } else {
-          // Ticket not in ticketMap (deleted?). Use a synthetic entry with no related field
-          // so downstream items get "unknown" relation and are conservatively held.
-          blockedItems.push({
-            id: item.ticketId,
-            ticket: { id: item.ticketId, type: "story", status: "active", title: item.ticketId, body: "" } as StructuredTicket,
-            blockerKind,
-          });
-        }
-
-        // Cooperative pause check after failure: if already paused, stop the loop.
-        if (!postCheck || postCheck.status !== "running") {
-          return {
-            stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
-            itemRecords,
-          };
-        }
+      if (!postCheck || postCheck.status !== "running") {
+        return {
+          stopReason: postCheck?.status === "abandoned" ? "abandoned" : "paused",
+          itemRecords,
+        };
       }
     }
   }
@@ -1162,4 +1358,91 @@ export async function resumeCampaign(
     loadWorkflowFn: opts.loadWorkflowFn,
     gateFn: opts.gateFn,
   });
+}
+
+export type EscalateLaneResult = { ok: true; planHash: string } | { ok: false; reason: string };
+
+// FG-442: the escalation store capability. approveCampaign() was hard-gated to
+// campaign.status==='planned' and there was no way to mutate an existing
+// campaign's planContent or re-approve a paused campaign — "reuse the approve
+// state machine" was not implementable as-is (RED-WIDE HIGH FINDING). This
+// mutates the ESCALATED item's lane directly into campaign.sourceInput (so
+// resolvePlan deterministically re-derives the SAME escalated lane on every
+// future resolve — it never reads campaign.metadata.planContent as its source
+// of truth), re-resolves the plan, and writes a fresh UNAPPROVED plan_hash —
+// forcing `forge campaign approve` before start/resume will accept the new
+// baseline (campaignBlocker's stale-plan check). The escalated item is also
+// reset to 'pending' so a subsequent resume dispatches it fresh, in its new
+// lane — never a silent downgrade, never a silent continue in the outgrown lane.
+export function escalateCampaignItemLane(
+  campaignId: string,
+  ticketId: string,
+  opts: { newLane: ExecutionLane; laneRationale: string; materialLaneAssumptions?: string[]; agentRole?: string }
+): EscalateLaneResult {
+  const campaign = getCampaign(campaignId);
+  if (!campaign) return { ok: false, reason: `campaign ${campaignId} not found` };
+  if (campaign.status !== "paused") {
+    return { ok: false, reason: `campaign must be paused to escalate a lane (status: ${campaign.status})` };
+  }
+  if (!campaign.projectDir) return { ok: false, reason: "campaign has no projectDir" };
+
+  // RED-WIDE fix: ticketId must name a real campaign item that is actually
+  // blocked on lane_escalation — otherwise an operator could escalate an
+  // unrelated (or nonexistent) ticket, mint a fresh plan_hash, and let
+  // `campaign approve` pass while the REAL escalated item stays unresolved.
+  const items = listCampaignItems(campaignId);
+  const targetItem = items.find((i) => i.ticketId === ticketId);
+  if (!targetItem) {
+    return { ok: false, reason: `ticket ${ticketId} is not a campaign item in campaign ${campaignId}` };
+  }
+  if (!(targetItem.lifecycleStatus === "failed" && targetItem.outcome === "blocked" && targetItem.blockerKind === "lane_escalation")) {
+    return {
+      ok: false,
+      reason: `ticket ${ticketId} is not currently blocked on lane_escalation (lifecycleStatus: ${targetItem.lifecycleStatus}, blockerKind: ${targetItem.blockerKind ?? "none"})`,
+    };
+  }
+
+  // A genuine escalation must change what actually dispatches — a rationale-only
+  // tweak that keeps the SAME lane must not be allowed to mint a "fresh" plan_hash
+  // and satisfy the re-approval gate without any real change (RED-WIDE LOW finding).
+  const currentLane = getItemPlanEntry(campaign.metadata?.["planContent"], ticketId).lane;
+  if (currentLane === opts.newLane) {
+    return { ok: false, reason: `newLane '${opts.newLane}' is the same as the item's current lane — escalation requires an actual lane change` };
+  }
+
+  const sourceInput: Record<string, unknown> = { ...campaign.sourceInput };
+  const existingOverrides = (sourceInput["itemOverrides"] as Record<string, ItemModeOverride> | undefined) ?? {};
+  const newOverride: ItemModeOverride = {
+    lane: opts.newLane,
+    laneRationale: opts.laneRationale,
+    materialLaneAssumptions: opts.materialLaneAssumptions ?? [],
+    agentRole: opts.agentRole,
+  };
+  sourceInput["itemOverrides"] = { ...existingOverrides, [ticketId]: newOverride };
+
+  let planHash: string;
+  let canonicalContent: unknown;
+  try {
+    const plannerInput = sourceInputToPlannerInput(sourceInput);
+    const resolved = resolvePlan(plannerInput, { projectDir: campaign.projectDir, mode: campaign.mode as PlanMode });
+    planHash = resolved.planHash;
+    canonicalContent = resolved.canonicalContent;
+  } catch (e) {
+    return { ok: false, reason: `plan could not be re-resolved: ${(e as Error).message}` };
+  }
+
+  const metadata = { ...(campaign.metadata ?? {}), planContent: canonicalContent };
+  const wrote = updateCampaignPlanForReapproval(campaignId, { sourceInput, metadata, planHash });
+  if (!wrote) return { ok: false, reason: "campaign is no longer paused (concurrent state change)" };
+
+  updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
+    lifecycleStatus: "pending",
+    outcome: undefined,
+    blockerKind: undefined,
+    continuePolicy: undefined,
+    reason: undefined,
+    requestedHumanAction: undefined,
+  });
+
+  return { ok: true, planHash };
 }

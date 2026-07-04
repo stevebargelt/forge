@@ -62,8 +62,22 @@ afterEach(() => {
   rmSync(projectDir, { recursive: true, force: true });
 });
 
-function runForge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], {
+// FG-442 finding 3: `campaign plan` refuses when no lane judgment is supplied
+// (no --routes, no --default-lane). The overwhelming majority of tests in this
+// file plan a campaign only as setup for testing unrelated behavior (approve,
+// start, escalate-lane, reconcile, ...), so runForge auto-supplies a
+// --default-lane for a bare `campaign plan` call unless the caller already
+// passed --routes or --default-lane. Tests that exercise the lane-judgment
+// requirement itself pass { rawPlan: true } to get the real, un-augmented CLI
+// invocation.
+function runForge(args: string[], opts: { rawPlan?: boolean } = {}) {
+  const isPlan = args[0] === "campaign" && args[1] === "plan";
+  const hasLaneJudgment = args.includes("--routes") || args.includes("--default-lane");
+  const finalArgs =
+    isPlan && !opts.rawPlan && !hasLaneJudgment
+      ? [...args, "--default-lane", "full_feature", "--default-lane-rationale", "test-harness default (FG-442 compat, unrelated to the behavior under test)"]
+      : args;
+  return spawnSync(tsx, [entry, ...finalArgs], {
     encoding: "utf8",
     env: { ...process.env, FORGE_HOME: forgeHome, NO_NOTIFY: "true" },
   });
@@ -3358,4 +3372,571 @@ test("integ campaign show (human, FG-452): prints a host-verification-status lin
   const jsonOutput = JSON.parse(jsonResult.stdout) as { items: { ticketId: string; hostVerificationReconcileHint: string | null }[] };
   const item = jsonOutput.items.find((i) => i.ticketId === "FG-625")!;
   assert.match(item.hostVerificationReconcileHint ?? "", /forge campaign reconcile/);
+});
+
+// ── FG-442: execution lanes ───────────────────────────────────────────────────
+
+function writeProjectRoutingPolicy(): void {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  const policy = {
+    version: 1,
+    governance: { accountable: "human" },
+    routes: {
+      implementation_full: {
+        responsible: "engineer", path: "workflow",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+      implementation_quick: {
+        responsible: "engineer", path: "invoke_chain",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+      documentation_durable: {
+        responsible: "documentation-maintainer", path: "invoke",
+        consulted: [], required_followups: [], informed: [], force_rules: [],
+      },
+    },
+  };
+  // Hand-rolled YAML — avoids adding a yaml-package dependency to a CLI-only test.
+  const yaml =
+    "version: 1\n" +
+    "governance:\n  accountable: human\n" +
+    "routes:\n" +
+    Object.entries(policy.routes)
+      .map(
+        ([key, route]) =>
+          `  ${key}:\n` +
+          `    responsible: ${route.responsible}\n` +
+          `    path: ${route.path}\n` +
+          `    consulted: []\n` +
+          `    required_followups: []\n` +
+          `    informed: []\n` +
+          `    force_rules: []\n`
+      )
+      .join("");
+  writeFileSync(join(projectDir, ".forge", "routing-policy.yml"), yaml);
+}
+
+test("integ campaign plan --routes: classifies each item's lane and prints lane + rationale (human + --json)", () => {
+  writeProjectRoutingPolicy();
+
+  const routes = JSON.stringify({ "FG-101": "implementation_quick", "FG-102": "documentation_durable" });
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--routes", routes,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+
+  const output = JSON.parse(result.stdout) as {
+    orderedItems: { ticketId: string; lane: string; laneRationale: string }[];
+    canonicalContent: { orderedItems: { ticketId: string; lane: string; agentRole?: string }[] };
+  };
+  const fg101 = output.orderedItems.find((i) => i.ticketId === "FG-101")!;
+  const fg102 = output.orderedItems.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(fg101.lane, "quick_implementation");
+  assert.ok(fg101.laneRationale.length > 0);
+  assert.equal(fg102.lane, "docs_only");
+
+  const canonicalFg102 = output.canonicalContent.orderedItems.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(canonicalFg102.agentRole, "documentation-maintainer");
+
+  const humanResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--routes", routes,
+    "--project", projectDir,
+  ]);
+  assert.equal(humanResult.status, 0);
+  assert.match(humanResult.stdout, /lane=quick_implementation/);
+  assert.match(humanResult.stdout, /lane=docs_only/);
+});
+
+test("integ campaign plan without --routes and without --default-lane: refuses non-zero, plans nothing (FG-442 finding 3)", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+  ], { rawPlan: true });
+
+  assert.notEqual(result.status, 0, `expected non-zero exit\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /no lane judgment supplied for 2 item\(s\) \(FG-442\)/);
+  assert.match(result.stderr, /--routes/);
+  assert.match(result.stderr, /--default-lane/);
+
+  const dbPath = join(forgeHome, "forge.db");
+  if (existsSync(dbPath)) {
+    const db = new Database(dbPath, { readonly: true });
+    const campaigns = db.prepare("SELECT * FROM campaigns").all();
+    assert.equal(campaigns.length, 0, "no campaign should be persisted when the refusal fires");
+    db.close();
+  }
+});
+
+test("integ campaign plan --default-lane full_feature --default-lane-rationale: succeeds, every item gets the operator lane + rationale, folded into plan_hash", () => {
+  const rationale = "operator reviewed backlog manually — everything here is a full feature build";
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+    "--default-lane-rationale", rationale,
+    "--json",
+  ], { rawPlan: true });
+
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as {
+    planHash: string;
+    orderedItems: { ticketId: string; lane: string; laneRationale: string }[];
+    canonicalContent: { orderedItems: { ticketId: string; lane: string; laneRationale: string }[] };
+  };
+
+  for (const item of output.orderedItems) {
+    assert.equal(item.lane, "full_feature");
+    assert.equal(item.laneRationale, rationale);
+  }
+  for (const entry of output.canonicalContent.orderedItems) {
+    assert.equal(entry.lane, "full_feature");
+    assert.equal(entry.laneRationale, rationale);
+    assert.notEqual(entry.laneRationale, "no lane override supplied — defaulting to full_feature");
+  }
+
+  // The operator rationale is part of canonicalContent, which the plan_hash
+  // is derived from — re-planning with a different rationale must change it.
+  const differentRationaleResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+    "--default-lane-rationale", "a completely different rationale",
+    "--json",
+  ], { rawPlan: true });
+  assert.equal(differentRationaleResult.status, 0);
+  const differentOutput = JSON.parse(differentRationaleResult.stdout) as { planHash: string };
+  assert.notEqual(differentOutput.planHash, output.planHash, "plan_hash must reflect the operator-supplied rationale");
+});
+
+test("integ campaign plan --default-lane <bad-lane>: rejected", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--default-lane", "not_a_real_lane",
+    "--default-lane-rationale", "text",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid --default-lane/);
+});
+
+test("integ campaign plan --default-lane docs_only (agentRole-bearing lane): rejected as a blanket default", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--default-lane", "docs_only",
+    "--default-lane-rationale", "text",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid --default-lane/);
+});
+
+test("integ campaign plan --default-lane without --default-lane-rationale: rejected", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--default-lane-rationale/);
+});
+
+test("integ campaign approve: restates the lane basis being recorded (human + --json)", () => {
+  writeProjectRoutingPolicy();
+
+  const routes = JSON.stringify({ "FG-101": "implementation_quick" });
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--routes", routes,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+  assert.match(approveResult.stdout, /Lane basis being recorded:/);
+  assert.match(approveResult.stdout, /FG-101: lane=quick_implementation/);
+
+  const approveJsonResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "already approved, re-check json shape",
+    "--json",
+  ]);
+  // Second approve call: campaign is now 'planned' still (approve doesn't transition status),
+  // so this remains a valid re-approval — asserts the JSON laneBasis shape independent of the
+  // human-output assertions above.
+  assert.equal(approveJsonResult.status, 0, `stdout: ${approveJsonResult.stdout}\nstderr: ${approveJsonResult.stderr}`);
+  const approveJson = JSON.parse(approveJsonResult.stdout) as {
+    laneBasis: { ticketId: string; lane: string; laneRationale: string }[];
+  };
+  const laneEntry = approveJson.laneBasis.find((e) => e.ticketId === "FG-101")!;
+  assert.equal(laneEntry.lane, "quick_implementation");
+});
+
+// ── RED-WIDE FG-442 follow-on fixes: escalation lifecycle integrity ──────────
+
+test("integ RED-WIDE fix 1: campaign resume after a lane_escalation pause (no escalate) refuses, item2 never dispatched", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Simulate the campaign having already paused on a lane_escalation blocker for
+  // item1 — the state escalateCampaignItemLane/finalizeInvokeDispatch produce,
+  // without needing a real dispatch to outgrow a lane.
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string; ticket_id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation', requested_human_action = 'escalate the lane and re-approve before resuming' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, "resume after an unresolved lane_escalation pause must exit non-zero");
+  const combined = (resumeResult.stderr + resumeResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("lane") && combined.includes("escalat"),
+    `expected a lane-escalation-specific refusal message\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath);
+  const item2After = db2.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[1]!.id) as {
+    lifecycle_status: string;
+  };
+  const campaignAfter = db2.prepare("SELECT status FROM campaigns WHERE id = ?").get(planOutput.campaignId) as { status: string };
+  db2.close();
+  assert.equal(item2After.lifecycle_status, "pending", "item2 must never be dispatched past the unresolved lane_escalation item");
+  assert.equal(campaignAfter.status, "paused", "a refused resume must not silently transition the campaign");
+});
+
+test("integ RED-WIDE fix 2: campaign approve refuses a paused campaign with an unresolved lane_escalation blocker and unchanged plan_hash", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const rubberStampResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "rubber stamp attempt",
+  ]);
+  assert.notEqual(rubberStampResult.status, 0, "approve must refuse a rubber-stamp on an unresolved lane_escalation pause");
+  const combined = (rubberStampResult.stderr + rubberStampResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("lane") && combined.includes("escalat"),
+    `expected a lane-escalation-specific refusal message\nstdout: ${rubberStampResult.stdout}\nstderr: ${rubberStampResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath);
+  const campaignAfter = db2.prepare("SELECT approval_rationale FROM campaigns WHERE id = ?").get(planOutput.campaignId) as {
+    approval_rationale: string | null;
+  };
+  db2.close();
+  assert.equal(
+    campaignAfter.approval_rationale,
+    "LGTM",
+    "the refused rubber-stamp attempt must not have overwritten the original approval record"
+  );
+});
+
+test("integ RED-WIDE follow-on: real `campaign escalate-lane` + approve + resume proceeds only after the genuine escalate", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const escalateResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-101",
+    "--new-lane", "quick_implementation",
+    "--rationale", "agent reported outgrowing full_feature",
+    "--json",
+  ]);
+  assert.equal(escalateResult.status, 0, `escalate-lane failed\nstdout: ${escalateResult.stdout}\nstderr: ${escalateResult.stderr}`);
+  const escalateOutput = JSON.parse(escalateResult.stdout) as { planHash: string };
+
+  const dbAfterEscalate = new Database(dbPath, { readonly: true });
+  const itemAfterEscalate = dbAfterEscalate.prepare("SELECT lifecycle_status, blocker_kind FROM campaign_items WHERE id = ?").get(items[0]!.id) as {
+    lifecycle_status: string;
+    blocker_kind: string | null;
+  };
+  const campaignAfterEscalate = dbAfterEscalate.prepare("SELECT plan_hash, approved_plan_hash FROM campaigns WHERE id = ?").get(campaignId) as {
+    plan_hash: string;
+    approved_plan_hash: string;
+  };
+  dbAfterEscalate.close();
+  assert.equal(itemAfterEscalate.lifecycle_status, "pending", "a genuine escalate must reset the escalated item to pending");
+  assert.equal(itemAfterEscalate.blocker_kind, null, "a genuine escalate must clear the lane_escalation blocker");
+  assert.equal(campaignAfterEscalate.plan_hash, escalateOutput.planHash);
+  assert.notEqual(campaignAfterEscalate.plan_hash, campaignAfterEscalate.approved_plan_hash, "escalate must mint a fresh unapproved plan hash");
+
+  const reapproveResult = runForge(["campaign", "approve", campaignId, "--rationale", "re-approved after genuine escalate"]);
+  assert.equal(reapproveResult.status, 0, `re-approve after a genuine escalate must succeed\nstdout: ${reapproveResult.stdout}\nstderr: ${reapproveResult.stderr}`);
+
+  // Simulate the re-dispatched item completing under its new lane (no real agent dispatch in this test).
+  const dbComplete = new Database(dbPath);
+  dbComplete.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  dbComplete.close();
+
+  const resumeResult = runForge(["campaign", "resume", campaignId, "--json"]);
+  assert.equal(resumeResult.status, 0, `resume failed\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+  const resumeOutput = JSON.parse(resumeResult.stdout) as Record<string, unknown>;
+  assert.equal(resumeOutput["stopReason"], "complete", "resume must proceed to complete only after the real escalate+approve");
+
+  const dbFinal = new Database(dbPath, { readonly: true });
+  const finalCampaign = dbFinal.prepare("SELECT status FROM campaigns WHERE id = ?").get(campaignId) as { status: string };
+  dbFinal.close();
+  assert.equal(finalCampaign.status, "complete");
+});
+
+test("integ RED-WIDE follow-on: `campaign escalate-lane` with an unrelated/unknown ticket id is rejected and mints no approvable plan hash", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaignId) as { id: string; ticket_id: string }[];
+  // FG-101 (items[0]) is the REAL item blocked on lane_escalation; FG-102 (items[1]) is unrelated and still pending.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  const planHashBefore = (db.prepare("SELECT plan_hash FROM campaigns WHERE id = ?").get(campaignId) as { plan_hash: string }).plan_hash;
+  db.close();
+
+  // Escalate the WRONG ticket: FG-102 is not the item blocked on lane_escalation.
+  const wrongTicketResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-102",
+    "--new-lane", "quick_implementation",
+    "--rationale", "attempted escalate of an unrelated ticket",
+  ]);
+  assert.notEqual(wrongTicketResult.status, 0, "escalate-lane on a ticket not blocked on lane_escalation must be rejected");
+  const wrongTicketCombined = (wrongTicketResult.stderr + wrongTicketResult.stdout).toLowerCase();
+  assert.ok(
+    wrongTicketCombined.includes("lane_escalation") || wrongTicketCombined.includes("lane escalation") || wrongTicketCombined.includes("blocked"),
+    `expected a lane_escalation-specific refusal\nstdout: ${wrongTicketResult.stdout}\nstderr: ${wrongTicketResult.stderr}`
+  );
+
+  // Escalate an UNKNOWN ticket id entirely.
+  const unknownTicketResult = runForge([
+    "campaign", "escalate-lane", campaignId, "FG-999-does-not-exist",
+    "--new-lane", "quick_implementation",
+    "--rationale", "attempted escalate of a nonexistent ticket",
+  ]);
+  assert.notEqual(unknownTicketResult.status, 0, "escalate-lane on an unknown ticket id must be rejected");
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const campaignAfter = dbAfter.prepare("SELECT plan_hash, approved_plan_hash FROM campaigns WHERE id = ?").get(campaignId) as {
+    plan_hash: string;
+    approved_plan_hash: string;
+  };
+  const item2After = dbAfter.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[1]!.id) as { lifecycle_status: string };
+  dbAfter.close();
+  assert.equal(campaignAfter.plan_hash, planHashBefore, "a rejected escalate must not mint any new plan hash");
+  assert.equal(item2After.lifecycle_status, "pending", "the unrelated ticket must not be reset/touched by the rejected escalate");
+
+  // A subsequent approve must still be refused: the REAL escalated item (FG-101) is still unresolved.
+  const approveAfterResult = runForge(["campaign", "approve", campaignId, "--rationale", "attempted rubber stamp"]);
+  assert.notEqual(approveAfterResult.status, 0, "approve must still refuse while the real lane_escalation item remains unresolved");
+  const approveCombined = (approveAfterResult.stderr + approveAfterResult.stdout).toLowerCase();
+  assert.ok(
+    approveCombined.includes("lane") && approveCombined.includes("escalat"),
+    `expected a lane-escalation-specific refusal\nstdout: ${approveAfterResult.stdout}\nstderr: ${approveAfterResult.stderr}`
+  );
+  assert.equal(campaignAfter.approved_plan_hash, planHashBefore, "approved_plan_hash must be unchanged since the rejected escalate never re-approved anything");
+});
+
+// ── FG-442 review (PR #11 follow-up), Finding 2: paused-approve plan-hash scoping ──
+
+test("integ FG-442 Finding 2: campaign approve refuses a paused campaign parked at awaiting_gate with an unchanged plan_hash (campaign-922 shape)", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "LGTM",
+  ]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string }[];
+  // The out-of-band shape: awaiting_gate with NO blocker_kind — e.g. an invoke-lane
+  // item that finished without shipping (Finding 1) or a gate:human pause. No plan change.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'agent finished but ticket FG-101 is not closed with a closedCommit — close the ticket and run `forge campaign reconcile`, or resolve manually' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const rubberStampResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "rubber stamp attempt",
+  ]);
+  assert.notEqual(rubberStampResult.status, 0, "approve must refuse a paused campaign whose plan_hash is unchanged since approval");
+  const combined = (rubberStampResult.stderr + rubberStampResult.stdout).toLowerCase();
+  assert.ok(
+    combined.includes("plan hash") || combined.includes("plan_hash"),
+    `expected a plan-hash-scoping refusal message\nstdout: ${rubberStampResult.stdout}\nstderr: ${rubberStampResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath);
+  const campaignAfter = db2.prepare("SELECT approval_rationale FROM campaigns WHERE id = ?").get(planOutput.campaignId) as {
+    approval_rationale: string | null;
+  };
+  const itemAfter = db2.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[0]!.id) as {
+    lifecycle_status: string;
+  };
+  db2.close();
+  assert.equal(
+    campaignAfter.approval_rationale,
+    "LGTM",
+    "the refused rubber-stamp attempt must not have overwritten the original approval record"
+  );
+  assert.equal(itemAfter.lifecycle_status, "awaiting_gate", "the preserved item must not be mutated by the refused approve");
+});
+
+test("integ FG-442 Finding 2: a genuine escalate->approve re-approval (fresh plan_hash) still proceeds", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const escalateResult = runForge([
+    "campaign", "escalate-lane", planOutput.campaignId, "FG-101",
+    "--new-lane", "quick_implementation",
+    "--rationale", "genuinely outgrew the assigned lane",
+  ]);
+  assert.equal(escalateResult.status, 0, `escalate-lane failed\nstdout: ${escalateResult.stdout}\nstderr: ${escalateResult.stderr}`);
+
+  const reapproveResult = runForge([
+    "campaign", "approve", planOutput.campaignId,
+    "--rationale", "re-approved after genuine escalate",
+  ]);
+  assert.equal(
+    reapproveResult.status,
+    0,
+    `genuine post-escalate re-approve must succeed\nstdout: ${reapproveResult.stdout}\nstderr: ${reapproveResult.stderr}`
+  );
+
+  const db2 = new Database(dbPath, { readonly: true });
+  const campaignAfter = db2.prepare("SELECT plan_hash, approved_plan_hash FROM campaigns WHERE id = ?").get(planOutput.campaignId) as {
+    plan_hash: string;
+    approved_plan_hash: string;
+  };
+  db2.close();
+  assert.equal(campaignAfter.plan_hash, campaignAfter.approved_plan_hash, "the genuine re-approve must record the fresh plan hash as approved");
 });

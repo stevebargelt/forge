@@ -20,68 +20,14 @@ export function setDoneAuditMapForTest(map: Map<string, DoneAuditResult> | null)
   _testDoneAuditMapOverride = map;
   return prev;
 }
-import { resolvePlan } from "./planner.js";
-import type { PlannerInput, PlanMode } from "./planner.js";
+import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
+import type { PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
 import { campaignBlocker } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
 import { evaluateReconcileEvidence, describeMissingReason } from "./reconcile-evidence.js";
-
-// Local — not exported; flows through DB as a plain string, never as a TS import
-type ItemExecutionMode = "workflow" | "invoke";
-
-type ItemExecutionConfig = {
-  executionMode: ItemExecutionMode;
-  workflowName: string;
-  agentRole: string | undefined;
-};
-
-function getItemExecutionConfig(
-  planContent: Record<string, unknown> | undefined,
-  ticketId: string
-): ItemExecutionConfig {
-  const DEFAULT: ItemExecutionConfig = { executionMode: "workflow", workflowName: "feature", agentRole: undefined };
-  if (!planContent) return DEFAULT;
-
-  // Step 1 (planner.ts) adds executionMode/workflowName per item in canonicalContent.
-  // Try orderedItems array first (most likely shape), then fall back to defaults.
-  const orderedItems = planContent["orderedItems"];
-  if (Array.isArray(orderedItems)) {
-    const found = (orderedItems as unknown[]).find(
-      (it) => typeof it === "object" && it !== null && (it as Record<string, unknown>)["ticketId"] === ticketId
-    ) as Record<string, unknown> | undefined;
-    if (found) {
-      const rawMode = found["executionMode"];
-      const mode: ItemExecutionMode = rawMode === "invoke" ? "invoke" : "workflow";
-      if (mode === "invoke") {
-        const ar = found["agentRole"];
-        return { executionMode: "invoke", workflowName: "", agentRole: typeof ar === "string" ? ar : undefined };
-      }
-      const wf = found["workflowName"];
-      return { executionMode: "workflow", workflowName: typeof wf === "string" ? wf : "feature", agentRole: undefined };
-    }
-  }
-
-  return DEFAULT;
-}
-
-function sourceInputToPlannerInput(sourceInput: Record<string, unknown>): PlannerInput {
-  const kind = sourceInput["kind"] as string;
-  if (kind === "list") {
-    return { kind: "list", ticketIds: (sourceInput["ticketIds"] as string[]) ?? [] };
-  }
-  if (kind === "epic") {
-    return { kind: "epic", epicId: sourceInput["epicId"] as string };
-  }
-  return {
-    kind: "mixed",
-    epicId: sourceInput["epicId"] as string,
-    additions: sourceInput["additions"] as string[] | undefined,
-    exclusions: sourceInput["exclusions"] as string[] | undefined,
-  };
-}
 
 function computeCurrentPlanHash(campaign: Campaign): string | null {
   if (!campaign.projectDir) return null;
@@ -387,6 +333,10 @@ export type ShowItemRow = {
   requestedHumanAction: string | null;
   readiness: ReadinessResult | null;
   hostVerificationReconcileHint: string | null;
+  // FG-442: policy-derived execution lane, per item.
+  lane: string;
+  laneRationale: string;
+  materialLaneAssumptions: string[];
 };
 
 export type ShowResult = {
@@ -435,19 +385,27 @@ export function assembleCampaignShow(id: string): ShowResult | null {
 
   const activeItem = items.find((i) => i.lifecycleStatus === "running") ?? null;
 
-  const itemRows: ShowItemRow[] = items.map((i) => ({
-    ticketId: i.ticketId,
-    title: titleMap.get(i.ticketId) ?? null,
-    lifecycleStatus: i.lifecycleStatus,
-    outcome: i.outcome ?? null,
-    blockerKind: i.blockerKind ?? null,
-    continuePolicy: i.continuePolicy ?? null,
-    runId: i.runId ?? null,
-    reason: i.reason ?? null,
-    requestedHumanAction: i.requestedHumanAction ?? null,
-    readiness: readinessMap.get(i.ticketId) ?? null,
-    hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
-  }));
+  const planContentForShow = campaign.metadata?.["planContent"] as Record<string, unknown> | undefined;
+
+  const itemRows: ShowItemRow[] = items.map((i) => {
+    const planEntry = getItemPlanEntry(planContentForShow, i.ticketId);
+    return {
+      ticketId: i.ticketId,
+      title: titleMap.get(i.ticketId) ?? null,
+      lifecycleStatus: i.lifecycleStatus,
+      outcome: i.outcome ?? null,
+      blockerKind: i.blockerKind ?? null,
+      continuePolicy: i.continuePolicy ?? null,
+      runId: i.runId ?? null,
+      reason: i.reason ?? null,
+      requestedHumanAction: i.requestedHumanAction ?? null,
+      readiness: readinessMap.get(i.ticketId) ?? null,
+      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
+      lane: planEntry.lane,
+      laneRationale: planEntry.laneRationale,
+      materialLaneAssumptions: planEntry.materialLaneAssumptions,
+    };
+  });
 
   const nextAction = computeNextShowAction(campaign, items);
 
@@ -594,11 +552,23 @@ export function assembleCampaignReport(id: string): ReportResult | null {
   const planContent = campaign.metadata?.["planContent"] as Record<string, unknown> | undefined;
 
   const itemRows: ReportItemRow[] = items.map((i) => {
-    const execConfig = getItemExecutionConfig(planContent, i.ticketId);
-    const executionMode = execConfig.executionMode === "invoke" ? "invoke (escape hatch)" : "workflow";
-    const agentRole = execConfig.executionMode === "invoke" ? (execConfig.agentRole ?? null) : null;
+    const planEntry = getItemPlanEntry(planContent, i.ticketId);
+    // FG-442: label is driven by the item's underlying dispatch mechanism
+    // (executionMode), which planner.ts derives from the lane — 'invoke' labels
+    // as "invoke (escape hatch)" whether it's the pre-FG-442 manual override or
+    // one of the docs_only/test_only/review_only/research_only lanes (same
+    // underlying mechanism: a single opts.dispatch invoke to a stored role).
+    const executionMode =
+      planEntry.executionMode === "invoke"
+        ? "invoke (escape hatch)"
+        : planEntry.executionMode === "invoke_chain"
+          ? "invoke chain (engineer -> test-engineer)"
+          : planEntry.executionMode === "none"
+            ? "no dispatch"
+            : "workflow";
+    const agentRole = planEntry.executionMode === "invoke" ? (planEntry.agentRole ?? null) : null;
 
-    let workflowName: string | null = execConfig.executionMode === "workflow" ? execConfig.workflowName : null;
+    let workflowName: string | null = planEntry.executionMode === "workflow" ? (planEntry.workflowName ?? "feature") : null;
     let taskSummaries: TaskSummary[] = [];
     let verdictSummaries: VerdictSummary[] = [];
 
@@ -606,7 +576,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       // workflowName from run record is authoritative over canonicalContent
       try {
         const run = getRun(i.runId);
-        if (run && execConfig.executionMode === "workflow") {
+        if (run && planEntry.executionMode === "workflow") {
           workflowName = run.workflow;
         }
       } catch {
@@ -653,6 +623,9 @@ export function assembleCampaignReport(id: string): ReportResult | null {
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
       hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
       reviewerResult: null,
+      lane: planEntry.lane,
+      laneRationale: planEntry.laneRationale,
+      materialLaneAssumptions: planEntry.materialLaneAssumptions,
       executionMode,
       workflowName,
       agentRole,
@@ -714,6 +687,15 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
     const blockerStr = item.blockerKind ? ` blocker=${item.blockerKind}` : "";
     const runStr = item.runId ? ` [run: ${item.runId}]` : "";
     lines.push(`  ${item.ticketId}${titleStr}: ${item.lifecycleStatus}${outcomeStr}${commitStr}${branchStr}${worktreeStr}${blockerStr}${runStr}`);
+    lines.push(`    lane: ${item.lane} — ${item.laneRationale}`);
+    if (item.materialLaneAssumptions.length > 0) {
+      lines.push(`    lane-assumptions: ${item.materialLaneAssumptions.join("; ")}`);
+    }
+    if (item.blockerKind === "lane_escalation") {
+      // FG-442: an escalation reads distinctly from a scope block — it invalidated
+      // the approved plan basis, not just this one item.
+      lines.push(`    LANE ESCALATION: item outgrew its approved lane — the whole campaign is paused pending re-approval of a new plan basis`);
+    }
     if (item.reason) lines.push(`    reason: ${item.reason}`);
     if (item.requestedHumanAction) lines.push(`    action: ${item.requestedHumanAction}`);
     if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
@@ -730,22 +712,24 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
       }
     }
     if (item.hostVerificationReconcileHint) lines.push(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
-    // Execution mode and workflow traceability
+    // Execution mode and workflow traceability — the mechanism underlying the lane.
     if (item.executionMode === "invoke (escape hatch)") {
       lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);
+    } else if (item.executionMode === "invoke chain (engineer -> test-engineer)" || item.executionMode === "no dispatch") {
+      lines.push(`    execution: ${item.executionMode}`);
     } else {
       const wfLabel = item.workflowName ? ` [workflow=${item.workflowName}]` : "";
       lines.push(`    execution: workflow${wfLabel}`);
-      if (item.taskSummaries.length > 0) {
-        const taskStr = item.taskSummaries.map((t) => `${t.phase}(${t.status})`).join(", ");
-        lines.push(`    tasks: ${taskStr}`);
-      }
-      if (item.verdictSummaries.length > 0) {
-        const vStr = item.verdictSummaries
-          .map((v) => `${v.verdict}/${v.authority}${v.findingsCount > 0 ? ` (${v.findingsCount} finding${v.findingsCount === 1 ? "" : "s"})` : ""}`)
-          .join(", ");
-        lines.push(`    verdicts: ${vStr}`);
-      }
+    }
+    if (item.taskSummaries.length > 0) {
+      const taskStr = item.taskSummaries.map((t) => `${t.phase}(${t.status})`).join(", ");
+      lines.push(`    tasks: ${taskStr}`);
+    }
+    if (item.verdictSummaries.length > 0) {
+      const vStr = item.verdictSummaries
+        .map((v) => `${v.verdict}/${v.authority}${v.findingsCount > 0 ? ` (${v.findingsCount} finding${v.findingsCount === 1 ? "" : "s"})` : ""}`)
+        .join(", ");
+      lines.push(`    verdicts: ${vStr}`);
     }
   }
   lines.push("Groupings:");
