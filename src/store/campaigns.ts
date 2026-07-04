@@ -359,6 +359,52 @@ export function updateCampaignItemIfCampaignPaused(
   return (result.changes ?? 0) > 0;
 }
 
+// FG-441: guarded write for the campaign-resume evidence-reconcile path — same
+// atomicity contract as updateCampaignItemIfCampaignPaused above, but gated on
+// 'running' rather than 'paused'. resumeCampaign transitions the campaign
+// paused->running BEFORE driveRemainingItems runs (see executor.ts), so by the
+// time a resume-reconcile write happens the campaign is already 'running', not
+// 'paused' — using the paused-only guard here would make every such write a
+// silent no-op. The subquery reads campaigns.status as part of the same UPDATE
+// statement, so a concurrent pause/abandon between the evidence check and this
+// write is still caught atomically: zero rows change and no optimistic ship occurs.
+export function updateCampaignItemIfCampaignRunning(
+  id: string,
+  campaignId: string,
+  update: CampaignItemUpdate
+): boolean {
+  const existing = getCampaignItem(id);
+  if (!existing) return false;
+  const next = { ...existing, ...update };
+  const result = getDb()
+    .prepare(
+      `UPDATE campaign_items SET
+         lifecycle_status = ?, outcome = ?, blocker_kind = ?, continue_policy = ?,
+         reason = ?, requested_human_action = ?, run_id = ?, branch = ?,
+         worktree_path = ?, pr_url = ?, updated_at = ?
+       WHERE id = ?
+         AND campaign_id = ?
+         AND (SELECT status FROM campaigns WHERE id = ?) = 'running'`
+    )
+    .run(
+      next.lifecycleStatus,
+      next.outcome ?? null,
+      next.blockerKind ?? null,
+      next.continuePolicy ?? null,
+      next.reason ?? null,
+      next.requestedHumanAction ?? null,
+      next.runId ?? null,
+      next.branch ?? null,
+      next.worktreePath ?? null,
+      next.prUrl ?? null,
+      nowIso(),
+      id,
+      campaignId,
+      campaignId
+    );
+  return (result.changes ?? 0) > 0;
+}
+
 export function updateCampaignItem(id: string, update: CampaignItemUpdate): void {
   const existing = getCampaignItem(id);
   if (!existing) return;

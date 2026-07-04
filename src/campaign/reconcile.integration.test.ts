@@ -154,6 +154,26 @@ function setupAwaitingGateCampaign(ticketId: string): { campaignId: string; item
   return { campaignId: campaign.id, itemId };
 }
 
+// FG-441: builds the OTHER shape that can leave an item 'awaiting_gate' with no
+// blockerKind — one that was manually driven outside the resume loop after the
+// campaign already attached its feature run: lifecycleStatus='awaiting_gate',
+// no blockerKind, but WITH a runId (unlike setupAwaitingGateCampaign, which
+// leaves run_id null). This is the shape `forge campaign resume` must reconcile
+// from the run's own authoritative events instead of re-parking forever.
+function setupAwaitingGateManualRunCampaign(ticketId: string): { campaignId: string; itemId: string; runId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "approved" });
+  const items = listCampaignItems(campaign.id);
+  const itemId = items[0]!.id;
+  const runId = `run-${itemId}`;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, itemId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  return { campaignId: campaign.id, itemId, runId };
+}
+
 function makeBaseCommit(label: string): void {
   writeFileSync(join(projectDir, `${label}.txt`), label);
   gitExec(["add", "."], projectDir);
@@ -1412,5 +1432,142 @@ test("FG-452 AC5: the hint disappears once the item ships via reconcile — it m
     afterRow.hostVerificationReconcileHint,
     null,
     "once shipped the item is no longer awaiting_gate — the hint's guard clause returns null"
+  );
+});
+
+// ── FG-441: campaign resume reconciles a manually-driven awaiting_gate item ──────
+//
+// A campaign item can be driven manually OUTSIDE the resume loop after the
+// campaign already attached its feature run: stored awaiting_gate/no blockerKind
+// with a runId, but the run was later driven manually through
+// gates/fixers/red/host-verification/PR-merge/backlog-close. `forge campaign
+// resume` must re-derive shipped-ness from the SAME durable evidence
+// `collectReconcileEvidence`/`evaluateReconcileEvidence` (FG-428) uses — the run's
+// own authoritative verdict/gate events — instead of re-parking it forever via
+// driveWorkflowItem's gate:human branch.
+
+test("FG-441: resume ships a manually-driven awaiting_gate item with complete evidence and unholds a downstream dependent", async () => {
+  const readyBody = "## Problem\nNeeds implementation.\n\n## Goal\nComplete it.\n\n## Acceptance Criteria\n- Done\n";
+  writeTicket(projectDir, { id: "FG-600", type: "story", status: "active", title: "t1", body: readyBody });
+  writeTicket(projectDir, { id: "FG-601", type: "story", status: "active", title: "t2", body: readyBody });
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-600", "FG-601"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved" });
+
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaign.id) as { id: string; ticket_id: string }[];
+  const item1 = items.find((i) => i.ticket_id === "FG-600")!;
+  const item2 = items.find((i) => i.ticket_id === "FG-601")!;
+  const runId = `run-${item1.id}`;
+
+  // item1: manually-driven awaiting_gate — no blockerKind, but a real runId.
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, item1.id);
+  // item2: held solely because item1 hadn't reached a terminal state (dependency-held).
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'pending', outcome = 'held', blocker_kind = NULL, reason = 'held because dependency relation is unknown in sequential mode' WHERE id = ?"
+  ).run(item2.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  seedAllEvidence("FG-600", runId);
+
+  const beforeEvents = countEvents();
+  const dispatchLog: string[] = [];
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchLog.push(args.runTitle ?? "");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch });
+
+  assert.equal(
+    resumeResult.stopReason,
+    "complete",
+    "campaign proceeds to complete once the manually-driven item is reconciled from evidence"
+  );
+
+  const finalItem1 = getCampaignItem(item1.id)!;
+  assert.equal(finalItem1.lifecycleStatus, "complete", "item is shipped, not re-parked at awaiting_gate");
+  assert.equal(finalItem1.outcome, "shipped");
+  assert.equal(finalItem1.blockerKind, undefined);
+
+  assert.deepEqual(dispatchLog, ["FG-601"], "downstream dependent is released and dispatched — no hand-rolled release needed");
+  const finalItem2 = getCampaignItem(item2.id)!;
+  assert.notEqual(finalItem2.outcome, "held", "downstream item must no longer be held");
+
+  assert.equal(countEvents(), beforeEvents + 1, "exactly one new audit event for the reconciled item");
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconciled' ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string; payload: string } | undefined;
+  assert.ok(evRow, "campaign_item.evidence_reconciled event logged for the resume-path reconcile");
+  const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; decidedBy: string };
+  assert.equal(payload.ticketId, "FG-600");
+  assert.equal(payload.campaignId, campaign.id);
+});
+
+test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when evidence is incomplete — no optimistic ship", async () => {
+  const ticketId = "FG-610";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+
+  // Seed everything EXCEPT a host-verification row — host_verification_not_recorded.
+  const commit = makeCommit(`impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "r", taskId: "t", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+
+  assert.notEqual(resumeResult.stopReason, "complete", "campaign must not report complete on incomplete evidence");
+  assert.equal(dispatched, 0, "must not dispatch anything else while the parked item is unresolved");
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.equal(afterItem.lifecycleStatus, beforeItem.lifecycleStatus, "item must remain parked — not shipped");
+  assert.notEqual(afterItem.lifecycleStatus, "complete");
+  assert.equal(afterItem.outcome, beforeItem.outcome, "outcome must not become 'shipped'");
+  assert.equal(afterItem.blockerKind, beforeItem.blockerKind);
+
+  assert.equal(
+    countEvents(),
+    beforeEvents,
+    "no campaign_item.evidence_reconciled (or any other) event logged for a refused reconcile"
+  );
+});
+
+test("FG-441 regression: a blocked_by_red item with blockerKind='scope' is NOT intercepted by the new resume-reconcile branch, even with full evidence present", async () => {
+  const ticketId = "FG-620";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId, { lifecycleStatus: "blocked_by_red" });
+  seedAllEvidence(ticketId, runId);
+
+  const beforeEvents = countEvents();
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => ({ runId: "r", taskId: "t", status: "complete" });
+
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+
+  // The FG-441 branch only fires for lifecycleStatus='awaiting_gate' items with no
+  // blockerKind. A blocked_by_red/scope item — FG-428's lane, not FG-441's — must
+  // reach the pre-existing behavior unchanged (recovery_needed, since the fabricated
+  // runId has no real `runs` row for driveWorkflowItem to reattach to), never the
+  // new evidence-reconcile shortcut.
+  assert.equal(resumeResult.stopReason, "recovery_needed");
+  const afterItem = getCampaignItem(itemId)!;
+  assert.equal(afterItem.lifecycleStatus, "blocked_by_red", "must remain blocked_by_red — not shipped by the new branch");
+  assert.equal(afterItem.blockerKind, "scope");
+  assert.equal(
+    countEvents(),
+    beforeEvents,
+    "no campaign_item.evidence_reconciled event for a blockerKind='scope' item via resume"
   );
 });
