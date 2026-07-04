@@ -79,25 +79,34 @@ test("reconcile: container gone, NO result → task failed with failure_kind=orp
 });
 
 test("reconcile: container gone WITH a valid result → finalized as complete (lost DB write recovered)", () => {
-  insertContainerized(mkTask("t-result", { status: "running" }));
-  const dir = taskDir(RUN.id, "t-result");
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
-  const r = reconcileRun(RUN.id, GONE);
-  assert.deepEqual(r.taskChanges, [{ taskId: "t-result", from: "running", to: "complete", reason: "container_gone_result_present" }]);
-  const t = getTask("t-result")!;
-  assert.equal(t.status, "complete");
-  assert.deepEqual(t.result, { status: "complete", output: "done" });
-  const types = eventsForTask("t-result").map((e) => e.eventType);
-  assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
+  const gitDir = makeDirtyGitRepo();
+  try {
+    insertContainerized(mkTask("t-result", { status: "running", worktreePath: gitDir }));
+    const dir = taskDir(RUN.id, "t-result");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+    const r = reconcileRun(RUN.id, GONE);
+    assert.deepEqual(r.taskChanges, [{ taskId: "t-result", from: "running", to: "complete", reason: "container_gone_result_present" }]);
+    const t = getTask("t-result")!;
+    assert.equal(t.status, "complete");
+    assert.deepEqual(t.result, { status: "complete", output: "done" });
+    const types = eventsForTask("t-result").map((e) => e.eventType);
+    assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
 
-  // FG-455 p1 review: the valid-result outcome is one of the four container-gone
-  // outcomes — it must carry the same durable evidence tuple as the other three.
-  const reconciled = eventsForTask("t-result").find((e) => e.eventType === "task.reconciled")!;
-  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
-  assert.equal(evidence.containerName, "forge-t-result");
-  assert.equal(evidence.containerLiveness, "gone");
-  assert.equal(evidence.resultState, "valid");
+    // FG-455 p1 review: the valid-result outcome is one of the four container-gone
+    // outcomes — it must carry the same accurately-gathered evidence tuple as the
+    // other three, not a hardcoded worktreePathChecked: null / changedFiles: [].
+    const reconciled = eventsForTask("t-result").find((e) => e.eventType === "task.reconciled")!;
+    const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+    assert.equal(evidence.containerName, "forge-t-result");
+    assert.equal(evidence.containerLiveness, "gone");
+    assert.equal(evidence.resultState, "valid");
+    assert.equal(evidence.worktreePathChecked, gitDir, "the task's real worktree_path is checked, not hardcoded null");
+    assert.deepEqual(evidence.changedFiles, ["?? changed-file.txt"], "changed files are actually computed, not hardcoded []");
+    assert.equal(evidence.source, "worktree");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
 });
 
 // ----- FG-455: don't discard persisted work on an empty/absent result.json -----

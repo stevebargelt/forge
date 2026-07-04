@@ -133,18 +133,31 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     // work finished but the DB write was lost); otherwise it was orphaned.
     const result = readResult(t.runId, t.id);
     const containerName = `forge-${t.id}`;
+
+    // FG-455 p1 review: gather the worktree/changedFiles evidence ONCE, before
+    // the result-present/absent split, so all four container-gone outcomes
+    // (valid result, recovered-from-stdout, work-may-persist, ordinary orphaned)
+    // share the same accurately-gathered tuple — none hardcodes
+    // worktreePathChecked/changedFiles. A dedicated worktree_path is task-
+    // exclusive, confident evidence; the run.projectDir fallback is SHARED with
+    // the operator's cwd, so its source is recorded separately (see
+    // OrphanEvidence.source).
+    const worktreePathChecked = t.worktreePath ?? run.projectDir;
+    const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
+    const changedFiles = changedWorktreeFiles(worktreePathChecked);
+    const baseEvidence = {
+      containerName,
+      containerLiveness: "gone" as const,
+      worktreePathChecked: worktreePathChecked ?? null,
+      changedFiles,
+      source,
+    };
+
     if (result !== undefined && markTaskComplete(t.id, result)) {
       // FG-455 p1 review: the valid-result outcome is one of the four
       // container-gone outcomes — it must carry the same durable evidence
       // tuple as the other three, not just an empty payload.
-      const evidence: OrphanEvidence = {
-        containerName,
-        containerLiveness: "gone",
-        resultState: "valid",
-        recoverableStdoutResult: false,
-        worktreePathChecked: null,
-        changedFiles: [],
-      };
+      const evidence: OrphanEvidence = { ...baseEvidence, resultState: "valid", recoverableStdoutResult: false };
       logEvent("task.completed", { runId, taskId: t.id });
       logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
       taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
@@ -176,28 +189,12 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
         inferred = undefined;
       }
 
-      // FG-455 review finding 2: gather the full evidence tuple ONCE, before the
-      // 3-way branch below, so all three container-gone outcomes (recovered
-      // complete, work-may-persist, ordinary orphaned) carry the same durable
-      // audit tuple on their task.reconciled event — not just the
-      // work-may-persist case. A dedicated worktree_path is this task's alone —
-      // any changed files found there are confident, task-exclusive evidence.
-      // The run.projectDir fallback (no-worktree tasks) is SHARED with the
-      // operator's cwd and any other no-worktree task in the run — a dirty
-      // status there may just be unrelated in-progress work, not proof this
-      // task persisted anything. Record which one it was so every consumer
-      // (show/status/ops-check) can render the honest confidence level.
-      const worktreePathChecked = t.worktreePath ?? run.projectDir;
-      const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
-      const changedFiles = changedWorktreeFiles(worktreePathChecked);
+      // Reuse baseEvidence gathered above the split — only resultState and
+      // recoverableStdoutResult vary per outcome.
       const evidence: OrphanEvidence = {
-        containerName,
-        containerLiveness: "gone",
+        ...baseEvidence,
         resultState: resultFileState(t.runId, t.id),
         recoverableStdoutResult: inferred !== undefined,
-        worktreePathChecked: worktreePathChecked ?? null,
-        changedFiles,
-        source,
       };
 
       if (inferred) {
