@@ -132,9 +132,21 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     // Container is gone. If it left a usable result, finalize as complete (the
     // work finished but the DB write was lost); otherwise it was orphaned.
     const result = readResult(t.runId, t.id);
+    const containerName = `forge-${t.id}`;
     if (result !== undefined && markTaskComplete(t.id, result)) {
+      // FG-455 p1 review: the valid-result outcome is one of the four
+      // container-gone outcomes — it must carry the same durable evidence
+      // tuple as the other three, not just an empty payload.
+      const evidence: OrphanEvidence = {
+        containerName,
+        containerLiveness: "gone",
+        resultState: "valid",
+        recoverableStdoutResult: false,
+        worktreePathChecked: null,
+        changedFiles: [],
+      };
       logEvent("task.completed", { runId, taskId: t.id });
-      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present" } });
+      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
       taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
     } else if (result === undefined) {
       // FG-455: an empty/absent result.json used to collapse straight to
@@ -145,7 +157,6 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
       //      was ever readable back out of the container
       //   3. only then, the ordinary orphaned/no-result classification.
       const dir = taskDir(t.runId, t.id);
-      const containerName = `forge-${t.id}`;
       // FG-455 finding 1: this whole attempt is best-effort recovery over
       // container.stdout.log — a malformed manifest, an unreadable log, or an
       // unexpected shape in the stdout analysis must never propagate out of

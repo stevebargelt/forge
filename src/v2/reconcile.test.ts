@@ -90,6 +90,14 @@ test("reconcile: container gone WITH a valid result → finalized as complete (l
   assert.deepEqual(t.result, { status: "complete", output: "done" });
   const types = eventsForTask("t-result").map((e) => e.eventType);
   assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
+
+  // FG-455 p1 review: the valid-result outcome is one of the four container-gone
+  // outcomes — it must carry the same durable evidence tuple as the other three.
+  const reconciled = eventsForTask("t-result").find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.containerName, "forge-t-result");
+  assert.equal(evidence.containerLiveness, "gone");
+  assert.equal(evidence.resultState, "valid");
 });
 
 // ----- FG-455: don't discard persisted work on an empty/absent result.json -----

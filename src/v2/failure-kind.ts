@@ -97,7 +97,7 @@ export function failureKindForTask(taskId: string): string | undefined {
 export type OrphanEvidence = {
   containerName: string;
   containerLiveness: "gone";
-  resultState: "absent" | "empty" | "malformed";
+  resultState: "absent" | "empty" | "malformed" | "valid";
   recoverableStdoutResult: boolean;
   worktreePathChecked: string | null;
   changedFiles: string[];
