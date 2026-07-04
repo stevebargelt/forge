@@ -15,8 +15,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, normalize, sep } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, normalize, sep } from "node:path";
 import { worktreeDir, integrationWorktreeDir } from "../util/paths.js";
 import { acquireFileLockBlocking, releaseFileLock, type LockInfo } from "../util/run-lock.js";
 
@@ -168,7 +168,7 @@ function forgeHome(): string {
   return process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge");
 }
 
-function dependencyCacheDir(): string {
+export function dependencyCacheDir(): string {
   return join(forgeHome(), "dependency-cache");
 }
 
@@ -374,16 +374,16 @@ export async function provisionDependencyCache(
 /** Best-effort removal of every dependency volume a worktree could have
  *  created. NOT called from per-task/worktree disposal (FIX3 — a shared cache
  *  volume must not be torn down just because ONE task using it finished; other
- *  tasks may still reference the same cache key). NOT wired to any
- *  operator-accessible caller today — cache volumes are intentionally
- *  retained (`forge-deps-*` accumulate on disk across runs) rather than
- *  auto-pruned; an explicit `forge` prune command is tracked separately in
- *  FG-434, not part of this change. Tries both the regular task-worktree path
- *  and the fan-out integration-worktree path for (runId, taskId), since
- *  callers pass parentTaskId as `taskId` when pruning an integration
- *  worktree's volumes. Tolerates a missing worktree dir, a missing lockfile
- *  (nothing to compute), and an already-absent volume (docker volume rm exits
- *  non-zero; swallowed) — never throws. */
+ *  tasks may still reference the same cache key). Still not wired to any
+ *  per-task disposal path — cache volumes are intentionally retained
+ *  (`forge-deps-*` accumulate on disk across runs) rather than auto-pruned;
+ *  the operator-triggered global prune is pruneDependencyCache below
+ *  (FG-434), which is a different shape (host-wide, not per-worktree). Tries
+ *  both the regular task-worktree path and the fan-out integration-worktree
+ *  path for (runId, taskId), since callers pass parentTaskId as `taskId` when
+ *  pruning an integration worktree's volumes. Tolerates a missing worktree
+ *  dir, a missing lockfile (nothing to compute), and an already-absent volume
+ *  (docker volume rm exits non-zero; swallowed) — never throws. */
 export function removeDependencyVolumes(runId: string, taskId: string): void {
   for (const repoRoot of [worktreeDir(runId, taskId), integrationWorktreeDir(runId, taskId)]) {
     let names: string[];
@@ -400,4 +400,166 @@ export function removeDependencyVolumes(runId: string, taskId: string): void {
       }
     }
   }
+}
+
+// ── FG-434: operator-triggered global prune ──────────────────────────────────
+// removeDependencyVolumes above is per-worktree (derives names from a
+// worktree's lockfile) — the wrong shape for "clear everything accumulated on
+// this host". pruneDependencyCache instead enumerates every forge-deps-*
+// volume docker knows about, plus every marker/lock under dependencyCacheDir,
+// with no worktree/run/task in scope at all.
+
+export type VolumeRemovalOutcome = "removed" | "in_use" | "error";
+
+export type PruneDependencyCacheOpts = {
+  dryRun?: boolean;
+};
+
+/** Test seams mirroring the isContainerAlive/killContainer pattern above — no
+ *  real docker or ~/.forge required to exercise pruneDependencyCache. */
+export type PruneDependencyCacheDeps = {
+  listVolumeNames?: () => string[];
+  removeVolume?: (name: string) => VolumeRemovalOutcome;
+  listMarkerFiles?: () => string[];
+  removeMarkerFile?: (path: string) => void;
+};
+
+export type PruneDependencyCacheResult = {
+  volumesRemoved: string[];
+  volumesSkippedInUse: string[];
+  volumesError: string[];
+  markersRemoved: string[];
+  dryRun: boolean;
+};
+
+function dockerListDependencyVolumeNames(): string[] {
+  try {
+    const out = execFileSync("docker", ["volume", "ls", "-q", "--filter", "name=forge-deps-"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out
+      .toString()
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } catch {
+    return []; // docker unavailable / errored — best-effort, never throw
+  }
+}
+
+function dockerRemoveVolume(name: string): VolumeRemovalOutcome {
+  try {
+    execFileSync("docker", ["volume", "rm", name], { stdio: ["ignore", "ignore", "pipe"] });
+    return "removed";
+  } catch (e) {
+    const stderr = (e as { stderr?: Buffer | string } | undefined)?.stderr?.toString() ?? "";
+    // docker's own wording for "refuses to remove a volume in use by any
+    // container, running or stopped": `Error response from daemon: remove
+    // <name>: volume is in use - [<containerId>...]`.
+    if (/volume is in use/i.test(stderr)) return "in_use";
+    return "error"; // NOT confirmed gone — reported separately from in_use
+  }
+}
+
+function listDependencyCacheMarkerFiles(): string[] {
+  const dir = dependencyCacheDir();
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".ready") || f.endsWith(".lock"))
+      .map((f) => join(dir, f));
+  } catch {
+    return []; // no cache dir yet — nothing to prune
+  }
+}
+
+/** Volume names are `forge-deps-<hash>-<slug>` (dependencyVolumeName above);
+ *  the hash is pure hex (no dashes), so the first dash-delimited segment
+ *  after the prefix is always the cache key, regardless of what's in slug. */
+function cacheKeyFromVolumeName(name: string): string {
+  return name.replace(/^forge-deps-/, "").split("-")[0]!;
+}
+
+function cacheKeyFromMarkerPath(path: string): string {
+  return basename(path).replace(/\.(ready|lock)$/, "");
+}
+
+/** Global, operator-triggered prune of every forge-deps-* dependency-cache
+ *  volume and .ready/.lock marker on this host (FG-434) — the explicit prune
+ *  the FIX3 comment on removeDependencyVolumes above defers. Never throws:
+ *  a docker or fs failure just drops that entry from the result instead of
+ *  aborting the whole prune.
+ *
+ *  A volume docker reports as in-use is left alone (skipped, not an error) —
+ *  and so is its marker/lock, since "in use" means some container, and
+ *  therefore plausibly a live provisioner, still references that cache key.
+ *  A volume that errors for any other reason is treated the same way as
+ *  in-use for marker purposes: unconfirmed, so left alone rather than force-
+ *  removed. Only cache keys with no surviving in-use/errored volume have
+ *  their marker/lock cleared. --dry-run performs no removal at all — every
+ *  enumerated volume/marker is reported as a removal candidate. */
+export function pruneDependencyCache(
+  opts?: PruneDependencyCacheOpts,
+  deps?: PruneDependencyCacheDeps,
+): PruneDependencyCacheResult {
+  const dryRun = opts?.dryRun ?? false;
+  const listVolumes = deps?.listVolumeNames ?? dockerListDependencyVolumeNames;
+  const removeVolume = deps?.removeVolume ?? dockerRemoveVolume;
+  const listMarkers = deps?.listMarkerFiles ?? listDependencyCacheMarkerFiles;
+  const removeMarker = deps?.removeMarkerFile ?? ((path: string) => rmSync(path, { force: true }));
+
+  const volumesRemoved: string[] = [];
+  const volumesSkippedInUse: string[] = [];
+  const volumesError: string[] = [];
+  const unsafeCacheKeys = new Set<string>();
+
+  let volumeNames: string[];
+  try {
+    volumeNames = listVolumes();
+  } catch {
+    volumeNames = []; // best-effort — an enumeration failure prunes nothing, never throws
+  }
+
+  for (const name of volumeNames) {
+    if (dryRun) {
+      volumesRemoved.push(name); // candidate only — nothing actually removed
+      continue;
+    }
+    let outcome: VolumeRemovalOutcome;
+    try {
+      outcome = removeVolume(name);
+    } catch {
+      outcome = "error"; // best-effort — an unexpected throw is just an unconfirmed removal
+    }
+    if (outcome === "removed") {
+      volumesRemoved.push(name);
+    } else if (outcome === "in_use") {
+      volumesSkippedInUse.push(name);
+      unsafeCacheKeys.add(cacheKeyFromVolumeName(name));
+    } else {
+      volumesError.push(name);
+      unsafeCacheKeys.add(cacheKeyFromVolumeName(name));
+    }
+  }
+
+  let markerPaths: string[];
+  try {
+    markerPaths = listMarkers();
+  } catch {
+    markerPaths = []; // best-effort — an enumeration failure clears no markers, never throws
+  }
+
+  const markersRemoved: string[] = [];
+  for (const path of markerPaths) {
+    if (unsafeCacheKeys.has(cacheKeyFromMarkerPath(path))) continue; // leave — cache key still in use/unconfirmed
+    if (!dryRun) {
+      try {
+        removeMarker(path);
+      } catch {
+        continue; // best-effort — leave it out of markersRemoved rather than throw
+      }
+    }
+    markersRemoved.push(path); // reported whether removed or (dry-run) a candidate
+  }
+
+  return { volumesRemoved, volumesSkippedInUse, volumesError, markersRemoved, dryRun };
 }
