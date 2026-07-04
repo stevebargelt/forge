@@ -1,9 +1,11 @@
 ---
 id: FG-453
 type: story
-status: active
+status: done
 title: Align done-audit host-verification aggregation with reconcile passing-row model (or document/report stricter audit semantics)
 created: 2026-07-03
+closed: 2026-07-04
+closed_commit: d029183
 ---
 
 ## Problem
