@@ -742,6 +742,55 @@ test("FG-455 p4: defaultContainerExitInfo param defaults to the real probe when 
   assert.ok(r);
 });
 
+test("FG-455 p4 review finding 4: container gone, containerExitInfo says oomKilled, AND a recoverable stdout result (FG-337 synthesis) exists → task COMPLETES via inferred-stdout, NOT classified oom_killed (recoverable output outranks OOM classification); evidence still carries exitCode/oomKilled alongside recoverableStdoutResult", () => {
+  const taskId = "t-oom-with-stdout";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output despite OOM.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  const exitInfo = () => ({ oomKilled: true, exitCode: 137 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" });
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.completed"), "must complete via the stdout-synthesis branch");
+  assert.ok(!types.includes("task.failed"), "recoverable stdout outranks OOM classification — must not fail as oom_killed");
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.recoverableStdoutResult, true);
+  assert.equal(evidence.oomKilled, true, "OOM evidence is still recorded even though it didn't drive classification");
+  assert.equal(evidence.exitCode, 137);
+});
+
+test("FG-455 p4 review finding 5 NEGATIVE: containerExitInfo returns {exitCode:1, oomKilled:false} on a dirty-worktree no-result task → classified orphaned_work_may_persist, NOT oom_killed (only 137/oomKilled trips oom_killed)", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-exit-1-dirty";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const exitInfo = () => ({ exitCode: 1, oomKilled: false });
+
+    const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_worktree_dirty" }]);
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const payload = failed.payload as Record<string, unknown>;
+    assert.equal(payload.failure_kind, "orphaned_work_may_persist", "a plain non-zero exit code does not trip oom_killed");
+    const evidence = payload.evidence as OrphanEvidence;
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(evidence.oomKilled, false);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
 // ----- FG-455 p4 Mode A: `complete` task with an empty result gets backfilled -----
 
 function makeCompleteEmptyResult(taskId: string, o: Partial<Task> = {}): void {

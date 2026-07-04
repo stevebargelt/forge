@@ -113,6 +113,59 @@ test("recover inspect: orphaned_work_may_persist task surfaces evidence, changed
   assert.equal(getEvents(taskId).length, beforeEvents);
 });
 
+// FG-455 p4 review finding 2: oom_killed carries the same worktree-evidence
+// shape as orphaned_work_may_persist and is now in CONTINUABLE_KINDS — it must
+// be surfaced and recommended for --continue too, not omitted.
+test("recover inspect: oom_killed task surfaces evidence, changed files, and a --continue recommendation — read-only", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-inspect-oom";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+  // containerExitInfo says oomKilled -> reconcileRun settles this into oom_killed.
+  reconcileRun(RUN.id, () => false, undefined, () => ({ oomKilled: true, exitCode: 137 }));
+  assert.equal(getTask(taskId)!.status, "failed", "sanity: reconcile produced the fixture we want to inspect");
+
+  const outcome = performInspect(taskId);
+  assert.equal(outcome.kind, "inspect-task");
+  if (outcome.kind !== "inspect-task") return;
+  assert.equal(outcome.task.failureKind, "oom_killed");
+  assert.deepEqual(outcome.task.changedFiles, ["?? changed-file.txt"]);
+  assert.equal(outcome.task.source, "worktree");
+  assert.match(outcome.task.recommendation, /forge recover t-inspect-oom --continue/, "performContinue now accepts oom_killed — recommendationFor must not still refuse it");
+  assert.ok(outcome.task.storedEvidence, "stored evidence from reconcile time is surfaced");
+});
+
+test("recover inspect: run id includes an oom_killed task among recoverable tasks", () => {
+  const gitDir = trackedDirtyGitRepo();
+  insertContainerized(mkTask("t-run-oom", { status: "running", worktreePath: gitDir }));
+  reconcileRun(RUN.id, () => false, undefined, () => ({ oomKilled: true, exitCode: 137 }));
+
+  const outcome = performInspect(RUN.id);
+  assert.equal(outcome.kind, "inspect-run");
+  if (outcome.kind !== "inspect-run") return;
+  assert.ok(outcome.tasks.some((t) => t.taskId === "t-run-oom"), "oom_killed must not be filtered out of the run-level recoverable list");
+});
+
+// FG-455 p4 review finding 2: recommendationFor must not suggest a --continue
+// performContinue will refuse — gate the recommendation by failure_kind, not
+// just by whether evidence happens to be present.
+test("recover inspect: a non-continuable failure_kind (e.g. container_crash) with a dirty worktree does NOT recommend --continue", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-inspect-noncontinuable";
+  insertTask(mkTask(taskId, { status: "failed", worktreePath: gitDir }));
+  logEvent("task.failed", { runId: RUN.id, taskId, payload: { failure_kind: "container_crash", error: "boom" } });
+
+  const outcome = performInspect(taskId);
+  assert.equal(outcome.kind, "inspect-task");
+  if (outcome.kind !== "inspect-task") return;
+  assert.equal(outcome.task.failureKind, "container_crash");
+  assert.deepEqual(outcome.task.changedFiles, ["?? changed-file.txt"], "evidence is still gathered live");
+  assert.doesNotMatch(
+    outcome.task.recommendation,
+    /^forge recover \S+ --continue/,
+    "performContinue refuses container_crash — must not be the recommended command",
+  );
+});
+
 test("recover inspect: shared project_dir evidence source is called out explicitly", () => {
   const gitDir = trackedDirtyGitRepo();
   const taskId = "t-inspect-shared";
@@ -245,6 +298,22 @@ test("recover --continue: refuses a project_dir_shared diff without --force, all
   const forced = performContinue(taskId, { force: true });
   assert.equal(forced.kind, "continued");
   assert.equal(getTask(taskId)!.status, "complete");
+});
+
+test("recover --continue: adopts an oom_killed task's diff (oom_killed is now a CONTINUABLE_KIND)", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-oom";
+  insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+  reconcileRun(RUN.id, () => false, undefined, () => ({ oomKilled: true, exitCode: 137 }));
+  assert.equal(getTask(taskId)!.status, "failed");
+
+  const outcome = performContinue(taskId);
+  assert.equal(outcome.kind, "continued");
+  if (outcome.kind !== "continued") return;
+  assert.equal(outcome.adoptedFrom, "diff_adopted");
+  const result = getTask(taskId)!.result as Record<string, unknown>;
+  assert.equal(result.contract, "adopted_diff");
+  assert.deepEqual(result.changedFiles, ["?? changed-file.txt"]);
 });
 
 test("recover --continue: refuses a task not in a recoverable state (e.g. gate_rejected)", () => {

@@ -128,10 +128,18 @@ export type OrphanEvidence = {
   oomKilled?: boolean;
 };
 
-/** Recover the orphaned_work_may_persist evidence from a task's event stream,
- *  mirroring failureKindFromEvents's newest-first walk (a later task.completed
- *  means recovered — no evidence to show). undefined for any other failure kind
- *  or a task.failed pre-dating this evidence. */
+// FG-455 p4 review finding 1: oom_killed carries the same OrphanEvidence shape
+// (recorded on the same container-gone evidence-gathering path in reconcile.ts)
+// as orphaned_work_may_persist — so it belongs in this same evidence lookup.
+// Match EXPLICITLY on this kind set rather than "any payload.evidence present":
+// other kinds (e.g. verification_environment_unavailable) record a DIFFERENT
+// evidence shape that would otherwise be mis-cast to OrphanEvidence here.
+const ORPHAN_EVIDENCE_KINDS = new Set(["orphaned_work_may_persist", "oom_killed"]);
+
+/** Recover the orphaned_work_may_persist / oom_killed evidence from a task's
+ *  event stream, mirroring failureKindFromEvents's newest-first walk (a later
+ *  task.completed means recovered — no evidence to show). undefined for any
+ *  other failure kind or a task.failed pre-dating this evidence. */
 export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -139,7 +147,8 @@ export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | u
     if (e.eventType === "task.completed") return undefined;
     if (e.eventType === "task.failed") {
       const payload = e.payload as Record<string, unknown> | null;
-      if (payload?.["failure_kind"] === "orphaned_work_may_persist" && payload["evidence"]) {
+      const kind = payload?.["failure_kind"];
+      if (typeof kind === "string" && ORPHAN_EVIDENCE_KINDS.has(kind) && payload?.["evidence"]) {
         return payload["evidence"] as OrphanEvidence;
       }
       return undefined;

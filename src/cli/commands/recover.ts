@@ -22,7 +22,11 @@ import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { analyzeProviderFailure } from "../../v2/provider-failure.js";
 import { inferredResultFrom, type InferredResult } from "../../v2/inferred-result.js";
 
-const CONTINUABLE_KINDS = new Set(["orphaned", "orphaned_work_may_persist"]);
+// FG-455 p4 review finding 2: oom_killed carries the same worktree-evidence
+// shape as orphaned_work_may_persist (both gathered on reconcile.ts's shared
+// container-gone evidence path) and is legitimately continuable when work
+// persisted despite the OOM/kill.
+const CONTINUABLE_KINDS = new Set(["orphaned", "orphaned_work_may_persist", "oom_killed"]);
 const TERMINAL = new Set(["complete", "failed"]);
 const VERIFICATION_HINT =
   "Before adopting: review the diff at the path below, then run this project's verification (e.g. `npm run typecheck` and `npm run test:all` on the host).";
@@ -91,16 +95,22 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
   return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutInferredResult };
 }
 
-function recommendationFor(task: Task, evidence: LiveEvidence): string {
-  if (evidence.validResult !== undefined || evidence.stdoutInferredResult !== undefined) {
+// FG-455 p4 review finding 2: only recommend --continue for a failure_kind
+// performContinue will actually accept (CONTINUABLE_KINDS) — otherwise this
+// recommended a command performContinue then refused (e.g. a container_crash
+// task that happened to have a dirty worktree). A non-continuable kind falls
+// back to the plain retry recommendation instead.
+function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: string | undefined): string {
+  const continuable = CONTINUABLE_KINDS.has(failureKind ?? "");
+  const hasRecoverableWork =
+    evidence.validResult !== undefined || evidence.stdoutInferredResult !== undefined || evidence.changedFiles.length > 0;
+  if (continuable && hasRecoverableWork) {
     return evidence.source === "project_dir_shared"
       ? `forge recover ${task.id} --continue --force  (shared project dir — confirm the diff is this task's before forcing)`
       : `forge recover ${task.id} --continue`;
   }
-  if (evidence.changedFiles.length > 0) {
-    return evidence.source === "project_dir_shared"
-      ? `forge recover ${task.id} --continue --force  (shared project dir — confirm the diff is this task's before forcing)`
-      : `forge recover ${task.id} --continue`;
+  if (hasRecoverableWork) {
+    return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue; evidence found but not adopted — inspect the diff first)`;
   }
   return `forge retry ${task.id}  (no persisted work found — safe to re-dispatch from scratch)`;
 }
@@ -137,7 +147,7 @@ function buildTaskView(task: Task, run: Run): TaskEvidenceView {
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
     hasStdoutRecoverableResult: evidence.stdoutInferredResult !== undefined,
-    recommendation: recommendationFor(task, evidence),
+    recommendation: recommendationFor(task, evidence, failureKind),
     verification: VERIFICATION_HINT,
   };
 }
@@ -237,7 +247,7 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
       id: taskId,
       reason:
         `task ${taskId} is not in a recoverable state (status=${task.status}, failure_kind=${failureKind ?? "none"}) — ` +
-        "--continue only applies to a failed task orphaned by a lost container (failure_kind orphaned / orphaned_work_may_persist)",
+        "--continue only applies to a failed task orphaned by a lost container (failure_kind orphaned / orphaned_work_may_persist / oom_killed)",
     };
   }
 

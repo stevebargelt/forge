@@ -132,6 +132,27 @@ test("retry after orphaned_work_may_persist: refused without --force, allowed wi
   assert.equal((retried.payload as Record<string, unknown>).forced, true);
 });
 
+// FG-455 p4 review finding 3 (HIGH, data-loss): oom_killed used to fall through
+// to the default `{retryable: true, reason: "unrecognized failure kind..."}`,
+// so `forge retry` would silently re-dispatch over an oom_killed task's dirty
+// worktree — the exact clobber orphaned_work_may_persist's retryable:false was
+// created to prevent. Same "needs --force" shape as orphaned_work_may_persist.
+test("retryPolicy: oom_killed is NOT retryable (don't clobber a possibly-persisted worktree after an OOM/kill)", () => {
+  const d = retryPolicy("oom_killed");
+  assert.equal(d.retryable, false);
+  assert.ok(d.advice, "must carry advice on how to proceed");
+});
+
+test("retry after oom_killed: refused without --force, allowed with --force", async () => {
+  failedTask("t-oom-killed", "oom_killed");
+  await assert.rejects(retry("t-oom-killed"), RetryNotAllowedError);
+  assert.equal(eventsForTask("t-oom-killed").some((e) => e.eventType === "task.retried"), false);
+  const out = await retry("t-oom-killed", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  const retried = eventsForTask("t-oom-killed").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).forced, true);
+});
+
 // ── FG-455 p3: retrying a fanout child directly must not strand a detached
 // parentId=undefined primary in the fanout's phase — `forge recover <parent>
 // --re-drive` is the coherent path instead. ──
