@@ -17,7 +17,7 @@
 // step pipelines are finalized by `forge next`, which has the workflow.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js";
@@ -25,6 +25,10 @@ import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
 import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
+import { getManifestRuntime } from "./task-manifest.js";
+import { analyzeProviderFailure } from "./provider-failure.js";
+import { inferredResultFrom } from "./inferred-result.js";
+import type { OrphanEvidence } from "./failure-kind.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -61,6 +65,40 @@ function readResult(runId: string, taskId: string): unknown | undefined {
   try { return JSON.parse(raw); } catch { return undefined; }
 }
 
+/** Diagnostic-only classification of the on-disk result.json state — recorded
+ *  in the container-gone evidence, never used to drive markTaskComplete/Failed
+ *  (that still goes through readResult's strict parse). */
+function resultFileState(runId: string, taskId: string): "absent" | "empty" | "malformed" {
+  const p = join(taskDir(runId, taskId), "result.json");
+  if (!existsSync(p)) return "absent";
+  const raw = readFileSync(p, "utf8").trim();
+  if (raw.length === 0) return "empty";
+  return "malformed"; // non-empty but readResult() above already returned undefined for this branch
+}
+
+function readStdoutLog(runId: string, taskId: string): string {
+  const p = join(taskDir(runId, taskId), "container.stdout.log");
+  if (!existsSync(p)) return "";
+  try { return readFileSync(p, "utf8"); } catch { return ""; }
+}
+
+/** FG-455: git status --porcelain against a task's persisted-work path. Never
+ *  throws — a missing path, a non-git directory, or any git error is reported
+ *  as "no changed files" so reconcile stays safe even against a half-formed
+ *  worktree. */
+function changedWorktreeFiles(path: string | undefined): string[] {
+  if (!path) return [];
+  try {
+    const out = execFileSync("git", ["status", "--porcelain"], {
+      cwd: path,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).toString();
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
 export function reconcileRun(runId: string, containerAlive: ContainerAlive = defaultContainerAlive): ReconcileResult {
@@ -86,11 +124,59 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
       logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present" } });
       taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
     } else if (result === undefined) {
-      const error = "orphaned: container gone with no result (reconciled after crash)";
-      markTaskFailed(t.id, error);
-      logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
-      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result" } });
-      taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
+      // FG-455: an empty/absent result.json used to collapse straight to
+      // "orphaned" — discarding any work the agent actually persisted before the
+      // wrapper died. Recover in strict precedence order before giving up:
+      //   1. a recoverable structured result sitting in stdout (FG-337 synthesis)
+      //   2. a dirty worktree — real files may have landed even though nothing
+      //      was ever readable back out of the container
+      //   3. only then, the ordinary orphaned/no-result classification.
+      const dir = taskDir(t.runId, t.id);
+      const containerName = `forge-${t.id}`;
+      const runtimeMeta = getManifestRuntime(dir);
+      const stdoutRaw = readStdoutLog(t.runId, t.id);
+      const analysis = analyzeProviderFailure({
+        logFormat: runtimeMeta?.logFormat,
+        runtimeKind: runtimeMeta?.kind,
+        stdoutRaw,
+      });
+      const inferred = inferredResultFrom(analysis, t.agentRole);
+
+      if (inferred) {
+        writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+        if (markTaskComplete(t.id, inferred)) {
+          logEvent("task.completed", { runId, taskId: t.id });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" } });
+          taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
+        }
+      } else {
+        const worktreePathChecked = t.worktreePath ?? run.projectDir;
+        const changedFiles = changedWorktreeFiles(worktreePathChecked);
+        const evidence: OrphanEvidence = {
+          containerName,
+          containerLiveness: "gone",
+          resultState: resultFileState(t.runId, t.id),
+          recoverableStdoutResult: false,
+          worktreePathChecked: worktreePathChecked ?? null,
+          changedFiles,
+        };
+
+        if (changedFiles.length > 0) {
+          const error =
+            `orphaned_work_may_persist: container gone with no recoverable result, but ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
+            "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
+          taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
+        } else {
+          const error = "orphaned: container gone with no result (reconciled after crash)";
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result" } });
+          taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
+        }
+      }
     }
     // AWN-8: reconciliation is a terminal transition too — don't leave the staged
     // bearer token behind (no-op when there's no auth file).

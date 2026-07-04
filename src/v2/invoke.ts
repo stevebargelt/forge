@@ -48,7 +48,7 @@ import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js
 import { loadAllConstraints, filterConstraints } from "./constraints.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { requiresStructuredResult } from "./role-capabilities.js";
+import { inferredResultFrom } from "./inferred-result.js";
 
 export type InvokeArgs = {
   agentRole: string;
@@ -557,8 +557,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     if (a.modelError) kind = classify({ source: "model_error" });
     // FG-337: clean completion + captured assistant text + narrative role →
     // synthesize an inferred result instead of hard-failing.
-    if (!a.modelError && a.finalAssistantText && !requiresStructuredResult(args.agentRole)) {
-      const inferred = { contract: "inferred", summary: a.finalAssistantText, status: "complete" };
+    const inferred = inferredResultFrom(a, args.agentRole);
+    if (inferred) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
       if (!markTaskComplete(taskId, inferred)) {
         const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";

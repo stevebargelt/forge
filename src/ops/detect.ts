@@ -20,6 +20,9 @@ import type { Incident } from "../types/index.js";
 import { getDb } from "../store/db.js";
 import { makeIncident } from "./incident.js";
 import { findReconcileCandidates, type LivenessProbe, probeContainerLiveness } from "./reconcile-candidate.js";
+import { eventsForTask } from "../store/events.js";
+import { failureKindFromEvents, getOrphanEvidenceFromEvents } from "../v2/failure-kind.js";
+import { taskDir } from "../util/paths.js";
 
 export type OpsCheckOptions = {
   /** Scope to one project's runs (runs.project_dir). Omit for the host-wide view. */
@@ -143,10 +146,63 @@ export function detectReconcileCandidate(
     });
 }
 
+type FailedRow = { taskId: string; runId: string; phase: string };
+
+/** A FAILED task classified `orphaned_work_may_persist` (FG-455): reconcile
+ *  found the container gone with no recoverable result, but changed files sat
+ *  in the task's worktree — real work that might otherwise be silently
+ *  discarded. db-confirmed: the classification + evidence already live on the
+ *  task's own task.failed event, no external probe needed. Never a `repair` —
+ *  a human must inspect the diff first; retry-policy.ts already blocks a blind
+ *  `forge retry` on this kind (needs --force). */
+export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
+  const rows = db
+    .prepare(
+      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase
+       FROM tasks t JOIN runs r ON r.id = t.run_id
+       WHERE t.status = 'failed'
+         AND (? IS NULL OR r.project_dir = ?)`
+    )
+    .all(opts.projectDir ?? null, opts.projectDir ?? null) as FailedRow[];
+
+  const incidents: Incident[] = [];
+  for (const row of rows) {
+    const events = eventsForTask(row.taskId);
+    if (failureKindFromEvents(events) !== "orphaned_work_may_persist") continue;
+    const evidence = getOrphanEvidenceFromEvents(events);
+    const dir = taskDir(row.runId, row.taskId);
+    incidents.push(
+      makeIncident({
+        kind: "orphaned_work_may_persist",
+        severity: "high",
+        confidence: "db-confirmed",
+        runId: row.runId,
+        taskId: row.taskId,
+        evidence: [
+          `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`,
+          evidence
+            ? `${evidence.changedFiles.length} changed file(s) found at ${evidence.worktreePathChecked ?? "(no worktree path recorded)"}`
+            : "changed-file evidence not recorded on this task.failed event",
+          `task dir: ${dir}`,
+        ],
+        recommendedAction: {
+          type: "investigate",
+          autonomy: "manual-only",
+          command: `forge show ${row.taskId} --json`,
+          reason:
+            "the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with `forge retry --force`.",
+        },
+      })
+    );
+  }
+  return incidents;
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
   detectReconcileCandidate,
+  detectOrphanedWorkMayPersist,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.

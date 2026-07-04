@@ -69,7 +69,7 @@ import { checkResolvedAvailability, checkToolCapability } from "./provider-docto
 import { CONTROL_PLANE_METADATA_KEYS } from "./startRun.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 import { fillClosedCommit } from "../backlog/structured.js";
-import { requiresStructuredResult } from "./role-capabilities.js";
+import { inferredResultFrom } from "./inferred-result.js";
 // FG-351/FG-352: worktree lifecycle — gate check, create, merge-back, cleanup.
 // FG-353: integration worktree helpers added.
 import {
@@ -2246,8 +2246,8 @@ async function runContainer(args: {
     if (a.modelError) kind = classify({ source: "model_error" });
     // FG-337: clean completion + captured assistant text + narrative role →
     // synthesize an inferred result instead of hard-failing.
-    if (!a.modelError && a.finalAssistantText && args.role && !requiresStructuredResult(args.role)) {
-      const inferred = { contract: "inferred", summary: a.finalAssistantText, status: "complete" };
+    const inferred = inferredResultFrom(a, args.role);
+    if (inferred) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
       return { kind: "ok", result: inferred };
     }

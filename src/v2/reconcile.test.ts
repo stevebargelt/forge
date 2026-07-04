@@ -1,6 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -10,6 +11,7 @@ import { insertTask, getTask } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { reconcileRun, reconcileRuns } from "./reconcile.js";
+import type { OrphanEvidence } from "./failure-kind.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -30,6 +32,28 @@ function insertContainerized(t: Task) {
 }
 const ALIVE = () => true;
 const GONE = () => false;
+
+// FG-455 fixtures: a pi-jsonl clean completion (mirrors fg337-inferred-result's
+// builder) and a git-backed worktree with an uncommitted change.
+function piCleanEndStdout(text: string): string {
+  return (
+    JSON.stringify({ type: "agent_start" }) + "\n" +
+    JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", stopReason: "end_turn", content: text }] }) + "\n"
+  );
+}
+
+function writePiManifest(dir: string): void {
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify({
+    runtime: { name: "pi-stub", kind: "pi", logFormat: "pi-jsonl", promptStrategy: "message-arg", authStrategy: "env-provider-api-key" },
+  }));
+}
+
+function makeDirtyGitRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-rec-worktree-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "changed-file.txt"), "uncommitted work\n");
+  return dir;
+}
 
 beforeEach(() => { db = makeInMemoryDb(); prev = setDbForTest(db); insertRun(RUN); });
 afterEach(() => { setDbForTest(prev as DatabaseInstance); db.close(); });
@@ -65,6 +89,112 @@ test("reconcile: container gone WITH a valid result → finalized as complete (l
   assert.deepEqual(t.result, { status: "complete", output: "done" });
   const types = eventsForTask("t-result").map((e) => e.eventType);
   assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
+});
+
+// ----- FG-455: don't discard persisted work on an empty/absent result.json -----
+
+test("FG-455: container gone, empty result, but a recoverable stdout result (FG-337 synthesis) → task COMPLETE, not orphaned", () => {
+  const taskId = "t-stdout-recoverable";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output from stdout.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  // result.json intentionally absent — the wrapper's empty seed was never filled in.
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" });
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.completed"), "must complete, not fail");
+  assert.ok(!types.includes("task.failed"), "must NOT be reported as failed");
+  assert.ok(types.includes("task.reconciled"));
+
+  // The recovered result is persisted to disk too, mirroring the FG-337 dispatch-time paths.
+  const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(onDisk.contract, "inferred");
+  assert.equal(onDisk.summary, text);
+});
+
+test("FG-455: container gone, empty result, no recoverable stdout, but a dirty worktree → failure_kind=orphaned_work_may_persist (work preserved, not discarded)", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-worktree-dirty";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    // No manifest / stdout at all — simulates the wrapper dying before either was written.
+
+    const r = reconcileRun(RUN.id, GONE);
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_worktree_dirty" }]);
+
+    const t = getTask(taskId)!;
+    assert.equal(t.status, "failed");
+    assert.match(t.error ?? "", /orphaned_work_may_persist/);
+    assert.match(t.error ?? "", /--force/);
+
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const payload = failed.payload as Record<string, unknown>;
+    assert.equal(payload.failure_kind, "orphaned_work_may_persist");
+    const evidence = payload.evidence as OrphanEvidence;
+    assert.equal(evidence.containerName, `forge-${taskId}`);
+    assert.equal(evidence.containerLiveness, "gone");
+    assert.equal(evidence.resultState, "absent");
+    assert.equal(evidence.recoverableStdoutResult, false);
+    assert.equal(evidence.worktreePathChecked, gitDir);
+    assert.deepEqual(evidence.changedFiles, ["?? changed-file.txt"]);
+
+    // The reconciled event carries the same evidence, for any consumer walking events only.
+    const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+    assert.equal((reconciled.payload as Record<string, unknown>).reason, "container_gone_worktree_dirty");
+    assert.deepEqual((reconciled.payload as Record<string, unknown>).evidence, evidence);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-455: worktree_path takes precedence over run.projectDir when both are set", () => {
+  const gitDir = makeDirtyGitRepo();
+  const otherDir = mkdtempSync(join(tmpdir(), "forge-rec-other-"));
+  try {
+    insertRun({ id: "run-rec-precedence", workflow: "invoke", title: "prec", status: "active", createdAt: "2026-05-30T00:00:00Z", projectDir: otherDir });
+    const taskId = "t-precedence";
+    insertContainerized(mkTask(taskId, { runId: "run-rec-precedence", status: "running", worktreePath: gitDir }));
+
+    reconcileRun("run-rec-precedence", GONE);
+
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const evidence = (failed.payload as Record<string, unknown>).evidence as OrphanEvidence;
+    assert.equal(evidence.worktreePathChecked, gitDir, "worktreePath (the actual persisted-work location) wins over run.projectDir");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+    rmSync(otherDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-455 NEGATIVE: non-empty stdout with no recoverable result AND no changed files → ordinary orphaned (stdout alone is not proof of persisted work)", () => {
+  const taskId = "t-stdout-not-proof";
+  insertContainerized(mkTask(taskId, { status: "running" })); // agentRole: "engineer" — requires structured result
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  // agent_start only — no agent_end, so analyzePiFailure finds no finalAssistantText.
+  // Non-empty, but nothing recoverable and no worktree configured (no changed files).
+  writeFileSync(join(dir, "container.stdout.log"), JSON.stringify({ type: "agent_start" }) + "\n");
+
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed");
+  assert.doesNotMatch(t.error ?? "", /orphaned_work_may_persist/);
+
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned", "ordinary orphaned — unchanged classification/shape");
+  assert.equal((failed.payload as Record<string, unknown>).evidence, undefined, "ordinary orphaned carries no evidence payload (happy path unchanged)");
 });
 
 test("reconcile: a host-side session task (no container.started) is NEVER reconciled (regression)", () => {

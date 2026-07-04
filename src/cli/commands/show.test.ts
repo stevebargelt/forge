@@ -13,6 +13,8 @@ import type { Event } from "../../store/events.js";
 import {
   performShow,
   getFailureKindFromEvents,
+  getOrphanEvidenceFromEvents,
+  orphanRecoveryMessage,
   classifyResultFile,
   computeElapsed,
   formatTimeAgo,
@@ -235,6 +237,42 @@ test("getFailureKindFromEvents: failure_kind round-trip via DB events", () => {
   if (result.kind === "task") {
     assert.equal(getFailureKindFromEvents(result.events), "gate_rejected");
   }
+});
+
+// ─── getOrphanEvidenceFromEvents / orphanRecoveryMessage (FG-455) ──────────
+
+test("getOrphanEvidenceFromEvents: recovers the evidence recorded on the task.failed event", () => {
+  const evidence = {
+    containerName: "forge-task-x", containerLiveness: "gone" as const, resultState: "absent" as const,
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? f.txt"],
+  };
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "orphaned_work_may_persist", error: "x", evidence })];
+  assert.deepEqual(getOrphanEvidenceFromEvents(events), evidence);
+});
+
+test("getOrphanEvidenceFromEvents: undefined for ordinary orphaned", () => {
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "orphaned", error: "x" })];
+  assert.equal(getOrphanEvidenceFromEvents(events), undefined);
+});
+
+test("orphanRecoveryMessage: names the task dir, worktree path, changed files, and --force guidance", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-recover-me", {
+    containerName: "forge-task-recover-me", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/some/worktree", changedFiles: ["?? new.txt", "M changed.txt"],
+  });
+  assert.match(msg, /task-recover-me/);
+  assert.match(msg, /\/tmp\/some\/worktree/);
+  assert.match(msg, /new\.txt/);
+  assert.match(msg, /changed\.txt/);
+  assert.match(msg, /--force/);
+});
+
+test("orphanRecoveryMessage: handles a null worktree path (neither worktree_path nor run.projectDir recorded)", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-no-path", {
+    containerName: "forge-task-no-path", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: null, changedFiles: [],
+  });
+  assert.match(msg, /none/i);
 });
 
 // ─── classifyResultFile ──────────────────────────────────────────────────────
@@ -655,6 +693,15 @@ test("deriveNextCommandForTask: failed+red_blocked → show red task + gate", ()
 
 test("deriveNextCommandForTask: failed+undefined failure_kind → forge retry", () => {
   assert.match(deriveNextCommandForTask("failed", undefined, "task-abc"), /forge retry task-abc/);
+});
+
+// FG-455: a dirty worktree may hold real, unreviewed work — point at inspection
+// first, not a blind retry (retry-policy.ts already blocks it without --force).
+test("deriveNextCommandForTask: failed+orphaned_work_may_persist → inspect before retry --force", () => {
+  const cmd = deriveNextCommandForTask("failed", "orphaned_work_may_persist", "task-abc");
+  assert.match(cmd, /forge show task-abc/);
+  assert.match(cmd, /--force/);
+  assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
 });
 
 test("deriveNextCommandForTask: awaiting_gate → forge gate --advance | --reject", () => {
