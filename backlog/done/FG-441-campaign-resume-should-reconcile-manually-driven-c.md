@@ -1,9 +1,11 @@
 ---
 id: FG-441
 type: story
-status: active
+status: done
 title: Campaign resume should reconcile manually-driven campaign item runs after merge/close
 created: 2026-07-02
+closed: 2026-07-04
+closed_commit: 54d4495
 ---
 
 ## Problem
