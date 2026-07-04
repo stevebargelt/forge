@@ -78,6 +78,7 @@ export function registerStatus(program: Command): void {
           // it here too, not just in `forge show`, so scripted/orchestrator
           // consumers of `forge status --json` see it without a second call.
           const events = eventsForTask(t.id);
+          const taskFailureKind = t.status === "failed" ? failureKindFromEvents(events) : undefined;
           const orphanEvidence = t.status === "failed" ? getOrphanEvidenceFromEvents(events) : undefined;
           return {
             id: t.id,
@@ -89,9 +90,9 @@ export function registerStatus(program: Command): void {
             startedAt: t.startedAt ?? null,
             completedAt: t.completedAt ?? null,
             error: t.error ?? null,
-            failureKind: t.status === "failed" ? (failureKindFromEvents(events) ?? null) : null,
+            failureKind: taskFailureKind ?? null,
             orphanRecovery: orphanEvidence
-              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence) }
+              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist") }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
@@ -148,9 +149,11 @@ export function registerStatus(program: Command): void {
           // FG-455: a generic ☠ icon doesn't distinguish "safe to retry" from
           // "the worktree may hold real work" — print the recovery message.
           if (t.status === "failed") {
-            const orphanEvidence = getOrphanEvidenceFromEvents(eventsForTask(t.id));
+            const events = eventsForTask(t.id);
+            const orphanEvidence = getOrphanEvidenceFromEvents(events);
             if (orphanEvidence) {
-              console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence)}`);
+              const kind = failureKindFromEvents(events) === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist";
+              console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind)}`);
             }
           }
         }

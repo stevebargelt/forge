@@ -298,6 +298,69 @@ test("orphanRecoveryMessage: handles a null worktree path (neither worktree_path
   assert.match(msg, /none/i);
 });
 
+// ── orphanRecoveryMessage: FG-455 p4 review finding 1 — oom_killed wording ──
+
+test("orphanRecoveryMessage: kind=oom_killed with oomKilled=true leads with a confirmed OOM, not the generic dirty-orphan wording", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-oom", {
+    containerName: "forge-task-oom", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    exitCode: 137, oomKilled: true,
+  }, "oom_killed");
+  assert.match(msg, /container killed \(OOM\)/);
+  assert.doesNotMatch(msg, /^work may have persisted/);
+  // still includes the usual task dir / worktree / changed files / guidance
+  assert.match(msg, /task-oom/);
+  assert.match(msg, /\/tmp\/wt/);
+  assert.match(msg, /new\.txt/);
+  assert.match(msg, /--force/);
+});
+
+test("orphanRecoveryMessage: kind=oom_killed with exitCode=137 but oomKilled not confirmed → 'possibly OOM or an external kill'", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-oom-137", {
+    containerName: "forge-task-oom-137", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: [],
+    exitCode: 137,
+  }, "oom_killed");
+  assert.match(msg, /exit 137 — possibly OOM or an external kill/);
+});
+
+test("orphanRecoveryMessage: kind defaults to orphaned_work_may_persist wording when omitted, even if evidence carries exitCode/oomKilled", () => {
+  // FG-455 p4 review finding 1: the valid-result/orphaned branches now also
+  // carry exitCode/oomKilled on baseEvidence — the OOM headline must be gated
+  // on the failure KIND, not merely the presence of these fields.
+  const msg = orphanRecoveryMessage(RUN.id, "task-plain-orphan", {
+    containerName: "forge-task-plain-orphan", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    exitCode: 137, oomKilled: false,
+  });
+  assert.match(msg, /^work may have persisted/);
+  assert.doesNotMatch(msg, /container killed/);
+});
+
+// ── orphanRecoveryMessage: FG-455 p4 re-review — oom_killed headline must not
+// contradict the changed-files line for a CLEAN worktree ───────────────────
+
+test("orphanRecoveryMessage: kind=oom_killed with no changed files does not claim changed files were found", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-oom-clean", {
+    containerName: "forge-task-oom-clean", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: [],
+    exitCode: 137, oomKilled: true,
+  }, "oom_killed");
+  assert.doesNotMatch(msg, /changed files were found/);
+  assert.match(msg, /no changed files on the worktree/);
+  assert.match(msg, /changed files:\s+\(none listed\)/);
+});
+
+test("orphanRecoveryMessage: kind=oom_killed with changed files present does claim changed files were found", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-oom-dirty", {
+    containerName: "forge-task-oom-dirty", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    exitCode: 137, oomKilled: true,
+  }, "oom_killed");
+  assert.match(msg, /changed files were found/);
+  assert.doesNotMatch(msg, /no changed files on the worktree/);
+});
+
 // ── orphanRecoveryMessage: FG-455 finding 2 source disclosure ───────────────
 
 test("orphanRecoveryMessage: source=project_dir_shared discloses the shared-projectDir ambiguity", () => {
@@ -793,6 +856,21 @@ test("deriveNextCommandForTask: failed+fanout_wave_orphaned → forge recover --
   const cmd = deriveNextCommandForTask("failed", "fanout_wave_orphaned", "task-abc");
   assert.match(cmd, /forge recover task-abc --re-drive/);
   assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
+});
+
+// FG-455 p4 review finding 5: exit 137 alone doesn't confirm OOM (an external
+// kill can also send SIGKILL) — the hint must not over-claim "out-of-memory".
+//
+// FG-455 p4 re-review: retry-policy.ts classifies oom_killed as retryable:false,
+// same as orphaned_work_may_persist — a bare `forge retry` is refused. The hint
+// must point at inspect-then-force, mirroring the orphaned_work_may_persist arm.
+test("deriveNextCommandForTask: failed+oom_killed → inspect before retry --force, not a bare retry", () => {
+  const cmd = deriveNextCommandForTask("failed", "oom_killed", "task-abc");
+  assert.match(cmd, /forge show task-abc/);
+  assert.match(cmd, /forge retry task-abc --force/);
+  assert.match(cmd, /exit 137, possibly OOM or external kill/);
+  assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
+  assert.doesNotMatch(cmd, /forge retry task-abc(?! --force)/, "must never recommend a bare forge retry without --force");
 });
 
 test("deriveNextCommandForTask: awaiting_gate → forge gate --advance | --reject", () => {

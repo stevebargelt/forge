@@ -641,3 +641,234 @@ test("reconcileRuns: forwards an injected reapContainer through to reconcileRun 
   assert.equal(getTask("t-plural-reap")!.status, "failed");
   assert.ok(changed.some((c) => c.runId === RUN.id));
 });
+
+// ----- FG-455 p4: OOM / SIGKILL / exit-137 classification -----
+
+const UNKNOWN_EXIT_INFO = () => ({});
+
+test("FG-455 p4: container gone, no recoverable result, dirty worktree, containerExitInfo says oomKilled → failure_kind=oom_killed (not orphaned_work_may_persist)", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-oom-killed";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const exitInfo = (name: string) => {
+      assert.equal(name, `forge-${taskId}`, "exit-info probe called with the agent container's real name");
+      return { oomKilled: true, exitCode: 137 };
+    };
+
+    const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_oom_killed" }]);
+    const t = getTask(taskId)!;
+    assert.equal(t.status, "failed");
+    assert.match(t.error ?? "", /oom_killed/);
+    assert.match(t.error ?? "", /work may have persisted/, "dirty worktree still surfaces the recovery guidance");
+
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const payload = failed.payload as Record<string, unknown>;
+    assert.equal(payload.failure_kind, "oom_killed", "NOT classified as an ordinary implementation failure");
+    const evidence = payload.evidence as OrphanEvidence;
+    assert.equal(evidence.oomKilled, true);
+    assert.equal(evidence.exitCode, 137);
+    assert.deepEqual(evidence.changedFiles, ["?? changed-file.txt"]);
+
+    const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+    assert.equal((reconciled.payload as Record<string, unknown>).reason, "container_oom_killed");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-455 p4: container gone, no recoverable result, CLEAN worktree, containerExitInfo says exitCode=137 (no oomKilled flag) → still oom_killed", () => {
+  const taskId = "t-exit-137";
+  insertContainerized(mkTask(taskId, { status: "running" })); // no worktreePath, no run.projectDir → no changed files
+  const exitInfo = () => ({ exitCode: 137 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_oom_killed" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed");
+  assert.match(t.error ?? "", /oom_killed/);
+  assert.doesNotMatch(t.error ?? "", /work may have persisted/, "no changed files — no false recovery guidance");
+
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  const payload = failed.payload as Record<string, unknown>;
+  assert.equal(payload.failure_kind, "oom_killed");
+  const evidence = payload.evidence as OrphanEvidence;
+  assert.equal(evidence.exitCode, 137);
+  assert.equal(evidence.oomKilled, undefined);
+});
+
+test("FG-455 p4 NEGATIVE: containerExitInfo returns {} (unknown) → classification UNCHANGED — still orphaned_work_may_persist on a dirty worktree", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-oom-unknown-dirty";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+
+    const r = reconcileRun(RUN.id, GONE, undefined, UNKNOWN_EXIT_INFO);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_worktree_dirty" }]);
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const payload = failed.payload as Record<string, unknown>;
+    assert.equal(payload.failure_kind, "orphaned_work_may_persist", "unchanged from pre-FG-455-p4 behavior");
+    const evidence = payload.evidence as OrphanEvidence;
+    assert.equal(evidence.oomKilled, undefined);
+    assert.equal(evidence.exitCode, undefined);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-455 p4 NEGATIVE: containerExitInfo returns {} (unknown), clean worktree → classification UNCHANGED — still ordinary orphaned", () => {
+  const taskId = "t-oom-unknown-clean";
+  insertContainerized(mkTask(taskId, { status: "running" }));
+
+  const r = reconcileRun(RUN.id, GONE, undefined, UNKNOWN_EXIT_INFO);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }]);
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned", "unchanged from pre-FG-455-p4 behavior");
+});
+
+test("FG-455 p4: defaultContainerExitInfo param defaults to the real probe when omitted — reconcileRun still never throws", () => {
+  insertContainerized(mkTask("t-default-exit-info", { status: "running" }));
+  // No containerExitInfo injected — falls back to defaultContainerExitInfo, which
+  // shells out to `docker inspect`. In this sandboxed test env docker may not be
+  // present at all; the never-throw guarantee must hold either way.
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.equal(getTask("t-default-exit-info")!.status, "failed");
+  assert.ok(r);
+});
+
+test("FG-455 p4 review finding 4: container gone, containerExitInfo says oomKilled, AND a recoverable stdout result (FG-337 synthesis) exists → task COMPLETES via inferred-stdout, NOT classified oom_killed (recoverable output outranks OOM classification); evidence still carries exitCode/oomKilled alongside recoverableStdoutResult", () => {
+  const taskId = "t-oom-with-stdout";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output despite OOM.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  const exitInfo = () => ({ oomKilled: true, exitCode: 137 });
+
+  const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" });
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.completed"), "must complete via the stdout-synthesis branch");
+  assert.ok(!types.includes("task.failed"), "recoverable stdout outranks OOM classification — must not fail as oom_killed");
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.recoverableStdoutResult, true);
+  assert.equal(evidence.oomKilled, true, "OOM evidence is still recorded even though it didn't drive classification");
+  assert.equal(evidence.exitCode, 137);
+});
+
+test("FG-455 p4 review finding 5 NEGATIVE: containerExitInfo returns {exitCode:1, oomKilled:false} on a dirty-worktree no-result task → classified orphaned_work_may_persist, NOT oom_killed (only 137/oomKilled trips oom_killed)", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-exit-1-dirty";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const exitInfo = () => ({ exitCode: 1, oomKilled: false });
+
+    const r = reconcileRun(RUN.id, GONE, undefined, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_worktree_dirty" }]);
+    const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+    const payload = failed.payload as Record<string, unknown>;
+    assert.equal(payload.failure_kind, "orphaned_work_may_persist", "a plain non-zero exit code does not trip oom_killed");
+    const evidence = payload.evidence as OrphanEvidence;
+    assert.equal(evidence.exitCode, 1);
+    assert.equal(evidence.oomKilled, false);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+// ----- FG-455 p4 Mode A: `complete` task with an empty result gets backfilled -----
+
+function makeCompleteEmptyResult(taskId: string, o: Partial<Task> = {}): void {
+  insertTask(mkTask(taskId, { status: "complete", ...o }));
+}
+
+test("FG-455 p4 Mode A: complete task, empty DB result + empty result.json, then result.json is populated → backfilled, status stays complete", () => {
+  const taskId = "t-modea-backfill";
+  makeCompleteEmptyResult(taskId);
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  // Simulates the detached container writing result.json after the DB row was
+  // already (wrongly) marked complete with nothing recorded.
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "late write" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete", "status is untouched — only the result is backfilled");
+  assert.deepEqual(t.result, { status: "complete", output: "late write" });
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const payload = reconciled.payload as Record<string, unknown>;
+  assert.equal(payload.reason, "complete_empty_result_backfilled");
+  assert.equal(payload.from, "complete");
+  assert.equal(payload.to, "complete");
+  assert.ok(!eventsForTask(taskId).some((e) => e.eventType === "task.failed"), "never fails the task");
+});
+
+test("FG-455 p4 Mode A: complete task, empty result.json, but a recoverable stdout result (FG-337 synthesis) → backfilled from stdout", () => {
+  const taskId = "t-modea-stdout";
+  makeCompleteEmptyResult(taskId, { agentRole: "research-specialist" });
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output from a detached-invoke wrapper.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  // result.json intentionally absent.
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" }]);
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" });
+
+  const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(onDisk.summary, text, "recovered result is also best-effort written to disk");
+});
+
+test("FG-455 p4 Mode A idempotency: complete task that ALREADY has a valid result → left untouched, no event, no change", () => {
+  const taskId = "t-modea-healthy";
+  insertTask(mkTask(taskId, { status: "complete", result: { status: "complete", output: "already fine" } }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  assert.equal(r.taskChanges.filter((c) => c.taskId === taskId).length, 0, "healthy complete task is a no-op");
+  const t = getTask(taskId)!;
+  assert.deepEqual(t.result, { status: "complete", output: "already fine" });
+  assert.equal(
+    eventsForTask(taskId).some((e) => e.eventType === "task.reconciled"),
+    false,
+    "no reconciled event for a task that was never touched",
+  );
+});
+
+test("FG-455 p4 Mode A no-recovery: complete task, empty DB result, empty result.json, no recoverable stdout → status stays complete, no crash, no spurious failure", () => {
+  const taskId = "t-modea-no-recovery";
+  makeCompleteEmptyResult(taskId);
+  // No result.json, no manifest, no stdout log at all.
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, ALIVE); });
+
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === taskId).length, 0, "nothing recoverable — left alone");
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete", "status is never flipped to failed for a complete task");
+  assert.equal(t.result, undefined);
+  assert.ok(!eventsForTask(taskId).some((e) => e.eventType === "task.failed"), "no spurious failure");
+});

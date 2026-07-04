@@ -147,9 +147,15 @@ export function detectReconcileCandidate(
 
 type FailedRow = { taskId: string; runId: string; phase: string; payload: string | null };
 
-/** A FAILED task classified `orphaned_work_may_persist` (FG-455): reconcile
- *  found the container gone with no recoverable result, but changed files sat
- *  in the task's worktree — real work that might otherwise be silently
+// FG-455 p4 review: oom_killed carries the same "container gone, worktree may
+// hold real work" shape as orphaned_work_may_persist (mirrors ORPHAN_EVIDENCE_KINDS
+// in failure-kind.ts and CONTINUABLE_KINDS in recover.ts) — excluding it here left
+// an OOM-killed task with a dirty worktree invisible to `forge ops check`.
+const WORK_MAY_PERSIST_KINDS = new Set(["orphaned_work_may_persist", "oom_killed"]);
+
+/** A FAILED task classified `orphaned_work_may_persist` or `oom_killed` (FG-455):
+ *  reconcile found the container gone with no recoverable result, but changed
+ *  files sat in the task's worktree — real work that might otherwise be silently
  *  discarded. db-confirmed: the classification + evidence already live on the
  *  task's own task.failed event, no external probe needed. Never a `repair` —
  *  a human must inspect the diff first; retry-policy.ts already blocks a blind
@@ -186,18 +192,30 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
   const incidents: Incident[] = [];
   for (const row of rows) {
     const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
-    if (payload?.["failure_kind"] !== "orphaned_work_may_persist") continue;
-    const evidence = payload["evidence"] as OrphanEvidence | undefined;
+    const failureKind = payload?.["failure_kind"];
+    if (typeof failureKind !== "string" || !WORK_MAY_PERSIST_KINDS.has(failureKind)) continue;
+    const evidence = payload?.["evidence"] as OrphanEvidence | undefined;
+    // oom_killed is emitted regardless of worktree state (failure-kind.ts /
+    // reconcile.ts), unlike orphaned_work_may_persist which only fires when the
+    // worktree is dirty — so a clean-worktree oom_killed task has no persisted
+    // work at risk and shouldn't raise this incident.
+    if (evidence && evidence.changedFiles.length === 0) continue;
     const dir = taskDir(row.runId, row.taskId);
+    const firstLine =
+      failureKind === "oom_killed"
+        ? evidence?.oomKilled === true
+          ? `task ${row.taskId} (${row.phase}) was killed (OOM) with no recoverable result`
+          : `task ${row.taskId} (${row.phase}) was killed (exit 137 — possibly OOM or an external kill) with no recoverable result`
+        : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
     incidents.push(
       makeIncident({
-        kind: "orphaned_work_may_persist",
+        kind: failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist",
         severity: "high",
         confidence: "db-confirmed",
         runId: row.runId,
         taskId: row.taskId,
         evidence: [
-          `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`,
+          firstLine,
           evidence
             ? `${evidence.changedFiles.length} changed file(s) found at ${evidence.worktreePathChecked ?? "(no worktree path recorded)"}` +
               (evidence.source === "project_dir_shared"

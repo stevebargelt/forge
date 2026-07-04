@@ -180,7 +180,7 @@ export type RecommendedAction = {
   reason: string;
 };
 
-export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist";
+export type IncidentKind = "retry_orphan" | "inconsistent_run_state" | "reconcile_candidate" | "orphaned_work_may_persist" | "oom_killed";
 
 export type VerificationCommand = {
   command: string;

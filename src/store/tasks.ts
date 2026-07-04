@@ -146,6 +146,21 @@ export function markTaskRecovered(id: string, result: unknown): boolean {
   return info.changes === 1;
 }
 
+// FG-455 p4 Mode A: a detached `forge invoke` whose wrapper died can leave a
+// task `complete` in the DB with no result ever written. reconcile discovers
+// this out-of-band and needs to persist a recovered result WITHOUT touching
+// status — markTaskComplete's CAS blocks complete->complete (WHERE status NOT
+// IN ('complete','failed')), so it can't be reused here. Guards on the result
+// column still being empty so a concurrent write in between isn't clobbered.
+export function backfillTaskResult(id: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET result = ? WHERE id = ? AND status = 'complete' AND (result IS NULL OR result = '')`
+    )
+    .run(JSON.stringify(result), id);
+  return info.changes === 1;
+}
+
 export function markTaskFailed(id: string, error: string, result?: unknown): void {
   getDb()
     .prepare(

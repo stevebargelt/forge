@@ -419,6 +419,18 @@ test("getOrphanEvidenceFromEvents: undefined for other failure kinds even when a
   assert.equal(getOrphanEvidenceFromEvents(events), undefined);
 });
 
+// FG-455 p4 review finding 1: oom_killed carries the same evidence shape as
+// orphaned_work_may_persist (both gathered on reconcile.ts's shared
+// container-gone evidence path) — forge show / status / recover must surface
+// it too, not just orphaned_work_may_persist.
+test("getOrphanEvidenceFromEvents: also returns the evidence recorded on an oom_killed task.failed", () => {
+  const oomEvidence: OrphanEvidence = { ...SAMPLE_EVIDENCE, exitCode: 137, oomKilled: true };
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "oom_killed", error: "x", evidence: oomEvidence }),
+  ];
+  assert.deepEqual(getOrphanEvidenceFromEvents(events), oomEvidence);
+});
+
 test("getOrphanEvidenceFromEvents: empty event list → undefined", () => {
   assert.equal(getOrphanEvidenceFromEvents([]), undefined);
 });

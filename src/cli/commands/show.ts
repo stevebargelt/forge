@@ -411,6 +411,14 @@ export function deriveNextCommandForTask(
     if (failureKind === "fanout_wave_orphaned") {
       return `forge show ${taskId} --json  # inspect which children completed, then \`forge recover ${taskId} --re-drive\``;
     }
+    // FG-455 p4: a positively-identified OOM/SIGKILL death — distinct from the
+    // generic orphaned kinds above, surfaced so the operator knows a bigger
+    // memory allowance (not just a re-dispatch) may be needed. Same posture as
+    // orphaned_work_may_persist above: retry-policy.ts refuses a bare `forge
+    // retry` for this kind, so point at inspect-then-force instead.
+    if (failureKind === "oom_killed") {
+      return `forge show ${taskId} --json  # inspect the worktree diff, then \`forge retry ${taskId} --force\` once verified — container killed (exit 137, possibly OOM or external kill); if OOM, consider more memory or a smaller task`;
+    }
     return `forge retry ${taskId}`;
   }
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;
@@ -420,9 +428,20 @@ export function deriveNextCommandForTask(
 }
 
 /** FG-455: the operator-facing recovery message for an orphaned_work_may_persist
- *  task — task id, task dir, worktree path, changed files, and what to do next.
- *  Shared rendering for `forge show`, `forge status`, and `forge ops check`. */
-export function orphanRecoveryMessage(runId: string, taskId: string, evidence: OrphanEvidence): string {
+ *  or (FG-455 p4) oom_killed task — task id, task dir, worktree path, changed
+ *  files, and what to do next. Shared rendering for `forge show`, `forge
+ *  status`, and `forge ops check`. `kind` defaults to orphaned_work_may_persist
+ *  so existing callers keep their prior wording unchanged; pass "oom_killed"
+ *  to lead with the OOM/kill cause instead of the generic dirty-worktree framing —
+ *  branch on the failure KIND (not evidence.oomKilled/exitCode alone), since the
+ *  valid-result/orphaned branches also carry those fields on baseEvidence and a
+ *  plain orphaned task that happened to exit 137 must not read as an OOM. */
+export function orphanRecoveryMessage(
+  runId: string,
+  taskId: string,
+  evidence: OrphanEvidence,
+  kind: "orphaned_work_may_persist" | "oom_killed" = "orphaned_work_may_persist",
+): string {
   const dir = taskDir(runId, taskId);
   const files = evidence.changedFiles.length > 0
     ? evidence.changedFiles.join(", ")
@@ -435,8 +454,24 @@ export function orphanRecoveryMessage(runId: string, taskId: string, evidence: O
     : evidence.source === "worktree"
       ? "    source:        dedicated worktree (task-exclusive)\n"
       : "";
+  // FG-455 p4 review: oom_killed evidence is recorded for both dirty AND clean
+  // worktrees — unlike orphaned_work_may_persist, which is only ever emitted
+  // dirty. The headline must not claim changed files were found when there
+  // are none (it would contradict the "(none listed)" changed-files line below).
+  const foundChangedFiles = evidence.changedFiles.length > 0;
+  const headline = kind === "oom_killed"
+    ? evidence.oomKilled === true
+      ? foundChangedFiles
+        ? "container killed (OOM) — no recoverable result, but changed files were found."
+        : "container killed (OOM) — no recoverable result and no changed files on the worktree."
+      : foundChangedFiles
+        ? "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result, but changed files were found."
+        : "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result and no changed files on the worktree."
+    : foundChangedFiles
+      ? "work may have persisted — container gone, no recoverable result, but changed files were found."
+      : "work may have persisted — container gone, no recoverable result and no changed files on the worktree.";
   return (
-    `work may have persisted — container gone, no recoverable result, but changed files were found.\n` +
+    `${headline}\n` +
     sourceLine +
     `    task dir:      ${dir}\n` +
     `    worktree path: ${evidence.worktreePathChecked ?? "(none — no worktree_path or run.projectDir recorded)"}\n` +
@@ -596,7 +631,7 @@ export function registerShow(program: Command): void {
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   orphanRecovery: orphanEvidence
-                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence) }
+                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist") }
                     : null,
                   fanoutWaveRecovery: fanoutWaveEvidence
                     ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence) }
@@ -649,7 +684,7 @@ export function registerShow(program: Command): void {
         // FG-455: don't let this collapse into a generic "failed" — the worktree
         // may hold real, unreviewed work.
         if (orphanEvidence) {
-          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence)}`);
+          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist")}`);
         }
         // FG-455 p2/p3 review finding 2: same distinct treatment for a fanout
         // parent orphaned mid-wave — don't let it collapse into a generic failure.

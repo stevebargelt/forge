@@ -19,6 +19,7 @@ const POLICY: Record<string, RetryDisposition> = {
   container_crash:      { retryable: true, reason: "transient infrastructure failure; re-dispatch" },
   orphaned:             { retryable: true, reason: "the container was lost (host/parent crash); re-dispatch" },
   orphaned_work_may_persist: { retryable: false, reason: "the container was lost, but the worktree has changed files — a blind retry would re-dispatch over unreviewed work and could clobber it", advice: "inspect the worktree diff, verify/salvage the work, then `forge retry --force` once you've confirmed it's safe to re-dispatch" },
+  oom_killed:           { retryable: false, reason: "the container was killed (OOM / exit 137) and the worktree may hold persisted work — a blind retry would re-dispatch over it and could clobber it", advice: "inspect the worktree diff (`forge recover <id>`), verify/salvage the work, then `forge retry --force` once safe (and consider a larger memory allowance or a smaller task if it was OOM)" },
   result_missing:       { retryable: true, reason: "no result was written; re-dispatch" },
   result_malformed:     { retryable: true, reason: "the result was unparseable; the agent may produce valid output on retry" },
   work_not_persisted:   { retryable: true, reason: "the agent's output never reached the host project mount; re-dispatch", advice: "ensure containers run with cwd = the /project bind mount (spawn.ts -w) so cwd-relative writes persist" },

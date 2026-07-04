@@ -50,6 +50,13 @@ test("classifyFailureKind: unknown future string → campaign_system (conservati
   assert.equal(classifyFailureKind("some_future_kind"), "campaign_system");
 });
 
+// FG-455 p4: oom_killed may hold persisted work (same posture as
+// orphaned_work_may_persist) — a blind campaign-continue could clobber it, so
+// this must be an explicit campaign_system case, not an implicit default fallthrough.
+test("classifyFailureKind: oom_killed → campaign_system (explicit, SHARED — may hold persisted work)", () => {
+  assert.equal(classifyFailureKind("oom_killed"), "campaign_system");
+});
+
 // ── SHARED_BLOCKER_KINDS set ──────────────────────────────────────────────────
 
 test("SHARED_BLOCKER_KINDS contains exactly the seven shared kinds", () => {

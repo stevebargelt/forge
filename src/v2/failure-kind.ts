@@ -4,10 +4,16 @@ import { markTaskFailed } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import type { Event } from "../store/events.js";
 
+// FG-455 p4: mirrors reconcile.ts's ContainerAlive/ContainerReap injectable-seam
+// pattern — a best-effort docker exit-code/OOM probe for a just-confirmed-gone
+// container. Never throws; an unknown/ambiguous result is `{}`.
+export type ContainerExitInfo = (containerName: string) => { exitCode?: number; oomKilled?: boolean };
+
 export type FailureKind =
   | "cancelled"
   | "orphaned"        // container gone with no result — reconciled after a host/parent crash (AWN-1)
   | "orphaned_work_may_persist" // FG-455: container gone, no recoverable result, but the worktree has changed files — real work may be sitting there; reconcile refuses to discard it and surfaces the diff for a human to inspect instead of silently orphaning it
+  | "oom_killed"      // FG-455 p4: container gone, positively identified as OOM-killed or exit-137/SIGKILL — a more specific cause than orphaned/orphaned_work_may_persist, surfaced whenever containerExitInfo has evidence, even over a dirty worktree
   | "fanout_wave_orphaned"     // FG-455 p2: a fanout PARENT left `running` after its children finished or died mid-wave with the process gone — reconciled from child evidence; not every child completed, so the parent fails pointing the operator at `forge recover <parent> --re-drive` (forge retry refuses this kind; forge show recommends the same)
   | "container_crash"
   | "idle_timeout"
@@ -114,12 +120,26 @@ export type OrphanEvidence = {
   // result regardless of whether the disk write succeeded. Set when that write
   // threw, so a bad task dir doesn't silently look like a clean recovery.
   resultWriteFailed?: boolean;
+  // FG-455 p4: best-effort `docker inspect` exit-info, gathered once per
+  // container-gone task alongside the rest of this evidence. Optional — a
+  // daemon hiccup, a genuinely-gone container, or events recorded before this
+  // field existed all omit it.
+  exitCode?: number;
+  oomKilled?: boolean;
 };
 
-/** Recover the orphaned_work_may_persist evidence from a task's event stream,
- *  mirroring failureKindFromEvents's newest-first walk (a later task.completed
- *  means recovered — no evidence to show). undefined for any other failure kind
- *  or a task.failed pre-dating this evidence. */
+// FG-455 p4 review finding 1: oom_killed carries the same OrphanEvidence shape
+// (recorded on the same container-gone evidence-gathering path in reconcile.ts)
+// as orphaned_work_may_persist — so it belongs in this same evidence lookup.
+// Match EXPLICITLY on this kind set rather than "any payload.evidence present":
+// other kinds (e.g. verification_environment_unavailable) record a DIFFERENT
+// evidence shape that would otherwise be mis-cast to OrphanEvidence here.
+const ORPHAN_EVIDENCE_KINDS = new Set(["orphaned_work_may_persist", "oom_killed"]);
+
+/** Recover the orphaned_work_may_persist / oom_killed evidence from a task's
+ *  event stream, mirroring failureKindFromEvents's newest-first walk (a later
+ *  task.completed means recovered — no evidence to show). undefined for any
+ *  other failure kind or a task.failed pre-dating this evidence. */
 export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
@@ -127,7 +147,8 @@ export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | u
     if (e.eventType === "task.completed") return undefined;
     if (e.eventType === "task.failed") {
       const payload = e.payload as Record<string, unknown> | null;
-      if (payload?.["failure_kind"] === "orphaned_work_may_persist" && payload["evidence"]) {
+      const kind = payload?.["failure_kind"];
+      if (typeof kind === "string" && ORPHAN_EVIDENCE_KINDS.has(kind) && payload?.["evidence"]) {
         return payload["evidence"] as OrphanEvidence;
       }
       return undefined;
