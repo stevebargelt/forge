@@ -72,3 +72,17 @@ Make agent dispatch/container loss diagnosable and recoverable. A killed wrapper
 - Surfaced during FG-442 build dispatch.
 - Adjacent to AWN-1 crash recovery and FG-437 provisioning-phase recovery, but this is specifically wrapper/container/task-loss classification and persisted-work recovery.
 - Orchestrator-side mitigation already in memory this session: prefer direct `forge invoke` (detaches/survives) over the pipeline for long builds, and never cancel a fanoutParent expecting a per-task effect.
+
+## Progress — 2026-07-03 overnight
+
+**Piece 1 (merged, PR #12):** reconcile detects/recovers persisted work before orphaning a container-gone task.
+
+**Pieces 2 & 3 (merged, PR #13 / merge 27ab422):**
+- Piece 2 — reconcile a fanout parent stuck `running` after its children finish/die mid-wave (→ complete, or failed `fanout_wave_orphaned`, liveness-guarded); `forge cancel` kills fanout child containers and gates whole-run abandon behind `--abandon-run` (no more silent abandon).
+- Piece 3 — new `forge recover <id>` (read-only inspect / `--continue` adopt-and-complete via `markTaskRecovered` with fail-safe refusals / `--re-drive` in-run fanout re-drive without stranding); `forge retry` refuses a fanout child/parent without `--force`; `forge show` recommends `forge recover --re-drive` for `fanout_wave_orphaned`. Red-wide reviewed; two HIGH findings fixed. Docs: concepts.md + FORGE-DEC-024.
+
+**REMAINING — "piece 4" (keeps this ticket OPEN):** two ACs still unmet, surfaced by the piece-2/3 red review:
+1. **OOM/SIGKILL / exit-137 classification** (AC "OOM/SIGKILL or exit 137 when detectable" + "record docker inspect/exit evidence"): `defaultContainerAlive` only reads `{{.State.Running}}`; nothing inspects `{{.State.ExitCode}}`/`{{.State.OOMKilled}}`, so an OOM/137 death is classified identically to any container-gone case. Fix: best-effort exit-code/OOM inspect on the gone branch, recorded in `OrphanEvidence`, distinct kind (e.g. `oom_killed`).
+2. **Mode A — detached-invoke falsely `complete` with empty result.json** (AC "distinguish DETACHED from ATTACHED" + "prefer the container's own written result as authoritative so a wrapper death after container success does not yield an empty result on a complete run"): `reconcileRun` only revisits `status==='running'` tasks, so an already-`complete` task/run with an empty `result.json` is never backfilled from the container's own mounted `/task/result.json`. Fix: reconcile a `complete` task whose result.json is empty by reading the container's own written result.
+
+Both are classification-completeness work (piece-1-adjacent), not part of the piece 2/3 cancel-fanout-recovery scope.
