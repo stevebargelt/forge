@@ -8,6 +8,7 @@ export type FailureKind =
   | "cancelled"
   | "orphaned"        // container gone with no result — reconciled after a host/parent crash (AWN-1)
   | "orphaned_work_may_persist" // FG-455: container gone, no recoverable result, but the worktree has changed files — real work may be sitting there; reconcile refuses to discard it and surfaces the diff for a human to inspect instead of silently orphaning it
+  | "fanout_wave_orphaned"     // FG-455 p2: a fanout PARENT left `running` after its children finished or died mid-wave with the process gone — reconciled from child evidence; not every child completed, so the parent fails pointing the operator at `forge retry`/`forge show`
   | "container_crash"
   | "idle_timeout"
   | "result_missing"

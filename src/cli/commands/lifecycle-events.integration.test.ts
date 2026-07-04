@@ -212,7 +212,7 @@ test("integ lifecycle run.abandoned: cancel emits BOTH run.cancelled AND run.aba
   insertTask(makeTask("t-abandon-lc-1", runId, { status: "running" }));
   insertTask(makeTask("t-abandon-lc-2", runId, { status: "pending" }));
 
-  const outcome = performCancel(runId, {}, () => { /* stub kill */ });
+  const outcome = performCancel(runId, { abandonRun: true }, () => { /* stub kill */ });
   assert.equal(outcome.kind, "run-cancelled");
 
   // eventsForRun must include BOTH run.cancelled and run.abandoned
@@ -254,7 +254,7 @@ test("integ lifecycle run.abandoned: task-id cancel path also emits run.abandone
   });
   insertTask(makeTask("t-sole-lc", runId, { status: "running" }));
 
-  performCancel("t-sole-lc", {}, () => { /* stub kill */ });
+  performCancel("t-sole-lc", { abandonRun: true }, () => { /* stub kill */ });
 
   const events = eventsForRun(runId);
   const types = events.map((e) => e.eventType);

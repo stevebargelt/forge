@@ -433,3 +433,61 @@ test("reconcile: a completed-phase child (red) task is never treated as an orpha
   assert.equal(r.taskChanges.length, 0, "children are not primaries — left alone");
   assert.equal(getTask("build-red")!.status, "pending");
 });
+
+// ----- FG-455 p2: fanout PARENT stuck `running` after its children settle -----
+
+test("FG-455 p2: fanout parent stuck running, all children complete → parent reconciled to complete", () => {
+  insertTask(mkTask("fanout-parent-a", { status: "running" }));
+  insertTask(mkTask("fanout-child-a1", { parentId: "fanout-parent-a", status: "complete" }));
+  insertTask(mkTask("fanout-child-a2", { parentId: "fanout-parent-a", status: "complete" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  assert.deepEqual(
+    r.taskChanges.find((c) => c.taskId === "fanout-parent-a"),
+    { taskId: "fanout-parent-a", from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" },
+  );
+  assert.equal(getTask("fanout-parent-a")!.status, "complete");
+  const types = eventsForTask("fanout-parent-a").map((e) => e.eventType);
+  assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
+});
+
+test("FG-455 p2: fanout parent stuck running, one child orphaned (container gone) → parent reconciled to failed, pointing at recovery", () => {
+  insertTask(mkTask("fanout-parent-b", { status: "running" }));
+  insertTask(mkTask("fanout-child-b1", { parentId: "fanout-parent-b", status: "complete" }));
+  insertContainerized(mkTask("fanout-child-b2", { parentId: "fanout-parent-b", status: "running" }));
+
+  const r = reconcileRun(RUN.id, GONE);
+
+  // The orphaned child is resolved by the per-task loop first.
+  assert.equal(getTask("fanout-child-b2")!.status, "failed");
+
+  const parentChange = r.taskChanges.find((c) => c.taskId === "fanout-parent-b");
+  assert.deepEqual(parentChange, { taskId: "fanout-parent-b", from: "running", to: "failed", reason: "fanout_wave_orphaned" });
+  assert.equal(getTask("fanout-parent-b")!.status, "failed", "parent must leave running");
+
+  const failedEvent = eventsForTask("fanout-parent-b").find((e) => e.eventType === "task.failed")!;
+  const payload = failedEvent.payload as Record<string, unknown>;
+  assert.equal(payload.failure_kind, "fanout_wave_orphaned");
+  assert.match(payload.error as string, /forge retry fanout-parent-b/);
+  assert.match(payload.error as string, /forge show fanout-parent-b/);
+});
+
+test("FG-455 p2: fanout parent stuck running, a child still has a LIVE container → parent NOT reconciled (stays running)", () => {
+  insertTask(mkTask("fanout-parent-c", { status: "running" }));
+  insertTask(mkTask("fanout-child-c1", { parentId: "fanout-parent-c", status: "complete" }));
+  insertContainerized(mkTask("fanout-child-c2", { parentId: "fanout-parent-c", status: "running" }));
+
+  const r = reconcileRun(RUN.id, ALIVE); // fanout-child-c2's container is still alive
+
+  assert.equal(r.taskChanges.filter((c) => c.taskId === "fanout-parent-c").length, 0);
+  assert.equal(getTask("fanout-parent-c")!.status, "running", "parent left alone — wave may still be in progress");
+  assert.equal(getTask("fanout-child-c2")!.status, "running", "live child untouched too");
+});
+
+test("FG-455 p2: a running task with NO children at all is never treated as a fanout parent (regression)", () => {
+  insertTask(mkTask("plain-running", { status: "running" }));
+  const r = reconcileRun(RUN.id, ALIVE);
+  assert.equal(r.taskChanges.filter((c) => c.taskId === "plain-running").length, 0);
+  assert.equal(getTask("plain-running")!.status, "running");
+});

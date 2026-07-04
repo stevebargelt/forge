@@ -46,12 +46,20 @@ function defaultCanAdvance(run: Run, cancelledTaskId: string): boolean {
   return computeReadyQueue(workflow, projected).length > 0;
 }
 
-export type CancelOpts = { dryRun?: boolean; json?: boolean };
+export type CancelOpts = { dryRun?: boolean; json?: boolean; abandonRun?: boolean };
 
 export type CancelOutcome =
   | { kind: "task-terminal"; taskId: string; runId: string; status: string }
-  | { kind: "task-cancelled"; taskId: string; runId: string; killed: boolean; runAbandoned: boolean }
-  | { kind: "run-cancelled"; runId: string; tasksKilled: string[] }
+  | {
+      kind: "task-cancelled";
+      taskId: string;
+      runId: string;
+      killed: boolean;
+      runAbandoned: boolean;
+      runAbandonRefused: boolean;
+      childrenKilled: string[];
+    }
+  | { kind: "run-cancelled"; runId: string; tasksKilled: string[]; runAbandoned: boolean; runAbandonRefused: boolean }
   | { kind: "run-terminal"; runId: string; status: string }
   | { kind: "unknown"; id: string };
 
@@ -72,25 +80,65 @@ export function performCancel(
     // run can't still advance through its workflow. A completed phase whose next
     // step is ready keeps the run alive (don't abandon over a cancelled orphan).
     const runStillAdvances = taskRun ? canAdvance(taskRun, task.id) : false;
+
+    // Fanout-parent cancel: children hang off this task via parentId and have
+    // no cancel path of their own — cancelling the parent must kill/fail them
+    // too, or every forge-<childId> container is orphaned (FG-455 p2).
+    const nonTerminalChildren = tasksForRun(task.runId).filter(
+      (t) => t.parentId === task.id && !isTerminal(t),
+    );
+
     let runAbandoned = false;
+    let runAbandonRefused = false;
+    const childrenKilled: string[] = [];
     if (!opts.dryRun) {
       killFn(`forge-${task.id}`);
       logEvent("container.killed", { runId: task.runId, taskId: task.id, payload: { containerName: `forge-${task.id}`, via: "forge cancel" } });
       failTask(task.id, { runId: task.runId, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
       logEvent("task.cancelled", { runId: task.runId, taskId: task.id, payload: { via: "forge cancel" } });
+
+      for (const child of nonTerminalChildren) {
+        const childContainer = `forge-${child.id}`;
+        killFn(childContainer);
+        childrenKilled.push(childContainer);
+        logEvent("container.killed", { runId: task.runId, taskId: child.id, payload: { containerName: childContainer, via: "forge cancel", fanoutParentId: task.id } });
+        failTask(child.id, { runId: task.runId, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel (fanout parent cancelled)" });
+        logEvent("task.cancelled", { runId: task.runId, taskId: child.id, payload: { via: "forge cancel", fanoutParentId: task.id } });
+      }
+
       const remaining = tasksForRun(task.runId).filter((t) => !isTerminal(t));
       if (remaining.length === 0 && !runStillAdvances) {
-        updateRunStatus(task.runId, "abandoned");
-        logEvent("run.cancelled", { runId: task.runId, payload: { via: "forge cancel" } });
-        logEvent("run.abandoned", { runId: task.runId, payload: { via: "forge cancel" } });
-        runAbandoned = true;
+        // FG-455 p2: abandoning the whole run is a bigger call than cancelling
+        // one task — require an explicit --abandon-run rather than silently
+        // escalating (the trap: cancelling a stray task quietly kills the run).
+        if (opts.abandonRun) {
+          updateRunStatus(task.runId, "abandoned");
+          logEvent("run.cancelled", { runId: task.runId, payload: { via: "forge cancel" } });
+          logEvent("run.abandoned", { runId: task.runId, payload: { via: "forge cancel" } });
+          runAbandoned = true;
+        } else {
+          runAbandonRefused = true;
+        }
       }
     } else {
-      const others = tasksForRun(task.runId).filter((t) => t.id !== task.id && !isTerminal(t));
-      runAbandoned = others.length === 0 && !runStillAdvances;
+      const others = tasksForRun(task.runId).filter(
+        (t) => t.id !== task.id && !isTerminal(t) && !nonTerminalChildren.some((c) => c.id === t.id),
+      );
+      const wouldAbandon = others.length === 0 && !runStillAdvances;
+      runAbandoned = wouldAbandon && !!opts.abandonRun;
+      runAbandonRefused = wouldAbandon && !opts.abandonRun;
+      childrenKilled.push(...nonTerminalChildren.map((c) => `forge-${c.id}`));
     }
 
-    return { kind: "task-cancelled", taskId: task.id, runId: task.runId, killed: !opts.dryRun, runAbandoned };
+    return {
+      kind: "task-cancelled",
+      taskId: task.id,
+      runId: task.runId,
+      killed: !opts.dryRun,
+      runAbandoned,
+      runAbandonRefused,
+      childrenKilled,
+    };
   }
 
   const run = getRun(id);
@@ -100,6 +148,8 @@ export function performCancel(
     }
     const tasks = tasksForRun(run.id);
     const nonTerminal = tasks.filter((t) => !isTerminal(t));
+    let runAbandoned = false;
+    let runAbandonRefused = false;
     if (!opts.dryRun) {
       for (const t of nonTerminal) {
         killFn(`forge-${t.id}`);
@@ -107,11 +157,23 @@ export function performCancel(
         failTask(t.id, { runId: run.id, kind: classify({ source: "cancelled" }), error: "cancelled via forge cancel" });
         logEvent("task.cancelled", { runId: run.id, taskId: t.id, payload: { via: "forge cancel" } });
       }
-      updateRunStatus(run.id, "abandoned");
       logEvent("run.cancelled", { runId: run.id, payload: { via: "forge cancel" } });
-      logEvent("run.abandoned", { runId: run.id, payload: { via: "forge cancel" } });
+      // FG-455 p2: same explicit-confirm gate as the single-task escalation
+      // above — killing every non-terminal task's container still happens, but
+      // the run is only marked abandoned (a terminal, non-resumable state) when
+      // --abandon-run is set.
+      if (opts.abandonRun) {
+        updateRunStatus(run.id, "abandoned");
+        logEvent("run.abandoned", { runId: run.id, payload: { via: "forge cancel" } });
+        runAbandoned = true;
+      } else {
+        runAbandonRefused = true;
+      }
+    } else {
+      runAbandoned = !!opts.abandonRun;
+      runAbandonRefused = !opts.abandonRun;
     }
-    return { kind: "run-cancelled", runId: run.id, tasksKilled: nonTerminal.map((t) => t.id) };
+    return { kind: "run-cancelled", runId: run.id, tasksKilled: nonTerminal.map((t) => t.id), runAbandoned, runAbandonRefused };
   }
 
   return { kind: "unknown", id };
@@ -124,7 +186,8 @@ export function registerCancel(program: Command): void {
     .description("Kill a stuck task or run and mark it failed/abandoned")
     .option("--dry-run", "report what would change, no writes or docker kills")
     .option("--json", "emit JSON result")
-    .action((id: string, opts: { dryRun?: boolean; json?: boolean }) => {
+    .option("--abandon-run", "confirm abandoning the whole run when this cancel would leave no dispatchable work")
+    .action((id: string, opts: { dryRun?: boolean; json?: boolean; abandonRun?: boolean }) => {
       ensureForgeDirs();
       // AWN-2: cancel is authoritative — it STEALS the run lock so it interrupts
       // a running next/gate/retry rather than waiting. Resolve the run to lock
@@ -165,9 +228,17 @@ export function registerCancel(program: Command): void {
       if (outcome.kind === "task-cancelled") {
         const prefix = opts.dryRun ? "(dry-run) would kill" : "Killed";
         console.log(`${prefix} container forge-${outcome.taskId} and marked task failed.`);
+        if (outcome.childrenKilled.length > 0) {
+          console.log(`${prefix} ${outcome.childrenKilled.length} fanout child container(s): ${outcome.childrenKilled.join(", ")}`);
+        }
         if (outcome.runAbandoned) {
           const verb = opts.dryRun ? "would be marked" : "marked";
           console.log(`Run ${outcome.runId} ${verb} abandoned.`);
+        } else if (outcome.runAbandonRefused) {
+          console.log(
+            `Run ${outcome.runId} has no dispatchable work remaining but was NOT abandoned — ` +
+              `re-run with --abandon-run to abandon it, or forge recover/re-invoke to continue.`,
+          );
         }
         return;
       }
@@ -179,7 +250,13 @@ export function registerCancel(program: Command): void {
       } else {
         console.log(`Run ${outcome.runId} has no non-terminal tasks.`);
       }
-      const verb = opts.dryRun ? "would be marked" : "marked";
-      console.log(`Run ${outcome.runId} ${verb} abandoned.`);
+      if (outcome.runAbandoned) {
+        const verb = opts.dryRun ? "would be marked" : "marked";
+        console.log(`Run ${outcome.runId} ${verb} abandoned.`);
+      } else {
+        console.log(
+          `Run ${outcome.runId} was NOT abandoned — re-run with --abandon-run to abandon it, or forge recover/re-invoke to continue.`,
+        );
+      }
     });
 }
