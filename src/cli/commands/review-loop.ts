@@ -56,6 +56,7 @@ function reviewTask(acceptance: string, diff: string, v: VerificationResult): st
     "- pass: the diff meets the acceptance (verification is already green).",
     "- needs_fix: concrete, fixable problems. List each as a finding, file+line anchored where possible (else \"unanchored\": true). needs_fix REQUIRES >= 1 finding.",
     "- blocked: cannot proceed (ambiguous requirement / missing context); explain in findings.",
+    "- Your standard RED vocabulary is also accepted: \"fail\" is mapped to needs_fix (list the findings same as above), \"inconclusive\" is mapped to blocked.",
   ].join("\n");
 }
 

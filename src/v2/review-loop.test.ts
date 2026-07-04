@@ -92,6 +92,41 @@ test("#301 verdict: unknown verdict value is rejected (never treated as pass)", 
   assert.equal(parseReviewerVerdict("not json shaped").ok, false);
 });
 
+// ── FG-457: RED vocabulary (fail/inconclusive) normalization ─────────────────
+
+test("#457 verdict: red-style fail with findings normalizes to needs_fix, findings preserved", async () => {
+  const r = parseReviewerVerdict({ verdict: "fail", findings: [{ summary: "off-by-one", file: "src/x.ts", line: 42 }] });
+  assert.equal(r.ok, true);
+  assert.equal((r as { verdict: string }).verdict, "needs_fix");
+  assert.deepEqual((r as { findings: Finding[] }).findings, [{ summary: "off-by-one", file: "src/x.ts", line: 42 }]);
+});
+
+test("#457 verdict: red-style inconclusive normalizes to blocked", async () => {
+  const r = parseReviewerVerdict({ verdict: "inconclusive", findings: [{ summary: "can't tell", unanchored: true }] });
+  assert.equal(r.ok, true);
+  assert.equal((r as { verdict: string }).verdict, "blocked");
+});
+
+test("#457 verdict: native needs_fix/pass/blocked still parse unchanged", async () => {
+  const nf = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "x", file: "a.ts", line: 1 }] });
+  assert.equal(nf.ok, true);
+  assert.equal((nf as { verdict: string }).verdict, "needs_fix");
+
+  const p = parseReviewerVerdict({ verdict: "pass" });
+  assert.equal(p.ok, true);
+  assert.equal((p as { verdict: string }).verdict, "pass");
+
+  const b = parseReviewerVerdict({ verdict: "blocked", findings: [{ summary: "ambiguous", unanchored: true }] });
+  assert.equal(b.ok, true);
+  assert.equal((b as { verdict: string }).verdict, "blocked");
+});
+
+test("#457 verdict: red-style fail with ZERO findings is still an error (empty fail isn't actionable)", async () => {
+  const r = parseReviewerVerdict({ verdict: "fail", findings: [] });
+  assert.equal(r.ok, false);
+  assert.match((r as { error: string }).error, /needs_fix requires at least one finding/);
+});
+
 // ── Slice 3: runVerification ─────────────────────────────────────────────────
 
 test("#301 verify: runs typecheck then test when both scripts exist; ok when all pass", async () => {
@@ -382,4 +417,45 @@ test("#415 note: fixer_out_of_scope stop reason in header", () => {
     },
   );
   assert.match(note, /stop reason:\*\* fixer_out_of_scope/);
+});
+
+// ── FG-457: red-vocabulary fail drives a real loop round, never reviewer_failed ──
+
+test("#457 loop e2e: reviewer returning RED-style fail (+ findings) never yields reviewer_failed, and findings surface in the rounds", async () => {
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => {
+      // Mimics the real CLI wiring (buildReviewLoopDeps): the reviewer's raw
+      // result.json is fed through parseReviewerVerdict before becoming a
+      // ReviewDispatch, exactly like a real red-wide result would be.
+      const parsed = parseReviewerVerdict({ verdict: "fail", findings: [{ summary: "off-by-one", file: "a.ts", line: 3 }] });
+      return parsed.ok ? { ok: true, verdict: parsed.verdict, findings: parsed.findings } : { ok: false, error: parsed.error };
+    },
+  }));
+  assert.notEqual(r.stopReason, "reviewer_failed");
+  assert.equal(r.stopReason, "needs_fix_max_rounds");
+  assert.equal(r.rounds[0]!.verdict, "needs_fix");
+  assert.deepEqual(r.rounds[0]!.findings, [{ summary: "off-by-one", file: "a.ts", line: 3 }]);
+});
+
+// ── FG-457: renderReviewLoopNote disambiguates absent-verdict causes ─────────
+
+test("#457 note: verification ok + no verdict → reviewer failed (invalid/absent result), not the skip line", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { stopReason: "reviewer_failed", closeable: false, rounds: [
+      { round: 1, verification: VERIFY_OK, findings: [], fixAttempted: false },
+    ] },
+  );
+  assert.match(note, /reviewer: failed \(invalid or absent result\)/);
+  assert.doesNotMatch(note, /reviewer: skipped \(verification failed\)/);
+});
+
+test("#457 note: verification failed + no verdict → still the genuine skip line", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { stopReason: "verification_failed", closeable: false, rounds: [
+      { round: 1, verification: VERIFY_BAD, findings: [], fixAttempted: false },
+    ] },
+  );
+  assert.match(note, /reviewer: skipped \(verification failed\)/);
 });
