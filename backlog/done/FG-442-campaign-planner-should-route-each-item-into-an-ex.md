@@ -1,9 +1,11 @@
 ---
 id: FG-442
 type: story
-status: active
+status: done
 title: Campaign planner should route each item into an execution lane instead of defaulting to full feature
 created: 2026-07-02
+closed: 2026-07-04
+closed_commit: 6a435f3
 ---
 
 ## Problem
