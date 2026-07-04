@@ -1,9 +1,11 @@
 ---
 id: FG-457
 type: story
-status: active
+status: done
 title: review-loop reports reviewer_failed when the reviewer actually returned a valid fail verdict
 created: 2026-07-04
+closed: 2026-07-04
+closed_commit: ab94c97
 ---
 
 During FG-455 p2/p3 review (run-review-loop-fg-455-e1a926), `forge review-loop` stopped with stop_reason=reviewer_failed and a self-contradictory round note: 'verification: ok (typecheck=ok, test=ok)' AND 'reviewer: skipped (verification failed)' on the same round. But the red-wide task (task-red-wide-cd4268) actually completed cleanly with a well-formed result.json: status=complete, verdict=fail, confidence 0.78, 4 findings, invariants_verified populated.
