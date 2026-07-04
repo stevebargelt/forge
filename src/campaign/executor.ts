@@ -729,6 +729,17 @@ async function driveRemainingItems(
           console.error(
             `campaign resume: ${item.ticketId} is awaiting_gate on a manually-driven run but evidence is incomplete — refusing to ship and re-parking (missing: ${evaluated.missing.join(", ")})`
           );
+          logEvent("campaign_item.evidence_reconcile_refused", {
+            runId: item.runId,
+            payload: {
+              campaignId,
+              itemId: item.id,
+              ticketId: item.ticketId,
+              missing: evaluated.missing,
+              decidedBy: "campaign_resume",
+              decidedAt: nowIso(),
+            },
+          });
         }
       }
 

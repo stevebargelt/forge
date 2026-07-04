@@ -1541,8 +1541,71 @@ test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when e
 
   assert.equal(
     countEvents(),
-    beforeEvents,
-    "no campaign_item.evidence_reconciled (or any other) event logged for a refused reconcile"
+    beforeEvents + 1,
+    "exactly one durable refusal event logged, no campaign_item.evidence_reconciled event"
+  );
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconcile_refused' ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string; payload: string } | undefined;
+  assert.ok(evRow, "campaign_item.evidence_reconcile_refused event logged for the refused reconcile");
+  const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; missing: string[]; decidedBy: string };
+  assert.equal(payload.ticketId, ticketId);
+  assert.equal(payload.campaignId, campaignId);
+  assert.ok(payload.missing.includes("host_verification_not_recorded"));
+});
+
+test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when the run's own authoritative outcome is a fail with no later pass or qualifying force-advance — logs the refusal with the authoritative-outcome clause", async () => {
+  const ticketId = "FG-611";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+
+  // Seed everything EXCEPT a superseding pass/force-advance on the run's own
+  // authoritative verdict — the inverse of seedAllEvidence's fail-then-pass
+  // sequence. This exercises the OTHER AND-gate clause than the host-verification
+  // test above, proving the resume branch enforces both, not just one.
+  const commit = makeCommit(`impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  // No later pass or qualifying force-advance.
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "r", taskId: "t", status: "complete" };
+  };
+
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+
+  assert.notEqual(resumeResult.stopReason, "complete", "campaign must not report complete on an unresolved authoritative fail");
+  assert.equal(dispatched, 0, "must not dispatch anything else while the parked item is unresolved");
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.equal(afterItem.lifecycleStatus, beforeItem.lifecycleStatus, "item must remain parked — not shipped");
+  assert.notEqual(afterItem.lifecycleStatus, "complete");
+  assert.equal(afterItem.outcome, beforeItem.outcome, "outcome must not become 'shipped'");
+
+  assert.equal(countEvents(), beforeEvents + 1, "exactly one durable refusal event logged");
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconcile_refused' ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string; payload: string } | undefined;
+  assert.ok(evRow, "campaign_item.evidence_reconcile_refused event logged for the refused reconcile");
+  const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; missing: string[]; decidedBy: string };
+  assert.equal(payload.ticketId, ticketId);
+  assert.equal(payload.campaignId, campaignId);
+  assert.ok(
+    payload.missing.includes("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    `expected the authoritative-outcome clause in missing, got: ${payload.missing.join(", ")}`
   );
 });
 
