@@ -32,6 +32,27 @@ import type { OrphanEvidence } from "./failure-kind.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
+/** Outcome of a best-effort `docker rm -f` reap attempt on a container we've
+ *  already confirmed is not alive (see containerAlive above) — mirrors
+ *  dependency-provisioning.ts's dockerKillContainer discriminated result so a
+ *  daemon hiccup ('error') is never mistaken for confirmed cleanup. */
+export type ContainerReapResult = "killed" | "not_found" | "error";
+export type ContainerReap = (containerName: string) => ContainerReapResult;
+
+/** Real `docker rm -f` — reconcile's default reaper for an orphaned
+ *  dependency-provisioner container. Tests inject a fake so no real docker is
+ *  required to exercise the FG-437 recovery branch. */
+export function defaultContainerReap(containerName: string): ContainerReapResult {
+  try {
+    execFileSync("docker", ["rm", "-f", containerName], { stdio: ["ignore", "ignore", "pipe"] });
+    return "killed";
+  } catch (e) {
+    const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? "";
+    if (/no such container/i.test(stderr)) return "not_found";
+    return "error"; // NOT confirmed gone — leave it, a later reconcile can retry
+  }
+}
+
 export type TaskReconcileChange = { taskId: string; from: string; to: string; reason: string };
 export type ReconcileResult = {
   runId: string;
@@ -115,19 +136,96 @@ export function changedWorktreeFiles(path: string | undefined): string[] {
 
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
-export function reconcileRun(runId: string, containerAlive: ContainerAlive = defaultContainerAlive): ReconcileResult {
+export function reconcileRun(
+  runId: string,
+  containerAlive: ContainerAlive = defaultContainerAlive,
+  reapContainer: ContainerReap = defaultContainerReap,
+): ReconcileResult {
   const run = getRun(runId);
   const taskChanges: TaskReconcileChange[] = [];
   if (!run) return { runId, taskChanges };
 
   for (const t of tasksForRun(runId)) {
     if (t.status !== "running") continue;
+    const taskEvents = eventsForTask(t.id);
+    const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
+
+    // FG-437: a task can crash between task.started and container.started —
+    // while its dependency provisioner (a SEPARATE, differently-named
+    // container: forge-provision-<cacheKey>, not forge-<taskId>) runs to
+    // completion. The container.started gate below exists precisely to skip
+    // host-side session/manual tasks, but it also (wrongly) skips this
+    // in-flight-provisioning shape forever, since container.started for the
+    // AGENT container only fires after provisioning succeeds. Detect + recover
+    // it here, before that gate, using the durable provision_started event
+    // (which carries the real container name/cacheKey independent of the
+    // worktree, which may already be gone).
+    if (!hasContainerStarted) {
+      const provisionStarted = taskEvents.find((e) => e.eventType === "container.provision_started");
+      if (provisionStarted) {
+        const payload = provisionStarted.payload as { containerName?: string; cacheKey?: string } | null;
+        const provisionContainerName = payload?.containerName;
+        const cacheKey = payload?.cacheKey;
+        if (provisionContainerName && cacheKey) {
+          if (containerAlive(provisionContainerName)) {
+            // FG-376 rule: never touch a live provisioner — an install may
+            // still be in flight. Leave running; a later reconcile settles
+            // this once the provisioner container actually dies.
+            continue;
+          }
+
+          // Provisioner confirmed gone. Best-effort reap of any orphaned
+          // container left behind — never throws, never blocks the task
+          // transition below on a reap failure (a daemon hiccup just means a
+          // later reconcile/dispatch tries again).
+          let reapResult: ContainerReapResult;
+          try {
+            reapResult = reapContainer(provisionContainerName);
+          } catch {
+            reapResult = "error";
+          }
+
+          const error =
+            `verification_environment_unavailable: task crashed during dependency provisioning ` +
+            `(provisioner ${provisionContainerName} is gone) — dependencies may already be cached; ` +
+            `retry with \`forge retry ${t.id}\`.`;
+          const evidence = {
+            containerName: provisionContainerName,
+            cacheKey,
+            provisionerLiveness: "gone" as const,
+            reapResult,
+            reason: error,
+          };
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "provisioning_phase_crash", evidence } });
+          taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "provisioning_phase_crash" });
+
+          // FG-437 AC: deliberately do NOT hand-clear the cacheKey's .lock /
+          // .ready files here — a crash mid-provision never writes the ready
+          // marker (atomic rename in markDependencyCacheReady), so there's
+          // nothing to un-mark, and a stale lock from the now-dead holder is
+          // already handled by FG-376's liveness-aware steal on the next
+          // provision attempt (dependency-provisioning.ts onDeadHolder).
+          // Duplicating that here would fight the single source of truth for
+          // lock recovery.
+
+          // AWN-8: same terminal cleanup as the container-gone branch below.
+          cleanupStagedAuth(taskDir(t.runId, t.id));
+          if (t.worktreePath && run.projectDir) {
+            removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
+          }
+          continue;
+        }
+      }
+    }
+
     // Only CONTAINERIZED tasks are reconcilable via container liveness. Session
     // (forge design / orchestrator) and manual tasks run host-side and never
     // launch a container, so `docker inspect` would always say "gone" and we'd
     // wrongly orphan them. The authoritative signal that forge launched a
     // container is a container.started event for the task.
-    if (!eventsForTask(t.id).some((e) => e.eventType === "container.started")) continue;
+    if (!hasContainerStarted) continue;
     if (containerAlive(`forge-${t.id}`)) continue; // genuinely still running
 
     // Container is gone. If it left a usable result, finalize as complete (the

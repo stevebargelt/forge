@@ -29,6 +29,11 @@ export type EventType =
   | "container.killed"
   | "container.idle_timeout"
   | "container.dependency_provisioning_failed"
+  // FG-437: durable phase-boundary markers around the (separate, short-lived)
+  // dependency provisioner container, so a mid-provision crash is visible to
+  // reconcile even though the task's own container.started hasn't fired yet.
+  | "container.provision_started"
+  | "container.provision_succeeded"
   | "auth.profile_applied"
   | "auth.profile_failed"
   // AWN-7 model resolution (policy mode). profile_resolved: a task resolved to a
