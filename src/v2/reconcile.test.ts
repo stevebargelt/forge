@@ -469,7 +469,7 @@ test("FG-455 p2: fanout parent stuck running, one child orphaned (container gone
   const failedEvent = eventsForTask("fanout-parent-b").find((e) => e.eventType === "task.failed")!;
   const payload = failedEvent.payload as Record<string, unknown>;
   assert.equal(payload.failure_kind, "fanout_wave_orphaned");
-  assert.match(payload.error as string, /forge retry fanout-parent-b/);
+  assert.match(payload.error as string, /forge recover fanout-parent-b --re-drive/);
   assert.match(payload.error as string, /forge show fanout-parent-b/);
 });
 

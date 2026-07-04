@@ -1,5 +1,5 @@
 import type { Command } from "commander";
-import { retry, RetryNotAllowedError } from "../../v2/retry.js";
+import { retry, RetryNotAllowedError, FanoutChildRetryError } from "../../v2/retry.js";
 import { ensureForgeDirs } from "../../util/paths.js";
 import { getTask } from "../../store/tasks.js";
 import { withRunLock, RunBusyError } from "../../util/run-lock.js";
@@ -29,6 +29,11 @@ export function registerRetry(program: Command): void {
         if (e instanceof RetryNotAllowedError) {
           console.error(`forge retry: ${e.message}`);
           if (e.disposition.advice) console.error(`  ${e.disposition.advice}.`);
+          process.exitCode = 1;
+          return;
+        }
+        if (e instanceof FanoutChildRetryError) {
+          console.error(`forge retry: ${e.message}`);
           process.exitCode = 1;
           return;
         }

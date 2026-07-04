@@ -131,6 +131,21 @@ export function markTaskComplete(id: string, result: unknown): boolean {
   return info.changes === 1;
 }
 
+// FG-455 p3: `forge recover --continue` explicitly completes a task the
+// operator has confirmed is safe to adopt — a DIFFERENT transition than
+// markTaskComplete's compare-and-set above, which deliberately BLOCKS
+// failed -> complete (that guard exists to stop a completing container racing
+// a `forge cancel`, not to block an operator's explicit recovery decision).
+// This CAS only ever fires from 'failed', so it can never clobber a task that
+// legitimately completed (or was already recovered) through another path.
+export function markTaskRecovered(id: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'complete', result = ?, completed_at = ?, error = NULL
+              WHERE id = ? AND status = 'failed'`)
+    .run(JSON.stringify(result), nowIso(), id);
+  return info.changes === 1;
+}
+
 export function markTaskFailed(id: string, error: string, result?: unknown): void {
   getDb()
     .prepare(

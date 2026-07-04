@@ -98,8 +98,9 @@ function readStdoutLog(runId: string, taskId: string): string {
 /** FG-455: git status --porcelain against a task's persisted-work path. Never
  *  throws — a missing path, a non-git directory, or any git error is reported
  *  as "no changed files" so reconcile stays safe even against a half-formed
- *  worktree. */
-function changedWorktreeFiles(path: string | undefined): string[] {
+ *  worktree. Exported so `forge recover` (FG-455 p3) can recompute the same
+ *  live diff without duplicating the never-throw git-status shape. */
+export function changedWorktreeFiles(path: string | undefined): string[] {
   if (!path) return [];
   try {
     const out = execFileSync("git", ["status", "--porcelain"], {
@@ -297,7 +298,7 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     } else {
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
-        `inspect with \`forge show ${parent.id}\` and recover with \`forge retry ${parent.id}\`.`;
+        `inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
       markTaskFailed(parent.id, error, parentResult);
       logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
       logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
