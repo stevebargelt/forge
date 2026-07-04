@@ -160,7 +160,16 @@ export function reconcileRun(
     // it here, before that gate, using the durable provision_started event
     // (which carries the real container name/cacheKey independent of the
     // worktree, which may already be gone).
-    if (!hasContainerStarted) {
+    // Gate this branch to the genuine in/mid-provisioning window: after
+    // provision_started but BEFORE provision_succeeded. Once
+    // container.provision_succeeded has fired, the provisioner has already
+    // --rm-removed itself and the task is legitimately mid-dispatch, waiting
+    // on the agent container to start — a HEALTHY task, not a crash. Without
+    // this check that window would be misclassified as a provisioning crash
+    // and false-failed. A task that already succeeded provisioning falls
+    // through to the existing container.started gate/logic below, unchanged.
+    const hasProvisionSucceeded = taskEvents.some((e) => e.eventType === "container.provision_succeeded");
+    if (!hasContainerStarted && !hasProvisionSucceeded) {
       const provisionStarted = taskEvents.find((e) => e.eventType === "container.provision_started");
       if (provisionStarted) {
         const payload = provisionStarted.payload as { containerName?: string; cacheKey?: string } | null;
@@ -468,8 +477,12 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
  *  reconcile only the workspace-filtered runs it shows, not every active run on
  *  the host (that would mutate other workspaces' runs). Returns only the runs
  *  that actually changed. */
-export function reconcileRuns(runIds: string[], containerAlive: ContainerAlive = defaultContainerAlive): ReconcileResult[] {
+export function reconcileRuns(
+  runIds: string[],
+  containerAlive: ContainerAlive = defaultContainerAlive,
+  reapContainer: ContainerReap = defaultContainerReap,
+): ReconcileResult[] {
   return runIds
-    .map((id) => reconcileRun(id, containerAlive))
+    .map((id) => reconcileRun(id, containerAlive, reapContainer))
     .filter((r) => r.taskChanges.length > 0 || r.runChange);
 }
