@@ -30,6 +30,7 @@ import { execFileSync } from "node:child_process";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { tasksForRun, getTask } from "../store/tasks.js";
+import { eventsForTask } from "../store/events.js";
 import { startRun } from "./startRun.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
 import { failureKindForTask } from "./failure-kind.js";
@@ -411,9 +412,17 @@ test("fg376 (d): a failed provisioner (exit 123) leaves no ready marker, fails t
   assert.deepEqual(wave1.failedSteps, ["build"]);
   assert.equal(calls1.length, 1, "the agent container must NEVER be spawned when provisioning fails");
   assert.equal(calls1[0]!.kind, "provisioner");
+  const primary1 = tasksForRun(run1.runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
+  assert.equal(failureKindForTask(primary1.id), "verification_environment_unavailable");
+
+  const failedEvent = eventsForTask(primary1.id).find((e) => e.eventType === "container.dependency_provisioning_failed");
+  assert.ok(failedEvent, "expected a container.dependency_provisioning_failed event");
+  const nameIdx = calls1[0]!.args.indexOf("--name");
+  const actualProvisionerName = calls1[0]!.args[nameIdx + 1];
   assert.equal(
-    failureKindForTask(tasksForRun(run1.runId).find((t) => t.phase === "build" && t.parentId === undefined)!.id),
-    "verification_environment_unavailable",
+    (failedEvent!.payload as { containerName?: string }).containerName,
+    actualProvisionerName,
+    "the failure telemetry must name the container that actually ran (forge-provision-<lockfileHash>), not a forge-provision-<taskId> name that never exists",
   );
 
   const repo2 = makeRepoWithLockContent(lockContent);

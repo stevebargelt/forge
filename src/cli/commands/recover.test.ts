@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun, getRun } from "../../store/runs.js";
-import { insertTask, getTask, markTaskComplete } from "../../store/tasks.js";
+import { insertTask, getTask, markTaskComplete, tasksForRun } from "../../store/tasks.js";
 import { eventsForTask, logEvent } from "../../store/events.js";
 import { taskDir } from "../../util/paths.js";
 import { reconcileRun } from "../../v2/reconcile.js";
@@ -348,6 +348,19 @@ test("recover --re-drive: refuses when a re-drive is already pending", () => {
   const outcome = performReDrive("parent-redrive-dupe");
   assert.equal(outcome.kind, "re-drive-refused");
   assert.equal(getTask("parent-redrive-dupe")!.status, "failed", "no second pending primary minted");
+});
+
+test("recover --re-drive: refuses a failed fanout parent whose failure kind isn't fanout_wave_orphaned", () => {
+  insertTask(mkTask("parent-redrive-wrongkind", { status: "failed", phase: "build" }));
+  logEvent("task.failed", { runId: RUN.id, taskId: "parent-redrive-wrongkind", payload: { failure_kind: "gate_rejected", error: "rejected" } });
+  insertTask(mkTask("child-redrive-wrongkind", { parentId: "parent-redrive-wrongkind", phase: "build", status: "failed" }));
+
+  const before = tasksForRun(RUN.id).length;
+  const outcome = performReDrive("parent-redrive-wrongkind");
+  assert.equal(outcome.kind, "re-drive-refused");
+  if (outcome.kind === "re-drive-refused") assert.match(outcome.reason, /gate_rejected/);
+  assert.equal(getTask("parent-redrive-wrongkind")!.status, "failed", "no mutation on refusal");
+  assert.equal(tasksForRun(RUN.id).length, before, "no new pending primary minted");
 });
 
 // ── performRecover dispatcher ────────────────────────────────────────────────

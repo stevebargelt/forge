@@ -363,6 +363,15 @@ export function performReDrive(id: string, opts: { containerAlive?: ContainerAli
     return { kind: "re-drive-refused", id, reason: `${parent.id} is in status '${parent.status}', not a recoverable failed fanout parent` };
   }
 
+  const parentFailureKind = failureKindForTask(parent.id);
+  if (parentFailureKind !== "fanout_wave_orphaned") {
+    return {
+      kind: "re-drive-refused",
+      id,
+      reason: `${parent.id} failed as ${parentFailureKind}, not fanout_wave_orphaned — --re-drive only re-drives an orphaned fanout wave; use forge retry / forge recover --continue as appropriate`,
+    };
+  }
+
   const allTasks = tasksForRun(parent.runId);
   const dupePending = allTasks.find((t) => t.phase === parent.phase && t.parentId === undefined && t.status === "pending");
   if (dupePending) {
