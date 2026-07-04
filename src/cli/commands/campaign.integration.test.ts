@@ -62,8 +62,22 @@ afterEach(() => {
   rmSync(projectDir, { recursive: true, force: true });
 });
 
-function runForge(args: string[]) {
-  return spawnSync(tsx, [entry, ...args], {
+// FG-442 finding 3: `campaign plan` refuses when no lane judgment is supplied
+// (no --routes, no --default-lane). The overwhelming majority of tests in this
+// file plan a campaign only as setup for testing unrelated behavior (approve,
+// start, escalate-lane, reconcile, ...), so runForge auto-supplies a
+// --default-lane for a bare `campaign plan` call unless the caller already
+// passed --routes or --default-lane. Tests that exercise the lane-judgment
+// requirement itself pass { rawPlan: true } to get the real, un-augmented CLI
+// invocation.
+function runForge(args: string[], opts: { rawPlan?: boolean } = {}) {
+  const isPlan = args[0] === "campaign" && args[1] === "plan";
+  const hasLaneJudgment = args.includes("--routes") || args.includes("--default-lane");
+  const finalArgs =
+    isPlan && !opts.rawPlan && !hasLaneJudgment
+      ? [...args, "--default-lane", "full_feature", "--default-lane-rationale", "test-harness default (FG-442 compat, unrelated to the behavior under test)"]
+      : args;
+  return spawnSync(tsx, [entry, ...finalArgs], {
     encoding: "utf8",
     env: { ...process.env, FORGE_HOME: forgeHome, NO_NOTIFY: "true" },
   });
@@ -3439,14 +3453,103 @@ test("integ campaign plan --routes: classifies each item's lane and prints lane 
   assert.match(humanResult.stdout, /lane=docs_only/);
 });
 
-test("integ campaign plan without --routes: every item shows the full_feature default lane, not a bare workflow default", () => {
+test("integ campaign plan without --routes and without --default-lane: refuses non-zero, plans nothing (FG-442 finding 3)", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+  ], { rawPlan: true });
+
+  assert.notEqual(result.status, 0, `expected non-zero exit\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stderr, /no lane judgment supplied for 2 item\(s\) \(FG-442\)/);
+  assert.match(result.stderr, /--routes/);
+  assert.match(result.stderr, /--default-lane/);
+
+  const dbPath = join(forgeHome, "forge.db");
+  if (existsSync(dbPath)) {
+    const db = new Database(dbPath, { readonly: true });
+    const campaigns = db.prepare("SELECT * FROM campaigns").all();
+    assert.equal(campaigns.length, 0, "no campaign should be persisted when the refusal fires");
+    db.close();
+  }
+});
+
+test("integ campaign plan --default-lane full_feature --default-lane-rationale: succeeds, every item gets the operator lane + rationale, folded into plan_hash", () => {
+  const rationale = "operator reviewed backlog manually — everything here is a full feature build";
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+    "--default-lane-rationale", rationale,
+    "--json",
+  ], { rawPlan: true });
+
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as {
+    planHash: string;
+    orderedItems: { ticketId: string; lane: string; laneRationale: string }[];
+    canonicalContent: { orderedItems: { ticketId: string; lane: string; laneRationale: string }[] };
+  };
+
+  for (const item of output.orderedItems) {
+    assert.equal(item.lane, "full_feature");
+    assert.equal(item.laneRationale, rationale);
+  }
+  for (const entry of output.canonicalContent.orderedItems) {
+    assert.equal(entry.lane, "full_feature");
+    assert.equal(entry.laneRationale, rationale);
+    assert.notEqual(entry.laneRationale, "no lane override supplied — defaulting to full_feature");
+  }
+
+  // The operator rationale is part of canonicalContent, which the plan_hash
+  // is derived from — re-planning with a different rationale must change it.
+  const differentRationaleResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+    "--default-lane-rationale", "a completely different rationale",
+    "--json",
+  ], { rawPlan: true });
+  assert.equal(differentRationaleResult.status, 0);
+  const differentOutput = JSON.parse(differentRationaleResult.stdout) as { planHash: string };
+  assert.notEqual(differentOutput.planHash, output.planHash, "plan_hash must reflect the operator-supplied rationale");
+});
+
+test("integ campaign plan --default-lane <bad-lane>: rejected", () => {
   const result = runForge([
     "campaign", "plan",
     "--tickets", "FG-101",
     "--project", projectDir,
-  ]);
-  assert.equal(result.status, 0);
-  assert.match(result.stdout, /lane=full_feature — no lane override supplied — defaulting to full_feature/);
+    "--default-lane", "not_a_real_lane",
+    "--default-lane-rationale", "text",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid --default-lane/);
+});
+
+test("integ campaign plan --default-lane docs_only (agentRole-bearing lane): rejected as a blanket default", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--default-lane", "docs_only",
+    "--default-lane-rationale", "text",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /invalid --default-lane/);
+});
+
+test("integ campaign plan --default-lane without --default-lane-rationale: rejected", () => {
+  const result = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--default-lane", "full_feature",
+  ], { rawPlan: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /--default-lane-rationale/);
 });
 
 test("integ campaign approve: restates the lane basis being recorded (human + --json)", () => {

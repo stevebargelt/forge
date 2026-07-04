@@ -47,7 +47,15 @@ export function registerCampaign(program: Command): void {
     .option("--project <dir>", "project directory (default: cwd)")
     .option(
       "--routes <json>",
-      "JSON map of ticketId -> compiled routing-policy route key (e.g. implementation_quick), supplying the FG-442 lane judgment for each ticket. Tickets omitted here are unclassified (lane 'manual'). Omit --routes entirely to skip classification and keep every item on the full_feature default."
+      "JSON map of ticketId -> compiled routing-policy route key (e.g. implementation_quick), supplying the FG-442 lane judgment for each ticket. Tickets omitted here are unclassified (lane 'manual'). A lane judgment is required for every resolved item: supply --routes, or pass --default-lane for items --routes doesn't cover — `campaign plan` refuses rather than silently defaulting to full_feature (FG-442)."
+    )
+    .option(
+      "--default-lane <lane>",
+      "explicit opt-in: assign this lane to every resolved item left unjudged by --routes (or all items, if --routes is omitted). One of full_feature|quick_implementation|ticketing_only|manual — lanes that require an agentRole (docs_only|test_only|review_only|research_only) cannot be used as a blanket default; route those items individually via --routes instead. Requires --default-lane-rationale."
+    )
+    .option(
+      "--default-lane-rationale <text>",
+      "rationale recorded against every item defaulted via --default-lane (required when --default-lane is used)"
     )
     .option("--json", "machine-readable JSON output")
     .action((opts: {
@@ -58,6 +66,8 @@ export function registerCampaign(program: Command): void {
       mode?: string;
       project?: string;
       routes?: string;
+      defaultLane?: string;
+      defaultLaneRationale?: string;
       json?: boolean;
     }) => {
       const hasTickets = opts.tickets !== undefined;
@@ -99,11 +109,24 @@ export function registerCampaign(program: Command): void {
         input = { kind: "epic", epicId: opts.epic! };
       }
 
+      const BLANKET_DEFAULT_LANES = ["full_feature", "quick_implementation", "ticketing_only", "manual"] as const;
+      if (opts.defaultLane !== undefined) {
+        if (!opts.defaultLaneRationale) {
+          throw new Error("--default-lane requires --default-lane-rationale");
+        }
+        if (!(BLANKET_DEFAULT_LANES as readonly string[]).includes(opts.defaultLane)) {
+          throw new Error(
+            `invalid --default-lane "${opts.defaultLane}": must be one of ${BLANKET_DEFAULT_LANES.join(", ")} ` +
+            `(lanes requiring an agentRole — docs_only, test_only, review_only, research_only — cannot be used as a blanket default; route those items via --routes)`
+          );
+        }
+      }
+
       // FG-442: run the lane classifier OUTSIDE resolvePlan/planCampaign, at
       // plan-authoring time — the one-time cost per plan. Only when --routes
-      // supplies a real ticket->route judgment; otherwise every item keeps the
-      // full_feature default (planner.ts's own fold logic), preserving current
-      // behavior when no judgment source is wired in.
+      // supplies a real ticket->route judgment.
+      const { resolvedIds } = resolvePlan(input, { projectDir, mode });
+      const itemOverrides: Record<string, ItemModeOverride> = { ...(input.itemOverrides ?? {}) };
       if (opts.routes) {
         let routes: Record<string, string>;
         try {
@@ -111,13 +134,38 @@ export function registerCampaign(program: Command): void {
         } catch {
           throw new Error("--routes must be valid JSON: a map of ticketId -> route key");
         }
-        const { resolvedIds } = resolvePlan(input, { projectDir, mode });
         const tickets = listTickets(projectDir).filter((t) => resolvedIds.includes(t.id));
         const classified = classifyItemsForPlan(tickets, {
           projectDir,
           classifyTicket: makeRouteLookupClassifier(routes),
         });
-        input = { ...input, itemOverrides: { ...(input.itemOverrides ?? {}), ...classified.itemOverrides } };
+        Object.assign(itemOverrides, classified.itemOverrides);
+      }
+
+      // FG-442 finding 3: the CLI is the refusal point — resolvePlan's own
+      // full_feature fallback (planner.ts foldItemEntry) remains for legacy/
+      // programmatic callers, but `campaign plan` must never reach it silently.
+      // Every resolved item needs a lane from --routes or an explicit
+      // --default-lane opt-in before a plan is persisted.
+      const unjudgedIds = resolvedIds.filter((id) => !itemOverrides[id]?.lane);
+      if (unjudgedIds.length > 0) {
+        if (!opts.defaultLane) {
+          throw new Error(
+            `campaign plan: no lane judgment supplied for ${unjudgedIds.length} item(s) (FG-442): ${unjudgedIds.join(", ")}. ` +
+            `Supply per-item lanes via --routes, or pass --default-lane <lane> --default-lane-rationale <text> to explicitly default the unjudged items.`
+          );
+        }
+        for (const id of unjudgedIds) {
+          itemOverrides[id] = {
+            lane: opts.defaultLane as ExecutionLane,
+            laneRationale: opts.defaultLaneRationale!,
+            materialLaneAssumptions: [`operator default via --default-lane=${opts.defaultLane}`],
+          };
+        }
+      }
+
+      if (Object.keys(itemOverrides).length > 0) {
+        input = { ...input, itemOverrides };
       }
 
       const result = planCampaign(input, { projectDir, mode });
