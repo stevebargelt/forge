@@ -96,3 +96,14 @@ Both guards exist so `forge recover --re-drive` stays the single coordinated pat
 
 - If `--re-drive`'s full-wave re-run becomes expensive enough to matter (large fanouts, costly children), revisit partial-index resume — it needs `dispatchFanoutStep` to accept a starting index/child subset, which was explicitly out of scope here.
 - If a second command needs the same live-evidence recomputation `recover.ts` currently mirrors from `reconcile.ts`, extract a shared module instead of maintaining two copies.
+
+---
+
+## Addendum (FG-455 p4, 2026-07-04): `oom_killed` + Mode A empty-result backfill
+
+Two more piece-4 additions extend this decision's evidence-gathering path rather than changing its shape:
+
+- **`oom_killed`**: reconcile now gathers a best-effort `docker inspect` exit-code/OOM probe (`containerExitInfo`, never throws) alongside the existing worktree/changed-files evidence, at the same point it discovers a container is gone with no recoverable result. A positive OOM/exit-137 reading is classified as the new `failure_kind: "oom_killed"` — a more specific cause than `orphaned` / `orphaned_work_may_persist`, and it takes precedence over both (even a dirty worktree), though a recoverable stdout result still outranks it (the task completes instead). It's wired through the same surfaces this decision established for `orphaned_work_may_persist`: `retry-policy.ts` (`retryable: false`, needs `--force`), `recover.ts`'s `CONTINUABLE_KINDS`, `show.ts`'s recovery message, and `ops/detect.ts`'s `forge ops check` (fires only when the worktree is dirty — a clean-worktree `oom_killed` has no persisted work at risk).
+- **Mode A backfill**: a distinct gap from anything above — a detached `forge invoke` whose wrapper is killed can leave a task `complete` in the DB with an *empty* result, which the `running`-task reconcile loop never revisits (it's already `complete`). A new pass, scoped to `status = 'complete'` tasks with no result, backfills from the container's own `result.json` or FG-337 stdout synthesis. Status-preserving (never flips `complete` back to anything else) and idempotent (a task with a result is left alone) — deliberately narrower than the adopt/re-drive decision above, since there's no ambiguous state to arbitrate: the task already completed, only its result was lost.
+
+See [docs/concepts.md](../../docs/concepts.md#orphaned-task-recovery) for the operator-facing description of both.
