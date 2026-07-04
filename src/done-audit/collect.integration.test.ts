@@ -9,8 +9,8 @@ import { writeTicket } from "../backlog/structured.js";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
-import { insertHostVerification, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
-import { checkClosedCommitCoveredByTestedSha } from "../campaign/reconcile-collect.js";
+import { insertHostVerification } from "../store/host-verifications.js";
+import { checkClosedCommitCoveredByTestedSha, collectReconcileEvidence } from "../campaign/reconcile-collect.js";
 import { collectDoneAuditInput, collectDoneAuditInputFor } from "./collect.js";
 import { evaluateDoneAudit } from "./done-audit.js";
 import type { CampaignItem, Run, Task } from "../types/index.js";
@@ -912,11 +912,10 @@ test("collect FG-453 AC4: done-audit hostVerified agrees with reconcile's passin
     recordedAt: "2026-01-01T01:00:00Z",
   });
 
-  const rowsPass = queryHostVerificationRowsForGate("FG-HV-AC4-PASS", projectDir, "npm run test:all");
-  const coveringPass = rowsPass.filter((r) =>
-    checkClosedCommitCoveredByTestedSha(projectDir, passCommit, r.commitSha, "main")
-  );
-  const reconcilePassed = coveringPass.some((r) => r.exitCode === 0);
+  // Call the real production collector — not a hand-duplicated copy of its
+  // passing-row logic — so this guards against reconcile-side logic drift too.
+  const reconcilePassEvidence = collectReconcileEvidence(projectDir, makeItem("FG-HV-AC4-PASS"));
+  const reconcilePassed = reconcilePassEvidence.hostVerification?.passed ?? null;
 
   const doneAuditPassInput = collectDoneAuditInputFor(projectDir, "FG-HV-AC4-PASS");
   assert.equal(reconcilePassed, true, "sanity: reconcile's passing-row model must find this covering set passing");
@@ -959,11 +958,8 @@ test("collect FG-453 AC4: done-audit hostVerified agrees with reconcile's passin
     recordedAt: "2026-01-01T01:00:00Z",
   });
 
-  const rowsFail = queryHostVerificationRowsForGate("FG-HV-AC4-FAIL", projectDir, "npm run test:all");
-  const coveringFail = rowsFail.filter((r) =>
-    checkClosedCommitCoveredByTestedSha(projectDir, failCommit, r.commitSha, "main")
-  );
-  const reconcileFailPassed = coveringFail.some((r) => r.exitCode === 0);
+  const reconcileFailEvidence = collectReconcileEvidence(projectDir, makeItem("FG-HV-AC4-FAIL"));
+  const reconcileFailPassed = reconcileFailEvidence.hostVerification?.passed ?? null;
 
   const doneAuditFailInput = collectDoneAuditInputFor(projectDir, "FG-HV-AC4-FAIL");
   assert.equal(reconcileFailPassed, false, "sanity: reconcile's passing-row model must find this covering set failing");

@@ -10,6 +10,7 @@ import {
   getCampaign,
   addCampaignItem,
   approveCampaign,
+  listCampaignItems,
   tryTransitionCampaignToRunning,
   updateCampaignStatus,
   updateCampaignItem,
@@ -20,6 +21,8 @@ import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, setDoneAuditMapForTest } from "./report.js";
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { campaignBlocker } from "./executor.js";
+import { collectReconcileEvidence } from "./reconcile-collect.js";
+import { insertHostVerification } from "../store/host-verifications.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -374,6 +377,93 @@ test("assembleCampaignReport: verdict='complete_with_issues' when complete but n
 
   const result = assembleCampaignReport(campaign.id)!;
   assert.equal(result.verdict, "complete_with_issues");
+});
+
+// ── FG-453 AC2/AC4: real report surface + real reconcile collector agree ───────
+
+test("assembleCampaignReport: fail-then-pass host verification is NOT reported as complete_with_issues, and agrees with the real reconcile evidence collector's ship decision", () => {
+  // No setDoneAuditMapForTest override here — this exercises the real
+  // collectDoneAuditInput -> evaluateDoneAudit path that computeVerdict reads,
+  // not a hand-fed doneAuditMap, per FG-453's finding that AC2/AC4 need
+  // coverage at the actual report surface.
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  // A real remote is required for the done-audit "pushed" check to resolve to
+  // pass rather than unknown — otherwise outcome can never reach "pass" and
+  // this test couldn't distinguish "not complete_with_issues" from "any other
+  // non-pass outcome".
+  const bareRemote = mkdtempSync(join(tmpdir(), "report-bare-"));
+  gitExec(["init", "--bare"], bareRemote);
+  gitExec(["remote", "add", "origin", bareRemote], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "close FG-101"], projectDir);
+  gitExec(["push", "origin", "main"], projectDir);
+
+  try {
+    // Passing-row model: an earlier failing host-verification row must not
+    // permanently outrank a later real pass for the same covering commit.
+    insertHostVerification({
+      ticketId: "FG-101",
+      projectDir,
+      commitSha: commit,
+      gateName: "npm run test:all",
+      command: "npm run test:all",
+      exitCode: 1,
+      recordedAt: "2026-01-01T00:00:00Z",
+    });
+    insertHostVerification({
+      ticketId: "FG-101",
+      projectDir,
+      commitSha: commit,
+      gateName: "npm run test:all",
+      command: "npm run test:all",
+      exitCode: 0,
+      recordedAt: "2026-01-01T01:00:00Z",
+    });
+
+    const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+    db.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+    updateCampaignStatus(campaign.id, "complete");
+
+    // AC2: exercised at the actual report surface (computeVerdict -> complete_with_issues).
+    const result = assembleCampaignReport(campaign.id)!;
+    assert.equal(
+      result.verdict,
+      "all_shipped",
+      "fail-then-pass host verification must not be reported as complete_with_issues"
+    );
+
+    // AC4: exercised against the real reconcile evidence collector, not a
+    // hand-duplicated copy of its passing-row logic.
+    const campaignItem = listCampaignItems(campaign.id)[0]!;
+    const evidence = collectReconcileEvidence(projectDir, campaignItem);
+    assert.equal(
+      evidence.hostVerification?.passed,
+      true,
+      "sanity: reconcile's passing-row model must find this covering set passing"
+    );
+    assert.equal(
+      result.verdict === "all_shipped",
+      evidence.hostVerification?.passed,
+      "report verdict must agree with reconcile's ship/refuse decision for the same fail-then-pass covering set"
+    );
+  } finally {
+    rmSync(bareRemote, { recursive: true, force: true });
+  }
 });
 
 test("assembleCampaignReport: verdict='not_complete' for non-complete campaigns", () => {
