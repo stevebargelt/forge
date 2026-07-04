@@ -55,7 +55,13 @@ export type EventType =
   // re-deriving delivery from durable evidence. Distinct from
   // campaign_item.evidence_reconciled — that event covers the scope-blocked
   // stale-red-fail shape; this one covers the non-pipeline/awaiting_gate shape.
-  | "campaign_item.out_of_band_reconciled";
+  | "campaign_item.out_of_band_reconciled"
+  // FG-441 red-review fix: `campaign resume`'s manually-driven awaiting_gate
+  // reconcile branch found evidence incomplete and refused to ship, re-parking
+  // the item. Durable counterpart to the console.error refusal message — under
+  // a cron/service invocation stderr may not be captured, so this is the only
+  // audit trail of the refusal decision.
+  | "campaign_item.evidence_reconcile_refused";
 
 export type Event = {
   id: number;

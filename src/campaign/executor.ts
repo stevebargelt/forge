@@ -9,10 +9,13 @@ import {
   listCampaignItems,
   updateCampaignItem,
   updateCampaignItemIfCampaignPaused,
+  updateCampaignItemIfCampaignRunning,
   updateCampaignPlanForReapproval,
   tryTransitionCampaign,
   tryTransitionCampaignToRunning,
 } from "../store/campaigns.js";
+import { getDb } from "../store/db.js";
+import { logEvent } from "../store/events.js";
 import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
@@ -40,8 +43,8 @@ import { verdictsForTask } from "../store/verdicts.js";
 import { evaluateDoneAudit } from "../done-audit/done-audit.js";
 import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
-import { collectAuthoritativeEvents } from "./reconcile-collect.js";
-import { evaluateAuthoritativeOutcome } from "./reconcile-evidence.js";
+import { collectAuthoritativeEvents, collectReconcileEvidence } from "./reconcile-collect.js";
+import { evaluateAuthoritativeOutcome, evaluateReconcileEvidence } from "./reconcile-evidence.js";
 import { assessRunDocsImpact, formatDocsImpactWarning } from "../v2/docs-impact.js";
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
@@ -668,6 +671,78 @@ async function driveRemainingItems(
     // back to paused (running→paused is valid) before returning recovery_needed. This
     // preserves the invariant that a paused campaign can always be safely re-examined.
     if (item.lifecycleStatus === "awaiting_gate" || item.lifecycleStatus === "blocked_by_red") {
+      // FG-441: an awaiting_gate item with no blockerKind can have been driven
+      // manually OUTSIDE this loop after the campaign attached its run — through
+      // gates/fixers/red/host-verification/PR-merge/backlog-close — leaving the
+      // item shipped in reality but still parked here. Before re-parking it via
+      // driveWorkflowItem below, re-derive shipped-ness from the SAME durable
+      // evidence `forge campaign reconcile`'s scope-blocked branch uses (the run's
+      // authoritative verdict/gate events, not the FG-443 out-of-band evaluator,
+      // which ignores run events and is reconcile.ts's job, not resume's). Only
+      // fires for the manually-driven shape: blocked_by_red and any item WITH a
+      // blockerKind are FG-428/other lanes and must reach driveWorkflowItem unchanged.
+      if (item.lifecycleStatus === "awaiting_gate" && !item.blockerKind && item.runId) {
+        const collected = collectReconcileEvidence(opts.projectDir, item);
+        const evaluated = evaluateReconcileEvidence(collected);
+        if (evaluated.eligible) {
+          // Atomic: same paused-guard pattern reconcile.ts uses, gated on 'running'
+          // instead of 'paused' — resumeCampaign already transitioned the campaign
+          // to 'running' before driveRemainingItems runs, so a paused-only guard
+          // would make this write a permanent no-op. A concurrent pause/abandon
+          // between the evidence check and this write still lands as a no-op here,
+          // never an optimistic ship.
+          const shipped = getDb().transaction(() => {
+            const applied = updateCampaignItemIfCampaignRunning(item.id, campaignId, {
+              lifecycleStatus: "complete",
+              outcome: "shipped",
+              blockerKind: undefined,
+              reason: undefined,
+              requestedHumanAction: undefined,
+            });
+            if (!applied) return false;
+            logEvent("campaign_item.evidence_reconciled", {
+              runId: item.runId,
+              payload: {
+                campaignId,
+                itemId: item.id,
+                ticketId: item.ticketId,
+                evidence: evaluated.evidence,
+                decidedBy: "campaign_resume",
+                decidedAt: nowIso(),
+              },
+            });
+            return true;
+          })();
+          if (shipped) {
+            itemRecords.push({
+              itemId: item.id,
+              ticketId: item.ticketId,
+              runId: item.runId,
+              lifecycleStatus: "complete",
+              outcome: "shipped",
+            });
+            continue;
+          }
+          // Campaign left 'running' between the evidence check and the write —
+          // fall through; the cooperative-pause checks below will stop cleanly.
+        } else {
+          console.error(
+            `campaign resume: ${item.ticketId} is awaiting_gate on a manually-driven run but evidence is incomplete — refusing to ship and re-parking (missing: ${evaluated.missing.join(", ")})`
+          );
+          logEvent("campaign_item.evidence_reconcile_refused", {
+            runId: item.runId,
+            payload: {
+              campaignId,
+              itemId: item.id,
+              ticketId: item.ticketId,
+              missing: evaluated.missing,
+              decidedBy: "campaign_resume",
+              decidedAt: nowIso(),
+            },
+          });
+        }
+      }
+
       if (!item.runId) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
         tryTransitionCampaign(campaignId, "running", "paused");
