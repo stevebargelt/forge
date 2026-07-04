@@ -144,14 +144,21 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
         checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch)
       );
       if (covering.length > 0) {
-        const anyFail = covering.some((r) => r.exitCode !== 0);
-        hostVerified = !anyFail;
-        // When any row fails (any-fail-wins), use the first failing row so the displayed
-        // evidence matches the verdict — the trailing pass row must not overwrite it.
-        const detailRow = anyFail ? covering.find((r) => r.exitCode !== 0)! : covering[covering.length - 1]!;
+        // FG-453: passing-row model, mirroring reconcile-collect.ts's hostVerification.passed —
+        // one real covering pass ships regardless of earlier covering failures (FG-440).
+        const passingRows = covering.filter((r) => r.exitCode === 0);
+        hostVerified = passingRows.length > 0;
+        // Evidence must match the verdict: a true verdict shows the passing row that
+        // establishes it (latest one), a false verdict shows a failing row — never the
+        // reverse. Earlier covering failures are retained as visible audit history.
+        const detailRow = hostVerified
+          ? passingRows[passingRows.length - 1]!
+          : covering[covering.length - 1]!;
+        const failureCount = covering.length - passingRows.length;
         hostVerificationDetail =
           `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}`;
+          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}` +
+          (hostVerified && failureCount > 0 ? `; earlier_covering_failures: ${failureCount}` : "");
       }
     } catch {
       // hostVerified stays null on any store error

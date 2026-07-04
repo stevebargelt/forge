@@ -9,7 +9,8 @@ import { writeTicket } from "../backlog/structured.js";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
-import { insertHostVerification } from "../store/host-verifications.js";
+import { insertHostVerification, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
+import { checkClosedCommitCoveredByTestedSha } from "../campaign/reconcile-collect.js";
 import { collectDoneAuditInput, collectDoneAuditInputFor } from "./collect.js";
 import { evaluateDoneAudit } from "./done-audit.js";
 import type { CampaignItem, Run, Task } from "../types/index.js";
@@ -763,9 +764,9 @@ test("collect FG419: explicit --gate override with different command satisfies r
   );
 });
 
-// ── FIX 2: any-fail-wins detail reflects the FAILING row, not the trailing pass ─
+// ── FG-453: passing-row model — a trailing pass ships over an earlier covering fail ─
 
-test("collect FIX2: fail row then pass row → hostVerified=false AND detail reflects failure exit_code", () => {
+test("collect FG-453: fail row then pass row → hostVerified=true AND detail reflects the passing row (not the earlier failure)", () => {
   const commitSha = makeCommit("hv-fail-then-pass");
 
   writeTicket(projectDir, {
@@ -802,15 +803,223 @@ test("collect FIX2: fail row then pass row → hostVerified=false AND detail ref
 
   const input = collectDoneAuditInputFor(projectDir, "FG-HV-FIX2-1");
 
-  assert.equal(input.verification.hostVerified, false, "any-fail-wins: hostVerified must be false when a fail row exists");
+  assert.equal(
+    input.verification.hostVerified,
+    true,
+    "passing-row model: a later covering pass must ship even over an earlier covering failure"
+  );
   assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
   assert.ok(
-    input.verification.hostVerificationDetail!.includes("exit_code: 1"),
-    `detail must reflect the FAILING row's exit_code, not the trailing pass\ndetail: ${input.verification.hostVerificationDetail}`
+    input.verification.hostVerificationDetail!.includes("exit_code: 0"),
+    `detail must reflect the PASSING row's exit_code, not the earlier failure\ndetail: ${input.verification.hostVerificationDetail}`
   );
   assert.ok(
-    !input.verification.hostVerificationDetail!.includes("exit_code: 0"),
-    `detail must NOT show exit_code: 0 when hostVerified=false\ndetail: ${input.verification.hostVerificationDetail}`
+    input.verification.hostVerificationDetail!.includes("earlier_covering_failures: 1"),
+    `detail must surface the earlier covering failure as audit history\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+
+  const result = evaluateDoneAudit(input);
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(
+    hostCheck?.status,
+    "pass",
+    "host_verification check must be pass, not reported as complete_with_issues, when a covering pass exists"
+  );
+});
+
+// ── FG-453 AC3: all covering rows fail → hostVerified stays false (real gap, not laundered) ─
+
+test("collect FG-453 AC3: all covering rows failing → hostVerified=false", () => {
+  const commitSha = makeCommit("hv-all-fail");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-AC3-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV AC3",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-AC3-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-AC3-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T01:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-AC3-1");
+
+  assert.equal(input.verification.hostVerified, false, "an all-failing covering set must not be laundered into a pass");
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("exit_code: 1"),
+    `detail must reflect a failing row when hostVerified=false\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+
+  const result = evaluateDoneAudit(input);
+  const hostCheck = result.checks.find((c) => c.name === "host_verification");
+  assert.equal(hostCheck?.status, "fail");
+});
+
+// ── FG-453 AC4: done-audit and reconcile agree on the SAME covering rows ────────
+
+test("collect FG-453 AC4: done-audit hostVerified agrees with reconcile's passing-row `passed` for the same covering rows (fail-then-pass and all-fail)", () => {
+  // fail-then-pass
+  const passCommit = makeCommit("hv-ac4-fail-then-pass");
+  writeTicket(projectDir, {
+    id: "FG-HV-AC4-PASS",
+    type: "story",
+    status: "done",
+    closedCommit: passCommit,
+    title: "HV AC4 Pass",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-AC4-PASS",
+    projectDir,
+    commitSha: passCommit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-AC4-PASS",
+    projectDir,
+    commitSha: passCommit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T01:00:00Z",
+  });
+
+  const rowsPass = queryHostVerificationRowsForGate("FG-HV-AC4-PASS", projectDir, "npm run test:all");
+  const coveringPass = rowsPass.filter((r) =>
+    checkClosedCommitCoveredByTestedSha(projectDir, passCommit, r.commitSha, "main")
+  );
+  const reconcilePassed = coveringPass.some((r) => r.exitCode === 0);
+
+  const doneAuditPassInput = collectDoneAuditInputFor(projectDir, "FG-HV-AC4-PASS");
+  assert.equal(reconcilePassed, true, "sanity: reconcile's passing-row model must find this covering set passing");
+  assert.equal(
+    doneAuditPassInput.verification.hostVerified,
+    reconcilePassed,
+    "done-audit hostVerified must agree with reconcile's passing-row `passed` for a fail-then-pass covering set"
+  );
+
+  // all-fail, different ticket
+  const failCommit = makeCommit("hv-ac4-all-fail");
+  writeTicket(projectDir, {
+    id: "FG-HV-AC4-FAIL",
+    type: "story",
+    status: "done",
+    closedCommit: failCommit,
+    title: "HV AC4 Fail",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-AC4-FAIL",
+    projectDir,
+    commitSha: failCommit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-AC4-FAIL",
+    projectDir,
+    commitSha: failCommit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 1,
+    recordedAt: "2026-01-01T01:00:00Z",
+  });
+
+  const rowsFail = queryHostVerificationRowsForGate("FG-HV-AC4-FAIL", projectDir, "npm run test:all");
+  const coveringFail = rowsFail.filter((r) =>
+    checkClosedCommitCoveredByTestedSha(projectDir, failCommit, r.commitSha, "main")
+  );
+  const reconcileFailPassed = coveringFail.some((r) => r.exitCode === 0);
+
+  const doneAuditFailInput = collectDoneAuditInputFor(projectDir, "FG-HV-AC4-FAIL");
+  assert.equal(reconcileFailPassed, false, "sanity: reconcile's passing-row model must find this covering set failing");
+  assert.equal(
+    doneAuditFailInput.verification.hostVerified,
+    reconcileFailPassed,
+    "done-audit hostVerified must agree with reconcile's passing-row `passed` for an all-failing covering set"
+  );
+});
+
+// ── FG-453 FIX 2: non-ancestor negative — done-audit's own ancestry call site ───
+
+test("collect FG-453: row's tested sha does NOT have closedCommit as an ancestor → not covering → hostVerified stays null", () => {
+  // Two commits that diverge from a common root — neither is an ancestor of the other.
+  // closedCommit lives on main; the row's testedSha is on a sibling branch cut from the
+  // SAME root but sharing none of closedCommit's history, so ancestry must fail.
+  makeCommit("hv-nonancestor-root");
+  gitExec(["checkout", "-b", "sibling-branch"], projectDir);
+  const siblingHead = makeCommit("hv-nonancestor-sibling");
+  gitExec(["checkout", "main"], projectDir);
+  const closedCommit = makeCommit("hv-nonancestor-closed");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-NONANCESTOR-1",
+    type: "story",
+    status: "done",
+    closedCommit,
+    title: "HV Non Ancestor",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-NONANCESTOR-1",
+    projectDir,
+    commitSha: siblingHead,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  assert.equal(
+    checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, siblingHead, "main"),
+    false,
+    "sanity: closedCommit must NOT be an ancestor of a sibling-branch commit that diverged before it existed"
+  );
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-NONANCESTOR-1");
+
+  assert.equal(
+    input.verification.hostVerified,
+    null,
+    "a row whose tested sha does not have closedCommit as an ancestor must not count as covering"
   );
 });
 
