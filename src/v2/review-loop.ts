@@ -85,14 +85,31 @@ const FindingSchema = z.object({
   }
 });
 
+// red-wide (the reviewer agent — see module header) writes the RED vocabulary
+// verdict:"fail"|"inconclusive" rather than the native needs_fix|blocked. Both
+// are accepted input; only the native pass|needs_fix|blocked is ever the
+// PARSED (downstream) verdict — see `normalizeVerdict` below.
+const RAW_VERDICTS = ["pass", "needs_fix", "blocked", "fail", "inconclusive"] as const;
+
 export const ReviewerVerdictSchema = z.object({
-  verdict: z.enum(["pass", "needs_fix", "blocked"]),
+  verdict: z.enum(RAW_VERDICTS),
   findings: z.array(FindingSchema).default([]),
-}).superRefine((v, ctx) => {
-  if (v.verdict === "needs_fix" && v.findings.length === 0) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["findings"], message: "needs_fix requires at least one finding" });
-  }
-});
+}).transform((v) => ({ ...v, verdict: normalizeVerdict(v.verdict) }))
+  .superRefine((v, ctx) => {
+    if (v.verdict === "needs_fix" && v.findings.length === 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["findings"], message: "needs_fix requires at least one finding" });
+    }
+  });
+
+/** Map the accepted raw verdict vocabulary (native + red) onto the canonical
+ *  ReviewerVerdict: red's `fail` carries concrete fixable findings, so it's a
+ *  needs_fix; red's `inconclusive` means the reviewer couldn't determine, so it
+ *  surfaces to a human like `blocked` rather than auto-driving a fixer. */
+function normalizeVerdict(v: (typeof RAW_VERDICTS)[number]): ReviewerVerdict {
+  if (v === "fail") return "needs_fix";
+  if (v === "inconclusive") return "blocked";
+  return v;
+}
 
 export type Finding = z.infer<typeof FindingSchema>;
 export type ReviewerOutput = z.infer<typeof ReviewerVerdictSchema>;
@@ -102,8 +119,11 @@ export type ParsedVerdict =
   | { ok: false; error: string };
 
 /** Parse + validate a reviewer agent's result.json into a structured verdict.
- *  An unparseable / contract-violating reviewer output is an error (slice 4 maps
- *  it to stop_reason "reviewer_failed"), never silently treated as a pass. */
+ *  Accepts both the native vocabulary (pass|needs_fix|blocked) and the RED
+ *  vocabulary (pass|fail|inconclusive) that red-wide (the reviewer) actually
+ *  writes, normalizing to the canonical ReviewerVerdict. An unparseable /
+ *  contract-violating reviewer output is an error (slice 4 maps it to
+ *  stop_reason "reviewer_failed"), never silently treated as a pass. */
 export function parseReviewerVerdict(raw: unknown): ParsedVerdict {
   const r = ReviewerVerdictSchema.safeParse(raw);
   if (!r.success) {
@@ -327,7 +347,11 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
     L.push(`## Round ${r.round}`);
     const checks = r.verification.steps.map((s) => `${s.name}=${s.ok ? "ok" : "FAIL"}`).join(", ") || "(no checks)";
     L.push(`- verification: ${r.verification.ok ? "ok" : "FAILED"} (${checks})`);
-    L.push(r.verdict ? `- reviewer verdict: ${r.verdict}` : `- reviewer: skipped (verification failed)`);
+    L.push(r.verdict
+      ? `- reviewer verdict: ${r.verdict}`
+      : r.verification.ok
+        ? `- reviewer: failed (invalid or absent result)`
+        : `- reviewer: skipped (verification failed)`);
     if (r.findings.length > 0) {
       L.push(`- findings:`);
       for (const f of r.findings) {
