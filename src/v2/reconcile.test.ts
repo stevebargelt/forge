@@ -120,6 +120,46 @@ test("FG-455: container gone, empty result, but a recoverable stdout result (FG-
   const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as Record<string, unknown>;
   assert.equal(onDisk.contract, "inferred");
   assert.equal(onDisk.summary, text);
+
+  // FG-455 review finding 2: the recovered-complete outcome must carry the same
+  // evidence tuple as the other two container-gone outcomes.
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.containerName, `forge-${taskId}`);
+  assert.equal(evidence.containerLiveness, "gone");
+  assert.equal(evidence.recoverableStdoutResult, true);
+  assert.equal(evidence.resultWriteFailed, undefined, "disk write succeeded — no failure noted");
+});
+
+test("FG-455 review finding1: recovered stdout result, but the result.json write throws (dir in the way) → task still COMPLETES from the in-memory result, reconcileRun does not throw, and evidence records resultWriteFailed", () => {
+  const taskId = "t-write-throws";
+  insertContainerized(mkTask(taskId, { status: "running", agentRole: "research-specialist" }));
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output from stdout.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  // result.json is a directory — writeFileSync throws EISDIR when reconcile
+  // tries to persist the recovered result, same TOCTOU stand-in as finding1's
+  // read-side test above.
+  mkdirSync(join(dir, "result.json"), { recursive: true });
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => { r = reconcileRun(RUN.id, GONE); });
+  assert.deepEqual(r!.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete", "completes from the in-memory recovered result despite the disk write failing");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" });
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.completed"), "must complete, not fail");
+  assert.ok(!types.includes("task.failed"), "must NOT be reported as failed");
+
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.recoverableStdoutResult, true);
+  assert.equal(evidence.resultWriteFailed, true, "the disk-write failure is recorded in evidence, not swallowed silently");
 });
 
 test("FG-455: container gone, empty result, no recoverable stdout, but a dirty worktree → failure_kind=orphaned_work_may_persist (work preserved, not discarded)", () => {
@@ -228,6 +268,15 @@ test("FG-455 NEGATIVE: non-empty stdout with no recoverable result AND no change
   const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
   assert.equal((failed.payload as Record<string, unknown>).failure_kind, "orphaned", "ordinary orphaned — unchanged classification/shape");
   assert.equal((failed.payload as Record<string, unknown>).evidence, undefined, "ordinary orphaned carries no evidence payload (happy path unchanged)");
+
+  // FG-455 review finding 2: the ordinary-orphaned outcome must still carry the
+  // evidence tuple on its task.reconciled event, same as the other two outcomes.
+  const reconciled = eventsForTask(taskId).find((e) => e.eventType === "task.reconciled")!;
+  const evidence = (reconciled.payload as Record<string, unknown>).evidence as OrphanEvidence;
+  assert.equal(evidence.containerName, `forge-${taskId}`);
+  assert.equal(evidence.containerLiveness, "gone");
+  assert.equal(evidence.recoverableStdoutResult, false);
+  assert.deepEqual(evidence.changedFiles, []);
 });
 
 // ----- FG-455 red-review finding 1: never-throw on unreadable result.json -----

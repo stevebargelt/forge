@@ -108,6 +108,11 @@ export type OrphanEvidence = {
   // inspect, not proof of this task's work. Optional: events recorded before
   // this field existed omit it.
   source?: "worktree" | "project_dir_shared";
+  // FG-455 review finding 1: the recovered stdout result is written to
+  // result.json best-effort — completion always proceeds from the in-memory
+  // result regardless of whether the disk write succeeded. Set when that write
+  // threw, so a bad task dir doesn't silently look like a clean recovery.
+  resultWriteFailed?: boolean;
 };
 
 /** Recover the orphaned_work_may_persist evidence from a task's event stream,

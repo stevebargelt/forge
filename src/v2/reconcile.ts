@@ -165,34 +165,47 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
         inferred = undefined;
       }
 
+      // FG-455 review finding 2: gather the full evidence tuple ONCE, before the
+      // 3-way branch below, so all three container-gone outcomes (recovered
+      // complete, work-may-persist, ordinary orphaned) carry the same durable
+      // audit tuple on their task.reconciled event — not just the
+      // work-may-persist case. A dedicated worktree_path is this task's alone —
+      // any changed files found there are confident, task-exclusive evidence.
+      // The run.projectDir fallback (no-worktree tasks) is SHARED with the
+      // operator's cwd and any other no-worktree task in the run — a dirty
+      // status there may just be unrelated in-progress work, not proof this
+      // task persisted anything. Record which one it was so every consumer
+      // (show/status/ops-check) can render the honest confidence level.
+      const worktreePathChecked = t.worktreePath ?? run.projectDir;
+      const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
+      const changedFiles = changedWorktreeFiles(worktreePathChecked);
+      const evidence: OrphanEvidence = {
+        containerName,
+        containerLiveness: "gone",
+        resultState: resultFileState(t.runId, t.id),
+        recoverableStdoutResult: inferred !== undefined,
+        worktreePathChecked: worktreePathChecked ?? null,
+        changedFiles,
+        source,
+      };
+
       if (inferred) {
-        writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+        // FG-455 review finding 1: completion must come from the in-memory
+        // recovered result, never depend on the disk write succeeding — the
+        // write is best-effort only. If result.json is a directory, unwritable,
+        // or the path races invalid, note the failure in evidence and still
+        // complete the task from `inferred`.
+        try {
+          writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
+        } catch {
+          evidence.resultWriteFailed = true;
+        }
         if (markTaskComplete(t.id, inferred)) {
           logEvent("task.completed", { runId, taskId: t.id });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
           taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
         }
       } else {
-        // FG-455 finding 2: a dedicated worktree_path is this task's alone — any
-        // changed files found there are confident, task-exclusive evidence. The
-        // run.projectDir fallback (no-worktree tasks, the core FG-455 case) is
-        // SHARED with the operator's cwd and any other no-worktree task in the
-        // run — a dirty status there may just be unrelated in-progress work, not
-        // proof this task persisted anything. Record which one it was so every
-        // consumer (show/status/ops-check) can render the honest confidence level.
-        const worktreePathChecked = t.worktreePath ?? run.projectDir;
-        const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
-        const changedFiles = changedWorktreeFiles(worktreePathChecked);
-        const evidence: OrphanEvidence = {
-          containerName,
-          containerLiveness: "gone",
-          resultState: resultFileState(t.runId, t.id),
-          recoverableStdoutResult: false,
-          worktreePathChecked: worktreePathChecked ?? null,
-          changedFiles,
-          source,
-        };
-
         if (changedFiles.length > 0) {
           const error =
             `orphaned_work_may_persist: container gone with no recoverable result, but ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
@@ -208,7 +221,7 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
           const error = "orphaned: container gone with no result (reconciled after crash)";
           markTaskFailed(t.id, error);
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result" } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
           taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
         }
       }
