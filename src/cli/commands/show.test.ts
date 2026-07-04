@@ -14,7 +14,9 @@ import {
   performShow,
   getFailureKindFromEvents,
   getOrphanEvidenceFromEvents,
+  getFanoutWaveEvidenceFromEvents,
   orphanRecoveryMessage,
+  fanoutWaveRecoveryMessage,
   classifyResultFile,
   computeElapsed,
   formatTimeAgo,
@@ -239,6 +241,27 @@ test("getFailureKindFromEvents: failure_kind round-trip via DB events", () => {
   }
 });
 
+test("fanout_wave_orphaned round-trip via DB events: failure kind, childSummary, and next command all agree", () => {
+  insertTask(makeTask("task-fanout-parent", { status: "failed" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId: "task-fanout-parent",
+    payload: { failure_kind: "fanout_wave_orphaned", error: "boom", childSummary: { total: 3, complete: 1 } },
+  });
+  const result = performShow("task-fanout-parent");
+  assert.equal(result.kind, "task");
+  if (result.kind !== "task") return;
+  const failureKind = getFailureKindFromEvents(result.events);
+  assert.equal(failureKind, "fanout_wave_orphaned");
+  // Same values feed both the --json diagnostic and the human "recovery:"/"Next:"
+  // lines in show.ts — a single source of truth means the two surfaces can't diverge.
+  const evidence = getFanoutWaveEvidenceFromEvents(result.events);
+  assert.deepEqual(evidence, { total: 3, complete: 1 });
+  const nextCommand = deriveNextCommandForTask(result.task.status, failureKind, result.task.id);
+  assert.match(nextCommand, /forge recover task-fanout-parent --re-drive/);
+  assert.match(fanoutWaveRecoveryMessage(result.task.id, evidence!), /1\/3/);
+});
+
 // ─── getOrphanEvidenceFromEvents / orphanRecoveryMessage (FG-455) ──────────
 
 test("getOrphanEvidenceFromEvents: recovers the evidence recorded on the task.failed event", () => {
@@ -304,6 +327,34 @@ test("orphanRecoveryMessage: omits the source line when evidence predates the `s
     recoverableStdoutResult: false, worktreePathChecked: "/proj", changedFiles: ["M foo.ts"],
   });
   assert.doesNotMatch(msg, /source:/i);
+});
+
+// ─── getFanoutWaveEvidenceFromEvents / fanoutWaveRecoveryMessage (FG-455 p2/p3 review finding 2) ──
+
+test("getFanoutWaveEvidenceFromEvents: recovers the childSummary recorded on the task.failed event", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "fanout_wave_orphaned", error: "x", childSummary: { total: 4, complete: 1 } }),
+  ];
+  assert.deepEqual(getFanoutWaveEvidenceFromEvents(events), { total: 4, complete: 1 });
+});
+
+test("getFanoutWaveEvidenceFromEvents: undefined for a different failure kind", () => {
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "orphaned_work_may_persist", error: "x" })];
+  assert.equal(getFanoutWaveEvidenceFromEvents(events), undefined);
+});
+
+test("getFanoutWaveEvidenceFromEvents: undefined when a later task.completed supersedes (recovered)", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "fanout_wave_orphaned", childSummary: { total: 2, complete: 1 } }),
+    makeEvent("task.completed"),
+  ];
+  assert.equal(getFanoutWaveEvidenceFromEvents(events), undefined);
+});
+
+test("fanoutWaveRecoveryMessage: names the child completion counts and the --re-drive guidance", () => {
+  const msg = fanoutWaveRecoveryMessage("parent-abc", { total: 3, complete: 2 });
+  assert.match(msg, /2\/3/);
+  assert.match(msg, /forge recover parent-abc --re-drive/);
 });
 
 // ─── classifyResultFile ──────────────────────────────────────────────────────
@@ -732,6 +783,15 @@ test("deriveNextCommandForTask: failed+orphaned_work_may_persist → inspect bef
   const cmd = deriveNextCommandForTask("failed", "orphaned_work_may_persist", "task-abc");
   assert.match(cmd, /forge show task-abc/);
   assert.match(cmd, /--force/);
+  assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
+});
+
+// FG-455 p2/p3 review finding 2: a fanout parent's blind `forge retry` is
+// unsafe (retry-policy.ts refuses it) — recommend `forge recover --re-drive`
+// instead, not the generic fallthrough.
+test("deriveNextCommandForTask: failed+fanout_wave_orphaned → forge recover --re-drive, not forge retry", () => {
+  const cmd = deriveNextCommandForTask("failed", "fanout_wave_orphaned", "task-abc");
+  assert.match(cmd, /forge recover task-abc --re-drive/);
   assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
 });
 

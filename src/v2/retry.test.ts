@@ -183,6 +183,39 @@ test("retry: an ordinary primary (no fanout parent) is unaffected by the strand 
   assert.equal(out.newTask.parentId, undefined);
 });
 
+// ── FG-455 p2/p3 review finding 1: retrying the fanout PARENT itself (not a
+// child) must also be refused without --force — a blind retry mints a second,
+// uncoordinated pending primary, bypassing `forge recover --re-drive`'s
+// dupePending refusal and audit trail. Closed via retry-policy.ts's
+// fanout_wave_orphaned entry (retryable: false), the same mechanism already
+// used for gate_rejected / red_blocked / orphaned_work_may_persist. ──
+
+test("retryPolicy: fanout_wave_orphaned is NOT retryable, advice points at forge recover --re-drive", () => {
+  const d = retryPolicy("fanout_wave_orphaned");
+  assert.equal(d.retryable, false);
+  assert.match(d.advice ?? "", /forge recover .*--re-drive/);
+});
+
+test("retry: a fanout PARENT (failed, failure_kind fanout_wave_orphaned) is refused without --force", async () => {
+  failedTask("parent-orphaned-wave", "fanout_wave_orphaned", "fanout wave orphaned: 1/2 children complete");
+  await assert.rejects(retry("parent-orphaned-wave"), (e: unknown) => {
+    assert.ok(e instanceof RetryNotAllowedError);
+    assert.match(e.message, /forge recover .*--re-drive/);
+    return true;
+  });
+  // refused attempt must create no new task and log no task.retried
+  assert.equal(eventsForTask("parent-orphaned-wave").some((e) => e.eventType === "task.retried"), false);
+  assert.equal(getTask("parent-orphaned-wave")!.status, "failed", "left untouched by the refusal");
+});
+
+test("retry: --force lets a determined operator retry a fanout parent anyway", async () => {
+  failedTask("parent-orphaned-wave-force", "fanout_wave_orphaned");
+  const out = await retry("parent-orphaned-wave-force", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  const retried = eventsForTask("parent-orphaned-wave-force").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).forced, true);
+});
+
 test("retry: a RED reviewer child (parentId + same phase, agentRole prefixed red-) is not treated as a fanout child", async () => {
   insertTask({
     id: "primary-with-red", runId: RUN.id, phase: "build", agentRole: "engineer", status: "complete",

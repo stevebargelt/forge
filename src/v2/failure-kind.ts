@@ -135,3 +135,26 @@ export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | u
   }
   return undefined;
 }
+
+// FG-455 p2/p3 review finding 2: reconcile.ts records how many children finished
+// before a fanout parent got reconciled to fanout_wave_orphaned — the same
+// childSummary shape it also writes onto task.reconciled. Sibling to
+// getOrphanEvidenceFromEvents (same newest-first, completed-supersedes walk) so
+// `forge show` can surface this alongside the generic failure summary.
+export type FanoutWaveEvidence = { total: number; complete: number };
+
+export function getFanoutWaveEvidenceFromEvents(events: Event[]): FanoutWaveEvidence | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.eventType === "task.completed") return undefined;
+    if (e.eventType === "task.failed") {
+      const payload = e.payload as Record<string, unknown> | null;
+      if (payload?.["failure_kind"] === "fanout_wave_orphaned" && payload["childSummary"]) {
+        return payload["childSummary"] as FanoutWaveEvidence;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
