@@ -4,8 +4,9 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
+import { logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
-import { detectRetryOrphan, detectInconsistentRunState, runOpsCheck } from "./detect.js";
+import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
 import { renderHuman } from "../cli/commands/ops.js";
 
@@ -84,6 +85,97 @@ test("detectInconsistentRunState: running under an active run is normal", () => 
   insertRun(mkRun("run-c", "active"));
   insertTask(mkTask("task-c", "run-c", "running"));
   assert.equal(detectInconsistentRunState(db).length, 0);
+});
+
+// ── detectOrphanedWorkMayPersist (FG-455) ───────────────────────────────────
+
+test("detectOrphanedWorkMayPersist: flags a failed task classified orphaned_work_may_persist", () => {
+  insertRun(mkRun("run-owmp", "active"));
+  insertTask(mkTask("task-owmp", "run-owmp", "failed"));
+  const evidence = {
+    containerName: "forge-task-owmp",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: ["?? new-file.txt"],
+  };
+  logEvent("task.failed", {
+    runId: "run-owmp", taskId: "task-owmp",
+    payload: { failure_kind: "orphaned_work_may_persist", error: "orphaned_work_may_persist: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "orphaned_work_may_persist");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.severity, "high");
+  assert.equal(i.taskId, "task-owmp");
+  assert.equal(i.recommendedAction.type, "investigate");
+  assert.equal(i.recommendedAction.autonomy, "manual-only", "never auto-actionable — a human must inspect the diff first");
+  assert.match(i.evidence.join(" "), /changed-file\.txt|1 changed file/);
+});
+
+test("detectOrphanedWorkMayPersist: ignores ordinary orphaned and non-failed tasks", () => {
+  insertRun(mkRun("run-ord", "active"));
+  insertTask(mkTask("task-ord", "run-ord", "failed"));
+  logEvent("task.failed", { runId: "run-ord", taskId: "task-ord", payload: { failure_kind: "orphaned", error: "orphaned" } });
+  insertTask(mkTask("task-running", "run-ord", "running"));
+
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), []);
+});
+
+test("detectOrphanedWorkMayPersist: discloses source=project_dir_shared in the rendered evidence", () => {
+  insertRun(mkRun("run-shared", "active"));
+  insertTask(mkTask("task-shared", "run-shared", "failed"));
+  const evidence = {
+    containerName: "forge-task-shared",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/some/project",
+    changedFiles: ["M foo.ts"],
+    source: "project_dir_shared",
+  };
+  logEvent("task.failed", {
+    runId: "run-shared", taskId: "task-shared",
+    payload: { failure_kind: "orphaned_work_may_persist", error: "...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.match(incidents[0]!.evidence.join(" "), /SHARED project directory/i);
+});
+
+test("detectOrphanedWorkMayPersist: only reads the LATEST task.failed event — a superseded earlier failure's evidence is ignored", () => {
+  insertRun(mkRun("run-retry", "active"));
+  insertTask(mkTask("task-retry", "run-retry", "failed"));
+  // An earlier attempt failed as ordinary orphaned...
+  logEvent("task.failed", { runId: "run-retry", taskId: "task-retry", payload: { failure_kind: "orphaned", error: "first" } });
+  // ...retried, and the SECOND attempt is the one classified orphaned_work_may_persist.
+  logEvent("task.retried", { runId: "run-retry", taskId: "task-retry" });
+  const evidence = {
+    containerName: "forge-task-retry", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/wt", changedFiles: ["?? f.txt"], source: "worktree",
+  };
+  logEvent("task.failed", { runId: "run-retry", taskId: "task-retry", payload: { failure_kind: "orphaned_work_may_persist", error: "second", evidence } });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.equal(incidents[0]!.taskId, "task-retry");
+});
+
+test("detectOrphanedWorkMayPersist: project scoping", () => {
+  insertRun(mkRun("run-owmp-a", "active", "/projects/alpha"));
+  insertTask(mkTask("task-owmp-a", "run-owmp-a", "failed"));
+  logEvent("task.failed", { runId: "run-owmp-a", taskId: "task-owmp-a", payload: { failure_kind: "orphaned_work_may_persist", error: "x" } });
+  insertRun(mkRun("run-owmp-b", "active", "/projects/beta"));
+  insertTask(mkTask("task-owmp-b", "run-owmp-b", "failed"));
+  logEvent("task.failed", { runId: "run-owmp-b", taskId: "task-owmp-b", payload: { failure_kind: "orphaned_work_may_persist", error: "x" } });
+
+  assert.equal(detectOrphanedWorkMayPersist(db, { projectDir: "/projects/alpha" }).length, 1);
+  assert.equal(detectOrphanedWorkMayPersist(db).length, 2, "no projectDir → host-wide");
 });
 
 // ── project scoping ─────────────────────────────────────────────────────────

@@ -10,8 +10,9 @@ import { eventsForTask, eventsForRun } from "../../store/events.js";
 import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
-import { failureKindFromEvents as getFailureKindFromEvents } from "../../v2/failure-kind.js";
+import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, type OrphanEvidence } from "../../v2/failure-kind.js";
 import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
+import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
 import { docsImpactSuggestion, loadOperatorSurfaces } from "../../v2/contract.js";
 import { summarizeFindings, gatherRunReviews } from "../../v2/review-quality.js";
@@ -74,7 +75,7 @@ export function showReconcileStep(
 // of truth, also consumed by the notification layer). Imported + re-exported
 // here under its long-standing name so forge show / watch importers and tests
 // stay stable.
-export { getFailureKindFromEvents };
+export { getFailureKindFromEvents, getOrphanEvidenceFromEvents };
 
 export function classifyResultFile(filePath: string): "missing" | "empty" | "malformed" | "valid" {
   let content: string;
@@ -333,26 +334,6 @@ export function getManifestIdleTimeoutMs(taskDirPath: string): number | undefine
   }
 }
 
-// #292: the runtime EXECUTION metadata this task ran under, from its manifest.
-// Undefined for pre-#292 manifests. Lets forge show report runtime behavior
-// (parser/prompt/auth strategy) distinctly from upstream provider/model.
-export type ManifestRuntime = {
-  name: string;
-  kind: string;
-  logFormat: string;
-  promptStrategy: string;
-  authStrategy: string;
-};
-export function getManifestRuntime(taskDirPath: string): ManifestRuntime | undefined {
-  try {
-    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
-    const manifest = JSON.parse(raw) as { runtime?: ManifestRuntime };
-    return manifest.runtime;
-  } catch {
-    return undefined;
-  }
-}
-
 // Docs-drift Walk (#241): the files an implementer reported touching, for
 // operator-surface inference. Tolerant of a missing/malformed result.
 export function getResultFilesModified(taskDirPath: string): string[] {
@@ -417,12 +398,44 @@ export function deriveNextCommandForTask(
     if (failureKind === "red_blocked") {
       return `forge show <redTaskId>  # review findings, then forge gate ${taskId} --advance | --reject`;
     }
+    // FG-455: a dirty worktree may hold real, unreviewed work — a blind retry
+    // would re-dispatch over it. Point at inspection first; retry-policy.ts
+    // already refuses `forge retry` on this kind without --force.
+    if (failureKind === "orphaned_work_may_persist") {
+      return `forge show ${taskId} --json  # inspect the worktree diff, then \`forge retry ${taskId} --force\` once verified`;
+    }
     return `forge retry ${taskId}`;
   }
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;
   if (status === "blocked_by_red")
     return `forge show <redTaskId>  # review findings, then forge gate ${taskId} --advance | --reject`;
   return "—";
+}
+
+/** FG-455: the operator-facing recovery message for an orphaned_work_may_persist
+ *  task — task id, task dir, worktree path, changed files, and what to do next.
+ *  Shared rendering for `forge show`, `forge status`, and `forge ops check`. */
+export function orphanRecoveryMessage(runId: string, taskId: string, evidence: OrphanEvidence): string {
+  const dir = taskDir(runId, taskId);
+  const files = evidence.changedFiles.length > 0
+    ? evidence.changedFiles.join(", ")
+    : "(none listed)";
+  // FG-455 finding 2: a shared-projectDir diff is NOT task-exclusive — disclose
+  // that up front so an operator doesn't mistake it for confirmed persisted work.
+  // Evidence recorded before `source` existed omits it; say nothing rather than guess.
+  const sourceLine = evidence.source === "project_dir_shared"
+    ? "    source:        SHARED project directory (no dedicated worktree for this task) — may include unrelated uncommitted changes; evidence to inspect, not proof of task work.\n"
+    : evidence.source === "worktree"
+      ? "    source:        dedicated worktree (task-exclusive)\n"
+      : "";
+  return (
+    `work may have persisted — container gone, no recoverable result, but changed files were found.\n` +
+    sourceLine +
+    `    task dir:      ${dir}\n` +
+    `    worktree path: ${evidence.worktreePathChecked ?? "(none — no worktree_path or run.projectDir recorded)"}\n` +
+    `    changed files: ${files}\n` +
+    `    guidance:      inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`
+  );
 }
 
 export function getBlockerTasks(tasks: Task[]): Task[] {
@@ -546,6 +559,9 @@ export function registerShow(program: Command): void {
         // #298/#290: reconcile-candidate reason from the read-only step above —
         // a running task whose container is gone is surfaced, never reconciled.
         const reconcileReason: ReconcileReason | null = candidateReason;
+        // FG-455: orphaned_work_may_persist carries recovery evidence on its
+        // task.failed event — surface it distinctly, not as a generic failure.
+        const orphanEvidence = getOrphanEvidenceFromEvents(events);
 
         if (opts.json) {
           console.log(
@@ -558,6 +574,9 @@ export function registerShow(program: Command): void {
                   runtime: runtimeMeta ?? null,
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
+                  orphanRecovery: orphanEvidence
+                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence) }
+                    : null,
                   elapsed,
                   lastOutputAgo,
                   idleTimeoutMs,
@@ -603,6 +622,11 @@ export function registerShow(program: Command): void {
           console.log(`  reconcile: CANDIDATE (${reconcileReason}) — DB says running but the container is gone; run \`forge show --reconcile ${task.id}\` to finalize`);
         }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
+        // FG-455: don't let this collapse into a generic "failed" — the worktree
+        // may hold real, unreviewed work.
+        if (orphanEvidence) {
+          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence)}`);
+        }
         // Docs-drift Walk (#241): if the completed task touched operator surfaces,
         // suggest the documentation-maintainer (advisory only — not a gate yet).
         // #246: surfaces are project-configurable via <project>/.forge/docs-surfaces.yml.

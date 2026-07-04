@@ -113,3 +113,21 @@ test("retry after red_blocked: refused without --force", async () => {
   failedTask("t-red", "red_blocked");
   await assert.rejects(retry("t-red"), RetryNotAllowedError);
 });
+
+// FG-455: a dirty worktree may hold real, unreviewed work — a blind retry
+// would re-dispatch over it. Same "needs --force" shape as gate_rejected/red_blocked.
+test("retryPolicy: orphaned_work_may_persist is NOT retryable (don't clobber a dirty worktree)", () => {
+  const d = retryPolicy("orphaned_work_may_persist");
+  assert.equal(d.retryable, false);
+  assert.ok(d.advice, "must carry advice on how to proceed");
+});
+
+test("retry after orphaned_work_may_persist: refused without --force, allowed with --force", async () => {
+  failedTask("t-orphan-work", "orphaned_work_may_persist");
+  await assert.rejects(retry("t-orphan-work"), RetryNotAllowedError);
+  assert.equal(eventsForTask("t-orphan-work").some((e) => e.eventType === "task.retried"), false);
+  const out = await retry("t-orphan-work", { force: true });
+  assert.equal(out.newTask.status, "pending");
+  const retried = eventsForTask("t-orphan-work").find((e) => e.eventType === "task.retried")!;
+  assert.equal((retried.payload as Record<string, unknown>).forced, true);
+});

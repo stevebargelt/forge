@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 // FG-350: RECORDED dispatch-time control-plane provenance. Written once at task
@@ -153,4 +153,26 @@ export type TaskManifest = {
 
 export function writeTaskManifest(dir: string, manifest: TaskManifest): void {
   writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
+}
+
+// #292: the runtime EXECUTION metadata this task ran under, from its manifest.
+// Undefined for pre-#292 manifests (or a missing/unreadable manifest). Lets
+// callers (forge show, reconcile's FG-455 stdout-recovery attempt) report
+// runtime behavior (parser/prompt/auth strategy) distinctly from upstream
+// provider/model — without depending on a CLI command module.
+export type ManifestRuntime = {
+  name: string;
+  kind: string;
+  logFormat: string;
+  promptStrategy: string;
+  authStrategy: string;
+};
+export function getManifestRuntime(taskDirPath: string): ManifestRuntime | undefined {
+  try {
+    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
+    const manifest = JSON.parse(raw) as { runtime?: ManifestRuntime };
+    return manifest.runtime;
+  } catch {
+    return undefined;
+  }
 }

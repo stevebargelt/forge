@@ -7,6 +7,7 @@ import type { Event } from "../store/events.js";
 export type FailureKind =
   | "cancelled"
   | "orphaned"        // container gone with no result — reconciled after a host/parent crash (AWN-1)
+  | "orphaned_work_may_persist" // FG-455: container gone, no recoverable result, but the worktree has changed files — real work may be sitting there; reconcile refuses to discard it and surfaces the diff for a human to inspect instead of silently orphaning it
   | "container_crash"
   | "idle_timeout"
   | "result_missing"
@@ -87,4 +88,49 @@ export function failureKindFromEvents(events: Event[]): string | undefined {
 /** The current failure_kind for a task id (loads its events). */
 export function failureKindForTask(taskId: string): string | undefined {
   return failureKindFromEvents(eventsForTask(taskId));
+}
+
+// FG-455: recovery evidence reconcile gathers BEFORE classifying a container-gone
+// task, recorded on the task.failed / task.reconciled payload so any consumer of
+// the event stream (forge show, forge status, forge ops check) can render it —
+// not just the process that did the classifying.
+export type OrphanEvidence = {
+  containerName: string;
+  containerLiveness: "gone";
+  resultState: "absent" | "empty" | "malformed" | "valid";
+  recoverableStdoutResult: boolean;
+  worktreePathChecked: string | null;
+  changedFiles: string[];
+  // FG-455 finding 2: where changedFiles came from. "worktree" = a dedicated
+  // worktree_path — task-exclusive, confident evidence. "project_dir_shared" =
+  // the no-worktree fallback onto run.projectDir, which the operator (and any
+  // other no-worktree task in the run) may also be touching — evidence to
+  // inspect, not proof of this task's work. Optional: events recorded before
+  // this field existed omit it.
+  source?: "worktree" | "project_dir_shared";
+  // FG-455 review finding 1: the recovered stdout result is written to
+  // result.json best-effort — completion always proceeds from the in-memory
+  // result regardless of whether the disk write succeeded. Set when that write
+  // threw, so a bad task dir doesn't silently look like a clean recovery.
+  resultWriteFailed?: boolean;
+};
+
+/** Recover the orphaned_work_may_persist evidence from a task's event stream,
+ *  mirroring failureKindFromEvents's newest-first walk (a later task.completed
+ *  means recovered — no evidence to show). undefined for any other failure kind
+ *  or a task.failed pre-dating this evidence. */
+export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.eventType === "task.completed") return undefined;
+    if (e.eventType === "task.failed") {
+      const payload = e.payload as Record<string, unknown> | null;
+      if (payload?.["failure_kind"] === "orphaned_work_may_persist" && payload["evidence"]) {
+        return payload["evidence"] as OrphanEvidence;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
 }

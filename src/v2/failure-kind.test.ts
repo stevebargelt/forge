@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { classify, failTask, failureKindFromEvents, type FailureKind } from "./failure-kind.js";
+import { classify, failTask, failureKindFromEvents, getOrphanEvidenceFromEvents, type FailureKind, type OrphanEvidence } from "./failure-kind.js";
 import type { Event } from "../store/events.js";
 import { AuthProfileError } from "./auth-state.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
@@ -380,4 +380,45 @@ test("failureKindFromEvents: picks LATEST task.failed (newest-first walk, post-r
     makeEvent("task.failed", { failure_kind: "container_crash" }),
   ];
   assert.equal(failureKindFromEvents(events), "container_crash", "latest failure wins");
+});
+
+// ── getOrphanEvidenceFromEvents (FG-455) ────────────────────────────────────
+
+const SAMPLE_EVIDENCE: OrphanEvidence = {
+  containerName: "forge-t-1",
+  containerLiveness: "gone",
+  resultState: "absent",
+  recoverableStdoutResult: false,
+  worktreePathChecked: "/tmp/worktree",
+  changedFiles: ["?? new-file.txt"],
+};
+
+test("getOrphanEvidenceFromEvents: returns the evidence recorded on an orphaned_work_may_persist task.failed", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "orphaned_work_may_persist", error: "x", evidence: SAMPLE_EVIDENCE }),
+  ];
+  assert.deepEqual(getOrphanEvidenceFromEvents(events), SAMPLE_EVIDENCE);
+});
+
+test("getOrphanEvidenceFromEvents: undefined for ordinary orphaned (no evidence to show)", () => {
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "orphaned", error: "x" })];
+  assert.equal(getOrphanEvidenceFromEvents(events), undefined);
+});
+
+test("getOrphanEvidenceFromEvents: undefined once a later task.completed supersedes the failure (retried + recovered)", () => {
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "orphaned_work_may_persist", error: "x", evidence: SAMPLE_EVIDENCE }),
+    makeEvent("task.retried"),
+    makeEvent("task.completed"),
+  ];
+  assert.equal(getOrphanEvidenceFromEvents(events), undefined);
+});
+
+test("getOrphanEvidenceFromEvents: undefined for other failure kinds even when a stray evidence key is present", () => {
+  const events: Event[] = [makeEvent("task.failed", { failure_kind: "model_error", error: "x", evidence: SAMPLE_EVIDENCE })];
+  assert.equal(getOrphanEvidenceFromEvents(events), undefined);
+});
+
+test("getOrphanEvidenceFromEvents: empty event list → undefined", () => {
+  assert.equal(getOrphanEvidenceFromEvents([]), undefined);
 });

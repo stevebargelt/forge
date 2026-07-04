@@ -5,8 +5,10 @@ import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { liveIdleCountdownForTask, formatIdleCountdown } from "./show.js";
+import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage } from "./show.js";
 import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
+import { eventsForTask } from "../../store/events.js";
+import { failureKindFromEvents, getOrphanEvidenceFromEvents } from "../../v2/failure-kind.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -71,25 +73,36 @@ export function registerStatus(program: Command): void {
       if (opts.json) {
         // Structured output for the orchestrator. One JSON object per call.
         // Stable schema: run + tasks (with verdicts inlined per task).
-        const tasksJson = tasks.map((t) => ({
-          id: t.id,
-          phase: t.phase,
-          agentRole: t.agentRole,
-          status: t.status,
-          parentTaskId: t.parentId ?? null,
-          createdAt: t.createdAt,
-          startedAt: t.startedAt ?? null,
-          completedAt: t.completedAt ?? null,
-          error: t.error ?? null,
-          idleCountdown: liveIdleCountdownForTask(t) ?? null,
-          verdicts: verdictsForTask(t.id).map((v) => ({
-            redRole: v.redRole,
-            verdict: v.verdict,
-            confidence: v.confidence,
-            authority: v.authority,
-            redTaskId: v.redTaskId,
-          })),
-        }));
+        const tasksJson = tasks.map((t) => {
+          // FG-455: orphaned_work_may_persist carries recovery evidence — surface
+          // it here too, not just in `forge show`, so scripted/orchestrator
+          // consumers of `forge status --json` see it without a second call.
+          const events = eventsForTask(t.id);
+          const orphanEvidence = t.status === "failed" ? getOrphanEvidenceFromEvents(events) : undefined;
+          return {
+            id: t.id,
+            phase: t.phase,
+            agentRole: t.agentRole,
+            status: t.status,
+            parentTaskId: t.parentId ?? null,
+            createdAt: t.createdAt,
+            startedAt: t.startedAt ?? null,
+            completedAt: t.completedAt ?? null,
+            error: t.error ?? null,
+            failureKind: t.status === "failed" ? (failureKindFromEvents(events) ?? null) : null,
+            orphanRecovery: orphanEvidence
+              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence) }
+              : null,
+            idleCountdown: liveIdleCountdownForTask(t) ?? null,
+            verdicts: verdictsForTask(t.id).map((v) => ({
+              redRole: v.redRole,
+              verdict: v.verdict,
+              confidence: v.confidence,
+              authority: v.authority,
+              redTaskId: v.redTaskId,
+            })),
+          };
+        });
         console.log(JSON.stringify({
           run: {
             id: run.id,
@@ -132,6 +145,14 @@ export function registerStatus(program: Command): void {
             line += `  — ${summary}`;
           }
           console.log(line);
+          // FG-455: a generic ☠ icon doesn't distinguish "safe to retry" from
+          // "the worktree may hold real work" — print the recovery message.
+          if (t.status === "failed") {
+            const orphanEvidence = getOrphanEvidenceFromEvents(eventsForTask(t.id));
+            if (orphanEvidence) {
+              console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence)}`);
+            }
+          }
         }
       }
     });
