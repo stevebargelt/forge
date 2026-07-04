@@ -1,9 +1,11 @@
 ---
 id: FG-437
 type: story
-status: active
+status: done
 title: "AWN-1 crash reconciler: model the FG-376 dependency provisioning phase (recover stranded task + orphaned forge-provision-* container after host crash mid-provision)"
 created: 2026-07-02
+closed: 2026-07-04
+closed_commit: eb57b0f
 ---
 
 ## Problem
