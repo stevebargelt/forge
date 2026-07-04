@@ -54,6 +54,23 @@ const RECONCILABLE_LIFECYCLE_STATUSES: ReadonlySet<CampaignItemLifecycleStatus> 
   "blocked_by_red",
 ]);
 
+// FG-458: the subset of evaluateReconcileEvidence's `missing` reason codes that
+// are specific to the run's OWN authoritative-review outcome (its fact 5) —
+// used by the out-of-band branch below to check consistency with `forge
+// campaign resume`'s events-aware evaluation of the same run (see executor.ts's
+// FG-441 reattach path). Deliberately excludes the other four facts (ticket
+// status, closed-commit presence/reachability, host-verification): those are
+// already independently re-derived by the out-of-band evaluator from the SAME
+// underlying ticket/git/host-verification data, so folding them in here too
+// would be redundant at best — and for host-verification specifically, actively
+// self-defeating: a not-yet-captured item would show host_verification_not_recorded
+// on both evaluators forever, permanently blocking the very capture below that's
+// supposed to resolve it.
+const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
+  "no_authoritative_verdict_or_force_advance_event",
+  "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+]);
+
 export function reconcileCampaign(
   campaignId: string,
   opts: {
@@ -146,6 +163,34 @@ export function reconcileCampaign(
       evidence = evaluated.evidence;
       eventType = "campaign_item.evidence_reconciled";
     } else {
+      // FG-458: an out-of-band item WITH a runId must ALSO agree with the run's
+      // own authoritative-review outcome — the same fact `forge campaign resume`
+      // checks for this exact shape (awaiting_gate, no blockerKind, has a runId —
+      // see executor.ts's FG-441 reattach path) — otherwise reconcile can ship a
+      // row resume would refuse for an unresolved authoritative fail on its own
+      // run. An item with no runId was never attached to a run in the first
+      // place (the legitimate FG-443 out-of-band delivery case) and is
+      // unaffected. Only the authoritative-outcome fact is composed here (see
+      // AUTHORITATIVE_OUTCOME_MISSING_CODES above) — NOT full events-aware
+      // eligibility, which would double-count host-verification against this
+      // branch's own capture below.
+      //
+      // Evaluated FIRST, before the lane-evidence needsCapture gate run below:
+      // an unresolved authoritative fail refuses regardless of lane evidence —
+      // no reason to spend a real host-verification gate run finding that out.
+      let eventsAwareMissing: string[] = [];
+      let eventsAwareEvidence: unknown = null;
+      if (item.runId) {
+        const eventsAwareEvaluated = evaluateReconcileEvidence(collect(projectDir, item));
+        eventsAwareEvidence = eventsAwareEvaluated.evidence;
+        // Labeled distinctly from a lane-evidence reason so the operator can
+        // tell "the run's own authoritative review is unresolved" apart from
+        // "the out-of-band delivery lacks lane evidence" at a glance.
+        eventsAwareMissing = eventsAwareEvaluated.missing
+          .filter((m) => AUTHORITATIVE_OUTCOME_MISSING_CODES.has(m))
+          .map((m) => `run_evidence:${m}`);
+      }
+
       let collected = collectOutOfBand(projectDir, item);
       // FG-452: parity with the scope-blocked needsCapture above — capture only
       // for the CODE-TOUCHING sub-lane. collectOutOfBandEvidence's laneEvidence is
@@ -157,6 +202,7 @@ export function reconcileCampaign(
       // "code-touching and not yet covered by a passing row" — the same gate
       // shape as the scope-blocked branch's needsCapture.
       const needsCapture =
+        eventsAwareMissing.length === 0 &&
         !!collected.ticketClosedCommit &&
         collected.closedCommitReachableOnBase === true &&
         collected.laneEvidence === null;
@@ -174,9 +220,9 @@ export function reconcileCampaign(
         collected = collectOutOfBand(projectDir, item);
       }
       const evaluated = evaluateOutOfBandEvidence(collected);
-      eligible = evaluated.eligible;
-      missing = evaluated.missing;
-      evidence = evaluated.evidence;
+      eligible = evaluated.eligible && eventsAwareMissing.length === 0;
+      missing = [...evaluated.missing, ...eventsAwareMissing];
+      evidence = item.runId ? { ...evaluated.evidence, eventsAware: eventsAwareEvidence } : evaluated.evidence;
       eventType = "campaign_item.out_of_band_reconciled";
     }
 

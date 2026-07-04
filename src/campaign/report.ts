@@ -93,6 +93,28 @@ function recoveryNeededAction(item: CampaignItem): string {
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
 }
 
+// FG-458: the subset of evaluateReconcileEvidence's `missing` reason codes that
+// are specific to the run's OWN authoritative-review outcome (its fact 5) —
+// mirrors reconcile.ts's AUTHORITATIVE_OUTCOME_MISSING_CODES (duplicated rather
+// than shared across that public/private boundary — same pattern as
+// isHostLocalNoisePath above). Deliberately excludes the other four facts
+// (ticket status, closed-commit presence/reachability, host-verification):
+// those are already independently re-derived by the out-of-band evaluator from
+// the SAME underlying data, and for host-verification specifically, folding it
+// in here too would be self-defeating — outOfBandHostVerificationHint below
+// exists PRECISELY for the not-yet-captured case, so gating it on full
+// events-aware eligibility would suppress it for every runId'd item forever,
+// not just the ones with a genuine unresolved authoritative fail.
+const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
+  "no_authoritative_verdict_or_force_advance_event",
+  "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+]);
+
+function hasUnresolvedAuthoritativeOutcome(projectDir: string, item: CampaignItem): boolean {
+  const evaluated = evaluateReconcileEvidence(collectReconcileEvidence(projectDir, item));
+  return evaluated.missing.some((m) => AUTHORITATIVE_OUTCOME_MISSING_CODES.has(m));
+}
+
 // FG-443: distinguishes an awaiting_gate item that was actually delivered outside
 // the feature pipeline (re-routed lane) — and is therefore completable via the
 // evidence-gated `forge campaign reconcile` out-of-band path — from a genuine
@@ -104,9 +126,15 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
   if (!campaign.projectDir) return null;
   try {
     const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
-    if (evaluated.eligible) {
-      return `${item.ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
+    if (!evaluated.eligible) return null;
+    // FG-458: an item WITH a runId must also agree with the run's own
+    // authoritative-review outcome — otherwise this hint would point the
+    // operator at `forge campaign reconcile` for a row reconcile itself now
+    // refuses (see reconcile.ts's out-of-band branch).
+    if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
+      return null;
     }
+    return `${item.ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
   } catch {
     // best-effort — fall through to the generic gate text
   }
@@ -151,6 +179,14 @@ function outOfBandHostVerificationHint(campaign: Campaign, item: CampaignItem): 
     const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
     if (evaluated.eligible) return null;
     if (evaluated.missing.length === 1 && evaluated.missing[0] === "lane_evidence_missing") {
+      // FG-458: only the lane evidence is missing — but if this item has a runId
+      // and its own run carries an unresolved authoritative fail, `forge campaign
+      // reconcile` would refuse it anyway (see reconcile.ts's out-of-band branch).
+      // Pointing the operator at reconcile here would be misleading — surface the
+      // run-evidence refusal reason instead.
+      if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
+        return null;
+      }
       return (
         "lane_evidence_missing (no covering passing host-verification row recorded yet for this out-of-band " +
         "delivery — run `forge campaign reconcile` to capture a real host-verification gate and re-check)"
