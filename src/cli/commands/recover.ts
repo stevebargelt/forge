@@ -16,6 +16,7 @@ import { acquireRunLock, releaseRunLock } from "../../util/run-lock.js";
 import { newTaskId, nowIso } from "../../util/ids.js";
 import { failureKindForTask, getOrphanEvidenceFromEvents } from "../../v2/failure-kind.js";
 import type { OrphanEvidence } from "../../v2/failure-kind.js";
+import { retryPolicy } from "../../v2/retry-policy.js";
 import { changedWorktreeFiles, defaultContainerAlive, reconcileRun } from "../../v2/reconcile.js";
 import type { ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
@@ -110,6 +111,9 @@ function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: stri
       : `forge recover ${task.id} --continue`;
   }
   if (hasRecoverableWork) {
+    if (retryPolicy(failureKind).retryable) {
+      return `forge retry ${task.id}  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue, but is retryable without --force; evidence found — inspect the diff first if unsure)`;
+    }
     return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue; evidence found but not adopted — inspect the diff first)`;
   }
   return `forge retry ${task.id}  (no persisted work found — safe to re-dispatch from scratch)`;

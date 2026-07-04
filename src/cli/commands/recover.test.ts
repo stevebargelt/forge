@@ -164,6 +164,28 @@ test("recover inspect: a non-continuable failure_kind (e.g. container_crash) wit
     /^forge recover \S+ --continue/,
     "performContinue refuses container_crash — must not be the recommended command",
   );
+  assert.equal(
+    outcome.task.recommendation,
+    `forge retry ${taskId}  (failure_kind=container_crash isn't continuable via --continue, but is retryable without --force; evidence found — inspect the diff first if unsure)`,
+    "container_crash is retry-policy retryable without --force — recommending --force here is over-conservative",
+  );
+});
+
+// FG-455 p4 review finding 3: recommendationFor over-recommended --force for
+// ANY non-continuable kind with evidence, even kinds retry-policy.ts marks
+// retryable without --force (container_crash, idle_timeout). Only a kind
+// retry-policy.ts marks non-retryable should still get --force.
+test("recover inspect: a non-continuable, non-retryable failure_kind (e.g. red_blocked) with evidence recommends --force", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-inspect-nonretryable";
+  insertTask(mkTask(taskId, { status: "failed", worktreePath: gitDir }));
+  logEvent("task.failed", { runId: RUN.id, taskId, payload: { failure_kind: "red_blocked", error: "blocked" } });
+
+  const outcome = performInspect(taskId);
+  assert.equal(outcome.kind, "inspect-task");
+  if (outcome.kind !== "inspect-task") return;
+  assert.equal(outcome.task.failureKind, "red_blocked");
+  assert.match(outcome.task.recommendation, /^forge retry \S+ --force/, "red_blocked is not retry-policy retryable — --force is the correct recommendation");
 });
 
 test("recover inspect: shared project_dir evidence source is called out explicitly", () => {

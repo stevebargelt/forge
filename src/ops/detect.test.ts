@@ -178,6 +178,80 @@ test("detectOrphanedWorkMayPersist: project scoping", () => {
   assert.equal(detectOrphanedWorkMayPersist(db).length, 2, "no projectDir → host-wide");
 });
 
+// FG-455 p4 review finding 1: an OOM-killed task with a dirty worktree was
+// invisible to `forge ops check` — oom_killed must be admitted alongside
+// orphaned_work_may_persist.
+test("detectOrphanedWorkMayPersist: flags an oom_killed task with a dirty worktree, distinguishing the OOM cause", () => {
+  insertRun(mkRun("run-oom", "active"));
+  insertTask(mkTask("task-oom", "run-oom", "failed"));
+  const evidence = {
+    containerName: "forge-task-oom",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: ["?? new-file.txt"],
+    oomKilled: true,
+    exitCode: 137,
+  };
+  logEvent("task.failed", {
+    runId: "run-oom", taskId: "task-oom",
+    payload: { failure_kind: "oom_killed", error: "oom_killed: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "oom_killed");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.severity, "high");
+  assert.equal(i.recommendedAction.autonomy, "manual-only");
+  assert.match(i.evidence[0]!, /was killed \(OOM\)/);
+  assert.match(i.evidence.join(" "), /new-file\.txt|1 changed file/);
+});
+
+test("detectOrphanedWorkMayPersist: oom_killed without a positive oomKilled flag describes exit 137 ambiguously", () => {
+  insertRun(mkRun("run-oom137", "active"));
+  insertTask(mkTask("task-oom137", "run-oom137", "failed"));
+  const evidence = {
+    containerName: "forge-task-oom137",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: ["?? new-file.txt"],
+    exitCode: 137,
+  };
+  logEvent("task.failed", {
+    runId: "run-oom137", taskId: "task-oom137",
+    payload: { failure_kind: "oom_killed", error: "oom_killed: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.match(incidents[0]!.evidence[0]!, /exit 137 — possibly OOM or an external kill/);
+});
+
+test("detectOrphanedWorkMayPersist: a CLEAN-worktree oom_killed task produces no incident, matching orphaned_work_may_persist's clean case", () => {
+  insertRun(mkRun("run-oom-clean", "active"));
+  insertTask(mkTask("task-oom-clean", "run-oom-clean", "failed"));
+  const evidence = {
+    containerName: "forge-task-oom-clean",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: [],
+    oomKilled: true,
+  };
+  logEvent("task.failed", {
+    runId: "run-oom-clean", taskId: "task-oom-clean",
+    payload: { failure_kind: "oom_killed", error: "oom_killed: ...", evidence },
+  });
+
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "clean worktree — no work at risk, no incident");
+});
+
 // ── project scoping ─────────────────────────────────────────────────────────
 
 test("project scoping: filters to projectDir; host-wide when omitted", () => {
