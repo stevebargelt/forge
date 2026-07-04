@@ -411,6 +411,12 @@ export function deriveNextCommandForTask(
     if (failureKind === "fanout_wave_orphaned") {
       return `forge show ${taskId} --json  # inspect which children completed, then \`forge recover ${taskId} --re-drive\``;
     }
+    // FG-455 p4: a positively-identified OOM/SIGKILL death — distinct from the
+    // generic orphaned kinds above, surfaced so the operator knows a bigger
+    // memory allowance (not just a re-dispatch) may be needed.
+    if (failureKind === "oom_killed") {
+      return `forge retry ${taskId}  # container out-of-memory / killed (exit 137) — consider more memory or a smaller task before retrying`;
+    }
     return `forge retry ${taskId}`;
   }
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;

@@ -20,7 +20,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun, updateRunStatus } from "../store/runs.js";
-import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js";
+import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
@@ -28,7 +28,7 @@ import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
-import type { OrphanEvidence } from "./failure-kind.js";
+import type { OrphanEvidence, ContainerExitInfo } from "./failure-kind.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -75,6 +75,26 @@ export function defaultContainerAlive(name: string): boolean {
     const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? "";
     if (/No such object|no such container/i.test(stderr)) return false; // genuinely gone
     return true; // ambiguous → assume alive, don't reconcile
+  }
+}
+
+/** FG-455 p4: best-effort exit-code/OOM probe for a container we've already
+ *  confirmed is gone (see defaultContainerAlive above). Never throws: any
+ *  docker error (daemon hiccup, "No such object" for a genuinely-gone
+ *  container) or unparseable output returns `{}` — unknown, not a guess. */
+export function defaultContainerExitInfo(name: string): { exitCode?: number; oomKilled?: boolean } {
+  try {
+    const out = execFileSync(
+      "docker",
+      ["inspect", "-f", "{{.State.ExitCode}} {{.State.OOMKilled}}", name],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ).toString().trim();
+    const [exitCodeRaw, oomRaw] = out.split(/\s+/);
+    const exitCode = exitCodeRaw !== undefined ? Number(exitCodeRaw) : NaN;
+    if (!Number.isFinite(exitCode) || (oomRaw !== "true" && oomRaw !== "false")) return {};
+    return { exitCode, oomKilled: oomRaw === "true" };
+  } catch {
+    return {};
   }
 }
 
@@ -140,6 +160,7 @@ export function reconcileRun(
   runId: string,
   containerAlive: ContainerAlive = defaultContainerAlive,
   reapContainer: ContainerReap = defaultContainerReap,
+  containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
 ): ReconcileResult {
   const run = getRun(runId);
   const taskChanges: TaskReconcileChange[] = [];
@@ -253,12 +274,23 @@ export function reconcileRun(
     const worktreePathChecked = t.worktreePath ?? run.projectDir;
     const source: OrphanEvidence["source"] = t.worktreePath ? "worktree" : "project_dir_shared";
     const changedFiles = changedWorktreeFiles(worktreePathChecked);
+    // FG-455 p4: gathered once alongside the rest of the container-gone evidence
+    // tuple — never throws (see defaultContainerExitInfo), so a daemon hiccup
+    // just yields {} (unknown), same as today's behavior.
+    let exitInfo: { exitCode?: number; oomKilled?: boolean };
+    try {
+      exitInfo = containerExitInfo(containerName);
+    } catch {
+      exitInfo = {};
+    }
     const baseEvidence = {
       containerName,
       containerLiveness: "gone" as const,
       worktreePathChecked: worktreePathChecked ?? null,
       changedFiles,
       source,
+      exitCode: exitInfo.exitCode,
+      oomKilled: exitInfo.oomKilled,
     };
 
     if (result !== undefined && markTaskComplete(t.id, result)) {
@@ -321,25 +353,41 @@ export function reconcileRun(
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
           taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
         }
+      } else if (exitInfo.oomKilled === true || exitInfo.exitCode === 137) {
+        // FG-455 p4: a positively-identified OOM/SIGKILL death is a distinct,
+        // more specific cause than the generic orphaned/orphaned_work_may_persist
+        // — takes precedence over both, even when the worktree is dirty (the
+        // "work may have persisted" guidance still applies in that case).
+        const error =
+          `oom_killed: container was killed (${exitInfo.oomKilled ? "OOM" : `exit ${exitInfo.exitCode}`}) with no recoverable result` +
+          (changedFiles.length > 0
+            ? ` — ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
+              (source === "project_dir_shared"
+                ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
+                : "") +
+              "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`."
+            : " (reconciled after crash)");
+        markTaskFailed(t.id, error);
+        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence } });
+        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence } });
+        taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_oom_killed" });
+      } else if (changedFiles.length > 0) {
+        const error =
+          `orphaned_work_may_persist: container gone with no recoverable result, but ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
+          (source === "project_dir_shared"
+            ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
+            : "") +
+          "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
+        markTaskFailed(t.id, error);
+        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
+        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
+        taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
       } else {
-        if (changedFiles.length > 0) {
-          const error =
-            `orphaned_work_may_persist: container gone with no recoverable result, but ${changedFiles.length} changed file(s) found at ${worktreePathChecked} — ` +
-            (source === "project_dir_shared"
-              ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
-              : "") +
-            "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
-          markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
-          taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
-        } else {
-          const error = "orphaned: container gone with no result (reconciled after crash)";
-          markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
-          taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
-        }
+        const error = "orphaned: container gone with no result (reconciled after crash)";
+        markTaskFailed(t.id, error);
+        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
+        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
+        taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
       }
     }
     // AWN-8: reconciliation is a terminal transition too — don't leave the staged
@@ -352,6 +400,55 @@ export function reconcileRun(
     if (t.worktreePath && run.projectDir) {
       removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
     }
+  }
+
+  // FG-455 p4 Mode A: a detached `forge invoke` whose wrapper was killed can
+  // leave a task `complete` in the DB but with an EMPTY result — the
+  // structured result was lost before it could be written back. The per-task
+  // loop above only ever revisits `running` tasks, so a `complete` task like
+  // this is never backfilled. Separate pass, gated on status === 'complete' so
+  // it never interacts with the running-task recovery above; idempotent — a
+  // task that already carries a non-empty result is left untouched.
+  for (const t of tasksForRun(runId)) {
+    if (t.status !== "complete") continue;
+    if (t.result !== undefined) continue; // already has a result — nothing to backfill
+
+    // Best-effort recovery, same precedence as the running-orphan path above:
+    // 1. result.json may have been written after the DB row was marked complete.
+    // 2. else synthesize from stdout (FG-337), same as the running-orphan path.
+    // Any error here safe-denies to "nothing recovered" — never throws.
+    let recovered: unknown;
+    try {
+      const onDisk = readResult(t.runId, t.id);
+      if (onDisk !== undefined) {
+        recovered = onDisk;
+      } else {
+        const dir = taskDir(t.runId, t.id);
+        const runtimeMeta = getManifestRuntime(dir);
+        const stdoutRaw = readStdoutLog(t.runId, t.id);
+        const analysis = analyzeProviderFailure({
+          logFormat: runtimeMeta?.logFormat,
+          runtimeKind: runtimeMeta?.kind,
+          stdoutRaw,
+        });
+        recovered = inferredResultFrom(analysis, t.agentRole);
+      }
+    } catch {
+      recovered = undefined;
+    }
+
+    if (recovered === undefined) continue; // nothing recoverable — leave the complete task alone
+
+    if (!backfillTaskResult(t.id, recovered)) continue; // result written concurrently since our read — no-op
+
+    const evidence: Record<string, unknown> = { recovered: true };
+    try {
+      writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
+    } catch {
+      evidence.resultWriteFailed = true;
+    }
+    logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
+    taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
   }
 
   // FG-455 p2: a fanout PARENT left `running` after its children finish or die
@@ -481,8 +578,9 @@ export function reconcileRuns(
   runIds: string[],
   containerAlive: ContainerAlive = defaultContainerAlive,
   reapContainer: ContainerReap = defaultContainerReap,
+  containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
 ): ReconcileResult[] {
   return runIds
-    .map((id) => reconcileRun(id, containerAlive, reapContainer))
+    .map((id) => reconcileRun(id, containerAlive, reapContainer, containerExitInfo))
     .filter((r) => r.taskChanges.length > 0 || r.runChange);
 }
