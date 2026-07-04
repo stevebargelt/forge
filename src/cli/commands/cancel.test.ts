@@ -25,6 +25,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
   return {
     id,
     runId,
+    parentId: overrides.parentId,
     phase: overrides.phase ?? "engineer",
     agentRole: overrides.agentRole ?? "engineer",
     status: overrides.status ?? "running",
@@ -89,10 +90,10 @@ test("cancel task: non-terminal task marked failed with correct error message", 
   assert.equal(t.error, "cancelled via forge cancel");
 });
 
-// (3) run -> abandoned when all its tasks are terminal
-test("cancel task: run marked abandoned when no non-terminal tasks remain", () => {
+// (3) run -> abandoned when all its tasks are terminal, WITH --abandon-run
+test("cancel task: run marked abandoned when no non-terminal tasks remain (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-only", status: "running" }));
-  performCancel("task-only", {});
+  performCancel("task-only", { abandonRun: true });
   assert.equal(getRun(RUN.id)!.status, "abandoned");
 });
 
@@ -133,32 +134,60 @@ test("cancel: unknown id returns kind unknown", () => {
 test("cancel task: --dry-run issues no kill and writes nothing", () => {
   insertTask(makeTask({ id: "task-dry", status: "running" }));
   const killed: string[] = [];
-  const outcome = performCancel("task-dry", { dryRun: true }, (name) => killed.push(name));
+  const outcome = performCancel("task-dry", { dryRun: true, abandonRun: true }, (name) => killed.push(name));
   assert.equal(killed.length, 0);
   assert.equal(getTask("task-dry")!.status, "running");
   assert.equal(getRun(RUN.id)!.status, "active");
   assert.equal(outcome.kind, "task-cancelled");
   if (outcome.kind === "task-cancelled") {
     assert.equal(outcome.killed, false);
-    assert.equal(outcome.runAbandoned, true); // would abandon since only task
+    assert.equal(outcome.runAbandoned, true); // would abandon since only task, with --abandon-run
   }
 });
 
-test("cancel run: kills all non-terminal tasks and marks run abandoned", () => {
+test("cancel task: --dry-run WITHOUT --abandon-run reports the abandon would be refused", () => {
+  insertTask(makeTask({ id: "task-dry-refuse", status: "running" }));
+  const killed: string[] = [];
+  const outcome = performCancel("task-dry-refuse", { dryRun: true }, (name) => killed.push(name));
+  assert.equal(outcome.kind, "task-cancelled");
+  if (outcome.kind === "task-cancelled") {
+    assert.equal(outcome.runAbandoned, false);
+    assert.equal(outcome.runAbandonRefused, true);
+  }
+});
+
+test("cancel run: kills all non-terminal tasks and marks run abandoned (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-r1", status: "running" }));
   insertTask(makeTask({ id: "task-r2", status: "pending" }));
   insertTask(makeTask({ id: "task-r3", status: "complete" }));
   const killed: string[] = [];
-  const outcome = performCancel(RUN.id, {}, (name) => killed.push(name));
+  const outcome = performCancel(RUN.id, { abandonRun: true }, (name) => killed.push(name));
   assert.equal(outcome.kind, "run-cancelled");
   if (outcome.kind === "run-cancelled") {
     assert.deepEqual(outcome.tasksKilled.sort(), ["task-r1", "task-r2"]);
+    assert.equal(outcome.runAbandoned, true);
   }
   assert.deepEqual(killed.sort(), ["forge-task-r1", "forge-task-r2"]);
   assert.equal(getTask("task-r1")!.status, "failed");
   assert.equal(getTask("task-r2")!.status, "failed");
   assert.equal(getTask("task-r3")!.status, "complete");
   assert.equal(getRun(RUN.id)!.status, "abandoned");
+});
+
+test("cancel run: WITHOUT --abandon-run kills non-terminal tasks but leaves the run active", () => {
+  insertTask(makeTask({ id: "task-rna1", status: "running" }));
+  insertTask(makeTask({ id: "task-rna2", status: "pending" }));
+  const killed: string[] = [];
+  const outcome = performCancel(RUN.id, {}, (name) => killed.push(name));
+  assert.equal(outcome.kind, "run-cancelled");
+  if (outcome.kind === "run-cancelled") {
+    assert.equal(outcome.runAbandoned, false);
+    assert.equal(outcome.runAbandonRefused, true);
+  }
+  assert.deepEqual(killed.sort(), ["forge-task-rna1", "forge-task-rna2"]);
+  assert.equal(getTask("task-rna1")!.status, "failed", "tasks still get killed/failed even when abandon is refused");
+  assert.equal(getTask("task-rna2")!.status, "failed");
+  assert.equal(getRun(RUN.id)!.status, "active", "run must NOT be abandoned without --abandon-run");
 });
 
 test("cancel run: --dry-run issues no kills and writes nothing", () => {
@@ -214,9 +243,9 @@ function getEvents(runId: string): Array<{ event_type: string; task_id: string |
 }
 
 // Finding 4: event emission on real cancel
-test("cancel task: emits task.cancelled and run.cancelled on real cancel", () => {
+test("cancel task: emits task.cancelled and run.cancelled on real cancel (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-ev1", status: "running" }));
-  performCancel("task-ev1", {});
+  performCancel("task-ev1", { abandonRun: true });
   const events = getEvents(RUN.id);
   const types = events.map((e) => e.event_type);
   assert.ok(types.includes("task.cancelled"), "should emit task.cancelled");
@@ -226,14 +255,25 @@ test("cancel task: emits task.cancelled and run.cancelled on real cancel", () =>
   assert.equal(JSON.parse(taskEvent!.payload!).via, "forge cancel");
 });
 
-test("cancel task: emits run.abandoned when the run enters abandoned state", () => {
+test("cancel task: emits run.abandoned when the run enters abandoned state (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-ev-abn", status: "running" }));
-  performCancel("task-ev-abn", {});
+  performCancel("task-ev-abn", { abandonRun: true });
   const events = getEvents(RUN.id);
   const types = events.map((e) => e.event_type);
   assert.ok(types.includes("run.abandoned"), "should emit run.abandoned when run enters abandoned state");
   const abandonedEvent = events.find((e) => e.event_type === "run.abandoned");
   assert.equal(JSON.parse(abandonedEvent!.payload!).via, "forge cancel");
+});
+
+test("cancel task: does NOT emit run.cancelled/run.abandoned WITHOUT --abandon-run, even when it's the sole non-terminal task", () => {
+  insertTask(makeTask({ id: "task-ev-refuse", status: "running" }));
+  performCancel("task-ev-refuse", {});
+  const events = getEvents(RUN.id);
+  const types = events.map((e) => e.event_type);
+  assert.ok(types.includes("task.cancelled"), "the task itself is still cancelled");
+  assert.ok(!types.includes("run.cancelled"), "must NOT emit run.cancelled without --abandon-run");
+  assert.ok(!types.includes("run.abandoned"), "must NOT emit run.abandoned without --abandon-run");
+  assert.equal(getRun(RUN.id)!.status, "active");
 });
 
 test("cancel task: does NOT emit events on dry-run", () => {
@@ -256,13 +296,21 @@ test("cancel run: emits task.cancelled per task and run.cancelled on real cancel
   assert.equal(runCancelledEvents.length, 1);
 });
 
-test("cancel run: emits run.abandoned when cancelling a run directly", () => {
+test("cancel run: emits run.abandoned when cancelling a run directly (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-rev-abn", status: "running" }));
-  performCancel(RUN.id, {});
+  performCancel(RUN.id, { abandonRun: true });
   const events = getEvents(RUN.id);
   const abandonedEvents = events.filter((e) => e.event_type === "run.abandoned");
   assert.equal(abandonedEvents.length, 1);
   assert.equal(JSON.parse(abandonedEvents[0]!.payload!).via, "forge cancel");
+});
+
+test("cancel run: does NOT emit run.abandoned when cancelling a run directly WITHOUT --abandon-run", () => {
+  insertTask(makeTask({ id: "task-rev-noabn", status: "running" }));
+  performCancel(RUN.id, {});
+  const events = getEvents(RUN.id);
+  assert.ok(!events.some((e) => e.event_type === "run.abandoned"), "must NOT emit run.abandoned without --abandon-run");
+  assert.equal(getRun(RUN.id)!.status, "active");
 });
 
 test("cancel run: does NOT emit events on dry-run", () => {
@@ -286,11 +334,22 @@ test("cancel task: run NOT abandoned when the run can still advance (advanceable
   assert.equal(getTask("task-orphan")!.status, "failed", "the cancelled task is still failed");
 });
 
-test("cancel task: run abandoned when no tasks remain AND the run cannot advance", () => {
+test("cancel task: run abandoned when no tasks remain AND the run cannot advance (--abandon-run)", () => {
   insertTask(makeTask({ id: "task-last", status: "running" }));
-  const outcome = performCancel("task-last", {}, () => {}, () => false);
+  const outcome = performCancel("task-last", { abandonRun: true }, () => {}, () => false);
   assert.equal(getRun(RUN.id)!.status, "abandoned");
   if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, true);
+});
+
+test("cancel task: WITHOUT --abandon-run, no tasks remain AND the run cannot advance → refused, run stays active", () => {
+  insertTask(makeTask({ id: "task-last-refuse", status: "running" }));
+  const outcome = performCancel("task-last-refuse", {}, () => {}, () => false);
+  assert.equal(getRun(RUN.id)!.status, "active", "run must NOT be abandoned without --abandon-run");
+  if (outcome.kind === "task-cancelled") {
+    assert.equal(outcome.runAbandoned, false);
+    assert.equal(outcome.runAbandonRefused, true);
+  }
+  assert.equal(getTask("task-last-refuse")!.status, "failed", "the cancelled task is still failed");
 });
 
 test("cancel task: --dry-run reports runAbandoned=false for an advanceable run and writes nothing", () => {
@@ -301,10 +360,50 @@ test("cancel task: --dry-run reports runAbandoned=false for an advanceable run a
   assert.equal(getTask("task-dry-adv")!.status, "pending", "dry-run leaves the task untouched");
 });
 
-test("cancel task: invoke run (default canAdvance) abandons on sole-task cancel — no workflow to advance", () => {
+test("cancel task: invoke run (default canAdvance) abandons on sole-task cancel with --abandon-run — no workflow to advance", () => {
   const invokeRun: Run = { ...RUN, id: "run-invoke-cancel", workflow: "invoke" };
   insertRun(invokeRun);
   insertTask(makeTask({ id: "task-inv", runId: "run-invoke-cancel", status: "running" }));
-  performCancel("task-inv", {}); // default canAdvance: invoke short-circuits to false
+  performCancel("task-inv", { abandonRun: true }); // default canAdvance: invoke short-circuits to false
   assert.equal(getRun("run-invoke-cancel")!.status, "abandoned");
+});
+
+// ----- FG-455 p2: fanout-safe cancel -----
+
+test("cancel task: fanout parent cancel kills every non-terminal child container too", () => {
+  insertTask(makeTask({ id: "parent-1", status: "running" }));
+  insertTask(makeTask({ id: "child-1", parentId: "parent-1", status: "running" }));
+  insertTask(makeTask({ id: "child-2", parentId: "parent-1", status: "pending" }));
+  insertTask(makeTask({ id: "child-3", parentId: "parent-1", status: "complete" }));
+
+  const killed: string[] = [];
+  performCancel("parent-1", {}, (name) => killed.push(name));
+
+  assert.deepEqual(killed.sort(), ["forge-child-1", "forge-child-2", "forge-parent-1"].sort());
+  assert.equal(getTask("child-1")!.status, "failed");
+  assert.equal(getTask("child-2")!.status, "failed");
+  assert.equal(getTask("child-3")!.status, "complete", "already-terminal child left untouched");
+  assert.equal(getTask("parent-1")!.status, "failed");
+});
+
+test("cancel task: fanout parent cancel outcome reports the killed children", () => {
+  insertTask(makeTask({ id: "parent-2", status: "running" }));
+  insertTask(makeTask({ id: "child-4", parentId: "parent-2", status: "running" }));
+
+  const outcome = performCancel("parent-2", {}, () => {});
+  if (outcome.kind === "task-cancelled") {
+    assert.deepEqual(outcome.childrenKilled, ["forge-child-4"]);
+  } else {
+    assert.fail("expected task-cancelled outcome");
+  }
+});
+
+test("cancel task: ordinary (non-fanout) single-task cancel has an empty childrenKilled list", () => {
+  insertTask(makeTask({ id: "task-solo", status: "running" }));
+  const outcome = performCancel("task-solo", {}, () => {});
+  if (outcome.kind === "task-cancelled") {
+    assert.deepEqual(outcome.childrenKilled, []);
+  } else {
+    assert.fail("expected task-cancelled outcome");
+  }
 });

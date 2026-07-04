@@ -17,7 +17,7 @@
 // step pipelines are finalized by `forge next`, which has the workflow.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { tasksForRun, markTaskComplete, markTaskFailed } from "../store/tasks.js";
@@ -98,8 +98,9 @@ function readStdoutLog(runId: string, taskId: string): string {
 /** FG-455: git status --porcelain against a task's persisted-work path. Never
  *  throws — a missing path, a non-git directory, or any git error is reported
  *  as "no changed files" so reconcile stays safe even against a half-formed
- *  worktree. */
-function changedWorktreeFiles(path: string | undefined): string[] {
+ *  worktree. Exported so `forge recover` (FG-455 p3) can recompute the same
+ *  live diff without duplicating the never-throw git-status shape. */
+export function changedWorktreeFiles(path: string | undefined): string[] {
   if (!path) return [];
   try {
     const out = execFileSync("git", ["status", "--porcelain"], {
@@ -243,6 +244,65 @@ export function reconcileRun(runId: string, containerAlive: ContainerAlive = def
     // recorded projectDir (e.g. legacy rows created before FG-374).
     if (t.worktreePath && run.projectDir) {
       removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
+    }
+  }
+
+  // FG-455 p2: a fanout PARENT left `running` after its children finish or die
+  // mid-wave. dispatchFanoutStep never gives the parent its own container (no
+  // container.started for forge-<parentId>), so the per-task loop above —
+  // gated on that event — always skips it, and nothing else ever advances it
+  // out of `running`. Runs AFTER the per-task loop above: any child left
+  // `running` with a dead container has already been resolved into
+  // complete/failed by then, so "every child terminal" below already reflects
+  // each child's own containerAlive check — a non-terminal child here means
+  // its container is still alive (or the wave never reached it), either way
+  // signalling the wave may still be in progress.
+  for (const parent of tasksForRun(runId)) {
+    if (parent.status !== "running" || parent.parentId !== undefined) continue;
+    const children = tasksForRun(runId).filter((c) => c.parentId === parent.id);
+    if (children.length === 0) continue; // no children — an ordinary task, not a fanout parent
+    if (eventsForTask(parent.id).some((e) => e.eventType === "container.started")) continue; // real containerized task
+    if (children.some((c) => !TERMINAL_TASK.has(c.status))) continue; // wave may still be in progress
+
+    const completeChildren = children.filter((c) => c.status === "complete");
+    const allComplete = completeChildren.length === children.length;
+    // Mirrors the aggregate dispatchFanoutStep writes at the end of a live wave
+    // (runNext.ts ~1378-1392) so a downstream depends_on step can still read it
+    // via deriveUpstream.
+    const parentResult = {
+      status: allComplete ? "complete" : "partial",
+      children: children.map((c, i) => ({
+        index: typeof c.taskPackage.inputs["fanoutIndex"] === "number" ? c.taskPackage.inputs["fanoutIndex"] : i,
+        status: c.status,
+        childTaskId: c.id,
+        result: c.result,
+      })),
+    };
+
+    // Best-effort disk write — never throws; a bad/missing task dir shouldn't
+    // block the status transition below.
+    try {
+      const parentDir = taskDir(runId, parent.id);
+      mkdirSync(parentDir, { recursive: true });
+      writeFileSync(join(parentDir, "result.json"), JSON.stringify(parentResult));
+    } catch {
+      // best-effort only
+    }
+
+    if (allComplete) {
+      if (markTaskComplete(parent.id, parentResult)) {
+        logEvent("task.completed", { runId, taskId: parent.id });
+        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered", childSummary: { total: children.length, complete: completeChildren.length } } });
+        taskChanges.push({ taskId: parent.id, from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" });
+      }
+    } else {
+      const error =
+        `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
+        `inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
+      markTaskFailed(parent.id, error, parentResult);
+      logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
+      logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
+      taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_orphaned" });
     }
   }
 

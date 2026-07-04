@@ -8,6 +8,7 @@ export type FailureKind =
   | "cancelled"
   | "orphaned"        // container gone with no result — reconciled after a host/parent crash (AWN-1)
   | "orphaned_work_may_persist" // FG-455: container gone, no recoverable result, but the worktree has changed files — real work may be sitting there; reconcile refuses to discard it and surfaces the diff for a human to inspect instead of silently orphaning it
+  | "fanout_wave_orphaned"     // FG-455 p2: a fanout PARENT left `running` after its children finished or died mid-wave with the process gone — reconciled from child evidence; not every child completed, so the parent fails pointing the operator at `forge recover <parent> --re-drive` (forge retry refuses this kind; forge show recommends the same)
   | "container_crash"
   | "idle_timeout"
   | "result_missing"
@@ -128,6 +129,29 @@ export function getOrphanEvidenceFromEvents(events: Event[]): OrphanEvidence | u
       const payload = e.payload as Record<string, unknown> | null;
       if (payload?.["failure_kind"] === "orphaned_work_may_persist" && payload["evidence"]) {
         return payload["evidence"] as OrphanEvidence;
+      }
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+// FG-455 p2/p3 review finding 2: reconcile.ts records how many children finished
+// before a fanout parent got reconciled to fanout_wave_orphaned — the same
+// childSummary shape it also writes onto task.reconciled. Sibling to
+// getOrphanEvidenceFromEvents (same newest-first, completed-supersedes walk) so
+// `forge show` can surface this alongside the generic failure summary.
+export type FanoutWaveEvidence = { total: number; complete: number };
+
+export function getFanoutWaveEvidenceFromEvents(events: Event[]): FanoutWaveEvidence | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.eventType === "task.completed") return undefined;
+    if (e.eventType === "task.failed") {
+      const payload = e.payload as Record<string, unknown> | null;
+      if (payload?.["failure_kind"] === "fanout_wave_orphaned" && payload["childSummary"]) {
+        return payload["childSummary"] as FanoutWaveEvidence;
       }
       return undefined;
     }

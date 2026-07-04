@@ -92,6 +92,8 @@ The fanout step's `agent_map: Record<discipline, agentRole>` optionally routes e
 
 Example: the `feature` workflow's `build` step fans out one child per tech-lead plan-step. Each plan-step carries `discipline: frontend | backend | infosec | platform | general`; the `agent_map` routes to `frontend-specialist`, `backend-specialist`, `security-advisor`, `agentic-platform-builder` respectively. `general` (or any unmapped value) falls back to `engineer`.
 
+A fanout parent never gets its own container (`dispatchFanoutStep` only spawns the children), so it can be left `running` forever if the process that would have finalized it dies mid-wave. Reconcile (FG-455) closes that gap: once every child is terminal, a parent still `running` with no `container.started` event is recomputed the way a live wave would finish it — `complete` if all children completed, or `failed` with `failure_kind: "fanout_wave_orphaned"` otherwise (see [Orphaned task recovery](#orphaned-task-recovery)). A non-terminal child leaves the parent alone, since the wave may still be in flight.
+
 ## Red agent
 
 An adversarial agent. Mounted **read-only** on the project at the OS level (not by prompt). Two stances: *wide* (generic disbelief, no specific failure mode) and *narrow* (anti-prompts derived from force-level constraints). Reds never see other panel members' findings or the blue's transcript. Both carry a `docs_drift` finding type: when a red detects that shipped code changes operator-visible behavior that the docs no longer describe, it files a finding anchored to the stale doc line (not the code). These findings feed the `documentation-maintainer`'s `stale_docs_found` input.
@@ -130,6 +132,22 @@ Example: a build phase whose red detected a stack violation would set the build 
 ## Container crash vs. agent failure
 
 Two failure modes, surfaced differently — but both emit `task.failed`; the machine-readable `failure_kind` in the event payload distinguishes them. **Container crash**: container exited non-zero with no result JSON (Docker issue, OOM, credential failure) → `failure_kind: "container_crash"` — unless the runtime's stdout carries a provider/model error (invalid model, quota, 4xx), in which case it's attributed as `failure_kind: "model_error"` with the cause (#228). **Agent failure**: container exited 0 and wrote a result JSON with `status: "failed"` and an error reason → classified per context. Different follow-up actions. (There is no `task.crashed` event type — the failure taxonomy lives in the `task.failed` payload, not in separate event types.)
+
+## Orphaned task recovery
+
+Two `failure_kind`s cover a lost container that may have left real work behind, plus a third for a lost fanout wave, and `forge recover <id>` is the operator-safe way to inspect and act on any of them:
+
+- **`orphaned`**: the container is gone (host/parent crash) and reconcile found no evidence of persisted work. Safe to `forge retry`.
+- **`orphaned_work_may_persist`** (FG-455): the container is gone, no result was recoverable, but the worktree has changed files — real work may be sitting there. Reconcile refuses to discard it silently; `forge retry` on this kind is **not** retryable without `--force` (see `retry-policy.ts`), since a blind retry would re-dispatch over unreviewed work.
+- **`fanout_wave_orphaned`** (FG-455 p2/p3): a fanout parent (see [Fanout](#fanout)) reconciled to `failed` because not every child completed before the wave's process was lost. `forge retry` on the parent — and a direct `forge retry` on any of its children — is refused without `--force`; both point at `forge recover <parent> --re-drive` instead. `forge show` on this parent renders a `childSummary` (complete/total) recovery line in both human and `--json` output and recommends `forge recover <id> --re-drive`, not `forge retry`.
+
+`forge recover <id>` takes a task or run id. Read-only by default: it recomputes a fresh evidence view (worktree vs. shared-project-dir source, changed files, a valid `result.json` or a stdout-inferred result) and prints a recommended next command; `--json` is the full structured surface.
+
+- **`--continue`** adopts the orphaned task's persisted work and marks it complete, preferring a valid `result.json`, then a stdout-inferred result, then the raw diff as a last resort. It's fail-safe: it refuses with no writes when the task isn't in a recoverable orphaned state (`orphaned` / `orphaned_work_may_persist`), when there's nothing to adopt, or when the only evidence is the ambiguous shared project directory (no dedicated worktree) — that last refusal requires `--force` to override, since the diff there may include unrelated uncommitted changes. Under the hood this uses `markTaskRecovered`, a compare-and-set that only ever fires from `status = 'failed'` — a distinct transition from the ordinary `markTaskComplete`, which deliberately blocks `failed → complete` to stop a completing container racing a `forge cancel`. An operator's explicit `--continue` is a different, gated decision.
+- **`--re-drive`** re-dispatches an orphaned fanout wave in-run: it mints one fresh pending primary task in the step's phase (the same shape `dispatchFanoutStep`'s parent lookup already expects), leaving the old parent and children in place as an audit trail. It refuses if the parent is already `complete` or still `running`, or if a re-drive is already pending for that phase. By design this re-runs the **full** wave — there's no partial-index resume for just the children that failed.
+- **`--force`** acknowledges an ambiguous shared-project-dir diff (or another refusal) and proceeds anyway.
+
+`forge cancel` is fanout-aware and no longer abandons a run silently (FG-455 p2). Cancelling a fanout parent kills and fails every non-terminal child container too, not just the parent's. And when a cancel would leave a run with no dispatchable work, the run is abandoned only if `--abandon-run` is passed explicitly — without it, the task(s)/container(s) are still killed and marked failed, but the run stays `active` with guidance to either re-run with `--abandon-run` or recover/re-invoke to continue. This applies to both the single-task escalation path and cancelling a run id directly.
 
 ## Post-merge integration gate
 

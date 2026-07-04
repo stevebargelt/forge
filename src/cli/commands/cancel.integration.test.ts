@@ -64,11 +64,11 @@ afterEach(() => {
 
 // ─── 1. Task-id form ────────────────────────────────────────────────────────
 
-test("integ cancel: task-id form marks task failed and abandons run (sole non-terminal)", () => {
+test("integ cancel: task-id form marks task failed and abandons run (sole non-terminal, --abandon-run)", () => {
   insertTask(makeTask("t-solo-run", { status: "running" }));
 
   const killed: string[] = [];
-  const outcome = performCancel("t-solo-run", {}, (n) => killed.push(n));
+  const outcome = performCancel("t-solo-run", { abandonRun: true }, (n) => killed.push(n));
 
   assert.equal(outcome.kind, "task-cancelled");
   if (outcome.kind === "task-cancelled") {
@@ -90,9 +90,26 @@ test("integ cancel: task-id form marks task failed and abandons run (sole non-te
   assert.deepEqual(killed, ["forge-t-solo-run"]);
 });
 
+test("integ cancel: task-id form WITHOUT --abandon-run kills/fails the task but leaves the run active (FG-455 p2)", () => {
+  insertTask(makeTask("t-solo-refuse", { status: "running" }));
+
+  const killed: string[] = [];
+  const outcome = performCancel("t-solo-refuse", {}, (n) => killed.push(n));
+
+  assert.equal(outcome.kind, "task-cancelled");
+  if (outcome.kind === "task-cancelled") {
+    assert.equal(outcome.runAbandoned, false);
+    assert.equal(outcome.runAbandonRefused, true);
+  }
+
+  assert.equal(getTask("t-solo-refuse")!.status, "failed", "the task itself is still cancelled");
+  assert.equal(getRun(BASE_RUN.id)!.status, "active", "run must NOT be abandoned without --abandon-run");
+  assert.deepEqual(killed, ["forge-t-solo-refuse"]);
+});
+
 // ─── 2. Run-id form ─────────────────────────────────────────────────────────
 
-test("integ cancel: run-id form fails all non-terminal tasks and abandons run", () => {
+test("integ cancel: run-id form fails all non-terminal tasks and abandons run (--abandon-run)", () => {
   const nonTerminalStatuses: TaskStatus[] = [
     "running",
     "pending",
@@ -103,7 +120,7 @@ test("integ cancel: run-id form fails all non-terminal tasks and abandons run", 
   }
 
   const killed: string[] = [];
-  const outcome = performCancel(BASE_RUN.id, {}, (n) => killed.push(n));
+  const outcome = performCancel(BASE_RUN.id, { abandonRun: true }, (n) => killed.push(n));
 
   assert.equal(outcome.kind, "run-cancelled");
   if (outcome.kind === "run-cancelled") {
@@ -112,6 +129,7 @@ test("integ cancel: run-id form fails all non-terminal tasks and abandons run", 
       [...outcome.tasksKilled].sort(),
       nonTerminalStatuses.map((s) => `t-multi-${s}`).sort(),
     );
+    assert.equal(outcome.runAbandoned, true);
   }
 
   for (const s of nonTerminalStatuses) {
@@ -124,6 +142,24 @@ test("integ cancel: run-id form fails all non-terminal tasks and abandons run", 
     killed.sort(),
     nonTerminalStatuses.map((s) => `forge-t-multi-${s}`).sort(),
   );
+});
+
+test("integ cancel: run-id form WITHOUT --abandon-run kills/fails all non-terminal tasks but leaves the run active (FG-455 p2)", () => {
+  insertTask(makeTask("t-multi-refuse-running", { status: "running" }));
+  insertTask(makeTask("t-multi-refuse-pending", { status: "pending" }));
+
+  const killed: string[] = [];
+  const outcome = performCancel(BASE_RUN.id, {}, (n) => killed.push(n));
+
+  assert.equal(outcome.kind, "run-cancelled");
+  if (outcome.kind === "run-cancelled") {
+    assert.equal(outcome.runAbandoned, false);
+    assert.equal(outcome.runAbandonRefused, true);
+  }
+  assert.equal(getTask("t-multi-refuse-running")!.status, "failed");
+  assert.equal(getTask("t-multi-refuse-pending")!.status, "failed");
+  assert.equal(getRun(BASE_RUN.id)!.status, "active", "run must NOT be abandoned without --abandon-run");
+  assert.deepEqual(killed.sort(), ["forge-t-multi-refuse-pending", "forge-t-multi-refuse-running"]);
 });
 
 // ─── 3. Orphaned running task (bug #185/#186) ────────────────────────────────
@@ -143,7 +179,7 @@ test("integ cancel: orphaned running task with absent container - noop kill reap
   let threw = false;
   let outcome: ReturnType<typeof performCancel> | undefined;
   try {
-    outcome = performCancel("t-orphan", {}, noopKill);
+    outcome = performCancel("t-orphan", { abandonRun: true }, noopKill);
   } catch {
     threw = true;
   }
@@ -169,7 +205,7 @@ test("integ cancel: mixed-status run leaves terminal tasks untouched, fails non-
   insertTask(makeTask("t-mix-pending", { status: "pending" }));
 
   const killed: string[] = [];
-  const outcome = performCancel(BASE_RUN.id, {}, (n) => killed.push(n));
+  const outcome = performCancel(BASE_RUN.id, { abandonRun: true }, (n) => killed.push(n));
 
   assert.equal(outcome.kind, "run-cancelled");
   if (outcome.kind === "run-cancelled") {
@@ -263,12 +299,12 @@ test("integ cancel: --dry-run by task-id issues no kill and makes zero DB writes
   insertTask(makeTask("t-dry-task", { status: "running" }));
   const killed: string[] = [];
 
-  const outcome = performCancel("t-dry-task", { dryRun: true }, (n) => killed.push(n));
+  const outcome = performCancel("t-dry-task", { dryRun: true, abandonRun: true }, (n) => killed.push(n));
 
   assert.equal(outcome.kind, "task-cancelled");
   if (outcome.kind === "task-cancelled") {
     assert.equal(outcome.killed, false);
-    assert.equal(outcome.runAbandoned, true, "reports would-abandon for sole non-terminal task");
+    assert.equal(outcome.runAbandoned, true, "reports would-abandon for sole non-terminal task, with --abandon-run");
   }
 
   assert.equal(killed.length, 0, "no kill issued in dry-run");
@@ -312,7 +348,7 @@ test("integ cancel: cancelled run cannot be resurrected — runNext dispatches n
 
   // Cancel the run. Running task becomes failed, run becomes abandoned.
   const killed: string[] = [];
-  performCancel(BASE_RUN.id, {}, (n) => killed.push(n));
+  performCancel(BASE_RUN.id, { abandonRun: true }, (n) => killed.push(n));
 
   assert.equal(getRun(BASE_RUN.id)!.status, "abandoned");
   assert.equal(getTask("t-resurrect-running")!.status, "failed");
@@ -459,14 +495,14 @@ test("integ cancel: cancelling an orphan in a COMPLETED phase leaves the run act
   if (outcome.kind === "task-cancelled") assert.equal(outcome.runAbandoned, false);
 });
 
-test("integ cancel: cancelling the sole running task of a not-yet-advanced phase abandons the run", () => {
+test("integ cancel: cancelling the sole running task of a not-yet-advanced phase abandons the run (--abandon-run)", () => {
   installAdvanceWorkflow();
   const run: Run = { id: "run-advance-2", workflow: ADVANCE_WF_NAME, title: "advance2", status: "active", createdAt: "2026-06-03T00:00:00Z" };
   insertRun(run);
   // build is the only work and it's running — no completed phase, nothing downstream ready.
   insertTask(makeTask("build-running", { runId: run.id, phase: "build", status: "running" }));
 
-  performCancel("build-running", {}, () => {}); // REAL default canAdvance
+  performCancel("build-running", { abandonRun: true }, () => {}); // REAL default canAdvance
 
-  assert.equal(getRun("run-advance-2")!.status, "abandoned", "no ready next step ⇒ genuinely dead ⇒ abandon");
+  assert.equal(getRun("run-advance-2")!.status, "abandoned", "no ready next step ⇒ genuinely dead ⇒ abandon, with --abandon-run");
 });

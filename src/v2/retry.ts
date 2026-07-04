@@ -25,6 +25,39 @@ export class RetryNotAllowedError extends Error {
   }
 }
 
+// FG-455 p3: retrying a fanout CHILD directly mints a new parentId-undefined
+// primary in the child's phase — the same phase the real fanout parent (and
+// its siblings) already occupy. That stray primary confuses dispatchFanoutStep's
+// existingParent lookup (which phase's the only-pending primary is now
+// ambiguous) and pollutes tasksForRun with a primary that was never a genuine
+// wave parent. `forge recover <parent> --re-drive` is the coherent path for
+// re-driving a fanout wave; refuse the child-retry shortcut unless the operator
+// explicitly forces it (preserving pre-FG-455 behavior).
+export class FanoutChildRetryError extends Error {
+  constructor(public taskId: string, public parentId: string) {
+    super(
+      `Task ${taskId} is a fanout child (parent ${parentId}) — retrying it directly would strand a detached primary in the fanout's phase. ` +
+        `Use \`forge recover ${parentId} --re-drive\` to re-drive the whole wave, or pass --force to retry this child anyway.`,
+    );
+    this.name = "FanoutChildRetryError";
+  }
+}
+
+/** Is `task` a fanout child? True iff it has a parent, that parent shares its
+ *  phase (fanout children run in the SAME phase as their synthetic parent —
+ *  gate.ts's reject->on_reject children land in a DIFFERENT phase, the on_reject
+ *  target, so phase equality alone rules those out), and it isn't itself a red
+ *  reviewer (reds also share parentId+phase with an ordinary primary, but are
+ *  always prefixed "red-" — see runNext.ts's own `!agentRole.startsWith("red-")`
+ *  filters for the same discriminator). */
+function fanoutParentOf(task: Task): Task | undefined {
+  if (task.parentId === undefined) return undefined;
+  if (task.agentRole.startsWith("red-")) return undefined;
+  const parent = getTask(task.parentId);
+  if (!parent || parent.phase !== task.phase) return undefined;
+  return parent;
+}
+
 export async function retry(taskId: string, opts?: { force?: boolean }): Promise<{ task: Task; newTask: Task; disposition: RetryDisposition; failureKind?: string }> {
   const task = getTask(taskId);
   if (!task) throw new Error(`Task not found: ${taskId}`);
@@ -33,6 +66,11 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     throw new Error(
       `Task ${taskId} is in status '${task.status}', not failed. Retry only resets failed tasks; for other states, gate or submit instead.`
     );
+  }
+
+  const fanoutParent = fanoutParentOf(task);
+  if (fanoutParent && !opts?.force) {
+    throw new FanoutChildRetryError(taskId, fanoutParent.id);
   }
 
   // AWN-3: consult the per-failure_kind retry policy. Non-retryable kinds (gate

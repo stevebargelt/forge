@@ -10,7 +10,7 @@ import { eventsForTask, eventsForRun } from "../../store/events.js";
 import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
-import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, type OrphanEvidence } from "../../v2/failure-kind.js";
+import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents, type OrphanEvidence, type FanoutWaveEvidence } from "../../v2/failure-kind.js";
 import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
@@ -75,7 +75,7 @@ export function showReconcileStep(
 // of truth, also consumed by the notification layer). Imported + re-exported
 // here under its long-standing name so forge show / watch importers and tests
 // stay stable.
-export { getFailureKindFromEvents, getOrphanEvidenceFromEvents };
+export { getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents };
 
 export function classifyResultFile(filePath: string): "missing" | "empty" | "malformed" | "valid" {
   let content: string;
@@ -404,6 +404,13 @@ export function deriveNextCommandForTask(
     if (failureKind === "orphaned_work_may_persist") {
       return `forge show ${taskId} --json  # inspect the worktree diff, then \`forge retry ${taskId} --force\` once verified`;
     }
+    // FG-455 p2/p3 review finding 2: this is the fanout wave's PARENT — a blind
+    // `forge retry` here mints a second, uncoordinated pending primary (retry-
+    // policy.ts already refuses it without --force). `forge recover --re-drive`
+    // is the coherent path; point at it directly, same as the child-strand guard.
+    if (failureKind === "fanout_wave_orphaned") {
+      return `forge show ${taskId} --json  # inspect which children completed, then \`forge recover ${taskId} --re-drive\``;
+    }
     return `forge retry ${taskId}`;
   }
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;
@@ -435,6 +442,17 @@ export function orphanRecoveryMessage(runId: string, taskId: string, evidence: O
     `    worktree path: ${evidence.worktreePathChecked ?? "(none — no worktree_path or run.projectDir recorded)"}\n` +
     `    changed files: ${files}\n` +
     `    guidance:      inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`
+  );
+}
+
+/** FG-455 p2/p3 review finding 2: the operator-facing recovery message for a
+ *  fanout_wave_orphaned parent — how many children finished before the wave
+ *  was reconciled to failed, and the re-drive path. Shared rendering for
+ *  `forge show` human + --json output. */
+export function fanoutWaveRecoveryMessage(taskId: string, evidence: FanoutWaveEvidence): string {
+  return (
+    `fanout wave orphaned — ${evidence.complete}/${evidence.total} children completed before the parent was reconciled to failed.\n` +
+    `    guidance:      \`forge recover ${taskId} --re-drive\` to re-drive the whole wave (forge retry is refused for this failure kind)`
   );
 }
 
@@ -562,6 +580,9 @@ export function registerShow(program: Command): void {
         // FG-455: orphaned_work_may_persist carries recovery evidence on its
         // task.failed event — surface it distinctly, not as a generic failure.
         const orphanEvidence = getOrphanEvidenceFromEvents(events);
+        // FG-455 p2/p3 review finding 2: fanout_wave_orphaned carries a childSummary
+        // (total/complete) on its task.failed event — surface it too, same as orphan evidence.
+        const fanoutWaveEvidence = getFanoutWaveEvidenceFromEvents(events);
 
         if (opts.json) {
           console.log(
@@ -576,6 +597,9 @@ export function registerShow(program: Command): void {
                   failureKind: failureKind ?? null,
                   orphanRecovery: orphanEvidence
                     ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence) }
+                    : null,
+                  fanoutWaveRecovery: fanoutWaveEvidence
+                    ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence) }
                     : null,
                   elapsed,
                   lastOutputAgo,
@@ -626,6 +650,11 @@ export function registerShow(program: Command): void {
         // may hold real, unreviewed work.
         if (orphanEvidence) {
           console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence)}`);
+        }
+        // FG-455 p2/p3 review finding 2: same distinct treatment for a fanout
+        // parent orphaned mid-wave — don't let it collapse into a generic failure.
+        if (fanoutWaveEvidence) {
+          console.log(`  recovery:  ${fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence)}`);
         }
         // Docs-drift Walk (#241): if the completed task touched operator surfaces,
         // suggest the documentation-maintainer (advisory only — not a gate yet).
