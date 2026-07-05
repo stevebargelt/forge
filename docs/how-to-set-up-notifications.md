@@ -15,12 +15,19 @@ Default trigger set (override via `FORGE_NOTIFY_ON`):
 
 Excluded by default: `awaiting_gate` (would fire during every normal gate; noisy).
 
-Example SMS body:
+Every message ends with an explicit action segment, so a glance tells you whether it's FYI or needs something from you. A clean finish is unmistakably non-actionable:
 ```
-forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s
+forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s · no action
 ```
 
-~70 chars; one SMS segment.
+A failure or a red-block names what happened and which task to look at:
+```
+forge: run-add-login-7c2a91 [failed] feature "add login" — 42s · inspect failure: oom_killed → forge show task-engineer-abc123
+```
+
+A `blocked_by_red` message reads similarly, with `review red → forge show <taskId>` in place of the failure detail. If the run carries campaign/ticket context (via `run.metadata`), that's prefixed too, e.g. `forge: FG-462 campaign camp-3a1b run-fg462-9c3f [complete] feature "FG-462 review-loop closeout" — 8m0s · no action`.
+
+Every variant fits one SMS segment (≤160 chars).
 
 ## Setup
 
@@ -74,7 +81,7 @@ forge notify test --to "+15550000000"      # send to a different number for this
 forge notify status                        # show current subscription + state
 ```
 
-`forge notify test` produces `✓ SMS sent (sid: SM...)` on success. The test SMS goes to the confirmed `TWILIO_TO` (or `--to` if overridden) and is body `forge: test message from <hostname>`.
+`forge notify test` first prints a preview of every message shape forge can produce — the run-transition variants (clean finish, failure, red-block, gate, campaign context) and the milestone action markers — so you can see the operator-action formatting with no provider configured and no real run needed. It then attempts a real send if a provider is configured, producing `✓ SMS sent (sid: SM...)` on success. That real test SMS is a fixed message, not one of the previewed formats: it goes to the confirmed `TWILIO_TO` (or `--to` if overridden) with body `forge: test message from <hostname>`.
 
 ### Unsubscribe
 
@@ -260,6 +267,8 @@ Every milestone is **always recorded** as an `orchestrator.milestone` event (aud
 | `acceptance_green`, `ready_for_review`, `shipped` | always |
 | `batch_complete` | only if the run has been going ≥ 10 min |
 | `plan_started` | suppressed by default (low importance) |
+
+When a milestone does push, the body leads with an action marker so it reads distinctly from an FYI at a glance: `▶ ACTION: <hint>` for `decision_needed` / `blocked` / `risk_found` / `ready_for_review` (these need you), `✓ FYI: <hint>` for the rest (`shipped` / `batch_complete` / `acceptance_green` / `plan_started`). For example, `decision_needed` pushes `▶ ACTION: your decision needed — AWN-7 Walk smoke complete`, while `shipped` pushes `✓ FYI: shipped — <title>`.
 
 `--dedupe-key` suppresses a *repeat* push for the same key within a run (the event is still recorded). Delivery uses the same `FORGE_NOTIFY` providers — with none configured, the milestone records but doesn't push.
 

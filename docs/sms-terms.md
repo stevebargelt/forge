@@ -27,7 +27,7 @@ Default behavior is one message per terminal transition. There are no marketing 
 
 Sample message:
 ```
-forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s
+forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s · no action
 ```
 
 Message frequency is bounded by how many workflows the user runs — typically a handful per day at most, often zero on a given day.
