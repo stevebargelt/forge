@@ -301,7 +301,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
       }, invokeFn ?? invoke);
 
-      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds }, deps);
+      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
       const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
 
       const runId = getRunId();

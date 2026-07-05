@@ -145,18 +145,32 @@ function isCloseoutActionPhrase(summary: string): boolean {
   return TICKET_CONTEXT_RE.test(summary) && CLOSEOUT_WEAK_RE.test(summary);
 }
 
-/** True when a finding is orchestrator closeout guidance, not fixer work:
- *  (a) it is anchored on a `backlog/` file OTHER than `backlog/done/` — an
- *      active ticket file under review, never fixer-actionable (the fixer
- *      cannot commit backlog changes), or
+/** True when `path` names the CURRENT ticket (`ticketId` appears, not followed by
+ *  another digit so FG-462 doesn't match FG-4620) — same #<num> boundary rule as
+ *  resolveCommitRange. Empty ticketId matches nothing. */
+function referencesTicket(path: string, ticketId: string): boolean {
+  if (!ticketId) return false;
+  const esc = ticketId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${esc}(?![0-9])`, "i").test(path);
+}
+
+/** True when a finding is orchestrator closeout guidance for the CURRENT ticket,
+ *  not fixer work:
+ *  (a) it is anchored on the current ticket's ACTIVE backlog file (a `backlog/`
+ *      file naming `ticketId`, excluding `backlog/done/`) — never fixer-actionable
+ *      (the fixer cannot commit backlog changes), or
  *  (b) it is truly unanchored AND its summary proposes a backlog close/move/
- *      mark-done action.
- *  `backlog/done/` (an ALREADY-closed ticket) is excluded from (a): a finding
- *  anchored there is stale closeout text on a past close, which is the
- *  genuine backlog-drift catch the ticket's Non-Goal preserves — not a
- *  close/move action to withhold from the fixer. */
-export function isCloseoutFinding(f: Finding): boolean {
-  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file)) return true;
+ *      mark-done action (about the ticket under review, by loop context).
+ *  Scoped to `ticketId` (FG-462 AC: "the current implementation ticket"): a
+ *  finding on an UNRELATED backlog file — another ticket's story, backlog/notes.md,
+ *  an epic/idea — is NOT closeout. It stays fixable so it is not silently relabeled
+ *  as routine post-merge closeout; if the fixer then can't touch it, DISALLOWED_RE
+ *  yields a clean `fixer_out_of_scope` stop for the orchestrator to inspect.
+ *  `backlog/done/` (an already-closed ticket) is likewise excluded from (a): a
+ *  finding there is stale closeout text on a past close — the genuine backlog-drift
+ *  catch the ticket's Non-Goal preserves — not a close/move to withhold. */
+export function isCloseoutFinding(f: Finding, ticketId: string): boolean {
+  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) return true;
   if (!f.file && isCloseoutActionPhrase(f.summary)) return true;
   return false;
 }
@@ -164,12 +178,13 @@ export function isCloseoutFinding(f: Finding): boolean {
 export type FindingPartition = { fixable: Finding[]; closeout: Finding[] };
 
 /** Split reviewer findings into those the fixer should address (`fixable`) and
- *  those that are orchestrator closeout guidance (`closeout`) — see
- *  isCloseoutFinding. Pure; order-preserving within each bucket. */
-export function partitionCloseoutFindings(findings: Finding[]): FindingPartition {
+ *  those that are orchestrator closeout guidance for the current ticket
+ *  (`closeout`) — see isCloseoutFinding. Pure; order-preserving within each
+ *  bucket. */
+export function partitionCloseoutFindings(findings: Finding[], ticketId: string): FindingPartition {
   const fixable: Finding[] = [];
   const closeout: Finding[] = [];
-  for (const f of findings) (isCloseoutFinding(f) ? closeout : fixable).push(f);
+  for (const f of findings) (isCloseoutFinding(f, ticketId) ? closeout : fixable).push(f);
   return { fixable, closeout };
 }
 
@@ -296,8 +311,9 @@ export type ReviewLoopDeps = {
  *  passes, review; on needs_fix (and rounds remain) → fix → next round. Stops on
  *  pass, blocked, max rounds, or verification/fixer/reviewer failure. Pure: all
  *  effects via `deps`. */
-export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps): Promise<ReviewLoopOutcome> {
+export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: string }, deps: ReviewLoopDeps): Promise<ReviewLoopOutcome> {
   const maxRounds = Math.max(1, opts.maxRounds ?? 2);
+  const ticketId = opts.ticketId ?? "";
   const rounds: RoundRecord[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
@@ -358,7 +374,7 @@ export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLo
     // needs_fix — FG-462: withhold backlog closeout findings from the fixer. They
     // are the orchestrator's post-merge job (and the fixer cannot commit backlog
     // changes anyway), so dispatch ONLY the fixable remainder.
-    const { fixable, closeout } = partitionCloseoutFindings(review.findings);
+    const { fixable, closeout } = partitionCloseoutFindings(review.findings, ticketId);
     if (closeout.length > 0) rec.closeoutFindings = closeout;
 
     if (fixable.length === 0) {
@@ -428,9 +444,16 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
       : r.verification.ok
         ? `- reviewer: failed (invalid or absent result)`
         : `- reviewer: skipped (verification failed)`);
-    if (r.findings.length > 0) {
+    // FG-462: closeout findings render ONLY under their dedicated section below,
+    // never again in the general list (rec.findings holds the full unpartitioned
+    // set). Dedupe by value key so it holds whether or not the two arrays share
+    // object identity.
+    const findingKey = (f: Finding): string => `${f.file ?? ""}:${f.line ?? ""}:${f.summary}`;
+    const closeoutKeys = new Set((r.closeoutFindings ?? []).map(findingKey));
+    const generalFindings = r.findings.filter((f) => !closeoutKeys.has(findingKey(f)));
+    if (generalFindings.length > 0) {
       L.push(`- findings:`);
-      for (const f of r.findings) {
+      for (const f of generalFindings) {
         const where = f.unanchored ? "[unanchored]" : `${f.file}:${f.line}`;
         L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
       }
