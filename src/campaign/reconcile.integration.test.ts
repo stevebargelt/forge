@@ -1511,18 +1511,55 @@ test("FG-441: resume ships a manually-driven awaiting_gate item with complete ev
   assert.equal(payload.campaignId, campaign.id);
 });
 
-test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when evidence is incomplete — no optimistic ship", async () => {
+test("FG-460: resume SHIPS a docs-only (non_code_diff) awaiting_gate item with a clean authoritative outcome and NO host-verification row — matching reconcile", async () => {
+  // makeCommit writes a .txt (non_code_diff lane). Before FG-460, resume used
+  // evaluateReconcileEvidence — lane-blind, always demanding a host-verification
+  // row — so it wrongly REFUSED this docs-only item that `forge campaign reconcile`
+  // already ships (a docs-only commit needs no host gate; FG-452). FG-460 unifies
+  // resume onto the same out-of-band composition, so it now ships it too.
   const ticketId = "FG-610";
   const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
 
-  // Seed everything EXCEPT a host-verification row — host_verification_not_recorded.
-  const commit = makeCommit(`impl-${ticketId}`);
-  closeTicket(projectDir, ticketId, commit);
+  seedOutOfBandDocsEvidence(ticketId); // base + docs-only commit (non_code_diff lane), ticket closed
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  // NO host-verification row — the whole point: a docs-only item must not need one.
+
+  const beforeEvents = countEvents();
+  let dispatched = 0;
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
+    dispatched++;
+    return { runId: "r", taskId: "t", status: "complete" };
+  };
+
+  await resumeCampaign(campaignId, { dispatch });
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.equal(afterItem.lifecycleStatus, "complete", "docs-only item with a clean authoritative outcome must ship on resume");
+  assert.equal(afterItem.outcome, "shipped");
+
+  assert.equal(countEvents(), beforeEvents + 1, "exactly one durable event logged");
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string; payload: string } | undefined;
+  assert.ok(evRow, "an event was logged");
+  assert.equal(evRow!.event_type, "campaign_item.evidence_reconciled", "ships via the evidence-reconciled path, not a refusal");
+  const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; decidedBy: string };
+  assert.equal(payload.ticketId, ticketId);
+  assert.equal(payload.decidedBy, "campaign_resume");
+});
+
+test("FG-460: resume REFUSES a CODE-touching awaiting_gate item that lacks a passing host-verification row — the widening is scoped to the non_code_diff lane, resume never ships un-verified code", async () => {
+  // A .ts commit is code-touching → the out-of-band lane needs a passing
+  // host-verification row (which resume never captures). Clean authoritative
+  // outcome, but no covering host-verification → lane_evidence_missing → refuse.
+  const ticketId = "FG-612";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+
+  // Code-touching commit, ticket closed, but NO host-verification row recorded.
+  seedOutOfBandCodeEvidence(ticketId, { recordVerification: false });
   logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
 
   const beforeItem = getCampaignItem(itemId)!;
-  const beforeEvents = countEvents();
-
   let dispatched = 0;
   const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
     dispatched++;
@@ -1531,28 +1568,37 @@ test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when e
 
   const resumeResult = await resumeCampaign(campaignId, { dispatch });
 
-  assert.notEqual(resumeResult.stopReason, "complete", "campaign must not report complete on incomplete evidence");
-  assert.equal(dispatched, 0, "must not dispatch anything else while the parked item is unresolved");
-
+  assert.notEqual(resumeResult.stopReason, "complete", "must not complete on un-verified code");
+  assert.equal(dispatched, 0);
   const afterItem = getCampaignItem(itemId)!;
-  assert.equal(afterItem.lifecycleStatus, beforeItem.lifecycleStatus, "item must remain parked — not shipped");
-  assert.notEqual(afterItem.lifecycleStatus, "complete");
-  assert.equal(afterItem.outcome, beforeItem.outcome, "outcome must not become 'shipped'");
-  assert.equal(afterItem.blockerKind, beforeItem.blockerKind);
+  assert.equal(afterItem.lifecycleStatus, beforeItem.lifecycleStatus, "code-touching item without host-verification must remain parked");
+  assert.notEqual(afterItem.outcome, "shipped");
 
-  assert.equal(
-    countEvents(),
-    beforeEvents + 1,
-    "exactly one durable refusal event logged, no campaign_item.evidence_reconciled event"
-  );
   const evRow = db
     .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconcile_refused' ORDER BY id DESC LIMIT 1")
     .get() as { event_type: string; payload: string } | undefined;
-  assert.ok(evRow, "campaign_item.evidence_reconcile_refused event logged for the refused reconcile");
-  const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; missing: string[]; decidedBy: string };
-  assert.equal(payload.ticketId, ticketId);
-  assert.equal(payload.campaignId, campaignId);
-  assert.ok(payload.missing.includes("host_verification_not_recorded"));
+  assert.ok(evRow, "a refusal event logged");
+  const payload = JSON.parse(evRow!.payload) as { missing: string[] };
+  assert.ok(
+    payload.missing.includes("lane_evidence_missing"),
+    `expected lane_evidence_missing (code-touching, no passing host-verification), got: ${payload.missing.join(", ")}`
+  );
+});
+
+test("FG-460: resume SHIPS a code-touching awaiting_gate item that HAS a passing host-verification row and a clean authoritative outcome — the host-verification lane is honored, unchanged from before", async () => {
+  const ticketId = "FG-613";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+
+  // Code-touching commit WITH a passing host-verification row → the out-of-band
+  // host_verification lane is satisfied. Clean authoritative outcome → ships.
+  seedOutOfBandCodeEvidence(ticketId); // recordVerification defaults to true
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  await resumeCampaign(campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.equal(afterItem.lifecycleStatus, "complete", "code-touching + passing host-verification + clean authoritative → ships");
+  assert.equal(afterItem.outcome, "shipped");
 });
 
 test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when the run's own authoritative outcome is a fail with no later pass or qualifying force-advance — logs the refusal with the authoritative-outcome clause", async () => {
@@ -1605,8 +1651,12 @@ test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when t
   assert.equal(payload.ticketId, ticketId);
   assert.equal(payload.campaignId, campaignId);
   assert.ok(
-    payload.missing.includes("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
-    `expected the authoritative-outcome clause in missing, got: ${payload.missing.join(", ")}`
+    // FG-460: resume now composes the authoritative-outcome fact through the
+    // shared out-of-band helper, which labels it `run_evidence:` (same as
+    // reconcile's out-of-band branch) so the operator can tell "the run's own
+    // review is unresolved" apart from a lane-evidence gap.
+    payload.missing.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    `expected the run_evidence:-prefixed authoritative-outcome clause in missing, got: ${payload.missing.join(", ")}`
   );
 });
 
