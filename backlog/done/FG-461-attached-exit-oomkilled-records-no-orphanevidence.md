@@ -5,7 +5,7 @@ status: done
 title: attached-exit oom_killed records no OrphanEvidence — surface recovery evidence for recovery-relevant kinds at the invoke/runNext attached-exit path
 created: 2026-07-05
 closed: 2026-07-05
-closed_commit: 7b4e102
+closed_commit: 4ecb1f7
 ---
 
 ## Problem
