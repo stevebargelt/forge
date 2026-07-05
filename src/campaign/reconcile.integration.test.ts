@@ -1601,6 +1601,58 @@ test("FG-460: resume SHIPS a code-touching awaiting_gate item that HAS a passing
   assert.equal(afterItem.outcome, "shipped");
 });
 
+test("FG-460 parity: resume and reconcile reach the SAME verdict against identical out-of-band evidence — both SHIP a docs-only item, both REFUSE a code-touching item lacking host-verification", async () => {
+  // Ships: identical docs-only evidence, one campaign driven through
+  // reconcileCampaign and an independent twin campaign through resumeCampaign —
+  // proving the "both ship" claim empirically, not just structurally (same
+  // shared composeOutOfBandEligibility call underneath both call sites).
+  const shipReconcile = setupAwaitingGateManualRunCampaign("FG-622");
+  seedOutOfBandDocsEvidence("FG-622");
+  logEvent("verdict.received", { runId: shipReconcile.runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  const reconcileShipResult = reconcileCampaign(shipReconcile.campaignId);
+  assert.equal(reconcileShipResult.items[0]!.status, "shipped");
+
+  const shipResume = setupAwaitingGateManualRunCampaign("FG-623");
+  seedOutOfBandDocsEvidence("FG-623");
+  logEvent("verdict.received", { runId: shipResume.runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  await resumeCampaign(shipResume.campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+  assert.equal(getCampaignItem(shipResume.itemId)!.outcome, "shipped", "resume ships the identical docs-only evidence reconcile just shipped above");
+
+  // Refuses: identical code-touching evidence with NO passing host-verification
+  // row fed to both paths — neither ships un-verified code.
+  const refuseReconcile = setupAwaitingGateManualRunCampaign("FG-624");
+  seedOutOfBandCodeEvidence("FG-624", { recordVerification: false });
+  logEvent("verdict.received", { runId: refuseReconcile.runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  const reconcileRefuseResult = reconcileCampaign(refuseReconcile.campaignId);
+  assert.equal(reconcileRefuseResult.items[0]!.status, "refused");
+
+  const refuseResume = setupAwaitingGateManualRunCampaign("FG-625");
+  seedOutOfBandCodeEvidence("FG-625", { recordVerification: false });
+  logEvent("verdict.received", { runId: refuseResume.runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  const resumeRefuseResult = await resumeCampaign(refuseResume.campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+  assert.notEqual(resumeRefuseResult.stopReason, "complete");
+  assert.notEqual(getCampaignItem(refuseResume.itemId)!.outcome, "shipped", "resume refuses the identical code-touching evidence reconcile just refused above");
+});
+
+test("FG-460 scope gap: a no-runId awaiting_gate item diverges between resume and reconcile — reconcile ships it directly (see the FG-458 non-goal-guard test above) but resume's item.runId guard (executor.ts:688) never lets it reach the shared eligibility path, so it re-parks with recovery_needed instead; this asymmetry predates FG-460 and is unchanged by it", async () => {
+  const { campaignId: reconcileCampaignId, itemId: reconcileItemId } = setupAwaitingGateCampaign("FG-626");
+  seedOutOfBandDocsEvidence("FG-626");
+  const reconcileResult = reconcileCampaign(reconcileCampaignId);
+  assert.equal(reconcileResult.items[0]!.status, "shipped", "reconcile ships a no-runId out-of-band item directly");
+  assert.equal(getCampaignItem(reconcileItemId)!.outcome, "shipped");
+
+  const { campaignId: resumeCampaignId, itemId: resumeItemId } = setupAwaitingGateCampaign("FG-627");
+  seedOutOfBandDocsEvidence("FG-627");
+  const resumeResult = await resumeCampaign(resumeCampaignId, {
+    dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }),
+  });
+
+  assert.equal(resumeResult.stopReason, "recovery_needed", "no-runId awaiting_gate items never reach composeOutOfBandEligibility via resume — they fall through to the '!item.runId' branch and pause");
+  const afterResumeItem = getCampaignItem(resumeItemId)!;
+  assert.equal(afterResumeItem.lifecycleStatus, "awaiting_gate", "still parked — resume did not ship it despite reconcile shipping the identical evidence shape above");
+  assert.notEqual(afterResumeItem.outcome, "shipped");
+});
+
 test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when the run's own authoritative outcome is a fail with no later pass or qualifying force-advance — logs the refusal with the authoritative-outcome clause", async () => {
   const ticketId = "FG-611";
   const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);

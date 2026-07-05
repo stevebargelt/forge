@@ -682,9 +682,7 @@ async function driveRemainingItems(
       // gates/fixers/red/host-verification/PR-merge/backlog-close — leaving the
       // item shipped in reality but still parked here. Before re-parking it via
       // driveWorkflowItem below, re-derive shipped-ness from the SAME durable
-      // evidence `forge campaign reconcile`'s scope-blocked branch uses (the run's
-      // authoritative verdict/gate events, not the FG-443 out-of-band evaluator,
-      // which ignores run events and is reconcile.ts's job, not resume's). Only
+      // evidence `forge campaign reconcile`'s scope-blocked branch uses. Only
       // fires for the manually-driven shape: blocked_by_red and any item WITH a
       // blockerKind are FG-428/other lanes and must reach driveWorkflowItem unchanged.
       if (item.lifecycleStatus === "awaiting_gate" && !item.blockerKind && item.runId) {
