@@ -370,6 +370,35 @@ test("invoke: failed exit + empty result.json marks task failed and returns fail
   assert.equal(task!.status, "failed");
 });
 
+test("invoke: FG-455 attached exit 137 + empty result.json marks task failed with oom_killed, not container_crash", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const oomKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 137;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "do thing",
+    projectDir: "/tmp/x",
+    dockerExec: oomKilled,
+  });
+
+  assert.equal(r.status, "failed");
+  assert.match(r.error ?? "", /killed|exit 137|OOM/);
+  assert.doesNotMatch(r.error ?? "", /container_crash/);
+  assert.equal(failureKindForTask(r.taskId), "oom_killed");
+
+  const task = getTask(r.taskId);
+  assert.equal(task!.status, "failed");
+});
+
 test("invoke: FG-376 dependency-provisioning exit code marks task failed with verification_environment_unavailable, not container_crash", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";

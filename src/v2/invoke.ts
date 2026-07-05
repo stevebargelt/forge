@@ -517,7 +517,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // from the runtime's structured stdout — a provider/model error (invalid
     // model, quota, 4xx) is classified `model_error` with the cause surfaced.
     let kind = classify({ exitCode, resultState: "missing" });
-    let error = `container_crash (exit ${exitCode})`;
+    let error = kind === "oom_killed"
+      ? `container killed (exit ${exitCode} — possibly OOM or an external kill)`
+      : `container_crash (exit ${exitCode})`;
     const a = analyzeProviderFailure({
       logFormat: runtimeMeta.logFormat,
       runtimeKind: runtimeMeta.runtimeKind,

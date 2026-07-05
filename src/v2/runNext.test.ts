@@ -358,6 +358,37 @@ test("runNext: FG-376 dependency-provisioning exit code marks the pipeline task 
   assert.equal(failureKindForTask(first!.id), "verification_environment_unavailable");
 });
 
+test("runNext: FG-455 attached exit 137 marks the pipeline task failed with oom_killed, not container_crash", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "oom test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Mimic a Docker OOM-kill / external SIGKILL at attached-exit: empty
+  // result.json, exit 137, no provider/model error in stdout.
+  const oomKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 137;
+  };
+
+  const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: oomKilled });
+  assert.deepEqual(wave.failedSteps, ["first"]);
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first");
+  assert.ok(first);
+  assert.equal(first!.status, "failed");
+  assert.match(first!.error ?? "", /killed|exit 137|OOM/);
+  assert.doesNotMatch(first!.error ?? "", /container_crash/);
+  assert.equal(failureKindForTask(first!.id), "oom_killed");
+});
+
 // Finding 1: runNext guard — non-active run returns empty dispatch
 test("runNext: abandoned run returns empty dispatch without starting any work", async () => {
   const { runId } = startRun({
