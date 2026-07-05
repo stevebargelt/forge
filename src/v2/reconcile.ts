@@ -60,6 +60,21 @@ export type ReconcileResult = {
   runChange?: { from: string; to: string; reason: string };
 };
 
+// FG-459: reconcileRun documents a never-throw invariant — the file/docker READ
+// side already upholds it (every read safe-denies), but the DB-WRITE side did
+// not. A DB-layer throw (SQLITE_BUSY when two forge processes reconcile the same
+// run concurrently, disk-full, etc.) must not propagate out of reconcileRun and
+// must not abort reconciliation of the run's other tasks/passes. The actual
+// safety mechanism is the per-item try/catch in each pass below; this injectable
+// seam mirrors the existing containerAlive/reapContainer/containerExitInfo params
+// so a test can force a write to throw SQLITE_BUSY-shaped deterministically.
+export type ReconcileWriters = {
+  markTaskComplete: typeof markTaskComplete;
+  markTaskFailed: typeof markTaskFailed;
+  backfillTaskResult: typeof backfillTaskResult;
+};
+export const defaultReconcileWriters: ReconcileWriters = { markTaskComplete, markTaskFailed, backfillTaskResult };
+
 const TERMINAL_TASK = new Set(["complete", "failed"]);
 
 /** Is the named container actually running? Conservative on ambiguity: a clear
@@ -161,13 +176,21 @@ export function reconcileRun(
   containerAlive: ContainerAlive = defaultContainerAlive,
   reapContainer: ContainerReap = defaultContainerReap,
   containerExitInfo: ContainerExitInfo = defaultContainerExitInfo,
+  writers: ReconcileWriters = defaultReconcileWriters,
 ): ReconcileResult {
+  const { markTaskComplete, markTaskFailed, backfillTaskResult } = writers;
   const run = getRun(runId);
   const taskChanges: TaskReconcileChange[] = [];
   if (!run) return { runId, taskChanges };
 
   for (const t of tasksForRun(runId)) {
     if (t.status !== "running") continue;
+    // FG-459: never-throw guard. A DB-write throw (markTaskComplete/Failed,
+    // backfillTaskResult, or the logEvent bookkeeping alongside them) during
+    // ONE task's reconcile must neither propagate out of reconcileRun nor abort
+    // the remaining tasks/passes. Swallow-and-continue mirrors the file's
+    // read-side safe-deny; reconcile is idempotent, so a later pass retries.
+    try {
     const taskEvents = eventsForTask(t.id);
     const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
 
@@ -400,6 +423,7 @@ export function reconcileRun(
     if (t.worktreePath && run.projectDir) {
       removeWorktreeIfSafe(t.worktreePath, t.runId, t.id, run.projectDir);
     }
+    } catch { /* FG-459: DB write (or its bookkeeping) threw — skip this task, keep reconciling the rest */ }
   }
 
   // FG-455 p4 Mode A: a detached `forge invoke` whose wrapper was killed can
@@ -439,16 +463,20 @@ export function reconcileRun(
 
     if (recovered === undefined) continue; // nothing recoverable — leave the complete task alone
 
-    if (!backfillTaskResult(t.id, recovered)) continue; // result written concurrently since our read — no-op
-
-    const evidence: Record<string, unknown> = { recovered: true };
+    // FG-459: guard the backfill write + its event so a SQLITE_BUSY throw here
+    // neither propagates nor aborts the remaining tasks/passes.
     try {
-      writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
-    } catch {
-      evidence.resultWriteFailed = true;
-    }
-    logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
-    taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
+      if (!backfillTaskResult(t.id, recovered)) continue; // result written concurrently since our read — no-op
+
+      const evidence: Record<string, unknown> = { recovered: true };
+      try {
+        writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
+      } catch {
+        evidence.resultWriteFailed = true;
+      }
+      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
+      taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
+    } catch { /* FG-459: never throw — keep reconciling the rest */ }
   }
 
   // FG-455 p2: a fanout PARENT left `running` after its children finish or die
@@ -468,6 +496,10 @@ export function reconcileRun(
     if (eventsForTask(parent.id).some((e) => e.eventType === "container.started")) continue; // real containerized task
     if (children.some((c) => !TERMINAL_TASK.has(c.status))) continue; // wave may still be in progress
 
+    // FG-459: guard the parent-finalization writes (markTaskComplete/Failed +
+    // events) so a DB throw here neither propagates nor aborts the run-level
+    // completion check that follows.
+    try {
     const completeChildren = children.filter((c) => c.status === "complete");
     const allComplete = completeChildren.length === children.length;
     // Mirrors the aggregate dispatchFanoutStep writes at the end of a live wave
@@ -508,6 +540,7 @@ export function reconcileRun(
       logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
       taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_orphaned" });
     }
+    } catch { /* FG-459: never throw — a DB throw finalizing one fanout parent must not abort the rest */ }
   }
 
   // Orphaned duplicate primaries: a pending primary in a phase that another
@@ -517,23 +550,32 @@ export function reconcileRun(
   // the run out of "complete" (it's non-terminal pending work) and, before the
   // ready-queue was made duplicate-tolerant, blocked the next phase. Finalize it
   // as failed/orphaned so the run can advance and complete.
-  for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
+  // FG-459: finalizeOrphanedPrimaries is itself never-throw (see its own
+  // per-item guard), but guard the call site too so an unexpected throw can't
+  // skip the run-level completion check below.
+  try {
+    for (const c of finalizeOrphanedPrimaries(runId)) taskChanges.push(c);
+  } catch { /* FG-459: never throw */ }
 
   // Run-level: an active run with no remaining non-terminal work is no longer in
   // flight. We only complete it when there are no further workflow steps to come
   // — unambiguous only for single-step invoke runs; pipelines are finalized by
   // `forge next` (which loads the workflow).
   let runChange: ReconcileResult["runChange"];
-  if (run.status === "active" && run.workflow === "invoke") {
-    const after = tasksForRun(runId);
-    const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
-    if (after.length > 0 && !anyNonTerminal) {
-      updateRunStatus(runId, "complete");
-      logEvent("run.completed", { runId, payload: { source: "reconcile" } });
-      logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } });
-      runChange = { from: "active", to: "complete", reason: "no_live_work" };
+  // FG-459: guard the run-level status write + its events so a DB throw here
+  // does not propagate out of reconcileRun after the task passes succeeded.
+  try {
+    if (run.status === "active" && run.workflow === "invoke") {
+      const after = tasksForRun(runId);
+      const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
+      if (after.length > 0 && !anyNonTerminal) {
+        updateRunStatus(runId, "complete");
+        logEvent("run.completed", { runId, payload: { source: "reconcile" } });
+        logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } });
+        runChange = { from: "active", to: "complete", reason: "no_live_work" };
+      }
     }
-  }
+  } catch { /* FG-459: never throw */ }
 
   return { runId, taskChanges, ...(runChange ? { runChange } : {}) };
 }
@@ -558,12 +600,16 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
     if (!primaries.some((p) => p.status === "complete")) continue;
     for (const p of primaries) {
       if (p.status !== "pending") continue;
-      const error =
-        "orphaned: duplicate pending primary in a phase already completed by another primary";
-      markTaskFailed(p.id, error);
-      logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
-      logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
-      changes.push({ taskId: p.id, from: "pending", to: "failed", reason: "orphaned_duplicate_primary" });
+      // FG-459: never-throw — a DB throw failing one orphaned primary must not
+      // abort the rest, and this function is also reused by `forge next`.
+      try {
+        const error =
+          "orphaned: duplicate pending primary in a phase already completed by another primary";
+        markTaskFailed(p.id, error);
+        logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
+        logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
+        changes.push({ taskId: p.id, from: "pending", to: "failed", reason: "orphaned_duplicate_primary" });
+      } catch { /* FG-459: never throw */ }
     }
   }
   return changes;

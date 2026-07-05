@@ -10,7 +10,8 @@ import { insertRun, getRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
-import { reconcileRun, reconcileRuns } from "./reconcile.js";
+import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo } from "./reconcile.js";
+import type { ReconcileWriters } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
 import { orphanRecoveryMessage } from "../cli/commands/show.js";
 import type { Run, Task } from "../types/index.js";
@@ -871,4 +872,74 @@ test("FG-455 p4 Mode A no-recovery: complete task, empty DB result, empty result
   assert.equal(t.status, "complete", "status is never flipped to failed for a complete task");
   assert.equal(t.result, undefined);
   assert.ok(!eventsForTask(taskId).some((e) => e.eventType === "task.failed"), "no spurious failure");
+});
+
+// FG-459: reconcileRun documents a never-throw invariant. The read/docker side
+// already upholds it; these cover the DB-WRITE side — a SQLITE_BUSY-shaped throw
+// (two forge processes reconciling the same run concurrently) must neither
+// propagate out of reconcileRun nor abort reconciliation of the other tasks.
+
+// A writer that throws SQLITE_BUSY-shaped on markTaskFailed for one specific
+// taskId, delegating every other call to the real store writers.
+function busyWriterFor(failingTaskId: string): ReconcileWriters {
+  return {
+    ...defaultReconcileWriters,
+    markTaskFailed(id, error, result) {
+      if (id === failingTaskId) {
+        const e = new Error("SQLITE_BUSY: database is locked") as Error & { code?: string };
+        e.code = "SQLITE_BUSY";
+        throw e;
+      }
+      return defaultReconcileWriters.markTaskFailed(id, error, result);
+    },
+  };
+}
+
+test("FG-459: a DB-write throw during one task's reconcile does not propagate out of reconcileRun", () => {
+  insertContainerized(mkTask("t-busy", { status: "running" }));
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+  }, "a SQLITE_BUSY throw on the write must be swallowed, not propagated");
+  // The failing task is left running (its write threw) — idempotent: a later
+  // pass retries. Crucially it did NOT throw and did NOT get a bogus change.
+  assert.equal(getTask("t-busy")!.status, "running");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === "t-busy").length, 0);
+});
+
+test("FG-459: a DB-write throw on one task still reconciles the run's OTHER tasks", () => {
+  insertContainerized(mkTask("t-busy", { status: "running" }));
+  insertContainerized(mkTask("t-ok", { status: "running" }));
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+  });
+  // t-busy's write threw → left running, no change recorded.
+  assert.equal(getTask("t-busy")!.status, "running");
+  // t-ok must still have been reconciled to failed despite the earlier throw.
+  assert.equal(getTask("t-ok")!.status, "failed", "the throw must not abort reconcile of the remaining tasks");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === "t-ok").length, 1);
+  assert.ok(eventsForTask("t-ok").some((e) => e.eventType === "task.reconciled"));
+});
+
+test("FG-459: a DB-write throw on a task does not abort the run-level completion check", () => {
+  // Two tasks: t-busy will throw on failed-write; t-done already has a valid
+  // result and completes cleanly. With t-busy left running the run stays active
+  // (correct — non-terminal work remains), proving the run-level pass RAN
+  // (didn't get skipped by an escaping throw) and reached the right verdict.
+  insertContainerized(mkTask("t-busy", { status: "running" }));
+  insertContainerized(mkTask("t-done", { status: "running" }));
+  const dir = taskDir(RUN.id, "t-done");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "ok" }));
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+  });
+  assert.equal(getTask("t-done")!.status, "complete");
+  assert.equal(getTask("t-busy")!.status, "running");
+  // Run has remaining non-terminal work (t-busy) → NOT completed. The absence of
+  // a thrown error here is the point: the run-level block ran to a decision.
+  assert.equal(r!.runChange, undefined);
 });
