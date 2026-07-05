@@ -118,13 +118,22 @@ export function failureDetailForRun(run: Run): FailureDetail | undefined {
   return failureKind ? { taskId: failed.id, failureKind } : { taskId: failed.id };
 }
 
+// FG-464: the red-blocked task to point the operator at (`forge show <task>`).
+// First top-level task in blocked_by_red; undefined if none is found.
+export function blockedTaskForRun(run: Run): FailureDetail | undefined {
+  const blocked = tasksForRun(run.id).find(
+    (t) => t.parentId === undefined && t.status === "blocked_by_red",
+  );
+  return blocked ? { taskId: blocked.id } : undefined;
+}
+
 export async function notifyOnTaskBlockedByRed(run: Run): Promise<void> {
   if (!isAnyProviderEnabled()) return;
 
   const filter = parseNotifyOn();
   if (!filter.has("blocked_by_red")) return;
 
-  const body = formatRunNotification(run, "blocked_by_red");
+  const body = formatRunNotification(run, "blocked_by_red", undefined, blockedTaskForRun(run));
   await dispatch(body, `forge: ${run.workflow} [blocked_by_red]`);
 }
 

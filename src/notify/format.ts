@@ -21,22 +21,51 @@ function projectSegment(run: Run): string {
   return base ? `${base}: ` : "";
 }
 
-// WALK-4: optional failure detail folded into a run-completion notification so
-// the push answers "what failed and what do I do next" without opening a
-// terminal. Kept compact (one SMS segment); the title absorbs truncation.
+// WALK-4: optional failure/action detail folded into a run notification so the
+// push answers "what happened and what do I do next" without opening a terminal.
+// Kept compact (one SMS segment); the title absorbs truncation. `taskId` is the
+// task to act on (the failed task, or the red-blocked task); `failureKind` names
+// the failure when known.
 export type FailureDetail = { taskId: string; failureKind?: string };
+
+// FG-464: the campaign/ticket context an operator needs to know WHERE a push
+// belongs, pulled from run.metadata when present (FG-433 populates ticketId on
+// campaign-created runs). Degrades to "" when nothing is recorded.
+function contextSegment(run: Run): string {
+  const meta = (run.metadata ?? {}) as { ticketId?: unknown; campaignId?: unknown };
+  const bits: string[] = [];
+  if (typeof meta.ticketId === "string" && meta.ticketId) bits.push(meta.ticketId);
+  if (typeof meta.campaignId === "string" && meta.campaignId) bits.push(`campaign ${meta.campaignId}`);
+  return bits.length > 0 ? `${bits.join(" ")} ` : "";
+}
 
 export function formatRunNotification(
   run: Run,
   state: NotifyState,
   durationMs?: number,
-  failure?: FailureDetail,
+  actionTask?: FailureDetail,
 ): string {
   const bits: string[] = [];
   if (durationMs !== undefined) bits.push(formatDuration(durationMs));
-  if (failure) bits.push(`${failure.failureKind ?? "failed"} → forge show ${failure.taskId}`);
+  // FG-464: the action segment — what to do next, keyed by state. A failure names
+  // the kind + the task to inspect; a red-block names the task to review; a clean
+  // finish is explicitly "no action" so a non-actionable push is unmistakable at a
+  // glance. `actionTask` carries the task to act on (the failed task, or the
+  // red-blocked task); the STATE — not its presence — decides which framing.
+  // Note: awaiting_gate is a TaskStatus, never a RunStatus, so notifyOnRunTransition
+  // never reaches this formatter with it — gate pushes go through
+  // formatGateNotification (taskId + phase + `forge gate`). So the branches here are
+  // the run-transition states only: red-block, failure, or a clean finish.
+  if (state === "blocked_by_red") {
+    bits.push(`review red${actionTask ? ` → forge show ${actionTask.taskId}` : ""}`);
+  } else if (actionTask !== undefined || state === "failed") {
+    const kind = actionTask?.failureKind ?? "failed";
+    bits.push(`inspect failure: ${kind}${actionTask ? ` → forge show ${actionTask.taskId}` : ""}`);
+  } else {
+    bits.push("no action");
+  }
   const titleQuoted = `"${run.title.replaceAll('"', "'")}"`;
-  const prefix = `forge: ${projectSegment(run)}${run.id} [${state}] ${run.workflow} `;
+  const prefix = `forge: ${projectSegment(run)}${contextSegment(run)}${run.id} [${state}] ${run.workflow} `;
   const suffix = bits.length > 0 ? ` — ${bits.join(" · ")}` : "";
 
   // If everything fits, emit as-is.

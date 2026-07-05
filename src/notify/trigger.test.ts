@@ -1,7 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { notifyOnRunTransition, notifyOnTaskBlockedByRed, failureDetailForRun, isAnyProviderEnabled, isNotifySuppressed } from "./trigger.js";
+import { notifyOnRunTransition, notifyOnTaskBlockedByRed, failureDetailForRun, blockedTaskForRun, isAnyProviderEnabled, isNotifySuppressed } from "./trigger.js";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
@@ -123,6 +123,43 @@ test("notifyOnTaskBlockedByRed: short-circuits when isTwilioEnabled is false", a
       insertTask(mkTask("task-ok", DBRUN.id, { status: "complete" }));
       insertTask(mkTask("task-child", DBRUN.id, { status: "failed", parentId: "task-ok" }));
       assert.equal(failureDetailForRun(DBRUN), undefined);
+    } finally {
+      setDbForTest(prev as DatabaseInstance);
+      db.close();
+    }
+  });
+}
+
+// ── blockedTaskForRun (FG-464) ──
+// These need a DB; install an in-memory one for just this block.
+{
+  let db: DatabaseInstance;
+  let prev: DatabaseInstance | null;
+  const DBRUN: Run = { id: "run-bt", workflow: "feature", title: "bt", status: "active", createdAt: "2026-05-25T12:00:00Z" };
+
+  test("blockedTaskForRun: returns the first top-level task blocked_by_red", () => {
+    db = makeInMemoryDb();
+    prev = setDbForTest(db);
+    try {
+      insertRun(DBRUN);
+      insertTask(mkTask("task-ok", DBRUN.id, { status: "complete" }));
+      insertTask(mkTask("task-blocked", DBRUN.id, { status: "blocked_by_red" }));
+      const bt = blockedTaskForRun(DBRUN);
+      assert.deepEqual(bt, { taskId: "task-blocked" });
+    } finally {
+      setDbForTest(prev as DatabaseInstance);
+      db.close();
+    }
+  });
+
+  test("blockedTaskForRun: undefined when no task is blocked_by_red; ignores blocked CHILD tasks", () => {
+    db = makeInMemoryDb();
+    prev = setDbForTest(db);
+    try {
+      insertRun(DBRUN);
+      insertTask(mkTask("task-ok", DBRUN.id, { status: "complete" }));
+      insertTask(mkTask("task-child", DBRUN.id, { status: "blocked_by_red", parentId: "task-ok" }));
+      assert.equal(blockedTaskForRun(DBRUN), undefined);
     } finally {
       setDbForTest(prev as DatabaseInstance);
       db.close();

@@ -46,6 +46,35 @@ const KIND_POLICY: Record<MilestoneKind, { rule: Rule; importance: Importance }>
   plan_started:     { rule: "suppress", importance: "low" },    // noise by default
 };
 
+// FG-464: the operator-action model for milestones — the leading marker on a
+// pushed body so a glance answers "is this ON ME?". `actionable` kinds need the
+// operator; the rest are FYI. The `hint` is a terse next-action label.
+const KIND_ACTION: Record<MilestoneKind, { actionable: boolean; hint: string }> = {
+  decision_needed:  { actionable: true,  hint: "your decision needed" },
+  blocked:          { actionable: true,  hint: "blocked — needs you" },
+  risk_found:       { actionable: true,  hint: "risk — review" },
+  ready_for_review: { actionable: true,  hint: "review ready" },
+  acceptance_green: { actionable: false, hint: "acceptance green" },
+  shipped:          { actionable: false, hint: "shipped" },
+  batch_complete:   { actionable: false, hint: "batch done" },
+  plan_started:     { actionable: false, hint: "progress" },
+};
+
+/** FG-464: the leading action marker for a milestone's pushed body — `▶ ACTION:
+ *  <hint>` when the operator must act, `✓ FYI: <hint>` otherwise. Makes an
+ *  action-needed push unmistakable from a no-action one at a glance. */
+export function milestoneActionMarker(kind: MilestoneKind): string {
+  const a = KIND_ACTION[kind];
+  return a.actionable ? `▶ ACTION: ${a.hint}` : `✓ FYI: ${a.hint}`;
+}
+
+/** FG-464: the full body pushed for a milestone — the action marker, then the
+ *  message text, then any ship-time docs-impact advisory. Extracted (and
+ *  exported) so the composed dispatch body is directly testable. */
+export function milestoneDispatchBody(kind: MilestoneKind, text: string, docsImpactWarning?: string): string {
+  return composeDispatchBody(`${milestoneActionMarker(kind)} — ${text}`, docsImpactWarning);
+}
+
 export const BATCH_ELAPSED_MIN_MS = 10 * 60 * 1000; // 10m
 
 export function isMilestoneKind(s: string): s is MilestoneKind {
@@ -137,7 +166,9 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
 
   let dispatched = false;
   if (decision.send && isAnyProviderEnabled()) {
-    await dispatch(composeDispatchBody(args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
+    // FG-464: lead the pushed body with the action marker so action-needed reads
+    // distinctly from FYI; the run title rides in the ntfy title.
+    await dispatch(milestoneDispatchBody(kind, args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
     dispatched = true;
   }
 

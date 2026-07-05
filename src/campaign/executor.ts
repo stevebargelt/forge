@@ -942,6 +942,7 @@ async function driveRemainingItems(
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
+          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
           projectDir: opts.projectDir,
         });
         updateCampaignItem(item.id, {
@@ -976,6 +977,7 @@ async function driveRemainingItems(
         : item.ticketId;
       const inputs: Record<string, unknown> = {
         ticketId: item.ticketId,
+        campaignId,
         brief: ticketBrief,
         projectContext: cachedTicket
           ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`
@@ -1003,6 +1005,7 @@ async function driveRemainingItems(
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
+          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
           projectDir: opts.projectDir,
         });
         updateCampaignItem(item.id, {
@@ -1121,7 +1124,7 @@ async function driveRemainingItems(
         title: item.ticketId,
         status: "active",
         createdAt: nowIso(),
-        metadata: { invokeChain: ["engineer", "test-engineer"] },
+        metadata: { invokeChain: ["engineer", "test-engineer"], campaignId, ticketId: item.ticketId, itemId: item.id },
         projectDir: opts.projectDir,
       });
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });
@@ -1238,7 +1241,7 @@ async function driveRemainingItems(
         title: item.ticketId,
         status: "active",
         createdAt: nowIso(),
-        metadata: { invokeAgent: agentRole },
+        metadata: { invokeAgent: agentRole, campaignId, ticketId: item.ticketId, itemId: item.id },
         projectDir: opts.projectDir,
       });
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });

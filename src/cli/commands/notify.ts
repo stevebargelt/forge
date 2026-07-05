@@ -11,8 +11,36 @@ import {
   looksLikeE164,
   PATHS,
 } from "../../notify/consent.js";
-import { subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody } from "../../notify/format.js";
-import { emitMilestone, MILESTONE_KINDS } from "../../notify/milestone.js";
+import { subscribeRequestBody, subscribeConfirmedBody, unsubscribeBody, formatRunNotification, formatGateNotification } from "../../notify/format.js";
+import { emitMilestone, MILESTONE_KINDS, milestoneActionMarker } from "../../notify/milestone.js";
+import type { Run } from "../../types/index.js";
+
+// FG-464: sample messages rendered by `forge notify test` so an operator sees the
+// new operator-action formatting without waiting for a real run. Covers each
+// representative shape: no-action finish, failure, red-block, gate, campaign
+// context, and the milestone action markers.
+export function sampleNotifications(): string[] {
+  const run: Run = {
+    id: "run-add-login-7c2a91", workflow: "feature", title: "add login",
+    status: "complete", createdAt: "2026-05-25T12:00:00Z", projectDir: "/Users/you/code/myapp",
+  };
+  const campaignRun: Run = { ...run, id: "run-fg462-9c3f", title: "FG-462 review-loop closeout", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } };
+  const lines = [
+    "run transitions:",
+    `  ${formatRunNotification(run, "complete", 14 * 60 * 1000 + 23 * 1000)}`,
+    `  ${formatRunNotification(run, "complete", 5 * 60 * 1000, { taskId: "task-engineer-abc123", failureKind: "result_malformed" })}`,
+    `  ${formatRunNotification(run, "failed", 42 * 1000, { taskId: "task-engineer-abc123", failureKind: "oom_killed" })}`,
+    `  ${formatRunNotification(run, "blocked_by_red", undefined, { taskId: "task-red-wide-9f2" })}`,
+    `  ${formatGateNotification(run, "task-tech-lead-77", "plan")}`,
+    `  ${formatRunNotification(campaignRun, "complete", 8 * 60 * 1000)}`,
+    "milestones (orchestrator):",
+    `  ${milestoneActionMarker("decision_needed")}`,
+    `  ${milestoneActionMarker("shipped")}`,
+    `  ${milestoneActionMarker("blocked")}`,
+    `  ${milestoneActionMarker("batch_complete")}`,
+  ];
+  return lines;
+}
 
 const CONFIRMATION_WINDOW_MIN = 10;
 
@@ -24,9 +52,15 @@ export function registerNotify(program: Command): void {
   // ----- test -----
   notify
     .command("test")
-    .description("Send a test notification via all configured providers.")
+    .description("Preview the operator-action notification formats, and send a test notification via all configured providers.")
     .option("--to <number>", "override TWILIO_TO for this one send (E.164 format, e.g. +15551234567)")
     .action(async (opts: { to?: string }) => {
+      // FG-464: always preview the formats — an operator can see the shapes even
+      // with no provider configured (no real run needed).
+      console.log("forge notify — message formats (operator-action model):");
+      for (const line of sampleNotifications()) console.log(line);
+      console.log("");
+
       const twilioOn = isTwilioEnabled();
       const ntfyOn = isNtfyEnabled();
       if (!twilioOn && !ntfyOn) {
