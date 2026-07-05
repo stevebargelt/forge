@@ -1,9 +1,11 @@
 ---
 id: FG-464
 type: story
-status: active
+status: done
 title: Rethink ntfy notification message text and actionable detail
 created: 2026-07-05
+closed: 2026-07-05
+closed_commit: aa581ab
 ---
 
 ## Problem
