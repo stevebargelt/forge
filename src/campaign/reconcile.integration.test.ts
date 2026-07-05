@@ -1653,6 +1653,41 @@ test("FG-460 scope gap: a no-runId awaiting_gate item diverges between resume an
   assert.notEqual(afterResumeItem.outcome, "shipped");
 });
 
+test("FG-460 matrix: a DOCS-ONLY item with an UNRESOLVED AUTHORITATIVE FAIL refuses on BOTH resume and reconcile — the authoritative axis blocks even a non_code_diff lane (guards the lane-bypasses-authoritative short-circuit)", async () => {
+  // The one AC matrix cell not otherwise covered: docs-only (non_code_diff lane,
+  // which is eligible on its own) combined with an unresolved authoritative fail.
+  // composeOutOfBandEligibility ANDs outOfBand.eligible with authoritative.missing
+  // === [] regardless of lane, so the authoritative fail must refuse even though
+  // the lane is fine — and the refusal reason must be the run_evidence: code, NOT
+  // lane_evidence_missing (the lane is satisfied). Asserted on BOTH paths.
+  const rec = setupAwaitingGateManualRunCampaign("FG-628");
+  seedOutOfBandDocsEvidence("FG-628"); // non_code_diff lane, ticket closed
+  logEvent("verdict.received", { runId: rec.runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  const recResult = reconcileCampaign(rec.campaignId);
+  assert.equal(recResult.items[0]!.status, "refused", "reconcile refuses a docs-only item on an unresolved authoritative fail");
+  assert.ok(
+    recResult.items[0]!.missing!.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    `reconcile: expected the run_evidence: authoritative code, got: ${recResult.items[0]!.missing!.join(", ")}`
+  );
+  assert.ok(!recResult.items[0]!.missing!.includes("lane_evidence_missing"), "the docs-only lane is eligible — only the authoritative axis fails");
+
+  const res = setupAwaitingGateManualRunCampaign("FG-629");
+  seedOutOfBandDocsEvidence("FG-629");
+  logEvent("verdict.received", { runId: res.runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  await resumeCampaign(res.campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+  assert.notEqual(getCampaignItem(res.itemId)!.outcome, "shipped", "resume refuses the identical docs-only + authoritative-fail evidence reconcile just refused");
+  const evRow = db
+    .prepare("SELECT payload FROM events WHERE event_type = 'campaign_item.evidence_reconcile_refused' ORDER BY id DESC LIMIT 1")
+    .get() as { payload: string } | undefined;
+  assert.ok(evRow, "resume logs a refusal event");
+  const payload = JSON.parse(evRow!.payload) as { missing: string[] };
+  assert.ok(
+    payload.missing.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    `resume: expected the run_evidence: authoritative code, got: ${payload.missing.join(", ")}`
+  );
+  assert.ok(!payload.missing.includes("lane_evidence_missing"), "resume: the docs-only lane is eligible — only the authoritative axis fails");
+});
+
 test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when the run's own authoritative outcome is a fail with no later pass or qualifying force-advance — logs the refusal with the authoritative-outcome clause", async () => {
   const ticketId = "FG-611";
   const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
