@@ -131,9 +131,12 @@ test("#457 verdict: red-style fail with ZERO findings is still an error (empty f
 
 // ── FG-462: closeout-finding partition ───────────────────────────────────────
 
-test("#462 closeout: a finding anchored on a backlog/ file is closeout (never fixer work)", () => {
+test("#462 closeout: a finding anchored on an active backlog/ file (not backlog/done/) is closeout (never fixer work)", () => {
   assert.equal(isCloseoutFinding({ summary: "still active in stories", file: "backlog/stories/FG-459-x.md", line: 3 }), true);
-  assert.equal(isCloseoutFinding({ summary: "stale done text", file: "backlog/done/FG-100.md", line: 1 }), true);
+});
+
+test("#462 closeout: a finding anchored on backlog/done/ (already-closed ticket) is NOT closeout — genuine stale-docs catch stays fixable", () => {
+  assert.equal(isCloseoutFinding({ summary: "stale done text", file: "backlog/done/FG-100.md", line: 1 }), false);
 });
 
 test("#462 closeout: an UNANCHORED finding proposing close/move/mark-done is closeout", () => {
@@ -141,7 +144,18 @@ test("#462 closeout: an UNANCHORED finding proposing close/move/mark-done is clo
   assert.equal(isCloseoutFinding({ summary: "the ticket should be moved to backlog/done", unanchored: true }), true);
   assert.equal(isCloseoutFinding({ summary: "set status: done for this ticket", unanchored: true }), true);
   assert.equal(isCloseoutFinding({ summary: "this ticket should be closed", unanchored: true }), true);
-  assert.equal(isCloseoutFinding({ summary: "move this to done", unanchored: true }), true);
+  assert.equal(isCloseoutFinding({ summary: "move the ticket to done", unanchored: true }), true);
+});
+
+test("#462 closeout: an UNANCHORED finding using bare close/done vocabulary with no ticket/backlog context is NOT closeout (application-domain sense)", () => {
+  // "move ... done" / "status ... done" / "mark ... done" / "should be closed" read
+  // just as plausibly as app-domain bug reports — only treat them as closeout when
+  // the summary also names a ticket/backlog, else legitimate bugs get silently
+  // dropped from the fixer.
+  assert.equal(isCloseoutFinding({ summary: "move this to done", unanchored: true }), false);
+  assert.equal(isCloseoutFinding({ summary: "the job's status becomes done before the callback fires, causing a race", unanchored: true }), false);
+  assert.equal(isCloseoutFinding({ summary: "marking the request done twice sends a duplicate completion event", unanchored: true }), false);
+  assert.equal(isCloseoutFinding({ summary: "this stream should be closed once the response finishes", unanchored: true }), false);
 });
 
 test("#462 closeout: a CODE-anchored finding is fixer work regardless of close/move phrasing", () => {

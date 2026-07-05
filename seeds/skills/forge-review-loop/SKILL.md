@@ -31,4 +31,4 @@ If the review outcome looks wrong, the fix is to read/adjust those seeds (an eng
 
 ## Stop conditions
 
-The loop stops on: `passed`, `blocked_by_reviewer`, `needs_fix_max_rounds`, `verification_failed`, `fixer_failed`, `fixer_out_of_scope`, or `reviewer_failed`. Any non-`passed` stop needs operator judgment — inspect the run rather than re-invoking the loop blindly.
+The loop stops on: `passed`, `blocked_by_reviewer`, `needs_fix_max_rounds`, `verification_failed`, `fixer_failed`, `fixer_out_of_scope`, `closeout_guidance_only`, or `reviewer_failed`. Any non-`passed` stop needs operator judgment — inspect the run rather than re-invoking the loop blindly.
