@@ -7,8 +7,12 @@
 // classifier and leaves the explicit reconcile to --reconcile / the lifecycle
 // commands). It NEVER silently rewrites state: every change emits a
 // task.reconciled / run.reconciled event alongside the normal terminal event, so
-// the forge show timeline explains what changed and why. Idempotent — a second
-// pass finds terminal state and no-ops.
+// the forge show timeline explains what changed and why. FG-463 makes that
+// invariant crash-atomic: each status write and its paired audit events commit in
+// one SQLite transaction, so a SQLITE_BUSY under concurrent forge processes can
+// never leave a status changed without its event — the group rolls back whole and
+// a later idempotent pass re-applies it. Idempotent — a second pass finds terminal
+// state and no-ops.
 //
 // Conservative by design: a container whose liveness we cannot determine (docker
 // daemon down, docker missing) is assumed alive, so we never reconcile real work
@@ -22,6 +26,7 @@ import { join } from "node:path";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
+import { getDb } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
 import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
@@ -224,6 +229,13 @@ export function reconcileRun(
     // ONE task's reconcile must neither propagate out of reconcileRun nor abort
     // the remaining tasks/passes. Swallow-and-continue mirrors the file's
     // read-side safe-deny; reconcile is idempotent, so a later pass retries.
+    // FG-463: each (status write + its paired audit events) group below is wrapped
+    // in a single getDb().transaction(...)() so it commits all-or-nothing — a
+    // SQLITE_BUSY on the SECOND statement can no longer leave the status changed
+    // without its task.reconciled/terminal event. The rollback throw surfaces here
+    // and is swallowed; the whole group is re-applied cleanly on a later pass (a
+    // rolled-back attempt inserts nothing, so no duplicate events). Filesystem work
+    // (result.json, staged-auth, worktree cleanup) stays OUTSIDE every transaction.
     try {
     const taskEvents = eventsForTask(t.id);
     const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
@@ -283,9 +295,14 @@ export function reconcileRun(
             reapResult,
             reason: error,
           };
-          markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, evidence } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "provisioning_phase_crash", evidence } });
+          // FG-463: status write + its paired audit events commit atomically. A
+          // SQLITE_BUSY on any statement rolls the whole group back (the FG-459
+          // outer catch swallows the throw; a later idempotent pass re-applies it).
+          getDb().transaction(() => {
+            markTaskFailed(t.id, error);
+            logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, evidence } });
+            logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "provisioning_phase_crash", evidence } });
+          })();
           taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "provisioning_phase_crash" });
 
           // FG-437 AC: deliberately do NOT hand-clear the cacheKey's .lock /
@@ -350,14 +367,21 @@ export function reconcileRun(
       oomKilled: exitInfo.oomKilled,
     };
 
-    if (result !== undefined && markTaskComplete(t.id, result)) {
+    if (result !== undefined) {
       // FG-455 p1 review: the valid-result outcome is one of the four
       // container-gone outcomes — it must carry the same durable evidence
       // tuple as the other three, not just an empty payload.
       const evidence: OrphanEvidence = { ...baseEvidence, resultState: "valid", recoverableStdoutResult: false };
-      logEvent("task.completed", { runId, taskId: t.id });
-      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
-      taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
+      // FG-463: the complete write + its paired events commit atomically. The
+      // markTaskComplete no-op (already complete concurrently) rolls back to
+      // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
+      const completed = getDb().transaction(() => {
+        if (!markTaskComplete(t.id, result)) return false;
+        logEvent("task.completed", { runId, taskId: t.id });
+        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
+        return true;
+      })();
+      if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
     } else if (result === undefined) {
       // FG-455: an empty/absent result.json used to collapse straight to
       // "orphaned" — discarding any work the agent actually persisted before the
@@ -405,11 +429,15 @@ export function reconcileRun(
         } catch {
           evidence.resultWriteFailed = true;
         }
-        if (markTaskComplete(t.id, inferred)) {
+        // FG-463: complete write + its events atomic (the result.json write above
+        // is best-effort and deliberately stays OUTSIDE the transaction).
+        const completed = getDb().transaction(() => {
+          if (!markTaskComplete(t.id, inferred)) return false;
           logEvent("task.completed", { runId, taskId: t.id });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
-          taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
-        }
+          return true;
+        })();
+        if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
       } else if (exitInfo.oomKilled === true || exitInfo.exitCode === 137) {
         // FG-455 p4: a positively-identified OOM/SIGKILL death is a distinct,
         // more specific cause than the generic orphaned/orphaned_work_may_persist
@@ -424,9 +452,11 @@ export function reconcileRun(
                 : "") +
               "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`."
             : " (reconciled after crash)");
-        markTaskFailed(t.id, error);
-        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence } });
-        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence } });
+        getDb().transaction(() => { // FG-463: fail write + its events atomic
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence } });
+        })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_oom_killed" });
       } else if (changedFiles.length > 0) {
         const error =
@@ -435,15 +465,19 @@ export function reconcileRun(
             ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
             : "") +
           "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
-        markTaskFailed(t.id, error);
-        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
-        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
+        getDb().transaction(() => { // FG-463: fail write + its events atomic
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
+        })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
       } else {
         const error = "orphaned: container gone with no result (reconciled after crash)";
-        markTaskFailed(t.id, error);
-        logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
-        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
+        getDb().transaction(() => { // FG-463: fail write + its events atomic
+          markTaskFailed(t.id, error);
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
+        })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
       }
     }
@@ -500,16 +534,24 @@ export function reconcileRun(
     // FG-459: guard the backfill write + its event so a SQLITE_BUSY throw here
     // neither propagates nor aborts the remaining tasks/passes.
     try {
-      if (!backfillTaskResult(t.id, recovered)) continue; // result written concurrently since our read — no-op
-
+      // FG-463: the backfill (result write) + its reconciled event commit
+      // atomically. The best-effort result.json disk write stays OUTSIDE the
+      // transaction (never hold a write lock across disk IO), but its outcome
+      // feeds the event's evidence, so it runs first. Writing it is idempotent —
+      // `recovered` is the same source another concurrent backfiller would use —
+      // so a subsequent no-op backfill (line below) simply doesn't log an event.
       const evidence: Record<string, unknown> = { recovered: true };
       try {
         writeFileSync(join(taskDir(t.runId, t.id), "result.json"), JSON.stringify(recovered));
       } catch {
         evidence.resultWriteFailed = true;
       }
-      logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
-      taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
+      const backfilled = getDb().transaction(() => {
+        if (!backfillTaskResult(t.id, recovered)) return false; // result written concurrently since our read — no-op
+        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
+        return true;
+      })();
+      if (backfilled) taskChanges.push({ taskId: t.id, from: "complete", to: "complete", reason: "complete_empty_result_backfilled" });
     } catch { /* FG-459: never throw — keep reconciling the rest */ }
   }
 
@@ -560,18 +602,24 @@ export function reconcileRun(
     }
 
     if (allComplete) {
-      if (markTaskComplete(parent.id, parentResult)) {
+      // FG-463: complete write + its events atomic (the parent result.json write
+      // above is best-effort and stays outside the transaction).
+      const completed = getDb().transaction(() => {
+        if (!markTaskComplete(parent.id, parentResult)) return false;
         logEvent("task.completed", { runId, taskId: parent.id });
         logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered", childSummary: { total: children.length, complete: completeChildren.length } } });
-        taskChanges.push({ taskId: parent.id, from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" });
-      }
+        return true;
+      })();
+      if (completed) taskChanges.push({ taskId: parent.id, from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" });
     } else {
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
         `inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
-      markTaskFailed(parent.id, error, parentResult);
-      logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
-      logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
+      getDb().transaction(() => { // FG-463: fail write + its events atomic
+        markTaskFailed(parent.id, error, parentResult);
+        logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
+        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
+      })();
       taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_orphaned" });
     }
     } catch { /* FG-459: never throw — a DB throw finalizing one fanout parent must not abort the rest */ }
@@ -603,9 +651,11 @@ export function reconcileRun(
       const after = tasksForRun(runId);
       const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
       if (after.length > 0 && !anyNonTerminal) {
-        updateRunStatus(runId, "complete");
-        logEvent("run.completed", { runId, payload: { source: "reconcile" } });
-        logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } });
+        getDb().transaction(() => { // FG-463: run status write + its events atomic
+          updateRunStatus(runId, "complete");
+          logEvent("run.completed", { runId, payload: { source: "reconcile" } });
+          logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } });
+        })();
         runChange = { from: "active", to: "complete", reason: "no_live_work" };
       }
     }
@@ -639,9 +689,11 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
       try {
         const error =
           "orphaned: duplicate pending primary in a phase already completed by another primary";
-        markTaskFailed(p.id, error);
-        logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
-        logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
+        getDb().transaction(() => { // FG-463: fail write + its events atomic
+          markTaskFailed(p.id, error);
+          logEvent("task.failed", { runId, taskId: p.id, payload: { failure_kind: "orphaned", error } });
+          logEvent("task.reconciled", { runId, taskId: p.id, payload: { from: "pending", to: "failed", reason: "orphaned_duplicate_primary" } });
+        })();
         changes.push({ taskId: p.id, from: "pending", to: "failed", reason: "orphaned_duplicate_primary" });
       } catch { /* FG-459: never throw */ }
     }

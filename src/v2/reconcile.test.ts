@@ -1008,6 +1008,112 @@ test("FG-459: a write throw inside the fanout-parent pass does not propagate and
   assert.equal(r!.runChange, undefined);
 });
 
+// FG-463: each (status write + its paired audit events) group commits in ONE
+// transaction. FG-459's busyOn throws on the status write itself (nothing lands);
+// FG-463's concern is the OTHER half — the status write SUCCEEDS and a SUBSEQUENT
+// statement in the group throws (SQLITE_BUSY on the 2nd logEvent). Without the
+// transaction the status would be left changed WITHOUT its reconciled event; with
+// it, the whole group rolls back. writeThenBusyOn performs the REAL write, then
+// throws — simulating exactly that post-write failure inside the group.
+function writeThenBusyOn(method: keyof ReconcileWriters, failingTaskId: string): ReconcileWriters {
+  const busyAfter = <T>(realWrite: () => T): T => {
+    realWrite(); // the real status write — commits within the group's transaction...
+    const e = new Error("SQLITE_BUSY: database is locked") as Error & { code?: string };
+    e.code = "SQLITE_BUSY";
+    throw e; // ...then a later statement in the SAME group throws → whole group rolls back
+  };
+  return {
+    markTaskComplete: (id, result) =>
+      method === "markTaskComplete" && id === failingTaskId
+        ? busyAfter(() => defaultReconcileWriters.markTaskComplete(id, result))
+        : defaultReconcileWriters.markTaskComplete(id, result),
+    markTaskFailed: (id, error, result) =>
+      method === "markTaskFailed" && id === failingTaskId
+        ? busyAfter(() => defaultReconcileWriters.markTaskFailed(id, error, result))
+        : defaultReconcileWriters.markTaskFailed(id, error, result),
+    backfillTaskResult: (id, result) =>
+      method === "backfillTaskResult" && id === failingTaskId
+        ? busyAfter(() => defaultReconcileWriters.backfillTaskResult(id, result))
+        : defaultReconcileWriters.backfillTaskResult(id, result),
+  };
+}
+
+test("FG-463: a throw AFTER the status write rolls the whole group back — status unchanged, no partial event; a later pass reconciles cleanly", () => {
+  // Containerized task, container GONE, no result → orphaned fail branch
+  // (markTaskFailed + task.failed + task.reconciled, all in one transaction).
+  insertContainerized(mkTask("t-atomic", { status: "running" }));
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, writeThenBusyOn("markTaskFailed", "t-atomic"));
+  }, "the rolled-back group's throw is swallowed by the FG-459 outer guard");
+
+  // Rolled back: status did NOT change, and NO partial event landed.
+  assert.equal(getTask("t-atomic")!.status, "running", "the status write must roll back when a later statement in the group throws");
+  const types1 = eventsForTask("t-atomic").map((e) => e.eventType);
+  assert.ok(!types1.includes("task.failed"), "no partial task.failed event");
+  assert.ok(!types1.includes("task.reconciled"), "no partial task.reconciled event");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === "t-atomic").length, 0, "no bogus change recorded");
+
+  // The group is retried WHOLE on a later idempotent pass (normal writers): the
+  // status change AND both events land together — no duplicate events from the
+  // rolled-back attempt (it inserted nothing).
+  const r2 = reconcileRun(RUN.id, GONE);
+  assert.equal(getTask("t-atomic")!.status, "failed", "a later pass applies the whole group cleanly");
+  const types2 = eventsForTask("t-atomic").map((e) => e.eventType);
+  assert.ok(types2.includes("task.failed"), "task.failed lands on the clean pass");
+  assert.equal(types2.filter((t) => t === "task.reconciled").length, 1, "exactly one reconciled event — no duplicate from the rollback");
+  assert.equal(r2.taskChanges.filter((c) => c.taskId === "t-atomic" && c.to === "failed").length, 1);
+});
+
+test("FG-463: complete-branch rollback — markTaskComplete commits then a later statement throws → status rolled back, no partial event, clean re-apply", () => {
+  // Container-gone WITH a valid result → the markTaskComplete-gated complete
+  // branch (structurally different from the fail branches: the write is inside
+  // the transaction's `if`, and the taskChanges push is gated on the txn result).
+  insertContainerized(mkTask("t-atomic-complete", { status: "running" }));
+  const dir = taskDir(RUN.id, "t-atomic-complete");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+
+  assert.doesNotThrow(() => {
+    reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, writeThenBusyOn("markTaskComplete", "t-atomic-complete"));
+  });
+  assert.equal(getTask("t-atomic-complete")!.status, "running", "the complete write must roll back");
+  const t1 = eventsForTask("t-atomic-complete").map((e) => e.eventType);
+  assert.ok(!t1.includes("task.completed") && !t1.includes("task.reconciled"), "no partial events");
+
+  const r2 = reconcileRun(RUN.id, GONE);
+  assert.equal(getTask("t-atomic-complete")!.status, "complete", "clean re-apply on the next pass");
+  const t2 = eventsForTask("t-atomic-complete").map((e) => e.eventType);
+  assert.ok(t2.includes("task.completed"), "task.completed lands on the clean pass");
+  assert.equal(t2.filter((e) => e === "task.reconciled").length, 1, "exactly one reconciled event — no duplicate");
+});
+
+test("FG-463: Mode-A backfill rollback — backfillTaskResult commits then a later statement throws → result stays empty, no reconciled event, clean re-apply (result.json write stays outside the txn)", () => {
+  // A complete task with an empty DB result + a recoverable result.json → the
+  // Mode-A backfill pass. Structurally different: the best-effort result.json
+  // write runs BEFORE the transaction, so a rollback leaves the disk mirror
+  // written but the DB result empty (no partial reconciled event).
+  const taskId = "t-atomic-backfill";
+  makeCompleteEmptyResult(taskId);
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "recovered" }));
+
+  assert.doesNotThrow(() => {
+    reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, writeThenBusyOn("backfillTaskResult", taskId));
+  });
+  assert.equal(getTask(taskId)!.result, undefined, "the backfill write must roll back — DB result stays empty");
+  const t1 = eventsForTask(taskId).map((e) => e.eventType);
+  assert.equal(t1.filter((e) => e === "task.reconciled").length, 0, "no partial reconciled event from the rolled-back backfill");
+
+  const r2 = reconcileRun(RUN.id, ALIVE);
+  assert.notEqual(getTask(taskId)!.result, undefined, "clean re-apply backfills the result");
+  const t2 = eventsForTask(taskId).map((e) => e.eventType);
+  assert.equal(t2.filter((e) => e === "task.reconciled").length, 1, "exactly one reconciled event on the clean pass");
+  assert.equal(r2.taskChanges.filter((c) => c.taskId === taskId).length, 1);
+});
+
 // FG-461 (review round): attachedExitEvidence's source disambiguation. The
 // attached-exit dispatch tests (invoke.test.ts / runNext.test.ts) all run
 // against a shared project dir, so they only cover source: "project_dir_shared".
