@@ -11,7 +11,8 @@ import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provision
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
-import { failureKindForTask } from "./failure-kind.js";
+import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
+import { execFileSync } from "node:child_process";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
 import type { TaskManifest } from "./task-manifest.js";
@@ -1312,4 +1313,93 @@ test("FG-337: pi model error still fails for narrative role (inferred path requi
   assert.equal(r.status, "failed");
   assert.match(r.error ?? "", /pi run failed/);
   assert.equal(failureKindForTask(r.taskId), "model_error");
+});
+
+// ── FG-461: attached-exit recovery evidence ─────────────────────────────────
+// For a recovery-relevant attached-exit kind (oom_killed / container_crash /
+// idle_timeout) with no result, invoke records the same OrphanEvidence tuple
+// reconcile records for a container-gone task, so getOrphanEvidenceFromEvents
+// surfaces it and show/status/ops-check can render a recovery line.
+
+// A dirty git project dir so changedWorktreeFiles returns a non-empty diff.
+function makeDirtyGitProject(): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg461-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "agent-work.txt"), "partial edits before the kill\n");
+  return dir;
+}
+
+// A crash exec: writes NO result.json, returns the given exit code.
+function makeNoResultExec(exitCode: number): DockerExecFn {
+  return async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return exitCode;
+  };
+}
+
+test("FG-461: attached exit 137 (oom_killed) records OrphanEvidence with exitCode/oomKilled/changed files", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeNoResultExec(137) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "oom_killed");
+
+  const evidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
+  assert.ok(evidence, "oom_killed attached-exit must record recovery evidence");
+  assert.equal(evidence!.containerName, `forge-${r.taskId}`);
+  assert.equal(evidence!.containerLiveness, "gone");
+  assert.equal(evidence!.resultState, "absent");
+  assert.equal(evidence!.exitCode, 137);
+  assert.equal(evidence!.oomKilled, true);
+  assert.equal(evidence!.source, "project_dir_shared");
+  assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")), "the dirty file is captured as recovery evidence");
+});
+
+test("FG-461: attached exit 1 (container_crash) records OrphanEvidence", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeNoResultExec(1) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "container_crash");
+
+  const evidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
+  assert.ok(evidence, "container_crash attached-exit must record recovery evidence");
+  assert.equal(evidence!.exitCode, 1);
+  assert.equal(evidence!.oomKilled, false);
+  assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
+});
+
+test("FG-461: idle_timeout records OrphanEvidence", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeNoResultExec(IDLE_TIMEOUT_EXIT_CODE) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "idle_timeout");
+
+  const evidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
+  assert.ok(evidence, "idle_timeout attached-exit must record recovery evidence");
+  assert.equal(evidence!.oomKilled, false);
+  assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
+});
+
+test("FG-461: a read-only-project crash records NO evidence (a red/audit can't persist work)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "red-wide", task: "audit", projectDir, readOnlyProject: true, dockerExec: makeNoResultExec(137) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "oom_killed");
+  // Read-only dispatch: the operator's own dirty files are not this task's work,
+  // so no recovery evidence is recorded.
+  assert.equal(getOrphanEvidenceFromEvents(eventsForTask(r.taskId)), undefined);
 });
