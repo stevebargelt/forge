@@ -372,7 +372,12 @@ test("orphanRecoveryMessage: kind=container_crash leads with the crash + exit co
   assert.match(msg, /container crashed \(exit 1\)/);
   assert.doesNotMatch(msg, /^work may have persisted/);
   assert.match(msg, /changed files were found/);
-  assert.match(msg, /--force/);
+  // FG-461 fix: container_crash is retryable:true (retry-policy.ts) and NOT in
+  // recover.ts's CONTINUABLE_KINDS — a bare `forge retry`, not --continue or
+  // --force, is what the tool actually accepts.
+  assert.match(msg, /forge retry task-crash/);
+  assert.match(msg, /retryable without --force/);
+  assert.doesNotMatch(msg, /continue from it or retry with --force/);
 });
 
 test("orphanRecoveryMessage: kind=idle_timeout leads with the idle-timeout kill", () => {
@@ -384,6 +389,10 @@ test("orphanRecoveryMessage: kind=idle_timeout leads with the idle-timeout kill"
   assert.match(msg, /idle-timed-out/);
   assert.doesNotMatch(msg, /^work may have persisted/);
   assert.match(msg, /changed files were found/);
+  // FG-461 fix: idle_timeout is likewise retryable:true and not continuable.
+  assert.match(msg, /forge retry task-idle/);
+  assert.match(msg, /retryable without --force/);
+  assert.doesNotMatch(msg, /continue from it or retry with --force/);
 });
 
 // ── orphanRecoveryMessage: FG-455 finding 2 source disclosure ───────────────

@@ -486,13 +486,21 @@ export function orphanRecoveryMessage(
       ? "work may have persisted — container gone, no recoverable result, but changed files were found."
       : "work may have persisted — container gone, no recoverable result and no changed files on the worktree.";
   }
+  // FG-461 fix: container_crash / idle_timeout are retryable:true (retry-policy.ts)
+  // and excluded from recover.ts's CONTINUABLE_KINDS, so "continue from it or
+  // retry with --force" is wrong for them — --continue would be refused and
+  // --force isn't required. Match recover.ts's own recommendationFor logic.
+  const guidance =
+    kind === "container_crash" || kind === "idle_timeout"
+      ? `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then \`forge retry ${taskId}\` (retryable without --force)`
+      : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
   return (
     `${headline}\n` +
     sourceLine +
     `    task dir:      ${dir}\n` +
     `    worktree path: ${evidence.worktreePathChecked ?? "(none — no worktree_path or run.projectDir recorded)"}\n` +
     `    changed files: ${files}\n` +
-    `    guidance:      inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`
+    `    guidance:      ${guidance}`
   );
 }
 

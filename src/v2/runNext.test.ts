@@ -8,7 +8,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
@@ -16,7 +18,7 @@ import { tasksForRun, getTask } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
-import { failureKindForTask } from "./failure-kind.js";
+import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { taskDir } from "../util/paths.js";
@@ -387,6 +389,124 @@ test("runNext: FG-455 attached exit 137 marks the pipeline task failed with oom_
   assert.match(first!.error ?? "", /killed|exit 137|OOM/);
   assert.doesNotMatch(first!.error ?? "", /container_crash/);
   assert.equal(failureKindForTask(first!.id), "oom_killed");
+});
+
+// ── FG-461: runNext attached-exit recovery evidence ─────────────────────────
+// runNext.ts wires the same recoveryEvidenceFor/attachedExitEvidence call as
+// invoke.ts (see invoke.test.ts's FG-461 block); cover it independently since
+// runNext dispatches via the real docker-args/task-manifest path, not invoke's.
+
+// A dirty git project dir so changedWorktreeFiles returns a non-empty diff.
+function makeDirtyGitProject(): string {
+  const dir = mkdtempSync(join(tmpdir(), "forge-fg461-runnext-proj-"));
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  writeFileSync(join(dir, "agent-work.txt"), "partial edits before the kill\n");
+  return dir;
+}
+
+test("runNext: FG-461 container_crash records OrphanEvidence with exitCode and changed files", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "container_crash evidence test",
+    inputs: { brief: "x" },
+    projectDir,
+  });
+
+  const crashingExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "container crashed");
+    return 1;
+  };
+
+  await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: crashingExec });
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first");
+  assert.ok(first);
+  assert.equal(failureKindForTask(first!.id), "container_crash");
+
+  const evidence = getOrphanEvidenceFromEvents(eventsForTask(first!.id));
+  assert.ok(evidence, "container_crash attached-exit must record recovery evidence");
+  assert.equal(evidence!.exitCode, 1);
+  assert.equal(evidence!.oomKilled, false);
+  assert.equal(evidence!.source, "project_dir_shared");
+  assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
+});
+
+test("runNext: FG-461 idle_timeout records OrphanEvidence with changed files", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "idle_timeout evidence test",
+    inputs: { brief: "x" },
+    projectDir,
+  });
+
+  const idleKilled: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return IDLE_TIMEOUT_EXIT_CODE;
+  };
+
+  await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: idleKilled });
+
+  const first = tasksForRun(runId).find((t) => t.phase === "first");
+  assert.ok(first);
+  assert.equal(failureKindForTask(first!.id), "idle_timeout");
+
+  const evidence = getOrphanEvidenceFromEvents(eventsForTask(first!.id));
+  assert.ok(evidence, "idle_timeout attached-exit must record recovery evidence");
+  assert.equal(evidence!.oomKilled, false);
+  assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
+});
+
+test("runNext: FG-461 a red task crash (projectMode ro) records NO evidence", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+  const { runId } = startRun({
+    workflow: REDS_SPECIALIST_FAIL_WORKFLOW,
+    title: "red crash evidence test",
+    inputs: {},
+    projectDir,
+  });
+
+  // Primary completes normally; the red container crashes (exit 137, empty result).
+  const primaryOkRedCrash: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const nameIdx = args.indexOf("--name");
+    const fullName = nameIdx >= 0 ? args[nameIdx + 1] ?? "" : "";
+    const taskId = fullName.replace(/^forge-/, "");
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    if (taskId.startsWith("task-review-")) {
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", artifact: "ok" }));
+      writeFileSync(stdoutPath, "stub stdout");
+      writeFileSync(stderrPath, "");
+      return 0;
+    }
+    writeFileSync(join(dir, "result.json"), "");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 137;
+  };
+
+  await runNext({ runId, workflow: REDS_SPECIALIST_FAIL_WORKFLOW, dockerExec: primaryOkRedCrash });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.parentId === undefined)!;
+  const red = tasks.find((t) => t.parentId === primary.id)!;
+  assert.ok(red);
+  assert.equal(failureKindForTask(red.id), "oom_killed");
+  // Reds run projectMode "ro" — they can't persist work, so recoveryEvidenceFor
+  // must not gather evidence even though the (shared) project dir is dirty.
+  assert.equal(getOrphanEvidenceFromEvents(eventsForTask(red.id)), undefined);
 });
 
 // Finding 1: runNext guard — non-active run returns empty dispatch
