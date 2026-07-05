@@ -498,7 +498,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
           worktreePath: getTask(taskId)?.worktreePath,
           projectDir: args.projectDir,
           exitCode,
-          oomKilled: exitCode === 137,
+          // FG-461 follow-up: the attached-exit path only has the process exit
+          // code — it never runs `docker inspect`, so it cannot CONFIRM OOM.
+          // Exit 137 (128+SIGKILL) is just as likely an external kill. Leave
+          // oomKilled UNSET (unknown) — only the reconcile path, which reads
+          // Docker's real OOMKilled flag, may assert it. This keeps the recovery
+          // message at the honest "exit 137 — possibly OOM or an external kill",
+          // matching the error string this same branch already emits.
         })
       : undefined;
 
