@@ -68,6 +68,13 @@ export function milestoneActionMarker(kind: MilestoneKind): string {
   return a.actionable ? `▶ ACTION: ${a.hint}` : `✓ FYI: ${a.hint}`;
 }
 
+/** FG-464: the full body pushed for a milestone — the action marker, then the
+ *  message text, then any ship-time docs-impact advisory. Extracted (and
+ *  exported) so the composed dispatch body is directly testable. */
+export function milestoneDispatchBody(kind: MilestoneKind, text: string, docsImpactWarning?: string): string {
+  return composeDispatchBody(`${milestoneActionMarker(kind)} — ${text}`, docsImpactWarning);
+}
+
 export const BATCH_ELAPSED_MIN_MS = 10 * 60 * 1000; // 10m
 
 export function isMilestoneKind(s: string): s is MilestoneKind {
@@ -161,8 +168,7 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
   if (decision.send && isAnyProviderEnabled()) {
     // FG-464: lead the pushed body with the action marker so action-needed reads
     // distinctly from FYI; the run title rides in the ntfy title.
-    const body = `${milestoneActionMarker(kind)} — ${args.body ?? args.title}`;
-    await dispatch(composeDispatchBody(body, docsImpactWarning), `forge: ${kind} — ${args.title}`);
+    await dispatch(milestoneDispatchBody(kind, args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
     dispatched = true;
   }
 

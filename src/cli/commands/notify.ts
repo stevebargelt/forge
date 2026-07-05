@@ -19,7 +19,7 @@ import type { Run } from "../../types/index.js";
 // new operator-action formatting without waiting for a real run. Covers each
 // representative shape: no-action finish, failure, red-block, gate, campaign
 // context, and the milestone action markers.
-function sampleNotifications(): string[] {
+export function sampleNotifications(): string[] {
   const run: Run = {
     id: "run-add-login-7c2a91", workflow: "feature", title: "add login",
     status: "complete", createdAt: "2026-05-25T12:00:00Z", projectDir: "/Users/you/code/myapp",

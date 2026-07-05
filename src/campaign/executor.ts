@@ -942,7 +942,7 @@ async function driveRemainingItems(
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
-          metadata: { campaignId },
+          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
           projectDir: opts.projectDir,
         });
         updateCampaignItem(item.id, {
@@ -1005,7 +1005,7 @@ async function driveRemainingItems(
           title: item.ticketId,
           status: "abandoned",
           createdAt: nowIso(),
-          metadata: { campaignId },
+          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
           projectDir: opts.projectDir,
         });
         updateCampaignItem(item.id, {
@@ -1124,7 +1124,7 @@ async function driveRemainingItems(
         title: item.ticketId,
         status: "active",
         createdAt: nowIso(),
-        metadata: { invokeChain: ["engineer", "test-engineer"], campaignId },
+        metadata: { invokeChain: ["engineer", "test-engineer"], campaignId, ticketId: item.ticketId, itemId: item.id },
         projectDir: opts.projectDir,
       });
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });
@@ -1241,7 +1241,7 @@ async function driveRemainingItems(
         title: item.ticketId,
         status: "active",
         createdAt: nowIso(),
-        metadata: { invokeAgent: agentRole, campaignId },
+        metadata: { invokeAgent: agentRole, campaignId, ticketId: item.ticketId, itemId: item.id },
         projectDir: opts.projectDir,
       });
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });

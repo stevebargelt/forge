@@ -25,7 +25,7 @@ A failure or a red-block names what happened and which task to look at:
 forge: run-add-login-7c2a91 [failed] feature "add login" — 42s · inspect failure: oom_killed → forge show task-engineer-abc123
 ```
 
-A `blocked_by_red` message reads similarly, with `review red → forge show <taskId>` in place of the failure detail. If the run carries campaign/ticket context (via `run.metadata`), that's prefixed too, e.g. `forge: FG-462 campaign camp-3a1b run-fg462-9c3f [complete] feature "FG-462 review-loop closeout" — 8m0s · no action`.
+A `blocked_by_red` message reads similarly, with `review red → forge show <taskId>` in place of the failure detail. If the run carries campaign/ticket context (via `run.metadata`, which campaign-created runs record), that's prefixed too — after the project name, e.g. `forge: myapp: FG-462 campaign camp-3a1b run-fg462-9c3f [complete] feature "FG-462 review-loop closeout" — 8m0s · no action`.
 
 Every variant fits one SMS segment (≤160 chars).
 

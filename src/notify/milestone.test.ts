@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { decideMilestone, emitMilestone, isMilestoneKind, composeDispatchBody, milestoneActionMarker, MILESTONE_KINDS, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
+import { decideMilestone, emitMilestone, isMilestoneKind, composeDispatchBody, milestoneActionMarker, milestoneDispatchBody, MILESTONE_KINDS, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
@@ -136,6 +136,15 @@ test("FG-464 milestoneActionMarker: action-needed kinds read distinctly from FYI
   for (const k of MILESTONE_KINDS) {
     assert.match(milestoneActionMarker(k), /^(▶ ACTION|✓ FYI): .+/, `marker for ${k}`);
   }
+});
+
+test("FG-464 milestoneDispatchBody: the composed push body leads with the marker, then text, then advisory", () => {
+  // This is the exact body emitMilestone dispatches to a provider.
+  assert.equal(milestoneDispatchBody("decision_needed", "AWN-7 Walk smoke complete"), "▶ ACTION: your decision needed — AWN-7 Walk smoke complete");
+  assert.equal(milestoneDispatchBody("shipped", "FG-464 shipped"), "✓ FYI: shipped — FG-464 shipped");
+  const withWarn = milestoneDispatchBody("shipped", "FG-464 shipped", "UNRESOLVED docs impact");
+  assert.match(withWarn, /^✓ FYI: shipped — FG-464 shipped/);
+  assert.match(withWarn, /⚠ UNRESOLVED docs impact/);
 });
 
 test("emitMilestone: shipped on a run that changed operator surfaces returns + records the advisory", async () => {

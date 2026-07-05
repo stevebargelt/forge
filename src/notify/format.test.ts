@@ -46,6 +46,18 @@ test("formatRunNotification: campaign/ticket context from run.metadata is surfac
   assert.equal(out, 'forge: FG-462 campaign camp-3a1b run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
 });
 
+test("formatRunNotification: project name AND campaign/ticket context render together (FG-464)", () => {
+  // The real campaign path always has both a projectDir and (now, via executor.ts)
+  // ticketId/campaignId in metadata — exercise them together, the exact shape a
+  // campaign run and `forge notify test` produce.
+  const out = formatRunNotification(
+    { ...RUN, projectDir: "/Users/x/code/myapp", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } },
+    "complete", 8 * 60 * 1000,
+  );
+  assert.equal(out, 'forge: myapp: FG-462 campaign camp-3a1b run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
+  assert.ok(out.length <= 160);
+});
+
 test("formatRunNotification: omits duration but still states the action when not provided", () => {
   const out = formatRunNotification(RUN, "complete");
   assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — no action');
