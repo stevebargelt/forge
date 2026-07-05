@@ -1,9 +1,11 @@
 ---
 id: FG-463
 type: story
-status: active
+status: done
 title: "reconcile: make each write+its-audit-events atomic (transaction) so a mid-sequence SQLITE_BUSY can't leave a status change without its task.reconciled event"
 created: 2026-07-05
+closed: 2026-07-05
+closed_commit: ac4a90c
 ---
 
 ## Problem
