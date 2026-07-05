@@ -29,7 +29,12 @@ export type ProjectRecord = {
   inFlightCount: number;
   readmeFirstLine?: string;
   liveSessions: number;   // #153: count of live Claude Code orchestrator sessions
+  githubUrl?: string;     // FG-438: canonical GitHub browser URL derived from the repo's remotes (dashboard-populated; absent when no GitHub remote)
 };
+
+// FG-438: re-exported so the dashboard can derive per-project GitHub links without
+// listProjects() (a hot path) paying the git-remote cost for every caller.
+export { deriveGithubUrl, githubBrowserUrl } from "./github-url.js";
 
 export type ListOptions = {
   scanRoots?: string[];   // defaults to [~/code] if HOME set

@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Run, Task } from "@forge/types";
 import { resolveProjectMeta } from "@forge/project-meta";
-import { listProjects, sortProjects, type ProjectRecord } from "@forge/projects";
+import { listProjects, sortProjects, deriveGithubUrl, type ProjectRecord } from "@forge/projects";
 import { governanceView, type GovernanceView } from "@forge/governance";
 import {
   findReconcileCandidates,
@@ -776,7 +776,13 @@ export function usageModelMix(groupBy: GroupBy, since: string, projectDir?: stri
 // readonly handle above). On a fresh install with no DB, getDb() will create
 // the schema; on a real install it's a no-op. Acceptable cost.
 export function projectsForDashboard(): ProjectRecord[] {
-  return sortProjects(listProjects(), "activity");
+  // FG-438: attach each project's canonical GitHub URL (derived from its repo
+  // remotes) so the Projects view can link out. Confined to the dashboard so the
+  // `forge projects` CLI and other listProjects() callers don't pay the git cost.
+  return sortProjects(listProjects(), "activity").map((p) => {
+    const githubUrl = deriveGithubUrl(p.projectDir);
+    return githubUrl ? { ...p, githubUrl } : p;
+  });
 }
 
 // #285: read-only routing/governance read model for the dashboard panel. Backed
