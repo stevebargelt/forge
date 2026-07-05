@@ -22,7 +22,8 @@ import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./execu
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
-import { updateRunStatus } from "../store/runs.js";
+import { updateRunStatus, getRun } from "../store/runs.js";
+import { assembleReviewerContextPacket } from "../v2/reviewer-context-packet.js";
 
 // All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
 // The wrapper forces executionMode:'invoke' for every list-type campaign without
@@ -338,6 +339,60 @@ test("shipped with evidence: ticket done + closedCommit → outcome='shipped'", 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
   assert.equal(result.stopReason, "complete");
   assert.equal(result.itemRecords[0]?.outcome, "shipped", "outcome must be 'shipped' when ticket is done with closedCommit");
+});
+
+// ── FG-433: campaign run.metadata drives the shipping-reviewer ticket-aware preflight ──
+
+test("FG-433: a campaign-driven run's metadata.ticketId drives the shipping-reviewer's ticket-aware acceptance preflight (producer → consumer)", async () => {
+  // PRODUCER: drive a real campaign item through the executor. Whichever invoke
+  // lane it takes, the executor records ticketId/campaignId/itemId on run.metadata.
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+
+  const item = listCampaignItems(campaign.id).find((i) => i.ticketId === "FG-101")!;
+  assert.ok(item.runId, "the campaign drove the item to a real run");
+  const run = getRun(item.runId!)!;
+  // Producer half: the run carries the campaign context on run.metadata (FG-464).
+  assert.equal(run.metadata?.["ticketId"], "FG-101", "executor populated run.metadata.ticketId");
+  assert.equal(run.metadata?.["campaignId"], campaign.id, "executor populated run.metadata.campaignId");
+  assert.equal(run.metadata?.["itemId"], item.id, "executor populated run.metadata.itemId");
+
+  // CONSUMER half: the shipping-reviewer's context packet resolves the backlog
+  // ticket FROM that run.metadata.ticketId → the preflight is ticket-aware.
+  const packet = assembleReviewerContextPacket(item.runId!, "task-eng-fg433", projectDir);
+  assert.ok(packet.backlog, "backlog ticket resolved from run.metadata.ticketId — the preflight is ticket-aware");
+  assert.equal(packet.backlog!.id, "FG-101");
+  assert.ok(packet.backlog!.acceptanceCriteria.includes("Story one is complete"), "the ticket's acceptance criteria are extracted for the reviewer");
+  // No required backlogTicket missing → runNext.ts would NOT pre-fail the
+  // shipping-reviewer for want of ticket context.
+  assert.equal(
+    packet.missingContext.filter((m) => m.field === "backlogTicket" && m.required).length,
+    0,
+    "ticket context present → the shipping-reviewer is not pre-failed for a missing ticket",
+  );
+});
+
+test("FG-433: a run with NO metadata.ticketId leaves the preflight ticket-blind (shipping-reviewer would be pre-failed) — proves the metadata is load-bearing", async () => {
+  // The negative half: without the campaign metadata population, the very same
+  // consumer cannot resolve the ticket, and runNext.ts pre-fails the shipping-
+  // reviewer. This is exactly what the FG-464 population prevents for campaign runs.
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+  const item = listCampaignItems(campaign.id).find((i) => i.ticketId === "FG-101")!;
+
+  // Simulate the pre-FG-464 shape: a run whose metadata lacks ticketId.
+  updateRunStatus(item.runId!, "active"); // no-op status touch to keep the row live
+  getDb().prepare("UPDATE runs SET metadata = ? WHERE id = ?").run(JSON.stringify({ campaignId: campaign.id }), item.runId!);
+
+  const packet = assembleReviewerContextPacket(item.runId!, "task-eng-fg433", projectDir);
+  assert.equal(packet.backlog, null, "no ticketId → no backlog resolution");
+  assert.equal(
+    packet.missingContext.filter((m) => m.field === "backlogTicket" && m.required).length,
+    1,
+    "missing required ticket context → runNext.ts pre-fails the shipping-reviewer",
+  );
 });
 
 // ── start: projectDir persistence ─────────────────────────────────────────────
