@@ -164,14 +164,15 @@ export function assertNoControlPlaneMeta(meta: Record<string, unknown>): void {
   }
 }
 
-// FG-472: true when any step in the workflow carries an authoritative
-// shipping-reviewer red — that red pre-fails (and blocks the gate) without a
-// backlog ticket to review against, so `forge new` must demand --ticket up
-// front rather than let the run reach that phase and die there. Exported for
-// testing.
+// FG-472: true when any step in the workflow carries any shipping-reviewer
+// red (regardless of authority), matching the runtime pre-fail block in
+// runNext.ts which does not filter on authority — that red pre-fails (and
+// blocks the gate) without a backlog ticket to review against, so `forge new`
+// must demand --ticket up front rather than let the run reach that phase and
+// die there. Exported for testing.
 export function workflowRequiresTicket(workflow: Workflow): boolean {
   return workflow.steps.some((step) =>
-    step.reds.some((red) => red.agent === "shipping-reviewer" && red.authority === "authoritative")
+    step.reds.some((red) => red.agent === "shipping-reviewer")
   );
 }
 

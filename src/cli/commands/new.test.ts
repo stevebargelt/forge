@@ -124,8 +124,8 @@ test("workflowRequiresTicket: false when no shipping-reviewer red at all", () =>
   assert.equal(workflowRequiresTicket(noShippingReviewer), false);
 });
 
-test("workflowRequiresTicket: false when shipping-reviewer is only specialist authority", () => {
-  assert.equal(workflowRequiresTicket(specialistShippingReviewer), false);
+test("workflowRequiresTicket: true even when shipping-reviewer is only specialist authority — the runtime blocks regardless of authority", () => {
+  assert.equal(workflowRequiresTicket(specialistShippingReviewer), true);
 });
 
 test("workflowRequiresTicket: true when shipping-reviewer is authoritative", () => {
@@ -164,6 +164,20 @@ test("resolveTicketId: missing --ticket for an authoritative-shipping-reviewer w
     () =>
       resolveTicketId({
         workflow: authoritativeShippingReviewer,
+        projectDir,
+        ticketOption: undefined,
+        metaTicketId: undefined,
+      }),
+    /workflow 'feature' requires --ticket <id> because shipping-reviewer needs backlog acceptance criteria/,
+  );
+});
+
+test("resolveTicketId: missing --ticket for a specialist-authority-shipping-reviewer workflow fails before run creation", () => {
+  const projectDir = makeTmpDir();
+  assert.throws(
+    () =>
+      resolveTicketId({
+        workflow: specialistShippingReviewer,
         projectDir,
         ticketOption: undefined,
         metaTicketId: undefined,
