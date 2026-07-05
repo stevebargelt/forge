@@ -64,7 +64,7 @@ The concrete model is then `profile.map[capability]` (falling back to
 ## Pin a whole run
 
 ```bash
-forge new feature "ship X" --brief "..." --profile claude-bedrock
+forge new feature "ship X" --brief "..." --ticket FG-42 --profile claude-bedrock
 ```
 
 Every task in the run resolves to `claude-bedrock`, recorded as

@@ -6,8 +6,10 @@ import { resolveProjectMount } from "../../util/resolve-project-mount.js";
 import { validateCredsForNewRun } from "../../util/creds.js";
 import { profileStatus } from "../../util/auth-profiles.js";
 import { loadWorkflow } from "../../v2/loader.js";
+import type { Workflow } from "../../v2/schema.js";
 import { startRun, CONTROL_PLANE_METADATA_KEYS } from "../../v2/startRun.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
+import { readTicket } from "../../backlog/structured.js";
 
 // v2: workflow names are arbitrary YAML files in ~/.forge/workflows/.
 // We don't enforce a fixed list; the loader raises if the YAML is missing.
@@ -24,6 +26,7 @@ export function registerNew(program: Command): void {
     .option("--project <path>", "project directory mounted at /project (default: cwd; persisted on run)")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--meta <json>", "extra run metadata as JSON")
+    .option("--ticket <id>", "FG-472: backlog ticket id backing this run (stored as run.metadata.ticketId); required for workflows with an authoritative shipping-reviewer")
     .option("--auth-profile <name>", "inject a captured auth profile (#176) into browser-verify steps so they test the app authenticated")
     .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
@@ -70,6 +73,19 @@ export function registerNew(program: Command): void {
       if (options.brief) inputs["brief"] = options.brief;
       if (options.question) inputs["question"] = options.question;
       if (options.prd) inputs["prd"] = options.prd;
+
+      // FG-472: workflows carrying an authoritative shipping-reviewer need a
+      // backlog ticket to review against (acceptance criteria, non-goals) — fail
+      // BEFORE creating the run rather than letting the reviewer pre-fail deep
+      // into the build phase. --ticket is the documented path; --meta ticketId
+      // still works for back-compat but the two must agree if both are given.
+      const ticketId = resolveTicketId({
+        workflow,
+        projectDir,
+        ticketOption: (options as { ticket?: string }).ticket,
+        metaTicketId: inputs["ticketId"] !== undefined ? String(inputs["ticketId"]) : undefined,
+      });
+      if (ticketId) inputs["ticketId"] = ticketId;
 
       // Resolve --design-dir for design-touching workflows. Default convention
       // (#67): `<projectDir>/designs/` — the per-project shared design corpus.
@@ -146,6 +162,50 @@ export function assertNoControlPlaneMeta(meta: Record<string, unknown>): void {
       );
     }
   }
+}
+
+// FG-472: true when any step in the workflow carries an authoritative
+// shipping-reviewer red — that red pre-fails (and blocks the gate) without a
+// backlog ticket to review against, so `forge new` must demand --ticket up
+// front rather than let the run reach that phase and die there. Exported for
+// testing.
+export function workflowRequiresTicket(workflow: Workflow): boolean {
+  return workflow.steps.some((step) =>
+    step.reds.some((red) => red.agent === "shipping-reviewer" && red.authority === "authoritative")
+  );
+}
+
+// FG-472: resolves the ticket id backing this run and validates it BEFORE the
+// caller creates the run row — `--ticket` is the documented flag; `--meta
+// ticketId` still works for back-compat, but the two must agree if both are
+// given. Throws on: disagreement, a required-but-missing ticket, or an id that
+// doesn't resolve to a real backlog ticket. Exported for testing.
+export function resolveTicketId(args: {
+  workflow: Workflow;
+  projectDir: string;
+  ticketOption?: string;
+  metaTicketId?: string;
+}): string | undefined {
+  const { workflow, projectDir, ticketOption, metaTicketId } = args;
+  if (ticketOption && metaTicketId && ticketOption !== metaTicketId) {
+    throw new Error(
+      `--ticket ${ticketOption} conflicts with --meta ticketId ${metaTicketId} — pass only one`
+    );
+  }
+  const ticketId = ticketOption ?? metaTicketId;
+  if (workflowRequiresTicket(workflow) && !ticketId) {
+    throw new Error(
+      `workflow '${workflow.name}' requires --ticket <id> because shipping-reviewer needs backlog acceptance criteria`
+    );
+  }
+  if (ticketId) {
+    try {
+      readTicket(projectDir, ticketId);
+    } catch {
+      throw new Error(`--ticket ${ticketId} not found in backlog under ${projectDir}/backlog/ (ideas|epics|stories|done)`);
+    }
+  }
+  return ticketId;
 }
 
 // Default design-dir convention (#67): a per-project shared design corpus at

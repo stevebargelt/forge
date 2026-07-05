@@ -107,12 +107,15 @@ You can mix freely — drive most work conversationally, drop to the CLI for a o
 
 The remaining steps show the direct-CLI walkthrough; if you're using the orchestrator-led path, your `claude` session handles all of this and you can read along for orientation only.
 
-From your project directory:
+Full feature runs are ticket-backed — the `build` phase's shipping-reviewer red needs a backlog ticket's acceptance criteria to review against, so `forge new feature` requires a `--ticket <id>` (or a campaign, which stamps one automatically). File one first if you don't already have it:
 
 ```bash
 cd ~/code/my-app
+forge backlog file "add OAuth login" --type story
+# → FG-42
 forge new feature "add login" \
-  --brief "wire OAuth into the existing user table; reuse the session middleware"
+  --brief "wire OAuth into the existing user table; reuse the session middleware" \
+  --ticket FG-42
 ```
 
 Output:
