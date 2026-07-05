@@ -1,9 +1,11 @@
 ---
 id: FG-459
 type: story
-status: active
+status: done
 title: "reconcile: wrap DB writes in reconcileRun in try/catch to honor the documented never-throw invariant (SQLITE_BUSY under concurrent forge processes)"
 created: 2026-07-04
+closed: 2026-07-05
+closed_commit: 193220b
 ---
 
 ## Problem
