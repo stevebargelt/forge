@@ -52,13 +52,15 @@ export function formatRunNotification(
   // finish is explicitly "no action" so a non-actionable push is unmistakable at a
   // glance. `actionTask` carries the task to act on (the failed task, or the
   // red-blocked task); the STATE — not its presence — decides which framing.
+  // Note: awaiting_gate is a TaskStatus, never a RunStatus, so notifyOnRunTransition
+  // never reaches this formatter with it — gate pushes go through
+  // formatGateNotification (taskId + phase + `forge gate`). So the branches here are
+  // the run-transition states only: red-block, failure, or a clean finish.
   if (state === "blocked_by_red") {
     bits.push(`review red${actionTask ? ` → forge show ${actionTask.taskId}` : ""}`);
   } else if (actionTask !== undefined || state === "failed") {
     const kind = actionTask?.failureKind ?? "failed";
     bits.push(`inspect failure: ${kind}${actionTask ? ` → forge show ${actionTask.taskId}` : ""}`);
-  } else if (state === "awaiting_gate") {
-    bits.push("review gate");
   } else {
     bits.push("no action");
   }
