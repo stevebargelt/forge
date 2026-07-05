@@ -1,9 +1,11 @@
 ---
 id: FG-438
 type: story
-status: active
+status: done
 title: "Dashboard Projects: project cards link to each project GitHub repo"
 created: 2026-07-02
+closed: 2026-07-05
+closed_commit: 825d8bbb5d3d5806d38a145ac87b49587acee205
 ---
 
 ## Problem
