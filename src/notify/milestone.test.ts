@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { decideMilestone, emitMilestone, isMilestoneKind, composeDispatchBody, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
+import { decideMilestone, emitMilestone, isMilestoneKind, composeDispatchBody, milestoneActionMarker, MILESTONE_KINDS, BATCH_ELAPSED_MIN_MS } from "./milestone.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
@@ -121,6 +121,21 @@ test("composeDispatchBody: appends the advisory to the pushed body, or returns b
   const withWarn = composeDispatchBody("done", "UNRESOLVED docs impact");
   assert.match(withWarn, /done/);
   assert.match(withWarn, /⚠ UNRESOLVED docs impact/);
+});
+
+test("FG-464 milestoneActionMarker: action-needed kinds read distinctly from FYI kinds", () => {
+  // Operator-action kinds lead with ▶ ACTION; the rest lead with ✓ FYI.
+  assert.match(milestoneActionMarker("decision_needed"), /^▶ ACTION: your decision needed$/);
+  assert.match(milestoneActionMarker("blocked"), /^▶ ACTION: /);
+  assert.match(milestoneActionMarker("risk_found"), /^▶ ACTION: /);
+  assert.match(milestoneActionMarker("ready_for_review"), /^▶ ACTION: /);
+  assert.match(milestoneActionMarker("shipped"), /^✓ FYI: shipped$/);
+  assert.match(milestoneActionMarker("batch_complete"), /^✓ FYI: /);
+  assert.match(milestoneActionMarker("acceptance_green"), /^✓ FYI: /);
+  // Every kind is covered (no fallthrough to an empty marker).
+  for (const k of MILESTONE_KINDS) {
+    assert.match(milestoneActionMarker(k), /^(▶ ACTION|✓ FYI): .+/, `marker for ${k}`);
+  }
 });
 
 test("emitMilestone: shipped on a run that changed operator surfaces returns + records the advisory", async () => {

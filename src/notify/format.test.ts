@@ -11,41 +11,51 @@ const RUN: Run = {
   createdAt: "2026-05-25T12:00:00Z",
 };
 
-test("formatRunNotification: complete state produces the expected one-liner", () => {
+test("formatRunNotification: a clean completion is explicitly non-actionable (FG-464 'no action')", () => {
   const out = formatRunNotification(RUN, "complete", 14 * 60 * 1000 + 23 * 1000);
-  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s · no action');
 });
 
-test("formatRunNotification: failed state produces the expected one-liner", () => {
+test("formatRunNotification: failed state carries the inspect-failure action label (FG-464)", () => {
   const out = formatRunNotification({ ...RUN, status: "abandoned" }, "failed", 5 * 1000);
-  assert.equal(out, 'forge: run-add-login-7c2a91 [failed] feature "add login" — 5s');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [failed] feature "add login" — 5s · inspect failure: failed');
 });
 
-test("formatRunNotification: folds failure_kind + forge show into the completion notification (WALK-4)", () => {
+test("formatRunNotification: folds failure_kind + inspect action + forge show into the completion notification (WALK-4 / FG-464)", () => {
   const out = formatRunNotification(RUN, "complete", 5 * 60 * 1000, { taskId: "task-engineer-abc123", failureKind: "result_malformed" });
-  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — 5m0s · result_malformed → forge show task-engineer-abc123');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — 5m0s · inspect failure: result_malformed → forge show task-engineer-abc123');
 });
 
-test("formatRunNotification: failure without a known kind still carries the forge show command", () => {
+test("formatRunNotification: failure without a known kind still carries the inspect action + forge show command", () => {
   const out = formatRunNotification(RUN, "complete", undefined, { taskId: "task-x-1" });
-  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — failed → forge show task-x-1');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — inspect failure: failed → forge show task-x-1');
 });
 
-test("formatRunNotification: blocked_by_red state produces the expected one-liner", () => {
+test("formatRunNotification: blocked_by_red carries the review-red action label (FG-464)", () => {
   const out = formatRunNotification(RUN, "blocked_by_red", 60 * 1000);
-  assert.equal(out, 'forge: run-add-login-7c2a91 [blocked_by_red] feature "add login" — 1m0s');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [blocked_by_red] feature "add login" — 1m0s · review red');
 });
 
-test("formatRunNotification: omits duration when not provided", () => {
+test("formatRunNotification: blocked_by_red with the blocked task points at forge show (FG-464)", () => {
+  const out = formatRunNotification(RUN, "blocked_by_red", 60 * 1000, { taskId: "task-red-wide-9f2" });
+  assert.equal(out, 'forge: run-add-login-7c2a91 [blocked_by_red] feature "add login" — 1m0s · review red → forge show task-red-wide-9f2');
+});
+
+test("formatRunNotification: campaign/ticket context from run.metadata is surfaced (FG-464)", () => {
+  const out = formatRunNotification({ ...RUN, metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } }, "complete", 8 * 60 * 1000);
+  assert.equal(out, 'forge: FG-462 campaign camp-3a1b run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
+});
+
+test("formatRunNotification: omits duration but still states the action when not provided", () => {
   const out = formatRunNotification(RUN, "complete");
-  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login"');
+  assert.equal(out, 'forge: run-add-login-7c2a91 [complete] feature "add login" — no action');
 });
 
 test("formatRunNotification: truncates a long title to keep the SMS under 160 chars", () => {
   const longTitle = "a".repeat(300);
   const out = formatRunNotification({ ...RUN, title: longTitle }, "complete", 1000);
   assert.ok(out.length <= 160, `expected length <= 160, got ${out.length}`);
-  assert.ok(out.endsWith('..." — 1s'), `expected truncation marker, got: ${out}`);
+  assert.ok(out.endsWith('..." — 1s · no action'), `expected truncation marker, got: ${out}`);
   assert.ok(out.startsWith("forge: run-add-login-7c2a91 [complete] feature "));
 });
 
@@ -56,7 +66,7 @@ test("formatRunNotification: handles a title containing double quotes without br
     1000,
   );
   // Double quotes inside the title get downgraded to singles so the outer quoting stays clean.
-  assert.equal(out, `forge: run-add-login-7c2a91 [complete] feature "add 'OAuth' login" — 1s`);
+  assert.equal(out, `forge: run-add-login-7c2a91 [complete] feature "add 'OAuth' login" — 1s · no action`);
 });
 
 test("formatGateNotification: awaiting_gate carries the actionable forge gate command", () => {
@@ -76,7 +86,7 @@ test("formatGateNotification: truncates a long title but keeps the command intac
 
 test("formatRunNotification: leads with the project name when the run has a projectDir", () => {
   const out = formatRunNotification({ ...RUN, projectDir: "/Users/x/code/wnba-led-scoreboard" }, "complete", 1000);
-  assert.equal(out, 'forge: wnba-led-scoreboard: run-add-login-7c2a91 [complete] feature "add login" — 1s');
+  assert.equal(out, 'forge: wnba-led-scoreboard: run-add-login-7c2a91 [complete] feature "add login" — 1s · no action');
 });
 
 test("formatGateNotification: leads with the project name when the run has a projectDir", () => {
