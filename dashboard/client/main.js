@@ -318,6 +318,16 @@ function ProjectCard({ project, onClick }) {
         ${project.liveSessions > 0
           ? html`<span class="live-indicator" title=${`${project.liveSessions} live orchestrator session(s)`}>● LIVE</span>`
           : null}
+        ${project.githubUrl
+          ? html`<a
+              class="project-github"
+              href=${project.githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title=${"Open " + project.githubUrl}
+              onClick=${(e) => e.stopPropagation()}
+            >GitHub ↗</a>`
+          : null}
       </div>
       ${project.description ? html`<div class="project-desc">${project.description}</div>` : null}
       ${!project.description && project.readmeFirstLine ? html`<div class="project-desc faint">${project.readmeFirstLine}</div>` : null}

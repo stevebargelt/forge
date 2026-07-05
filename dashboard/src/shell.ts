@@ -313,6 +313,21 @@ section.projects-grid {
 
 .project-card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .project-card-head .project-chip { font-size: 12px; padding: 2px 10px; cursor: default; }
+/* FG-438: GitHub repo link on the project card. margin-left:auto pins it right so
+   the chip/live-indicator cluster left; stopPropagation on click keeps card
+   selection intact. */
+.project-github {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--fg-faint);
+  white-space: nowrap;
+}
+.project-github:hover { background: var(--bg-elev-2); text-decoration: underline; }
 .live-indicator {
   font-size: 11px;
   font-weight: 600;
