@@ -29,14 +29,29 @@ function projectSegment(run: Run): string {
 export type FailureDetail = { taskId: string; failureKind?: string };
 
 // FG-464: the campaign/ticket context an operator needs to know WHERE a push
-// belongs, pulled from run.metadata when present (FG-433 populates ticketId on
-// campaign-created runs). Degrades to "" when nothing is recorded.
+// belongs, pulled from run.metadata when present (campaign-created runs record
+// ticketId/campaignId/itemId — see executor.ts / startRun). Renders all three the
+// AC names, each only when available; degrades to "" when nothing is recorded.
 function contextSegment(run: Run): string {
-  const meta = (run.metadata ?? {}) as { ticketId?: unknown; campaignId?: unknown };
+  const meta = (run.metadata ?? {}) as { ticketId?: unknown; campaignId?: unknown; itemId?: unknown };
   const bits: string[] = [];
   if (typeof meta.ticketId === "string" && meta.ticketId) bits.push(meta.ticketId);
   if (typeof meta.campaignId === "string" && meta.campaignId) bits.push(`campaign ${meta.campaignId}`);
+  if (typeof meta.itemId === "string" && meta.itemId) bits.push(`item ${meta.itemId}`);
   return bits.length > 0 ? `${bits.join(" ")} ` : "";
+}
+
+// FG-464: when there is no room for the title, the actionable SUFFIX (the next
+// step — `· no action` / `inspect failure … → forge show <task>` / `review red →
+// forge show <task>` / `forge gate <task>`) is the operator-action payload and must
+// survive WHOLE. Drop the title, and if even prefix+suffix overflows (a long
+// project + full campaign/item context), trim the PREFIX from its tail — never the
+// suffix. Shared by both formatters so they protect the action identically.
+function dropTitleProtectingSuffix(prefix: string, suffix: string): string {
+  const bare = `${prefix.trimEnd()}${suffix}`;
+  if (bare.length <= MAX_SMS_LEN) return bare;
+  const prefixRoom = Math.max(0, MAX_SMS_LEN - suffix.length);
+  return `${prefix.slice(0, prefixRoom).trimEnd()}${suffix}`;
 }
 
 export function formatRunNotification(
@@ -74,10 +89,9 @@ export function formatRunNotification(
 
   // Truncate the title to fit. Reserve 3 chars for "..." inside the quotes.
   const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
-  if (budget <= 0) {
-    // Pathological: even with empty title we're over budget. Drop the title.
-    return `${prefix.trimEnd()}${suffix}`.slice(0, MAX_SMS_LEN);
-  }
+  // FG-464: no room for the title → protect the action suffix (drop title, trim
+  // prefix), so `inspect failure → forge show <task>` / `review red → …` survives.
+  if (budget <= 0) return dropTitleProtectingSuffix(prefix, suffix);
   const truncated = `"${run.title.slice(0, budget)}..."`;
   return `${prefix}${truncated}${suffix}`;
 }
@@ -92,12 +106,17 @@ export function formatGateNotification(
   state: NotifyState = "awaiting_gate",
 ): string {
   const label = "gate";
-  const prefix = `forge: ${projectSegment(run)}${run.workflow} `;
+  // FG-464: the gate push is the MOST actionable notification ("gate needs you"),
+  // so it must carry the same campaign/ticket context as run transitions — a
+  // campaign-created run pausing at a gate is exactly a "campaign-related
+  // notification" the AC covers.
+  const prefix = `forge: ${projectSegment(run)}${contextSegment(run)}${run.workflow} `;
   const suffix = ` — ${phase} ${label}: forge gate ${taskId}`;
   const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;
   if (full.length <= MAX_SMS_LEN) return full;
   const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
-  if (budget <= 0) return `${prefix.trimEnd()}${suffix}`.slice(0, MAX_SMS_LEN);
+  // FG-464: protect the `forge gate <task>` command — drop title, trim prefix.
+  if (budget <= 0) return dropTitleProtectingSuffix(prefix, suffix);
   return `${prefix}"${run.title.slice(0, budget)}..."${suffix}`;
 }
 

@@ -46,16 +46,20 @@ test("formatRunNotification: campaign/ticket context from run.metadata is surfac
   assert.equal(out, 'forge: FG-462 campaign camp-3a1b run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
 });
 
-test("formatRunNotification: project name AND campaign/ticket context render together (FG-464)", () => {
-  // The real campaign path always has both a projectDir and (now, via executor.ts)
-  // ticketId/campaignId in metadata — exercise them together, the exact shape a
-  // campaign run and `forge notify test` produce.
+test("formatRunNotification: project name AND all three context fields (ticket/campaign/item) render together (FG-464)", () => {
+  // The real campaign path has a projectDir plus ticketId/campaignId/itemId on
+  // run.metadata — exercise all three, the exact shape a campaign run produces.
   const out = formatRunNotification(
-    { ...RUN, projectDir: "/Users/x/code/myapp", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } },
+    { ...RUN, projectDir: "/Users/x/code/myapp", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b", itemId: "citem-9f2" } },
     "complete", 8 * 60 * 1000,
   );
-  assert.equal(out, 'forge: myapp: FG-462 campaign camp-3a1b run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
+  assert.equal(out, 'forge: myapp: FG-462 campaign camp-3a1b item citem-9f2 run-add-login-7c2a91 [complete] feature "add login" — 8m0s · no action');
   assert.ok(out.length <= 160);
+});
+
+test("formatRunNotification: itemId renders even when it is the only context field available (FG-464 — item is a required part of the AC)", () => {
+  const out = formatRunNotification({ ...RUN, metadata: { itemId: "citem-9f2" } }, "complete", 1000);
+  assert.equal(out, 'forge: item citem-9f2 run-add-login-7c2a91 [complete] feature "add login" — 1s · no action');
 });
 
 test("formatRunNotification: omits duration but still states the action when not provided", () => {
@@ -69,6 +73,23 @@ test("formatRunNotification: truncates a long title to keep the SMS under 160 ch
   assert.ok(out.length <= 160, `expected length <= 160, got ${out.length}`);
   assert.ok(out.endsWith('..." — 1s · no action'), `expected truncation marker, got: ${out}`);
   assert.ok(out.startsWith("forge: run-add-login-7c2a91 [complete] feature "));
+});
+
+test("formatRunNotification: the forge show command survives even when project + full context overflow the budget (FG-464 action protection, symmetric to the gate)", () => {
+  // A long project path plus all three context fields makes the prefix huge; the
+  // action suffix (inspect failure … → forge show <task>) must NOT be truncated —
+  // it's the operator-action payload, same as the gate command.
+  const out = formatRunNotification(
+    {
+      ...RUN,
+      title: "z".repeat(200),
+      projectDir: "/Users/x/code/" + "a-very-long-monorepo-package-name".repeat(4),
+      metadata: { ticketId: "FG-462", campaignId: "campaign-abcdef123456", itemId: "citem-abcdef123456" },
+    },
+    "complete", 5 * 60 * 1000, { taskId: "task-engineer-deadbeef", failureKind: "oom_killed" },
+  );
+  assert.ok(out.length <= 160, `expected ≤160, got ${out.length}: ${out}`);
+  assert.ok(out.endsWith("→ forge show task-engineer-deadbeef"), `the action command must survive whole, got: ${out}`);
 });
 
 test("formatRunNotification: handles a title containing double quotes without breaking the format", () => {
@@ -105,6 +126,39 @@ test("formatGateNotification: leads with the project name when the run has a pro
   const out = formatGateNotification({ ...RUN, projectDir: "/Users/x/code/wnba-led-scoreboard" }, "task-build-2ea3ee", "build");
   assert.match(out, /^forge: wnba-led-scoreboard: feature /);
   assert.match(out, /forge gate task-build-2ea3ee$/);
+});
+
+test("formatGateNotification: carries all three context fields (ticket/campaign/item) from run.metadata (FG-464 — the most actionable push must not drop them)", () => {
+  const out = formatGateNotification(
+    { ...RUN, projectDir: "/Users/x/code/myapp", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b", itemId: "citem-9f2" } },
+    "task-build-2ea3ee", "build",
+  );
+  // context sits after the project name, before the workflow — same order as run transitions
+  assert.equal(out, 'forge: myapp: FG-462 campaign camp-3a1b item citem-9f2 feature "add login" — build gate: forge gate task-build-2ea3ee');
+  assert.ok(out.length <= 160);
+  assert.match(out, /forge gate task-build-2ea3ee$/, "the action survives");
+});
+
+test("formatGateNotification: the forge gate command survives even when project + full context overflow the budget (FG-464 truncation protection)", () => {
+  // Realistic-worst case: a long project path plus all three context fields makes
+  // the prefix huge. The title drops and the prefix is trimmed, but the actionable
+  // `forge gate <task>` suffix must remain WHOLE and the output stays ≤ 160.
+  const out = formatGateNotification(
+    {
+      ...RUN,
+      title: "z".repeat(200),
+      projectDir: "/Users/x/code/" + "a-very-long-monorepo-package-name".repeat(4),
+      metadata: { ticketId: "FG-462", campaignId: "campaign-abcdef123456", itemId: "citem-abcdef123456" },
+    },
+    "task-red-wide-deadbeef", "verify",
+  );
+  assert.ok(out.length <= 160, `expected ≤160, got ${out.length}: ${out}`);
+  assert.ok(out.endsWith("forge gate task-red-wide-deadbeef"), `the gate command must survive whole, got: ${out}`);
+});
+
+test("formatGateNotification: no metadata → no context segment (degrades cleanly)", () => {
+  const out = formatGateNotification(RUN, "task-x-1", "plan");
+  assert.equal(out, 'forge: feature "add login" — plan gate: forge gate task-x-1');
 });
 
 test("formatDuration: sub-minute returns just seconds", () => {
