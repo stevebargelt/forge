@@ -1,9 +1,11 @@
 ---
 id: FG-439
 type: story
-status: active
+status: done
 title: "Orchestrator autonomy: decide routine review-gate disposition from policy, not operator preference"
 created: 2026-07-02
+closed: 2026-07-05
+closed_commit: e5f8e65
 ---
 
 ## Problem

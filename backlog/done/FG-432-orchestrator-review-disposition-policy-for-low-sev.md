@@ -1,9 +1,11 @@
 ---
 id: FG-432
 type: story
-status: active
+status: done
 title: Orchestrator review-disposition policy for low-severity findings
 created: 2026-07-02
+closed: 2026-07-05
+closed_commit: e5f8e65
 ---
 
 ## Problem
