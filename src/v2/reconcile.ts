@@ -169,6 +169,40 @@ export function changedWorktreeFiles(path: string | undefined): string[] {
   }
 }
 
+/** FG-461: build the OrphanEvidence tuple for an ATTACHED-EXIT missing-result
+ *  failure (invoke.ts / runNext.ts), mirroring the reconcile-time evidence
+ *  gathered in the container-gone branch above. The attached path already knows
+ *  the exit code directly (no docker inspect needed) and that the result is
+ *  absent, so it passes those in; changed files are gathered from the same
+ *  never-throwing git-status probe reconcile uses. Never throws. The container
+ *  has already exited here, hence containerLiveness: "gone". */
+export function attachedExitEvidence(opts: {
+  containerName: string;
+  // The task's dedicated worktree, if it has one (task-exclusive, confident
+  // evidence); undefined when it runs against the shared project dir.
+  worktreePath: string | undefined;
+  // The shared project dir — the fallback path probed when there's no dedicated
+  // worktree. Recorded with source: "project_dir_shared" so a consumer knows the
+  // diff may include the operator's own uncommitted changes.
+  projectDir: string;
+  exitCode?: number;
+  oomKilled?: boolean;
+}): OrphanEvidence {
+  const pathChecked = opts.worktreePath ?? opts.projectDir;
+  const source: OrphanEvidence["source"] = opts.worktreePath ? "worktree" : "project_dir_shared";
+  return {
+    containerName: opts.containerName,
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: pathChecked,
+    changedFiles: changedWorktreeFiles(pathChecked),
+    source,
+    ...(opts.exitCode !== undefined ? { exitCode: opts.exitCode } : {}),
+    ...(opts.oomKilled !== undefined ? { oomKilled: opts.oomKilled } : {}),
+  };
+}
+
 /** Reconcile a single run's task + run state against reality. Returns what (if
  *  anything) changed. */
 export function reconcileRun(

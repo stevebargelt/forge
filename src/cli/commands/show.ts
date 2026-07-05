@@ -440,7 +440,10 @@ export function orphanRecoveryMessage(
   runId: string,
   taskId: string,
   evidence: OrphanEvidence,
-  kind: "orphaned_work_may_persist" | "oom_killed" = "orphaned_work_may_persist",
+  // FG-461: container_crash / idle_timeout attached-exit failures now carry the
+  // same evidence and get their own headline; anything else (incl. the reconcile
+  // orphaned_work_may_persist default) uses the generic "work may have persisted".
+  kind: string = "orphaned_work_may_persist",
 ): string {
   const dir = taskDir(runId, taskId);
   const files = evidence.changedFiles.length > 0
@@ -459,17 +462,30 @@ export function orphanRecoveryMessage(
   // dirty. The headline must not claim changed files were found when there
   // are none (it would contradict the "(none listed)" changed-files line below).
   const foundChangedFiles = evidence.changedFiles.length > 0;
-  const headline = kind === "oom_killed"
-    ? evidence.oomKilled === true
-      ? foundChangedFiles
-        ? "container killed (OOM) — no recoverable result, but changed files were found."
-        : "container killed (OOM) — no recoverable result and no changed files on the worktree."
-      : foundChangedFiles
-        ? "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result, but changed files were found."
-        : "container killed (exit 137 — possibly OOM or an external kill) — no recoverable result and no changed files on the worktree."
-    : foundChangedFiles
+  // Common trailing clause for the specific-cause headlines (oom / crash / idle).
+  const changedClause = foundChangedFiles
+    ? " — no recoverable result, but changed files were found."
+    : " — no recoverable result and no changed files on the worktree.";
+  let headline: string;
+  if (kind === "oom_killed") {
+    const lead = evidence.oomKilled === true
+      ? "container killed (OOM)"
+      : "container killed (exit 137 — possibly OOM or an external kill)";
+    headline = lead + changedClause;
+  } else if (kind === "container_crash") {
+    // FG-461: an attached-exit non-zero crash with no result.
+    const lead = evidence.exitCode !== undefined
+      ? `container crashed (exit ${evidence.exitCode})`
+      : "container crashed";
+    headline = lead + changedClause;
+  } else if (kind === "idle_timeout") {
+    // FG-461: the idle watchdog SIGKILLed a hung agent — partial edits may remain.
+    headline = "agent idle-timed-out (killed after no output within the idle window)" + changedClause;
+  } else {
+    headline = foundChangedFiles
       ? "work may have persisted — container gone, no recoverable result, but changed files were found."
       : "work may have persisted — container gone, no recoverable result and no changed files on the worktree.";
+  }
   return (
     `${headline}\n` +
     sourceLine +
@@ -631,7 +647,7 @@ export function registerShow(program: Command): void {
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   orphanRecovery: orphanEvidence
-                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist") }
+                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist") }
                     : null,
                   fanoutWaveRecovery: fanoutWaveEvidence
                     ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence) }
@@ -684,7 +700,7 @@ export function registerShow(program: Command): void {
         // FG-455: don't let this collapse into a generic "failed" — the worktree
         // may hold real, unreviewed work.
         if (orphanEvidence) {
-          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist")}`);
+          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist")}`);
         }
         // FG-455 p2/p3 review finding 2: same distinct treatment for a fanout
         // parent orphaned mid-wave — don't let it collapse into a generic failure.

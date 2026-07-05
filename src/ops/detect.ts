@@ -151,7 +151,16 @@ type FailedRow = { taskId: string; runId: string; phase: string; payload: string
 // hold real work" shape as orphaned_work_may_persist (mirrors ORPHAN_EVIDENCE_KINDS
 // in failure-kind.ts and CONTINUABLE_KINDS in recover.ts) — excluding it here left
 // an OOM-killed task with a dirty worktree invisible to `forge ops check`.
-const WORK_MAY_PERSIST_KINDS = new Set(["orphaned_work_may_persist", "oom_killed"]);
+const WORK_MAY_PERSIST_KINDS = new Set(["orphaned_work_may_persist", "oom_killed", "container_crash", "idle_timeout"]);
+// FG-461: the attached-exit kinds only carry recovery evidence when it was
+// actually recorded (invoke.ts / runNext.ts). A pre-FG-461 crash — or any
+// read-only-dispatch crash — has no evidence payload, and container_crash /
+// idle_timeout are common outcomes, so raising an incident for one with no
+// recorded persisted-work evidence would be retroactive noise. Require evidence
+// (with changed files) for these kinds; the reconcile-time kinds keep their
+// prior behavior (they always carry evidence, or legacy events with none still
+// surface as "evidence not recorded").
+const ATTACHED_EXIT_EVIDENCE_KINDS = new Set(["container_crash", "idle_timeout"]);
 
 /** A FAILED task classified `orphaned_work_may_persist` or `oom_killed` (FG-455):
  *  reconcile found the container gone with no recoverable result, but changed
@@ -200,13 +209,22 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     // worktree is dirty — so a clean-worktree oom_killed task has no persisted
     // work at risk and shouldn't raise this incident.
     if (evidence && evidence.changedFiles.length === 0) continue;
+    // FG-461: an attached-exit container_crash / idle_timeout only rises to an
+    // incident when it recorded persisted-work evidence — skip the evidence-less
+    // ones (pre-FG-461 events, read-only-dispatch crashes) so common crashes
+    // don't retroactively flood ops check.
+    if (ATTACHED_EXIT_EVIDENCE_KINDS.has(failureKind) && !evidence) continue;
     const dir = taskDir(row.runId, row.taskId);
     const firstLine =
       failureKind === "oom_killed"
         ? evidence?.oomKilled === true
           ? `task ${row.taskId} (${row.phase}) was killed (OOM) with no recoverable result`
           : `task ${row.taskId} (${row.phase}) was killed (exit 137 — possibly OOM or an external kill) with no recoverable result`
-        : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
+        : failureKind === "container_crash"
+          ? `task ${row.taskId} (${row.phase}) crashed (exit ${evidence?.exitCode ?? "?"}) with no recoverable result`
+          : failureKind === "idle_timeout"
+            ? `task ${row.taskId} (${row.phase}) idle-timed-out (killed after no output) with no recoverable result`
+            : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
     incidents.push(
       makeIncident({
         kind: failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist",

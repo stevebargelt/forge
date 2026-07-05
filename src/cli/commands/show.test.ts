@@ -361,6 +361,31 @@ test("orphanRecoveryMessage: kind=oom_killed with changed files present does cla
   assert.doesNotMatch(msg, /no changed files on the worktree/);
 });
 
+// ── orphanRecoveryMessage: FG-461 attached-exit kinds get their own headline ──
+
+test("orphanRecoveryMessage: kind=container_crash leads with the crash + exit code, not the generic wording", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-crash", {
+    containerName: "forge-task-crash", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    exitCode: 1, oomKilled: false,
+  }, "container_crash");
+  assert.match(msg, /container crashed \(exit 1\)/);
+  assert.doesNotMatch(msg, /^work may have persisted/);
+  assert.match(msg, /changed files were found/);
+  assert.match(msg, /--force/);
+});
+
+test("orphanRecoveryMessage: kind=idle_timeout leads with the idle-timeout kill", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-idle", {
+    containerName: "forge-task-idle", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    oomKilled: false,
+  }, "idle_timeout");
+  assert.match(msg, /idle-timed-out/);
+  assert.doesNotMatch(msg, /^work may have persisted/);
+  assert.match(msg, /changed files were found/);
+});
+
 // ── orphanRecoveryMessage: FG-455 finding 2 source disclosure ───────────────
 
 test("orphanRecoveryMessage: source=project_dir_shared discloses the shared-projectDir ambiguity", () => {

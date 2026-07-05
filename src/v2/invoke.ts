@@ -25,7 +25,9 @@ import type { Workflow, Step, Runtime } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
-import { failTask, classify } from "./failure-kind.js";
+import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
+import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
+import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
@@ -482,12 +484,31 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   emitAgentProgressEvents(dir, runId, taskId);
   cleanupStagedAuth(dir); // AWN-8: remove staged auth-state once the container is done
 
+  // FG-461: for a recovery-relevant attached-exit kind (oom_killed /
+  // container_crash / idle_timeout), gather the same OrphanEvidence tuple
+  // reconcile records for a container-gone task, so getOrphanEvidenceFromEvents
+  // surfaces it and show/status/ops-check render a recovery line. Skipped for a
+  // read-only project mount — a red/audit agent can't persist work, so there's
+  // no worktree diff worth recovering (and the operator's own dirty files would
+  // be noise). Never throws (attachedExitEvidence uses the safe git probe).
+  const recoveryEvidenceFor = (kind: FailureKind): OrphanEvidence | undefined =>
+    !args.readOnlyProject && ORPHAN_EVIDENCE_KINDS.has(kind)
+      ? attachedExitEvidence({
+          containerName,
+          worktreePath: getTask(taskId)?.worktreePath,
+          projectDir: args.projectDir,
+          exitCode,
+          oomKilled: exitCode === 137,
+        })
+      : undefined;
+
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
     logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
-    failTask(taskId, { runId, kind: classify({ exitCode }), error });
+    const kind = classify({ exitCode });
+    failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -529,7 +550,10 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       kind = classify({ source: "model_error" });
       if (a.error) error = a.error;
     }
-    failTask(taskId, { runId, kind, error });
+    // FG-461: oom_killed / container_crash carry recovery evidence; model_error
+    // (a clean provider rejection) is not in ORPHAN_EVIDENCE_KINDS, so
+    // recoveryEvidenceFor returns undefined for it.
+    failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }

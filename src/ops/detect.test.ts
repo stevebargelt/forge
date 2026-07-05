@@ -361,3 +361,80 @@ test("renderHuman: surfaces kind, location, autonomy, and the repair_unavailable
   assert.match(out, /manual-only/);
   assert.match(out, /no DB-safe repair/);
 });
+
+// ── FG-461: attached-exit container_crash / idle_timeout with recovery evidence ──
+
+test("detectOrphanedWorkMayPersist: FG-461 flags a container_crash carrying evidence with changed files, describing the crash + exit code", () => {
+  insertRun(mkRun("run-crash", "active"));
+  insertTask(mkTask("task-crash", "run-crash", "failed"));
+  const evidence = {
+    containerName: "forge-task-crash",
+    containerLiveness: "gone",
+    resultState: "absent",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/wt",
+    changedFiles: ["?? partial.txt"],
+    source: "worktree",
+    exitCode: 1,
+    oomKilled: false,
+  };
+  logEvent("task.failed", {
+    runId: "run-crash", taskId: "task-crash",
+    payload: { failure_kind: "container_crash", error: "container_crash (exit 1)", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "orphaned_work_may_persist");
+  assert.match(i.evidence[0]!, /crashed \(exit 1\)/);
+  assert.match(i.evidence.join(" "), /1 changed file/);
+});
+
+test("detectOrphanedWorkMayPersist: FG-461 flags an idle_timeout carrying evidence", () => {
+  insertRun(mkRun("run-idle", "active"));
+  insertTask(mkTask("task-idle", "run-idle", "failed"));
+  const evidence = {
+    containerName: "forge-task-idle", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? partial.txt"],
+    source: "worktree", oomKilled: false,
+  };
+  logEvent("task.failed", {
+    runId: "run-idle", taskId: "task-idle",
+    payload: { failure_kind: "idle_timeout", error: "idle_timeout ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.match(incidents[0]!.evidence[0]!, /idle-timed-out/);
+});
+
+test("detectOrphanedWorkMayPersist: FG-461 a container_crash with NO evidence payload raises NO incident (no retroactive noise on historical crashes)", () => {
+  insertRun(mkRun("run-crash-noev", "active"));
+  insertTask(mkTask("task-crash-noev", "run-crash-noev", "failed"));
+  // A pre-FG-461 (or read-only-dispatch) crash: no evidence recorded.
+  logEvent("task.failed", {
+    runId: "run-crash-noev", taskId: "task-crash-noev",
+    payload: { failure_kind: "container_crash", error: "container_crash (exit 1)" },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 0, "an evidence-less attached-exit crash must not raise a work-may-persist incident");
+});
+
+test("detectOrphanedWorkMayPersist: FG-461 a container_crash with evidence but a CLEAN worktree raises NO incident", () => {
+  insertRun(mkRun("run-crash-clean", "active"));
+  insertTask(mkTask("task-crash-clean", "run-crash-clean", "failed"));
+  const evidence = {
+    containerName: "forge-task-crash-clean", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: [],
+    source: "worktree", exitCode: 1, oomKilled: false,
+  };
+  logEvent("task.failed", {
+    runId: "run-crash-clean", taskId: "task-crash-clean",
+    payload: { failure_kind: "container_crash", error: "container_crash (exit 1)", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 0, "no changed files → no persisted work at risk → no incident");
+});

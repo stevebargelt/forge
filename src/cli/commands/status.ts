@@ -92,7 +92,7 @@ export function registerStatus(program: Command): void {
             error: t.error ?? null,
             failureKind: taskFailureKind ?? null,
             orphanRecovery: orphanEvidence
-              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist") }
+              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind ?? "orphaned_work_may_persist") }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
@@ -152,7 +152,7 @@ export function registerStatus(program: Command): void {
             const events = eventsForTask(t.id);
             const orphanEvidence = getOrphanEvidenceFromEvents(events);
             if (orphanEvidence) {
-              const kind = failureKindFromEvents(events) === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist";
+              const kind = failureKindFromEvents(events) ?? "orphaned_work_may_persist";
               console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind)}`);
             }
           }

@@ -66,13 +66,23 @@ export function failTask(
     kind: FailureKind;
     error: string;
     result?: unknown;
+    // FG-461: recovery evidence for a recovery-relevant attached-exit failure
+    // (oom_killed / container_crash / idle_timeout). Recorded on the task.failed
+    // payload so getOrphanEvidenceFromEvents surfaces it — the same read path the
+    // reconcile-time oom_killed / orphaned_work_may_persist evidence uses. Omit
+    // for kinds with no persisted-work recovery story.
+    evidence?: OrphanEvidence;
   },
 ): void {
   markTaskFailed(taskId, opts.error, opts.result);
   logEvent("task.failed", {
     runId: opts.runId,
     taskId,
-    payload: { failure_kind: opts.kind, error: opts.error },
+    payload: {
+      failure_kind: opts.kind,
+      error: opts.error,
+      ...(opts.evidence ? { evidence: opts.evidence } : {}),
+    },
   });
 }
 
@@ -137,10 +147,20 @@ export type OrphanEvidence = {
 // FG-455 p4 review finding 1: oom_killed carries the same OrphanEvidence shape
 // (recorded on the same container-gone evidence-gathering path in reconcile.ts)
 // as orphaned_work_may_persist — so it belongs in this same evidence lookup.
+// FG-461: the attached-exit path (invoke.ts / runNext.ts) now records the same
+// OrphanEvidence shape for its recovery-relevant kinds — container_crash and
+// idle_timeout — so they join this lookup too.
 // Match EXPLICITLY on this kind set rather than "any payload.evidence present":
 // other kinds (e.g. verification_environment_unavailable) record a DIFFERENT
-// evidence shape that would otherwise be mis-cast to OrphanEvidence here.
-const ORPHAN_EVIDENCE_KINDS = new Set(["orphaned_work_may_persist", "oom_killed"]);
+// evidence shape that would otherwise be mis-cast to OrphanEvidence here. Safe
+// from miscast: only reconcile.ts and the FG-461 attached-exit path record an
+// `evidence` payload, and both use the OrphanEvidence shape for these kinds.
+export const ORPHAN_EVIDENCE_KINDS = new Set([
+  "orphaned_work_may_persist",
+  "oom_killed",
+  "container_crash",
+  "idle_timeout",
+]);
 
 /** Recover the orphaned_work_may_persist / oom_killed evidence from a task's
  *  event stream, mirroring failureKindFromEvents's newest-first walk (a later
