@@ -167,14 +167,20 @@ function referencesTicket(path: string, ticketId: string): boolean {
 /** True when a finding is orchestrator closeout guidance for the CURRENT ticket,
  *  not fixer work:
  *  (a) it is anchored on the current ticket's ACTIVE backlog file (a `backlog/`
- *      file naming `ticketId`, excluding `backlog/done/`) AND its summary reads
- *      as a close/move/mark-done recommendation, or
+ *      file naming `ticketId`, excluding `backlog/done/`) — withheld regardless
+ *      of its wording, or
  *  (b) it is truly unanchored AND its summary proposes a backlog close/move/
  *      mark-done action (about the ticket under review, by loop context).
- *  Both branches gate on `isCloseoutActionPhrase`: merely being anchored on the
- *  ticket's own backlog file is not enough on its own (e.g. a finding pointing
- *  out an ambiguous AC in that same file is a content concern, not a close/move
- *  proposal) — content, not location alone, decides closeout in either branch.
+ *  Branch (a) is LOCATION-decided, NOT content-gated: the fixer cannot commit ANY
+ *  backlog change (DISALLOWED_RE reverts it), so a finding anchored on the ticket's
+ *  own active file is never fixer-actionable regardless of phrasing. Content-gating
+ *  it (requiring an explicit close/move verb) reintroduced the exact FG-459 AC1
+ *  violation — the incident's own phrasing ("still active despite implemented")
+ *  names no close/move verb, so it would slip through to the fixer and poison the
+ *  loop. A non-close/move content finding on the ticket's own file (e.g. an
+ *  ambiguous-AC note) is still the orchestrator's to act on; it is surfaced in the
+ *  note as closeout guidance, never silently dropped. Branch (b) IS content-gated —
+ *  content is the only signal when there's no anchor.
  *  Scoped to `ticketId` (FG-462 AC: "the current implementation ticket"): a
  *  finding on an UNRELATED backlog file — another ticket's story, backlog/notes.md,
  *  an epic/idea — is NOT closeout. It stays fixable so it is not silently relabeled
@@ -184,9 +190,7 @@ function referencesTicket(path: string, ticketId: string): boolean {
  *  finding there is stale closeout text on a past close — the genuine backlog-drift
  *  catch the ticket's Non-Goal preserves — not a close/move to withhold. */
 export function isCloseoutFinding(f: Finding, ticketId: string): boolean {
-  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) {
-    return isCloseoutActionPhrase(f.summary);
-  }
+  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) return true;
   if (!f.file && isCloseoutActionPhrase(f.summary)) return true;
   return false;
 }

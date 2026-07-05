@@ -131,16 +131,17 @@ test("#457 verdict: red-style fail with ZERO findings is still an error (empty f
 
 // ── FG-462: closeout-finding partition ───────────────────────────────────────
 
-test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file recommending move/close is closeout (never fixer work)", () => {
+test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file is closeout (never fixer work)", () => {
   assert.equal(isCloseoutFinding({ summary: "still active in stories — should be moved to backlog/done", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), true);
 });
 
-test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file with NO close/move/done content is NOT closeout — anchoring alone must not override content", () => {
-  // e.g. a reviewer pointing out an ambiguous AC in the ticket's own backlog file
-  // is a content concern, not a close/move proposal — it stays fixable (and, since
-  // the fixer can't touch backlog/ files, surfaces as a clean fixer_out_of_scope
-  // stop rather than being silently mislabeled as closeout guidance).
-  assert.equal(isCloseoutFinding({ summary: "AC #3 is ambiguous about scope", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), false);
+test("#462 closeout: AC1 robustness — a finding anchored on the current ticket's active backlog file is closeout even with NO explicit close/move verb (the literal FG-459 incident phrasing)", () => {
+  // The FG-459 incident finding named the ticket's own file as still-active with no
+  // "move/close/done" verb. It is anchored on a backlog/ file the fixer can NEVER
+  // commit (DISALLOWED_RE), so it must be withheld regardless of wording — content-
+  // gating this branch reintroduced the exact AC1 violation the ticket fixes.
+  assert.equal(isCloseoutFinding({ summary: "still active in stories despite the fix being implemented in cc3a09f", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), true);
+  assert.equal(isCloseoutFinding({ summary: "AC #3 is ambiguous about scope", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), true);
 });
 
 test("#462 closeout: a finding anchored on backlog/done/ (already-closed ticket) is NOT closeout — genuine stale-docs catch stays fixable", () => {
