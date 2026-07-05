@@ -92,6 +92,31 @@ test("describeMissingReason: unrecognized codes pass through unchanged", () => {
   assert.equal(describeMissingReason("ticket_status_not_done"), "ticket_status_not_done");
 });
 
+test("FG-465 describeMissingReason: lane_evidence_missing renders friendly text (not the raw code)", () => {
+  const text = describeMissingReason("lane_evidence_missing");
+  assert.notEqual(text, "lane_evidence_missing", "must not fall through to the raw code");
+  assert.match(text, /^lane_evidence_missing \(/, "keeps the code, adds an explanation");
+  assert.match(text, /covering passing host-verification row/i);
+  assert.match(text, /forge campaign reconcile/, "points at the capture path");
+});
+
+test("FG-465 describeMissingReason: a run_evidence:<code> prefixed reason renders friendly text carrying the inner code", () => {
+  const inner = "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance";
+  const text = describeMissingReason(`run_evidence:${inner}`);
+  assert.notEqual(text, `run_evidence:${inner}`, "must not fall through to the raw code");
+  assert.match(text, /the run's own authoritative review is unresolved/i);
+  assert.ok(text.includes(inner), "surfaces the underlying reconcile reason code");
+  // A prefixed code must never collide with the plain switch cases.
+  assert.doesNotMatch(text, /captured automatically/i);
+});
+
+test("FG-465 describeMissingReason: the run_evidence: prefix takes precedence over any switch case name in the suffix", () => {
+  // e.g. run_evidence:host_verification_not_recorded must use the run-evidence
+  // framing, not the plain host_verification_not_recorded text.
+  const text = describeMissingReason("run_evidence:host_verification_not_recorded");
+  assert.match(text, /the run's own authoritative review is unresolved/i);
+});
+
 test("fact 5 missing: no authoritative verdict or force-advance event at all → ineligible with no_authoritative_verdict_or_force_advance_event", () => {
   const input = { ...baseInput(), events: [] as ReconcileRunEvent[] };
   const result = evaluateReconcileEvidence(input);
