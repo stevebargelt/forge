@@ -27,7 +27,7 @@ import { campaignBlocker } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
-import { evaluateReconcileEvidence, describeMissingReason } from "./reconcile-evidence.js";
+import { evaluateReconcileEvidence, describeMissingReason, AUTHORITATIVE_OUTCOME_MISSING_CODES } from "./reconcile-evidence.js";
 
 function computeCurrentPlanHash(campaign: Campaign): string | null {
   if (!campaign.projectDir) return null;
@@ -93,23 +93,10 @@ function recoveryNeededAction(item: CampaignItem): string {
   return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
 }
 
-// FG-458: the subset of evaluateReconcileEvidence's `missing` reason codes that
-// are specific to the run's OWN authoritative-review outcome (its fact 5) —
-// mirrors reconcile.ts's AUTHORITATIVE_OUTCOME_MISSING_CODES (duplicated rather
-// than shared across that public/private boundary — same pattern as
-// isHostLocalNoisePath above). Deliberately excludes the other four facts
-// (ticket status, closed-commit presence/reachability, host-verification):
-// those are already independently re-derived by the out-of-band evaluator from
-// the SAME underlying data, and for host-verification specifically, folding it
-// in here too would be self-defeating — outOfBandHostVerificationHint below
-// exists PRECISELY for the not-yet-captured case, so gating it on full
-// events-aware eligibility would suppress it for every runId'd item forever,
-// not just the ones with a genuine unresolved authoritative fail.
-const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
-  "no_authoritative_verdict_or_force_advance_event",
-  "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
-]);
-
+// FG-460: shared single definition of the authoritative-outcome codes (see
+// reconcile-evidence.ts) — was a hand-mirrored duplicate here. outOfBandHost-
+// VerificationHint below relies on this excluding host-verification (a not-yet-
+// captured item must still surface the hint, not be suppressed as ineligible).
 function hasUnresolvedAuthoritativeOutcome(projectDir: string, item: CampaignItem): boolean {
   const evaluated = evaluateReconcileEvidence(collectReconcileEvidence(projectDir, item));
   return evaluated.missing.some((m) => AUTHORITATIVE_OUTCOME_MISSING_CODES.has(m));

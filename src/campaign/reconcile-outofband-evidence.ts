@@ -10,6 +10,12 @@
 // that run), so this evaluator must not be able to accept run events as a
 // substitute for real out-of-band delivery evidence.
 
+import {
+  evaluateReconcileEvidence,
+  AUTHORITATIVE_OUTCOME_MISSING_CODES,
+  type ReconcileEvidenceInput,
+} from "./reconcile-evidence.js";
+
 export type OutOfBandLaneEvidence =
   | { kind: "non_code_diff" }
   | { kind: "host_verification"; recorded: true; allExitZero: true };
@@ -33,6 +39,56 @@ export type OutOfBandEvidenceResult = {
   missing: string[];
   evidence: OutOfBandEvidence;
 };
+
+// FG-460: the run's authoritative-outcome contribution to an out-of-band item's
+// eligibility. An out-of-band item WITH a runId must also agree with its run's
+// OWN authoritative-review outcome (the FG-458 fact) — otherwise a path could
+// ship a row another path would refuse for an unresolved authoritative fail. An
+// item with NO runId was never attached to a run (the pure FG-443 delivery case)
+// and contributes nothing here. Only the authoritative-outcome codes are folded
+// in (see AUTHORITATIVE_OUTCOME_MISSING_CODES) — NOT full events-aware
+// eligibility, which would double-count host-verification. Prefixed
+// `run_evidence:` so a consumer can tell "the run's own review is unresolved"
+// apart from "the out-of-band delivery lacks lane evidence."
+export type AuthoritativeContribution = { missing: string[]; evidence: unknown };
+
+export function authoritativeOutcomeContribution(
+  runEventsCollected: ReconcileEvidenceInput | null,
+): AuthoritativeContribution {
+  if (!runEventsCollected) return { missing: [], evidence: null };
+  const evaluated = evaluateReconcileEvidence(runEventsCollected);
+  return {
+    missing: evaluated.missing
+      .filter((m) => AUTHORITATIVE_OUTCOME_MISSING_CODES.has(m))
+      .map((m) => `run_evidence:${m}`),
+    evidence: evaluated.evidence,
+  };
+}
+
+// FG-460: the SINGLE shared composition of "is this out-of-band item eligible" —
+// out-of-band lane evidence AND (when it has a runId) the run's authoritative
+// outcome must both hold. Called by BOTH `forge campaign reconcile` (reconcile.ts
+// isOutOfBand branch, with lane evidence gathered AFTER its host-verification
+// capture) and `forge campaign resume` (executor.ts FG-441 reattach, with NO
+// capture — resume must never run a real host gate). Because both feed the same
+// two evaluators into this one function, they cannot reach opposite verdicts for
+// the same evidence: the only asymmetry is reconcile's capture step, which can
+// turn a code-touching-uncovered item into a covered one before this runs —
+// resume deliberately lacks that, so it refuses un-verified code rather than
+// shipping it.
+export function composeOutOfBandEligibility(input: {
+  outOfBand: OutOfBandEvidenceResult;
+  authoritative: AuthoritativeContribution;
+  hasRunId: boolean;
+}): { eligible: boolean; missing: string[]; evidence: unknown } {
+  return {
+    eligible: input.outOfBand.eligible && input.authoritative.missing.length === 0,
+    missing: [...input.outOfBand.missing, ...input.authoritative.missing],
+    evidence: input.hasRunId
+      ? { ...input.outOfBand.evidence, eventsAware: input.authoritative.evidence }
+      : input.outOfBand.evidence,
+  };
+}
 
 export function evaluateOutOfBandEvidence(input: OutOfBandEvidenceInput): OutOfBandEvidenceResult {
   const missing: string[] = [];

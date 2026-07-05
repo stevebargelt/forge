@@ -110,6 +110,24 @@ function taskBucketKey(e: ReconcileRunEvent): string {
   return e.taskId ?? NO_TASK_BUCKET;
 }
 
+// FG-458/FG-460: the subset of evaluateReconcileEvidence's `missing` reason
+// codes that are specific to the run's OWN authoritative-review outcome (its
+// Fact 5). The out-of-band composition (reconcile.ts's isOutOfBand branch AND
+// `forge campaign resume`'s FG-441 reattach path — see composeOutOfBandEligibility
+// in reconcile-outofband-evidence.ts) folds ONLY these codes in, so the two
+// paths agree on the authoritative-outcome axis by construction. Deliberately
+// excludes the other four facts (ticket status, closed-commit presence/
+// reachability, host-verification): those are independently re-derived by the
+// out-of-band evaluator from the same underlying data — and folding
+// host-verification in here specifically would be self-defeating (a not-yet-
+// captured item would show host_verification_not_recorded forever, blocking the
+// very capture meant to resolve it). Single exported definition — reconcile.ts,
+// report.ts, and the resume path all import THIS one (previously duplicated).
+export const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
+  "no_authoritative_verdict_or_force_advance_event",
+  "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+]);
+
 export type AuthoritativeOutcome = "pass" | "fail" | "unresolved";
 
 export type AuthoritativeOutcomeResult = {

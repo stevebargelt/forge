@@ -45,6 +45,12 @@ import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { collectDoneAuditInputFor } from "../done-audit/collect.js";
 import { collectAuthoritativeEvents, collectReconcileEvidence } from "./reconcile-collect.js";
 import { evaluateAuthoritativeOutcome, evaluateReconcileEvidence } from "./reconcile-evidence.js";
+import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
+import {
+  evaluateOutOfBandEvidence,
+  authoritativeOutcomeContribution,
+  composeOutOfBandEligibility,
+} from "./reconcile-outofband-evidence.js";
 import { assessRunDocsImpact, formatDocsImpactWarning } from "../v2/docs-impact.js";
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
@@ -676,14 +682,25 @@ async function driveRemainingItems(
       // gates/fixers/red/host-verification/PR-merge/backlog-close — leaving the
       // item shipped in reality but still parked here. Before re-parking it via
       // driveWorkflowItem below, re-derive shipped-ness from the SAME durable
-      // evidence `forge campaign reconcile`'s scope-blocked branch uses (the run's
-      // authoritative verdict/gate events, not the FG-443 out-of-band evaluator,
-      // which ignores run events and is reconcile.ts's job, not resume's). Only
+      // evidence `forge campaign reconcile`'s scope-blocked branch uses. Only
       // fires for the manually-driven shape: blocked_by_red and any item WITH a
       // blockerKind are FG-428/other lanes and must reach driveWorkflowItem unchanged.
       if (item.lifecycleStatus === "awaiting_gate" && !item.blockerKind && item.runId) {
-        const collected = collectReconcileEvidence(opts.projectDir, item);
-        const evaluated = evaluateReconcileEvidence(collected);
+        // FG-460: evaluate this reattach with the SAME shared out-of-band
+        // composition `forge campaign reconcile` uses (reconcile.ts's isOutOfBand
+        // branch) — MINUS reconcile's host-verification capture, which is
+        // reconcile-only. Previously resume used evaluateReconcileEvidence, whose
+        // fixed host_verification requirement wrongly refused a docs-only
+        // (non_code_diff) item that reconcile ships (FG-452's lane needs no host
+        // gate). Now both paths reach the same verdict for the same evidence by
+        // construction: resume ships a docs-only item, still refuses an
+        // unresolved authoritative fail, and — because it never captures — still
+        // refuses any code-touching item that lacks a passing host-verification
+        // row (it never starts shipping un-verified code; the widening is scoped
+        // to the non_code_diff lane).
+        const authoritative = authoritativeOutcomeContribution(collectReconcileEvidence(opts.projectDir, item));
+        const outOfBand = evaluateOutOfBandEvidence(collectOutOfBandEvidence(opts.projectDir, item));
+        const evaluated = composeOutOfBandEligibility({ outOfBand, authoritative, hasRunId: true });
         if (evaluated.eligible) {
           // Atomic: same paused-guard pattern reconcile.ts uses, gated on 'running'
           // instead of 'paused' — resumeCampaign already transitioned the campaign
