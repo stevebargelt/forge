@@ -23,6 +23,7 @@ import type { DoneAuditResult } from "../done-audit/done-audit.js";
 import { campaignBlocker } from "./executor.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
 import { insertHostVerification } from "../store/host-verifications.js";
+import { logEvent } from "../store/events.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -2183,6 +2184,135 @@ test("assembleCampaignShow: awaiting_gate item WITH a blockerKind is never treat
 
   const show = assembleCampaignShow(campaign.id)!;
   assert.equal(show.nextAction, "Human gate required at step review", "blockerKind present — must not be treated as out-of-band-eligible");
+});
+
+// ── FG-458: reconcile/resume consistency — report hints must not point the
+// operator at `forge campaign reconcile` for a runId'd item that reconcile
+// itself now refuses (an unresolved authoritative fail on the item's own run).
+
+test("FG-458: awaiting_gate item WITH a runId and an unresolved authoritative fail on that run — outOfBandCompletableAction must NOT claim out-of-band eligibility, even though out-of-band evidence alone is satisfied", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg458-101";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  // Code-touching delivery with a covering PASSING host-verification row — the
+  // out-of-band evaluator alone would call this eligible.
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  insertHostVerification({
+    ticketId: "FG-101",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  // The run's own authoritative review is an unresolved fail.
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(!show.nextAction.includes("delivered out-of-band"), `must not claim out-of-band eligibility, got: ${show.nextAction}`);
+  assert.ok(!show.nextAction.includes("forge campaign reconcile"), `must not point at forge campaign reconcile, got: ${show.nextAction}`);
+  assert.equal(show.nextAction, "Human gate required at step review", "falls back to the generic gate text");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(!report.nextOperatorAction.includes("delivered out-of-band"));
+  assert.ok(!report.nextOperatorAction.includes("forge campaign reconcile"));
+  assert.equal(report.nextOperatorAction, "Human gate required at step review");
+});
+
+test("FG-458: awaiting_gate item WITH a runId, unresolved authoritative fail, AND missing lane evidence — outOfBandHostVerificationHint must NOT point at forge campaign reconcile", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg458-102";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  // Code-touching delivery with NO covering host-verification row — out-of-band's
+  // own evidence is exactly {missing: ["lane_evidence_missing"]}, the shape
+  // outOfBandHostVerificationHint targets.
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(!show.nextAction.includes("forge campaign reconcile"), `must not point at forge campaign reconcile, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const row = report.items.find((i) => i.ticketId === "FG-101")!;
+  assert.ok(
+    !row.hostVerificationReconcileHint?.includes("forge campaign reconcile"),
+    `hostVerificationReconcileHint must not point at forge campaign reconcile, got: ${row.hostVerificationReconcileHint}`
+  );
+});
+
+test("FG-458 regression: awaiting_gate item WITH a runId whose events are clean (authoritative pass) AND lane evidence missing — outOfBandHostVerificationHint still points at forge campaign reconcile (unaffected)", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg458-103";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const row = report.items.find((i) => i.ticketId === "FG-101")!;
+  assert.ok(
+    row.hostVerificationReconcileHint?.includes("forge campaign reconcile"),
+    `clean run events must not suppress the hint, got: ${row.hostVerificationReconcileHint}`
+  );
 });
 
 // ── FG-442: execution lanes surfaced in show/report ──────────────────────────

@@ -32,6 +32,7 @@ import { resumeCampaign } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { reconcileCampaign } from "./reconcile.js";
 import { collectReconcileEvidence, runAndRecordHostVerification } from "./reconcile-collect.js";
+import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { assembleCampaignReport, assembleCampaignShow, renderCampaignReportHuman } from "./report.js";
 
@@ -1632,5 +1633,127 @@ test("FG-441 regression: a blocked_by_red item with blockerKind='scope' is NOT i
     countEvents(),
     beforeEvents,
     "no campaign_item.evidence_reconciled event for a blockerKind='scope' item via resume"
+  );
+});
+
+// ── FG-458: reconcile and resume must reach the SAME verdict for an
+// awaiting_gate item WITH a runId — see executor.ts's FG-441 reattach branch
+// (the resume side of this consistency property, exercised by the FG-441
+// tests directly above) and reconcile.ts's out-of-band branch (the reconcile
+// side, fixed here).
+
+test("FG-458: out-of-band item WITH a runId that has an UNRESOLVED AUTHORITATIVE FAIL on the run REFUSES via reconcile — agrees with what resume/evaluateReconcileEvidence would report for the same run", () => {
+  const ticketId = "FG-700";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  // Ticket done + closedCommit reachable + host-verification passing — the
+  // out-of-band evaluator ALONE would ship this.
+  seedOutOfBandCodeEvidence(ticketId);
+  // The run's own authoritative review is an unresolved fail — no later pass
+  // or qualifying force-advance.
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items.length, 1);
+  assert.equal(
+    result.items[0]!.status,
+    "refused",
+    "reconcile must refuse — resume would refuse this same run for an unresolved authoritative fail"
+  );
+  assert.ok(
+    result.items[0]!.missing!.includes(
+      "run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"
+    ),
+    `expected the run-evidence authoritative-outcome clause in missing, got: ${result.items[0]!.missing?.join(", ")}`
+  );
+
+  // Cross-check: the SAME shared evaluator, called directly on this item's own
+  // evidence, reports the identical (unlabeled) reason — reconcile's refusal is
+  // the raw reason resume reports, merely labeled for the operator.
+  const directlyEvaluated = evaluateReconcileEvidence(collectReconcileEvidence(projectDir, getCampaignItem(itemId)!));
+  assert.equal(directlyEvaluated.eligible, false);
+  assert.deepEqual(directlyEvaluated.missing, ["latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refusal");
+  assert.equal(countEvents(), beforeEvents, "no event row written on refusal");
+});
+
+test("FG-458: out-of-band item WITH a runId whose authoritative fail IS superseded by a qualifying force-advance REFUSES only when unresolved, SHIPS once resolved", () => {
+  const ticketId = "FG-701";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const firstResult = reconcileCampaign(campaignId);
+  assert.equal(firstResult.items[0]!.status, "refused", "unresolved fail must refuse");
+
+  logEvent("gate.decided", { runId, payload: { decision: "advance", rationale: "operator override: verified out of band", force: true } });
+
+  const secondResult = reconcileCampaign(campaignId);
+  assert.equal(secondResult.items[0]!.status, "shipped", "a qualifying force-advance resolves the run's authoritative outcome — both facts now agree to ship");
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-458: out-of-band item WITH a runId whose run events are clean (authoritative pass) AND out-of-band eligible → still SHIPS (both agree)", () => {
+  const ticketId = "FG-702";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(result.items[0]!.missing, undefined);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-458 non-goal guard: out-of-band item with NO runId, out-of-band eligible, ships UNCHANGED — the legitimate out-of-band delivery case is not weakened", () => {
+  const ticketId = "FG-703";
+  const { campaignId, itemId } = setupAwaitingGateCampaign(ticketId);
+  assert.equal(getCampaignItem(itemId)!.runId, undefined, "precondition: this item was never attached to a run");
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(result.items[0]!.missing, undefined);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-458: an unresolved authoritative fail refuses WITHOUT running the host-verification capture gate — the gate run is skipped, not wasted", () => {
+  const ticketId = "FG-704";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  // Code-touching delivery with NO covering host-verification row yet, closedCommit
+  // reachable on a CLEAN tree — exactly the shape that would normally make the
+  // out-of-band branch's needsCapture fire and run a real (passing) gate.
+  const commit = commitGateScript(`impl-${ticketId}`, "exit 0");
+  closeTicket(projectDir, ticketId, commit);
+  commitPendingChanges(`close ${ticketId}`);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  // No later pass or qualifying force-advance.
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  // Lane evidence itself is ALSO still missing (the capture below never ran),
+  // alongside the run-evidence reason — the short-circuit skips the gate run,
+  // it doesn't fabricate lane eligibility.
+  assert.deepEqual(result.items[0]!.missing, [
+    "lane_evidence_missing",
+    "run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+  ]);
+  assert.equal(
+    queryHostVerificationRowsForGate(ticketId, projectDir, "npm run test:all").length,
+    0,
+    "the events-aware refusal must short-circuit before the lane-evidence capture gate ever runs"
   );
 });
