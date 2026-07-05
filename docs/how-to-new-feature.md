@@ -4,9 +4,11 @@ Three feature workflows: `feature` (no UI design needed), `feature-ui-design-pro
 
 This doc walks the design-needed flow with a concrete example. All three workflows share an architect → plan → build → verify → docs core; `feature-ui-design-needed` prepends a `brief` (prompt-author) and `ui-review` (manual) phase before that.
 
-## Full feature runs require a backlog ticket
+## Workflows with a shipping-reviewer red require a backlog ticket
 
-The `build` phase's `shipping-reviewer` red is authoritative — it reviews the diff against the ticket's acceptance criteria and non-goals, and blocks the gate if it can't resolve one. There are two ways to give it one:
+The rule is per-workflow, not per-family: `forge new` requires `--ticket <id>` iff the workflow has a `shipping-reviewer` red on any step. Today that's only the plain **`feature`** workflow, whose `build` phase's `shipping-reviewer` red is authoritative — it reviews the diff against the ticket's acceptance criteria and non-goals, and blocks the gate if it can't resolve one. `feature-ui-design-needed` and `feature-ui-design-provided` do not carry a `shipping-reviewer` red today, so they do not require `--ticket` (if another workflow adds one later, the same requirement kicks in for it automatically).
+
+For a workflow that does require it, there are two ways to give it one:
 
 - Drive the work through a **campaign** (`forge campaign ...`), which stamps `run.metadata.ticketId` on every run it creates.
 - Pass **`--ticket <id>`** directly to `forge new` for a standalone run, e.g. `--ticket FG-123`. The id must reference a real ticket under `backlog/` (ideas/epics/stories/done).
@@ -15,7 +17,7 @@ If neither is given, `forge new` fails immediately — before the run is created
 
 ## Example
 
-You have a feature brief, a backlog ticket, but no design yet. Designs will land at `~/code/atlas/designs/`.
+You have a feature brief, a backlog ticket, but no design yet. Designs will land at `~/code/atlas/designs/`. `--ticket` isn't required for `feature-ui-design-needed` (it has no `shipping-reviewer` red), but passing it links the run to the ticket for traceability.
 
 ```bash
 forge new feature-ui-design-needed "clock-skew-fix" \
@@ -51,7 +53,7 @@ Output: `{steps: [{id, summary, files, acceptance}]}`. No reds. Gate: `human`.
 
 Output: `{steps_completed, diff_summary, files_modified}`. The engineer (or discipline specialist) edits files inside the container; the host project directory is mounted `rw`.
 
-Reds include a **shipping-reviewer**, along with wide/narrow/frontend/backend/security specialists — all **authoritative authority + `gateOnVerdict: true`**. If any returns `fail`, the task is set to `blocked_by_red` and the run halts. shipping-reviewer specifically needs the ticket from "Full feature runs require a backlog ticket" above — without it, it pre-fails and blocks the gate too. To override:
+Reds include wide/narrow/frontend/backend/security specialists — all **authoritative authority + `gateOnVerdict: true`**. If any returns `fail`, the task is set to `blocked_by_red` and the run halts. The plain `feature` workflow's `build` phase additionally includes a **shipping-reviewer** red (see "Workflows with a shipping-reviewer red require a backlog ticket" above); `feature-ui-design-needed` (used in the example above) and `feature-ui-design-provided` do not carry one. Where present, shipping-reviewer needs the run's ticket — without it, it pre-fails and blocks the gate too. To override:
 
 ```bash
 forge gate task-build-<suffix> advance --force --rationale "specific reason for overriding the red"
