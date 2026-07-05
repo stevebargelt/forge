@@ -1,9 +1,11 @@
 ---
 id: FG-458
 type: story
-status: active
+status: done
 title: "campaign reconcile: route awaiting_gate+runId items through the events-aware evaluator so reconcile and resume cannot disagree"
 created: 2026-07-04
+closed: 2026-07-05
+closed_commit: 18f68fb
 ---
 
 Surfaced by the FG-441 red-wide review (run-fg-441-red-wide-review-79c86f, findings 1b + 2).
