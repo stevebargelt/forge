@@ -879,19 +879,23 @@ test("FG-455 p4 Mode A no-recovery: complete task, empty DB result, empty result
 // (two forge processes reconciling the same run concurrently) must neither
 // propagate out of reconcileRun nor abort reconciliation of the other tasks.
 
-// A writer that throws SQLITE_BUSY-shaped on markTaskFailed for one specific
-// taskId, delegating every other call to the real store writers.
-function busyWriterFor(failingTaskId: string): ReconcileWriters {
+// A writer that throws SQLITE_BUSY-shaped on ONE chosen store method for ONE
+// specific taskId, delegating every other call to the real store writers. Lets
+// each test target exactly one of the three AC-named writes (markTaskComplete,
+// markTaskFailed, backfillTaskResult) on exactly one task.
+function busyOn(method: keyof ReconcileWriters, failingTaskId: string): ReconcileWriters {
+  const busy = (): never => {
+    const e = new Error("SQLITE_BUSY: database is locked") as Error & { code?: string };
+    e.code = "SQLITE_BUSY";
+    throw e;
+  };
   return {
-    ...defaultReconcileWriters,
-    markTaskFailed(id, error, result) {
-      if (id === failingTaskId) {
-        const e = new Error("SQLITE_BUSY: database is locked") as Error & { code?: string };
-        e.code = "SQLITE_BUSY";
-        throw e;
-      }
-      return defaultReconcileWriters.markTaskFailed(id, error, result);
-    },
+    markTaskComplete: (id, result) =>
+      method === "markTaskComplete" && id === failingTaskId ? busy() : defaultReconcileWriters.markTaskComplete(id, result),
+    markTaskFailed: (id, error, result) =>
+      method === "markTaskFailed" && id === failingTaskId ? busy() : defaultReconcileWriters.markTaskFailed(id, error, result),
+    backfillTaskResult: (id, result) =>
+      method === "backfillTaskResult" && id === failingTaskId ? busy() : defaultReconcileWriters.backfillTaskResult(id, result),
   };
 }
 
@@ -899,7 +903,7 @@ test("FG-459: a DB-write throw during one task's reconcile does not propagate ou
   insertContainerized(mkTask("t-busy", { status: "running" }));
   let r: ReturnType<typeof reconcileRun> | undefined;
   assert.doesNotThrow(() => {
-    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskFailed", "t-busy"));
   }, "a SQLITE_BUSY throw on the write must be swallowed, not propagated");
   // The failing task is left running (its write threw) — idempotent: a later
   // pass retries. Crucially it did NOT throw and did NOT get a bogus change.
@@ -912,7 +916,7 @@ test("FG-459: a DB-write throw on one task still reconciles the run's OTHER task
   insertContainerized(mkTask("t-ok", { status: "running" }));
   let r: ReturnType<typeof reconcileRun> | undefined;
   assert.doesNotThrow(() => {
-    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskFailed", "t-busy"));
   });
   // t-busy's write threw → left running, no change recorded.
   assert.equal(getTask("t-busy")!.status, "running");
@@ -935,11 +939,71 @@ test("FG-459: a DB-write throw on a task does not abort the run-level completion
 
   let r: ReturnType<typeof reconcileRun> | undefined;
   assert.doesNotThrow(() => {
-    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyWriterFor("t-busy"));
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskFailed", "t-busy"));
   });
   assert.equal(getTask("t-done")!.status, "complete");
   assert.equal(getTask("t-busy")!.status, "running");
   // Run has remaining non-terminal work (t-busy) → NOT completed. The absence of
   // a thrown error here is the point: the run-level block ran to a decision.
+  assert.equal(r!.runChange, undefined);
+});
+
+// FG-459 (review round 1): the AC names all THREE writes (markTaskComplete,
+// markTaskFailed, backfillTaskResult) and the fanout-parent pass explicitly.
+// The tests above only exercise markTaskFailed in the per-task loop; these cover
+// the other two writes and the fanout-parent pass directly.
+
+test("FG-459: a markTaskComplete throw (container-gone valid-result branch) does not propagate, and other tasks still reconcile", () => {
+  // t-cbusy has a valid result on disk → reconcile would markTaskComplete it.
+  insertContainerized(mkTask("t-cbusy", { status: "running" }));
+  const dir = taskDir(RUN.id, "t-cbusy");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+  // t-ok is an ordinary orphan reconciled via the real markTaskFailed.
+  insertContainerized(mkTask("t-ok", { status: "running" }));
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskComplete", "t-cbusy"));
+  });
+  assert.equal(getTask("t-cbusy")!.status, "running", "the completing write threw → left running (idempotent retry later)");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === "t-cbusy").length, 0);
+  assert.equal(getTask("t-ok")!.status, "failed", "a throw completing one task must not abort reconcile of the others");
+});
+
+test("FG-459: a backfillTaskResult throw (complete-empty backfill pass) does not propagate", () => {
+  // A complete task with an empty DB result but a result.json on disk → the
+  // backfill pass calls backfillTaskResult; force it to throw SQLITE_BUSY.
+  const taskId = "t-bf-busy";
+  makeCompleteEmptyResult(taskId);
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "recovered" }));
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, busyOn("backfillTaskResult", taskId));
+  }, "a SQLITE_BUSY throw in the backfill pass must be swallowed");
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "complete", "status untouched");
+  assert.equal(t.result, undefined, "the backfill write threw → result stays empty, retried on a later pass");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === taskId).length, 0);
+});
+
+test("FG-459: a write throw inside the fanout-parent pass does not propagate and does not abort the run-level check", () => {
+  // A fanout parent stuck running with all children complete → the fanout pass
+  // calls markTaskComplete(parent). Force that write to throw.
+  insertTask(mkTask("fp-busy", { status: "running" }));
+  insertTask(mkTask("fp-child-1", { parentId: "fp-busy", status: "complete" }));
+  insertTask(mkTask("fp-child-2", { parentId: "fp-busy", status: "complete" }));
+
+  let r: ReturnType<typeof reconcileRun> | undefined;
+  assert.doesNotThrow(() => {
+    r = reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskComplete", "fp-busy"));
+  }, "a throw finalizing a fanout parent must not propagate");
+  assert.equal(getTask("fp-busy")!.status, "running", "the parent-completing write threw → left running");
+  assert.equal(r!.taskChanges.filter((c) => c.taskId === "fp-busy").length, 0);
+  // The run-level completion check still ran to a verdict (no escaping throw): the
+  // parent is non-terminal so the run is NOT completed.
   assert.equal(r!.runChange, undefined);
 });
