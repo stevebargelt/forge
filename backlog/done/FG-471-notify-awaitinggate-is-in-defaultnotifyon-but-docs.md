@@ -1,9 +1,11 @@
 ---
 id: FG-471
 type: story
-status: active
+status: done
 title: "notify: awaiting_gate is in DEFAULT_NOTIFY_ON but docs say 'Excluded by default' — reconcile code vs doc (pre-existing)"
 created: 2026-07-05
+closed: 2026-07-05
+closed_commit: c18a8ee
 ---
 
 ## Problem
