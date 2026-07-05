@@ -1,24 +1,26 @@
-**Last session ended 2026-07-04 evening.** Autonomous run: cleared the FG-459 → FG-461 → FG-460 reliability/campaign queue. All three shipped, merged, and closed; `main` in sync with origin. Nothing mid-flight.
+**Last session ended 2026-07-05.**
 
-**Shipped this session:**
-1. **FG-459** (PR #25, 193220b) — reconcileRun now honors its never-throw invariant: every per-item DB-write pass + the run-level block + finalizeOrphanedPrimaries are guarded so a SQLITE_BUSY throw neither propagates nor aborts the other tasks. Injectable ReconcileWriters seam for deterministic throw-injection tests.
-2. **FG-461** (PR #26, 7b4e102) — attached-exit oom_killed/container_crash/idle_timeout now record OrphanEvidence (via attachedExitEvidence in reconcile.ts), so show/status/ops-check render a recovery line. Skipped for read-only dispatches; ops-check gated on recorded evidence so historical crashes don't retroactively flood. Review caught a real bug: the recovery guidance told operators to `retry --force` for container_crash/idle_timeout, but those are retryable:true — fixed to `forge retry <id>`.
-3. **FG-460** (PR #27, fd1b5d3) — campaign resume and reconcile now share one out-of-band composition (composeOutOfBandEligibility + authoritativeOutcomeContribution), so they can't disagree. Resume now ships docs-only (non_code_diff) items reconcile already ships, while still refusing unresolved-authoritative-fail and code-touching items lacking a passing host-verification row (resume never captures). Authoritative-codes set de-duplicated into reconcile-evidence.ts.
+**Where we left off:** Cleared the FG-459 → FG-461 → FG-460 reliability/campaign queue autonomously (all shipped, merged, closed), then did housekeeping: pruned merged remote branches and, on operator direction, **abandoned campaign-922c83b7c577** (no longer needed as evidence). `main` in sync with origin; nothing mid-flight. Two operator catches late in the session both resolved cleanly and are captured under Decisions.
 
-**Follow-ups filed (all NEW scope, not deferred AC):**
-- **FG-463** — reconcile: make each write+its-audit-events atomic (transaction) so a mid-sequence SQLITE_BUSY can't leave a status change without its task.reconciled event. Pre-existing gap FG-459's coarse catch surfaced; ~10-site refactor.
-- **FG-462** — review-loop must not route backlog close/move findings to the engineer fixer (the fixer_out_of_scope quirk that blocks a clean `closeable` on every implementation ticket). Auto-filed by the tooling. **Worth prioritizing** — it made every review-loop this session unable to reach `closeable` on the backlog-story-active false-positive.
-- **FG-465** — describeMissingReason has no friendly CLI text for lane_evidence_missing / run_evidence:<code> (fall through to raw code). Minor operator polish.
-- **FG-464** — rethink ntfy notification text/actionability (auto-filed).
+**Picked up next:**
+1. **FG-462** — review-loop must not route backlog close/move findings to the engineer fixer. Highest-leverage: it made EVERY review-loop this session unable to reach `closeable` (reviewer flags the ticket's own still-active backlog file → `fixer_out_of_scope`, poisoning every round). Fixing it makes the review-loop → auto-merge path clean.
+2. **FG-463** — wrap each reconcileRun write + its audit events in a transaction so a mid-sequence SQLITE_BUSY can't leave a status change without its `task.reconciled` event. Finishes FG-459's story (its coarse never-throw catch left this atomicity gap; ~10-site refactor).
+3. **FG-450** — Dashboard "Forge Fleet in Motion" marquee band — still deliberately reserved for your eye + fresh context (frontend + subjective "catchy" tone + browser-tools visual verification). Untouched across sessions by intent.
+4. **FG-465** — small: `describeMissingReason` has no friendly CLI text for `lane_evidence_missing` / `run_evidence:<code>` (fall through to raw code).
 
-**Operational learning (also in memory `project_review_loop_operational_quirks`):** twice this session a `forge review-loop` run backgrounded via the Bash tool `run_in_background` came back `status: killed` — i.e. terminated by a signal, not a clean exit. That's ALL that's evidenced. Do NOT assert the *harness* did the killing (the notification reports the disposition, not the agent — signal source never identified; not-excluded candidates: harness lifecycle, another process on the box, or a stray broad `pkill` of mine) and do NOT assert a "~7-10 min" threshold (n=2 kills at different times ≠ a threshold; I over-claimed both and retracted). Ruled out only: OS OOM (mem free, no jetsam) and a code/verify failure. **The one durable finding — the workaround:** the SAME review-loop relaunched DETACHED (`python3 -c "os.fork(); child: os.setsid(); subprocess.Popen([...review-loop...])"` from a FOREGROUND Bash call → orphaned session leader outside the tracked-background set) ran to completion both times. No completion notification → poll the log + pgrep. A killed-wrapper run can also leave the fixer's edits uncommitted OR committed — inspect and adopt after host verification. If it recurs, capture the signal source live rather than inferring.
+**External state to remember:**
+- **backlog/notes.md is uncommitted** (this handoff block). 0 commits ahead of origin, but the notes edit is not yet committed/pushed — operator was asked and hasn't said yes to pushing. Commit as a `chore(backlog)` if you want it durable on origin.
 
-**Picked up next (operator's call — nothing forced):**
-1. **FG-462** — fix the review-loop backlog-finding-to-fixer routing so implementation tickets can reach `closeable` cleanly (this bit every review-loop this session).
-2. **FG-463** — transactional write+event atomicity in reconcileRun (finishes FG-459's story).
-3. **FG-450** — Dashboard "Forge Fleet in Motion" marquee band — still deliberately reserved for your eye + fresh context (frontend + subjective tone + browser-tools verification).
+**Decisions worth not relitigating:**
+- **campaign-922c83b7c577 is ABANDONED (terminal, irreversible)** — operator released it; its 3 tickets (FG-357/376/422) had all shipped independently so nothing was stranded. Its preserved-evidence memory + MEMORY.md pointer were deleted. Don't re-preserve it.
+- **review-loop backgrounded via Bash `run_in_background` is unreliable here** — twice it came back `status: killed` (terminated by a signal; **killer UNIDENTIFIED and NOT time-bound** — do not re-assert "the harness" or "~7 min", both were over-claims that got retracted). Workaround that worked both times: launch DETACHED via `python3 -c "os.fork(); child os.setsid(); subprocess.Popen([...review-loop...])"` from a foreground Bash call → survives; poll log + pgrep (no completion notification). Detail in memory `project_review_loop_operational_quirks`; capture the signal source live if it recurs.
+- **FG-461's no-OOM-confirmation model:** attached-exit leaves `oomKilled` UNSET (unknown) — only reconcile, which reads Docker's real `OOMKilled` via `docker inspect`, may assert confirmed OOM. Message stays "exit 137 — possibly OOM or an external kill". (This was the operator catch that reopened+re-closed FG-461 via PR #28.)
+- **FG-460's no-runId asymmetry is by design:** resume's `item.runId` guard excludes no-runId items (they re-park); reconcile handles them via the FG-443 pure path. Documented + tested, not a bug.
+- **Merged 4 PRs under the session directive's "findings resolved under policy" branch** (not review-loop `closeable`, which FG-462 blocked): all code/AC findings resolved + `test:all` green each time.
+- **1 benign ops incident persists** — `orphaned_work_may_persist` on `task-engineer-67e458` (FG-455 fixer orphan; work merged, evidence is just the untracked `notes/`). `investigate`-type, not repairable, no dismiss verb. Harmless. `notes/` stays uncommitted (host-local, FG-380).
 
-**Don't relitigate:**
-- campaign-922c83b7c577 stays paused — preserved evidence for FG-427/440/443; untouched all session.
-- notes/ is intentionally uncommitted (host-local, FG-380).
-- FG-460's no-runId case is a by-design asymmetry (resume's runId guard excludes it; reconcile handles via the FG-443 pure path) — documented + tested, not a bug.
+**Shipped (for reference):**
+- FG-459 (PR #25) — reconcileRun honors its never-throw invariant on every DB-write pass; injectable ReconcileWriters seam.
+- FG-461 (PR #26 + accuracy fix #28) — attached-exit oom_killed/container_crash/idle_timeout record OrphanEvidence → show/status/ops render a recovery line; #28 removed the fabricated-OOM over-claim.
+- FG-460 (PR #27) — campaign resume + reconcile share one out-of-band composition; resume ships docs-only items reconcile ships, still refuses unverified code.
+- Filed this session: FG-462, FG-463, FG-464 (ntfy text), FG-465.

@@ -1,9 +1,11 @@
 ---
 id: FG-462
 type: story
-status: active
+status: done
 title: review-loop must not pass backlog close/move findings to engineer fixers
 created: 2026-07-05
+closed: 2026-07-05
+closed_commit: ca2b306
 ---
 
 ## Problem
