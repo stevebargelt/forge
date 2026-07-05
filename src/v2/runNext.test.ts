@@ -432,7 +432,7 @@ test("runNext: FG-461 container_crash records OrphanEvidence with exitCode and c
   const evidence = getOrphanEvidenceFromEvents(eventsForTask(first!.id));
   assert.ok(evidence, "container_crash attached-exit must record recovery evidence");
   assert.equal(evidence!.exitCode, 1);
-  assert.equal(evidence!.oomKilled, false);
+  assert.equal(evidence!.oomKilled, undefined, "attached path never inspects OOM — left unset");
   assert.equal(evidence!.source, "project_dir_shared");
   assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
 });
@@ -464,7 +464,7 @@ test("runNext: FG-461 idle_timeout records OrphanEvidence with changed files", a
 
   const evidence = getOrphanEvidenceFromEvents(eventsForTask(first!.id));
   assert.ok(evidence, "idle_timeout attached-exit must record recovery evidence");
-  assert.equal(evidence!.oomKilled, false);
+  assert.equal(evidence!.oomKilled, undefined, "attached path never inspects OOM — left unset");
   assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
 });
 

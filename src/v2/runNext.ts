@@ -2216,7 +2216,11 @@ async function runContainer(args: {
           worktreePath: args.worktreePath,
           projectDir: args.projectDir,
           exitCode,
-          oomKilled: exitCode === 137,
+          // FG-461 follow-up: attached-exit has only the exit code, never a
+          // `docker inspect` OOMKilled flag — exit 137 is as likely an external
+          // kill as an OOM. Leave oomKilled UNSET (unknown) so the recovery
+          // message stays "exit 137 — possibly OOM or an external kill"; only the
+          // reconcile path may assert a confirmed OOM.
         })
       : undefined;
 

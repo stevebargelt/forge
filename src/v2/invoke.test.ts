@@ -12,6 +12,7 @@ import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
+import { orphanRecoveryMessage } from "../cli/commands/show.js";
 import { execFileSync } from "node:child_process";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
@@ -1355,9 +1356,16 @@ test("FG-461: attached exit 137 (oom_killed) records OrphanEvidence with exitCod
   assert.equal(evidence!.containerLiveness, "gone");
   assert.equal(evidence!.resultState, "absent");
   assert.equal(evidence!.exitCode, 137);
-  assert.equal(evidence!.oomKilled, true);
   assert.equal(evidence!.source, "project_dir_shared");
   assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")), "the dirty file is captured as recovery evidence");
+  // FG-461 follow-up: the attached path never ran `docker inspect`, so it must
+  // NOT assert a confirmed OOM — exit 137 could be an external kill. oomKilled is
+  // left unset, and the operator-facing message stays the honest uncertain form,
+  // matching the reconcile-time behavior for an unconfirmed exit 137.
+  assert.notEqual(evidence!.oomKilled, true, "attached exit 137 must not fabricate a confirmed OOM (no docker inspect ran)");
+  const msg = orphanRecoveryMessage(r.runId, r.taskId, evidence!, "oom_killed");
+  assert.match(msg, /exit 137 — possibly OOM or an external kill/);
+  assert.doesNotMatch(msg, /container killed \(OOM\)/);
 });
 
 test("FG-461: attached exit 1 (container_crash) records OrphanEvidence", async () => {
@@ -1372,7 +1380,7 @@ test("FG-461: attached exit 1 (container_crash) records OrphanEvidence", async (
   const evidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
   assert.ok(evidence, "container_crash attached-exit must record recovery evidence");
   assert.equal(evidence!.exitCode, 1);
-  assert.equal(evidence!.oomKilled, false);
+  assert.equal(evidence!.oomKilled, undefined, "attached path never inspects OOM — left unset");
   assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
 });
 
@@ -1387,7 +1395,7 @@ test("FG-461: idle_timeout records OrphanEvidence", async () => {
 
   const evidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
   assert.ok(evidence, "idle_timeout attached-exit must record recovery evidence");
-  assert.equal(evidence!.oomKilled, false);
+  assert.equal(evidence!.oomKilled, undefined, "attached path never inspects OOM — left unset");
   assert.ok(evidence!.changedFiles.some((f) => f.includes("agent-work.txt")));
 });
 
