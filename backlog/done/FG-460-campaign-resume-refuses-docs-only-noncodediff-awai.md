@@ -1,9 +1,11 @@
 ---
 id: FG-460
 type: story
-status: active
+status: done
 title: campaign resume refuses docs-only (non_code_diff) awaiting_gate+runId items that reconcile correctly ships — unify resume/reconcile evaluation on the host-verification/lane axis
 created: 2026-07-04
+closed: 2026-07-05
+closed_commit: fd1b5d3
 ---
 
 ## Problem
