@@ -24,7 +24,7 @@ export function sampleNotifications(): string[] {
     id: "run-add-login-7c2a91", workflow: "feature", title: "add login",
     status: "complete", createdAt: "2026-05-25T12:00:00Z", projectDir: "/Users/you/code/myapp",
   };
-  const campaignRun: Run = { ...run, id: "run-fg462-9c3f", title: "FG-462 review-loop closeout", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } };
+  const campaignRun: Run = { ...run, id: "run-fg462-9c3f", title: "FG-462 review-loop closeout", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b", itemId: "citem-9f2" } };
   const lines = [
     "run transitions:",
     `  ${formatRunNotification(run, "complete", 14 * 60 * 1000 + 23 * 1000)}`,

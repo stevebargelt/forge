@@ -15,7 +15,7 @@ test("FG-464 forge notify test: sampleNotifications previews every message shape
   assert.match(joined, /\[failed\][^\n]*inspect failure: oom_killed/, "failed state names the kind");
   assert.match(joined, /review red → forge show/, "red block → forge show the blocked task");
   assert.match(joined, /gate: forge gate/, "gate → forge gate");
-  assert.match(joined, /FG-462 campaign camp-3a1b/, "campaign/ticket context");
+  assert.match(joined, /FG-462 campaign camp-3a1b item citem-9f2/, "all three context fields (ticket/campaign/item)");
 
   // milestone markers
   assert.match(joined, /▶ ACTION: your decision needed/, "actionable milestone marker");

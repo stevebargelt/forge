@@ -29,13 +29,15 @@ function projectSegment(run: Run): string {
 export type FailureDetail = { taskId: string; failureKind?: string };
 
 // FG-464: the campaign/ticket context an operator needs to know WHERE a push
-// belongs, pulled from run.metadata when present (FG-433 populates ticketId on
-// campaign-created runs). Degrades to "" when nothing is recorded.
+// belongs, pulled from run.metadata when present (campaign-created runs record
+// ticketId/campaignId/itemId — see executor.ts / startRun). Renders all three the
+// AC names, each only when available; degrades to "" when nothing is recorded.
 function contextSegment(run: Run): string {
-  const meta = (run.metadata ?? {}) as { ticketId?: unknown; campaignId?: unknown };
+  const meta = (run.metadata ?? {}) as { ticketId?: unknown; campaignId?: unknown; itemId?: unknown };
   const bits: string[] = [];
   if (typeof meta.ticketId === "string" && meta.ticketId) bits.push(meta.ticketId);
   if (typeof meta.campaignId === "string" && meta.campaignId) bits.push(`campaign ${meta.campaignId}`);
+  if (typeof meta.itemId === "string" && meta.itemId) bits.push(`item ${meta.itemId}`);
   return bits.length > 0 ? `${bits.join(" ")} ` : "";
 }
 
@@ -101,7 +103,16 @@ export function formatGateNotification(
   const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;
   if (full.length <= MAX_SMS_LEN) return full;
   const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
-  if (budget <= 0) return `${prefix.trimEnd()}${suffix}`.slice(0, MAX_SMS_LEN);
+  if (budget <= 0) {
+    // No room for the title. FG-464: the `forge gate <task>` suffix is the ACTION —
+    // it must survive whole. Drop the title; if even prefix+suffix overflows (a very
+    // long project/context prefix, now heavier with campaign/item context), trim the
+    // PREFIX from its tail, never the suffix, so the command is never truncated.
+    const bare = `${prefix.trimEnd()}${suffix}`;
+    if (bare.length <= MAX_SMS_LEN) return bare;
+    const prefixRoom = Math.max(0, MAX_SMS_LEN - suffix.length);
+    return `${prefix.slice(0, prefixRoom).trimEnd()}${suffix}`;
+  }
   return `${prefix}"${run.title.slice(0, budget)}..."${suffix}`;
 }
 
