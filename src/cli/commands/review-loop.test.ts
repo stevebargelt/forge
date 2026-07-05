@@ -120,6 +120,28 @@ test("FG-457 reviewer brief accepts the RED vocabulary and states its mapping", 
   assert.match(seen!.task, /"inconclusive" is mapped to blocked/i);
 });
 
+test("FG-462 reviewer brief scopes stale-closeout to already-closed tickets and protects the ticket under review", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({ result: { verdict: "pass" } }); });
+  await deps.review({ ok: true, steps: [] });
+  const t = seen!.task;
+  // stale-closeout narrowed to already-closed (backlog/done/) tickets
+  assert.match(t, /already-closed tickets only/i);
+  assert.match(t, /backlog\/done\//);
+  // ticket-under-review is expected to remain open; don't recommend close/move
+  assert.match(t, /TICKET UNDER REVIEW IS EXPECTED TO BE OPEN/i);
+  assert.match(t, /do NOT recommend `forge backlog close`/i);
+  assert.match(t, /closeout guidance/i);
+});
+
+test("FG-462 fixer brief forbids editing backlog / running forge backlog close-move", async () => {
+  let seen: InvokeArgs | undefined;
+  const { deps } = buildReviewLoopDeps(ctx(), async (a) => { seen = a; return RESULT({}); });
+  await deps.fix([{ summary: "off-by-one", file: "a.ts", line: 7 }]);
+  assert.match(seen!.task, /Never edit `backlog\/` ticket files/i);
+  assert.match(seen!.task, /forge backlog close.*move/i);
+});
+
 test("#301 deps.review: invoke status failed → ok false", async () => {
   const { deps } = buildReviewLoopDeps(ctx(), async () => RESULT({ status: "failed", error: "boom" }));
   const r = await deps.review({ ok: true, steps: [] });

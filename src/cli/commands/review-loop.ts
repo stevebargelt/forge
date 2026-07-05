@@ -37,7 +37,8 @@ function reviewTask(acceptance: string, diff: string, v: VerificationResult): st
     "- When implementation changes a name/shape/vocabulary, reconcile ALL design records — accepted PRDs and ADRs, not only how-to docs. An accepted PRD still describing the pre-implementation vocabulary is a finding.",
     "", "## Adjacent-surface regression matrix (the recurring miss pattern — apply rigorously)",
     "Literal acceptance is necessary but NOT sufficient. The misses that slip through are in adjacent surfaces:",
-    "- STALE CLOSEOUT TEXT: when the diff closes a ticket, its committed backlog/docs closeout text must not retain open-ticket status language — `Deferred`, `not urgent`, `TODO`, `not in scope yet`, or future-tense plans. Stale closeout wording on a closed ticket is a finding.",
+    "- STALE CLOSEOUT TEXT (already-closed tickets only): when the diff CLOSES a ticket — moves it to `backlog/done/` — its committed closeout text must not retain open-ticket status language: `Deferred`, `not urgent`, `TODO`, `not in scope yet`, or future-tense plans. Stale closeout wording on an ALREADY-CLOSED ticket (a file under `backlog/done/`) is a finding.",
+    "- THE TICKET UNDER REVIEW IS EXPECTED TO BE OPEN: the ticket whose work you are reviewing is EXPECTED to still live in `backlog/stories/` with `status: active` until the orchestrator closes it AFTER merge + verification. Do NOT raise its still-active / still-in-stories state as a finding, and do NOT recommend `forge backlog close`, moving it to `backlog/done/`, or setting its status to `done` — that closeout is the orchestrator's post-merge job, not fixer work. The loop withholds any such finding from the fixer and surfaces it to the orchestrator as closeout guidance, so raising it as a fix only adds noise.",
     "- ALL SUPPORTED FORMATS, not just the named one: when a helper is applied GENERICALLY (not gated to one format), inspect EVERY currently supported log_format / runtime_kind, not only the one named in the ticket. A helper that handles one agent log shape (e.g. claude-stream-json) but silently no-ops on another supported one (e.g. codex-jsonl) is a finding.",
     "- RECENTLY-ACTIVATED PATHS: include recently-activated paths in the regression matrix even when the ticket doesn't mention them. The Codex reviewer path (codex-subscription / codex-jsonl) is CURRENTLY ACTIVE, so any show / log / usage / runtime / dispatch change must consider codex-jsonl where applicable.",
     "- STALE NON-PROSE TEXT: flag stale claims in code comments, seed text/templates, test fixtures, and ADR/backlog wording — not only formal docs.",
@@ -67,6 +68,7 @@ function fixTask(ticketId: string, findings: Finding[]): string {
   return [
     `You are the FIXER in a bounded review loop for ticket #${ticketId.replace(/^#/, "")}. Address ONLY the findings below`,
     "with the minimal change that resolves each. Do not refactor beyond them. Self-validate per your seed and write /task/result.json.",
+    "Never edit `backlog/` ticket files and never run `forge backlog close`/`move` or mark this ticket done/closed — ticket closeout is the orchestrator's job after merge, and such changes are rejected as out-of-scope.",
     "", "## Findings to fix", list,
   ].join("\n");
 }
@@ -270,7 +272,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
       console.log(`  commit range: ${range.diffRange} (${range.mode}${spanNote})`);
       console.log(`  max rounds:   ${opts.maxRounds}`);
       console.log(`  reviewer:     red-wide (read-only)   fixer: engineer`);
-      console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | fixer_out_of_scope | reviewer_failed`);
+      console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | fixer_out_of_scope | closeout_guidance_only | reviewer_failed`);
       console.log(`  never auto-closes the ticket; reports whether it's closeable.`);
       if (opts.dryRun) { console.log("\n(dry run — no dispatch)"); return; }
 
@@ -299,7 +301,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
       }, invokeFn ?? invoke);
 
-      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds }, deps);
+      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
       const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
 
       const runId = getRunId();
@@ -313,6 +315,12 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
 
       if (outcome.closeable) {
         console.log(`\n✓ closeable — reviewer passed AND verification is green. Close with:  forge backlog close ${ticketId}`);
+      } else if (outcome.stopReason === "closeout_guidance_only") {
+        // FG-462: the reviewer's only remaining asks were backlog closeout (the
+        // orchestrator's post-merge job); the code review is otherwise clean. Not
+        // auto-closeable — the orchestrator decides after merge + verification.
+        console.log(`\n✗ not closeable — stop reason: closeout_guidance_only. The reviewer's only remaining findings are backlog closeout guidance (orchestrator post-merge work), which the fixer is not asked to perform. Review the closeout guidance in the note, then close after merge + verification if appropriate.`);
+        process.exitCode = 1;
       } else {
         console.log(`\n✗ not closeable — stop reason: ${outcome.stopReason}. The ticket is left open.`);
         process.exitCode = 1;

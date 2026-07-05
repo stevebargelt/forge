@@ -114,6 +114,100 @@ function normalizeVerdict(v: (typeof RAW_VERDICTS)[number]): ReviewerVerdict {
 export type Finding = z.infer<typeof FindingSchema>;
 export type ReviewerOutput = z.infer<typeof ReviewerVerdictSchema>;
 
+// ── FG-462: closeout-finding partition ───────────────────────────────────────
+// Ticket close/move ("forge backlog close", move-to-`backlog/done/`, status:done)
+// is the ORCHESTRATOR's post-merge closeout, never the engineer fixer's work. A
+// reviewer that anchors a finding on the current ticket's active backlog file (as
+// in the FG-459 incident) would otherwise be handed to the fixer, which cannot
+// commit a backlog change at all (the CLI's DISALLOWED_RE reverts it) — poisoning
+// every round with `fixer_out_of_scope`. We classify such findings as CLOSEOUT and
+// surface them to the orchestrator as guidance instead of dispatching them.
+
+// Matches an explicit backlog close/move/mark-done ACTION in a finding summary.
+// Consulted for BOTH branches of isCloseoutFinding below — a finding anchored on
+// a real code file (e.g. "remove the stale 'close after merge' comment") never
+// reaches this check at all (it's fixer work regardless of phrasing); a finding
+// anchored on the ticket's own backlog file, or truly unanchored, must still
+// read as an actual close/move/done recommendation, not merely sit on/near the
+// backlog, or a content-unrelated finding gets mislabeled as closeout guidance.
+//
+// Split in two: STRONG phrases name the backlog/ticket mechanism outright, so
+// they're unambiguous on their own. WEAK phrases are generic close/done/mark
+// vocabulary that application-domain findings also use (e.g. "marking the
+// request done before the callback runs" or "this stream should be closed") —
+// those only count as closeout when a `ticket`/`backlog` mention sits within
+// CLOSEOUT_CONTEXT_WINDOW characters of the matched phrase, so an unrelated
+// bug report elsewhere in the same (possibly multi-sentence) summary isn't
+// silently dropped from the fixer just because the words appear somewhere in it.
+const CLOSEOUT_STRONG_RE =
+  /forge\s+backlog\s+(?:close|move)|backlog\/done|clos(?:e|ed|ing)\s+(?:the\s+|this\s+)?ticket/i;
+const CLOSEOUT_WEAK_RE =
+  /move[- ]?to[- ]?done|mov(?:e|ed|ing)\b[^.\n]*\bdone\b|status\s*[:=]?\s*done\b|status\s+to\s+done\b|mark(?:ed|s)?\b[^.\n]*\bdone\b|should\s+be\s+(?:closed|moved\s+to\s+done)/i;
+const TICKET_CONTEXT_RE = /\b(?:ticket|backlog)\b/i;
+const CLOSEOUT_CONTEXT_WINDOW = 40;
+
+function isCloseoutActionPhrase(summary: string): boolean {
+  if (CLOSEOUT_STRONG_RE.test(summary)) return true;
+  const weak = CLOSEOUT_WEAK_RE.exec(summary);
+  if (!weak) return false;
+  const start = Math.max(0, weak.index - CLOSEOUT_CONTEXT_WINDOW);
+  const end = weak.index + weak[0].length + CLOSEOUT_CONTEXT_WINDOW;
+  return TICKET_CONTEXT_RE.test(summary.slice(start, end));
+}
+
+/** True when `path` names the CURRENT ticket (`ticketId` appears, not followed by
+ *  another digit so FG-462 doesn't match FG-4620) — same #<num> boundary rule as
+ *  resolveCommitRange. Empty ticketId matches nothing. */
+function referencesTicket(path: string, ticketId: string): boolean {
+  if (!ticketId) return false;
+  const esc = ticketId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${esc}(?![0-9])`, "i").test(path);
+}
+
+/** True when a finding is orchestrator closeout guidance for the CURRENT ticket,
+ *  not fixer work:
+ *  (a) it is anchored on the current ticket's ACTIVE backlog file (a `backlog/`
+ *      file naming `ticketId`, excluding `backlog/done/`) — withheld regardless
+ *      of its wording, or
+ *  (b) it is truly unanchored AND its summary proposes a backlog close/move/
+ *      mark-done action (about the ticket under review, by loop context).
+ *  Branch (a) is LOCATION-decided, NOT content-gated: the fixer cannot commit ANY
+ *  backlog change (DISALLOWED_RE reverts it), so a finding anchored on the ticket's
+ *  own active file is never fixer-actionable regardless of phrasing. Content-gating
+ *  it (requiring an explicit close/move verb) reintroduced the exact FG-459 AC1
+ *  violation — the incident's own phrasing ("still active despite implemented")
+ *  names no close/move verb, so it would slip through to the fixer and poison the
+ *  loop. A non-close/move content finding on the ticket's own file (e.g. an
+ *  ambiguous-AC note) is still the orchestrator's to act on; it is surfaced in the
+ *  note as closeout guidance, never silently dropped. Branch (b) IS content-gated —
+ *  content is the only signal when there's no anchor.
+ *  Scoped to `ticketId` (FG-462 AC: "the current implementation ticket"): a
+ *  finding on an UNRELATED backlog file — another ticket's story, backlog/notes.md,
+ *  an epic/idea — is NOT closeout. It stays fixable so it is not silently relabeled
+ *  as routine post-merge closeout; if the fixer then can't touch it, DISALLOWED_RE
+ *  yields a clean `fixer_out_of_scope` stop for the orchestrator to inspect.
+ *  `backlog/done/` (an already-closed ticket) is likewise excluded from (a): a
+ *  finding there is stale closeout text on a past close — the genuine backlog-drift
+ *  catch the ticket's Non-Goal preserves — not a close/move to withhold. */
+export function isCloseoutFinding(f: Finding, ticketId: string): boolean {
+  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) return true;
+  if (!f.file && isCloseoutActionPhrase(f.summary)) return true;
+  return false;
+}
+
+export type FindingPartition = { fixable: Finding[]; closeout: Finding[] };
+
+/** Split reviewer findings into those the fixer should address (`fixable`) and
+ *  those that are orchestrator closeout guidance for the current ticket
+ *  (`closeout`) — see isCloseoutFinding. Pure; order-preserving within each
+ *  bucket. */
+export function partitionCloseoutFindings(findings: Finding[], ticketId: string): FindingPartition {
+  const fixable: Finding[] = [];
+  const closeout: Finding[] = [];
+  for (const f of findings) (isCloseoutFinding(f, ticketId) ? closeout : fixable).push(f);
+  return { fixable, closeout };
+}
+
 export type ParsedVerdict =
   | { ok: true; verdict: ReviewerVerdict; findings: Finding[] }
   | { ok: false; error: string };
@@ -186,6 +280,7 @@ export type StopReason =
   | "verification_failed"   // deterministic verification still failing at max rounds
   | "fixer_failed"          // the fixer dispatch failed
   | "fixer_out_of_scope"    // the fixer mutated orchestrator-owned paths (backlog/, docs/, etc.)
+  | "closeout_guidance_only" // FG-462: reviewer's ONLY remaining asks are backlog closeout (orchestrator post-merge work); nothing for the fixer
   | "reviewer_failed";      // the reviewer dispatch failed or returned an invalid verdict
 
 export type RoundRecord = {
@@ -194,6 +289,9 @@ export type RoundRecord = {
   /** undefined when verification failed — the reviewer is short-circuited that round */
   verdict?: ReviewerVerdict;
   findings: Finding[];
+  /** FG-462: the subset of `findings` reclassified as orchestrator closeout
+   *  guidance and withheld from the fixer (backlog close/move). */
+  closeoutFindings?: Finding[];
   fixAttempted: boolean;
   fixError?: string;
   committedSha?: string;
@@ -233,8 +331,9 @@ export type ReviewLoopDeps = {
  *  passes, review; on needs_fix (and rounds remain) → fix → next round. Stops on
  *  pass, blocked, max rounds, or verification/fixer/reviewer failure. Pure: all
  *  effects via `deps`. */
-export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLoopDeps): Promise<ReviewLoopOutcome> {
+export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: string }, deps: ReviewLoopDeps): Promise<ReviewLoopOutcome> {
   const maxRounds = Math.max(1, opts.maxRounds ?? 2);
+  const ticketId = opts.ticketId ?? "";
   const rounds: RoundRecord[] = [];
 
   for (let round = 1; round <= maxRounds; round++) {
@@ -292,12 +391,25 @@ export async function runReviewLoop(opts: { maxRounds?: number }, deps: ReviewLo
       return { stopReason: "blocked_by_reviewer", closeable: false, rounds };
     }
 
-    // needs_fix
+    // needs_fix — FG-462: withhold backlog closeout findings from the fixer. They
+    // are the orchestrator's post-merge job (and the fixer cannot commit backlog
+    // changes anyway), so dispatch ONLY the fixable remainder.
+    const { fixable, closeout } = partitionCloseoutFindings(review.findings, ticketId);
+    if (closeout.length > 0) rec.closeoutFindings = closeout;
+
+    if (fixable.length === 0) {
+      // The reviewer's only asks are closeout guidance — nothing actionable for the
+      // fixer, and close/move is the orchestrator's call after merge. Terminal, and
+      // NOT closeable: the orchestrator retains final closeout authority.
+      rounds.push(rec);
+      return { stopReason: "closeout_guidance_only", closeable: false, rounds };
+    }
+
     if (round === maxRounds) {
       rounds.push(rec);
       return { stopReason: "needs_fix_max_rounds", closeable: false, rounds };
     }
-    const fix = await deps.fix(review.findings);
+    const fix = await deps.fix(fixable);
     rec.fixAttempted = true;
     if (fix.ok) {
       if (fix.committedSha) rec.committedSha = fix.committedSha;
@@ -352,10 +464,25 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
       : r.verification.ok
         ? `- reviewer: failed (invalid or absent result)`
         : `- reviewer: skipped (verification failed)`);
-    if (r.findings.length > 0) {
+    // FG-462: closeout findings render ONLY under their dedicated section below,
+    // never again in the general list (rec.findings holds the full unpartitioned
+    // set). Dedupe by value key so it holds whether or not the two arrays share
+    // object identity.
+    const findingKey = (f: Finding): string => `${f.file ?? ""}:${f.line ?? ""}:${f.summary}`;
+    const closeoutKeys = new Set((r.closeoutFindings ?? []).map(findingKey));
+    const generalFindings = r.findings.filter((f) => !closeoutKeys.has(findingKey(f)));
+    if (generalFindings.length > 0) {
       L.push(`- findings:`);
-      for (const f of r.findings) {
+      for (const f of generalFindings) {
         const where = f.unanchored ? "[unanchored]" : `${f.file}:${f.line}`;
+        L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
+      }
+    }
+    if (r.closeoutFindings && r.closeoutFindings.length > 0) {
+      // FG-462: withheld from the fixer; surfaced to the orchestrator as closeout guidance.
+      L.push(`- closeout guidance (orchestrator post-merge — NOT sent to fixer):`);
+      for (const f of r.closeoutFindings) {
+        const where = f.unanchored || !f.file ? "[unanchored]" : `${f.file}:${f.line}`;
         L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
       }
     }
