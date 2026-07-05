@@ -1066,6 +1066,54 @@ test("FG-463: a throw AFTER the status write rolls the whole group back — stat
   assert.equal(r2.taskChanges.filter((c) => c.taskId === "t-atomic" && c.to === "failed").length, 1);
 });
 
+test("FG-463: complete-branch rollback — markTaskComplete commits then a later statement throws → status rolled back, no partial event, clean re-apply", () => {
+  // Container-gone WITH a valid result → the markTaskComplete-gated complete
+  // branch (structurally different from the fail branches: the write is inside
+  // the transaction's `if`, and the taskChanges push is gated on the txn result).
+  insertContainerized(mkTask("t-atomic-complete", { status: "running" }));
+  const dir = taskDir(RUN.id, "t-atomic-complete");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+
+  assert.doesNotThrow(() => {
+    reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, writeThenBusyOn("markTaskComplete", "t-atomic-complete"));
+  });
+  assert.equal(getTask("t-atomic-complete")!.status, "running", "the complete write must roll back");
+  const t1 = eventsForTask("t-atomic-complete").map((e) => e.eventType);
+  assert.ok(!t1.includes("task.completed") && !t1.includes("task.reconciled"), "no partial events");
+
+  const r2 = reconcileRun(RUN.id, GONE);
+  assert.equal(getTask("t-atomic-complete")!.status, "complete", "clean re-apply on the next pass");
+  const t2 = eventsForTask("t-atomic-complete").map((e) => e.eventType);
+  assert.ok(t2.includes("task.completed"), "task.completed lands on the clean pass");
+  assert.equal(t2.filter((e) => e === "task.reconciled").length, 1, "exactly one reconciled event — no duplicate");
+});
+
+test("FG-463: Mode-A backfill rollback — backfillTaskResult commits then a later statement throws → result stays empty, no reconciled event, clean re-apply (result.json write stays outside the txn)", () => {
+  // A complete task with an empty DB result + a recoverable result.json → the
+  // Mode-A backfill pass. Structurally different: the best-effort result.json
+  // write runs BEFORE the transaction, so a rollback leaves the disk mirror
+  // written but the DB result empty (no partial reconciled event).
+  const taskId = "t-atomic-backfill";
+  makeCompleteEmptyResult(taskId);
+  const dir = taskDir(RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "recovered" }));
+
+  assert.doesNotThrow(() => {
+    reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, writeThenBusyOn("backfillTaskResult", taskId));
+  });
+  assert.equal(getTask(taskId)!.result, undefined, "the backfill write must roll back — DB result stays empty");
+  const t1 = eventsForTask(taskId).map((e) => e.eventType);
+  assert.equal(t1.filter((e) => e === "task.reconciled").length, 0, "no partial reconciled event from the rolled-back backfill");
+
+  const r2 = reconcileRun(RUN.id, ALIVE);
+  assert.notEqual(getTask(taskId)!.result, undefined, "clean re-apply backfills the result");
+  const t2 = eventsForTask(taskId).map((e) => e.eventType);
+  assert.equal(t2.filter((e) => e === "task.reconciled").length, 1, "exactly one reconciled event on the clean pass");
+  assert.equal(r2.taskChanges.filter((c) => c.taskId === taskId).length, 1);
+});
+
 // FG-461 (review round): attachedExitEvidence's source disambiguation. The
 // attached-exit dispatch tests (invoke.test.ts / runNext.test.ts) all run
 // against a shared project dir, so they only cover source: "project_dir_shared".
