@@ -10,7 +10,7 @@ import { insertRun, getRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
-import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo } from "./reconcile.js";
+import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo, attachedExitEvidence } from "./reconcile.js";
 import type { ReconcileWriters } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
 import { orphanRecoveryMessage } from "../cli/commands/show.js";
@@ -1006,4 +1006,41 @@ test("FG-459: a write throw inside the fanout-parent pass does not propagate and
   // The run-level completion check still ran to a verdict (no escaping throw): the
   // parent is non-terminal so the run is NOT completed.
   assert.equal(r!.runChange, undefined);
+});
+
+// FG-461 (review round): attachedExitEvidence's source disambiguation. The
+// attached-exit dispatch tests (invoke.test.ts / runNext.test.ts) all run
+// against a shared project dir, so they only cover source: "project_dir_shared".
+// This exercises the source: "worktree" branch directly — a dedicated
+// worktreePath is task-exclusive, confident evidence, and flips both `source`
+// and `worktreePathChecked` (which changes the operator-facing disclosure).
+test("FG-461: attachedExitEvidence with a dedicated worktreePath reports source=worktree and checks that path", () => {
+  const wt = makeDirtyGitRepo();
+  try {
+    const ev = attachedExitEvidence({ containerName: "forge-t-wt", worktreePath: wt, projectDir: "/some/shared/proj", exitCode: 1, oomKilled: false });
+    assert.equal(ev.source, "worktree", "a dedicated worktree is task-exclusive evidence");
+    assert.equal(ev.worktreePathChecked, wt, "the worktree path is what's probed, not the shared projectDir");
+    assert.equal(ev.containerLiveness, "gone");
+    assert.equal(ev.resultState, "absent");
+    assert.equal(ev.recoverableStdoutResult, false);
+    assert.equal(ev.exitCode, 1);
+    assert.equal(ev.oomKilled, false);
+    assert.ok(ev.changedFiles.some((f) => f.includes("changed-file.txt")), "changed files come from the worktree");
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("FG-461: attachedExitEvidence with no worktreePath falls back to the shared projectDir with source=project_dir_shared", () => {
+  const proj = makeDirtyGitRepo();
+  try {
+    const ev = attachedExitEvidence({ containerName: "forge-t-shared", worktreePath: undefined, projectDir: proj, exitCode: 137, oomKilled: true });
+    assert.equal(ev.source, "project_dir_shared", "no dedicated worktree → the shared-dir hedge applies");
+    assert.equal(ev.worktreePathChecked, proj);
+    assert.equal(ev.exitCode, 137);
+    assert.equal(ev.oomKilled, true);
+    assert.ok(ev.changedFiles.some((f) => f.includes("changed-file.txt")));
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
 });
