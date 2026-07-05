@@ -124,25 +124,35 @@ export type ReviewerOutput = z.infer<typeof ReviewerVerdictSchema>;
 // surface them to the orchestrator as guidance instead of dispatching them.
 
 // Matches an explicit backlog close/move/mark-done ACTION in a finding summary.
-// Only consulted for UNANCHORED findings — a finding anchored on a real code file
-// (e.g. "remove the stale 'close after merge' comment") is legitimate fixer work
-// regardless of phrasing, so phrasing alone must never reclassify it.
+// Consulted for BOTH branches of isCloseoutFinding below — a finding anchored on
+// a real code file (e.g. "remove the stale 'close after merge' comment") never
+// reaches this check at all (it's fixer work regardless of phrasing); a finding
+// anchored on the ticket's own backlog file, or truly unanchored, must still
+// read as an actual close/move/done recommendation, not merely sit on/near the
+// backlog, or a content-unrelated finding gets mislabeled as closeout guidance.
 //
 // Split in two: STRONG phrases name the backlog/ticket mechanism outright, so
 // they're unambiguous on their own. WEAK phrases are generic close/done/mark
 // vocabulary that application-domain findings also use (e.g. "marking the
 // request done before the callback runs" or "this stream should be closed") —
-// those only count as closeout when the summary also names a `ticket` or
-// `backlog`, so an unrelated bug report isn't silently dropped from the fixer.
+// those only count as closeout when a `ticket`/`backlog` mention sits within
+// CLOSEOUT_CONTEXT_WINDOW characters of the matched phrase, so an unrelated
+// bug report elsewhere in the same (possibly multi-sentence) summary isn't
+// silently dropped from the fixer just because the words appear somewhere in it.
 const CLOSEOUT_STRONG_RE =
   /forge\s+backlog\s+(?:close|move)|backlog\/done|clos(?:e|ed|ing)\s+(?:the\s+|this\s+)?ticket/i;
 const CLOSEOUT_WEAK_RE =
   /move[- ]?to[- ]?done|mov(?:e|ed|ing)\b[^.\n]*\bdone\b|status\s*[:=]?\s*done\b|status\s+to\s+done\b|mark(?:ed|s)?\b[^.\n]*\bdone\b|should\s+be\s+(?:closed|moved\s+to\s+done)/i;
 const TICKET_CONTEXT_RE = /\b(?:ticket|backlog)\b/i;
+const CLOSEOUT_CONTEXT_WINDOW = 40;
 
 function isCloseoutActionPhrase(summary: string): boolean {
   if (CLOSEOUT_STRONG_RE.test(summary)) return true;
-  return TICKET_CONTEXT_RE.test(summary) && CLOSEOUT_WEAK_RE.test(summary);
+  const weak = CLOSEOUT_WEAK_RE.exec(summary);
+  if (!weak) return false;
+  const start = Math.max(0, weak.index - CLOSEOUT_CONTEXT_WINDOW);
+  const end = weak.index + weak[0].length + CLOSEOUT_CONTEXT_WINDOW;
+  return TICKET_CONTEXT_RE.test(summary.slice(start, end));
 }
 
 /** True when `path` names the CURRENT ticket (`ticketId` appears, not followed by
@@ -157,10 +167,14 @@ function referencesTicket(path: string, ticketId: string): boolean {
 /** True when a finding is orchestrator closeout guidance for the CURRENT ticket,
  *  not fixer work:
  *  (a) it is anchored on the current ticket's ACTIVE backlog file (a `backlog/`
- *      file naming `ticketId`, excluding `backlog/done/`) — never fixer-actionable
- *      (the fixer cannot commit backlog changes), or
+ *      file naming `ticketId`, excluding `backlog/done/`) AND its summary reads
+ *      as a close/move/mark-done recommendation, or
  *  (b) it is truly unanchored AND its summary proposes a backlog close/move/
  *      mark-done action (about the ticket under review, by loop context).
+ *  Both branches gate on `isCloseoutActionPhrase`: merely being anchored on the
+ *  ticket's own backlog file is not enough on its own (e.g. a finding pointing
+ *  out an ambiguous AC in that same file is a content concern, not a close/move
+ *  proposal) — content, not location alone, decides closeout in either branch.
  *  Scoped to `ticketId` (FG-462 AC: "the current implementation ticket"): a
  *  finding on an UNRELATED backlog file — another ticket's story, backlog/notes.md,
  *  an epic/idea — is NOT closeout. It stays fixable so it is not silently relabeled
@@ -170,7 +184,9 @@ function referencesTicket(path: string, ticketId: string): boolean {
  *  finding there is stale closeout text on a past close — the genuine backlog-drift
  *  catch the ticket's Non-Goal preserves — not a close/move to withhold. */
 export function isCloseoutFinding(f: Finding, ticketId: string): boolean {
-  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) return true;
+  if (f.file && /^backlog\//.test(f.file) && !/^backlog\/done\//.test(f.file) && referencesTicket(f.file, ticketId)) {
+    return isCloseoutActionPhrase(f.summary);
+  }
   if (!f.file && isCloseoutActionPhrase(f.summary)) return true;
   return false;
 }

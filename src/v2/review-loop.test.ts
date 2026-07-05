@@ -131,8 +131,16 @@ test("#457 verdict: red-style fail with ZERO findings is still an error (empty f
 
 // ── FG-462: closeout-finding partition ───────────────────────────────────────
 
-test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file is closeout (never fixer work)", () => {
-  assert.equal(isCloseoutFinding({ summary: "still active in stories", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), true);
+test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file recommending move/close is closeout (never fixer work)", () => {
+  assert.equal(isCloseoutFinding({ summary: "still active in stories — should be moved to backlog/done", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), true);
+});
+
+test("#462 closeout: a finding anchored on the CURRENT ticket's active backlog file with NO close/move/done content is NOT closeout — anchoring alone must not override content", () => {
+  // e.g. a reviewer pointing out an ambiguous AC in the ticket's own backlog file
+  // is a content concern, not a close/move proposal — it stays fixable (and, since
+  // the fixer can't touch backlog/ files, surfaces as a clean fixer_out_of_scope
+  // stop rather than being silently mislabeled as closeout guidance).
+  assert.equal(isCloseoutFinding({ summary: "AC #3 is ambiguous about scope", file: "backlog/stories/FG-459-x.md", line: 3 }, "FG-459"), false);
 });
 
 test("#462 closeout: a finding anchored on backlog/done/ (already-closed ticket) is NOT closeout — genuine stale-docs catch stays fixable", () => {
@@ -149,8 +157,8 @@ test("#462 closeout: a finding anchored on an UNRELATED ticket's backlog file is
 });
 
 test("#462 closeout: ticketId boundary — FG-462 does not match FG-4620 (no substring bleed)", () => {
-  assert.equal(isCloseoutFinding({ summary: "x", file: "backlog/stories/FG-4620-x.md", line: 1 }, "FG-462"), false);
-  assert.equal(isCloseoutFinding({ summary: "x", file: "backlog/stories/FG-462-x.md", line: 1 }, "FG-462"), true);
+  assert.equal(isCloseoutFinding({ summary: "should be moved to backlog/done", file: "backlog/stories/FG-4620-x.md", line: 1 }, "FG-462"), false);
+  assert.equal(isCloseoutFinding({ summary: "should be moved to backlog/done", file: "backlog/stories/FG-462-x.md", line: 1 }, "FG-462"), true);
 });
 
 test("#462 closeout: an UNANCHORED finding proposing close/move/mark-done is closeout", () => {
@@ -170,6 +178,19 @@ test("#462 closeout: an UNANCHORED finding using bare close/done vocabulary with
   assert.equal(isCloseoutFinding({ summary: "the job's status becomes done before the callback fires, causing a race", unanchored: true }, "FG-462"), false);
   assert.equal(isCloseoutFinding({ summary: "marking the request done twice sends a duplicate completion event", unanchored: true }, "FG-462"), false);
   assert.equal(isCloseoutFinding({ summary: "this stream should be closed once the response finishes", unanchored: true }, "FG-462"), false);
+});
+
+test("#462 closeout: an UNANCHORED domain bug report that mentions 'ticket'/'backlog' far from unrelated close/done vocabulary is NOT closeout", () => {
+  // The ticket/backlog mention and the close/done vocabulary must be near each
+  // other (same clause) to read as one recommendation — a summary that opens by
+  // noting it came out of backlog triage, then separately describes an unrelated
+  // application bug using generic mark/done vocabulary many characters later,
+  // must not be misread as a close/move recommendation just because both
+  // vocabularies appear somewhere in the same (multi-clause) summary.
+  assert.equal(isCloseoutFinding({
+    summary: "Filed via backlog triage last week. Completely unrelated: the invoice worker's retry path marks the payment as done before the charge is confirmed, producing duplicate ledger entries during peak load.",
+    unanchored: true,
+  }, "FG-462"), false);
 });
 
 test("#462 closeout: a CODE-anchored finding is fixer work regardless of close/move phrasing", () => {
@@ -348,7 +369,7 @@ test("#462 loop: FG-459 shape — reviewer flags the active backlog file + a rea
   let round = 0;
   let given: Finding[] = [];
   const mixed: Finding[] = [
-    { summary: "FG-459 still active in stories — move to done", file: "backlog/stories/FG-459-x.md", line: 3 }, // closeout
+    { summary: "FG-459 still active in the backlog — move to done", file: "backlog/stories/FG-459-x.md", line: 3 }, // closeout
     { summary: "reconcile.test.ts missing a case", file: "src/v2/reconcile.test.ts", line: 42 },                // fixable
   ];
   const r = await runReviewLoop({ maxRounds: 2, ticketId: "FG-459" }, deps({
