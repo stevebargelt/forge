@@ -28,20 +28,6 @@ function projectSegment(run: Run): string {
 // the failure when known.
 export type FailureDetail = { taskId: string; failureKind?: string };
 
-// FG-464: the operator-action model. Every run notification answers "is this on
-// ME, and what do I do next". `actionable:false` states are FYI (no action);
-// actionable states carry a short label. Kept terse for a one-segment SMS.
-export type NotifyAction = { actionable: boolean; label: string };
-
-export function actionForState(state: NotifyState): NotifyAction {
-  switch (state) {
-    case "complete":      return { actionable: false, label: "no action" };
-    case "failed":        return { actionable: true, label: "inspect failure" };
-    case "blocked_by_red": return { actionable: true, label: "review red" };
-    case "awaiting_gate": return { actionable: true, label: "review gate" };
-  }
-}
-
 // FG-464: the campaign/ticket context an operator needs to know WHERE a push
 // belongs, pulled from run.metadata when present (FG-433 populates ticketId on
 // campaign-created runs). Degrades to "" when nothing is recorded.
