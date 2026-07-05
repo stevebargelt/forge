@@ -81,6 +81,18 @@ export type ReconcileEvidenceResult = {
 // and failed," and the latter must never read as something to wait out or
 // override. Unrecognized codes pass through unchanged.
 export function describeMissingReason(reason: string): string {
+  // FG-458: the run's OWN authoritative-review outcome, folded into an out-of-band
+  // item's eligibility with a `run_evidence:` prefix (see
+  // authoritativeOutcomeContribution). The suffix is the underlying reconcile
+  // reason code. A prefix, not a fixed value, so it's matched before the switch.
+  if (reason.startsWith("run_evidence:")) {
+    const inner = reason.slice("run_evidence:".length);
+    return (
+      `${reason} (the run's own authoritative review is unresolved: ${inner} — the ` +
+      "out-of-band item shares that run, so the run must reach a passing (or force-advanced) " +
+      "review before it can ship; resolve the run's review, don't wait it out or override)"
+    );
+  }
   switch (reason) {
     case "host_verification_not_recorded":
       return (
@@ -91,6 +103,13 @@ export function describeMissingReason(reason: string): string {
       return (
         "host_verification_recorded_but_failed (the required gate ran for real and failed — " +
         "fix the failure and re-merge; this is a genuine failure, not something to wait out or override)"
+      );
+    // FG-452: the docs-only out-of-band lane isn't satisfied AND no covering
+    // passing host-verification row exists yet. Tone matches report.ts's hint.
+    case "lane_evidence_missing":
+      return (
+        "lane_evidence_missing (no covering passing host-verification row recorded yet for this " +
+        "out-of-band delivery — run `forge campaign reconcile` to capture a real host-verification gate and re-check)"
       );
     default:
       return reason;
