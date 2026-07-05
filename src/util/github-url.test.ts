@@ -24,6 +24,13 @@ test("FG-438 githubBrowserUrl: trailing slash trimmed", () => {
   assert.equal(githubBrowserUrl("https://github.com/owner/repo/"), "https://github.com/owner/repo");
 });
 
+test("FG-438 githubBrowserUrl: trailing slash AND .git together are both trimmed (operator-found edge)", () => {
+  // `repo.git/` must become `repo`, not `repo.git` — slashes are trimmed before .git.
+  assert.equal(githubBrowserUrl("https://github.com/owner/repo.git/"), "https://github.com/owner/repo");
+  assert.equal(githubBrowserUrl("git@github.com:owner/repo.git/"), "https://github.com/owner/repo");
+  assert.equal(githubBrowserUrl("ssh://git@github.com/owner/repo.git/"), "https://github.com/owner/repo");
+});
+
 test("FG-438 githubBrowserUrl: non-GitHub / malformed → undefined", () => {
   assert.equal(githubBrowserUrl("git@gitlab.com:owner/repo.git"), undefined);
   assert.equal(githubBrowserUrl("https://bitbucket.org/owner/repo.git"), undefined);

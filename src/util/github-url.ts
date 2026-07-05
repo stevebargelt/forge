@@ -25,7 +25,9 @@ export function githubBrowserUrl(remoteUrl: string): string | undefined {
     const m = re.exec(u);
     if (m) {
       const owner = m[1];
-      const repo = (m[2] ?? "").replace(/\.git$/i, "").replace(/\/+$/, "");
+      // Trim trailing slashes FIRST, then `.git` — otherwise `repo.git/` keeps its
+      // `.git` (the `.git$` anchor misses because the string ends in `/`).
+      const repo = (m[2] ?? "").replace(/\/+$/, "").replace(/\.git$/i, "");
       if (owner && repo) return `https://github.com/${owner}/${repo}`;
     }
   }
