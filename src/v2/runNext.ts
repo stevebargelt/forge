@@ -2232,7 +2232,9 @@ async function runContainer(args: {
     // #228: attribute a provider/model error from structured stdout before
     // defaulting to a generic container_crash.
     let kind = classify({ exitCode, resultState: "missing" });
-    let msg = `container_crash (exit ${exitCode})`;
+    let msg = kind === "oom_killed"
+      ? `container killed (exit ${exitCode} — possibly OOM or an external kill)`
+      : `container_crash (exit ${exitCode})`;
     const a = analyzeProviderFailure({
       logFormat: runtimeMeta.logFormat,
       runtimeKind: runtimeMeta.runtimeKind,

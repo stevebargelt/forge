@@ -45,6 +45,12 @@ export function classify(ctx: FailureContext): FailureKind {
     return (ctx.error as Error).message.includes("expired") ? "auth_expired" : "auth_missing";
   }
   if (ctx.exitCode === IDLE_TIMEOUT_EXIT_CODE) return "idle_timeout";
+  // FG-455: exit 137 = 128 + SIGKILL(9) — a Docker OOM-kill or an external kill,
+  // directly detectable at attached-exit. Classify it the same specific way as
+  // the reconcile-time OOM path rather than the generic container_crash below.
+  // Guarded on resultState === "missing": a 137 that still produced a result
+  // goes through the normal result path, not this one.
+  if (ctx.exitCode === 137 && ctx.resultState === "missing") return "oom_killed";
   if (ctx.exitCode !== undefined && ctx.exitCode !== 0 && ctx.resultState === "missing") {
     return "container_crash";
   }

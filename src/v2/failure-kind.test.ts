@@ -20,11 +20,26 @@ test("classify: source=cancelled → cancelled", () => {
 
 test("classify: exitCode=non-zero + resultState=missing → container_crash", () => {
   assert.equal(classify({ exitCode: 1, resultState: "missing" }), "container_crash");
-  assert.equal(classify({ exitCode: 137, resultState: "missing" }), "container_crash");
 });
 
 test("classify: exitCode=IDLE_TIMEOUT_EXIT_CODE → idle_timeout", () => {
   assert.equal(classify({ exitCode: IDLE_TIMEOUT_EXIT_CODE }), "idle_timeout");
+});
+
+test("classify: exitCode=137 + resultState=missing → oom_killed (FG-455 attached-exit)", () => {
+  assert.equal(classify({ exitCode: 137, resultState: "missing" }), "oom_killed");
+});
+
+test("classify: exitCode=124 (idle sentinel) + resultState=missing → idle_timeout, not reclassified by the 137 rule", () => {
+  assert.equal(classify({ exitCode: IDLE_TIMEOUT_EXIT_CODE, resultState: "missing" }), "idle_timeout");
+});
+
+test("classify: exitCode=137 + resultState=malformed → not oom_killed (guard on missing)", () => {
+  assert.notEqual(classify({ exitCode: 137, resultState: "malformed" }), "oom_killed");
+});
+
+test("classify: exitCode=137 with no resultState → not oom_killed", () => {
+  assert.notEqual(classify({ exitCode: 137 }), "oom_killed");
 });
 
 test("classify: resultState=missing (no exitCode) → result_missing", () => {
