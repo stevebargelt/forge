@@ -20,3 +20,5 @@
 **Operational note (cost me ~20 min):** a backgrounded `until ! pgrep 'node --test'` wait-loop died silently (same signal that kills backgrounded waiters on this host) so I never got the test:all completion ping and sat waiting — the run had actually finished. LESSON: for the *final* wait, poll the log directly (`grep '^ℹ pass' <log>`) rather than trusting a backgrounded pgrep-waiter; or check `pgrep` + log mtime after a couple minutes instead of blocking on the notification.
 
 **Blockers:** none. **Recommended next:** FG-472 (product decision — non-campaign feature ticketId); then FG-450 (dashboard "Forge Fleet in Motion" marquee, still reserved for your eye).
+
+**FG-438 follow-up fix (PR #37, `825d8bb`):** operator found githubBrowserUrl() mistrimmed `repo.git/` (trailing slash + .git) → `repo.git` instead of `repo` — the .git$ anchor missed because the string ended in '/'. Fixed (trim slashes before .git) + combined-edge test (https/scp-SSH/ssh://). Reopened→fixed→re-closed. One-line correctness fix, gated on test:all green (3017+27), full review-loop skipped as disproportionate (recorded disposition).
