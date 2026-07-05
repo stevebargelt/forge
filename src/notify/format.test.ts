@@ -75,6 +75,23 @@ test("formatRunNotification: truncates a long title to keep the SMS under 160 ch
   assert.ok(out.startsWith("forge: run-add-login-7c2a91 [complete] feature "));
 });
 
+test("formatRunNotification: the forge show command survives even when project + full context overflow the budget (FG-464 action protection, symmetric to the gate)", () => {
+  // A long project path plus all three context fields makes the prefix huge; the
+  // action suffix (inspect failure … → forge show <task>) must NOT be truncated —
+  // it's the operator-action payload, same as the gate command.
+  const out = formatRunNotification(
+    {
+      ...RUN,
+      title: "z".repeat(200),
+      projectDir: "/Users/x/code/" + "a-very-long-monorepo-package-name".repeat(4),
+      metadata: { ticketId: "FG-462", campaignId: "campaign-abcdef123456", itemId: "citem-abcdef123456" },
+    },
+    "complete", 5 * 60 * 1000, { taskId: "task-engineer-deadbeef", failureKind: "oom_killed" },
+  );
+  assert.ok(out.length <= 160, `expected ≤160, got ${out.length}: ${out}`);
+  assert.ok(out.endsWith("→ forge show task-engineer-deadbeef"), `the action command must survive whole, got: ${out}`);
+});
+
 test("formatRunNotification: handles a title containing double quotes without breaking the format", () => {
   const out = formatRunNotification(
     { ...RUN, title: 'add "OAuth" login' },

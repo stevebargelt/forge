@@ -41,6 +41,19 @@ function contextSegment(run: Run): string {
   return bits.length > 0 ? `${bits.join(" ")} ` : "";
 }
 
+// FG-464: when there is no room for the title, the actionable SUFFIX (the next
+// step — `· no action` / `inspect failure … → forge show <task>` / `review red →
+// forge show <task>` / `forge gate <task>`) is the operator-action payload and must
+// survive WHOLE. Drop the title, and if even prefix+suffix overflows (a long
+// project + full campaign/item context), trim the PREFIX from its tail — never the
+// suffix. Shared by both formatters so they protect the action identically.
+function dropTitleProtectingSuffix(prefix: string, suffix: string): string {
+  const bare = `${prefix.trimEnd()}${suffix}`;
+  if (bare.length <= MAX_SMS_LEN) return bare;
+  const prefixRoom = Math.max(0, MAX_SMS_LEN - suffix.length);
+  return `${prefix.slice(0, prefixRoom).trimEnd()}${suffix}`;
+}
+
 export function formatRunNotification(
   run: Run,
   state: NotifyState,
@@ -76,10 +89,9 @@ export function formatRunNotification(
 
   // Truncate the title to fit. Reserve 3 chars for "..." inside the quotes.
   const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
-  if (budget <= 0) {
-    // Pathological: even with empty title we're over budget. Drop the title.
-    return `${prefix.trimEnd()}${suffix}`.slice(0, MAX_SMS_LEN);
-  }
+  // FG-464: no room for the title → protect the action suffix (drop title, trim
+  // prefix), so `inspect failure → forge show <task>` / `review red → …` survives.
+  if (budget <= 0) return dropTitleProtectingSuffix(prefix, suffix);
   const truncated = `"${run.title.slice(0, budget)}..."`;
   return `${prefix}${truncated}${suffix}`;
 }
@@ -103,16 +115,8 @@ export function formatGateNotification(
   const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;
   if (full.length <= MAX_SMS_LEN) return full;
   const budget = MAX_SMS_LEN - prefix.length - suffix.length - 2 /* quotes */ - 3 /* ellipsis */;
-  if (budget <= 0) {
-    // No room for the title. FG-464: the `forge gate <task>` suffix is the ACTION —
-    // it must survive whole. Drop the title; if even prefix+suffix overflows (a very
-    // long project/context prefix, now heavier with campaign/item context), trim the
-    // PREFIX from its tail, never the suffix, so the command is never truncated.
-    const bare = `${prefix.trimEnd()}${suffix}`;
-    if (bare.length <= MAX_SMS_LEN) return bare;
-    const prefixRoom = Math.max(0, MAX_SMS_LEN - suffix.length);
-    return `${prefix.slice(0, prefixRoom).trimEnd()}${suffix}`;
-  }
+  // FG-464: protect the `forge gate <task>` command — drop title, trim prefix.
+  if (budget <= 0) return dropTitleProtectingSuffix(prefix, suffix);
   return `${prefix}"${run.title.slice(0, budget)}..."${suffix}`;
 }
 
