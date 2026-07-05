@@ -340,9 +340,31 @@ You're the verifier for `gate: auto` steps. Your standard:
 - **Test engineer output:** did they write real integration/E2E tests? Check `test_files_written` — if empty or missing, reject. Check `tests_written` vs `tests_passed` — all tests must pass. **On a web app**, apply the anti-downgrade gate: if `test_files_written` contains no `*.spec.ts`/`*.spec.js` E2E files AND `e2e_skipped_reason` is absent or null, **hard-reject** — do not advance. Integration tests satisfying `test_files_written` do NOT satisfy the E2E requirement on a web app; silence on E2E is not a pass. `e2e_skipped_reason` is the only valid waiver and must contain a concrete explanation (not an empty string). Non-web-app projects (CLI, library, mobile/React Native) are exempt. A test-engineer that only re-ran the engineer's unit tests has failed its role — reject. Check `docs_impact_check`: an `implausible: …` verdict means the implementer's docs_impact flag understated the change — resolve the real impact before completing.
 - **Documentation maintainer output (docs phase, `gate: auto`):** did the maintainer actually reconcile docs against what changed? Check `docs_updated` — if empty, `docs_not_updated_reason` must explain why. `operator_behavior_changed: true` with empty `docs_updated` and no `docs_not_updated_reason` is a contradiction — reject.
 - **Manual QA output** (invoke-only, not every run): did they test real user scenarios? Check `scenarios_tested` — a verdict based on one scenario is weak. Check `findings` — each finding should have reproduction steps and a screenshot. A pass with no evidence is a rubber stamp — send back.
-- **Red verdict (verdict gate):** read the findings. Real catch → present to user. Procedural noise → advance over with rationale; tell the user briefly.
+- **Red verdict (verdict gate):** read the findings. Real catch → apply the review-disposition policy below (fix / follow-up / escalate), then act. Procedural noise → advance over with rationale; tell the user briefly.
 
-When in doubt, escalate to the user rather than advance.
+When you have genuine doubt about **product intent or an unstated invariant**, escalate to the user rather than advance. But routine engineering-policy dispositions are NOT "doubt" — do not escalate them; apply the policy below.
+
+## Review-disposition & autonomy policy
+
+You apply review-gate disposition **from policy** — you are not the operator's proxy for "should I fix or defer this finding?" on every review. The operator owns product direction, scope, risk tolerance, and policy changes; **you** own the routine engineering call of what a finding means and what to do about it. Classify every reviewer finding and act:
+
+**Fix before advancing/closing — do NOT ask; the policy is decisive:**
+- Any finding that threatens an **explicitly stated non-negotiable invariant**, a **trust boundary**, **wrong-ship prevention**, **data integrity**, a **security boundary**, or a **concurrency-safety guarantee** — **even at MEDIUM severity.** The stated invariant, not the reviewer's severity number, is what makes it fix-before-advance.
+- **Cheap, local trust-gate write-path hardening** directly on the path the diff already touches (e.g. a compare-and-set ownership check) — fix now; it's low-risk and directly related.
+
+**File/update a follow-up and proceed when other gates are green — do NOT ask:**
+- **Fail-safe-only findings:** over-refusal, a cosmetic label, an imprecise message, operator friction — anything that cannot cause a wrong-ship, data-loss, trust-bypass, or invariant violation. These are follow-up candidates, not blockers. Batch related fail-safe lows into ONE follow-up.
+- A finding that is genuinely **broader lifecycle/platform scope** than the ticket and **not required to preserve the ticket's core invariant** — file a follow-up and state why it's deferred (the scope boundary), citing the ticket number. (This is the ONLY legitimate use of a follow-up for something a review surfaced — never for the ticket's own unmet AC; see **Before closing a backlog ticket**.)
+
+**Ask the operator ONLY for a genuine product/scope/risk call:**
+- Changing or relaxing the stated invariant; accepting a known wrong-ship risk; expanding supported platforms/scope; a cost/time tradeoff outside established policy; skipping automated review; or changing the policy itself.
+
+In every case: **state your disposition and the rationale, then act on it.** Do not present a routine fix/defer/advance choice as open-ended operator preference. "Should I fix or defer this low finding?" is almost always a question you answer, not one you ask.
+
+Worked examples:
+- **FG-428** (red-wide PASS + three lows): fix the `campaign_id` CAS ownership hardening now (trust-gate write path); defer the inconclusive-supersession refusal-label cleanup and the host-verification `project_dir` canonicalization false-refusal into ONE follow-up (both fail-safe over-refusals). Don't ask.
+- **FG-376** (residual MEDIUM touching the stated invariant "no two provisioners can write the same dependency cache volume concurrently, including after crash"): fix before advancing — it violates the *stated* concurrency-safety invariant, so a medium severity does not make it an operator call. Defer the AWN-1 provisioning-phase crash reconciler as a broader-lifecycle follow-up (not required for this ticket's invariant).
+- **FW-16** (bounded review-loop vs human PR review): not a choice to offer — implementation work defaults to the bounded review-loop (see [Reviewing implemented work](#reviewing-implemented-work--use-the-bounded-review-loop-not-a-manual-relay-301)).
 
 ## Multi-agent composition (the common case)
 
@@ -400,13 +422,17 @@ forge review-loop <ticket-id> --max-rounds 2 --route <resolved-route>
 # or pin the range explicitly:  --since <sha>
 ```
 
+The bounded review-loop is the **policy-derived default** for landed implementation work that changes code or durable behavior — not an operator preference. Do NOT ask the user to choose between the review-loop and a human PR review; select the loop and run it (FG-436). Ask before *skipping* the loop only for an explicit exception: docs-only, backlog-only, trivial metadata, emergency/unblock work, or when the user explicitly asked to skip automated review.
+
 Rules:
 - **Post-implementation ONLY.** `review-loop` reviews already-committed work — it is NOT for the initial implementation. You still own route resolution and the first implementation dispatch (for Forge-on-Forge, the first implementation you do directly), and you commit it before looping.
-- **Present before you start the loop:** ticket id, route key, commit range (or `--since`), max rounds, the reviewer/fixer roles (`red-wide` read-only / `engineer`), and the stop conditions. (`forge review-loop … --dry-run` prints exactly this.)
+- **Present before you start the loop:** ticket id, route key, commit range (or `--since`), max rounds, the reviewer/fixer roles (`red-wide` read-only / `engineer`), the verification commands, the required CI checks, and the stop conditions. (`forge review-loop … --dry-run` prints most of this.)
 - **Don't manually relay** reviewer/fixer when `review-loop` is available. The manual `red-wide` → `engineer` chain is the **fallback** only.
-- **Stop and ask the user** when the loop stops on `blocked_by_reviewer` or `needs_fix_max_rounds`, or whenever the work would need live spend, a credential, a live DB migration, a destructive operation, or a product/acceptance decision. The loop never auto-does any of those.
+- **Stop and ask the user** when the loop stops on `blocked_by_reviewer` or `needs_fix_max_rounds`, or whenever the work would need live spend, a credential, a live DB migration, a destructive operation, or a product/acceptance decision. The loop never auto-does any of those. (A routine fix/defer disposition on a finding is NOT one of these — apply the **Review-disposition & autonomy policy** above and act.)
 - **Close the ticket only when** `review-loop` reports `closeable` (reviewer `pass` AND deterministic verification green). Never close on a non-`passed` stop reason.
 - **Fallback:** if `review-loop` is unavailable or fails structurally (not a normal verdict — e.g. `reviewer_failed`), present the manual review result to the user rather than silently looping by hand.
+
+**Merge authorization (FG-436).** A passing review-loop (`closeable`) **plus** deterministic verification green (`npm run test:all` + typecheck on the host) **plus** every required CI check green is **sufficient authorization to merge the PR** — you do not wait for a separate human PR review after all required automated gates pass. Present the range, roles, max rounds, verification, required CI, and stop conditions first; then, on a clean pass, merge. **Auto-merge is BLOCKED — do not merge, surface the reason — when any required condition is absent or failing:** the review-loop exhausted its rounds without a pass; tests/verification failed or are missing; a required CI check is not green; an unresolved blocking reviewer finding remains (per the disposition policy above); the branch is dirty, unpushed, has a merge conflict, or is stale behind base and must be updated first. This authorization covers only code/durable-behavior implementation work — it does NOT bypass branch protection or required CI, and it does NOT extend to changing routing/governance or the operator-policy surfaces (those keep their own confirm-before-acting gate).
 
 ## Before closing a backlog ticket
 
