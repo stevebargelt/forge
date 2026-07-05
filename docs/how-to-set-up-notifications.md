@@ -6,14 +6,13 @@ This doc covers the **forge** side only — credentials, the opt-in flow, the te
 
 ## What it does
 
-When a forge run hits a terminal-ish state, forge POSTs a one-line SMS via Twilio. The trigger is inside forge (`runs.status` transitions + task `blocked_by_red` events), not a Claude Code hook — that way you get one ping per workflow, regardless of how chatty the orchestrator was getting there.
+When a forge run hits a terminal-ish state, forge POSTs a one-line SMS via Twilio. The trigger is inside forge (`runs.status` transitions + task `blocked_by_red` / `awaiting_gate` events), not a Claude Code hook — that way you get one ping per workflow, regardless of how chatty the orchestrator was getting there.
 
 Default trigger set (override via `FORGE_NOTIFY_ON`):
 - **`complete`** — the run finished successfully (`runs.status` flipped to `complete`).
 - **`failed`** — the run was abandoned (`runs.status` flipped to `abandoned`).
 - **`blocked_by_red`** — a task got blocked by an authoritative red verdict; the run is parked, needs you to decide.
-
-Excluded by default: `awaiting_gate` (would fire during every normal gate; noisy).
+- **`awaiting_gate`** — a task paused for a human/verdict gate; a gate is exactly the kind of thing that needs your action, so it's on by default (not opt-in).
 
 Every message ends with an explicit action segment, so a glance tells you whether it's FYI or needs something from you. A clean finish is unmistakably non-actionable:
 ```
@@ -167,14 +166,16 @@ NTFY_URL=https://ntfy.sh/my-forge-notifications
 
 ## Customizing the trigger set
 
-By default forge notifies on `complete`, `failed`, and `blocked_by_red`. Override via:
+By default forge notifies on `complete`, `failed`, `blocked_by_red`, and `awaiting_gate`. Override via:
 
 ```bash
-export FORGE_NOTIFY_ON="complete,blocked_by_red"   # drop the failed pings
+export FORGE_NOTIFY_ON="complete,blocked_by_red"   # drop the failed and gate pings
 export FORGE_NOTIFY_ON="complete"                   # quietest mode: only successes
 ```
 
 Comma-separated. Unrecognized values are silently ignored. Empty / unset = use the default set.
+
+Find gate pings noisy? Drop `awaiting_gate` from the set: `export FORGE_NOTIFY_ON="complete,failed,blocked_by_red"`.
 
 ## Opt out (master switch)
 
@@ -186,7 +187,6 @@ Notifications immediately stop on the next forge invocation. The other `TWILIO_*
 
 ## What forge does NOT notify on
 
-- **`awaiting_gate`** — every normal gate would fire. Opt in via `FORGE_NOTIFY_ON=complete,failed,blocked_by_red,awaiting_gate` if you want it.
 - **Individual task failures inside a still-active run.** Only the run-level terminal transition fires.
 - **Non-forge work.** A long Claude Code session that doesn't touch forge gets no notification from here. (Use a Claude Code `Stop` hook for that — orthogonal concern.)
 - **Container crashes, idle-timeouts.** These flip the task to `failed` but don't terminate the run, so no SMS. If the run subsequently gets abandoned, that triggers a `failed` SMS.
