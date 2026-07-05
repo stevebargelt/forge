@@ -6,6 +6,8 @@ import {
   runVerification,
   runReviewLoop,
   renderReviewLoopNote,
+  isCloseoutFinding,
+  partitionCloseoutFindings,
   type GitRunner,
   type CommandRunner,
   type ReviewLoopDeps,
@@ -125,6 +127,44 @@ test("#457 verdict: red-style fail with ZERO findings is still an error (empty f
   const r = parseReviewerVerdict({ verdict: "fail", findings: [] });
   assert.equal(r.ok, false);
   assert.match((r as { error: string }).error, /needs_fix requires at least one finding/);
+});
+
+// ── FG-462: closeout-finding partition ───────────────────────────────────────
+
+test("#462 closeout: a finding anchored on a backlog/ file is closeout (never fixer work)", () => {
+  assert.equal(isCloseoutFinding({ summary: "still active in stories", file: "backlog/stories/FG-459-x.md", line: 3 }), true);
+  assert.equal(isCloseoutFinding({ summary: "stale done text", file: "backlog/done/FG-100.md", line: 1 }), true);
+});
+
+test("#462 closeout: an UNANCHORED finding proposing close/move/mark-done is closeout", () => {
+  assert.equal(isCloseoutFinding({ summary: "run forge backlog close FG-459 after merge", unanchored: true }), true);
+  assert.equal(isCloseoutFinding({ summary: "the ticket should be moved to backlog/done", unanchored: true }), true);
+  assert.equal(isCloseoutFinding({ summary: "set status: done for this ticket", unanchored: true }), true);
+  assert.equal(isCloseoutFinding({ summary: "this ticket should be closed", unanchored: true }), true);
+  assert.equal(isCloseoutFinding({ summary: "move this to done", unanchored: true }), true);
+});
+
+test("#462 closeout: a CODE-anchored finding is fixer work regardless of close/move phrasing", () => {
+  // e.g. "remove the stale 'close after merge' comment" — a real code fix, not closeout.
+  assert.equal(isCloseoutFinding({ summary: "remove the stale 'close the ticket after merge' comment", file: "src/x.ts", line: 12 }), false);
+  assert.equal(isCloseoutFinding({ summary: "status: done handling is wrong here", file: "src/status.ts", line: 5 }), false);
+});
+
+test("#462 closeout: an unanchored real concern (no close/move phrasing) stays fixable", () => {
+  assert.equal(isCloseoutFinding({ summary: "the new behavior lacks test coverage", unanchored: true }), false);
+  assert.equal(isCloseoutFinding({ summary: "off-by-one in the retry counter", unanchored: true }), false);
+});
+
+test("#462 closeout: partition splits closeout from fixable, order-preserving", () => {
+  const findings: Finding[] = [
+    { summary: "off-by-one", file: "a.ts", line: 1 },                                   // fixable
+    { summary: "move FG-459 to backlog/done", file: "backlog/stories/FG-459-x.md", line: 2 }, // closeout (backlog-anchored)
+    { summary: "missing coverage", unanchored: true },                                  // fixable
+    { summary: "run forge backlog close after merge", unanchored: true },               // closeout (phrase)
+  ];
+  const { fixable, closeout } = partitionCloseoutFindings(findings);
+  assert.deepEqual(fixable.map((f) => f.summary), ["off-by-one", "missing coverage"]);
+  assert.deepEqual(closeout.map((f) => f.summary), ["move FG-459 to backlog/done", "run forge backlog close after merge"]);
 });
 
 // ── Slice 3: runVerification ─────────────────────────────────────────────────
@@ -271,6 +311,61 @@ test("#301 loop: maxRounds clamps to >= 1", async () => {
   const r = await runReviewLoop({ maxRounds: 0 }, deps({}));
   assert.equal(r.rounds.length, 1, "0 is treated as 1 round, not a no-op");
   assert.equal(r.stopReason, "passed");
+});
+
+// ── FG-462: closeout findings are withheld from the fixer ────────────────────
+
+test("#462 loop: FG-459 shape — reviewer flags the active backlog file + a real code finding; fixer gets ONLY the code finding", async () => {
+  let round = 0;
+  let given: Finding[] = [];
+  const mixed: Finding[] = [
+    { summary: "FG-459 still active in stories — move to done", file: "backlog/stories/FG-459-x.md", line: 3 }, // closeout
+    { summary: "reconcile.test.ts missing a case", file: "src/v2/reconcile.test.ts", line: 42 },                // fixable
+  ];
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => (++round === 1
+      ? { ok: true, verdict: "needs_fix", findings: mixed }
+      : { ok: true, verdict: "pass", findings: [] }),
+    fix: (f) => { given = f; return { ok: true }; },
+  }));
+  assert.equal(r.stopReason, "passed");
+  // The fixer received ONLY the legitimate code finding — never the backlog close/move.
+  assert.deepEqual(given.map((f) => f.summary), ["reconcile.test.ts missing a case"]);
+  // The closeout finding is surfaced on the round, not dropped silently.
+  assert.deepEqual(r.rounds[0]!.closeoutFindings?.map((f) => f.file), ["backlog/stories/FG-459-x.md"]);
+});
+
+test("#462 loop: reviewer's ONLY findings are closeout → closeout_guidance_only, fixer NOT called, not closeable", async () => {
+  let fixCalled = false;
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => ({ ok: true, verdict: "needs_fix", findings: [
+      { summary: "move this ticket to backlog/done and set status: done", file: "backlog/stories/FG-462-x.md", line: 1 },
+    ] }),
+    fix: () => { fixCalled = true; return { ok: true }; },
+  }));
+  assert.equal(r.stopReason, "closeout_guidance_only");
+  assert.equal(r.closeable, false, "orchestrator retains final closeout authority");
+  assert.equal(fixCalled, false, "fixer must never be dispatched to close/move the ticket");
+  assert.equal(r.rounds.length, 1);
+  assert.equal(r.rounds[0]!.closeoutFindings?.length, 1);
+});
+
+test("#462 note: closeout guidance is rendered as orchestrator post-merge, not sent to fixer", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "462", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "closeout_guidance_only", closeable: false,
+      rounds: [{
+        round: 1, verification: VERIFY_OK, verdict: "needs_fix",
+        findings: [{ summary: "move to done", file: "backlog/stories/FG-462-x.md", line: 1 }],
+        closeoutFindings: [{ summary: "move to done", file: "backlog/stories/FG-462-x.md", line: 1 }],
+        fixAttempted: false,
+      }],
+    },
+  );
+  assert.match(note, /stop reason:\*\* closeout_guidance_only/);
+  assert.match(note, /closeout guidance \(orchestrator post-merge — NOT sent to fixer\)/);
+  assert.match(note, /backlog\/stories\/FG-462-x\.md:1 move to done/);
 });
 
 // ── Slice 5: renderReviewLoopNote ────────────────────────────────────────────
