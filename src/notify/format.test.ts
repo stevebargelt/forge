@@ -107,6 +107,22 @@ test("formatGateNotification: leads with the project name when the run has a pro
   assert.match(out, /forge gate task-build-2ea3ee$/);
 });
 
+test("formatGateNotification: carries campaign/ticket context from run.metadata (FG-464 — the most actionable push must not drop it)", () => {
+  const out = formatGateNotification(
+    { ...RUN, projectDir: "/Users/x/code/myapp", metadata: { ticketId: "FG-462", campaignId: "camp-3a1b" } },
+    "task-build-2ea3ee", "build",
+  );
+  // context sits after the project name, before the workflow — same order as run transitions
+  assert.equal(out, 'forge: myapp: FG-462 campaign camp-3a1b feature "add login" — build gate: forge gate task-build-2ea3ee');
+  assert.ok(out.length <= 160);
+  assert.match(out, /forge gate task-build-2ea3ee$/, "the action survives");
+});
+
+test("formatGateNotification: no metadata → no context segment (degrades cleanly)", () => {
+  const out = formatGateNotification(RUN, "task-x-1", "plan");
+  assert.equal(out, 'forge: feature "add login" — plan gate: forge gate task-x-1');
+});
+
 test("formatDuration: sub-minute returns just seconds", () => {
   assert.equal(formatDuration(500), "0s");
   assert.equal(formatDuration(45 * 1000), "45s");

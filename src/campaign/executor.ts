@@ -978,6 +978,7 @@ async function driveRemainingItems(
       const inputs: Record<string, unknown> = {
         ticketId: item.ticketId,
         campaignId,
+        itemId: item.id,
         brief: ticketBrief,
         projectContext: cachedTicket
           ? `${item.ticketId}: ${cachedTicket.title}\n\n${cachedTicket.body}`

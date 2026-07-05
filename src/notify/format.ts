@@ -92,7 +92,11 @@ export function formatGateNotification(
   state: NotifyState = "awaiting_gate",
 ): string {
   const label = "gate";
-  const prefix = `forge: ${projectSegment(run)}${run.workflow} `;
+  // FG-464: the gate push is the MOST actionable notification ("gate needs you"),
+  // so it must carry the same campaign/ticket context as run transitions — a
+  // campaign-created run pausing at a gate is exactly a "campaign-related
+  // notification" the AC covers.
+  const prefix = `forge: ${projectSegment(run)}${contextSegment(run)}${run.workflow} `;
   const suffix = ` — ${phase} ${label}: forge gate ${taskId}`;
   const full = `${prefix}"${run.title.replaceAll('"', "'")}"${suffix}`;
   if (full.length <= MAX_SMS_LEN) return full;
