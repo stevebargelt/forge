@@ -1,9 +1,11 @@
 ---
 id: FG-465
 type: story
-status: active
+status: done
 title: "campaign: describeMissingReason has no friendly CLI text for lane_evidence_missing / run_evidence:<code> refusal reasons (fall through to raw code)"
 created: 2026-07-05
+closed: 2026-07-05
+closed_commit: 50ce5fb
 ---
 
 ## Problem
