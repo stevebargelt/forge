@@ -1,9 +1,10 @@
 ---
 id: FG-467
 type: story
-status: active
+status: done
 title: "review-loop: add CLI integration test for the closeout_guidance_only branch (console message + exitCode=1) in registerReviewLoop"
 created: 2026-07-05
+closed: 2026-07-05
 ---
 
 ## Problem

@@ -1,9 +1,10 @@
 ---
 id: FG-470
 type: story
-status: active
+status: done
 title: "test: end-to-end collector test that a campaign-created run persists ticketId/campaignId/itemId on run.metadata (FG-464 population regression guard)"
 created: 2026-07-05
+closed: 2026-07-05
 ---
 
 ## Problem

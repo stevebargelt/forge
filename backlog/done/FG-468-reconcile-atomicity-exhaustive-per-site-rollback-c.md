@@ -1,9 +1,10 @@
 ---
 id: FG-468
 type: story
-status: active
+status: done
 title: "reconcile atomicity: exhaustive per-site rollback coverage + make finalizeOrphanedPrimaries writer-injectable"
 created: 2026-07-05
+closed: 2026-07-05
 ---
 
 ## Problem

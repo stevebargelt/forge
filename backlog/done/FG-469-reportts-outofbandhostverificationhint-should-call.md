@@ -1,9 +1,10 @@
 ---
 id: FG-469
 type: story
-status: active
+status: done
 title: "report.ts: outOfBandHostVerificationHint should call describeMissingReason('lane_evidence_missing') instead of hardcoding the same string (single source of truth)"
 created: 2026-07-05
+closed: 2026-07-05
 ---
 
 ## Problem

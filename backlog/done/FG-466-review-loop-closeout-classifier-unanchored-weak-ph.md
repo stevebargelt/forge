@@ -1,9 +1,10 @@
 ---
 id: FG-466
 type: story
-status: active
+status: done
 title: "review-loop closeout classifier: unanchored weak-phrase + ticket-context-window heuristic can withhold a legit application-domain bug from the fixer"
 created: 2026-07-05
+closed: 2026-07-05
 ---
 
 ## Problem
