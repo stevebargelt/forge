@@ -2363,6 +2363,150 @@ test("FG-458 regression: awaiting_gate item WITH a runId whose events are clean 
   );
 });
 
+// ── FG-473: invoke-lane (quick_implementation) runs produce ZERO authoritative
+// verdicts — no red-team step at all. That absence must read as no-objection,
+// not as an unresolved authoritative outcome, or every invoke-lane item that
+// ever reaches awaiting_gate would wedge permanently. Display must agree with
+// reconcile (FG-444 no-divergence) on this new case, same as it already does
+// for the fail/inconclusive cases above.
+
+test("FG-473: awaiting_gate item WITH a runId and ZERO authoritative-verdict events (invoke-lane shape) — outOfBandCompletableAction MUST claim eligibility, matching reconcile now shipping it", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg473-101";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  // Full lane evidence: code-touching commit, closed ticket, passing host-verification.
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  insertHostVerification({
+    ticketId: "FG-101",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  // No verdict.received / gate.decided events at all — the invoke lane never produces one.
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(
+    show.nextAction.includes("delivered out-of-band"),
+    `zero-verdict invoke-lane run must not block out-of-band completion, got: ${show.nextAction}`
+  );
+  assert.equal(show.items[0]!.outOfBandEligible, true);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(report.nextOperatorAction.includes("delivered out-of-band"));
+  assert.equal(report.items[0]!.outOfBandEligible, true);
+});
+
+test("FG-473 regression: awaiting_gate item WITH a runId and an unresolved authoritative INCONCLUSIVE verdict — outOfBandCompletableAction must still refuse, matching reconcile", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg473-102";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  insertHostVerification({
+    ticketId: "FG-101",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "inconclusive", authority: "authoritative" } });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(!show.nextAction.includes("delivered out-of-band"), `must not claim eligibility on an unresolved inconclusive verdict, got: ${show.nextAction}`);
+  assert.equal(show.items[0]!.outOfBandEligible, false);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(!report.nextOperatorAction.includes("delivered out-of-band"));
+  assert.equal(report.items[0]!.outOfBandEligible, false);
+});
+
+test("FG-473 regression: awaiting_gate item WITH a runId and an unresolved authoritative FAIL verdict — outOfBandCompletableAction must still refuse, matching reconcile (FG-458 preserved)", () => {
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg473-103";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, run_id = ?, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  insertHostVerification({
+    ticketId: "FG-101",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.ok(!show.nextAction.includes("delivered out-of-band"), `must not claim eligibility on an unresolved fail verdict, got: ${show.nextAction}`);
+  assert.equal(show.items[0]!.outOfBandEligible, false);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.ok(!report.nextOperatorAction.includes("delivered out-of-band"));
+  assert.equal(report.items[0]!.outOfBandEligible, false);
+});
+
 // ── FG-444: out-of-band eligibility surfaced per parked item, not just the first ──
 
 test("FG-444: two concurrently-parked awaiting_gate items both delivered out-of-band → BOTH marked outOfBandEligible in JSON (show + report), and BOTH surfaced in rendered text", () => {

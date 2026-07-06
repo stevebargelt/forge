@@ -40,16 +40,21 @@ export type OutOfBandEvidenceResult = {
   evidence: OutOfBandEvidence;
 };
 
-// FG-460: the run's authoritative-outcome contribution to an out-of-band item's
-// eligibility. An out-of-band item WITH a runId must also agree with its run's
-// OWN authoritative-review outcome (the FG-458 fact) — otherwise a path could
-// ship a row another path would refuse for an unresolved authoritative fail. An
-// item with NO runId was never attached to a run (the pure FG-443 delivery case)
-// and contributes nothing here. Only the authoritative-outcome codes are folded
-// in (see AUTHORITATIVE_OUTCOME_MISSING_CODES) — NOT full events-aware
-// eligibility, which would double-count host-verification. Prefixed
-// `run_evidence:` so a consumer can tell "the run's own review is unresolved"
-// apart from "the out-of-band delivery lacks lane evidence."
+// FG-460/FG-473: the run's authoritative-outcome contribution to an out-of-band
+// item's eligibility. An out-of-band item WITH a runId must also agree with its
+// run's OWN authoritative-review outcome (the FG-458 fact) — otherwise a path
+// could ship a row another path would refuse for an unresolved authoritative
+// fail or inconclusive verdict. An item with NO runId was never attached to a
+// run (the pure FG-443 delivery case) and contributes nothing here. Only the
+// authoritative-outcome codes that represent a REAL objection are folded in
+// (see AUTHORITATIVE_OUTCOME_MISSING_CODES) — NOT full events-aware
+// eligibility, which would double-count host-verification, and NOT "no
+// authoritative reviewer ran at all," which is the normal shape for an
+// invoke-lane (quick_implementation) run with no red-team step: that absence
+// is no-objection, and the out-of-band lane evidence below is what vouches for
+// the work instead. Prefixed `run_evidence:` so a consumer can tell "the run's
+// own review is unresolved" apart from "the out-of-band delivery lacks lane
+// evidence."
 export type AuthoritativeContribution = { missing: string[]; evidence: unknown };
 
 export function authoritativeOutcomeContribution(

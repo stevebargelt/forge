@@ -1939,3 +1939,165 @@ test("FG-458: an unresolved authoritative fail refuses WITHOUT running the host-
     "the events-aware refusal must short-circuit before the lane-evidence capture gate ever runs"
   );
 });
+
+// ── FG-473: an invoke-lane run (engineer + test-engineer, no red step) produces
+// ZERO authoritative verdicts — that absence is the NORMAL shape for a
+// quick_implementation item, not an objection. Before this fix, evaluateReconcileEvidence's
+// no_authoritative_verdict_or_force_advance_event code was folded into the
+// out-of-band composition just like a real fail/inconclusive objection would be,
+// permanently wedging every invoke-lane item that ever reached awaiting_gate. The
+// fix narrows AUTHORITATIVE_OUTCOME_MISSING_CODES to only the fail/inconclusive
+// codes — a run with no authoritative reviewer at all now contributes nothing.
+
+test("FG-473: reconcile SHIPS an invoke-lane out-of-band item (runId, ZERO authoritative verdicts) with full lane evidence (code-touching + passing host-verification)", () => {
+  const ticketId = "FG-800";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  // Full lane evidence: closed ticket + reachable commit + passing host-verification.
+  seedOutOfBandCodeEvidence(ticketId);
+  // No verdict.received / gate.decided events at all on this run — the invoke lane
+  // (engineer + test-engineer only) never produces one.
+  const eventCount = db.prepare("SELECT COUNT(*) as n FROM events WHERE run_id = ?").get(runId) as { n: number };
+  assert.equal(eventCount.n, 0, "precondition: the invoke-lane run has zero events");
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(
+    result.items[0]!.status,
+    "shipped",
+    `expected shipped, got: ${result.items[0]!.status} missing=${result.items[0]!.missing?.join(", ")}`
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-473: reconcile SHIPS an invoke-lane out-of-band item (runId, ZERO authoritative verdicts) with full lane evidence (docs-only, non_code_diff)", () => {
+  const ticketId = "FG-801";
+  const { campaignId, itemId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(result.items[0]!.missing, undefined);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-473: resume SHIPS an invoke-lane manually-driven awaiting_gate item (runId, ZERO authoritative verdicts) with full lane evidence — matching reconcile", async () => {
+  const ticketId = "FG-802";
+  const { campaignId, itemId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+  // No authoritative verdict/gate events at all on this run.
+
+  const dispatch = async (_args: InvokeArgs): Promise<InvokeResult> => ({ runId: "r", taskId: "t", status: "complete" });
+  const resumeResult = await resumeCampaign(campaignId, { dispatch });
+
+  assert.equal(resumeResult.stopReason, "complete", "campaign completes — the invoke-lane item ships on lane evidence alone");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+});
+
+test("FG-473 parity: resume and reconcile reach the SAME 'ship' verdict for an invoke-lane item with zero authoritative verdicts", async () => {
+  const shipReconcile = setupAwaitingGateManualRunCampaign("FG-803");
+  seedOutOfBandCodeEvidence("FG-803");
+  const reconcileResult = reconcileCampaign(shipReconcile.campaignId);
+  assert.equal(reconcileResult.items[0]!.status, "shipped");
+
+  const shipResume = setupAwaitingGateManualRunCampaign("FG-804");
+  seedOutOfBandCodeEvidence("FG-804");
+  await resumeCampaign(shipResume.campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+  assert.equal(getCampaignItem(shipResume.itemId)!.outcome, "shipped", "resume ships the identical zero-verdict evidence reconcile just shipped above");
+});
+
+test("FG-473 regression (FG-458 preserved): an invoke-lane-shaped item whose run's latest authoritative verdict IS an unresolved FAIL still REFUSES — zero-verdict is not a loophole for a real objection — item NOT shipped, no state written", () => {
+  const ticketId = "FG-805";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.ok(
+    result.items[0]!.missing!.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    `expected the run_evidence: fail code, got: ${result.items[0]!.missing!.join(", ")}`
+  );
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.deepEqual(afterItem, beforeItem, "campaign_items row must be byte-identical after a refusal — item NOT shipped");
+  assert.notEqual(afterItem.outcome, "shipped");
+  assert.notEqual(afterItem.lifecycleStatus, "complete");
+  assert.equal(countEvents(), beforeEvents, "no event row written on refusal — no state written");
+});
+
+test("FG-473 regression: an invoke-lane-shaped item whose run's latest authoritative verdict IS inconclusive still REFUSES — item NOT shipped, no state written", () => {
+  const ticketId = "FG-806";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  seedOutOfBandCodeEvidence(ticketId);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "inconclusive", authority: "authoritative" } });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.ok(
+    result.items[0]!.missing!.includes(
+      "run_evidence:latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"
+    ),
+    `expected the run_evidence: inconclusive code, got: ${result.items[0]!.missing!.join(", ")}`
+  );
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.deepEqual(afterItem, beforeItem, "campaign_items row must be byte-identical after a refusal — item NOT shipped");
+  assert.notEqual(afterItem.outcome, "shipped");
+  assert.notEqual(afterItem.lifecycleStatus, "complete");
+  assert.equal(countEvents(), beforeEvents, "no event row written on refusal — no state written");
+});
+
+test("FG-473: lane-evidence gate is still enforced — an invoke-lane item (runId, ZERO authoritative verdicts) with a code-touching commit and NO passing host-verification recorded still REFUSES with lane_evidence_missing — the fix narrows the authoritative-outcome axis, never the lane-evidence axis", () => {
+  const ticketId = "FG-808";
+  const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);
+  // Code-touching commit, closed ticket — deliberately no host-verification row.
+  seedOutOfBandCodeEvidence(ticketId, { recordVerification: false });
+  const eventCount = db.prepare("SELECT COUNT(*) as n FROM events WHERE run_id = ?").get(runId) as { n: number };
+  assert.equal(eventCount.n, 0, "precondition: zero events on this run — must not accidentally satisfy anything");
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+
+  const afterItem = getCampaignItem(itemId)!;
+  assert.deepEqual(afterItem, beforeItem, "campaign_items row must be byte-identical after a refusal");
+  assert.equal(countEvents(), beforeEvents, "no event row written on refusal");
+});
+
+test("FG-473: shape-1 (scope-blocked feature-pipeline reconcile) is UNAFFECTED — a run with zero authoritative verdicts STILL refuses with no_authoritative_verdict_or_force_advance_event", () => {
+  const ticketId = "FG-807";
+  const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);
+  const commit = makeCommit(`impl-${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  // No authoritative verdict/gate events at all — shape-1 must still refuse.
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused", "the normal feature-pipeline reconcile path never widened — only the out-of-band composition did");
+  assert.deepEqual(result.items[0]!.missing, ["no_authoritative_verdict_or_force_advance_event"]);
+  assert.equal(getCampaignItem(itemId)!.lifecycleStatus, "failed");
+});
