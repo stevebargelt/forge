@@ -3141,6 +3141,198 @@ test("integ campaign show (human): a genuinely unfinished gate (ticket not yet c
   assert.ok(!humanResult.stdout.includes("delivered out-of-band"), `must not claim out-of-band eligibility\nstdout: ${humanResult.stdout}`);
 });
 
+// Multi-ticket counterpart to setupOutOfBandCliCampaign above: plans and parks
+// EVERY item at the out-of-band shape (lifecycle_status='awaiting_gate', no
+// blocker_kind), so a test can deliver some or all of them out-of-band and
+// assert per-item surfacing (FG-444) rather than just the first.
+function setupOutOfBandCliCampaignMulti(ticketIds: string[]): { campaignId: string } {
+  for (const ticketId of ticketIds) {
+    writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: "Out of band", body: "" });
+  }
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", ticketIds.join(","),
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "approved"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(planOutput.campaignId) as { id: string }[];
+  for (const item of items) {
+    db.prepare(
+      "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+    ).run(item.id);
+  }
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  return { campaignId: planOutput.campaignId };
+}
+
+test("FG-444 integ campaign show (JSON + human): TWO concurrently-parked awaiting_gate items both delivered out-of-band → both surfaced per-item, Next action line still singular", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupOutOfBandCliCampaignMulti(["FG-610", "FG-611"]);
+  makeCommitIn(projectDir, "base-FG-610-611");
+  const commit610 = commitFileIn(projectDir, "docs/FG-610.md", "docs delivering FG-610", "docs: FG-610");
+  closeTicket(projectDir, "FG-610", commit610);
+  const commit611 = commitFileIn(projectDir, "docs/FG-611.md", "docs delivering FG-611", "docs: FG-611");
+  closeTicket(projectDir, "FG-611", commit611);
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0, `show --json failed\nstdout: ${jsonResult.stdout}\nstderr: ${jsonResult.stderr}`);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as {
+    nextAction: string;
+    items: { ticketId: string; outOfBandEligible: boolean }[];
+  };
+  const row610 = jsonOutput.items.find((i) => i.ticketId === "FG-610")!;
+  const row611 = jsonOutput.items.find((i) => i.ticketId === "FG-611")!;
+  assert.equal(row610.outOfBandEligible, true, "FG-610 must be marked out-of-band-eligible");
+  assert.equal(row611.outOfBandEligible, true, "FG-611 must be marked out-of-band-eligible");
+  assert.ok(jsonOutput.nextAction.includes("FG-610 delivered out-of-band"), `nextAction: ${jsonOutput.nextAction}`);
+  assert.ok(!jsonOutput.nextAction.includes("FG-611"), "Next action must remain a single recommendation, not multiplied per item");
+
+  const humanResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(humanResult.status, 0, `show (human) failed\nstdout: ${humanResult.stdout}\nstderr: ${humanResult.stderr}`);
+  const eligibleLines = humanResult.stdout.split("\n").filter((l) => l.includes("out-of-band-eligible:"));
+  assert.equal(eligibleLines.length, 2, `expected one out-of-band-eligible line per eligible item\nstdout: ${humanResult.stdout}`);
+  assert.ok(eligibleLines.some((l) => l.includes("FG-610")));
+  assert.ok(eligibleLines.some((l) => l.includes("FG-611")));
+});
+
+// FG-444 hardening: THREE concurrently-parked items of genuinely MIXED shape —
+// one out-of-band-eligible, one parked-but-ineligible (ticket never closed),
+// and one blocked_by_red (not even the out-of-band awaiting_gate shape at all,
+// since lifecycleStatus !== 'awaiting_gate' short-circuits outOfBandCompletable-
+// Action to null regardless of blockerKind). Exercises show, report, AND a real
+// `campaign reconcile` run against the SAME campaign state to prove the display
+// flag never diverges from what reconcile itself would actually do (the AC's
+// no-divergence requirement) — reconcile routes 'blocked_by_red' items through
+// its isScopeBlocked/isOutOfBand branch selection the exact same way
+// outOfBandCompletableAction's lifecycleStatus check does, so a real reconcile
+// run is the strongest possible confirmation the two surfaces agree.
+test("FG-444 integ: THREE concurrently-parked items of mixed eligibility — show/report agree exactly, Next action line stays singular, and reconcile ships/refuses/skips in lockstep with the displayed flag", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupOutOfBandCliCampaignMulti(["FG-620", "FG-621", "FG-622"]);
+  makeCommitIn(projectDir, "base-FG-620-621-622");
+
+  // FG-620: eligible — closed with a docs-only (non_code_diff lane) commit, so
+  // no host-verification capture is even needed for eligibility.
+  const commit620 = commitFileIn(projectDir, "docs/FG-620.md", "docs delivering FG-620", "docs: FG-620");
+  closeTicket(projectDir, "FG-620", commit620);
+
+  // FG-621: stays 'active' — never closed. Still awaiting_gate/no blockerKind
+  // (the right SHAPE for out-of-band), but missing the durable evidence
+  // (ticket_status_not_done + ticket_closed_commit_missing) → ineligible.
+
+  // FG-622: re-parked as blocked_by_red — a genuinely different concurrently-
+  // parked state, not the awaiting_gate shape at all.
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const row622 = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? AND ticket_id = ?")
+    .get(campaignId, "FG-622") as { id: string };
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'blocked_by_red', outcome = 'blocked', blocker_kind = NULL WHERE id = ?"
+  ).run(row622.id);
+  db.close();
+
+  // ── show: JSON ──
+  const showJson = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(showJson.status, 0, `show --json failed\nstdout: ${showJson.stdout}\nstderr: ${showJson.stderr}`);
+  const showOutput = JSON.parse(showJson.stdout) as {
+    nextAction: string;
+    items: { ticketId: string; outOfBandEligible: boolean }[];
+  };
+  const showEligibility = new Map(showOutput.items.map((i) => [i.ticketId, i.outOfBandEligible]));
+  assert.equal(showEligibility.get("FG-620"), true, "FG-620 (closed, docs-only) must be eligible");
+  assert.equal(showEligibility.get("FG-621"), false, "FG-621 (never closed) must NOT be eligible");
+  assert.equal(showEligibility.get("FG-622"), false, "FG-622 (blocked_by_red) must NOT be eligible");
+  assert.ok(showOutput.nextAction.includes("FG-620 delivered out-of-band"), `nextAction: ${showOutput.nextAction}`);
+  assert.ok(!showOutput.nextAction.includes("FG-621"), "Next action must not multiply to name the ineligible item");
+  assert.ok(!showOutput.nextAction.includes("FG-622"), "Next action must not multiply to name the blocked_by_red item");
+
+  // ── show: human ──
+  const showHuman = runForge(["campaign", "show", campaignId]);
+  assert.equal(showHuman.status, 0, `show (human) failed\nstdout: ${showHuman.stdout}\nstderr: ${showHuman.stderr}`);
+  const showEligibleLines = showHuman.stdout.split("\n").filter((l) => l.includes("out-of-band-eligible:"));
+  assert.equal(showEligibleLines.length, 1, `expected exactly one eligible line (FG-620 only)\nstdout: ${showHuman.stdout}`);
+  assert.ok(showEligibleLines[0]!.includes("FG-620"));
+  const showNextActionLines = showHuman.stdout.split("\n").filter((l) => l.startsWith("Next action:"));
+  assert.equal(showNextActionLines.length, 1, "Next action must render as exactly one line");
+  assert.ok(showNextActionLines[0]!.includes("FG-620 delivered out-of-band"));
+
+  // ── report: JSON ──
+  const reportJson = runForge(["campaign", "report", campaignId, "--json"]);
+  assert.equal(reportJson.status, 0, `report --json failed\nstdout: ${reportJson.stdout}\nstderr: ${reportJson.stderr}`);
+  const reportOutput = JSON.parse(reportJson.stdout) as {
+    nextOperatorAction: string;
+    items: { ticketId: string; outOfBandEligible: boolean }[];
+  };
+  const reportEligibility = new Map(reportOutput.items.map((i) => [i.ticketId, i.outOfBandEligible]));
+  assert.ok(reportOutput.nextOperatorAction.includes("FG-620 delivered out-of-band"), `nextOperatorAction: ${reportOutput.nextOperatorAction}`);
+  assert.ok(!reportOutput.nextOperatorAction.includes("FG-621"));
+  assert.ok(!reportOutput.nextOperatorAction.includes("FG-622"));
+
+  // report and show must agree EXACTLY, per item — no divergence between the surfaces.
+  for (const ticketId of ["FG-620", "FG-621", "FG-622"]) {
+    assert.equal(
+      reportEligibility.get(ticketId),
+      showEligibility.get(ticketId),
+      `report/show must agree on outOfBandEligible for ${ticketId}`
+    );
+  }
+
+  // ── report: human ──
+  const reportHuman = runForge(["campaign", "report", campaignId]);
+  assert.equal(reportHuman.status, 0, `report (human) failed\nstdout: ${reportHuman.stdout}\nstderr: ${reportHuman.stderr}`);
+  const reportEligibleLines = reportHuman.stdout.split("\n").filter((l) => l.includes("out-of-band-eligible:"));
+  assert.equal(reportEligibleLines.length, 1, `expected exactly one eligible line (FG-620 only)\nstdout: ${reportHuman.stdout}`);
+  assert.ok(reportEligibleLines[0]!.includes("FG-620"));
+  const reportNextActionLines = reportHuman.stdout.split("\n").filter((l) => l.startsWith("Next operator action:"));
+  assert.equal(reportNextActionLines.length, 1, "Next operator action must render as exactly one line");
+
+  // ── no-divergence: what does a REAL `campaign reconcile` do with this exact
+  // state? It must ship the item the display marked eligible, refuse the
+  // ineligible-but-right-shape item, and treat the blocked_by_red item as
+  // not_applicable (neither isScopeBlocked [blockerKind !== 'scope'] nor
+  // isOutOfBand [lifecycleStatus !== 'awaiting_gate']) — the exact same verdict
+  // the outOfBandEligible flag predicted for every item, by construction. ──
+  const reconcileResult = runForge(["campaign", "reconcile", campaignId, "--json", "--by", "steve"]);
+  assert.equal(reconcileResult.status, 0, `reconcile failed\nstdout: ${reconcileResult.stdout}\nstderr: ${reconcileResult.stderr}`);
+  const reconcileOutput = JSON.parse(reconcileResult.stdout) as {
+    ok: boolean;
+    items: { ticketId: string; status: string; missing?: string[] }[];
+  };
+  assert.equal(reconcileOutput.ok, true);
+  const reconcileStatus = new Map(reconcileOutput.items.map((i) => [i.ticketId, i]));
+  assert.equal(reconcileStatus.get("FG-620")!.status, "shipped", "reconcile must ship the item the display marked eligible");
+  assert.equal(reconcileStatus.get("FG-621")!.status, "refused", "reconcile must refuse the item the display marked ineligible");
+  assert.ok(
+    reconcileStatus.get("FG-621")!.missing && reconcileStatus.get("FG-621")!.missing!.length > 0,
+    "refused item must report missing evidence facts"
+  );
+  assert.equal(
+    reconcileStatus.get("FG-622")!.status,
+    "not_applicable",
+    "reconcile must treat the blocked_by_red item as not_applicable, matching its non-out-of-band shape"
+  );
+});
+
 // ── FG-440: automatic host-verification capture — real CLI-subprocess coverage ──
 //
 // Everything above exercises reconcileCampaign()/collectReconcileEvidence() as

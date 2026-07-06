@@ -2315,6 +2315,121 @@ test("FG-458 regression: awaiting_gate item WITH a runId whose events are clean 
   );
 });
 
+// ── FG-444: out-of-band eligibility surfaced per parked item, not just the first ──
+
+test("FG-444: two concurrently-parked awaiting_gate items both delivered out-of-band → BOTH marked outOfBandEligible in JSON (show + report), and BOTH surfaced in rendered text", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit101 = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit101);
+
+  writeFileSync(join(projectDir, "docs", "FG-102.md"), "docs delivering FG-102 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-102"], projectDir);
+  const commit102 = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-102", commit102);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const showRow101 = show.items.find((i) => i.ticketId === "FG-101")!;
+  const showRow102 = show.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(showRow101.outOfBandEligible, true, "FG-101 must be marked out-of-band-eligible");
+  assert.equal(showRow102.outOfBandEligible, true, "FG-102 must be marked out-of-band-eligible");
+
+  // The single top-level Next action line stays unchanged in shape — still ONE
+  // line, naming the first parked item found (FG-101) — this ticket broadens
+  // per-item surfacing only, it does not multiply the Next action line.
+  assert.ok(show.nextAction.includes("FG-101 delivered out-of-band"), `show.nextAction: ${show.nextAction}`);
+  assert.ok(!show.nextAction.includes("FG-102"), "Next action must not multiply to name both items");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const reportRow101 = report.items.find((i) => i.ticketId === "FG-101")!;
+  const reportRow102 = report.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(reportRow101.outOfBandEligible, true);
+  assert.equal(reportRow102.outOfBandEligible, true);
+  assert.ok(report.nextOperatorAction.includes("FG-101 delivered out-of-band"));
+
+  const rendered = renderCampaignReportHuman(report).join("\n");
+  const eligibleLines = rendered.split("\n").filter((l) => l.includes("out-of-band-eligible:"));
+  assert.equal(eligibleLines.length, 2, `expected one out-of-band-eligible line per eligible item, got:\n${rendered}`);
+  assert.ok(eligibleLines.some((l) => l.includes("FG-101")));
+  assert.ok(eligibleLines.some((l) => l.includes("FG-102")));
+});
+
+test("FG-444 mixed case: one parked item delivered out-of-band, the other genuinely unfinished (not closed) → only the eligible one is marked outOfBandEligible", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[1]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit101 = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit101);
+  // FG-102 stays 'active' — never closed, so out-of-band evidence can never be satisfied.
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const showRow101 = show.items.find((i) => i.ticketId === "FG-101")!;
+  const showRow102 = show.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(showRow101.outOfBandEligible, true, "FG-101 delivered out-of-band — must be marked eligible");
+  assert.equal(showRow102.outOfBandEligible, false, "FG-102 not closed — must not be marked eligible");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const reportRow101 = report.items.find((i) => i.ticketId === "FG-101")!;
+  const reportRow102 = report.items.find((i) => i.ticketId === "FG-102")!;
+  assert.equal(reportRow101.outOfBandEligible, true);
+  assert.equal(reportRow102.outOfBandEligible, false);
+
+  const rendered = renderCampaignReportHuman(report).join("\n");
+  const eligibleLines = rendered.split("\n").filter((l) => l.includes("out-of-band-eligible:"));
+  assert.equal(eligibleLines.length, 1, `expected exactly one eligible line for the eligible item only, got:\n${rendered}`);
+  assert.ok(eligibleLines[0]!.includes("FG-101"));
+});
+
 // ── FG-442: execution lanes surfaced in show/report ──────────────────────────
 
 test("FG-442: assembleCampaignShow surfaces lane/laneRationale/materialLaneAssumptions per item", () => {

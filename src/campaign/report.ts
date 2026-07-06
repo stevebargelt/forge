@@ -108,6 +108,13 @@ function hasUnresolvedAuthoritativeOutcome(projectDir: string, item: CampaignIte
 // unfinished human gate. Only awaiting_gate items with no blockerKind are ever
 // out-of-band candidates (see reconcile.ts's isOutOfBand routing); best-effort —
 // any collection/evaluation error falls through to the generic gate text.
+// FG-444: shared text for the out-of-band eligibility hint — used both for the
+// single top-level Next action line (via outOfBandCompletableAction below) and
+// for the per-item hint lines in show/report, so the two surfaces never drift.
+export function formatOutOfBandEligibleHint(ticketId: string): string {
+  return `${ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
+}
+
 function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): string | null {
   if (item.lifecycleStatus !== "awaiting_gate" || item.blockerKind) return null;
   if (!campaign.projectDir) return null;
@@ -121,7 +128,7 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
     if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
       return null;
     }
-    return `${item.ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
+    return formatOutOfBandEligibleHint(item.ticketId);
   } catch {
     // best-effort — fall through to the generic gate text
   }
@@ -356,6 +363,9 @@ export type ShowItemRow = {
   requestedHumanAction: string | null;
   readiness: ReadinessResult | null;
   hostVerificationReconcileHint: string | null;
+  // FG-444: per-item out-of-band completion eligibility (the same evaluator the
+  // Next action line uses for the first parked item, applied to EVERY item).
+  outOfBandEligible: boolean;
   // FG-442: policy-derived execution lane, per item.
   lane: string;
   laneRationale: string;
@@ -424,6 +434,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
       requestedHumanAction: i.requestedHumanAction ?? null,
       readiness: readinessMap.get(i.ticketId) ?? null,
       hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
+      outOfBandEligible: outOfBandCompletableAction(campaign, i) !== null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
       materialLaneAssumptions: planEntry.materialLaneAssumptions,
@@ -645,6 +656,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       hostVerificationDetail:
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
       hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
+      outOfBandEligible: outOfBandCompletableAction(campaign, i) !== null,
       reviewerResult: null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
@@ -735,6 +747,7 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
       }
     }
     if (item.hostVerificationReconcileHint) lines.push(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
+    if (item.outOfBandEligible) lines.push(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
     // Execution mode and workflow traceability — the mechanism underlying the lane.
     if (item.executionMode === "invoke (escape hatch)") {
       lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);
