@@ -173,6 +173,10 @@ export function setTaskStatus(id: string, status: TaskStatus): void {
   getDb().prepare(`UPDATE tasks SET status = ? WHERE id = ?`).run(status, id);
 }
 
+export function setTaskParentId(id: string, parentId: string): void {
+  getDb().prepare(`UPDATE tasks SET parent_id = ? WHERE id = ?`).run(parentId, id);
+}
+
 // Write captured result and transition to awaiting_gate before the human gate.
 // Distinct from markTaskComplete: gate completion still has to happen via the
 // human's gate decision; this is just the data-capture step before the gate.

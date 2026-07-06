@@ -128,6 +128,11 @@ test("gate reject->on_reject dedups: two rejects targeting the same phase produc
     auditV2.id,
     "lineage must point at the LATEST rejecting task",
   );
+  assert.equal(
+    recoveryTasks[0]!.parentId,
+    auditV2.id,
+    "parentId must follow the LATEST rejecting task too, not stay pinned to the first rejector",
+  );
 });
 
 test("gate reject->on_reject: a single reject still creates a fresh pending recovery task when none exists", async () => {

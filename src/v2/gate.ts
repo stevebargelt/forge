@@ -20,7 +20,7 @@
 // blocked_by_red also requires --force to advance.
 
 import type { GateDecision, Task, TaskPackage, VerdictRow } from "../types/index.js";
-import { getTask, setTaskStatus, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
+import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
 import { getDb } from "../store/db.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
@@ -202,6 +202,10 @@ export async function gate(
             rejectedRationale: rationale ?? "",
             rejectedTaskId: taskId,
           });
+          // Keep the durable parentId column aligned with the inputs above —
+          // the dedup exists to carry the newer rationale, so lineage must
+          // follow the newer reject too, not stay pinned to the first rejector.
+          setTaskParentId(existingRecovery.id, taskId);
           const updatedRecovery = getTask(existingRecovery.id);
           if (!updatedRecovery) {
             throw new Error(
