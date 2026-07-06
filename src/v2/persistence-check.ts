@@ -20,20 +20,51 @@ export type PersistenceCheck =
   | { ok: true }
   | { ok: false; claimed: string[]; missing: string[] };
 
+export type PersistenceCheckDeps = {
+  existsFn?: (path: string) => boolean;
+  sleepFn?: (ms: number) => Promise<void>;
+};
+
 const PROJECT_MOUNT_PREFIX = "/project/";
 
-export function checkResultPersistence(projectDir: string, result: unknown): PersistenceCheck {
+// FG-377: on macOS, Docker Desktop's gRPC-FUSE / DEC-019 shadow-volume bind
+// mount can sync a container's writes to the host a beat after the container
+// reports complete. A same-instant total-absence check can catch that gap and
+// false-fail, causing the orchestrator to re-run and duplicate/conflict with
+// work that actually landed. These bound how long we wait for it to settle.
+const SETTLE_RETRIES = 3;
+const SETTLE_DELAY_MS = 250;
+
+export async function checkResultPersistence(
+  projectDir: string,
+  result: unknown,
+  deps?: PersistenceCheckDeps,
+): Promise<PersistenceCheck> {
   if (!isObject(result)) return { ok: true };
   if (result["status"] !== "complete") return { ok: true };
 
   const claimed = extractFilesModified(result);
   if (claimed.length === 0) return { ok: true };
 
-  const missing = claimed.filter((f) => !existsOnHost(projectDir, f));
+  const existsFn = deps?.existsFn ?? existsSync;
+  const sleepFn = deps?.sleepFn ?? sleep;
+
+  let missing = claimed.filter((f) => !existsOnHost(projectDir, f, existsFn));
   // Only the total-absence signature is loss. If even one claimed file landed,
   // persistence is working and any absences are likely intentional deletions.
+  if (missing.length !== claimed.length) return { ok: true };
+
+  for (let attempt = 0; attempt < SETTLE_RETRIES && missing.length === claimed.length; attempt++) {
+    await sleepFn(SETTLE_DELAY_MS);
+    missing = claimed.filter((f) => !existsOnHost(projectDir, f, existsFn));
+  }
+
   if (missing.length === claimed.length) return { ok: false, claimed, missing };
   return { ok: true };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function persistenceErrorMessage(c: { claimed: string[]; missing: string[] }): string {
@@ -61,9 +92,9 @@ function resolveHostPath(projectDir: string, claimed: string): string | null {
   return null;
 }
 
-function existsOnHost(projectDir: string, claimed: string): boolean {
+function existsOnHost(projectDir: string, claimed: string, existsFn: (path: string) => boolean): boolean {
   const p = resolveHostPath(projectDir, claimed);
-  return p !== null && existsSync(p);
+  return p !== null && existsFn(p);
 }
 
 function extractFilesModified(result: Record<string, unknown>): string[] {
