@@ -1,9 +1,11 @@
 ---
 id: FG-429
 type: story
-status: active
+status: done
 title: "Orchestrator: resolve route from policy; do not ask operator to adjudicate route when policy is decisive"
 created: 2026-07-01
+closed: 2026-07-06
+closed_commit: 1e0d65f
 ---
 
 ## Problem
