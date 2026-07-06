@@ -4,8 +4,10 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
-import { eventsForTask } from "../store/events.js";
+import { getRun } from "../store/runs.js";
+import { eventsForTask, eventsForRun } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
+import type { LivenessState } from "./reconcile-candidate.js";
 import { performOpsRepair } from "./repair.js";
 
 let db: DatabaseInstance;
@@ -111,4 +113,75 @@ test("performOpsRepair: idempotent — repairing twice refuses the second (now f
   const second = performOpsRepair("t-orphan");
   assert.equal(second.kind, "refused");
   assert.match((second as { reason: string }).reason, /not pending/);
+});
+
+// ── stuck_run repair (FG-414): repair takes a run id, not a task id ─────────
+
+const NEVER_ALIVE = (): LivenessState => "gone";
+const ALWAYS_ALIVE = (): LivenessState => "alive";
+
+test("performOpsRepair: transitions a stuck run (active, all tasks terminal, no live container) to abandoned", () => {
+  insertRun(mkRun("run-stuck", "active"));
+  insertTask(mkTask("t-stuck-1", "run-stuck", "complete"));
+  insertTask(mkTask("t-stuck-2", "run-stuck", "failed"));
+
+  const outcome = performOpsRepair("run-stuck", {}, NEVER_ALIVE);
+  assert.equal(outcome.kind, "run-repaired");
+  assert.equal((outcome as { dryRun: boolean }).dryRun, false);
+
+  assert.equal(getRun("run-stuck")!.status, "abandoned");
+  const events = eventsForRun("run-stuck");
+  const abandoned = events.find((e) => e.eventType === "run.abandoned");
+  const reconciled = events.find((e) => e.eventType === "run.reconciled");
+  assert.ok(abandoned, "emits run.abandoned");
+  assert.ok(reconciled, "emits run.reconciled");
+  assert.equal((reconciled!.payload as { reason?: string }).reason, "stuck_run_repaired");
+});
+
+test("performOpsRepair: --dry-run reports the stuck-run repair but writes nothing", () => {
+  insertRun(mkRun("run-stuck-dry", "active"));
+  insertTask(mkTask("t-stuck-dry", "run-stuck-dry", "failed"));
+
+  const outcome = performOpsRepair("run-stuck-dry", { dryRun: true }, NEVER_ALIVE);
+  assert.equal(outcome.kind, "run-repaired");
+  assert.equal((outcome as { dryRun: boolean }).dryRun, true);
+  assert.equal(getRun("run-stuck-dry")!.status, "active", "run stays active");
+  assert.equal(eventsForRun("run-stuck-dry").length, 0, "no events written");
+});
+
+test("performOpsRepair: refuses a run with a non-terminal task (not orphaned)", () => {
+  insertRun(mkRun("run-live", "active"));
+  insertTask(mkTask("t-live-done", "run-live", "complete"));
+  insertTask(mkTask("t-live-pending", "run-live", "pending"));
+
+  const outcome = performOpsRepair("run-live", {}, NEVER_ALIVE);
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /non-terminal task/);
+  assert.equal(getRun("run-live")!.status, "active", "unchanged");
+});
+
+test("performOpsRepair: refuses a run with a live container even though every task row is terminal", () => {
+  insertRun(mkRun("run-live-container", "active"));
+  insertTask(mkTask("t-live-container", "run-live-container", "failed"));
+
+  const outcome = performOpsRepair("run-live-container", {}, ALWAYS_ALIVE);
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /container.*still alive/);
+  assert.equal(getRun("run-live-container")!.status, "active", "unchanged");
+});
+
+test("performOpsRepair: refuses a run that is not active (already terminal)", () => {
+  insertRun(mkRun("run-already-done", "complete"));
+  insertTask(mkTask("t-already-done", "run-already-done", "complete"));
+
+  const outcome = performOpsRepair("run-already-done", {}, NEVER_ALIVE);
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /not active/);
+});
+
+test("performOpsRepair: refuses a run with no tasks", () => {
+  insertRun(mkRun("run-no-tasks", "active"));
+  const outcome = performOpsRepair("run-no-tasks", {}, NEVER_ALIVE);
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /no tasks/);
 });

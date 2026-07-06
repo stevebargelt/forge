@@ -51,24 +51,26 @@ export function registerOps(program: Command): void {
 
   ops
     .command("repair")
-    .argument("<task-id>", "the orphaned task to repair")
+    .argument("<id>", "the orphaned task id (retry_orphan) or stuck run id (stuck_run) to repair")
     .option("--dry-run", "report what would change; write nothing")
     .option("--json", "emit JSON result")
     .description(
-      "Repair a retry_orphan: mark a pending task stranded under a terminal run as failed (orphaned). Refuses anything that is not a genuine orphan."
+      "Repair a retry_orphan (pending task stranded under a terminal run → marked failed) or a stuck_run " +
+        "(active run whose tasks are all terminal → marked abandoned). Refuses anything that is not a genuine orphan."
     )
-    .action((taskId: string, opts: { dryRun?: boolean; json?: boolean }) => {
+    .action((id: string, opts: { dryRun?: boolean; json?: boolean }) => {
       ensureForgeDirs();
       // Serialize the mutation against a concurrent next/gate/retry on the same
       // run (mirrors cancel/retry). dry-run writes nothing, so it takes no lock.
-      const runId = getTask(taskId)?.runId;
+      // `id` may be a task id or a run id — resolve to the run either way.
+      const runId = getTask(id)?.runId ?? id;
       let outcome: OpsRepairOutcome;
       try {
-        if (!opts.dryRun && runId) acquireRunLock(runId, "ops repair");
+        if (!opts.dryRun) acquireRunLock(runId, "ops repair");
         try {
-          outcome = performOpsRepair(taskId, { dryRun: opts.dryRun });
+          outcome = performOpsRepair(id, { dryRun: opts.dryRun });
         } finally {
-          if (!opts.dryRun && runId) releaseRunLock(runId);
+          if (!opts.dryRun) releaseRunLock(runId);
         }
       } catch (e) {
         if (e instanceof RunBusyError) {
@@ -85,12 +87,18 @@ export function registerOps(program: Command): void {
       }
 
       if (outcome.kind === "unknown") {
-        process.stderr.write(`forge ops repair: unknown task '${taskId}'\n`);
+        process.stderr.write(`forge ops repair: unknown task or run '${id}'\n`);
         process.exit(1);
       }
       if (outcome.kind === "refused") {
         process.stderr.write(`forge ops repair: refused — ${outcome.reason}\n`);
         process.exit(1);
+      }
+      if (outcome.kind === "run-repaired") {
+        const verb = outcome.dryRun ? "(dry-run) would mark" : "Marked";
+        console.log(`${verb} run ${outcome.runId} abandoned (stuck_run — no non-terminal tasks, no live container).`);
+        if (outcome.dryRun) console.log("No writes.");
+        return;
       }
       const verb = outcome.dryRun ? "(dry-run) would mark" : "Marked";
       console.log(`${verb} task ${outcome.taskId} failed (orphaned); run ${outcome.runId} left terminal/untouched.`);

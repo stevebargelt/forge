@@ -6,7 +6,7 @@ import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
-import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, runOpsCheck } from "./detect.js";
+import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
 import { renderHuman } from "../cli/commands/ops.js";
 
@@ -252,6 +252,58 @@ test("detectOrphanedWorkMayPersist: a CLEAN-worktree oom_killed task produces no
   assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "clean worktree — no work at risk, no incident");
 });
 
+// ── detectStuckRun (FG-414) ─────────────────────────────────────────────────
+
+test("detectStuckRun: flags an active run whose tasks are all terminal", () => {
+  insertRun(mkRun("run-stuck", "active"));
+  insertTask(mkTask("task-stuck-1", "run-stuck", "complete"));
+  insertTask(mkTask("task-stuck-2", "run-stuck", "failed"));
+
+  const incidents = detectStuckRun(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "stuck_run");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.severity, "high");
+  assert.equal(i.runId, "run-stuck");
+  assert.equal(i.taskId, null);
+  assert.equal(i.recommendedAction.type, "repair");
+  assert.equal(i.recommendedAction.autonomy, "ask");
+  assert.equal(i.recommendedAction.command, "forge ops repair run-stuck");
+  assert.match(i.recommendedAction.reason, /forge cancel run-stuck --abandon-run/);
+});
+
+test("detectStuckRun: does NOT flag a healthy in-progress run (has a non-terminal task)", () => {
+  insertRun(mkRun("run-healthy", "active"));
+  insertTask(mkTask("task-healthy-done", "run-healthy", "complete"));
+  insertTask(mkTask("task-healthy-live", "run-healthy", "running"));
+
+  assert.deepEqual(detectStuckRun(db), []);
+});
+
+test("detectStuckRun: ignores a terminal run whose tasks are all terminal (that's just done, not stuck)", () => {
+  insertRun(mkRun("run-done", "complete"));
+  insertTask(mkTask("task-done", "run-done", "complete"));
+
+  assert.deepEqual(detectStuckRun(db), []);
+});
+
+test("detectStuckRun: ignores an active run with no tasks yet", () => {
+  insertRun(mkRun("run-fresh", "active"));
+  assert.deepEqual(detectStuckRun(db), []);
+});
+
+test("detectStuckRun: project scoping", () => {
+  insertRun(mkRun("run-stuck-a", "active", "/projects/alpha"));
+  insertTask(mkTask("task-stuck-a", "run-stuck-a", "failed"));
+  insertRun(mkRun("run-stuck-b", "active", "/projects/beta"));
+  insertTask(mkTask("task-stuck-b", "run-stuck-b", "complete"));
+
+  assert.equal(detectStuckRun(db, { projectDir: "/projects/alpha" }).length, 1);
+  assert.equal(detectStuckRun(db, { projectDir: "/projects/alpha" })[0]!.runId, "run-stuck-a");
+  assert.equal(detectStuckRun(db).length, 2, "no projectDir → host-wide");
+});
+
 // ── project scoping ─────────────────────────────────────────────────────────
 
 test("project scoping: filters to projectDir; host-wide when omitted", () => {
@@ -280,6 +332,16 @@ test("runOpsCheck: clean state → no incidents", () => {
   insertRun(mkRun("run-clean", "complete"));
   insertTask(mkTask("task-clean", "run-clean", "complete"));
   assert.deepEqual(runOpsCheck(), []);
+});
+
+test("runOpsCheck: includes stuck_run alongside the terminal-run detectors", () => {
+  insertRun(mkRun("run-d2", "complete"));
+  insertTask(mkTask("task-pending2", "run-d2", "pending"));
+  insertRun(mkRun("run-stuck2", "active"));
+  insertTask(mkTask("task-stuck2", "run-stuck2", "failed"));
+
+  const kinds = runOpsCheck().map((i) => i.kind).sort();
+  assert.deepEqual(kinds, ["retry_orphan", "stuck_run"]);
 });
 
 // ── makeIncident invariant ──────────────────────────────────────────────────
