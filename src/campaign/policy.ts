@@ -32,6 +32,13 @@ export function classifyFailureKind(failureKind: string | undefined): BlockerKin
     case "result_missing":
     case "result_malformed":
     case "work_not_persisted":
+    // FG-424: unlike a clean-merge-but-broken-code failure (integration_failed,
+    // below), a gate run that timed out or was killed by signal reflects
+    // host/environment state, not this item's changes — it must pause the
+    // whole campaign (SHARED) rather than being scoped to one item. Deliberate
+    // divergence from the adjacent integration_failed case, not an oversight.
+    case "integration_gate_timeout":
+    case "integration_gate_crashed":
       return "infrastructure";
     case "merge_conflict":
       return "merge_conflict";

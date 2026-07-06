@@ -20,7 +20,17 @@ const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
 export type IntegrationGateResult =
   | { ok: true; output: string }
-  | { ok: false; output: string; error: string };
+  | {
+      ok: false;
+      output: string;
+      error: string;
+      // Raw process-exit evidence off the thrown execFileSync error — surfaced
+      // (not discarded) so callers can distinguish an infra/platform failure
+      // (timeout, signal-kill) from a genuine non-zero test-suite exit.
+      status: number | null;
+      signal: string | null;
+      timedOut: boolean;
+    };
 
 /** Mirrors forge-test's own `_pkg_has_script`: true only if package.json parses
  *  and declares the named script. A project with no test:unit script has
@@ -54,8 +64,24 @@ export function runIntegrationGate(dir: string): IntegrationGateResult {
     });
     return { ok: true, output };
   } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; message?: string };
+    const err = e as {
+      stdout?: string;
+      stderr?: string;
+      message?: string;
+      status?: number | null;
+      signal?: string | null;
+      code?: string;
+    };
     const output = [err.stdout, err.stderr].filter((s): s is string => Boolean(s)).join("\n").trim();
-    return { ok: false, output, error: err.message ?? String(e) };
+    return {
+      ok: false,
+      output,
+      error: err.message ?? String(e),
+      status: err.status ?? null,
+      signal: err.signal ?? null,
+      // execFileSync sets error.code === "ETIMEDOUT" only when its own `timeout`
+      // option fired the kill — the sync API never sets a `killed` boolean.
+      timedOut: err.code === "ETIMEDOUT",
+    };
   }
 }

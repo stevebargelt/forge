@@ -26,6 +26,16 @@ test("classifyFailureKind: infra failures → infrastructure (SHARED)", () => {
   assert.equal(classifyFailureKind("work_not_persisted"), "infrastructure");
 });
 
+// FG-424: contrast with the FG-426 test below — a gate timeout or signal-kill
+// reflects host/environment state, not the item's own changes, so both are
+// SHARED "infrastructure", not the LOCAL "scope" that integration_failed gets.
+test("FG-424: classifyFailureKind: integration_gate_timeout / integration_gate_crashed → infrastructure (SHARED)", () => {
+  assert.equal(classifyFailureKind("integration_gate_timeout"), "infrastructure");
+  assert.equal(isSharedBlocker(classifyFailureKind("integration_gate_timeout")), true);
+  assert.equal(classifyFailureKind("integration_gate_crashed"), "infrastructure");
+  assert.equal(isSharedBlocker(classifyFailureKind("integration_gate_crashed")), true);
+});
+
 test("classifyFailureKind: merge_conflict → merge_conflict (SHARED)", () => {
   assert.equal(classifyFailureKind("merge_conflict"), "merge_conflict");
 });

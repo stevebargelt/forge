@@ -22,6 +22,8 @@ export type FailureKind =
   | "work_not_persisted"  // result claims files_modified but none landed on the host project mount (#254)
   | "merge_conflict"      // FG-352: worktree branch could not be fast-forwarded into run.projectDir
   | "integration_failed"  // FG-357: clean merge, but build+test of the merged tree failed
+  | "integration_gate_timeout"  // FG-424: post-merge gate run hit its timeout — transient, may complete on retry
+  | "integration_gate_crashed"  // FG-424: post-merge gate run was killed by a signal outside the timeout path (e.g. kill -9/SIGSEGV) — worktree state after an abrupt kill is not trustworthy to blindly re-run against
   | "auth_missing"
   | "auth_expired"
   | "auth_injection_failed"
@@ -37,12 +39,30 @@ export type FailureContext = {
   exitCode?: number;
   resultState?: "missing" | "malformed";
   source?: Exclude<FailureKind, "auth_missing" | "auth_expired" | "idle_timeout" | "container_crash" | "result_missing" | "result_malformed" | "unknown">;
+  // FG-424: raw evidence off the post-merge integration gate's process exit —
+  // a disjoint shape from the exitCode-based evidence below (the gate runs on
+  // the host, not attached to a container exit).
+  integrationGate?: { status: number | null; signal: string | null; timedOut: boolean };
 };
 
 export function classify(ctx: FailureContext): FailureKind {
   if (ctx.source !== undefined) return ctx.source;
   if (ctx.error instanceof AuthProfileError) {
     return (ctx.error as Error).message.includes("expired") ? "auth_expired" : "auth_missing";
+  }
+  // FG-424: checked independent of the exitCode branches below — disjoint
+  // evidence shape. Heuristic and its known false-negative bound: a timeout
+  // is transient (retry may complete); a signal-kill outside the timeout path
+  // means the worktree's post-kill state can't be trusted to blindly re-run.
+  // Anything else — including an ordinary non-zero npm/test exit, and a
+  // non-signal, non-timeout infra failure such as a corrupted on-disk cache —
+  // is indistinguishable from a real test failure here and intentionally
+  // still classifies as integration_failed (fail-closed default: broken code
+  // must never slip through unblocked).
+  if (ctx.integrationGate !== undefined) {
+    if (ctx.integrationGate.timedOut) return "integration_gate_timeout";
+    if (ctx.integrationGate.signal) return "integration_gate_crashed";
+    return "integration_failed";
   }
   if (ctx.exitCode === IDLE_TIMEOUT_EXIT_CODE) return "idle_timeout";
   // FG-455: exit 137 = 128 + SIGKILL(9) — a Docker OOM-kill or an external kill,

@@ -521,7 +521,7 @@ async function dispatchSingleStep(args: {
     if (!gate.ok) {
       failTask(taskId, {
         runId: args.runId,
-        kind: "integration_failed",
+        kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
         error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
         result,
       });
@@ -1211,7 +1211,7 @@ async function dispatchFanoutStep(args: {
         if (!gate.ok) {
           failTask(existingParent.id, {
             runId: args.runId,
-            kind: "integration_failed",
+            kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
             error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
             result: savedResult,
           });
@@ -1529,7 +1529,7 @@ async function dispatchFanoutStep(args: {
       if (!gate.ok) {
         failTask(parentId, {
           runId: args.runId,
-          kind: "integration_failed",
+          kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
           error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
           result: parentResult,
         });
@@ -1575,7 +1575,7 @@ async function dispatchFanoutStep(args: {
     if (!gate.ok) {
       failTask(parentId, {
         runId: args.runId,
-        kind: "integration_failed",
+        kind: classify({ integrationGate: { status: gate.status, signal: gate.signal, timedOut: gate.timedOut } }),
         error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
         result: parentResult,
       });

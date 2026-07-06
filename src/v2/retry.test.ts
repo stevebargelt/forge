@@ -30,13 +30,22 @@ afterEach(() => { setDbForTest(prev as DatabaseInstance); db.close(); });
 // ── retryPolicy ──
 
 test("retryPolicy: transient kinds are retryable; outcome kinds are not", () => {
-  for (const k of ["idle_timeout", "container_crash", "orphaned", "result_missing", "result_malformed", "model_error", "tool_error", "cancelled", "unknown"]) {
+  for (const k of ["idle_timeout", "container_crash", "orphaned", "result_missing", "result_malformed", "model_error", "tool_error", "cancelled", "unknown", "integration_gate_timeout"]) {
     assert.equal(retryPolicy(k).retryable, true, `${k} should be retryable`);
   }
-  for (const k of ["gate_rejected", "red_blocked"]) {
+  for (const k of ["gate_rejected", "red_blocked", "integration_gate_crashed"]) {
     assert.equal(retryPolicy(k).retryable, false, `${k} should NOT be retryable`);
     assert.ok(retryPolicy(k).advice, `${k} should carry advice`);
   }
+});
+
+// FG-424: integration_gate_crashed's advice must point the operator at
+// inspecting the environment, not at fixing code that may not be broken.
+test("retryPolicy: integration_gate_crashed advice does not say 'fix the code' or suggest git reset", () => {
+  const d = retryPolicy("integration_gate_crashed");
+  assert.equal(d.retryable, false);
+  assert.doesNotMatch(d.advice ?? "", /fix the code/i);
+  assert.doesNotMatch(d.advice ?? "", /git reset/i);
 });
 
 test("retryPolicy: auth kinds are retryable but carry resolve-auth advice", () => {

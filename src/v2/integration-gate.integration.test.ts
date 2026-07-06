@@ -87,6 +87,19 @@ test("runIntegrationGate: test:unit script exits non-zero → ok:false with capt
     assert.match(result.output, /integration-gate-fail-stdout/, "stdout must be captured");
     assert.match(result.output, /integration-gate-fail-stderr/, "stderr must be captured");
     assert.ok(result.error.length > 0, "a non-empty error message must be recorded");
+    assert.ok(typeof result.status === "number" && result.status > 0, "an ordinary non-zero exit must report a positive status");
+    assert.ok(!result.signal, "an ordinary non-zero exit must not report a signal");
+    assert.equal(result.timedOut, false, "an ordinary non-zero exit must not be reported as a timeout");
+  }
+});
+
+test("runIntegrationGate: test:unit script killed by signal (not timeout, not a normal exit) → ok:false with signal populated", () => {
+  writePackageJson({ "test:unit": "kill -9 $$" });
+  const result = runIntegrationGate(dir);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.ok(result.signal, "a signal-killed script must report the signal");
+    assert.equal(result.timedOut, false, "a signal-kill outside the timeout path must not be reported as a timeout");
   }
 });
 
@@ -102,6 +115,7 @@ test("runIntegrationGate: FORGE_INTEGRATION_GATE_TIMEOUT_MS cuts off a hanging t
 
   assert.equal(result.ok, false, "a script that outlives the configured timeout must fail the gate");
   assert.ok(elapsed < 5000, `gate must respect the short timeout override, not the 5s script (took ${elapsed}ms)`);
+  if (!result.ok) assert.equal(result.timedOut, true, "a timeout-cutoff run must report timedOut: true");
 });
 
 test("runIntegrationGate: non-numeric FORGE_INTEGRATION_GATE_TIMEOUT_MS falls back to default without crashing", () => {

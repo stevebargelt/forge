@@ -95,6 +95,29 @@ test("classify: empty context → unknown", () => {
   assert.equal(classify({}), "unknown");
 });
 
+// --- FG-424: integrationGate evidence branch ---
+
+test("classify: integrationGate.timedOut=true → integration_gate_timeout", () => {
+  assert.equal(
+    classify({ integrationGate: { status: null, signal: null, timedOut: true } }),
+    "integration_gate_timeout",
+  );
+});
+
+test("classify: integrationGate.signal set (timedOut false) → integration_gate_crashed", () => {
+  assert.equal(
+    classify({ integrationGate: { status: null, signal: "SIGKILL", timedOut: false } }),
+    "integration_gate_crashed",
+  );
+});
+
+test("classify: integrationGate ordinary non-zero status, no signal, not timed out → integration_failed (fail-closed default)", () => {
+  assert.equal(
+    classify({ integrationGate: { status: 1, signal: null, timedOut: false } }),
+    "integration_failed",
+  );
+});
+
 test("classify: source takes precedence over exitCode", () => {
   assert.equal(
     classify({ source: "cancelled", exitCode: IDLE_TIMEOUT_EXIT_CODE }),
@@ -171,7 +194,8 @@ test("failTask: covers all FailureKind values in payload", () => {
   const kinds: FailureKind[] = [
     "cancelled", "container_crash", "idle_timeout", "result_missing", "result_malformed",
     "auth_missing", "auth_expired", "auth_injection_failed", "model_error", "tool_error",
-    "red_blocked", "gate_rejected", "integration_failed", "verification_environment_unavailable", "unknown",
+    "red_blocked", "gate_rejected", "integration_failed", "integration_gate_timeout",
+    "integration_gate_crashed", "verification_environment_unavailable", "unknown",
   ];
   for (const kind of kinds) {
     const runId = newRunId(`test-fk-${kind}`);
