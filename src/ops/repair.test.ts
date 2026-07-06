@@ -119,6 +119,7 @@ test("performOpsRepair: idempotent — repairing twice refuses the second (now f
 
 const NEVER_ALIVE = (): LivenessState => "gone";
 const ALWAYS_ALIVE = (): LivenessState => "alive";
+const ALWAYS_UNKNOWN = (): LivenessState => "unknown";
 
 test("performOpsRepair: transitions a stuck run (active, all tasks terminal, no live container) to abandoned", () => {
   insertRun(mkRun("run-stuck", "active"));
@@ -168,6 +169,16 @@ test("performOpsRepair: refuses a run with a live container even though every ta
   assert.equal(outcome.kind, "refused");
   assert.match((outcome as { reason: string }).reason, /container.*still alive/);
   assert.equal(getRun("run-live-container")!.status, "active", "unchanged");
+});
+
+test("performOpsRepair: refuses a run when container liveness is unknown (probe failure, not coerced to gone)", () => {
+  insertRun(mkRun("run-unknown", "active"));
+  insertTask(mkTask("t-unknown", "run-unknown", "failed"));
+
+  const outcome = performOpsRepair("run-unknown", {}, ALWAYS_UNKNOWN);
+  assert.equal(outcome.kind, "refused");
+  assert.match((outcome as { reason: string }).reason, /liveness is unknown/);
+  assert.equal(getRun("run-unknown")!.status, "active", "unchanged — a probe failure must not be treated as gone");
 });
 
 test("performOpsRepair: refuses a run that is not active (already terminal)", () => {

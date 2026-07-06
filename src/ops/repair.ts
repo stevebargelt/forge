@@ -103,13 +103,22 @@ function repairStuckRun(run: Run, opts: { dryRun?: boolean }, probe: LivenessPro
       reason: `run ${run.id} has a non-terminal task (${nonTerminal[0]!.id} is ${nonTerminal[0]!.status}) — forge next can still dispatch it`,
     };
   }
-  const liveTask = tasks.find((t) => probe(`forge-${t.id}`) === "alive");
-  if (liveTask) {
-    return {
-      kind: "refused",
-      id: run.id,
-      reason: `task ${liveTask.id}'s container forge-${liveTask.id} is still alive — run is not orphaned`,
-    };
+  for (const t of tasks) {
+    const liveness = probe(`forge-${t.id}`);
+    if (liveness === "alive") {
+      return {
+        kind: "refused",
+        id: run.id,
+        reason: `task ${t.id}'s container forge-${t.id} is still alive — run is not orphaned`,
+      };
+    }
+    if (liveness === "unknown") {
+      return {
+        kind: "refused",
+        id: run.id,
+        reason: `task ${t.id}'s container forge-${t.id} liveness is unknown (probe failed) — refusing to abandon a run we can't confirm is orphaned`,
+      };
+    }
   }
 
   // Confirmed stuck_run.
