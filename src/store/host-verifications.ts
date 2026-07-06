@@ -1,4 +1,15 @@
+import path from "node:path";
 import { getDb } from "./db.js";
+
+// FG-431: LOOKUP exact-matches project_dir, but callers (the CLI recorder, the
+// reconcile-time auto-capture writer) may hand in a relative or otherwise
+// non-canonical path. Canonicalizing to the same absolute form on both the
+// insert and the lookup side means a row recorded with an equivalent-but-not-
+// identical path string is still found by reconcile — without loosening any
+// other match dimension (ticket_id, gate_name, commit_sha stay exact).
+function canonicalizeProjectDir(projectDir: string): string {
+  return path.resolve(projectDir);
+}
 
 export type HostVerificationRow = {
   id?: number;
@@ -58,11 +69,12 @@ function isDanglingRunIdForeignKeyError(err: unknown): boolean {
 }
 
 export function insertHostVerification(v: Omit<HostVerificationRow, "id">): void {
+  const canonical = { ...v, projectDir: canonicalizeProjectDir(v.projectDir) };
   try {
-    runInsert(v, v.runId ?? null);
+    runInsert(canonical, canonical.runId ?? null);
   } catch (err) {
-    if (v.runId && isDanglingRunIdForeignKeyError(err)) {
-      runInsert(v, null);
+    if (canonical.runId && isDanglingRunIdForeignKeyError(err)) {
+      runInsert(canonical, null);
       return;
     }
     throw err;
@@ -81,7 +93,7 @@ export function queryHostVerificationRows(
        WHERE ticket_id = ? AND project_dir = ? AND commit_sha = ? AND gate_name = ?
        ORDER BY recorded_at ASC`
     )
-    .all(ticketId, projectDir, commitSha, gateName) as DbRow[];
+    .all(ticketId, canonicalizeProjectDir(projectDir), commitSha, gateName) as DbRow[];
   return rows.map(rowToVerification);
 }
 
@@ -99,6 +111,6 @@ export function queryHostVerificationRowsForGate(
        WHERE ticket_id = ? AND project_dir = ? AND gate_name = ?
        ORDER BY recorded_at ASC`
     )
-    .all(ticketId, projectDir, gateName) as DbRow[];
+    .all(ticketId, canonicalizeProjectDir(projectDir), gateName) as DbRow[];
   return rows.map(rowToVerification);
 }
