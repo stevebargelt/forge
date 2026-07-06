@@ -28,6 +28,15 @@
 //       → integration_failed, all state retained.
 //   (8) Fanout pass case: merged tree passes test:unit → parent completes,
 //       integration + child worktrees cleaned up.
+//   (9) FG-424 negative test: an injected infra-style (signal-killed, not a
+//       timeout, not an ordinary test failure) test:unit run must NOT produce
+//       failure_kind integration_failed / the "fix the code" non-retryable
+//       path — it must classify as integration_gate_crashed instead, while
+//       preserving the same no-discard worktree/branch retention contract.
+//   (10) FG-424 fanout no-reds seam (runNext.ts ~1578): the same negative test
+//       as (9), but through the fanout dispatch path (a distinct classify()
+//       call site from the one (9) exercises) — proves FG-424's evidence
+//       plumbing isn't seam-specific.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -509,6 +518,59 @@ test("fg357 (4): clean merge whose merged tree passes build/test completes green
   );
 });
 
+// ─── (9) FG-424 negative test: signal-killed test:unit → integration_gate_crashed ─
+//
+// The ticket's required negative test: an injected infra-style failure (the
+// test:unit script killed by signal, not a timeout, not an ordinary non-zero
+// test exit) must NOT be classified as the non-retryable integration_failed
+// "fix the code" path.
+
+test("fg424 (9): test:unit killed by signal → failure_kind integration_gate_crashed, not integration_failed; no fix-the-code advice; worktree/branch retained", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  initGitRepoWithTestUnitScript(repo, "kill -9 $$");
+
+  const { runId } = startRun({
+    workflow: SINGLE_STEP_WORKFLOW,
+    title: "fg424 signal-killed integration gate",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const wave = await runNext({
+    runId,
+    workflow: SINGLE_STEP_WORKFLOW,
+    dockerExec: makeCleanMergeExec("crashed.ts"),
+  });
+
+  assert.deepEqual(wave.failedSteps, ["build"], "build must fail when the integration gate is killed by signal");
+  assert.deepEqual(wave.completedSteps, [], "no steps must complete");
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(primary, "primary build task must exist");
+  assert.equal(primary!.status, "failed", "task status must be failed");
+  assert.equal(
+    failureKindForTask(primary!.id),
+    "integration_gate_crashed",
+    "a signal-killed gate run must classify as integration_gate_crashed, not integration_failed",
+  );
+
+  const disposition = retryPolicy("integration_gate_crashed");
+  assert.equal(disposition.retryable, false, "integration_gate_crashed must not be retryable");
+  assert.doesNotMatch(disposition.advice ?? "", /fix the code/i, "advice must not misdirect toward a code fix");
+  assert.doesNotMatch(disposition.advice ?? "", /git reset/i, "advice must not offer the integration_failed git-reset remedy");
+
+  // Same no-discard contract as integration_failed: worktree and branch retained.
+  const worktreePath = primary!.worktreePath!;
+  assert.ok(worktreePath, "task.worktreePath must be set");
+  assert.ok(existsSync(worktreePath), "worktree directory must be retained after a signal-killed integration gate");
+  assertBranchRetained(repo, runId, primary!.id);
+});
+
 function worktreePathFor(tasks: ReturnType<typeof tasksForRun>, phase: string): string {
   const t = tasks.find((task) => task.phase === phase && task.parentId === undefined);
   return t?.worktreePath as string;
@@ -917,5 +979,91 @@ test("fg357 (8): fanout pass case — merge to HEAD clean, merged tree passes te
         `child ${child.id} worktree must be removed after a successful merge + passing integration gate`,
       );
     }
+  }
+});
+
+// ─── (10) FG-424 fanout no-reds seam: signal-killed test:unit → integration_gate_crashed ─
+//
+// Test (9) exercises FG-424's classify({ integrationGate }) evidence only
+// through the single-step dispatch seam (runNext.ts ~524). The fanout no-reds
+// seam (runNext.ts ~1578, exercised for integration_failed by test (6)) is a
+// distinct call site with its own gate.status/signal/timedOut wiring — this
+// proves the same infra-vs-real-failure distinction holds there too, not just
+// in the seam that happens to run first.
+
+test("fg424 (10): fanout no-reds seam — test:unit killed by signal → failure_kind integration_gate_crashed, not integration_failed, all state retained", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  // Mirrors test (6)'s "test ! -f child1.ts" gating: the source step (which
+  // also passes through the integration gate) must stay green, and only the
+  // fanout build step's post-merge run.projectDir — once both children's
+  // files are present — hits the signal-kill.
+  initGitRepoWithTestUnitScript(repo, "test ! -f child1.ts || kill -9 $$");
+
+  const { runId } = startRun({
+    workflow: FANOUT_WORKFLOW,
+    title: "fg424 fanout no-reds signal-killed integration gate",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const taskId = extractTaskId(args);
+    const projectMount = findProjectMountHost(args);
+    writeFileSync(stderrPath, "");
+
+    if (taskId.startsWith("task-source-")) {
+      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+    } else if (taskId.startsWith("task-build-0-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else if (taskId.startsWith("task-build-1-")) {
+      if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
+      writeTaskResult(stdoutPath, { status: "complete" });
+    } else {
+      writeTaskResult(stdoutPath, { status: "complete" });
+    }
+    return 0;
+  };
+
+  const wave1 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave1.completedSteps, ["source"], "source must stay green — it touches no files, so the gated kill never fires for it");
+
+  const wave2 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: stubExec });
+  assert.deepEqual(wave2.failedSteps, ["build"], "build must fail when the integration gate is killed by signal");
+  assert.deepEqual(wave2.completedSteps, [], "no steps must complete");
+
+  const allTasks = tasksForRun(runId);
+  const parentTask = allTasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(parentTask, "fanout parent task must exist");
+  assert.equal(parentTask!.status, "failed", "parent status must be failed");
+  assert.equal(
+    failureKindForTask(parentTask!.id),
+    "integration_gate_crashed",
+    "a signal-killed gate run must classify as integration_gate_crashed, not integration_failed, in the fanout no-reds seam too",
+  );
+
+  const disposition = retryPolicy("integration_gate_crashed");
+  assert.equal(disposition.retryable, false, "integration_gate_crashed must not be retryable");
+  assert.doesNotMatch(disposition.advice ?? "", /fix the code/i, "advice must not misdirect toward a code fix");
+  assert.doesNotMatch(disposition.advice ?? "", /git reset/i, "advice must not offer the integration_failed git-reset remedy");
+
+  // Same no-discard contract as (6)'s integration_failed case: integration
+  // worktree and both children's worktrees/branches retained.
+  assert.ok(existsSync(join(repo, "child0.ts")), "child0.ts must be present — integration merged to HEAD before the gate ran");
+  assert.ok(existsSync(join(repo, "child1.ts")), "child1.ts must be present — integration merged to HEAD before the gate ran");
+
+  const integPath = integrationWorktreeDir(runId, parentTask!.id);
+  assert.ok(existsSync(integPath), "integration worktree must be retained after a signal-killed integration gate");
+
+  const children = allTasks.filter((t) => t.parentId === parentTask!.id && !t.agentRole.startsWith("red-"));
+  assert.equal(children.length, 2, "two fanout children must exist");
+  for (const child of children) {
+    assert.ok(child.worktreePath, `child ${child.id} must have worktreePath recorded`);
+    assert.ok(existsSync(child.worktreePath!), `child ${child.id} worktree must be retained after a signal-killed integration gate`);
+    assertBranchRetained(repo, runId, child.id);
   }
 });
