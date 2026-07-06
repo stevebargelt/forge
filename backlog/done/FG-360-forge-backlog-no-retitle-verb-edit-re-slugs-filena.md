@@ -1,9 +1,11 @@
 ---
 id: FG-360
 type: story
-status: active
+status: done
 title: "forge backlog: no retitle verb + edit re-slugs filename on title change → duplicate same-id files"
 created: 2026-06-22
+closed: 2026-07-06
+closed_commit: fa83eb32b836c6f90b9dbd88707da35b862037fe
 ---
 
 **Found:** 2026-06-22 while re-scoping FG-345.
