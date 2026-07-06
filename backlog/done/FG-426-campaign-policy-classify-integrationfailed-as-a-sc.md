@@ -1,9 +1,11 @@
 ---
 id: FG-426
 type: story
-status: active
+status: done
 title: "Campaign policy: classify integration_failed as a scoped item blocker, not the campaign_system default"
 created: 2026-07-01
+closed: 2026-07-06
+closed_commit: 44aea95
 ---
 
 ## Problem
