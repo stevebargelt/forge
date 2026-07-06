@@ -116,6 +116,11 @@ export function formatOutOfBandEligibleHint(ticketId: string): string {
 }
 
 function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): string | null {
+  // FG-444 fix: `forge campaign reconcile` refuses categorically unless the
+  // campaign is paused (see reconcile.ts's paused-only guard) — this display
+  // must gate on the same condition or it can claim eligibility reconcile will
+  // never honor (e.g. for an abandoned campaign).
+  if (campaign.status !== "paused") return null;
   if (item.lifecycleStatus !== "awaiting_gate" || item.blockerKind) return null;
   if (!campaign.projectDir) return null;
   try {
@@ -192,7 +197,25 @@ function outOfBandHostVerificationHint(campaign: Campaign, item: CampaignItem): 
   return null;
 }
 
-function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): string {
+// FG-444 fix: outOfBandCompletableAction shells out to git (via
+// collectOutOfBandEvidence/hasUnresolvedAuthoritativeOutcome) — memoize per
+// ticketId so a single assemble call evaluates each item at most once, even
+// though both the Next-action computation and the per-item row need it.
+function memoizeOutOfBandCompletableAction(): (campaign: Campaign, item: CampaignItem) => string | null {
+  const cache = new Map<string, string | null>();
+  return (campaign: Campaign, item: CampaignItem) => {
+    if (!cache.has(item.ticketId)) {
+      cache.set(item.ticketId, outOfBandCompletableAction(campaign, item));
+    }
+    return cache.get(item.ticketId) ?? null;
+  };
+}
+
+function computeNextShowAction(
+  campaign: Campaign,
+  items: CampaignItem[],
+  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null
+): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
     if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
@@ -210,7 +233,7 @@ function computeNextShowAction(campaign: Campaign, items: CampaignItem[]): strin
     if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
-      const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
+      const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
       if (reconcileHint) return `run \`forge campaign reconcile\` to capture host verification for ${gateParkedItem.ticketId} and complete it`;
@@ -284,7 +307,8 @@ function computeNextOperatorAction(
   campaign: Campaign,
   verdict: CampaignVerdict,
   items: CampaignItem[],
-  doneAuditMap: Map<string, DoneAuditResult>
+  doneAuditMap: Map<string, DoneAuditResult>,
+  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -324,7 +348,7 @@ function computeNextOperatorAction(
     // Parked at a human gate or red block: surface the specific gate/block action.
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
-      const outOfBand = outOfBandCompletableAction(campaign, gateParkedItem);
+      const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
       if (reconcileHint) return `run \`forge campaign reconcile\` to capture host verification for ${gateParkedItem.ticketId} and complete it`;
@@ -420,6 +444,8 @@ export function assembleCampaignShow(id: string): ShowResult | null {
 
   const planContentForShow = campaign.metadata?.["planContent"] as Record<string, unknown> | undefined;
 
+  const getOutOfBandCompletableAction = memoizeOutOfBandCompletableAction();
+
   const itemRows: ShowItemRow[] = items.map((i) => {
     const planEntry = getItemPlanEntry(planContentForShow, i.ticketId);
     return {
@@ -434,14 +460,14 @@ export function assembleCampaignShow(id: string): ShowResult | null {
       requestedHumanAction: i.requestedHumanAction ?? null,
       readiness: readinessMap.get(i.ticketId) ?? null,
       hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
-      outOfBandEligible: outOfBandCompletableAction(campaign, i) !== null,
+      outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
       materialLaneAssumptions: planEntry.materialLaneAssumptions,
     };
   });
 
-  const nextAction = computeNextShowAction(campaign, items);
+  const nextAction = computeNextShowAction(campaign, items, getOutOfBandCompletableAction);
 
   return {
     campaignId: campaign.id,
@@ -576,7 +602,8 @@ export function assembleCampaignReport(id: string): ReportResult | null {
 
   const safetyToContinue = computeSafety(campaign, items);
   const verdict = computeVerdict(campaign, items, doneAuditMap);
-  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items, doneAuditMap);
+  const getOutOfBandCompletableAction = memoizeOutOfBandCompletableAction();
+  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items, doneAuditMap, getOutOfBandCompletableAction);
 
   const goal =
     campaign.metadata?.["goal"] !== undefined
@@ -656,7 +683,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       hostVerificationDetail:
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
       hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
-      outOfBandEligible: outOfBandCompletableAction(campaign, i) !== null,
+      outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
       reviewerResult: null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,

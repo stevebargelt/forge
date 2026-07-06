@@ -2186,6 +2186,54 @@ test("assembleCampaignShow: awaiting_gate item WITH a blockerKind is never treat
   assert.equal(show.nextAction, "Human gate required at step review", "blockerKind present — must not be treated as out-of-band-eligible");
 });
 
+test("FG-444 fix: abandoned campaign with fully out-of-band-eligible evidence → per-item outOfBandEligible is false (reconcile refuses any non-paused campaign)", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', blocker_kind = NULL, requested_human_action = 'Human gate required at step review' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  // Same evidence as the passing "delivered out-of-band" test above — the only
+  // difference is the campaign status. `forge campaign reconcile` refuses
+  // categorically once a campaign is abandoned, regardless of item evidence.
+  updateCampaignStatus(campaign.id, "abandoned");
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(
+    show.items[0]!.outOfBandEligible,
+    false,
+    "abandoned campaign — reconcile would refuse categorically, so per-item display must not claim eligibility"
+  );
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(
+    report.items[0]!.outOfBandEligible,
+    false,
+    "abandoned campaign — reconcile would refuse categorically, so per-item display must not claim eligibility"
+  );
+});
+
 // ── FG-458: reconcile/resume consistency — report hints must not point the
 // operator at `forge campaign reconcile` for a runId'd item that reconcile
 // itself now refuses (an unresolved authoritative fail on the item's own run).
