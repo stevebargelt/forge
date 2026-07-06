@@ -143,7 +143,7 @@ Baseline: 230/230 forge tests pass on `main` at `2b2e212`. Dashboard typecheck c
 
 After implementation:
 
-1. **End-to-end smoke run.** `forge new feature "smoke-fanout" --brief "add two trivial functions, one in src/store/ and one in dashboard/client/, with type signatures and a one-line implementation each"`. Walk through architect → plan (verify the tech-lead emits two steps with `discipline: backend` and `discipline: frontend` respectively) → build (verify the fanout dispatches two children, one with `agentRole: backend-specialist`, one with `frontend-specialist`).
+1. **End-to-end smoke run.** `forge new feature "smoke-fanout" --brief "add two trivial functions, one in src/store/ and one in dashboard/client/, with type signatures and a one-line implementation each" --ticket FG-139`. Walk through architect → plan (verify the tech-lead emits two steps with `discipline: backend` and `discipline: frontend` respectively) → build (verify the fanout dispatches two children, one with `agentRole: backend-specialist`, one with `frontend-specialist`).
 2. **Fallback path.** Same brief but with a `general` step (e.g. "add a comment to BACKLOG.md") — confirm child task uses `agentRole: engineer`.
 3. **Backwards compat.** Run an existing investigation or design workflow — confirm nothing breaks (other workflows don't have `agent_map`; their fanouts continue to use `step.agent`).
 4. **Parent reds.** Confirm `red-wide`/`red-narrow`/`red-frontend`/`red-backend`/`red-security` run once on the parent build task after children settle, not once per child.

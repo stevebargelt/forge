@@ -39,7 +39,7 @@ After `forge init`, you have two ways to drive forge in this project:
 **Direct CLI.** Run `forge new` or `forge invoke` yourself. Useful for scripting, automation, or when you already know which workflow + flags you want:
 
 ```bash
-forge new feature "add login" --brief "wire OAuth into the existing user table"
+forge new feature "add login" --brief "wire OAuth into the existing user table" --ticket FG-123
 forge next run-add-login-<suffix>
 forge gate task-architect-<suffix> advance
 forge next run-add-login-<suffix>

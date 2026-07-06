@@ -49,7 +49,7 @@ Start `claude` from inside the project directory. The orchestrator block that `f
 
 You never type a `forge` command. The orchestrator does, on your behalf. Examples of what this looks like:
 
-- *"Add OAuth login using the existing user table"* → orchestrator classifies as implementation, runs `forge new feature "add-oauth-login" --brief "..."`, watches the architect → plan → build → verify → docs pipeline, presents each gate, lands the commit.
+- *"Add OAuth login using the existing user table"* → orchestrator classifies as implementation, files (or reuses) a backlog ticket, runs `forge new feature "add-oauth-login" --brief "..." --ticket FG-42`, watches the architect → plan → build → verify → docs pipeline, presents each gate, lands the commit.
 - *"Audit `src/auth/session.ts` for security issues"* → orchestrator classifies as review, runs `forge invoke red-security --task "..." --read-only`, presents findings.
 - *"What runs are in flight for this project?"* → in-session: orchestrator runs `forge status --json` and summarizes.
 
@@ -92,7 +92,7 @@ Most projects don't need this; the default workflows in `seeds/workflows/` cover
 cd ~/code/my-app
 cp ~/.forge/workflows/feature.yml .forge/workflows/feature.yml
 # edit .forge/workflows/feature.yml to taste
-forge new feature "X" --brief "..."
+forge new feature "X" --brief "..." --ticket FG-42
 ```
 
 The loader logs which YAML it picked, so you can confirm the override is taking effect.

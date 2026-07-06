@@ -241,7 +241,7 @@ Local network or DNS issue. Confirm `curl https://api.twilio.com/` from the same
 ### How to silence notifications for one run without unsubscribing
 
 ```bash
-FORGE_NOTIFY= forge new feature "..." --brief "..."
+FORGE_NOTIFY= forge new feature "..." --brief "..." --ticket FG-42
 ```
 
 Setting `FORGE_NOTIFY=` (empty) for the one command keeps your shell-wide config intact.

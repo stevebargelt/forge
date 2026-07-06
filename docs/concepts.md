@@ -20,7 +20,7 @@ On `forge new` / `forge invoke`, forge resolves the mount target before launchin
 
 Override with `--project <dir>` to target a different repo from your cwd. Pass `--allow-subproject` when you intentionally want a subdir mount (records `explicitSubproject: true` in the task manifest).
 
-Example: a run created via `cd ~/code/my-app && forge new feature "add login" --brief "..."` has `projectDir = /Users/you/code/my-app`. Every container spawned for that run mounts that path at `/project`.
+Example: a run created via `cd ~/code/my-app && forge new feature "add login" --brief "..." --ticket FG-123` has `projectDir = /Users/you/code/my-app`. Every container spawned for that run mounts that path at `/project`.
 
 ## Workspace
 

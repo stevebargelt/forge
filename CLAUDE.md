@@ -259,10 +259,10 @@ forge invoke manual-qa --task "exploratory test of <feature>" --run <same-run-id
 **For `implementation` (full) — pipeline:**
 
 ```bash
-forge new feature "<title>" --brief "<brief>" --project "$(pwd)"
+forge new feature "<title>" --brief "<brief>" --ticket <id> --project "$(pwd)"
 ```
 
-(Adjust flags for the workflow variant: `feature-ui-design-needed` adds `--design-dir`; `feature-ui-design-provided` uses `--prd`.)
+`--ticket <id>` is **required** for the `feature` workflow — its authoritative shipping-reviewer red reviews the diff against the ticket's acceptance criteria, and `forge new` fails fast (before the run is created) without one. Full-pipeline implementation work is always ticketed, so pass the backlog id you're implementing. (Adjust flags for the workflow variant: `feature-ui-design-needed` adds `--design-dir`; `feature-ui-design-provided` uses `--prd` — those variants carry no shipping-reviewer red and take no `--ticket`.)
 
 The pipeline runs architect → tech-lead → engineer (specialist per step) → test-engineer with reds → documentation-maintainer docs phase. You watch it via `forge watch <run-id>`.
 

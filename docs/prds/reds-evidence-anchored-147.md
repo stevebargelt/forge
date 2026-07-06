@@ -128,7 +128,7 @@ Baseline: 287/287 forge tests + 8/8 dashboard tests pass on `main` at `ff41394`.
 ### Manual verification
 
 After implementation:
-1. Re-run a simple `forge new feature "noop" --brief "..."` against the split-keyboard-teacher project (or any local project with sources).
+1. Re-run a simple `forge new feature "noop" --brief "..." --ticket FG-147` against the split-keyboard-teacher project (or any local project with sources).
 2. When reds run, confirm the verdicts in DB show the new fields when reds cite source.
 3. To verify the validator catches hallucinations: manually craft a verdict JSON (or use a synthetic stub-dockerExec test) where a finding cites a non-existent file. Verify the finding gets dropped and a `verdict.findings_dropped` event lands.
 4. To verify downgrade: synthesize a `fail` verdict where ALL findings are hallucinated. Verify it lands in DB as `inconclusive` with the synthesized note.
