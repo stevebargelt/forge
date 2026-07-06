@@ -1,9 +1,11 @@
 ---
 id: FG-431
 type: story
-status: active
+status: done
 title: "campaign reconcile: improve inconclusive-supersession refusal label + canonicalize project_dir between host-verification recording and lookup (FG-428 red-wide lows)"
 created: 2026-07-02
+closed: 2026-07-06
+closed_commit: 4cd28cb
 ---
 
 ## Problem
