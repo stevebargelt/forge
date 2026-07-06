@@ -1,9 +1,11 @@
 ---
 id: FG-377
 type: story
-status: active
+status: done
 title: "Persistence-check false-positive on macOS: settle/retry window before 'work not persisted'"
 created: 2026-06-23
+closed: 2026-07-06
+closed_commit: 9fad83a3608be52275ed36f34b2ec7a623a88bce
 ---
 
 **Priority: medium — infra/correctness (orchestrator reliability).**
