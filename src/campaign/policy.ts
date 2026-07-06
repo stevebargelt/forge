@@ -48,6 +48,13 @@ export function classifyFailureKind(failureKind: string | undefined): BlockerKin
     case "red_blocked":
     case "gate_rejected":
       return "scope";
+    // FG-426: the merge itself was clean — the post-merge integration gate
+    // (FG-357) caught a broken merged tree. That's a scoped, operator-fixable
+    // build/test failure on this item, not a campaign-wide system fault, so it
+    // gets the same LOCAL "scope" treatment as gate_rejected rather than
+    // falling through to the conservative campaign_system default.
+    case "integration_failed":
+      return "scope";
     case undefined:
       // No terminal event recorded — anomalous when the campaign saw status:failed.
       // Cannot positively identify as a LOCAL agent failure; must HOLD the campaign.

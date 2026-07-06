@@ -545,6 +545,8 @@ SHARED blocker kinds: `auth`, `infrastructure`, `git_state`, `dependency`, `merg
 
 **LOCAL blockers apply the dependency policy.** When the agent ran but could not complete the ticket (scope, acceptance, or its own tests), the failure is LOCAL. The runner records the blocked item (`lifecycleStatus: failed`, `outcome: blocked`, `blockerKind`, `continuePolicy`, `reason`, `requestedHumanAction`) and then evaluates each remaining `pending` item against the blocked item using the ticket's `related` metadata only — no deeper inference:
 
+`classifyFailureKind` maps `model_error`, `tool_error`, `red_blocked`, `gate_rejected`, and (FG-426) `integration_failed` to `blockerKind: scope` — all are outcomes where the agent ran and produced a concrete, operator-fixable result on this item alone, not a condition that would affect every remaining item. `integration_failed` (FG-357's post-merge integration gate — see [Post-merge integration gate](#post-merge-integration-gate)) means the merge itself was clean but build/test of the merged tree failed; that's scoped to this item's changes, so it gets the LOCAL/dependency policy above instead of the SHARED `campaign_system` default.
+
 | Relation | Sequential mode | Pilot mode |
 |---|---|---|
 | DEPENDENT — either ticket's `related` field lists the other | HELD | HELD |
