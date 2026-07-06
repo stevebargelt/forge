@@ -42,6 +42,20 @@ test("classifyFailureKind: agent-ran failures → scope (LOCAL)", () => {
   assert.equal(classifyFailureKind("gate_rejected"), "scope");
 });
 
+// FG-426: the integration gate (FG-357) catching a broken merged tree is a
+// scoped, operator-fixable item failure — not a campaign-wide system fault —
+// so it must classify like gate_rejected, not fall through to campaign_system.
+test("FG-426: classifyFailureKind: integration_failed → scope (LOCAL), not campaign_system", () => {
+  assert.equal(classifyFailureKind("integration_failed"), "scope");
+  assert.equal(isSharedBlocker(classifyFailureKind("integration_failed")), false);
+});
+
+test("FG-426: evaluateContinuePolicy for integration_failed is not hold_campaign", () => {
+  const kind = classifyFailureKind("integration_failed");
+  assert.equal(evaluateContinuePolicy(kind, "independent", "sequential"), "continue_allowed");
+  assert.equal(evaluateContinuePolicy(kind, "dependent", "sequential"), "hold_dependents");
+});
+
 test("classifyFailureKind: undefined (no terminal event) → campaign_system (SHARED — conservative, cannot confirm LOCAL)", () => {
   assert.equal(classifyFailureKind(undefined), "campaign_system");
 });
