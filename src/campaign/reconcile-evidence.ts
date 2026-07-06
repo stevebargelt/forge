@@ -140,21 +140,36 @@ function taskBucketKey(e: ReconcileRunEvent): string {
   return e.taskId ?? NO_TASK_BUCKET;
 }
 
-// FG-458/FG-460: the subset of evaluateReconcileEvidence's `missing` reason
-// codes that are specific to the run's OWN authoritative-review outcome (its
-// Fact 5). The out-of-band composition (reconcile.ts's isOutOfBand branch AND
-// `forge campaign resume`'s FG-441 reattach path — see composeOutOfBandEligibility
-// in reconcile-outofband-evidence.ts) folds ONLY these codes in, so the two
-// paths agree on the authoritative-outcome axis by construction. Deliberately
-// excludes the other four facts (ticket status, closed-commit presence/
-// reachability, host-verification): those are independently re-derived by the
-// out-of-band evaluator from the same underlying data — and folding
-// host-verification in here specifically would be self-defeating (a not-yet-
-// captured item would show host_verification_not_recorded forever, blocking the
-// very capture meant to resolve it). Single exported definition — reconcile.ts,
-// report.ts, and the resume path all import THIS one (previously duplicated).
+// FG-458/FG-460/FG-473: the subset of evaluateReconcileEvidence's `missing`
+// reason codes that are specific to the run's OWN authoritative-review outcome
+// (its Fact 5) AND represent a real objection — a reviewer that ran and either
+// failed or came back inconclusive. The out-of-band composition (reconcile.ts's
+// isOutOfBand branch AND `forge campaign resume`'s FG-441 reattach path — see
+// composeOutOfBandEligibility in reconcile-outofband-evidence.ts) folds ONLY
+// these codes in, so the two paths agree on the authoritative-outcome axis by
+// construction. Deliberately excludes the other four facts (ticket status,
+// closed-commit presence/reachability, host-verification): those are
+// independently re-derived by the out-of-band evaluator from the same
+// underlying data — and folding host-verification in here specifically would
+// be self-defeating (a not-yet-captured item would show
+// host_verification_not_recorded forever, blocking the very capture meant to
+// resolve it).
+//
+// FG-473: `no_authoritative_verdict_or_force_advance_event` is deliberately NOT
+// in this set. That code means "no authoritative reviewer ever ran" — the
+// normal, expected shape for an invoke-lane (quick_implementation) run, which
+// has no red-team step at all. That absence is not an objection; the
+// out-of-band lane evidence (closed ticket + reachable commit + passing
+// host-verification) is what vouches for the work instead. Only a reviewer
+// that actually ran and objected (fail) or couldn't reach a verdict
+// (inconclusive) blocks out-of-band completion. shape-1 (the normal
+// scope-blocked reconcile path in evaluateReconcileEvidence below) does NOT
+// consult this set — it pushes `no_authoritative_verdict_or_force_advance_event`
+// into `missing` directly — so a feature-pipeline run with no verdict at all is
+// still refused exactly as before; this set only narrows what the *out-of-band*
+// paths fold in. Single exported definition — reconcile.ts, report.ts, and the
+// resume path all import THIS one (previously duplicated).
 export const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
-  "no_authoritative_verdict_or_force_advance_event",
   "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
   "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance",
 ]);

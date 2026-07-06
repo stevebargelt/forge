@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
+import {
+  evaluateOutOfBandEvidence,
+  authoritativeOutcomeContribution,
+  composeOutOfBandEligibility,
+} from "./reconcile-outofband-evidence.js";
 import type { OutOfBandEvidenceInput } from "./reconcile-outofband-evidence.js";
+import type { ReconcileEvidenceInput } from "./reconcile-evidence.js";
 
 function baseInput(): OutOfBandEvidenceInput {
   return {
@@ -95,4 +100,51 @@ test("type-level: OutOfBandEvidenceInput rejects an `events` property (compile-t
   // Runtime is irrelevant here — evaluateOutOfBandEvidence ignores unknown
   // properties — this test's value is entirely the @ts-expect-error above.
   assert.equal(evaluateOutOfBandEvidence(withEvents).eligible, true);
+});
+
+// ── FG-473: "no authoritative reviewer ran at all" is not an objection ───────
+
+function reconcileBaseInput(): ReconcileEvidenceInput {
+  return {
+    ticketStatus: "done",
+    ticketClosedCommit: "abc123",
+    closedCommitReachableOnBase: true,
+    hostVerification: { recorded: true, passed: true },
+    events: [],
+  };
+}
+
+test("FG-473: authoritativeOutcomeContribution with ZERO authoritative-verdict events → no missing codes (invoke-lane runs never produce a reviewer verdict)", () => {
+  const result = authoritativeOutcomeContribution(reconcileBaseInput());
+  assert.deepEqual(result.missing, [], "no authoritative reviewer ever ran — that absence is no-objection, not a blocker");
+});
+
+test("FG-473 regression: authoritativeOutcomeContribution STILL folds in an unresolved authoritative FAIL", () => {
+  const input: ReconcileEvidenceInput = {
+    ...reconcileBaseInput(),
+    events: [{ id: 1, kind: "verdict", verdict: "fail", authority: "authoritative" }],
+  };
+  const result = authoritativeOutcomeContribution(input);
+  assert.deepEqual(result.missing, [
+    "run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+  ]);
+});
+
+test("FG-473 regression: authoritativeOutcomeContribution STILL folds in an unresolved authoritative INCONCLUSIVE verdict", () => {
+  const input: ReconcileEvidenceInput = {
+    ...reconcileBaseInput(),
+    events: [{ id: 1, kind: "verdict", verdict: "inconclusive", authority: "authoritative" }],
+  };
+  const result = authoritativeOutcomeContribution(input);
+  assert.deepEqual(result.missing, [
+    "run_evidence:latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance",
+  ]);
+});
+
+test("FG-473: composeOutOfBandEligibility ships an invoke-lane item (zero authoritative verdicts) with full lane evidence", () => {
+  const outOfBand = evaluateOutOfBandEvidence(baseInput());
+  const authoritative = authoritativeOutcomeContribution(reconcileBaseInput());
+  const composed = composeOutOfBandEligibility({ outOfBand, authoritative, hasRunId: true });
+  assert.equal(composed.eligible, true);
+  assert.deepEqual(composed.missing, []);
 });
