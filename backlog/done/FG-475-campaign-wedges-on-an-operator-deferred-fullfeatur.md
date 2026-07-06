@@ -1,9 +1,11 @@
 ---
 id: FG-475
 type: story
-status: active
+status: done
 title: "Campaign wedges on an operator-deferred full_feature item: rejected/failed run leaves item awaiting_gate, resume hangs instead of advancing to independent items"
 created: 2026-07-06
+closed: 2026-07-06
+closed_commit: 2928b10
 ---
 
 ## Problem
