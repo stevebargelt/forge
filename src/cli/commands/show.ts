@@ -419,6 +419,18 @@ export function deriveNextCommandForTask(
     if (failureKind === "oom_killed") {
       return `forge show ${taskId} --json  # inspect the worktree diff, then \`forge retry ${taskId} --force\` once verified — container killed (exit 137, possibly OOM or external kill); if OOM, consider more memory or a smaller task`;
     }
+    // FG-424: retry-policy.ts marks this non-retryable — a signal-killed gate
+    // run leaves run.projectDir's toolchain/cache state untrustworthy to blindly
+    // re-run against. Same inspect-then-force posture as oom_killed above.
+    if (failureKind === "integration_gate_crashed") {
+      return `forge show ${taskId} --json  # inspect run.projectDir for a broken or half-updated toolchain/cache, resolve it, then \`forge retry ${taskId} --force\``;
+    }
+    // FG-424: retryable:true in retry-policy.ts (a timeout is transient), but
+    // made explicit here rather than relying on the default fallthrough — same
+    // FG-461 consistency posture as the container_crash/idle_timeout guidance.
+    if (failureKind === "integration_gate_timeout") {
+      return `forge retry ${taskId}`;
+    }
     return `forge retry ${taskId}`;
   }
   if (status === "awaiting_gate") return `forge gate ${taskId} --advance | --reject`;

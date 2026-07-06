@@ -907,6 +907,25 @@ test("deriveNextCommandForTask: failed+oom_killed → inspect before retry --for
   assert.doesNotMatch(cmd, /forge retry task-abc(?! --force)/, "must never recommend a bare forge retry without --force");
 });
 
+// FG-424: retry-policy.ts classifies integration_gate_crashed as retryable:false
+// (a signal-killed gate run leaves the merged tree's toolchain/cache state
+// untrustworthy) — a bare `forge retry` is refused. The hint must point at
+// inspect-then-force, mirroring the oom_killed arm.
+test("deriveNextCommandForTask: failed+integration_gate_crashed → inspect before retry --force, not a bare retry", () => {
+  const cmd = deriveNextCommandForTask("failed", "integration_gate_crashed", "task-abc");
+  assert.match(cmd, /forge show task-abc/);
+  assert.match(cmd, /forge retry task-abc --force/);
+  assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
+  assert.doesNotMatch(cmd, /forge retry task-abc(?! --force)/, "must never recommend a bare forge retry without --force");
+});
+
+// FG-424: retry-policy.ts classifies integration_gate_timeout as retryable:true
+// (a timeout is transient) — a bare `forge retry` is correct here.
+test("deriveNextCommandForTask: failed+integration_gate_timeout → forge retry", () => {
+  const cmd = deriveNextCommandForTask("failed", "integration_gate_timeout", "task-abc");
+  assert.match(cmd, /^forge retry task-abc$/);
+});
+
 test("deriveNextCommandForTask: awaiting_gate → forge gate --advance | --reject", () => {
   const cmd = deriveNextCommandForTask("awaiting_gate", undefined, "task-abc");
   assert.match(cmd, /forge gate task-abc/);
