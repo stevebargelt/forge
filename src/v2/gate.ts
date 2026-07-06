@@ -31,6 +31,7 @@ import { loadWorkflow } from "./loader.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
+import { isRunSettled } from "./ready-queue.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -165,53 +166,73 @@ export async function gate(
     // run row.
     finalizeRunIfDone(run.id, workflow);
   } else if (decision === "reject") {
-    failTask(taskId, {
-      runId: run.id,
-      kind: classify({ source: "gate_rejected" }),
-      error: rationale ?? "rejected by gate",
-    });
-
-    if (step.on_reject) {
-      const targetStep = findStep(workflow, step.on_reject);
-      if (!targetStep) {
-        throw new Error(
-          `step '${step.id}' on_reject references unknown step '${step.on_reject}'`,
-        );
-      }
-      // Insert a fresh pending task in the on_reject step. The runner's
-      // ready-queue will pick it up. Inject the rejection rationale into
-      // inputs so the on_reject agent has context.
-      const newId = newTaskId(targetStep.id);
-      const tp: TaskPackage = {
-        taskId: newId,
-        runId: task.runId,
-        phase: targetStep.id,
-        role: targetStep.agent ?? task.agentRole,
-        inputs: {
-          rejectedRationale: rationale ?? "",
-          rejectedTaskId: taskId,
-        },
-        composedSystemPrompt: "",
-      };
-      const newTask: Task = {
-        id: newId,
-        runId: task.runId,
-        parentId: taskId,
-        phase: targetStep.id,
-        agentRole: targetStep.agent ?? task.agentRole,
-        agentAlias: targetStep.activity,
-        status: "pending",
-        taskPackage: tp,
-        createdAt: nowIso(),
-      };
-      insertTask(newTask);
-      logEvent("task.created", {
+    // Atomic: failTask (markTaskFailed + task.failed event) and the conditional
+    // on_reject recovery insert (+ its task.created event) must land together.
+    // A crash between failTask committing and the recovery insert would leave
+    // a rejected task terminally failed with no recovery task and no audit
+    // trail — mirrors the fanout re-entry transaction below and dispatchReds'
+    // verdict-insert transaction in runNext.ts.
+    getDb().transaction(() => {
+      failTask(taskId, {
         runId: run.id,
-        taskId: newId,
-        payload: { from: "reject->on_reject" },
+        kind: classify({ source: "gate_rejected" }),
+        error: rationale ?? "rejected by gate",
       });
-      nextTasks = [newTask];
-    }
+
+      if (step.on_reject) {
+        const targetStep = findStep(workflow, step.on_reject);
+        if (!targetStep) {
+          throw new Error(
+            `step '${step.id}' on_reject references unknown step '${step.on_reject}'`,
+          );
+        }
+        // Insert a fresh pending task in the on_reject step. The runner's
+        // ready-queue will pick it up. Inject the rejection rationale into
+        // inputs so the on_reject agent has context.
+        const newId = newTaskId(targetStep.id);
+        const tp: TaskPackage = {
+          taskId: newId,
+          runId: task.runId,
+          phase: targetStep.id,
+          role: targetStep.agent ?? task.agentRole,
+          inputs: {
+            rejectedRationale: rationale ?? "",
+            rejectedTaskId: taskId,
+          },
+          composedSystemPrompt: "",
+        };
+        const newTask: Task = {
+          id: newId,
+          runId: task.runId,
+          parentId: taskId,
+          phase: targetStep.id,
+          agentRole: targetStep.agent ?? task.agentRole,
+          agentAlias: targetStep.activity,
+          status: "pending",
+          taskPackage: tp,
+          createdAt: nowIso(),
+        };
+        insertTask(newTask);
+        logEvent("task.created", {
+          runId: run.id,
+          taskId: newId,
+          payload: { from: "reject->on_reject" },
+        });
+        nextTasks = [newTask];
+      }
+    })();
+    // A rejected gate with no on_reject leaves this step terminally failed with
+    // no replacement task — parity with the advance branch's finalizeRunIfDone
+    // call. Without this, a gate-rejected step whose failure makes every
+    // remaining step permanently unreachable would leave the run stuck at
+    // status "active" forever (no runNext call ever flips it, since
+    // computeReadyQueue's ready queue is empty and nothing dispatches again).
+    // When on_reject DID fire, the fresh pending recovery task above keeps its
+    // target phase's settle-state "active" — computeStepSettleStates treats a
+    // live (pending/running) recovery task as unsettled regardless of that
+    // phase's original (pre-reject) primary being complete — so this call is
+    // correctly a no-op until the recovery task itself resolves.
+    finalizeRunIfDone(run.id, workflow);
   } else if (decision === "request-changes") {
     if (step.manual) {
       throw new Error(
@@ -295,14 +316,7 @@ export function findStep(workflow: Workflow, stepId: string): Step | undefined {
 // or `forge status` again.
 function finalizeRunIfDone(runId: string, workflow: Workflow): void {
   const tasks = tasksForRun(runId);
-  const allStepsHavePrimary = workflow.steps.every((s) =>
-    tasks.some((t) => t.phase === s.id && t.parentId === undefined),
-  );
-  if (!allStepsHavePrimary) return;
-  const noPending = tasks.every(
-    (t) => t.status === "complete" || t.status === "failed" || t.parentId !== undefined,
-  );
-  if (!noPending) return;
+  if (!isRunSettled(workflow, tasks)) return;
   updateRunStatus(runId, "complete");
   logEvent("run.completed", { runId, payload: { via: "gate" } });
 }

@@ -47,7 +47,7 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
@@ -139,7 +139,39 @@ export async function runNext(args: {
   const ready = computeReadyQueue(args.workflow, tasks);
 
   if (ready.length === 0) {
-    // Either everything's done, gated, or running (some other runNext is in flight).
+    // Either everything's done, gated, running (some other runNext is in flight),
+    // or — the hang this branch used to miss entirely — a step failed terminally
+    // with no pending replacement and no on_reject fired, permanently stranding
+    // every downstream step with unmet deps that will never dispatch. Zero I/O
+    // happens in that case (nothing here is "ready"), so a caller looping on
+    // runNext would spin forever without this check ever moving run.status off
+    // "active". isRunSettled distinguishes that terminal case from a legitimate
+    // "waiting on a human gate / another runNext in flight" pause.
+    if (isRunSettled(args.workflow, tasks)) {
+      // AWN-2 cancel-vs-completion race: a concurrent `forge cancel` may have
+      // abandoned the run between the getRun at the top of runNext and this
+      // write. Re-read the current status before flipping to complete — an
+      // abandoned run is authoritatively terminal and must never be resurrected.
+      const currentStatus = getRun(args.runId)?.status ?? run.status;
+      if (currentStatus === "abandoned") {
+        return {
+          dispatchedSteps: [],
+          completedSteps: [],
+          awaitingGate: [],
+          failedSteps: [],
+          runStatus: "abandoned",
+        };
+      }
+      updateRunStatus(args.runId, "complete");
+      logEvent("run.completed", { runId: args.runId, payload: { via: "runNext-settled-no-dispatch" } });
+      return {
+        dispatchedSteps: [],
+        completedSteps: [],
+        awaitingGate: [],
+        failedSteps: [],
+        runStatus: "complete",
+      };
+    }
     return {
       dispatchedSteps: [],
       completedSteps: [],
@@ -189,19 +221,13 @@ export async function runNext(args: {
   // the run is done. Check by recomputing after this wave's writes.
   const tasksAfter = tasksForRun(args.runId);
   const readyAfter = computeReadyQueue(args.workflow, tasksAfter);
-  const allStepsHaveTasks = args.workflow.steps.every((s) =>
-    tasksAfter.some((t) => t.phase === s.id && t.parentId === undefined)
-  );
-  const noPendingWork = tasksAfter.every(
-    (t) => t.status === "complete" || t.status === "failed" || t.parentId !== undefined
-  );
 
   let runStatus: string = run.status;
   // Re-read the status: a concurrent `forge cancel` may have abandoned the run
   // while this wave ran. An abandoned run is authoritatively terminal — don't
   // flip it back to complete (AWN-2 cancel-vs-completion coherence).
   const currentStatus = getRun(args.runId)?.status ?? run.status;
-  if (currentStatus !== "abandoned" && readyAfter.length === 0 && allStepsHaveTasks && noPendingWork) {
+  if (currentStatus !== "abandoned" && readyAfter.length === 0 && isRunSettled(args.workflow, tasksAfter)) {
     // RunStatus union is "active" | "complete" | "abandoned" — there's no
     // "failed" state for runs. Mark complete regardless; the human / orchestrator
     // reads task statuses to know whether the run failed. Aligns with how the

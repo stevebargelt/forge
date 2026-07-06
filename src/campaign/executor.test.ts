@@ -22,7 +22,8 @@ import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./execu
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
-import { updateRunStatus, getRun } from "../store/runs.js";
+import { updateRunStatus, getRun, insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
 import { assembleReviewerContextPacket } from "../v2/reviewer-context-packet.js";
 
 // All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
@@ -1747,6 +1748,145 @@ test("FG-412: explicit failure_kind='unknown' → campaign_system (SHARED), camp
 
   const finalCampaign = getCampaign(campaign.id)!;
   assert.equal(finalCampaign.status, "paused", "campaign paused on 'unknown' failure (conservative SHARED hold)");
+});
+
+// FG-475: a full_feature item's run reached terminal 'complete' with no authoritative
+// verdict ever recorded (reconcileTerminalOutcome's 'unresolved' branch) because its
+// only task was gate-rejected — mirrors campaign-e89beee993ec (FG-425's architect gate
+// rejected). Before the fix this unconditionally defaulted to blockerKind:'campaign_system'
+// (SHARED), pausing the whole campaign for what is actually a LOCAL, per-item failure.
+const FEATURE_WORKFLOW_STUB = () => ({
+  name: "feature",
+  description: "",
+  inputs: [],
+  steps: [{ id: "architect", agent: "architect", runtime: "claude" as const, depends_on: [], gate: "human" as const, reds: [], manual: false }],
+});
+
+test("FG-475: gate-rejected terminal run resolves via classifyFailureKind('gate_rejected') -> blockerKind 'scope' (LOCAL), not campaign_system (SHARED)", async () => {
+  const { campaign } = _planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const runId = "run-fg475-gate-reject";
+  insertRun({ id: runId, workflow: "feature", title: "FG-101", status: "complete", createdAt: "2026-01-01T00:00:00Z" });
+  insertTask({
+    id: "task-fg475-architect",
+    runId,
+    phase: "architect",
+    agentRole: "architect",
+    status: "failed",
+    taskPackage: { taskId: "task-fg475-architect", runId, phase: "architect", role: "architect", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-01-01T00:00:01Z",
+  });
+  // Mirrors evidence: the campaign item's lifecycle_status stayed 'awaiting_gate' —
+  // the run went terminal without the item ever being reconciled.
+  const items = listCampaignItems(campaign.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = ? WHERE id = ?").run(runId, items[0]!.id);
+
+  // A gate-reject event (no on_reject) — this is what the operator's manual reject produced.
+  logEvent("task.failed", { runId, taskId: "task-fg475-architect", payload: { failure_kind: "gate_rejected", error: "gate rejected by operator" } });
+
+  const result = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FEATURE_WORKFLOW_STUB,
+    runNextFn: async () => {
+      throw new Error("runNextFn must not be called — the run is already terminal");
+    },
+  });
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string };
+  assert.equal(dbItem.lifecycle_status, "failed");
+  assert.equal(dbItem.outcome, "blocked");
+  assert.equal(dbItem.blocker_kind, "scope", "FG-475: gate_rejected -> scope (LOCAL), never campaign_system");
+
+  // scope is a LOCAL blocker — must not pause the whole campaign for this single item.
+  assert.notEqual(result.stopReason, "paused", "FG-475: a LOCAL blocker must not pause the whole campaign like SHARED does");
+});
+
+test("FG-475: terminal run with NO failed primary task (unclassifiable) still falls back to campaign_system (SHARED) — regression guard", async () => {
+  const { campaign } = _planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const runId = "run-fg475-no-primary";
+  insertRun({ id: runId, workflow: "feature", title: "FG-101", status: "complete", createdAt: "2026-01-01T00:00:00Z" });
+  // Deliberately NO task rows for this run — tasksForRun(runId) is empty, so there is
+  // no failed primary task to classify. Must fall back to the conservative default.
+  const items = listCampaignItems(campaign.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = ? WHERE id = ?").run(runId, items[0]!.id);
+
+  const result = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FEATURE_WORKFLOW_STUB,
+    runNextFn: async () => {
+      throw new Error("runNextFn must not be called — the run is already terminal");
+    },
+  });
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string };
+  assert.equal(dbItem.lifecycle_status, "failed");
+  assert.equal(dbItem.outcome, "blocked");
+  assert.equal(dbItem.blocker_kind, "campaign_system", "FG-475: no failed primary task found -> conservative campaign_system fallback preserved");
+  assert.equal(result.stopReason, "paused", "FG-475: campaign_system is SHARED — must still pause the whole campaign");
+});
+
+test("FG-475: mixed failed primaries (earlier SHARED + later gate_rejected LOCAL) -> SHARED wins, never downgrades to scope", async () => {
+  const { campaign } = _planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const runId = "run-fg475-mixed-primaries";
+  insertRun({ id: runId, workflow: "feature", title: "FG-101", status: "complete", createdAt: "2026-01-01T00:00:00Z" });
+  // Earlier failed primary: a container_crash -> classifies to infrastructure (SHARED).
+  insertTask({
+    id: "task-fg475-mixed-earlier",
+    runId,
+    phase: "architect",
+    agentRole: "architect",
+    status: "failed",
+    taskPackage: { taskId: "task-fg475-mixed-earlier", runId, phase: "architect", role: "architect", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-01-01T00:00:01Z",
+  });
+  logEvent("task.failed", { runId, taskId: "task-fg475-mixed-earlier", payload: { failure_kind: "container_crash", error: "container crashed" } });
+
+  // Later failed primary (retry): gate_rejected -> classifies to scope (LOCAL).
+  insertTask({
+    id: "task-fg475-mixed-later",
+    runId,
+    phase: "architect",
+    agentRole: "architect",
+    status: "failed",
+    taskPackage: { taskId: "task-fg475-mixed-later", runId, phase: "architect", role: "architect", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-01-01T00:00:02Z",
+  });
+  logEvent("task.failed", { runId, taskId: "task-fg475-mixed-later", payload: { failure_kind: "gate_rejected", error: "gate rejected by operator" } });
+
+  const items = listCampaignItems(campaign.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', run_id = ? WHERE id = ?").run(runId, items[0]!.id);
+
+  const result = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FEATURE_WORKFLOW_STUB,
+    runNextFn: async () => {
+      throw new Error("runNextFn must not be called — the run is already terminal");
+    },
+  });
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; outcome: string; blocker_kind: string };
+  assert.equal(dbItem.lifecycle_status, "failed");
+  assert.equal(dbItem.outcome, "blocked");
+  assert.equal(
+    dbItem.blocker_kind,
+    "campaign_system",
+    "FG-475: an earlier SHARED failed primary must not be downgraded to scope by a later LOCAL gate_rejected"
+  );
+  assert.equal(result.stopReason, "paused", "FG-475: SHARED-wins must still pause the whole campaign");
 });
 
 // Test 1: dependent relation holds later item in SEQUENTIAL

@@ -441,12 +441,35 @@ function reconcileTerminalOutcome(run: Run, itemId: string, projectDir?: string)
   } else {
     // unresolved — no authoritative verdict (and no qualifying force-advance
     // superseding one) recorded for any task in this run.
+    //
+    // FG-475: this also fires for a run that reached 'complete' by way of
+    // driveWorkflowItem's terminal-unreachable settlement (v2/ready-queue.ts's
+    // shared settled-run helper) after a gate reject with no on_reject — there
+    // was never a reviewer verdict to evaluate, only a rejected gate. Blindly
+    // defaulting to blockerKind:'campaign_system' here would pause the WHOLE
+    // campaign (SHARED) for what is actually a LOCAL, per-item scope failure.
+    // Before falling back, classify EVERY failed primary task in the run through
+    // the exact failureKindForTask -> classifyFailureKind sequence finalizeInvokeDispatch
+    // already uses above, then apply SHARED-WINS precedence: if any failed primary
+    // classifies to a SHARED blockerKind (isSharedBlocker), the whole run stays
+    // campaign_system — a single shared infra/auth failure must never be masked
+    // by a later local gate_rejected on the same run. Only when every failed
+    // primary classifies LOCAL do we use that local kind (e.g. 'scope' for
+    // gate_rejected). A run with no failed primary at all still lands on
+    // campaign_system, preserving today's behavior for that case.
+    const failedPrimaries = tasksForRun(run.id).filter((t) => t.parentId === undefined && t.status === "failed");
+    const failedBlockerKinds = failedPrimaries.map((t) => classifyFailureKind(failureKindForTask(t.id)));
+    const anySharedFailure = failedBlockerKinds.some((k) => isSharedBlocker(k));
+    const unresolvedBlockerKind: BlockerKind =
+      failedPrimaries.length === 0 || anySharedFailure ? "campaign_system" : failedBlockerKinds[failedBlockerKinds.length - 1]!;
     updateCampaignItem(itemId, {
       lifecycleStatus: "failed",
       outcome: "blocked",
-      blockerKind: "campaign_system",
+      blockerKind: unresolvedBlockerKind,
       requestedHumanAction:
-        "workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration",
+        unresolvedBlockerKind === "campaign_system"
+          ? "workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration"
+          : `resolve ${unresolvedBlockerKind} for this item then resume`,
     });
   }
 }
