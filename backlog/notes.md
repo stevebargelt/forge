@@ -21,3 +21,5 @@
 **Recommended next:** (1) **FG-451** — finish the deferred stretch item with fresh context (see journal for the safe-prune approach). (2) **FG-473** — fix the invoke-lane reconcile completion gap so quick_implementation campaign items can actually complete (unwedges campaigns). Both are campaign-runner correctness; FG-473 unblocks campaign-based batches like this one.
 
 **Op note:** on this host, tracked `run_in_background` for long review-loops/invokes gets KILLED (~2.5min) and takes the container with it (orphaned). Use the double-fork daemonizer (scratchpad/daemonize.py this session) + Monitor on the pidfile. Also: run host `test:all` via `npm run test:all` directly (NOT `bash -lc` — the login shell's nvm default resets node to a v131 build that can't load the v137 better-sqlite3).
+
+**Addendum (2026-07-06):** FG-472 got an operator-found post-close fix — the CLI `--ticket` help string said 'authoritative shipping-reviewer' but the shipped/test-pinned behavior requires it for ANY shipping-reviewer red. Reopened → fixed (PR #42, merge f0307a4) → re-closed (7d9714c). Text-only, host test:all green. FG-451 (deferred) and FG-473 (filed) remain the open items.
