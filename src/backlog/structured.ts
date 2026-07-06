@@ -125,7 +125,23 @@ export function readTicket(projectDir: string, id: string): StructuredTicket {
   return { ...frontmatter, body };
 }
 
+// Returns true if a file for this id already exists anywhere in backlog/.
+export function ticketExists(projectDir: string, id: string): boolean {
+  return findTicketFile(projectDir, id) !== undefined;
+}
+
+// Writing a ticket that already has a file on disk MUST write back to that
+// same file — the slug is fixed at creation and is cosmetic. Recomputing a
+// title-derived filename here is what caused edit (and retitle) to orphan
+// the original file and create a second one sharing the same id (FG-360).
 export function writeTicket(projectDir: string, ticket: StructuredTicket): void {
+  const { body, ...fm } = ticket;
+  const existing = findTicketFile(projectDir, ticket.id);
+  if (existing) {
+    writeFileSync(existing.path, serializeTicket(fm, body));
+    return;
+  }
+
   const base = backlogDir(projectDir);
   const subdir = subdirForTicket(ticket);
   const dir = join(base, subdir);
@@ -133,7 +149,6 @@ export function writeTicket(projectDir: string, ticket: StructuredTicket): void 
 
   const slug = generateSlug(ticket.title);
   const filename = `${ticket.id}-${slug}.md`;
-  const { body, ...fm } = ticket;
   writeFileSync(join(dir, filename), serializeTicket(fm, body));
 }
 
@@ -358,6 +373,35 @@ export function fillClosedCommit(projectDir: string, id: string, commit: string)
 
   const updated: TicketFrontmatter = { ...frontmatter, closedCommit: commit };
   writeFileSync(found.path, serializeTicket(updated, body));
+}
+
+// If the body's first non-blank line is a markdown heading that echoes the
+// old title (e.g. "# old title" or "### FG-1 — old title"), swap in the new
+// title text and leave the heading marker/prefix untouched. Bodies with no
+// such heading are left alone — not every ticket carries one.
+function retitleHeading(body: string, oldTitle: string, newTitle: string): string {
+  const lines = body.split("\n");
+  const idx = lines.findIndex((l) => l.trim().length > 0);
+  if (idx === -1) return body;
+  const match = lines[idx]!.match(/^(#{1,6}\s+)(.*)$/);
+  if (!match) return body;
+  const [, marker, text] = match;
+  if (!text!.includes(oldTitle)) return body;
+  lines[idx] = marker + text!.replace(oldTitle, newTitle);
+  return lines.join("\n");
+}
+
+// Changes only the mutable title (frontmatter title: + any heading echoing
+// it) in place. Never touches the filename — the slug is fixed at creation.
+export function retitleTicket(projectDir: string, id: string, newTitle: string): void {
+  const found = findTicketFile(projectDir, id);
+  if (!found) throw new Error(`Ticket ${id} not found`);
+
+  const content = readFileSync(found.path, "utf8");
+  const { frontmatter, body } = parseTicketFile(content);
+  const updatedBody = retitleHeading(body, frontmatter.title, newTitle);
+  const updated: TicketFrontmatter = { ...frontmatter, title: newTitle };
+  writeFileSync(found.path, serializeTicket(updated, updatedBody));
 }
 
 export function moveTicket(projectDir: string, id: string, newType: TicketType): void {

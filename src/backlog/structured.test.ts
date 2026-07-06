@@ -8,6 +8,8 @@ import {
   fillClosedCommit,
   generateSlug,
   readTicket,
+  retitleTicket,
+  ticketExists,
   writeTicket,
   listTickets,
   moveTicket,
@@ -617,4 +619,114 @@ test("fillClosedCommit: silently ignores missing ticket", () => {
   const dir = makeTmpDir();
   // Must not throw even when the ticket does not exist
   assert.doesNotThrow(() => fillClosedCommit(dir, "FG-NONEXISTENT", "anysha"));
+});
+
+// ----- FG-360: edit must never re-slug the filename -----
+
+function countFilesForId(dir: string, id: string): number {
+  let count = 0;
+  for (const sub of ["stories", "epics", "ideas", "done"]) {
+    const d = join(dir, "backlog", sub);
+    if (existsSync(d)) count += readdirSync(d).filter((f) => f.startsWith(`${id}-`)).length;
+  }
+  return count;
+}
+
+test("writeTicket: body-only update on a ticket whose frontmatter title diverged from its slug does not create a second file", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-600", title: "original title" }));
+  const before = readTicket(dir, "FG-600");
+
+  // Simulate title having drifted from the slug (e.g. hand-edited frontmatter),
+  // then a body-only edit — the historical bug re-slugged from the new title.
+  writeTicket(dir, { ...before, title: "a completely different title", body: "same body, new title" });
+
+  assert.equal(countFilesForId(dir, "FG-600"), 1, "exactly one file must exist for FG-600");
+  const result = readTicket(dir, "FG-600");
+  assert.equal(result.body.trim(), "same body, new title");
+});
+
+test("writeTicket: resolved path for a diverged-title ticket is the original file, not a title-derived one", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-601", title: "keep-this-slug" }));
+  const originalFiles = readdirSync(join(dir, "backlog", "stories"));
+
+  const ticket = readTicket(dir, "FG-601");
+  writeTicket(dir, { ...ticket, title: "totally unrelated new title", body: "edited body" });
+
+  const filesAfter = readdirSync(join(dir, "backlog", "stories"));
+  assert.deepEqual(filesAfter, originalFiles, "filename must be unchanged by a title/body update via writeTicket");
+});
+
+test("retitleTicket: updates frontmatter title in the single existing file", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-602", title: "old title" }));
+  retitleTicket(dir, "FG-602", "new title");
+
+  assert.equal(countFilesForId(dir, "FG-602"), 1, "exactly one file must exist for FG-602");
+  const result = readTicket(dir, "FG-602");
+  assert.equal(result.title, "new title");
+});
+
+test("retitleTicket: updates a heading in the body that echoes the old title", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-603", title: "old title", body: "### old title\n\nSome details." }));
+  retitleTicket(dir, "FG-603", "new title");
+
+  const result = readTicket(dir, "FG-603");
+  assert.equal(result.title, "new title");
+  assert.match(result.body, /^### new title/);
+  assert.doesNotMatch(result.body, /old title/);
+});
+
+test("retitleTicket: leaves body untouched when it has no title-echoing heading", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-604", title: "old title", body: "Just some prose, no heading." }));
+  retitleTicket(dir, "FG-604", "new title");
+
+  const result = readTicket(dir, "FG-604");
+  assert.equal(result.title, "new title");
+  assert.equal(result.body.trim(), "Just some prose, no heading.");
+});
+
+test("retitleTicket: never renames the file (slug stays fixed)", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-605", title: "keep-this-slug" }));
+  const before = readdirSync(join(dir, "backlog", "stories"));
+  retitleTicket(dir, "FG-605", "a wildly different title entirely");
+  const after = readdirSync(join(dir, "backlog", "stories"));
+  assert.deepEqual(after, before, "retitle must not change the filename");
+});
+
+test("retitleTicket: throws for unknown id", () => {
+  const dir = makeTmpDir();
+  assert.throws(() => retitleTicket(dir, "FG-999", "new title"), /not found/i);
+});
+
+test("ticketExists: true after writeTicket, false for unknown id", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-606" }));
+  assert.equal(ticketExists(dir, "FG-606"), true);
+  assert.equal(ticketExists(dir, "FG-NOPE"), false);
+});
+
+test("writeTicket: guard scenario — writing to an id that already exists on disk updates in place rather than duplicating", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-607", title: "first title" }));
+  assert.ok(ticketExists(dir, "FG-607"));
+
+  // A second writeTicket call for the same id (as edit performs) must land
+  // on the existing file, never create a duplicate with a title-derived name.
+  writeTicket(dir, makeTicket({ id: "FG-607", title: "second title", body: "updated" }));
+  assert.equal(countFilesForId(dir, "FG-607"), 1, "no duplicate file may be created for an id that already exists");
+});
+
+test("listTickets: regression — never double-counts a ticket after a body-only edit with a diverged title", () => {
+  const dir = makeTmpDir();
+  writeTicket(dir, makeTicket({ id: "FG-608", title: "original title" }));
+  const ticket = readTicket(dir, "FG-608");
+  writeTicket(dir, { ...ticket, title: "diverged title", body: "edited" });
+
+  const results = listTickets(dir).filter((t) => t.id === "FG-608");
+  assert.equal(results.length, 1, "list must not double-count FG-608");
 });
