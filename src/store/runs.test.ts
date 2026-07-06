@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import Database from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertRun, getRun, setRunProjectDir, listRunsForWorkspace } from "./runs.js";
-import type { Run } from "../types/index.js";
+import { insertRun, getRun, setRunProjectDir, listRunsForWorkspace, uniqueProjectDirs } from "./runs.js";
+import { insertTask } from "./tasks.js";
+import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -125,6 +126,58 @@ test("schema migration: existing DB without project_dir gets the column added on
     | undefined;
   assert.equal(row?.project_dir, null);
   legacy.close();
+});
+
+// ── uniqueProjectDirs / inFlightCount (FG-414) ──────────────────────────────
+// inFlightCount must agree with the dashboard's in-flight view: a run with
+// >= 1 non-terminal task, excluding orchestrator session rows. Plain
+// `status = 'active'` over-counted long-lived orchestrator rows and
+// un-reconciled/stuck runs whose tasks are all terminal.
+
+function mkTask(id: string, runId: string, status: Task["status"]): Task {
+  return {
+    id, runId, phase: "engineer", agentRole: "engineer", status,
+    taskPackage: { taskId: id, runId, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+    createdAt: "2026-05-08T00:00:00Z",
+  };
+}
+
+test("uniqueProjectDirs: inFlightCount counts a run with a non-terminal task", () => {
+  insertRun({ ...RUN, id: "run-live", projectDir: "/code/proj" });
+  insertTask(mkTask("t-live", "run-live", "running"));
+
+  const [agg] = uniqueProjectDirs();
+  assert.equal(agg!.projectDir, "/code/proj");
+  assert.equal(agg!.inFlightCount, 1);
+});
+
+test("uniqueProjectDirs: excludes an orchestrator session row even though its task is still 'running'", () => {
+  insertRun({ ...RUN, id: "run-orch", workflow: "orchestrator", projectDir: "/code/proj" });
+  insertTask(mkTask("t-orch", "run-orch", "running"));
+
+  const [agg] = uniqueProjectDirs();
+  assert.equal(agg!.inFlightCount, 0, "a long-lived orchestrator session must not inflate in-flight");
+});
+
+test("uniqueProjectDirs: excludes a stuck run (active, all tasks terminal) — un-reconciled orphans don't inflate in-flight", () => {
+  insertRun({ ...RUN, id: "run-stuck", projectDir: "/code/proj" });
+  insertTask(mkTask("t-stuck", "run-stuck", "failed"));
+
+  const [agg] = uniqueProjectDirs();
+  assert.equal(agg!.inFlightCount, 0);
+});
+
+test("uniqueProjectDirs: mixed project — counts only the genuinely in-flight run", () => {
+  insertRun({ ...RUN, id: "run-a", projectDir: "/code/proj" });
+  insertTask(mkTask("t-a", "run-a", "awaiting_gate"));
+  insertRun({ ...RUN, id: "run-b", workflow: "orchestrator", projectDir: "/code/proj" });
+  insertTask(mkTask("t-b", "run-b", "running"));
+  insertRun({ ...RUN, id: "run-c", projectDir: "/code/proj" });
+  insertTask(mkTask("t-c", "run-c", "complete"));
+
+  const [agg] = uniqueProjectDirs();
+  assert.equal(agg!.runCount, 3);
+  assert.equal(agg!.inFlightCount, 1, "only run-a has a non-terminal task on a non-orchestrator run");
 });
 
 test("schema migration: re-running the migration is a noop", () => {

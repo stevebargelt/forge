@@ -255,11 +255,65 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
   return incidents;
 }
 
+const TERMINAL_TASK_STATES = ["complete", "failed"];
+
+type StuckRunRow = { runId: string; taskIds: string };
+
+/** An active run whose tasks are ALL terminal (FG-414) — the inverse of
+ *  retry_orphan: instead of a pending task stranded under a terminal run, this
+ *  is a terminal-shaped run stranded under an active status. `forge next`'s
+ *  self-healing "mark complete when nothing's left to dispatch" check
+ *  (runNext.ts) only runs at the tail of an actual dispatch wave — if that
+ *  wave never reaches the check (a crash between the last task's terminal
+ *  write and the run-completion write) the run is left `active` forever with
+ *  no pending task and no container to progress it. Re-invoking `forge next`
+ *  doesn't self-heal it either: computeReadyQueue is empty, so it takes the
+ *  early-return path before ever reaching that check again. db-confirmed
+ *  (pure status join, mirrors detectRetryOrphan); repaired by `forge ops
+ *  repair <runId>` (autonomy "ask", same as retry_orphan). */
+export function detectStuckRun(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
+  const rows = db
+    .prepare(
+      `SELECT r.id AS runId, GROUP_CONCAT(t.id) AS taskIds
+       FROM runs r JOIN tasks t ON t.run_id = r.id
+       WHERE r.status = 'active'
+         AND (? IS NULL OR r.project_dir = ?)
+       GROUP BY r.id
+       HAVING SUM(CASE WHEN t.status IN (${TERMINAL_TASK_STATES.map(() => "?").join(",")}) THEN 0 ELSE 1 END) = 0`
+    )
+    .all(opts.projectDir ?? null, opts.projectDir ?? null, ...TERMINAL_TASK_STATES) as StuckRunRow[];
+
+  return rows.map((row) => {
+    const taskIds = row.taskIds.split(",");
+    return makeIncident({
+      kind: "stuck_run",
+      severity: "high",
+      confidence: "db-confirmed",
+      runId: row.runId,
+      taskId: null,
+      evidence: [
+        `run ${row.runId} is active but all ${taskIds.length} of its task(s) are terminal`,
+        `no pending task and no container can advance it: ${taskIds.join(", ")}`,
+      ],
+      recommendedAction: {
+        type: "repair",
+        autonomy: "ask",
+        command: `forge ops repair ${row.runId}`,
+        reason:
+          "an active run with only terminal tasks will never progress — forge next's self-healing completion check never got to run (likely an interrupted dispatch). `forge ops repair` marks it abandoned. `forge cancel " +
+          row.runId +
+          " --abandon-run` is the equivalent manual remediation. Autonomy is 'ask' — confirm before running.",
+      },
+    });
+  });
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
   detectReconcileCandidate,
   detectOrphanedWorkMayPersist,
+  detectStuckRun,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.

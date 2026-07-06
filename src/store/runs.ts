@@ -92,18 +92,31 @@ export type ProjectAggregate = {
   inFlightCount: number; // active or awaiting_gate runs
 };
 
+// FG-414: "in-flight" for this aggregate must agree with the dashboard's
+// in-flight view — a run with >= 1 non-terminal task, excluding orchestrator
+// session rows (`forge claude`'s long-lived session run/task, workflow ===
+// "orchestrator"; tracked separately via liveSessions/#153 heartbeats). Plain
+// `status = 'active'` over-counted: it included orchestrator rows that never
+// terminate on a crashed session, and stuck_run/un-reconciled orphans whose
+// tasks are all terminal despite the run row still saying active.
+const NON_TERMINAL_TASK_STATES = ["running", "awaiting_gate", "awaiting_red", "blocked_by_red"];
+
 export function uniqueProjectDirs(): ProjectAggregate[] {
   const rows = getDb().prepare(`
     SELECT
-      project_dir AS projectDir,
-      MAX(created_at) AS lastRunAt,
+      r.project_dir AS projectDir,
+      MAX(r.created_at) AS lastRunAt,
       COUNT(*) AS runCount,
-      SUM(CASE WHEN status IN ('active') THEN 1 ELSE 0 END) AS inFlightCount
-    FROM runs
-    WHERE project_dir IS NOT NULL AND project_dir != ''
-    GROUP BY project_dir
+      SUM(CASE WHEN r.status = 'active' AND r.workflow != 'orchestrator' AND EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.run_id = r.id
+              AND t.status IN (${NON_TERMINAL_TASK_STATES.map(() => "?").join(",")})
+          ) THEN 1 ELSE 0 END) AS inFlightCount
+    FROM runs r
+    WHERE r.project_dir IS NOT NULL AND r.project_dir != ''
+    GROUP BY r.project_dir
     ORDER BY lastRunAt DESC
-  `).all() as Array<{ projectDir: string; lastRunAt: string; runCount: number; inFlightCount: number }>;
+  `).all(...NON_TERMINAL_TASK_STATES) as Array<{ projectDir: string; lastRunAt: string; runCount: number; inFlightCount: number }>;
   return rows;
 }
 
