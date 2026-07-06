@@ -1,9 +1,11 @@
 ---
 id: FG-424
 type: story
-status: active
+status: done
 title: "Integration gate: distinguish real test failures from infra/platform failures in integration_failed classification + advice"
 created: 2026-07-01
+closed: 2026-07-06
+closed_commit: 0c778c53417dac8dcf391015e6e23a7646086948
 ---
 
 ## Problem
