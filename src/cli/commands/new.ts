@@ -26,7 +26,7 @@ export function registerNew(program: Command): void {
     .option("--project <path>", "project directory mounted at /project (default: cwd; persisted on run)")
     .option("--workspace <path>", "orchestrator's workspace dir (default: cwd). For per-workspace `forge status` filtering. Distinct from --project when an audit workspace targets external repos.")
     .option("--meta <json>", "extra run metadata as JSON")
-    .option("--ticket <id>", "FG-472: backlog ticket id backing this run (stored as run.metadata.ticketId); required for workflows with an authoritative shipping-reviewer")
+    .option("--ticket <id>", "FG-472: backlog ticket id backing this run (stored as run.metadata.ticketId); required for workflows with a shipping-reviewer red")
     .option("--auth-profile <name>", "inject a captured auth profile (#176) into browser-verify steps so they test the app authenticated")
     .option("--profile <name>", "AWN-7: pin every task in the run (primary/red/fanout) to a model profile (policy mode) — highest profile-selection precedence; no-op without model-policy.yml")
     .option("--route <key>", "#297: the route key you resolved via `forge route explain` — satisfies the dispatch preflight")
