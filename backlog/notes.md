@@ -1,27 +1,33 @@
-**Last session ended 2026-07-06 (autonomous batch + FG-473 + CI discussion).**
+**Last session: autonomous batch (2026-07-06) — FG-456/429/426/424/425/414/377/360/340.** 7 shipped, 2 deferred with captured specs, 1 follow-up filed.
 
-**Where we left off:** Finished the FG-473 fix and validated it live against the campaign it was wedging. Open question I posed and you haven't answered: whether to finish the campaign end-to-end (stash host-local files → `forge campaign reconcile` auto-captures the host gate → flips FG-472's item to `shipped`) for a fully-green campaign, OR leave it since FG-473 is already proven. Also mid-thread: a design discussion about moving the test suite to CI (filed as FG-474) to kill redundant host runs and the "nothing's happening" invisibility.
+**Shipped & closed (7):**
+- FG-429 (#44) — orchestrator seed: resolve route from policy, don't ask operator to adjudicate a policy-decisive route (+ decisive/ambiguous examples). Orchestrator-direct.
+- FG-426 (#45) — campaign policy: `integration_failed` classifies as item-scoped `scope`, not the `campaign_system` default. Ran INSIDE the campaign.
+- FG-424 (#46) — integration gate distinguishes infra/platform failures (timeout/signal-kill) from real test failures: new `integration_gate_timeout` (retryable) / `integration_gate_crashed` (non-retryable, SHARED infrastructure) kinds, structural process-evidence only (no content-matching), fail-closed. Full pipeline INSIDE the campaign; post-merge I fixed a build-red finding (show.ts next-command guidance) + dispositioned an over-strict review-loop finding (documented false-negative bound).
+- FG-414 (#47) — ops check detects stuck active-run/all-terminal-tasks orphans + `ops repair` for them; projects-show/dashboard in-flight count reconciled. Direct exec (review-loop caught+fixed a real liveness-coercion bug).
+- FG-377 (#48) — persistence-check bounded settle/retry window (macOS mount-sync false-positive). Direct exec.
+- FG-360 (#49) — `forge backlog retitle` verb + edit no longer re-slugs/orphans the file. Direct exec (removed a fixer over-correction that violated the no-move AC).
+- FG-340 (#50) — test-engineer seed reworded so it writes durable test files and does NOT git commit (commit is orchestrator closeout). Direct exec (documentation-maintainer). NOTE: run `forge upgrade` (or install-seeds) to propagate the reworded seed into ~/.forge/agents/ so future test-engineer invokes pick it up.
+
+**Deferred (open, with captured analysis — NOT started/partial):**
+- FG-456 (autonomous mode) — architecture pass returned INFERABLE with a full 5-slice decomposition (saved `notes/fg456-architecture-decomposition-2026-07-05.json`). Recommended: persisted `autonomous` attr on Campaign (not a new command), reusing the reserved `human_decision` BlockerKind. **Slice D (executor wiring) changes the autonomous-self-merge governance policy + is a self-modification/bootstrap hazard → warrants HUMAN PR review, not autonomous self-merge.** Deferred implementation to an attended session; the hard part (decomposition) is delivered.
+- FG-425 (per-projectDir gate locking) — 2 architect rounds + reds produced a COMPLETE spec (saved `notes/fg425-architecture-spec-2026-07-06.json`): a projectDir-keyed HYBRID lock = in-process async mutex (for runNext's Promise.all wave concurrency + the campaign-executor no-run-lock path) + cross-process file lock, canonical projectDir key, held across merge→gate→finalize at all 4 runNext.ts sites, deterministic release. Deferred: data-integrity concurrency where a half-right lock is worse than none; needs a focused session with HOST STRESS-LOOP validation (100x+).
+
+**Campaign vs direct (which ran where):** Campaign `campaign-e89beee993ec` (sequential, per-item lanes) shipped FG-426 (quick) + FG-424 (full_feature) INSIDE it. FG-429 was orchestrator-direct (no container lane). FG-425 was deferred by rejecting its architect gate — which WEDGED the sequential campaign (item stuck `awaiting_gate` over a failed run; resume re-park-looped and never advanced to independent items; required a manual process-kill). Recovery: killed the resume process tree, paused, then ran FG-414/377/360/340 via DIRECT execution (invoke → review-loop → PR → merge → close). Campaign then ABANDONED (all its work resolved).
+
+**Backlog delta:**
+- Closed (7): FG-429, FG-426, FG-424, FG-414, FG-377, FG-360, FG-340.
+- Opened (1): **FG-475** — "Campaign wedges on an operator-deferred full_feature item" (met threshold: campaign-runner correctness + operator pain — a sequential campaign can't advance past a rejected/failed full_feature item; recovery is a manual kill). Durable evidence of the wedge; the campaign-runner limitation, not an FG-425 issue.
+- Left open (2, deferred): FG-456, FG-425 (specs captured, above).
+
+**Tests/reviews:** every implementation ticket went through the bounded review-loop (red-wide + fixer) or the full pipeline reds; host `npm run test:all` green per-item and a final aggregate run on main (de5631e). Review-loops caught real bugs (FG-414 liveness coercion; FG-424 next-command guidance) that were fixed before merge.
+
+**Autonomous decisions:** all "would-have-asked" calls journaled in `notes/autonomous-session-2026-07-05d.md` (D1–D12: execution-surface decomposition, FG-429/FG-456 bypass rationale, gate dispositions incl. FG-424 architect advance + plan request-changes for fanout-safety + build force-advance, FG-425 defer, campaign bypass). Deferred review notes (below the filing threshold, NOT filed) are in that journal's "Deferred review notes" section (FG-426 campaign-runner-plan.md staleness — resolved by FG-424 docs phase; FG-414 dashboard `awaiting_human_input` dead code per FORGE-DEC-020).
+
+**Blockers:** none active. FG-425 and FG-456 need attended sessions (concurrency stress-loop / governance-slice human review, respectively).
 
 **Picked up next:**
-1. **Decide the campaign-validation thread (NOT a ticket):** campaign `campaign-2753b15667d7` is paused with FG-472's item at `awaiting_gate`. FG-473's fix removed the Fact-5 wedge (refusal dropped from `[lane_evidence_missing, run_evidence:no_authoritative_verdict...]` to `[lane_evidence_missing]` only — proven). To flip the item to `shipped`, stash the untracked host-local files (reconcile's FG-440 auto-capture correctly skips a dirty tree) then `forge campaign reconcile campaign-2753b15667d7`. Optional polish; the fix is already validated.
-2. **FG-474** (active) — CI (GitHub Actions) for the suite + wire into the merge gate. Directly fixes the redundant-host-run + invisible-verification pain raised this session. Body has the design + open questions (should the review-loop stop running host verification and defer to CI; dashboard CI-status surfacing).
-3. **FG-451** (active) — the deferred stretch item (prune/cap host_verifications rows). Highest-risk (trust-store row deletion; must preserve FG-440/FG-453 passing-row + audit-history semantics). Safe-prune approach is in the decision journal.
-
-**External state to remember:**
-- Campaign `campaign-2753b15667d7` is PAUSED and now un-wedgeable, but its items FG-431/444/454 are `pending`-in-campaign yet already shipped OUTSIDE it, and FG-451 is deferred. **Do NOT `forge campaign resume`** — it would re-dispatch already-shipped work. Use reconcile-only (per thread 1) or abandon it when done.
-- Decision journal for this session: `notes/autonomous-session-2026-07-05c.md` (16 decisions, host-local, uncommitted per FG-380). Deferred review-notes recorded there (not filed): status.ts:56 hint, FG-431 pre-existing non-canonical rows, forge-test tier-flag footgun.
-- Host-local uncommitted (leave as-is): `notes/`, `docs/autonomous-run-prompt.md`.
-
-**Decisions worth not relitigating:**
-- Campaign was the planned execution surface but WEDGED at item 0 (the FG-473 gap); everything after FG-472's dispatch ran as orchestrator-driven direct execution. FG-473 now fixes the wedge for future campaigns.
-- Redundant host test runs: the review-loop already runs root suite + typecheck green on the merge HEAD, so after a clean review-loop pass the orchestrator should run ONLY the dashboard suite (`npm test -w dashboard`), not a fresh full `test:all`. (Superseded entirely if FG-474/CI lands.)
-- FG-451 deferred by design (stretch + persistence risk + deep-session context) — reopen-and-finish, not a follow-up.
-- On this host: tracked `run_in_background` for long review-loops/invokes gets KILLED (~2.5min) and orphans the container — use the double-fork daemonizer (`scratchpad/daemonize.py`) + Monitor on the pidfile. Run host `test:all` under the project node directly, NOT `bash -lc` (login-shell nvm default = v131, breaks better-sqlite3 v137 ABI).
-
-**Shipped (for reference):**
-- FG-472 (#38, +#42 help-text) — `forge new feature --ticket` + fail-fast for any shipping-reviewer red.
-- FG-431 (#39) — reconcile inconclusive-refusal label + projectDir canonicalization.
-- FG-444 (#40) — per-item out-of-band eligibility in campaign show/report.
-- FG-454 (#41) — docs: host-verification row effective scope is a commit range.
-- FG-473 (#43) — invoke-lane out-of-band items can complete via reconcile/resume (validated live).
-- Filed: FG-474 (CI/visibility). Deferred: FG-451.
+1. **FG-475** (active) — fix the campaign-runner wedge (advance past a rejected/failed full_feature item; a `campaign skip` verb or resume auto-handling the terminal-failed run). Unblocks clean operator-deferral of campaign items.
+2. **FG-425** (active) — implement the captured hybrid-lock spec (`notes/fg425-architecture-spec-2026-07-06.json`) WITH host stress-loop validation. Highest data-integrity value; needs focus.
+3. **FG-456** (active) — implement autonomous mode per the captured decomposition (`notes/fg456-architecture-decomposition-2026-07-05.json`); slice D (executor wiring) gets HUMAN PR review, not autonomous self-merge.
+4. Housekeeping: `forge upgrade` to propagate the FG-340 reworded test-engineer seed into ~/.forge.
