@@ -1,9 +1,11 @@
 ---
 id: FG-473
 type: story
-status: active
+status: done
 title: "campaign reconcile: quick_implementation (invoke-lane) code items can never complete — Fact-5 folding blocks 'no authoritative verdict at all', not just an unresolved fail"
 created: 2026-07-06
+closed: 2026-07-06
+closed_commit: c7ec3e1
 ---
 
 ## Problem (found live, campaign-2753b15667d7, 2026-07-06)
