@@ -47,7 +47,7 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
@@ -323,9 +323,23 @@ async function dispatchSingleStep(args: {
   // Find or create a pending task row for this step. If a pending row exists
   // (e.g. from request-changes), reuse it; otherwise create fresh. Reuse only
   // applies to primary (non-child) dispatch — fanout children are always fresh.
+  //
+  // FG-476: when the phase has no pending parentId===undefined primary — the
+  // normal case once a phase's primary has already completed — fall back to a
+  // pending on_reject recovery row (marker-tagged via isOnRejectRecoveryTask)
+  // scoped to this phase. This is computeReadyQueue's admission exception
+  // reaching dispatch: a gate reject whose on_reject targets an already-complete
+  // step leaves exactly this shape (complete primary + pending recovery task).
+  // Reuse the recovery row's OWN id/parentId — never rewrite it to a fresh
+  // parentId===undefined primary, which would sever the rejectedTaskId lineage
+  // and duplicate the phase's primary. A fanout/red child (parentId-tagged,
+  // no marker) never matches isOnRejectRecoveryTask, so it's never picked up here.
+  const phaseTasks = args.parentId === undefined ? tasksForRun(args.runId) : [];
   const existing = args.parentId === undefined
-    ? tasksForRun(args.runId).find(
+    ? phaseTasks.find(
         (t) => t.phase === phase && t.status === "pending" && t.parentId === undefined
+      ) ?? phaseTasks.find(
+        (t) => t.phase === phase && t.status === "pending" && isOnRejectRecoveryTask(t)
       )
     : undefined;
   const taskId = existing?.id ?? newTaskId(phase);
@@ -348,6 +362,9 @@ async function dispatchSingleStep(args: {
   // freshly-derived upstream layer on top and win on shared keys. A fresh
   // dispatch has no carried inputs, so this is a no-op there.
   const carried = (existing?.taskPackage?.inputs as Record<string, unknown> | undefined) ?? {};
+  // This merge (and the taskPackage built from it below) is dispatch-time-only:
+  // on a reuse, it drives the live container's inputs but is never written back
+  // to the task's DB row (no reuse path here calls updateTaskPackageInputs).
   const inputs: Record<string, unknown> = { ...carried, ...args.runMetadata, upstream };
   // Control-plane metadata (designDir/authProfile/modelProfile/workspace) lives
   // at the mount / policy / scoping layer — never expose it as an input value,

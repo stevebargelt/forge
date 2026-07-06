@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeReadyQueue, isRunSettled } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
 import type { Task, TaskPackage } from "../types/index.js";
 
@@ -405,4 +405,70 @@ test("isRunSettled: cross-step on_reject (audit->investigate, different phase) =
     false,
     "a live pending on_reject recovery task in a different phase from its rejected parent must keep the run active",
   );
+});
+
+// ----- FG-476: a live on_reject recovery task must actually be dispatchable -----
+// FG-475 fixed isRunSettled so the run doesn't wrongly finalize while a recovery
+// task is pending. But computeReadyQueue's "complete primary => skip" rule (line
+// 45 above) never had a matching exception, so that same pending recovery task
+// was ALSO never admitted to the ready queue — a permanent hang: correctly
+// "active" forever, never dispatched. These tests assert the admission exception.
+
+test("computeReadyQueue: phase with a COMPLETE primary PLUS a PENDING rejectedTaskId-marked task IS admitted (FG-476)", () => {
+  const wf = mkWorkflow([
+    { id: "investigate", agent: "investigate", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "audit", agent: "audit", gate: "human", manual: false, depends_on: ["investigate"], on_reject: "investigate", runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-investigate-1", phase: "investigate", status: "complete" }),
+    mkTask({ id: "t-audit-1", phase: "audit", status: "failed" }),
+    mkTask({
+      id: "t-investigate-2",
+      phase: "investigate",
+      parentId: "t-audit-1",
+      status: "pending",
+      inputs: { rejectedTaskId: "t-audit-1", rejectedRationale: "scope too narrow" },
+    }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(
+    ready.map((s) => s.id),
+    ["investigate"],
+    "the pending recovery task must make 'investigate' ready again despite its complete primary",
+  );
+});
+
+test("computeReadyQueue: phase with a COMPLETE primary plus a fanout/red child (parentId-tagged, NO rejectedTaskId marker) is still NOT admitted (FG-476 hard constraint)", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-build-1", phase: "build", status: "complete" }),
+    // Red reviewer child — parentId-tagged, same phase, but carries no
+    // rejectedTaskId marker. Must NOT be mistaken for a recovery task.
+    mkTask({ id: "t-build-1-red1", phase: "build", parentId: "t-build-1", status: "pending" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(
+    ready.map((s) => s.id),
+    [],
+    "a pending fanout/red child must never re-admit a phase with a complete primary",
+  );
+});
+
+test("isOnRejectRecoveryTask: true only for a parentId-tagged task carrying rejectedTaskId", () => {
+  const recovery = mkTask({
+    id: "t-recovery",
+    phase: "investigate",
+    parentId: "t-audit-1",
+    status: "pending",
+    inputs: { rejectedTaskId: "t-audit-1", rejectedRationale: "why" },
+  });
+  assert.equal(isOnRejectRecoveryTask(recovery), true);
+
+  const redChild = mkTask({ id: "t-red", phase: "build", parentId: "t-build-1", status: "pending" });
+  assert.equal(isOnRejectRecoveryTask(redChild), false, "fanout/red child without the marker is not a recovery task");
+
+  const primary = mkTask({ id: "t-primary", phase: "build", status: "pending" });
+  assert.equal(isOnRejectRecoveryTask(primary), false, "a parentId===undefined primary is never a recovery task");
 });

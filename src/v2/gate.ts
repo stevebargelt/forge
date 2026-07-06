@@ -31,7 +31,7 @@ import { loadWorkflow } from "./loader.js";
 import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
-import { isRunSettled } from "./ready-queue.js";
+import { isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -186,39 +186,69 @@ export async function gate(
             `step '${step.id}' on_reject references unknown step '${step.on_reject}'`,
           );
         }
-        // Insert a fresh pending task in the on_reject step. The runner's
-        // ready-queue will pick it up. Inject the rejection rationale into
-        // inputs so the on_reject agent has context.
-        const newId = newTaskId(targetStep.id);
-        const tp: TaskPackage = {
-          taskId: newId,
-          runId: task.runId,
-          phase: targetStep.id,
-          role: targetStep.agent ?? task.agentRole,
-          inputs: {
+
+        // Dedup: if a pending on_reject recovery row already exists in the
+        // target phase, update its rejectedRationale/rejectedTaskId lineage
+        // inputs instead of inserting a second row — mirrors the
+        // request-changes dedup below. Two pending recovery rows in the same
+        // phase would silently orphan the newer rationale (FG-476).
+        const existingRecovery = tasksForRun(task.runId).find(
+          (t) => t.phase === targetStep.id && t.status === "pending" && isOnRejectRecoveryTask(t),
+        );
+
+        if (existingRecovery) {
+          updateTaskPackageInputs(existingRecovery.id, {
+            ...existingRecovery.taskPackage.inputs,
             rejectedRationale: rationale ?? "",
             rejectedTaskId: taskId,
-          },
-          composedSystemPrompt: "",
-        };
-        const newTask: Task = {
-          id: newId,
-          runId: task.runId,
-          parentId: taskId,
-          phase: targetStep.id,
-          agentRole: targetStep.agent ?? task.agentRole,
-          agentAlias: targetStep.activity,
-          status: "pending",
-          taskPackage: tp,
-          createdAt: nowIso(),
-        };
-        insertTask(newTask);
-        logEvent("task.created", {
-          runId: run.id,
-          taskId: newId,
-          payload: { from: "reject->on_reject" },
-        });
-        nextTasks = [newTask];
+          });
+          const updatedRecovery = getTask(existingRecovery.id);
+          if (!updatedRecovery) {
+            throw new Error(
+              `reject->on_reject dedup: task ${existingRecovery.id} vanished after updateTaskPackageInputs`,
+            );
+          }
+          logEvent("gate.decided", {
+            runId: run.id,
+            taskId: existingRecovery.id,
+            payload: { decision: "reject-on_reject-dedup", rationale },
+          });
+          nextTasks = [updatedRecovery];
+        } else {
+          // Insert a fresh pending task in the on_reject step. The runner's
+          // ready-queue will pick it up. Inject the rejection rationale into
+          // inputs so the on_reject agent has context.
+          const newId = newTaskId(targetStep.id);
+          const tp: TaskPackage = {
+            taskId: newId,
+            runId: task.runId,
+            phase: targetStep.id,
+            role: targetStep.agent ?? task.agentRole,
+            inputs: {
+              rejectedRationale: rationale ?? "",
+              rejectedTaskId: taskId,
+            },
+            composedSystemPrompt: "",
+          };
+          const newTask: Task = {
+            id: newId,
+            runId: task.runId,
+            parentId: taskId,
+            phase: targetStep.id,
+            agentRole: targetStep.agent ?? task.agentRole,
+            agentAlias: targetStep.activity,
+            status: "pending",
+            taskPackage: tp,
+            createdAt: nowIso(),
+          };
+          insertTask(newTask);
+          logEvent("task.created", {
+            runId: run.id,
+            taskId: newId,
+            payload: { from: "reject->on_reject" },
+          });
+          nextTasks = [newTask];
+        }
       }
     })();
     // A rejected gate with no on_reject leaves this step terminally failed with

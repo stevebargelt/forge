@@ -2189,3 +2189,123 @@ steps:
   const runAfterRecoveryCompletes = getRun(runId);
   assert.equal(runAfterRecoveryCompletes!.status, "complete");
 });
+
+// ----- FG-476: the live on_reject recovery task must actually be dispatchable -----
+// FG-475's fix above keeps the run "active" instead of finalizing while a
+// recovery task sits pending in an already-complete phase. But nothing made
+// that pending task actually DISPATCH — computeReadyQueue skipped its phase
+// (complete primary) and dispatchSingleStep's pending-row reuse lookup only
+// matched parentId===undefined rows, so the recovery task was permanently
+// stuck pending. These tests assert the dispatch-side fix directly.
+
+test("runNext: FG-476 a pending on_reject recovery row in an already-complete phase is dispatched by reusing that exact row, not minting a fresh primary", async () => {
+  const { insertTask } = await import("../store/tasks.js");
+  const wf: Workflow = {
+    name: "test-fg476-recovery-reuse",
+    description: "investigate/audit on_reject shape (security-audit.yml twin)",
+    inputs: [],
+    steps: [
+      { id: "investigate", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+      { id: "audit", agent: "test-agent", gate: "human", manual: false, depends_on: ["investigate"], on_reject: "investigate", runtime: "claude", reds: [] },
+    ],
+  };
+  const { runId } = startRun({ workflow: wf, title: "fg476 recovery reuse", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+
+  // Post-reject shape: 'investigate' already has a complete primary from its
+  // first run; 'audit' was gate-rejected (terminally failed, no replacement);
+  // gate.ts's reject->on_reject branch left a fresh pending recovery task
+  // parented to the rejected 'audit' task, in the 'investigate' phase.
+  insertTask({
+    id: "t-investigate-1", runId, phase: "investigate", agentRole: "test-agent", status: "complete",
+    taskPackage: { taskId: "t-investigate-1", runId, phase: "investigate", role: "test-agent", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+  insertTask({
+    id: "t-audit-1", runId, phase: "audit", agentRole: "test-agent", status: "failed", error: "rejected by gate",
+    taskPackage: { taskId: "t-audit-1", runId, phase: "audit", role: "test-agent", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+  insertTask({
+    id: "t-investigate-recovery", runId, parentId: "t-audit-1", phase: "investigate", agentRole: "test-agent", status: "pending",
+    taskPackage: {
+      taskId: "t-investigate-recovery", runId, phase: "investigate", role: "test-agent",
+      inputs: { rejectedTaskId: "t-audit-1", rejectedRationale: "scope too narrow, re-investigate" },
+      composedSystemPrompt: "",
+    },
+    createdAt: new Date().toISOString(),
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  const wave = await runNext({ runId, workflow: wf, dockerExec: stub });
+
+  assert.deepEqual(
+    wave.dispatchedSteps,
+    ["investigate"],
+    "the recovery task's phase must be picked up by the ready queue and dispatched — this is the core FG-476 regression",
+  );
+
+  const investigateTasks = tasksForRun(runId).filter((t) => t.phase === "investigate");
+  assert.equal(
+    investigateTasks.length,
+    2,
+    "exactly the original complete primary + the reused recovery row — no third (duplicate parentId=undefined) task minted",
+  );
+
+  const recovery = getTask("t-investigate-recovery")!;
+  assert.notEqual(recovery.status, "pending", "the recovery task must have actually been dispatched, not left pending");
+  assert.equal(
+    recovery.parentId,
+    "t-audit-1",
+    "lineage to the rejected task must be preserved — never rewritten to parentId=undefined",
+  );
+  assert.equal(recovery.taskPackage.inputs["rejectedTaskId"], "t-audit-1", "rejectedTaskId marker must survive dispatch");
+  assert.equal(
+    recovery.taskPackage.inputs["rejectedRationale"],
+    "scope too narrow, re-investigate",
+    "rejectedRationale must survive dispatch",
+  );
+
+  // 'audit' itself must never be auto-resubmitted by this fix — recovery re-runs
+  // 'investigate', not 'audit'. Its terminally-failed gate-reject row is untouched.
+  const auditTask = getTask("t-audit-1")!;
+  assert.equal(auditTask.status, "failed", "audit's reject decision must remain the audit trail — never re-run by this fix");
+});
+
+test("runNext: FG-476 a fanout/red child (parentId-tagged, no rejectedTaskId marker) in an already-complete phase is never dispatched as a primary", async () => {
+  const { insertTask } = await import("../store/tasks.js");
+  const wf: Workflow = {
+    name: "test-fg476-no-fanout-reuse",
+    description: "complete primary + pending red/fanout child, no marker",
+    inputs: [],
+    steps: [
+      { id: "build", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    ],
+  };
+  const { runId } = startRun({ workflow: wf, title: "fg476 no fanout reuse", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
+
+  insertTask({
+    id: "t-build-1", runId, phase: "build", agentRole: "test-agent", status: "complete",
+    taskPackage: { taskId: "t-build-1", runId, phase: "build", role: "test-agent", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+  // A red reviewer / fanout child: parentId-tagged, same phase, but carries NO
+  // rejectedTaskId marker. Must never be mistaken for a live recovery task.
+  insertTask({
+    id: "t-build-1-red1", runId, parentId: "t-build-1", phase: "build", agentRole: "test-agent", status: "pending",
+    taskPackage: { taskId: "t-build-1-red1", runId, phase: "build", role: "test-agent", inputs: {}, composedSystemPrompt: "" },
+    createdAt: new Date().toISOString(),
+  });
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("nothing should be dispatched — 'build' has a complete primary and no live recovery task");
+  };
+  const wave = await runNext({ runId, workflow: wf, dockerExec: throwingExec });
+
+  assert.deepEqual(wave.dispatchedSteps, [], "a fanout/red child without the marker must not re-admit the phase to the ready queue");
+
+  const buildTasks = tasksForRun(runId).filter((t) => t.phase === "build");
+  assert.equal(buildTasks.length, 2, "no fresh parentId=undefined primary must be minted alongside the existing complete primary + child");
+
+  const child = getTask("t-build-1-red1")!;
+  assert.equal(child.status, "pending", "the red/fanout child is untouched — never reused or dispatched as a primary by this fix");
+});

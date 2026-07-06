@@ -202,6 +202,22 @@ export const WorkflowSchema = z
           message: `step '${step.id}' on_reject references unknown step '${step.on_reject}'`,
         });
       }
+      // FG-476/FG-478: dispatchFanoutStep's existingParent lookup has no
+      // recovery-row reuse (unlike dispatchSingleStep's), so an on_reject
+      // targeting a fanout step reproduces the duplicate-primary hang FG-476
+      // fixed for single-agent steps. Real recovery-into-fanout semantics
+      // (re-expansion, child identity, parent aggregation) are out of scope
+      // here — fail fast at validation instead.
+      if (step.on_reject && ids.has(step.on_reject)) {
+        const targetStep = wf.steps.find((s) => s.id === step.on_reject);
+        if (targetStep?.fanout) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["steps"],
+            message: `step '${step.id}' has on_reject: '${step.on_reject}', but '${step.on_reject}' is a fanout step; on_reject recovery into a fanout step is not supported (tracked in FG-478)`,
+          });
+        }
+      }
       if (step.fanout && !ids.has(step.fanout.from_upstream.step)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

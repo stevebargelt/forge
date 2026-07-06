@@ -128,6 +128,33 @@ test("Workflow: on_reject referencing unknown step is rejected", () => {
   assert.match(JSON.stringify(r.error!.issues), /on_reject references unknown step 'nope'/);
 });
 
+// FG-476/FG-478: dispatchFanoutStep has no recovery-row reuse, so on_reject
+// targeting a fanout step would reproduce the duplicate-primary hang FG-476
+// fixed for single-agent steps. Fail fast at validation instead of at runtime.
+test("Workflow: on_reject targeting a fanout step is rejected", () => {
+  const r = WorkflowSchema.safeParse({
+    ...minimalWorkflow,
+    steps: [
+      { id: "plan", agent: "tech-lead", gate: "human" },
+      {
+        id: "build",
+        agent: "engineer",
+        depends_on: ["plan"],
+        gate: "human",
+        fanout: {
+          from_upstream: { step: "plan", array_key: "steps", input_key: "step" },
+        },
+      },
+      { id: "review", agent: "reviewer", depends_on: ["build"], gate: "human", on_reject: "build" },
+    ],
+  });
+  assert.ok(!r.success);
+  const messages = JSON.stringify(r.error!.issues);
+  assert.match(messages, /step 'review' has on_reject: 'build'/);
+  assert.match(messages, /'build' is a fanout step/);
+  assert.match(messages, /FG-478/);
+});
+
 test("Workflow: fanout referencing unknown step is rejected", () => {
   const r = WorkflowSchema.safeParse({
     ...minimalWorkflow,

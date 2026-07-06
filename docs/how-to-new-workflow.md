@@ -96,7 +96,7 @@ When a human rejects a gate step — either overriding a `verdict` result or exp
 
 In `security-audit`, rejecting the `audit` gate returns to `investigate`. The reviewer's rejection message tells the investigator where to dig deeper — a different surface, a missed dependency — without starting a new run from scratch.
 
-`on_reject` must name an existing step id. The loader validates this; a typo is a schema error at load time, not a silent runtime no-op.
+`on_reject` must name an existing step id. The loader validates this; a typo is a schema error at load time, not a silent runtime no-op. It cannot target a `fanout` step: recovery into a fanout has no defined re-expansion/child-identity semantics, so the schema rejects such a workflow at load time (FG-478).
 
 ### Step 4: ensure the agent dirs exist
 
@@ -157,6 +157,6 @@ The upstream agent (here, `tech-lead`) must emit the discipline field on each el
 - Each step can carry `workflow_additions` — phase-specific framing appended to the agent's base `CLAUDE.md`.
 - A step can have `gate: "human" | "verdict" | "auto" | "none"` — see `docs/concepts.md`.
 - `gate: verdict` requires at least one red (enforced by the schema). All `authority: authoritative, gate_on_verdict: true` reds must pass for the gate to advance.
-- `on_reject: <step-id>` routes a rejected gate back to a named upstream step instead of aborting. Valid on any step type; the target must be an existing step id.
+- `on_reject: <step-id>` routes a rejected gate back to a named upstream step instead of aborting. The target must be an existing step id and must not be a `fanout` step (rejected at load time — see Step 3).
 - Steps declare dependencies via `depends_on: [step-id, ...]`. The runner dispatches in topological order; the schema rejects cycles.
 - A step can be `manual: true` — no agent runs, the human submits artifacts via `forge submit`. Manual steps must have `gate: human`, no reds, and no fanout. See `feature-ui-design-needed.yml` for an example.
