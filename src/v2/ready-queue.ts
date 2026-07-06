@@ -71,3 +71,112 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
 function hasCompletePrimary(tasks: Task[]): boolean {
   return tasks.some((t) => t.parentId === undefined && COMPLETE_LIKE.has(t.status));
 }
+
+// Shared "is this run settled" reachability check, consumed identically by
+// gate.ts's finalizeRunIfDone (advance AND reject branches) and runNext.ts's
+// two independent "is the run done" checks. A run is settled when every step
+// is either COMPLETE (has a complete primary) or permanently BLOCKED
+// (unreachable — its only primary(s) are terminally failed with no pending
+// replacement, or a dependency is itself permanently blocked). Any step still
+// ACTIVE (has a pending/running/awaiting_gate/awaiting_red/blocked_by_red
+// primary, or is dispatchable right now because its deps are all complete but
+// it has no task row yet) means the run still has outstanding work.
+//
+// This recursive definition is what "any complete primary" in computeReadyQueue
+// above is missing: computeReadyQueue only asks "is this ONE step ready to
+// dispatch right now" — it has no notion of "will this step EVER be ready,
+// transitively". A step whose dependency failed terminally is never ready and
+// never gets a task row, so a naive "does every step have a task row" check
+// (the pre-fix behavior) waits forever. isRunSettled instead asks "is there
+// any step that could still produce a task row or is waiting on a human", and
+// treats a step downstream of a terminally-failed dependency as unreachable
+// rather than pending.
+type StepSettleState = "complete" | "active" | "blocked";
+
+export function isRunSettled(workflow: Workflow, tasks: Task[]): boolean {
+  const states = computeStepSettleStates(workflow, tasks);
+  for (const state of states.values()) {
+    if (state === "active") return false;
+  }
+  return true;
+}
+
+function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string, StepSettleState> {
+  const tasksByPhase = new Map<string, Task[]>();
+  // gate.ts's reject->on_reject path inserts a fresh recovery task whose
+  // parentId is the REJECTED task's id — lineage ("who rejected me"), not
+  // fanout ("who spawned me as a child"). Phase equality can't distinguish the
+  // two: a self-referencing on_reject (on_reject === step.id, schema-legal —
+  // schema.ts only checks the target step exists) puts the recovery task in
+  // the SAME phase as the primary it's recovering, indistinguishable by phase
+  // from a red/fanout child. Instead key off the explicit marker gate.ts
+  // stamps on every on_reject recovery task's inputs (see gate.ts's reject
+  // branch): only a recovery task carries `rejectedTaskId`. A parentId-tagged
+  // task without that marker is a genuine fanout/red child and is ignored.
+  const recoveryTasksByPhase = new Map<string, Task[]>();
+  for (const t of tasks) {
+    if (t.parentId !== undefined) {
+      const isOnRejectRecovery = t.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
+      if (!isOnRejectRecovery) continue; // red/fanout child — ignore
+      const arr = recoveryTasksByPhase.get(t.phase) ?? [];
+      arr.push(t);
+      recoveryTasksByPhase.set(t.phase, arr);
+      continue;
+    }
+    const arr = tasksByPhase.get(t.phase) ?? [];
+    arr.push(t);
+    tasksByPhase.set(t.phase, arr);
+  }
+  const stepsById = new Map(workflow.steps.map((s) => [s.id, s]));
+  const states = new Map<string, StepSettleState>();
+
+  function resolve(stepId: string): StepSettleState {
+    const cached = states.get(stepId);
+    if (cached) return cached;
+    // Cycle defensive-guard (schema already forbids cycles, but never hang here).
+    states.set(stepId, "active");
+
+    const step = stepsById.get(stepId);
+    const primaries = tasksByPhase.get(stepId) ?? [];
+    const recoveryTasks = recoveryTasksByPhase.get(stepId) ?? [];
+
+    let state: StepSettleState;
+    if (recoveryTasks.some((t) => t.status !== "failed" && !COMPLETE_LIKE.has(t.status))) {
+      // A live (pending/running/...) on_reject recovery task targeting this
+      // phase — even when the phase already has a complete primary left over
+      // from before the reject. There is real outstanding work here again.
+      state = "active";
+    } else if (hasCompletePrimary(primaries)) {
+      state = "complete";
+    } else if (primaries.some((t) => t.status !== "failed")) {
+      // A live primary — pending (fresh dispatch or retry replacement), running,
+      // awaiting_gate, awaiting_red, or blocked_by_red — means there is still
+      // work in flight or a human decision outstanding. Not settled.
+      state = "active";
+    } else if (!step) {
+      state = "active";
+    } else {
+      // No primary rows yet, or only terminally-failed primaries with no
+      // pending replacement. Reachability now depends entirely on deps.
+      const depStates = step.depends_on.map((depId) => resolve(depId));
+      if (depStates.some((s) => s === "blocked")) {
+        // A dep is permanently unreachable ⇒ this step can never dispatch either.
+        state = "blocked";
+      } else if (depStates.every((s) => s === "complete")) {
+        state = primaries.length === 0
+          ? "active" // deps satisfied, no task row yet ⇒ ready-queue will dispatch it
+          : "blocked"; // deps satisfied but this step's own primary(s) are terminally failed
+      } else {
+        // Some dep is still active (in progress) — this step's fate isn't
+        // determined yet, but the run is already not-settled because of that dep.
+        state = "active";
+      }
+    }
+
+    states.set(stepId, state);
+    return state;
+  }
+
+  for (const step of workflow.steps) resolve(step.id);
+  return states;
+}

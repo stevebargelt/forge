@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeReadyQueue } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
 import type { Task, TaskPackage } from "../types/index.js";
 
@@ -31,6 +31,7 @@ function mkTask(opts: {
   parentId?: string;
   createdAt?: string;
   agentRole?: string;
+  inputs?: TaskPackage["inputs"];
 }): Task {
   return {
     id: opts.id,
@@ -39,7 +40,7 @@ function mkTask(opts: {
     phase: opts.phase,
     agentRole: opts.agentRole ?? "test-agent",
     status: opts.status,
-    taskPackage: STUB_TP,
+    taskPackage: opts.inputs ? { ...STUB_TP, inputs: opts.inputs } : STUB_TP,
     createdAt: opts.createdAt ?? "2026-05-13T00:00:00.000Z",
   };
 }
@@ -220,4 +221,188 @@ test("computeReadyQueue: legit retry (old failed + new pending, NO complete) sti
   ];
   const ready = computeReadyQueue(wf, tasks);
   assert.deepEqual(ready.map((s) => s.id), ["build"], "retry replacement is dispatched; verify stays blocked until build completes");
+});
+
+// ----- isRunSettled (FG-475) -----
+// The shared "is this run done, permanently unreachable steps included" check.
+// computeReadyQueue only answers "is this ONE step dispatchable right now" — it
+// has no notion of "will this run ever produce more ready work". isRunSettled is
+// what gate.ts's finalizeRunIfDone and runNext.ts's two "is the run done" checks
+// both now consume identically.
+
+test("isRunSettled: linear chain A->B->C, A's primary failed terminally (no pending replacement) => settled", () => {
+  const wf = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "b", agent: "b", gate: "auto", manual: false, depends_on: ["a"], runtime: "claude", reds: [] },
+    { id: "c", agent: "c", gate: "auto", manual: false, depends_on: ["b"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [mkTask({ id: "t-a", phase: "a", status: "failed" })];
+  // B/C never materialize task rows — computeReadyQueue correctly reports [] forever.
+  assert.deepEqual(computeReadyQueue(wf, tasks), []);
+  assert.equal(isRunSettled(wf, tasks), true, "A terminally failed with no retry ⇒ B and C are permanently unreachable ⇒ run is settled");
+});
+
+test("isRunSettled: same linear chain but A has a fresh pending primary (retry in flight) => NOT settled", () => {
+  const wf = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "b", agent: "b", gate: "auto", manual: false, depends_on: ["a"], runtime: "claude", reds: [] },
+    { id: "c", agent: "c", gate: "auto", manual: false, depends_on: ["b"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-a-1", phase: "a", status: "failed", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "t-a-2", phase: "a", status: "pending", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  assert.equal(isRunSettled(wf, tasks), false, "a pending retry replacement means the run still has outstanding work");
+});
+
+test("isRunSettled: diamond A->B, A->C — B fails terminally but C (deps only on A, complete) is still outstanding => NOT settled", () => {
+  const wf = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "b", agent: "b", gate: "auto", manual: false, depends_on: ["a"], runtime: "claude", reds: [] },
+    { id: "c", agent: "c", gate: "auto", manual: false, depends_on: ["a"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-a", phase: "a", status: "complete" }),
+    mkTask({ id: "t-b", phase: "b", status: "failed" }),
+    // 'c' has no task row yet — still dispatchable off 'a' being complete.
+  ];
+  assert.equal(
+    isRunSettled(wf, tasks),
+    false,
+    "failure of one branch (b) must not falsely settle the run while an unrelated branch (c) is still outstanding",
+  );
+});
+
+test("isRunSettled: fully-complete run => settled", () => {
+  const wf = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "b", agent: "b", gate: "auto", manual: false, depends_on: ["a"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-a", phase: "a", status: "complete" }),
+    mkTask({ id: "t-b", phase: "b", status: "complete" }),
+  ];
+  assert.equal(isRunSettled(wf, tasks), true);
+});
+
+test("isRunSettled: a run with a running/awaiting_gate task => NOT settled", () => {
+  const wfRunning = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  assert.equal(
+    isRunSettled(wfRunning, [mkTask({ id: "t-a", phase: "a", status: "running" })]),
+    false,
+  );
+
+  const wfGate = mkWorkflow([
+    { id: "a", agent: "a", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  assert.equal(
+    isRunSettled(wfGate, [mkTask({ id: "t-a", phase: "a", status: "awaiting_gate" })]),
+    false,
+  );
+});
+
+test("isRunSettled: no tasks at all (run just started) => NOT settled", () => {
+  const wf = mkWorkflow([
+    { id: "a", agent: "a", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  assert.equal(isRunSettled(wf, []), false, "first step is dispatchable but hasn't run yet — not settled");
+});
+
+// ----- on_reject recovery vs. red/fanout child discriminator (FG-475 edge) -----
+// computeStepSettleStates used to tell an on_reject recovery task (live phase
+// primary — must keep the run active) apart from a red/fanout child (ignored
+// for step-settle) by PHASE EQUALITY: parent.phase === t.phase meant "child,
+// ignore". That's wrong for a step whose on_reject targets its OWN step id
+// (schema-legal — schema.ts only checks the target step exists), because then
+// the recovery task lands in the SAME phase as the rejected primary and gets
+// misclassified as a fanout/red child. The fix keys off the explicit marker
+// gate.ts stamps on every on_reject recovery task: `inputs.rejectedTaskId`.
+
+test("isRunSettled: self-referencing on_reject (recovery task shares its parent's phase) => phase active, run NOT settled", () => {
+  const wf = mkWorkflow([
+    {
+      id: "review",
+      agent: "review",
+      gate: "human",
+      manual: false,
+      depends_on: [],
+      on_reject: "review",
+      runtime: "claude",
+      reds: [],
+    },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-review-1", phase: "review", status: "failed" }),
+    mkTask({
+      id: "t-review-2",
+      phase: "review",
+      parentId: "t-review-1",
+      status: "pending",
+      inputs: { rejectedTaskId: "t-review-1", rejectedRationale: "needs another pass" },
+    }),
+  ];
+  // Pre-fix trace (phase-equality discriminator): parent ("t-review-1").phase
+  // === t.phase ("review") for the recovery task, so it was dropped as a
+  // "red/fanout child — ignore". With no recovery task counted, 'review''s
+  // only primary is the terminally-failed t-review-1, depends_on is empty
+  // (every() on [] is vacuously true), so the step resolved to "blocked" and
+  // isRunSettled wrongly returned true — finalizing the run while the live
+  // pending recovery task sat orphaned. This assertion would have failed
+  // against that code path.
+  assert.equal(
+    isRunSettled(wf, tasks),
+    false,
+    "a live pending on_reject recovery task must keep its phase active even when it shares the rejected primary's phase",
+  );
+});
+
+test("isRunSettled: genuine fanout/red child (same phase as parent, no recovery marker) => correctly ignored, run settled", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "build", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-build-1", phase: "build", status: "complete" }),
+    // Red reviewer child — same phase as its parent, but carries no
+    // rejectedTaskId marker. Must NOT be treated as a live on_reject recovery
+    // task, or a still-running red would wrongly keep the run "active".
+    mkTask({ id: "t-build-1-red1", phase: "build", parentId: "t-build-1", status: "running" }),
+  ];
+  assert.equal(
+    isRunSettled(wf, tasks),
+    true,
+    "a red/fanout child without the recovery marker must not by itself keep the run active",
+  );
+});
+
+test("isRunSettled: cross-step on_reject (audit->investigate, different phase) => target phase active, run NOT settled", () => {
+  const wf = mkWorkflow([
+    {
+      id: "audit",
+      agent: "audit",
+      gate: "human",
+      manual: false,
+      depends_on: [],
+      on_reject: "investigate",
+      runtime: "claude",
+      reds: [],
+    },
+    { id: "investigate", agent: "investigate", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "t-audit-1", phase: "audit", status: "failed" }),
+    mkTask({
+      id: "t-investigate-1",
+      phase: "investigate",
+      parentId: "t-audit-1",
+      status: "pending",
+      inputs: { rejectedTaskId: "t-audit-1", rejectedRationale: "audit rejected, investigate further" },
+    }),
+  ];
+  assert.equal(
+    isRunSettled(wf, tasks),
+    false,
+    "a live pending on_reject recovery task in a different phase from its rejected parent must keep the run active",
+  );
 });

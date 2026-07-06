@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
 import { startRun } from "./startRun.js";
-import { tasksForRun, getTask } from "../store/tasks.js";
+import { tasksForRun, getTask, markTaskComplete } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
@@ -1865,4 +1865,327 @@ test("runNext FG-337: pi model error still fails for narrative role (not inferra
     if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = prevKey;
   }
+});
+
+// ---------------------------------------------------------------------------
+// FG-475: campaign resume hang — a full_feature run driven to terminal-failed
+// via a gate reject with no on_reject used to leave run.status stuck "active"
+// forever. computeReadyQueue correctly returns [] (nothing is dispatchable),
+// but nothing ever re-evaluated whether the run was actually DONE (settled)
+// vs. just quiet. isRunSettled (ready-queue.ts) closes that gap; these tests
+// reproduce the exact hang shape end-to-end and prove a single call resolves it.
+// ---------------------------------------------------------------------------
+
+test("runNext: FG-475 a step already terminally failed with no pending replacement — a single runNext() call settles the run via the ready.length===0 early-return path (the reported hang shape)", async () => {
+  const { insertTask } = await import("../store/tasks.js");
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "fg475 hang shape test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Simulate the post-gate-reject state directly (mirrors what gate.ts's reject
+  // branch leaves behind when a step has no on_reject): 'first' has a terminally
+  // failed primary and zero pending replacements. computeReadyQueue reports []
+  // immediately — 'second' can never become ready ('first' never completes) —
+  // which is exactly the shape that hung: zero I/O, run.status never leaves
+  // "active" no matter how many times runNext is called.
+  insertTask({
+    id: "task-first-rejected",
+    runId,
+    phase: "first",
+    agentRole: "test-agent",
+    status: "failed",
+    error: "rejected by gate",
+    taskPackage: {
+      taskId: "task-first-rejected",
+      runId,
+      phase: "first",
+      role: "test-agent",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: new Date().toISOString(),
+  });
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("nothing should be dispatched — the ready queue must be empty");
+  };
+
+  const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: throwingExec });
+
+  assert.deepEqual(wave.dispatchedSteps, [], "ready queue is empty on entry — this exercises the early-return path, not a dispatch wave");
+  assert.equal(
+    wave.runStatus,
+    "complete",
+    "a SINGLE runNext() call must settle the run — no hang, no manual process kill, no follow-up call required",
+  );
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "complete");
+});
+
+test("runNext: FG-475 empty-ready-queue-but-awaiting-gate is still NOT settled (regression guard — human/verdict gates must not be swept up by the new settled check)", async () => {
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const { runId } = startRun({
+    workflow: HUMAN_GATE_WORKFLOW,
+    title: "fg475 awaiting-gate not settled test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+  const stub = makeStubExec({ status: "complete" });
+  await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stub });
+
+  const task = tasksForRun(runId).find((t) => t.phase === "needs-review")!;
+  assert.equal(task.status, "awaiting_gate");
+
+  // Second call: ready queue is empty (nothing dispatchable while awaiting a
+  // human gate) — must stay "active", not be swept into "complete" by the new
+  // settled check. A human decision is still outstanding, not a permanently
+  // unreachable step.
+  const wave = await runNext({ runId, workflow: HUMAN_GATE_WORKFLOW, dockerExec: stub });
+  assert.deepEqual(wave.dispatchedSteps, []);
+  assert.equal(wave.runStatus, "active");
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "active");
+});
+
+// FG-475 review Finding 2 (AWN-2 cancel-vs-completion race, zero-ready settled
+// path): the ready.length===0 && isRunSettled(...) early-return used to call
+// updateRunStatus(runId, "complete") without re-reading the run's current
+// status, unlike the later post-dispatch completion path (which already re-reads
+// via getRun before flipping to complete). A concurrent `forge cancel` racing
+// between the getRun at the top of runNext and this write could resurrect an
+// abandoned run back to complete. Mirrors the existing resurrection-prevention
+// pattern (cancel.integration.test.ts's "cancelled run cannot be resurrected"
+// test): drive the run to abandoned, then call runNext, and assert it is never
+// flipped back to complete.
+test("runNext: AWN-2 — an abandoned run in the settled/zero-ready shape must not be resurrected to complete", async () => {
+  const { insertTask } = await import("../store/tasks.js");
+  const { runId } = startRun({
+    workflow: LINEAR_WORKFLOW,
+    title: "fg475 awn-2 settled-path cancel race test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  // Same settled-zero-ready shape as the FG-475 hang-shape test above: 'first'
+  // has a terminally failed primary with no pending replacement, so
+  // computeReadyQueue returns [] and isRunSettled is true — this run would
+  // otherwise be a candidate for the ready.length===0 early-return completion.
+  insertTask({
+    id: "task-first-rejected-awn2",
+    runId,
+    phase: "first",
+    agentRole: "test-agent",
+    status: "failed",
+    error: "rejected by gate",
+    taskPackage: {
+      taskId: "task-first-rejected-awn2",
+      runId,
+      phase: "first",
+      role: "test-agent",
+      inputs: {},
+      composedSystemPrompt: "",
+    },
+    createdAt: new Date().toISOString(),
+  });
+
+  // A concurrent `forge cancel` wins the race: by the time this runNext call
+  // happens, the run is already abandoned.
+  updateRunStatus(runId, "abandoned");
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("nothing should be dispatched — the run is abandoned");
+  };
+
+  const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: throwingExec });
+
+  assert.equal(
+    wave.runStatus,
+    "abandoned",
+    "AWN-2: an abandoned run settled with zero ready steps must not be resurrected to complete",
+  );
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "abandoned", "run must stay abandoned in the DB, never flipped to complete");
+
+  const events = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(!events.includes("run.completed"), "run.completed must never fire for an abandoned run via the settled-path early return");
+});
+
+test("gate: FG-475 reject on a step with no on_reject finalizes the run synchronously (parity with the advance branch's finalizeRunIfDone)", async () => {
+  const { gate } = await import("./gate.js");
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // gate.ts loads the workflow from disk by name — write a YAML twin of
+  // HUMAN_GATE_WORKFLOW (single step, gate: human, no on_reject) so gate()
+  // can resolve it the same way the CLI would.
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfName = "fg475-gate-reject-no-on-reject-test";
+  const wfPath = join(forgeHome, "workflows", `${wfName}.yml`);
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: ${wfName}
+description: FG-475 gate-reject-with-no-on_reject regression test
+inputs: []
+steps:
+  - id: needs-review
+    agent: test-agent
+    gate: human
+    manual: false
+    depends_on: []
+    runtime: claude
+    reds: []
+`,
+  );
+  const wf: Workflow = {
+    name: wfName,
+    description: "FG-475 gate-reject-with-no-on_reject regression test",
+    inputs: [],
+    steps: [
+      { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    ],
+  };
+
+  const { runId } = startRun({
+    workflow: wf,
+    title: "fg475 gate reject finalize test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  await runNext({ runId, workflow: wf, dockerExec: stub });
+
+  const task = tasksForRun(runId).find((t) => t.phase === "needs-review")!;
+  assert.equal(task.status, "awaiting_gate");
+
+  await gate(task.id, "reject", "operator deferring this item");
+
+  // A rejected gate with no on_reject leaves this (only) step terminally
+  // failed with no replacement task — parity with the advance branch's
+  // finalizeRunIfDone call. The run must reconcile to "complete" within the
+  // gate() call itself; it must NOT require a follow-up forge next/runNext
+  // call (that follow-up call is exactly what hung in campaign-e89beee993ec).
+  const run = getRun(runId);
+  assert.equal(run!.status, "complete", "gate(reject) with no on_reject must finalize the run synchronously");
+
+  const rejectedTask = getTask(task.id)!;
+  assert.equal(rejectedTask.status, "failed");
+});
+
+test("gate: FG-475 reject with on_reject targeting an EARLIER already-complete step keeps the run active until the recovery task actually finishes (security-audit.yml audit->investigate shape)", async () => {
+  const { gate } = await import("./gate.js");
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Mirrors seeds/workflows/security-audit.yml: 'audit' depends on 'investigate'
+  // and its on_reject bounces back to 'investigate' — a step that, by the time
+  // 'audit' is gate-rejected, already has a COMPLETE primary from its earlier run.
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfName = "fg475-gate-reject-on-reject-earlier-complete-test";
+  const wfPath = join(forgeHome, "workflows", `${wfName}.yml`);
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: ${wfName}
+description: FG-475 gate-reject with on_reject targeting an earlier complete step
+inputs: []
+steps:
+  - id: investigate
+    agent: test-agent
+    gate: auto
+    manual: false
+    depends_on: []
+    runtime: claude
+    reds: []
+  - id: audit
+    agent: test-agent
+    gate: human
+    manual: false
+    depends_on: [investigate]
+    on_reject: investigate
+    runtime: claude
+    reds: []
+`,
+  );
+  const wf: Workflow = {
+    name: wfName,
+    description: "FG-475 gate-reject with on_reject targeting an earlier complete step",
+    inputs: [],
+    steps: [
+      { id: "investigate", agent: "test-agent", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+      { id: "audit", agent: "test-agent", gate: "human", manual: false, depends_on: ["investigate"], on_reject: "investigate", runtime: "claude", reds: [] },
+    ],
+  };
+
+  const { runId } = startRun({
+    workflow: wf,
+    title: "fg475 on_reject earlier-complete-step test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+
+  // Wave 1: 'investigate' auto-completes, leaving a COMPLETE primary in that phase.
+  const wave1 = await runNext({ runId, workflow: wf, dockerExec: stub });
+  assert.deepEqual(wave1.completedSteps, ["investigate"]);
+
+  // Wave 2: 'audit' dispatches and lands on its human gate.
+  const wave2 = await runNext({ runId, workflow: wf, dockerExec: stub });
+  assert.deepEqual(wave2.awaitingGate, ["audit"]);
+
+  const auditTask = tasksForRun(runId).find((t) => t.phase === "audit")!;
+  assert.equal(auditTask.status, "awaiting_gate");
+
+  await gate(auditTask.id, "reject", "scope was too narrow, re-investigate");
+
+  // (1) The run must NOT be prematurely finalized to "complete" immediately
+  // after the reject — the fresh on_reject recovery task landing in the
+  // already-complete 'investigate' phase is live outstanding work. Pre-fix,
+  // computeStepSettleStates had no notion of this recovery task's lineage and
+  // would see 'investigate' as settled purely off its old complete primary,
+  // incorrectly finalizing the run right under the freshly-created recovery work.
+  const runRightAfterReject = getRun(runId);
+  assert.equal(
+    runRightAfterReject!.status,
+    "active",
+    "run must stay active — a live on_reject recovery task in 'investigate' is outstanding work, not settled",
+  );
+
+  // (2) The recovery task itself: a fresh pending task in 'investigate', parented
+  // to the rejected 'audit' task (lineage, not fanout — it's in a different phase).
+  const investigatePhaseTasks = tasksForRun(runId).filter((t) => t.phase === "investigate");
+  assert.equal(investigatePhaseTasks.length, 2, "original complete primary + fresh recovery task");
+  const recoveryTask = investigatePhaseTasks.find((t) => t.status === "pending");
+  assert.ok(recoveryTask, "expected a pending recovery task in the 'investigate' phase");
+  assert.equal(recoveryTask!.parentId, auditTask.id, "recovery task is parented to the rejected 'audit' task (lineage)");
+
+  const rejectedAuditTask = getTask(auditTask.id)!;
+  assert.equal(rejectedAuditTask.status, "failed");
+
+  // (3) Only once the recovery task ACTUALLY finishes does the run finalize.
+  // Simulate the on_reject re-investigation completing (the harness has no
+  // stubbed re-dispatch path for a recovery task parented outside its phase's
+  // normal ready-queue flow, so drive it directly the way a real completion
+  // would land: status -> complete).
+  markTaskComplete(recoveryTask!.id, { status: "complete", output: "re-investigated" });
+
+  const throwingExec: DockerExecFn = async () => {
+    throw new Error("nothing should be dispatched — 'audit' is terminally failed with no retry, 'investigate' is settled");
+  };
+  const finalWave = await runNext({ runId, workflow: wf, dockerExec: throwingExec });
+  assert.deepEqual(finalWave.dispatchedSteps, []);
+  assert.equal(
+    finalWave.runStatus,
+    "complete",
+    "run finalizes once the recovery task actually completes — not before",
+  );
+
+  const runAfterRecoveryCompletes = getRun(runId);
+  assert.equal(runAfterRecoveryCompletes!.status, "complete");
 });
