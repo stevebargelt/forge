@@ -7,6 +7,7 @@
 //   forge backlog close <id> [--commit <sha>]
 //   forge backlog move <id> <type>
 //   forge backlog edit <id> [--body -|<text>]
+//   forge backlog retitle <id> "<new title>"
 //   forge backlog notes [show|add|replace]
 //   forge backlog config [--show]
 
@@ -20,6 +21,8 @@ import {
   listTickets as listStructuredTickets,
   moveTicket as moveStructuredTicket,
   readTicket,
+  retitleTicket,
+  ticketExists,
   withBacklogLock,
   writeTicket,
   TYPE_DIRS,
@@ -107,6 +110,11 @@ export function registerBacklog(program: Command): void {
           return Math.max(max, n);
         }, 0) + 1;
         const newId = `${prefix}-${nextNum}`;
+        if (ticketExists(dir, newId)) {
+          throw new Error(
+            `Ticket ${newId} already exists on disk; refusing to create a duplicate (dedupe by id)`,
+          );
+        }
         const ticket: StructuredTicket = {
           id: newId,
           type: (opts.type as TicketType) ?? "story",
@@ -149,6 +157,19 @@ export function registerBacklog(program: Command): void {
       const updated = { ...ticket, body: bodyRaw };
       writeTicket(dir, updated);
       console.log(`Updated body of ${idArg}`);
+    });
+
+  // ----- retitle -----
+  backlog
+    .command("retitle")
+    .argument("<id>", "ticket id (e.g. FG-123)")
+    .argument("<title>", "new ticket title")
+    .description("Change a ticket's title (frontmatter + heading) without moving its file")
+    .option("--project <dir>", "project directory (default: cwd)")
+    .action((idArg: string, title: string, opts: { project?: string }) => {
+      const dir = resolve(opts.project ?? process.cwd());
+      retitleTicket(dir, idArg, title);
+      console.log(`Retitled ${idArg}`);
     });
 
   // ----- move -----
