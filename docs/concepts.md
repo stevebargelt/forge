@@ -679,6 +679,7 @@ With `--json`, the output is a single stable object:
       "requestedHumanAction": null,
       "readiness": { "outcome": "ready", "gaps": [], "refinementProposal": null },
       "hostVerificationReconcileHint": null,
+      "outOfBandEligible": false,
       "lane": "full_feature",
       "laneRationale": "no lane override supplied — defaulting to full_feature",
       "materialLaneAssumptions": []
