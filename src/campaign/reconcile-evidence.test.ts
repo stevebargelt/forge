@@ -232,6 +232,53 @@ test("specialist fail does not count as a qualifying event and does not block a 
   assert.equal(result.evidence.supersedingEvent?.id, 3);
 });
 
+// FG-431: the latest authoritative verdict is `inconclusive` (needs_human /
+// unrecognized / reviewer produced no verdict) rather than a genuine `fail` —
+// must be refused with its OWN distinct reason, not the fail-oriented one.
+// The refusal outcome itself is unchanged: inconclusive still does not ship.
+test("inconclusive-with-no-later-event: ineligible with the NEW inconclusive missing reason, not the fail label — fail-safe preserved", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [{ id: 1, kind: "verdict", verdict: "inconclusive", authority: "authoritative" }],
+  });
+  assert.equal(result.eligible, false, "inconclusive must never qualify as shipped evidence");
+  assert.deepEqual(result.missing, ["latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"]);
+  assert.ok(
+    !result.missing.includes("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    "must not also carry the fail-oriented label"
+  );
+});
+
+test("evaluateAuthoritativeOutcome: inconclusive verdict with no later pass/force-advance -> fail outcome, inconclusive failureKind", () => {
+  const result = evaluateAuthoritativeOutcome([
+    { id: 1, kind: "verdict", verdict: "inconclusive", authority: "authoritative", taskId: "task-a" },
+  ]);
+  assert.equal(result.outcome, "fail", "outcome enum is unchanged — inconclusive still resolves as a non-passing outcome");
+  assert.equal(result.failureKind, "inconclusive");
+});
+
+test("describeMissingReason: the new inconclusive code renders friendly text distinct from the fail label's text", () => {
+  const inconclusiveText = describeMissingReason(
+    "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"
+  );
+  const failText = describeMissingReason("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance");
+  assert.notEqual(inconclusiveText, "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance");
+  assert.notEqual(inconclusiveText, failText);
+  assert.match(inconclusiveText, /inconclusive/i);
+});
+
+test("a genuine fail on one task and an inconclusive-only resolution on another both fail: the real fail label wins, never softened to inconclusive", () => {
+  const result = evaluateReconcileEvidence({
+    ...baseInput(),
+    events: [
+      { id: 1, kind: "verdict", verdict: "fail", authority: "authoritative", taskId: "task-a" },
+      { id: 2, kind: "verdict", verdict: "inconclusive", authority: "authoritative", taskId: "task-b" },
+    ],
+  });
+  assert.equal(result.eligible, false);
+  assert.deepEqual(result.missing, ["latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"]);
+});
+
 test("reject/request-changes gate decisions never qualify as supersession even with force+rationale", () => {
   const result = evaluateReconcileEvidence({
     ...baseInput(),

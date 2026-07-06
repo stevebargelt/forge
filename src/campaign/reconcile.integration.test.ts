@@ -1688,6 +1688,51 @@ test("FG-460 matrix: a DOCS-ONLY item with an UNRESOLVED AUTHORITATIVE FAIL refu
   assert.ok(!payload.missing.includes("lane_evidence_missing"), "resume: the docs-only lane is eligible — only the authoritative axis fails");
 });
 
+test("FG-431/FG-460 matrix: a DOCS-ONLY item with an UNRESOLVED AUTHORITATIVE INCONCLUSIVE verdict refuses on BOTH resume and reconcile — the run_evidence: code is the NEW inconclusive-specific label, never the fail label (fail-safe preserved)", async () => {
+  // Same shape as the fail-matrix test above, but the run's only authoritative
+  // verdict is `inconclusive` (needs_human/unrecognized), never resolved by a
+  // later pass or qualifying force-advance. authoritativeOutcomeContribution
+  // folds AUTHORITATIVE_OUTCOME_MISSING_CODES straight through with a
+  // `run_evidence:` prefix, so the composed out-of-band result must surface the
+  // inconclusive-specific code (not the fail-oriented one) and stay ineligible —
+  // on both the reconcile and resume call sites, since both feed the same
+  // composeOutOfBandEligibility.
+  const rec = setupAwaitingGateManualRunCampaign("FG-930");
+  seedOutOfBandDocsEvidence("FG-930"); // non_code_diff lane, ticket closed
+  logEvent("verdict.received", { runId: rec.runId, payload: { redRole: "shipping-reviewer", verdict: "inconclusive", authority: "authoritative" } });
+  const recResult = reconcileCampaign(rec.campaignId);
+  assert.equal(recResult.items[0]!.status, "refused", "reconcile refuses a docs-only item on an unresolved authoritative inconclusive verdict");
+  assert.ok(
+    recResult.items[0]!.missing!.includes("run_evidence:latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"),
+    `reconcile: expected the run_evidence: inconclusive code, got: ${recResult.items[0]!.missing!.join(", ")}`
+  );
+  assert.ok(
+    !recResult.items[0]!.missing!.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    "reconcile: must never carry the fail-oriented label for an inconclusive verdict"
+  );
+  assert.ok(!recResult.items[0]!.missing!.includes("lane_evidence_missing"), "the docs-only lane is eligible — only the authoritative axis fails");
+
+  const res = setupAwaitingGateManualRunCampaign("FG-931");
+  seedOutOfBandDocsEvidence("FG-931");
+  logEvent("verdict.received", { runId: res.runId, payload: { redRole: "shipping-reviewer", verdict: "inconclusive", authority: "authoritative" } });
+  await resumeCampaign(res.campaignId, { dispatch: async () => ({ runId: "r", taskId: "t", status: "complete" }) });
+  assert.notEqual(getCampaignItem(res.itemId)!.outcome, "shipped", "resume refuses the identical docs-only + authoritative-inconclusive evidence reconcile just refused");
+  const evRow = db
+    .prepare("SELECT payload FROM events WHERE event_type = 'campaign_item.evidence_reconcile_refused' ORDER BY id DESC LIMIT 1")
+    .get() as { payload: string } | undefined;
+  assert.ok(evRow, "resume logs a refusal event");
+  const payload = JSON.parse(evRow!.payload) as { missing: string[] };
+  assert.ok(
+    payload.missing.includes("run_evidence:latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"),
+    `resume: expected the run_evidence: inconclusive code, got: ${payload.missing.join(", ")}`
+  );
+  assert.ok(
+    !payload.missing.includes("run_evidence:latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"),
+    "resume: must never carry the fail-oriented label for an inconclusive verdict"
+  );
+  assert.ok(!payload.missing.includes("lane_evidence_missing"), "resume: the docs-only lane is eligible — only the authoritative axis fails");
+});
+
 test("FG-441: resume refuses to ship a manually-driven awaiting_gate item when the run's own authoritative outcome is a fail with no later pass or qualifying force-advance — logs the refusal with the authoritative-outcome clause", async () => {
   const ticketId = "FG-611";
   const { campaignId, itemId, runId } = setupAwaitingGateManualRunCampaign(ticketId);

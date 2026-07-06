@@ -305,3 +305,68 @@ test("queryHostVerificationRowsForGate: excludes rows for a different gate_name"
   const rows = queryHostVerificationRowsForGate("FG-014", "/home/test/project", "npm run test:all");
   assert.equal(rows.length, 0);
 });
+
+// ── FG-431: projectDir canonicalization on BOTH the insert and lookup side ────
+//
+// insertHostVerification (backing the public `forge record-host-verification`
+// CLI command) can be handed a relative or otherwise non-canonical project
+// path. Reconcile's lookup exact-matches project_dir, so a row recorded under
+// an equivalent-but-differently-spelled path must still resolve — otherwise
+// legitimate evidence silently becomes unmatchable and reconcile falsely
+// refuses with host_verification_not_recorded.
+
+test("FG-431: a row recorded with a non-canonical projectDir (redundant segments) is found by queryHostVerificationRows using the canonical absolute path", () => {
+  const nonCanonical = "/home/test/other/../project";
+  const canonical = "/home/test/project";
+  // Confirm the fixture actually exercises a non-canonical path, not a no-op.
+  assert.notEqual(nonCanonical, canonical);
+
+  insertHostVerification({
+    ticketId: "FG-015",
+    projectDir: nonCanonical,
+    commitSha: "sha-a",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRows("FG-015", canonical, "sha-a", "npm run test:all");
+  assert.equal(rows.length, 1, "a non-canonical projectDir at insert must resolve to the same row the canonical lookup expects");
+  assert.equal(rows[0]!.projectDir, canonical, "the stored projectDir is itself canonicalized");
+});
+
+test("FG-431: a row recorded with an equivalent non-canonical projectDir (trailing slash) is found by queryHostVerificationRowsForGate", () => {
+  const nonCanonical = "/home/test/project/";
+  const canonical = "/home/test/project";
+  assert.notEqual(nonCanonical, canonical);
+
+  insertHostVerification({
+    ticketId: "FG-016",
+    projectDir: nonCanonical,
+    commitSha: "sha-b",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-016", canonical, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.projectDir, canonical);
+});
+
+test("FG-431: canonicalization does not loosen matching — a genuinely different project still does not match", () => {
+  insertHostVerification({
+    ticketId: "FG-017",
+    projectDir: "/home/test/project-a",
+    commitSha: "sha-c",
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const rows = queryHostVerificationRowsForGate("FG-017", "/home/test/project-b", "npm run test:all");
+  assert.equal(rows.length, 0, "a different project directory must never match, canonicalized or not");
+});

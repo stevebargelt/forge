@@ -104,6 +104,17 @@ export function describeMissingReason(reason: string): string {
         "host_verification_recorded_but_failed (the required gate ran for real and failed — " +
         "fix the failure and re-merge; this is a genuine failure, not something to wait out or override)"
       );
+    // FG-431: distinguished from the fail label below — the latest authoritative
+    // verdict here is inconclusive (needs_human / unrecognized / no verdict
+    // produced), not a genuine fail. Still refused: inconclusive is not evidence
+    // of shipping either.
+    case "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance":
+      return (
+        "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance (the latest " +
+        "authoritative review verdict is inconclusive — needs_human, an unrecognized verdict, or the reviewer " +
+        "produced no verdict — with no later passing review or qualifying force-advance; re-run the authoritative " +
+        "review to get a real verdict, this is not something to wait out or override)"
+      );
     // FG-452: the docs-only out-of-band lane isn't satisfied AND no covering
     // passing host-verification row exists yet. Tone matches report.ts's hint.
     case "lane_evidence_missing":
@@ -145,13 +156,23 @@ function taskBucketKey(e: ReconcileRunEvent): string {
 export const AUTHORITATIVE_OUTCOME_MISSING_CODES: ReadonlySet<string> = new Set([
   "no_authoritative_verdict_or_force_advance_event",
   "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance",
+  "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance",
 ]);
 
 export type AuthoritativeOutcome = "pass" | "fail" | "unresolved";
 
+// FG-431: which verdict drove a "fail" outcome — a genuine `fail` verdict on at
+// least one non-passing task, or ONLY `inconclusive` verdicts (needs_human /
+// unrecognized / no verdict produced). A real fail on any task always wins this
+// label, even if other non-passing tasks are merely inconclusive: this is a
+// refusal-reason label refinement only, never a way to soften a genuine fail.
+// null when the outcome isn't "fail".
+export type AuthoritativeFailureKind = "fail" | "inconclusive" | null;
+
 export type AuthoritativeOutcomeResult = {
   outcome: AuthoritativeOutcome;
   supersedingEventsByTask: Map<string, ReconcileRunEvent>;
+  failureKind: AuthoritativeFailureKind;
 };
 
 // FG-427: the SINGLE shared evaluator for "did this item's authoritative
@@ -189,6 +210,7 @@ export function evaluateAuthoritativeOutcome(events: ReconcileRunEvent[]): Autho
   const supersedingEventsByTask = new Map<string, ReconcileRunEvent>();
   let anyTaskWithAuthoritativeVerdict = false;
   let anyTaskFailed = false;
+  let anyFailedTaskIsRealFail = false;
 
   for (const [key, bucket] of byTask) {
     const hasAuthoritativeVerdict = bucket.some((e) => e.kind === "verdict" && e.authority === "authoritative");
@@ -204,6 +226,9 @@ export function evaluateAuthoritativeOutcome(events: ReconcileRunEvent[]): Autho
       supersedingEventsByTask.set(key, highest);
     } else {
       anyTaskFailed = true;
+      if (highest.kind === "verdict" && highest.verdict === "fail") {
+        anyFailedTaskIsRealFail = true;
+      }
     }
   }
 
@@ -216,7 +241,9 @@ export function evaluateAuthoritativeOutcome(events: ReconcileRunEvent[]): Autho
     outcome = "pass";
   }
 
-  return { outcome, supersedingEventsByTask };
+  const failureKind: AuthoritativeFailureKind = outcome === "fail" ? (anyFailedTaskIsRealFail ? "fail" : "inconclusive") : null;
+
+  return { outcome, supersedingEventsByTask, failureKind };
 }
 
 export function evaluateReconcileEvidence(input: ReconcileEvidenceInput): ReconcileEvidenceResult {
@@ -249,13 +276,17 @@ export function evaluateReconcileEvidence(input: ReconcileEvidenceInput): Reconc
   // Fact 5 — supersession, evaluated per reviewing task by the shared
   // evaluateAuthoritativeOutcome (see above) — the same function the drive-path
   // reconciliation in executor.ts uses, so the two paths cannot drift.
-  const { outcome, supersedingEventsByTask } = evaluateAuthoritativeOutcome(input.events);
+  const { outcome, supersedingEventsByTask, failureKind } = evaluateAuthoritativeOutcome(input.events);
 
   let supersedingEvent: ReconcileRunEvent | null = null;
   if (outcome === "unresolved") {
     missing.push("no_authoritative_verdict_or_force_advance_event");
   } else if (outcome === "fail") {
-    missing.push("latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance");
+    missing.push(
+      failureKind === "inconclusive"
+        ? "latest_authoritative_verdict_is_inconclusive_with_no_later_pass_or_force_advance"
+        : "latest_authoritative_verdict_is_fail_with_no_later_pass_or_force_advance"
+    );
   } else {
     // Representative superseding event for existing consumers of
     // evidence.supersedingEvent — the highest-id winner across all
