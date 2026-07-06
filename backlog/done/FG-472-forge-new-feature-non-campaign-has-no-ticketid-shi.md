@@ -5,7 +5,7 @@ status: done
 title: forge new feature (non-campaign) has no ticketId → shipping-reviewer pre-fails and BLOCKS the run; decide the intended behavior
 created: 2026-07-05
 closed: 2026-07-06
-closed_commit: 5cf8a58
+closed_commit: f0307a4
 ---
 
 ## Problem (verified, FG-433 investigation)
