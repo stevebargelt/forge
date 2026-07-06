@@ -1,9 +1,11 @@
 ---
 id: FG-414
 type: story
-status: active
+status: done
 title: ops check misses active-run/all-terminal-tasks orphans; projects-show in-flight count disagrees with dashboard
 created: 2026-06-26
+closed: 2026-07-06
+closed_commit: ef30eb7bf83ad55d8eaa7bb5c4aff347edb6dabe
 ---
 
 Two related operational-visibility gaps, surfaced 2026-06-26 while reconciling a stale run.
