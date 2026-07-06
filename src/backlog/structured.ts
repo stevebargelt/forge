@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, rmdirSync, rmSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { stringify as stringifyYaml, parse as parseYaml } from "yaml";
 
 export type TicketType = "idea" | "epic" | "story";
@@ -138,7 +138,17 @@ export function writeTicket(projectDir: string, ticket: StructuredTicket): void 
   const { body, ...fm } = ticket;
   const existing = findTicketFile(projectDir, ticket.id);
   if (existing) {
-    writeFileSync(existing.path, serializeTicket(fm, body));
+    const targetSubdir = subdirForTicket(fm);
+    if (targetSubdir !== existing.subdir) {
+      // type/status changed since the file was placed — relocate it so the
+      // frontmatter never claims a subdir the file isn't physically in.
+      // Filename (slug) stays fixed; only the containing directory moves.
+      const destDir = join(backlogDir(projectDir), targetSubdir);
+      mkdirSync(destDir, { recursive: true });
+      atomicMoveFile(existing.path, join(destDir, basename(existing.path)), serializeTicket(fm, body));
+    } else {
+      writeFileSync(existing.path, serializeTicket(fm, body));
+    }
     return;
   }
 

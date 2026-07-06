@@ -1,6 +1,6 @@
 ---
 name: forge-backlog
-description: Read and manage structured backlog/ tickets (list, show, file, close, edit, move, notes, config) via `forge backlog`. Use this as the bounded interface for ticket work instead of hand-editing files under backlog/.
+description: Read and manage structured backlog/ tickets (list, show, file, close, edit, retitle, move, notes, config) via `forge backlog`. Use this as the bounded interface for ticket work instead of hand-editing files under backlog/.
 ---
 
 # forge-backlog
@@ -19,6 +19,7 @@ forge backlog show  <id> [--json]
 forge backlog file  "<title>" [--body <text>|-] [--type idea|epic|story]
 forge backlog close <id> [--commit <sha>]
 forge backlog edit  <id> [--body <text>|-]
+forge backlog retitle <id> "<new title>"
 forge backlog move  <id> <type>
 forge backlog config [--show]
 forge backlog notes show
@@ -30,6 +31,7 @@ forge backlog notes replace [text|-]
 - `file` creates a new ticket; `--body -` reads the body from stdin (useful for multi-line bodies piped in).
 - `close` marks a ticket done and records the close date; `--commit <sha>` attaches the shipping commit.
 - `edit` replaces a ticket's body wholesale — it is not a patch/append operation.
+- `retitle` changes a ticket's title (frontmatter + heading) in place without moving or renaming its file.
 - `move` relocates a ticket between the idea/epic/story type directories.
 - `notes` reads/writes the project's `backlog/notes.md` "notes for next session" block — `add` appends a paragraph, `replace` overwrites the whole file.
 
