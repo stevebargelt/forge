@@ -12,6 +12,10 @@ created: 2026-06-23
 
 The agent persistence-check (FG-354 lineage) can FALSE-FAIL on macOS. An FG-375 engineer returned `status: failed` with "work not persisted: result.json reports status=complete with N modified files, but none exist on the host project dir — the agent likely wrote to an ephemeral container path." But `git status` on the host immediately afterward showed ALL the files present and complete (correct content, typecheck clean, command working). The agent HAD written to `/project` correctly; Docker Desktop's gRPC-FUSE / the DEC-019 shadow-volume bind mount synced the writes to the host slightly AFTER the persistence-check ran. The check observed the dir before the container's writes had flushed and declared the work lost.
 
+## Goal
+
+Eliminate the macOS false-positive in the agent persistence-check by adding a bounded settle/retry window, so a task whose writes land within the mount-sync window is NOT misreported as `failed: work not persisted`, while genuine misses (writes to `/workspace` instead of `/project`) are still caught. Restore trust in the persistence-check without materially slowing the common already-synced case.
+
 ## Impact
 
 - A successful task is reported as `failed`, and the natural response (re-run) DUPLICATES/CONFLICTS with work that actually landed.
