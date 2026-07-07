@@ -3583,3 +3583,298 @@ test("FG-488: drive loop no-progress bound — active run + zero dispatch + unch
   });
   assert.notEqual(resumeResult.stopReason, "not_paused", "campaign must accept a resume attempt after the no-progress pause");
 });
+
+// FG-490 (review F7): the drive path awaits runNextFn/startRun uncaught after
+// the campaign has already transitioned to 'running' — any dispatch-time throw
+// (docker spawn error, runNext missing projectDir, startRun input validation)
+// used to propagate straight out with the campaign left 'running' forever:
+// resume/start both refuse 'not_paused', and the only way back was manual DB
+// surgery. Same dead end as F2b/FG-488, reached via an exception instead of a
+// stalled loop. These tests drive the REAL path (startCampaign ->
+// driveRemainingItems -> driveWorkflowItem) with an injected throwing
+// runNextFn/startRunFn and assert: campaign lands paused, item lands in a
+// recoverable non-terminal state (awaiting_gate), the failure is durably
+// recorded, the ORIGINAL error still reaches the caller, and resume can
+// proceed afterward.
+
+test("FG-490: thrown runNextFn parks the campaign (running->paused) with a recoverable item, durably records the failure, and rethrows the original error with next-action guidance", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F7 thrown runNextFn" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-490 repro" });
+
+  const RUN_ID = "run-fg490-runnext-throw";
+  const startRunFn = (args: StartRunArgs): { runId: string } => {
+    insertRun({
+      id: RUN_ID,
+      workflow: args.workflow.name,
+      title: args.title,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+      projectDir: args.projectDir,
+    });
+    return { runId: RUN_ID };
+  };
+
+  await assert.rejects(
+    () =>
+      startCampaign(campaign.id, {
+        loadWorkflowFn: FG488_WORKFLOW,
+        startRunFn,
+        runNextFn: async () => {
+          throw new Error("docker spawn failed: no such image");
+        },
+      }),
+    (err: Error) => {
+      assert.match(err.message, /docker spawn failed: no such image/, "original error message must survive in the rethrown error");
+      assert.match(err.message, /forge campaign resume/, "rethrown error must carry next-action guidance");
+      assert.equal(
+        (err.cause as Error | undefined)?.message,
+        "docker spawn failed: no such image",
+        "original error must be preserved via cause, not just paraphrased"
+      );
+      return true;
+    }
+  );
+
+  const dbItem = db
+    .prepare(
+      "SELECT lifecycle_status, outcome, run_id, reason, requested_human_action FROM campaign_items WHERE ticket_id = 'FG-101'"
+    )
+    .get() as {
+    lifecycle_status: string;
+    outcome: string | null;
+    run_id: string;
+    reason: string | null;
+    requested_human_action: string | null;
+  };
+  assert.equal(dbItem.lifecycle_status, "awaiting_gate", "item must land in a recoverable, non-terminal state — never stranded at 'running'");
+  assert.equal(dbItem.outcome, null, "not a terminal blocked outcome — awaiting_gate is the recoverable reattach shape");
+  assert.equal(dbItem.run_id, RUN_ID);
+  assert.equal(dbItem.reason, "docker spawn failed: no such image", "the thrown error must be durably recorded on the item");
+  assert.ok(dbItem.requested_human_action?.includes(RUN_ID), "guidance must name the run so the operator can inspect it");
+
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "campaign must transition running->paused BEFORE the error propagates");
+
+  const driveErrorEvent = db
+    .prepare("SELECT payload FROM events WHERE event_type = 'campaign_item.drive_error' AND run_id = ?")
+    .get(RUN_ID) as { payload: string } | undefined;
+  assert.ok(driveErrorEvent, "the failure must be durably recorded as an event — not swallowed, not silently retried");
+  const payload = JSON.parse(driveErrorEvent!.payload);
+  assert.equal(payload.error, "docker spawn failed: no such image");
+  assert.equal(payload.ticketId, "FG-101");
+
+  // campaignBlocker's inFlight check explicitly excludes awaiting_gate, so
+  // resume must not refuse outright the way it would for a stuck 'running' item.
+  const resumeResult = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FG488_WORKFLOW,
+    runNextFn: async () => {
+      updateRunStatus(RUN_ID, "complete");
+      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    },
+  });
+  assert.notEqual(resumeResult.stopReason, "not_paused", "forge campaign resume must succeed (not refuse) after the F7 park");
+});
+
+test("FG-490 review F8: parkCampaignOnDriveThrow clears a stale outcome/blockerKind from a prior blocked attempt — a re-thrown item must not look terminally blocked while lifecycleStatus is the recoverable awaiting_gate", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F8 stale outcome/blockerKind" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-490 F8 repro" });
+
+  const item = listCampaignItems(campaign.id).find((i) => i.ticketId === "FG-101")!;
+  // Simulate a prior blocked attempt (e.g. a resolved scope block) whose outcome/blockerKind
+  // were never cleared before the item was re-dispatched and threw again.
+  db.prepare("UPDATE campaign_items SET outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?").run(item.id);
+
+  const RUN_ID = "run-fg490-f8-stale-blocked";
+  const startRunFn = (args: StartRunArgs): { runId: string } => {
+    insertRun({
+      id: RUN_ID,
+      workflow: args.workflow.name,
+      title: args.title,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+      projectDir: args.projectDir,
+    });
+    return { runId: RUN_ID };
+  };
+
+  await assert.rejects(() =>
+    startCampaign(campaign.id, {
+      loadWorkflowFn: FG488_WORKFLOW,
+      startRunFn,
+      runNextFn: async () => {
+        throw new Error("docker spawn failed: no such image");
+      },
+    })
+  );
+
+  const dbItem = db.prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE id = ?").get(item.id) as {
+    lifecycle_status: string;
+    outcome: string | null;
+    blocker_kind: string | null;
+  };
+  assert.equal(dbItem.lifecycle_status, "awaiting_gate");
+  assert.equal(dbItem.outcome, null, "stale 'blocked' outcome from the prior attempt must be cleared — awaiting_gate is the recoverable shape, not a terminal block");
+  assert.equal(dbItem.blocker_kind, null, "stale blockerKind from the prior attempt must be cleared alongside outcome");
+});
+
+test("FG-490 review (round 2, F1): thrown startRunFn parks the item directly at failed/blocked/infrastructure (not awaiting_gate) and rethrows the original error; the item is then recoverable through forge campaign retry + resume, and the retried item actually re-dispatches", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F1 thrown startRunFn" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-490 F1 repro" });
+
+  const startRunFn = (): { runId: string } => {
+    throw new Error("startRun: required input 'brief' missing for workflow 'feature'");
+  };
+
+  await assert.rejects(
+    () => startCampaign(campaign.id, { loadWorkflowFn: FG488_WORKFLOW, startRunFn }),
+    (err: Error) => {
+      assert.match(err.message, /required input 'brief' missing/, "original error message must survive in the rethrown error");
+      assert.match(err.message, /forge campaign retry/, "rethrown error must name the actual recovery verb (retry)");
+      assert.match(err.message, /forge campaign resume/, "rethrown error must carry next-action guidance");
+      return true;
+    }
+  );
+
+  const dbItemAfterThrow = db
+    .prepare("SELECT lifecycle_status, outcome, blocker_kind, run_id, reason FROM campaign_items WHERE ticket_id = 'FG-101'")
+    .get() as {
+    lifecycle_status: string;
+    outcome: string | null;
+    blocker_kind: string | null;
+    run_id: string | null;
+    reason: string | null;
+  };
+  assert.equal(
+    dbItemAfterThrow.lifecycle_status,
+    "failed",
+    "a thrown startRun never dispatched work — there is no live run to reattach to, so the item parks directly at its true terminal state"
+  );
+  assert.equal(dbItemAfterThrow.outcome, "blocked");
+  assert.equal(
+    dbItemAfterThrow.blocker_kind,
+    "infrastructure",
+    "a startRun dispatch-time failure classifies as the transient host/environment blocker kind, making it retryable"
+  );
+  assert.ok(dbItemAfterThrow.run_id, "a synthetic run row must still be linked for traceability");
+  assert.equal(dbItemAfterThrow.reason, "startRun: required input 'brief' missing for workflow 'feature'");
+
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "campaign must transition running->paused BEFORE the error propagates");
+
+  const driveErrorEvent = db
+    .prepare("SELECT payload FROM events WHERE event_type = 'campaign_item.drive_error' AND run_id = ?")
+    .get(dbItemAfterThrow.run_id) as { payload: string } | undefined;
+  assert.ok(driveErrorEvent, "the failure must be durably recorded as an event — not swallowed, not silently retried");
+  const payload = JSON.parse(driveErrorEvent!.payload);
+  assert.equal(payload.error, "startRun: required input 'brief' missing for workflow 'feature'");
+  assert.equal(payload.ticketId, "FG-101");
+
+  // Recovery: forge campaign retry resets the item to pending (the ONLY
+  // supported path for a transient auth/infrastructure blocker — FG-489).
+  const retryResult = retryCampaignItem(campaign.id, "FG-101");
+  assert.equal(retryResult.ok, true, "retry must succeed for a failed/blocked/infrastructure item");
+
+  const dbItemAfterRetry = db
+    .prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'")
+    .get() as { lifecycle_status: string; outcome: string | null; blocker_kind: string | null };
+  assert.equal(dbItemAfterRetry.lifecycle_status, "pending", "retry must reset the item to pending for a clean re-dispatch");
+  assert.equal(dbItemAfterRetry.outcome, null);
+  assert.equal(dbItemAfterRetry.blocker_kind, null);
+
+  // Then forge campaign resume with a startRun that now succeeds must actually
+  // re-dispatch the item — proving recovery works end to end, not just that
+  // the state machine allows it.
+  let startRunInvoked = false;
+  const RESUME_RUN_ID = "run-fg490-f1-retry-success";
+  const resumeResult = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FG488_WORKFLOW,
+    startRunFn: (args: StartRunArgs) => {
+      startRunInvoked = true;
+      insertRun({
+        id: RESUME_RUN_ID,
+        workflow: args.workflow.name,
+        title: args.title,
+        status: "active",
+        createdAt: "2026-01-01T00:00:00Z",
+        projectDir: args.projectDir,
+      });
+      return { runId: RESUME_RUN_ID };
+    },
+    runNextFn: async () => {
+      updateRunStatus(RESUME_RUN_ID, "complete");
+      return { dispatchedSteps: [], completedSteps: ["engineer"], awaitingGate: [], failedSteps: [], runStatus: "complete" };
+    },
+  });
+  assert.notEqual(resumeResult.stopReason, "not_paused", "forge campaign resume must succeed (not refuse) after retry");
+  assert.ok(startRunInvoked, "the retried item must actually re-dispatch through startRun on resume — not just sit in pending");
+});
+
+test("FG-490: if the park-transition itself fails (DB error), the original drive error still propagates — never masked by the recovery path", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F7 park failure must not mask root cause" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-490 repro" });
+
+  const RUN_ID = "run-fg490-park-fail";
+  const startRunFn = (args: StartRunArgs): { runId: string } => {
+    insertRun({
+      id: RUN_ID,
+      workflow: args.workflow.name,
+      title: args.title,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+      projectDir: args.projectDir,
+    });
+    return { runId: RUN_ID };
+  };
+
+  await assert.rejects(
+    () =>
+      startCampaign(campaign.id, {
+        loadWorkflowFn: FG488_WORKFLOW,
+        startRunFn,
+        runNextFn: async () => {
+          // Simulate a broken DB at the moment of the drive-path throw — swap in
+          // a closed database so the park write itself (updateCampaignItem,
+          // logEvent, tryTransitionCampaign) throws too.
+          const broken = makeInMemoryDb();
+          broken.close();
+          setDbForTest(broken);
+          throw new Error("docker spawn failed: ECONNREFUSED");
+        },
+      }),
+    (err: Error) => {
+      assert.match(err.message, /docker spawn failed: ECONNREFUSED/, "the ORIGINAL drive error must propagate, not a DB error from the failed park");
+      return true;
+    }
+  );
+
+  setDbForTest(db);
+  const dbItem = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
+  assert.equal(dbItem.lifecycle_status, "running", "when the park write fails, the item is left as it was — never falsely marked recovered");
+  assert.equal(
+    getCampaign(campaign.id)!.status,
+    "running",
+    "when the park write fails, the campaign is left as it was — never falsely marked paused"
+  );
+});

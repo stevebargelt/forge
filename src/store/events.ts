@@ -66,7 +66,13 @@ export type EventType =
   // the item. Durable counterpart to the console.error refusal message — under
   // a cron/service invocation stderr may not be captured, so this is the only
   // audit trail of the refusal decision.
-  | "campaign_item.evidence_reconcile_refused";
+  | "campaign_item.evidence_reconcile_refused"
+  // FG-490 (review F7): the drive path (runNext/startRun) threw instead of
+  // returning a structured failure. Durable record of the thrown error, taken
+  // BEFORE the campaign is parked to 'paused' and the error is rethrown to the
+  // caller — the only audit trail of the raw error under a cron/service
+  // invocation where stderr may not be captured.
+  | "campaign_item.drive_error";
 
 export type Event = {
   id: number;
