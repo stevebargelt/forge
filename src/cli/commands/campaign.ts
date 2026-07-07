@@ -63,6 +63,39 @@ function blockedItemsGuidance(campaignId: string, blocked: { ticketId: string; b
   return `campaign paused — ${parts.join("; ")}`;
 }
 
+// FG-490 review: startCampaign/resumeCampaign rethrow (never return) when the
+// executor's drive path parks the campaign on an uncaught error — every OTHER
+// stop reason renders through the structured result below, so this is the one
+// failure class an uncaught throw would otherwise hand to the CLI's generic
+// top-level catch as a bare non-JSON stderr line. Renders it the same way:
+// --json gets a machine-readable object, human output keeps the wrapped
+// message text (unchanged wording — it already carries the resume guidance).
+// ticketId/runId come from the campaign item the executor parked at
+// 'awaiting_gate' with this exact reason (set by parkCampaignOnDriveThrow
+// before it rethrows) — undefined only in the rare case the park write itself
+// failed, in which case nothing was recorded to look up.
+function renderDriveErrorAndExit(campaignId: string, err: unknown, json: boolean | undefined): never {
+  const message = err instanceof Error ? err.message : String(err);
+  const original = err instanceof Error && err.cause instanceof Error ? err.cause.message : message;
+  const parked = listCampaignItems(campaignId).find(
+    (item) => item.lifecycleStatus === "awaiting_gate" && item.reason === original
+  );
+
+  if (json) {
+    console.log(JSON.stringify({
+      stopReason: "drive_error",
+      campaignId,
+      ticketId: parked?.ticketId,
+      runId: parked?.runId,
+      error: original,
+      guidance: `forge campaign resume ${campaignId}`,
+    }, null, 2));
+  } else {
+    console.error(message);
+  }
+  process.exit(1);
+}
+
 export function registerCampaign(program: Command): void {
   const campaign = program
     .command("campaign")
@@ -385,7 +418,12 @@ export function registerCampaign(program: Command): void {
         }
       }
 
-      const result = await startCampaign(campaignId);
+      let result;
+      try {
+        result = await startCampaign(campaignId);
+      } catch (err) {
+        renderDriveErrorAndExit(campaignId, err, opts.json);
+      }
 
       // Exit 0 only for clean completion states; all other stop reasons are failures
       const startSuccessReasons = new Set(["complete", "paused"]);
@@ -496,7 +534,12 @@ export function registerCampaign(program: Command): void {
         }
       }
 
-      const result = await resumeCampaign(campaignId);
+      let result;
+      try {
+        result = await resumeCampaign(campaignId);
+      } catch (err) {
+        renderDriveErrorAndExit(campaignId, err, opts.json);
+      }
 
       // Exit 0 only for clean completion states; all other stop reasons are failures
       const resumeSuccessReasons = new Set(["complete", "paused"]);

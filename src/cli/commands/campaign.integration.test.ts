@@ -4451,3 +4451,188 @@ test("integ FG-442 Finding 2: a genuine escalate->approve re-approval (fresh pla
   db2.close();
   assert.equal(campaignAfter.plan_hash, campaignAfter.approved_plan_hash, "the genuine re-approve must record the fresh plan hash as approved");
 });
+
+// ── FG-490 review: drive-error rethrow renders through the CLI's stop-reason
+// output paths instead of escaping as a bare uncaught exception ────────────
+//
+// A project-override `feature.yml` that declares a required input the
+// executor never supplies forces the real (non-mocked) startRun to throw
+// synchronously the moment the item dispatches — the same drive-path throw
+// parkCampaignOnDriveThrow wraps and rethrows in production.
+function writeDriveErrorForcingWorkflow(): void {
+  mkdirSync(join(projectDir, ".forge", "workflows"), { recursive: true });
+  const yaml = [
+    "name: feature",
+    "description: FG-490 fixture — forces startRun's required-input check to throw.",
+    "inputs:",
+    "  - name: brief",
+    "    required: true",
+    "    type: text",
+    "  - name: drive-error-fixture-field",
+    "    required: true",
+    "    type: text",
+    "    help: never supplied by the campaign executor — forces the drive-time throw",
+    "steps:",
+    "  - id: architect",
+    "    agent: architecture-advisor",
+    "",
+  ].join("\n");
+  writeFileSync(join(projectDir, ".forge", "workflows", "feature.yml"), yaml);
+}
+
+// The shared beforeEach's FG-101 has an empty body, so it never clears the
+// readiness gate (evaluateReadiness) and the item parks on outcome=held
+// before it ever reaches dispatch. Rewrite it with Problem/Goal/Acceptance
+// Criteria sections — same shape executor.test.ts's real-dispatch fixtures
+// use — so the item actually dispatches and hits the drive-error fixture.
+function writeReadyTicket(): void {
+  writeTicket(projectDir, {
+    id: "FG-101",
+    type: "story",
+    status: "active",
+    title: "Story One",
+    created: "2024-01-01",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+}
+
+test("integ FG-490 review: campaign start --json renders a drive-error as structured JSON, not a bare non-JSON exception", () => {
+  writeDriveErrorForcingWorkflow();
+  writeReadyTicket();
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId, "--json"]);
+  assert.notEqual(startResult.status, 0, "a drive-error must still exit non-zero");
+
+  let parsed: { stopReason: string; ticketId?: string; runId?: string; error: string; guidance: string };
+  assert.doesNotThrow(
+    () => { parsed = JSON.parse(startResult.stdout); },
+    `--json output must be parseable JSON, not a bare 'forge: ...' line\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  parsed = JSON.parse(startResult.stdout);
+  assert.equal(parsed.stopReason, "drive_error");
+  assert.equal(parsed.ticketId, "FG-101");
+  assert.ok(parsed.runId, "runId must be derivable from the parked campaign item");
+  assert.match(parsed.error, /required input 'drive-error-fixture-field' missing/, "error must carry the ORIGINAL drive-path error, not the wrapped guidance text");
+  assert.match(parsed.guidance, /forge campaign resume/);
+});
+
+test("integ FG-490 review: campaign start (human) still prints the wrapped drive-error message with resume guidance", () => {
+  writeDriveErrorForcingWorkflow();
+  writeReadyTicket();
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId]);
+  assert.notEqual(startResult.status, 0, "a drive-error must still exit non-zero");
+
+  const combined = startResult.stderr + startResult.stdout;
+  assert.ok(
+    combined.includes(`campaign ${planOutput.campaignId} paused after a drive error on FG-101`),
+    `human output must keep the executor's wrapped message text\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  assert.ok(
+    combined.includes(`forge campaign resume ${planOutput.campaignId}`),
+    `human output must keep the resume guidance\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+});
+
+test("integ FG-490 review: campaign resume --json renders a fresh drive-error as structured JSON", () => {
+  writeDriveErrorForcingWorkflow();
+  writeReadyTicket();
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  // Drive resume straight into dispatch (skipping a real `start`): flip the
+  // campaign to paused with its item still pending, exactly as the other
+  // in-flight/held resume tests in this file seed state directly via DB.
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId, "--json"]);
+  assert.notEqual(resumeResult.status, 0, "a drive-error must still exit non-zero");
+
+  let parsed: { stopReason: string; ticketId?: string; runId?: string; error: string; guidance: string };
+  assert.doesNotThrow(
+    () => { parsed = JSON.parse(resumeResult.stdout); },
+    `--json output must be parseable JSON, not a bare 'forge: ...' line\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  parsed = JSON.parse(resumeResult.stdout);
+  assert.equal(parsed.stopReason, "drive_error");
+  assert.equal(parsed.ticketId, "FG-101");
+  assert.ok(parsed.runId, "runId must be derivable from the parked campaign item");
+  assert.match(parsed.error, /required input 'drive-error-fixture-field' missing/);
+  assert.match(parsed.guidance, /forge campaign resume/);
+});
+
+test("integ FG-490 review: campaign resume (human) still prints the wrapped drive-error message with resume guidance", () => {
+  writeDriveErrorForcingWorkflow();
+  writeReadyTicket();
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  const resumeResult = runForge(["campaign", "resume", planOutput.campaignId]);
+  assert.notEqual(resumeResult.status, 0, "a drive-error must still exit non-zero");
+
+  const combined = resumeResult.stderr + resumeResult.stdout;
+  assert.ok(
+    combined.includes(`campaign ${planOutput.campaignId} paused after a drive error on FG-101`),
+    `human output must keep the executor's wrapped message text\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+  assert.ok(
+    combined.includes(`forge campaign resume ${planOutput.campaignId}`),
+    `human output must keep the resume guidance\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
