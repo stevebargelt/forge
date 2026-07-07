@@ -1,9 +1,11 @@
 ---
 id: FG-489
 type: story
-status: active
+status: done
 title: "forge campaign retry <ticket>: supported reset-to-pending for transiently-failed campaign items; recovery guidance stops saying hand-edit the DB (review F6)"
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: 6e8f4d1
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md), finding F6 / backlog rec #8.

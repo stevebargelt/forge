@@ -18,6 +18,8 @@ Current FG-485 evidence shows the distinction matters:
 
 This weak evidence creates folklore: operators and orchestrators infer a cause from symptoms, then repeat that cause in handoffs. The result is wasted debugging and misplaced fixes.
 
+Related current symptom: a documentation-maintainer wait loop missed completion for about 11 minutes because it used `pgrep -f "[d]ocumentation-maintainer"` as its wait condition. The real maintainer had exited, but unrelated long-lived Codex/Claude processes still matched because their argv contained conversation text with the role name. This is not container disappearance, but it is the same evidence-quality class: process-name matching on a multi-agent machine is too polluted to be a source of truth.
+
 ## Goal
 
 Make container/agent disappearance causally diagnosable. Forge should record enough terminal evidence that an operator can distinguish harness kill, Docker/container exit, OOM/exit-137, idle timeout, wrapper crash, laptop sleep/Docker daemon interruption, and plain missing-result behavior. When evidence is absent, Forge should say that explicitly instead of naming an unproven cause.
@@ -34,6 +36,7 @@ Make container/agent disappearance causally diagnosable. Forge should record eno
 - Operator-facing text avoids unproven causal labels. It may say "container disappeared without terminal evidence"; it must not say "harness killed" unless evidence supports that.
 - Add a debug/diagnostic mode or retention policy so abnormal containers/logs are retained long enough for investigation, e.g. keep-on-failure or keep-for-N-minutes. Do not require this in normal success paths.
 - Add a diagnostic command or show section that summarizes the task's causal evidence and explicitly lists what evidence is missing.
+- Monitoring guidance and operator surfaces prefer durable Forge state and unique artifacts over process-name matching. `pgrep -f <role|ticket|command text>` must not be documented or used as the wait condition for Forge-launched work; at most it is a debugging aid.
 - Add tests/fakes for at least:
   - started container disappears with no exit event;
   - exited container has code 137/OOM evidence;
@@ -51,6 +54,7 @@ Use this checklist for current incidents until the feature lands:
 - Last stdout stream event and stderr tail.
 - Failure kind and whether it came from attached exit or reconcile.
 - Worktree/shared-project changed files.
+- If the task was detached, the exact launched PID/pidfile, terminal log marker, result artifact, or Forge DB terminal state used to decide completion. Avoid role-name or ticket-text process matching.
 - macOS sleep/wake/Docker Desktop events around the timestamp before concluding "harness killed".
 
 ## Related / Consolidation
