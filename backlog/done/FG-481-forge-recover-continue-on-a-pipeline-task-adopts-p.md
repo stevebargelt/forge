@@ -1,9 +1,11 @@
 ---
 id: FG-481
 type: story
-status: active
+status: done
 title: forge recover --continue on a PIPELINE task adopts persisted work as complete, skipping merge/integration-gate/reds — decide whether the operator-explicit path needs the FG-479 guard too
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: f74dc5e
 ---
 
 Discovered while implementing FG-479 (reconcile no longer completes pipeline tasks from container-gone recovery; recover --continue deliberately refuses the new orphaned_needs_finalize kind).
