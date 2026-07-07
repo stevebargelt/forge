@@ -4,7 +4,8 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
@@ -36,10 +37,49 @@ let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 let projectDir: string;
 
+// FG-483: real git plumbing for the evidence eligibility executor.ts now
+// requires (composeOutOfBandEligibility) — the pre-FG-483 fake "abc123"
+// closedCommit string makeDispatchSpy used to fabricate a ship no longer
+// passes checkClosedCommitReachableOnBase. Same gitExec pattern as
+// executor.test.ts/reconcile.integration.test.ts.
+function gitExec(args: string[], cwd: string): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 10000,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "t@t.com",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "t@t.com",
+    },
+  });
+}
+
+// Real, reachable, non-code commit — satisfies composeOutOfBandEligibility's
+// non_code_diff out-of-band lane with no host-verification row needed. These
+// tests exercise the readiness gate, not the evidence gate — a plain markdown
+// "ship" commit is legitimate, incidental evidence for the dispatched item.
+function makeShipCommit(label: string): string {
+  writeFileSync(join(projectDir, `${label.replace(/[^A-Za-z0-9_-]/g, "_")}-ship.md`), `${label} shipped`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", `ship ${label}`], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
   projectDir = mkdtempSync(join(tmpdir(), "readiness-gate-integration-"));
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  // Base commit so the first makeShipCommit call has exactly one parent — a
+  // root commit is ambiguous and safe-denies in commitTouchesOnlyNonCodePaths.
+  writeFileSync(join(projectDir, "base.txt"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "init"], projectDir);
 });
 
 afterEach(() => {
@@ -75,7 +115,8 @@ function makeDispatchSpy(): {
       calls.push(args.runTitle ?? "");
       // Simulate the agent shipping the ticket as part of completing the dispatch —
       // required for the item to reach lifecycleStatus 'complete' (FG-442 review Finding 1).
-      if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+      // FG-483: must be a real, reachable commit — fabricated shas no longer ship.
+      if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
     },
   };

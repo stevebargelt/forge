@@ -510,7 +510,12 @@ test("end-to-end: reconciling a scope-blocked item unholds a downstream item and
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    // FG-483: a fabricated closedCommit no longer ships — give FG-241 real,
+    // reachable, docs-only evidence (non_code_diff lane) via commitDocsFile.
+    if (args.runTitle) {
+      const commit = commitDocsFile(`docs/${args.runTitle}.md`, "docs", `docs: ${args.runTitle}`);
+      closeTicket(projectDir, args.runTitle, commit);
+    }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1480,7 +1485,12 @@ test("FG-441: resume ships a manually-driven awaiting_gate item with complete ev
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    // FG-483: a fabricated closedCommit no longer ships — give FG-601 real,
+    // reachable, docs-only evidence (non_code_diff lane) via commitDocsFile.
+    if (args.runTitle) {
+      const commit = commitDocsFile(`docs/${args.runTitle}.md`, "docs", `docs: ${args.runTitle}`);
+      closeTicket(projectDir, args.runTitle, commit);
+    }
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1501,9 +1511,17 @@ test("FG-441: resume ships a manually-driven awaiting_gate item with complete ev
   const finalItem2 = getCampaignItem(item2.id)!;
   assert.notEqual(finalItem2.outcome, "held", "downstream item must no longer be held");
 
-  assert.equal(countEvents(), beforeEvents + 1, "exactly one new audit event for the reconciled item");
+  // FG-483: FG-601 now ships via the SAME evidence-gated invoke-lane finalize
+  // (decidedBy: 'campaign_drive') instead of the old frontmatter-only check, so
+  // it logs its own campaign_item.evidence_reconciled event alongside FG-600's
+  // reattach-path one (decidedBy: 'campaign_resume') — two new events, not one.
+  assert.equal(
+    countEvents(),
+    beforeEvents + 2,
+    "one audit event for the manually-driven FG-600 reattach-reconcile, one for FG-601's invoke-lane ship"
+  );
   const evRow = db
-    .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconciled' ORDER BY id DESC LIMIT 1")
+    .prepare("SELECT event_type, payload FROM events WHERE event_type = 'campaign_item.evidence_reconciled' AND payload LIKE '%\"decidedBy\":\"campaign_resume\"%' ORDER BY id DESC LIMIT 1")
     .get() as { event_type: string; payload: string } | undefined;
   assert.ok(evRow, "campaign_item.evidence_reconciled event logged for the resume-path reconcile");
   const payload = JSON.parse(evRow!.payload) as { ticketId: string; campaignId: string; decidedBy: string };

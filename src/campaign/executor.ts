@@ -20,7 +20,7 @@ import { tasksForRun } from "../store/tasks.js";
 import type { Campaign, CampaignItem, CampaignItemLifecycleStatus, CampaignItemOutcome, BlockerKind, Run } from "../types/index.js";
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./planner.js";
-import { listTickets, readTicket } from "../backlog/structured.js";
+import { listTickets } from "../backlog/structured.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, updateRunStatus } from "../store/runs.js";
 import { newRunId, nowIso } from "../util/ids.js";
@@ -641,6 +641,86 @@ async function driveWorkflowItem(
   }
 }
 
+// FG-483: the SINGLE shared evidence-eligibility evaluation for a drive-time
+// invoke-lane finalize (quick_implementation and the docs_only/test_only/
+// review_only/research_only escape hatch) — the exact composeOutOfBandEligibility
+// chain the FG-441 reattach branch above already uses for the resume path, so
+// drive-time and resume-time can never disagree for the same evidence. Replaces
+// the pre-FG-483 check (freshTicket.status==='done' && !!freshTicket.closedCommit)
+// that trusted hand-editable ticket frontmatter alone — spoofable by any agent
+// that can self-close its own ticket with a fabricated closedCommit (review F4).
+function evaluateInvokeLaneEligibility(
+  projectDir: string,
+  item: CampaignItem
+): { eligible: boolean; missing: string[]; evidence: unknown } {
+  const authoritative = authoritativeOutcomeContribution(collectReconcileEvidence(projectDir, item));
+  const outOfBand = evaluateOutOfBandEvidence(collectOutOfBandEvidence(projectDir, item));
+  return composeOutOfBandEligibility({ outOfBand, authoritative, hasRunId: true });
+}
+
+type InvokeLaneFinalizeResult = { outcome: "shipped" } | { outcome: "parked"; missing: string[] };
+
+// FG-483: applies an evaluateInvokeLaneEligibility verdict — refuses (logging
+// the SAME campaign_item.evidence_reconcile_refused event the reattach path
+// emits) or ships. The terminal 'shipped' write is guarded by the SAME
+// running-gated CAS the reattach path uses (updateCampaignItemIfCampaignRunning):
+// a concurrent pause/abandon landing between the evidence check and the write
+// must never let this be an optimistic ship. When the CAS is lost (eligible,
+// but the campaign left 'running' underneath us) the caller parks the item at
+// 'awaiting_gate' exactly like a genuine refusal — never left at its prior
+// 'running' status — so the SAME reattach branch above can finish the job on
+// the next resume/reconcile instead of stranding the item mid-flight.
+function finalizeInvokeLaneOutcome(
+  campaignId: string,
+  item: CampaignItem,
+  evaluated: { eligible: boolean; missing: string[]; evidence: unknown },
+  opts: { shippedReason?: string } = {}
+): InvokeLaneFinalizeResult {
+  if (!evaluated.eligible) {
+    logEvent("campaign_item.evidence_reconcile_refused", {
+      runId: item.runId,
+      payload: {
+        campaignId,
+        itemId: item.id,
+        ticketId: item.ticketId,
+        missing: evaluated.missing,
+        decidedBy: "campaign_drive",
+        decidedAt: nowIso(),
+      },
+    });
+    return { outcome: "parked", missing: evaluated.missing };
+  }
+
+  const shipped = getDb().transaction(() => {
+    // Only touch `reason` when the caller has one to set (e.g. quick_implementation's
+    // docs-impact warning) — an omitted key preserves whatever pre-dispatch reason is
+    // already on the item (e.g. FG-393's "continued because ..." for an item that
+    // continued past a blocker), since {...existing, ...update} treats a present-but-
+    // undefined key as an explicit clear, not a no-op.
+    const update: Parameters<typeof updateCampaignItemIfCampaignRunning>[2] = {
+      lifecycleStatus: "complete",
+      outcome: "shipped",
+    };
+    if (opts.shippedReason) update.reason = opts.shippedReason;
+    const applied = updateCampaignItemIfCampaignRunning(item.id, campaignId, update);
+    if (!applied) return false;
+    logEvent("campaign_item.evidence_reconciled", {
+      runId: item.runId,
+      payload: {
+        campaignId,
+        itemId: item.id,
+        ticketId: item.ticketId,
+        evidence: evaluated.evidence,
+        decidedBy: "campaign_drive",
+        decidedAt: nowIso(),
+      },
+    });
+    return true;
+  })();
+
+  return shipped ? { outcome: "shipped" } : { outcome: "parked", missing: [] };
+}
+
 // Shared item-dispatch loop used by startCampaign and resumeCampaign.
 // Requires the campaign to already be in 'running' state.
 // Skips terminal items (complete/failed); dispatches only pending items.
@@ -721,9 +801,7 @@ async function driveRemainingItems(
         // refuses any code-touching item that lacks a passing host-verification
         // row (it never starts shipping un-verified code; the widening is scoped
         // to the non_code_diff lane).
-        const authoritative = authoritativeOutcomeContribution(collectReconcileEvidence(opts.projectDir, item));
-        const outOfBand = evaluateOutOfBandEvidence(collectOutOfBandEvidence(opts.projectDir, item));
-        const evaluated = composeOutOfBandEligibility({ outOfBand, authoritative, hasRunId: true });
+        const evaluated = evaluateInvokeLaneEligibility(opts.projectDir, item);
         if (evaluated.eligible) {
           // Atomic: same paused-guard pattern reconcile.ts uses, gated on 'running'
           // instead of 'paused' — resumeCampaign already transitioned the campaign
@@ -1194,30 +1272,36 @@ async function driveRemainingItems(
         continue;
       }
 
-      // Both invokes completed — finalize the item. Only outcome==='shipped' (ticket
-      // done + closedCommit) may complete the item; anything else means the agent(s)
-      // finished without actually shipping, so the item parks at awaiting_gate for
-      // `forge campaign reconcile` (or manual resolution) instead of reporting
-      // complete (FG-442 review: invoke lanes had no gate on a non-shipped outcome).
-      let outcome: CampaignItemOutcome | undefined;
-      try {
-        const freshTicket = readTicket(opts.projectDir, item.ticketId);
-        if (freshTicket.status === "done" && !!freshTicket.closedCommit) outcome = "shipped";
-      } catch {
-        // ticket not found after run — leave outcome undefined
-      }
+      // Both invokes completed — finalize the item using the SAME evidence
+      // eligibility the FG-441 resume/reattach path uses (see
+      // evaluateInvokeLaneEligibility/finalizeInvokeLaneOutcome above): only a
+      // genuinely eligible item may complete; anything else parks at
+      // awaiting_gate for `forge campaign reconcile`/`forge campaign resume`
+      // (or manual resolution) instead of reporting complete (FG-442 review
+      // Finding 1; hardened by FG-483 to require real evidence — commit
+      // reachability + a covering host-verification row for code-touching
+      // commits, or the non_code_diff classification — never ticket
+      // frontmatter alone).
+      const itemWithRunId = { ...item, runId };
+      const eligibility = evaluateInvokeLaneEligibility(opts.projectDir, itemWithRunId);
 
       // FG-442: docs-impact resolution — advisory only, mirrors milestone.ts's
       // ship-time check. quick_implementation has no docs phase of its own
       // (unlike full_feature's pipeline, which always runs documentation-maintainer).
-      const docsWarning = outcome === "shipped" ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
+      const docsWarning = eligibility.eligible ? formatDocsImpactWarning(assessRunDocsImpact(runId), runId) : null;
 
-      if (outcome === "shipped") {
-        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome, reason: docsWarning ?? undefined });
-      } else {
+      const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility, {
+        shippedReason: docsWarning ?? undefined,
+      });
+      const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
+
+      if (finalized.outcome === "parked") {
         updateCampaignItem(item.id, {
           lifecycleStatus: "awaiting_gate",
-          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
+          requestedHumanAction:
+            finalized.missing.length > 0
+              ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+              : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`,
         });
       }
 
@@ -1296,26 +1380,27 @@ async function driveRemainingItems(
         continue;
       }
 
-      // Only outcome==='shipped' (ticket done + closedCommit) may complete the item;
-      // anything else means the agent finished without actually shipping, so the item
-      // parks at awaiting_gate for `forge campaign reconcile` (or manual resolution)
-      // instead of reporting complete (FG-442 review).
-      let outcome: CampaignItemOutcome | undefined;
-      try {
-        const freshTicket = readTicket(opts.projectDir, item.ticketId);
-        if (freshTicket.status === "done" && !!freshTicket.closedCommit) {
-          outcome = "shipped";
-        }
-      } catch {
-        // ticket not found after run — leave outcome undefined
-      }
+      // Only a genuinely eligible item may complete — the SAME evidence
+      // eligibility the FG-441 resume/reattach path uses (see
+      // evaluateInvokeLaneEligibility/finalizeInvokeLaneOutcome above);
+      // anything else parks at awaiting_gate for `forge campaign
+      // reconcile`/`forge campaign resume` (or manual resolution) instead of
+      // reporting complete (FG-442 review; hardened by FG-483 to require real
+      // evidence — commit reachability + a covering host-verification row for
+      // code-touching commits, or the non_code_diff classification — never
+      // ticket frontmatter alone).
+      const itemWithRunId = { ...item, runId };
+      const eligibility = evaluateInvokeLaneEligibility(opts.projectDir, itemWithRunId);
+      const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility);
+      const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
 
-      if (outcome === "shipped") {
-        updateCampaignItem(item.id, { lifecycleStatus: "complete", outcome });
-      } else {
+      if (finalized.outcome === "parked") {
         updateCampaignItem(item.id, {
           lifecycleStatus: "awaiting_gate",
-          requestedHumanAction: `agent finished but ticket ${item.ticketId} is not closed with a closedCommit — close the ticket and run \`forge campaign reconcile\`, or resolve manually`,
+          requestedHumanAction:
+            finalized.missing.length > 0
+              ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+              : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`,
         });
       }
 
