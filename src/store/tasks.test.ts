@@ -8,6 +8,7 @@ import {
   getTask,
   markTaskRunning,
   markTaskComplete,
+  markTaskBlockedByRed,
   markTaskFailed,
   setTaskStatus,
   pendingTasksForRun,
@@ -187,6 +188,35 @@ test("re-running a failed task: markTaskRunning clears error, then markTaskCompl
   const t = getTask("task-retry")!;
   assert.equal(t.status, "complete");
   assert.equal(t.error, undefined);
+});
+
+// ---------- markTaskBlockedByRed (FG-482) ----------
+
+test("markTaskBlockedByRed writes status+result together from awaiting_red", () => {
+  insertTask(task({ id: "task-bred-1", status: "awaiting_red" }));
+  const applied = markTaskBlockedByRed("task-bred-1", { verdict: "fail" });
+  assert.equal(applied, true);
+  const t = getTask("task-bred-1")!;
+  assert.equal(t.status, "blocked_by_red");
+  assert.deepEqual(t.result, { verdict: "fail" });
+  assert.equal(t.completedAt, undefined);
+});
+
+test("markTaskBlockedByRed returns false and leaves the row untouched from a non-awaiting_red status", () => {
+  for (const status of ["running", "complete", "failed", "awaiting_gate"] as const) {
+    insertTask(task({ id: `task-bred-${status}`, status }));
+    const applied = markTaskBlockedByRed(`task-bred-${status}`, { verdict: "fail" });
+    assert.equal(applied, false, `expected CAS to fail from status=${status}`);
+    const t = getTask(`task-bred-${status}`)!;
+    assert.equal(t.status, status, `status must remain ${status}`);
+    assert.equal(t.result, undefined, "result must not be written on a failed CAS");
+  }
+});
+
+test("markTaskBlockedByRed never leaves a row observable as awaiting_gate", () => {
+  insertTask(task({ id: "task-bred-2", status: "awaiting_red" }));
+  markTaskBlockedByRed("task-bred-2", { verdict: "fail" });
+  assert.notEqual(getTask("task-bred-2")!.status, "awaiting_gate");
 });
 
 // ---------- agent_alias / agent_model (#38) ----------
