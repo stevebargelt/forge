@@ -1766,3 +1766,72 @@ export function escalateCampaignItemLane(
 
   return { ok: true, planHash };
 }
+
+export type RetryItemResult = { ok: true } | { ok: false; reason: string };
+
+// FG-489: the ONLY supported way to return a transiently-failed item to
+// 'pending' — replaces the "hand-edit the DB" workaround the FG-489 review
+// (F6) flagged as the one path operators had for the most common overnight
+// interruptions (expired auth, container/infra crash, idle timeout). Reuses
+// classifyFailureKind's SHARED categories: auth and infrastructure (which
+// already folds in idle_timeout/container_crash/orphaned) reflect host/
+// environment trouble, not the item's own work, so they retry directly. A
+// scope/verdict failure (or any other blockerKind, including lane_escalation
+// which has its own escalate-lane recovery path) is refused — silently
+// retrying a red/verdict failure would re-burn the item with no operator
+// signal that anything about the failure actually changed. Auto-reset on
+// resume is deliberately NOT implemented here (scope decision at filing):
+// that would re-burn an item against a still-broken transient blocker with
+// no operator signal.
+const RETRYABLE_BLOCKER_KINDS = new Set<BlockerKind>(["auth", "infrastructure"]);
+
+export function retryCampaignItem(campaignId: string, ticketId: string): RetryItemResult {
+  const campaign = getCampaign(campaignId);
+  if (!campaign) return { ok: false, reason: `campaign ${campaignId} not found` };
+  if (campaign.status !== "paused") {
+    return { ok: false, reason: `campaign must be paused to retry an item (status: ${campaign.status})` };
+  }
+
+  const items = listCampaignItems(campaignId);
+  const targetItem = items.find((i) => i.ticketId === ticketId);
+  if (!targetItem) {
+    return { ok: false, reason: `ticket ${ticketId} is not a campaign item in campaign ${campaignId}` };
+  }
+  if (!(targetItem.lifecycleStatus === "failed" && targetItem.outcome === "blocked")) {
+    return {
+      ok: false,
+      reason: `ticket ${ticketId} is not currently failed (lifecycleStatus: ${targetItem.lifecycleStatus}, outcome: ${targetItem.outcome ?? "none"})`,
+    };
+  }
+  if (!targetItem.blockerKind || !RETRYABLE_BLOCKER_KINDS.has(targetItem.blockerKind)) {
+    const kind = targetItem.blockerKind ?? "none";
+    const hint =
+      targetItem.blockerKind === "lane_escalation"
+        ? `run forge campaign escalate-lane ${campaignId} ${ticketId} --new-lane <lane> --rationale <text> instead`
+        : `it is not a transient host/environment failure — inspect the item (blockerKind: ${kind}), then re-plan or abandon`;
+    return {
+      ok: false,
+      reason: `ticket ${ticketId} failed with blockerKind '${kind}', which is not retryable — ${hint}`,
+    };
+  }
+
+  // Clear per-attempt state (run/branch/worktree/PR from the failed attempt)
+  // so the next dispatch starts clean — mirrors escalateCampaignItemLane's
+  // reset above, plus the run-linkage fields that a lane escalation leaves
+  // untouched but a retry of the SAME lane must not carry forward.
+  const applied = updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
+    lifecycleStatus: "pending",
+    outcome: undefined,
+    blockerKind: undefined,
+    continuePolicy: undefined,
+    reason: undefined,
+    requestedHumanAction: undefined,
+    runId: undefined,
+    branch: undefined,
+    worktreePath: undefined,
+    prUrl: undefined,
+  });
+  if (!applied) return { ok: false, reason: "campaign is no longer paused (concurrent state change)" };
+
+  return { ok: true };
+}

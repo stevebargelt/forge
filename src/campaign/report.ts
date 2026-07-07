@@ -88,9 +88,31 @@ function unrefinedReadinessItem(items: CampaignItem[]): CampaignItem | undefined
   );
 }
 
-function recoveryNeededAction(item: CampaignItem): string {
-  const runPart = item.runId ? ` (run ${item.runId})` : "";
-  return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before continuing`;
+// FG-489: mirrors campaign.ts's recoveryGuidanceMessage — same recovery_needed
+// scenario (item stuck in an indeterminate lifecycle state), surfaced here on
+// the show/report next-action fields instead of start/resume stderr. Must not
+// tell the operator to hand-edit the DB; once the run is confirmed dead and the
+// item lands on a transient (auth/infrastructure) blockerKind, `forge campaign
+// retry` — not a raw reset — is the supported path.
+function recoveryNeededAction(campaignId: string, item: CampaignItem): string {
+  const runPart = item.runId ? ` run ${item.runId}` : "the run";
+  const showHint = item.runId ? ` ${item.runId}` : "";
+  return `recovery needed: item ${item.ticketId} is ${item.lifecycleStatus} — inspect ${runPart} (forge show${showHint}); if it turns out to be a transient failure (auth/infrastructure), \`forge campaign retry ${campaignId} ${item.ticketId}\` once the campaign is paused will reset it for a clean re-dispatch`;
+}
+
+// FG-489: same retryable-kind set as executor.ts's RETRYABLE_BLOCKER_KINDS and
+// campaign.ts's — auth/infrastructure are transient host/environment failures
+// eligible for `forge campaign retry`; everything else (scope/verdict failures,
+// lane_escalation, etc.) needs operator re-plan/escalate/abandon, not a reset.
+const RETRYABLE_BLOCKER_KINDS = new Set(["auth", "infrastructure"]);
+
+function blockedItemGuidance(campaignId: string, blockedItem: CampaignItem): string {
+  const kind = blockedItem.blockerKind ?? "unknown";
+  const retryHint =
+    blockedItem.blockerKind && RETRYABLE_BLOCKER_KINDS.has(blockedItem.blockerKind)
+      ? ` — transient: \`forge campaign retry ${campaignId} ${blockedItem.ticketId}\` will reset it`
+      : "";
+  return `resolve blocker ${blockedItem.ticketId} (${kind})${retryHint} then resume`;
 }
 
 // FG-460: shared single definition of the authoritative-outcome codes (see
@@ -218,7 +240,7 @@ function computeNextShowAction(
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
-    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
+    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(campaign.id, inf);
     return "running";
   }
   if (campaign.status === "complete") return "complete — none";
@@ -230,7 +252,7 @@ function computeNextShowAction(
   if (blocker === null) {
     if (intent === "start") return "start";
     const blockedItem = unresolvedBlockedItem(items);
-    if (blockedItem) return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+    if (blockedItem) return blockedItemGuidance(campaign.id, blockedItem);
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
       const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
@@ -243,7 +265,7 @@ function computeNextShowAction(
     if (readinessHeld) return `refine ${readinessHeld.ticketId} then resume`;
     return "resume";
   }
-  if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
+  if (blocker === "recovery_needed") return recoveryNeededAction(campaign.id, findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan";
@@ -312,7 +334,7 @@ function computeNextOperatorAction(
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
-    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(inf);
+    if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(campaign.id, inf);
     return "campaign is running — monitor progress";
   }
   if (campaign.status === "complete") {
@@ -343,7 +365,7 @@ function computeNextOperatorAction(
     // Paused with unresolved blocked item: surface it to guide the operator.
     const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) {
-      return `resolve blocker ${blockedItem.ticketId} (${blockedItem.blockerKind ?? "unknown"}) then resume`;
+      return blockedItemGuidance(campaign.id, blockedItem);
     }
     // Parked at a human gate or red block: surface the specific gate/block action.
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
@@ -363,7 +385,7 @@ function computeNextOperatorAction(
     }
     return "resume the campaign when ready";
   }
-  if (blocker === "recovery_needed") return recoveryNeededAction(findInFlightItem(items)!);
+  if (blocker === "recovery_needed") return recoveryNeededAction(campaign.id, findInFlightItem(items)!);
   if (blocker === "not_approved") return "approve the campaign, then start";
   if (blocker === "dry_run_not_executable") return "dry_run: re-plan with --mode pilot or --mode sequential to execute";
   if (blocker === "stale_plan") return "stale: re-plan and re-approve";

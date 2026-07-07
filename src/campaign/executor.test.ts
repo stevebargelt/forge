@@ -20,7 +20,7 @@ import {
 import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./planner.js";
 import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
-import { startCampaign, resumeCampaign, escalateCampaignItemLane } from "./executor.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane, retryCampaignItem } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
 import { logEvent } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
@@ -3325,6 +3325,122 @@ test("RED-WIDE fix 4: escalateCampaignItemLane rejects a no-op lane change (rati
   const items = listCampaignItems(campaign.id);
   assert.equal(items[0]!.blockerKind, "lane_escalation", "item must remain in its escalated blocked state — no silent clear");
   assert.equal(items[0]!.lifecycleStatus, "failed");
+});
+
+// ── FG-489: retryCampaignItem — supported reset-to-pending for transiently-failed items ──
+
+test("FG-489: pause on an auth-classified failure, retryCampaignItem resets it, resume re-dispatches through the normal drive path and reaches shipped", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  let dispatchCallCount = 0;
+  const authThenSucceedDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    dispatchCallCount++;
+    if (dispatchCallCount === 1) {
+      logEvent("task.failed", { taskId: "task-auth-1", payload: { failure_kind: "auth_expired", error: "auth token expired" } });
+      return { runId: args.runId ?? "run-auth-1", taskId: "task-auth-1", status: "failed", error: "auth token expired" };
+    }
+    return { runId: args.runId ?? "run-auth-2", taskId: "task-auth-2", status: "complete", result: {} };
+  };
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: authThenSucceedDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+  assert.equal(dispatchCallCount, 1);
+
+  const failedItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(failedItem.lifecycleStatus, "failed");
+  assert.equal(failedItem.outcome, "blocked");
+  assert.equal(failedItem.blockerKind, "auth", "task.failed auth_expired must classify to blockerKind 'auth'");
+  assert.ok(failedItem.runId, "the failed attempt's run must be retained until retry clears it");
+
+  const retryResult = retryCampaignItem(campaign.id, "FG-101");
+  assert.equal(retryResult.ok, true, `retry must accept an auth-classified failure: ${!retryResult.ok ? retryResult.reason : ""}`);
+
+  const resetItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(resetItem.lifecycleStatus, "pending", "retry must reset the item to pending");
+  assert.equal(resetItem.outcome, undefined);
+  assert.equal(resetItem.blockerKind, undefined);
+  assert.equal(resetItem.runId, undefined, "retry must clear the failed attempt's run linkage for a clean re-dispatch");
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "retry must not itself change campaign status");
+
+  // Real ship evidence (FG-483: invoke-lane completion requires it, not just a
+  // 'complete' dispatch status) so the re-dispatch can actually reach shipped.
+  shipTicket("FG-101");
+
+  const resumeResult = await resumeCampaign(campaign.id, { dispatch: authThenSucceedDispatch });
+  assert.equal(dispatchCallCount, 2, "resume must re-dispatch the retried item through the normal drive path");
+  assert.equal(resumeResult.stopReason, "complete");
+
+  const shippedItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(shippedItem.lifecycleStatus, "complete");
+  assert.equal(shippedItem.outcome, "shipped");
+});
+
+test("FG-489: retryCampaignItem refuses when the campaign is running (only a paused campaign is eligible)", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  tryTransitionCampaignToRunning(campaign.id);
+
+  const result = retryCampaignItem(campaign.id, "FG-101");
+  assert.equal(result.ok, false, "retry must refuse a running campaign");
+  if (!result.ok) {
+    assert.match(result.reason, /paused/i);
+  }
+});
+
+test("FG-489: retryCampaignItem refuses a scope/verdict-blocked item — no silent retry over a red/verdict failure", async () => {
+  // Two items: FG-101 fails LOCAL (scope) and FG-102 (unknown relation,
+  // sequential) holds behind it — same shape as the "first-item failure
+  // (FG-393)" test — so the campaign lands on 'paused' (not 'complete') and
+  // there is a real failed item to attempt retry against.
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  const scopeFailDispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
+    seedLocalFailure("task-scope-fake");
+    return { runId: args.runId ?? "run-scope-fake", taskId: "task-scope-fake", status: "failed", error: "agent produced wrong scope" };
+  };
+
+  const firstRun = await startCampaign(campaign.id, { dispatch: scopeFailDispatch });
+  assert.equal(firstRun.stopReason, "paused");
+
+  const failedItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(failedItem.blockerKind, "scope", "model_error must classify to blockerKind 'scope'");
+
+  const result = retryCampaignItem(campaign.id, "FG-101");
+  assert.equal(result.ok, false, "retry must refuse a scope-blocked item");
+  if (!result.ok) {
+    assert.match(result.reason, /scope/i);
+  }
+
+  const untouchedItem = listCampaignItems(campaign.id)[0]!;
+  assert.equal(untouchedItem.lifecycleStatus, "failed", "a refused retry must not mutate the item");
+  assert.equal(untouchedItem.blockerKind, "scope");
+});
+
+test("FG-489: retryCampaignItem refuses an unknown ticket id and a not-currently-failed item", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const unknownResult = retryCampaignItem(campaign.id, "FG-999-does-not-exist");
+  assert.equal(unknownResult.ok, false, "retry must refuse a ticket id that is not a campaign item");
+
+  const pendingResult = retryCampaignItem(campaign.id, "FG-101");
+  assert.equal(pendingResult.ok, false, "retry must refuse an item that is not currently failed");
 });
 
 test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field) dispatches via single invoke, not the full_feature workflow path", async () => {
