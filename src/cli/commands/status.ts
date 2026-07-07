@@ -9,6 +9,7 @@ import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage } 
 import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
 import { eventsForTask } from "../../store/events.js";
 import { failureKindFromEvents, getOrphanEvidenceFromEvents } from "../../v2/failure-kind.js";
+import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 
 export function registerStatus(program: Command): void {
   program
@@ -72,7 +73,8 @@ export function registerStatus(program: Command): void {
       // FG-481: recover.ts's --continue now refuses unconditionally for a
       // pipeline-run task — thread that same signal into orphanRecoveryMessage
       // so `forge status` doesn't steer the operator toward a refused command.
-      const runIsInvokeRun = run.workflow === "invoke";
+      // FG-486: invoke_chain tasks have no finalize either — shared predicate.
+      const runIsInvokeRun = !taskHasPipelineFinalize(run);
 
       if (opts.json) {
         // Structured output for the orchestrator. One JSON object per call.

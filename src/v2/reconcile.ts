@@ -35,6 +35,7 @@ import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
 import type { OrphanEvidence, ContainerExitInfo } from "./failure-kind.js";
+import { taskHasPipelineFinalize } from "./run-kind.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -230,20 +231,21 @@ export function reconcileRun(
   // integration gate → reds → finalizePrimary, runNext.ts dispatchSingleStep),
   // so a valid result.json proves only that the AGENT finished — none of the
   // trust gates have run. Completing it here would skip reds, verdict/human
-  // gates, and (in worktree mode) the merge-back. Shared predicate with the
-  // run-level completion guard below — one definition of "invoke run".
-  const isInvokeRun = run.workflow === "invoke";
+  // gates, and (in worktree mode) the merge-back. FG-486: `invoke_chain` runs
+  // (campaign quick lanes) dispatch plain invokes with no finalize either, so
+  // their tasks complete the same way — run-kind.ts owns the one definition.
+  const isInvokeLikeRun = !taskHasPipelineFinalize(run);
 
   // FG-479: the fail-safe landing for a pipeline task whose container finished
   // with a usable result but whose host-side finalize never ran. Preserves the
   // result (task row + disk) as evidence and points the operator at the real
   // re-drive path. `forge recover --continue` deliberately refuses this kind —
   // adopting the result as complete would recreate the exact bypass.
-  // FG-481: recover.ts's isInvokeRun mirrors this predicate to unconditionally
-  // refuse `--continue` for a pipeline-run task. The persisted error text below
+  // FG-481: recover.ts consumes the same predicate to unconditionally refuse
+  // `--continue` for a pipeline-run task. The persisted error text below
   // must not recommend a command that recovery will then refuse.
   const workMayPersistAdvice = (taskId: string) =>
-    isInvokeRun ? `continue from it or \`forge retry ${taskId} --force\`` : `\`forge retry ${taskId} --force\``;
+    isInvokeLikeRun ? `continue from it or \`forge retry ${taskId} --force\`` : `\`forge retry ${taskId} --force\``;
 
   const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence) => {
     const error =
@@ -407,7 +409,7 @@ export function reconcileRun(
       // container-gone outcomes — it must carry the same durable evidence
       // tuple as the other three, not just an empty payload.
       const evidence: OrphanEvidence = { ...baseEvidence, resultState: "valid", recoverableStdoutResult: false };
-      if (!isInvokeRun) {
+      if (!isInvokeLikeRun) {
         // FG-479: pipeline task — the agent finished but merge/gate/reds never
         // ran. Never complete it here; land fail-safe with the result preserved.
         failPipelineUnfinalized(t.id, result, evidence);
@@ -470,7 +472,7 @@ export function reconcileRun(
         } catch {
           evidence.resultWriteFailed = true;
         }
-        if (!isInvokeRun) {
+        if (!isInvokeLikeRun) {
           // FG-479: same guard as the valid-result branch above — a recovered
           // stdout result proves the agent finished, not that the pipeline's
           // host-side finalize ran.
@@ -708,7 +710,12 @@ export function reconcileRun(
   // FG-459: guard the run-level status write + its events so a DB throw here
   // does not propagate out of reconcileRun after the task passes succeeded.
   try {
-    if (run.status === "active" && isInvokeRun) {
+    // FG-486: run-level completion stays LITERALLY invoke-only — deliberately
+    // narrower than the task-level isInvokeLikeRun above. An `invoke_chain`
+    // run with no live work may simply be BETWEEN chain steps; whether another
+    // invoke is coming is known only to the campaign executor, so reconcile
+    // must never complete it early.
+    if (run.status === "active" && run.workflow === "invoke") {
       const after = tasksForRun(runId);
       const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
       if (after.length > 0 && !anyNonTerminal) {

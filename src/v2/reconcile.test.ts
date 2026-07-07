@@ -324,6 +324,50 @@ test("FG-479: PIPELINE run, stdout-recoverable result (no result.json) → faile
   assert.equal(onDisk.summary, text);
 });
 
+// ----- FG-486: invoke_chain runs are NOT pipeline runs at the TASK level -----
+// Campaign quick lanes create workflow "invoke_chain" runs whose tasks are
+// plain invokes (no merge/gate/reds). Container-gone-with-result must complete
+// them like invoke tasks — the FG-479 guard wrongly landed them
+// orphaned_needs_finalize. Run-level completion stays invoke-only: whether the
+// chain has another invoke coming is known only to the campaign executor.
+
+const INVOKE_CHAIN_RUN: Run = { id: "run-rec-chain", workflow: "invoke_chain", title: "chain rec", status: "active", createdAt: "2026-05-30T00:00:00Z" };
+
+test("FG-486: invoke_chain run, container gone WITH a valid result → task COMPLETED (not orphaned_needs_finalize)", () => {
+  insertRun(INVOKE_CHAIN_RUN);
+  const taskId = "t-chain-result";
+  insertContainerized(mkTask(taskId, { runId: INVOKE_CHAIN_RUN.id }));
+  const dir = taskDir(INVOKE_CHAIN_RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "quick lane done" }));
+
+  const r = reconcileRun(INVOKE_CHAIN_RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_present" }]);
+  assert.equal(getTask(taskId)!.status, "complete", "no finalize exists to bypass — must complete like an invoke task");
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(types.includes("task.completed") && !types.includes("task.failed"));
+
+  // Run-level completion stays invoke-only: the chain may have another invoke
+  // coming that only the campaign executor knows about.
+  assert.equal(r.runChange, undefined, "reconcile must never complete an invoke_chain RUN");
+  assert.equal(getRun(INVOKE_CHAIN_RUN.id)!.status, "active");
+});
+
+test("FG-486: invoke_chain run, stdout-recoverable result → task COMPLETED from the inferred result", () => {
+  insertRun(INVOKE_CHAIN_RUN);
+  const taskId = "t-chain-stdout";
+  insertContainerized(mkTask(taskId, { runId: INVOKE_CHAIN_RUN.id, agentRole: "research-specialist" }));
+  const dir = taskDir(INVOKE_CHAIN_RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered quick-lane output.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+
+  const r = reconcileRun(INVOKE_CHAIN_RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" }]);
+  assert.deepEqual(getTask(taskId)!.result, { contract: "inferred", summary: text, status: "complete" });
+});
+
 // ----- FG-455 red-review finding 2: honest evidence source on the projectDir fallback -----
 
 test("FG-455 finding2: no worktree_path, dirty run.projectDir → orphaned_work_may_persist, but evidence/message disclose SHARED-projectDir ambiguity (not task-exclusive)", () => {

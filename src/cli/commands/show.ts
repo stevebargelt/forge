@@ -11,6 +11,7 @@ import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
 import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents, type OrphanEvidence, type FanoutWaveEvidence } from "../../v2/failure-kind.js";
+import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
 import { findReconcileCandidates, type ReconcileReason, type LivenessProbe, type ResultProbe } from "../../ops/reconcile-candidate.js";
@@ -653,7 +654,8 @@ export function registerShow(program: Command): void {
         // same signal into orphanRecoveryMessage's guidance so it doesn't
         // steer the operator toward a command that will be refused.
         const taskRun = getRun(task.runId);
-        const taskIsInvokeRun = taskRun?.workflow === "invoke";
+        // FG-486: invoke_chain tasks have no finalize either — shared predicate.
+        const taskIsInvokeRun = taskRun ? !taskHasPipelineFinalize(taskRun) : false;
         const tDir = taskDir(task.runId, task.id);
         const runtimeMeta = getManifestRuntime(tDir);
         const stdoutLog = join(tDir, "container.stdout.log");
