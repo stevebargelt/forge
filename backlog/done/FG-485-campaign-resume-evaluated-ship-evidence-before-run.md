@@ -1,9 +1,11 @@
 ---
 id: FG-485
 type: story
-status: active
+status: done
 title: "campaign resume evaluated ship-evidence before run liveness — false refusal event/message on a live human-gated run (fix: liveness-first reattach; FG-475 sibling)"
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: dc7d725
 ---
 
 Observed live 2026-07-07, campaign-6cc65ccc6519 (sequential, 4x full_feature), item FG-481, run run-fg-481-a9d3f6.
