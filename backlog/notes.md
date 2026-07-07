@@ -20,3 +20,5 @@
 - Two failed-but-false-positive task rows sit in shipped runs (preserved evidence, do not mutate).
 
 **Recommended next:** F2b/F6/F7 from the review (drive-loop bound, campaign transient-retry, catch-and-park) + FG-485 — that set makes campaigns genuinely unattended; then FG-477 slice 1 off the new architecture artifact.
+
+2026-07-07 post-batch addendum: operator review of the batch surfaced FG-486 (invoke_chain misclassified as pipeline by the FG-479/481 guards) — fixed same-session via the standard direct+review-loop flow, PR #59 merged as 690bd1b, closed. New shared predicate: v2/run-kind.ts taskHasPipelineFinalize (invoke + invoke_chain = no finalize; run-level reconcile completion stays invoke-only). Also filed FG-487 (dashboard: host-side verification invisible — review-loop verification phases, reconcile gates, host_verifications rows; operator feedback with tonight's concrete instances) and pasted the FG-477 slice table into its ticket for durability (both landed in PR #59). Session lesson repeated twice: do NOT touch the repo (even backlog commits) while a review-loop is in flight.
