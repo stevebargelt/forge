@@ -23,7 +23,8 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getRun, updateRunStatus } from "../store/runs.js";
+import { getRun } from "../store/runs.js";
+import { finalizeRunIfSettled } from "./run-finalize.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
 import { getDb } from "../store/db.js";
@@ -711,12 +712,23 @@ export function reconcileRun(
       const after = tasksForRun(runId);
       const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
       if (after.length > 0 && !anyNonTerminal) {
-        getDb().transaction(() => { // FG-463: run status write + its events atomic
-          updateRunStatus(runId, "complete");
-          logEvent("run.completed", { runId, payload: { source: "reconcile" } });
-          logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } });
-        })();
-        runChange = { from: "active", to: "complete", reason: "no_live_work" };
+        // FG-484: finalizeRunIfSettled re-reads the run and refuses the
+        // write (no events, no notification) if a concurrent `forge cancel`
+        // already abandoned it — the `run.status === "active"` check above
+        // is only this function's local snapshot from earlier in the call
+        // and can be stale by the time we get here. The completion write and
+        // BOTH its run.completed and run.reconciled events commit atomically
+        // inside the helper's transaction (FG-463: restores the guarantee the
+        // old getDb().transaction()-wrapped call here used to provide before
+        // the FG-484 refactor split them into separate statements) — passed
+        // as onCompleted so it only fires when the write actually applied.
+        if (
+          finalizeRunIfSettled(runId, "reconcile", { source: "reconcile" }, () =>
+            logEvent("run.reconciled", { runId, payload: { from: "active", to: "complete", reason: "no_live_work" } }),
+          )
+        ) {
+          runChange = { from: "active", to: "complete", reason: "no_live_work" };
+        }
       }
     }
   } catch { /* FG-459: never throw */ }

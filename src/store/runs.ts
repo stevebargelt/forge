@@ -120,17 +120,72 @@ export function uniqueProjectDirs(): ProjectAggregate[] {
   return rows;
 }
 
+// FG-484: compare-and-set that completes a run ONLY out of 'active' — the
+// only other live state RunStatus has is 'abandoned', so this equally
+// refuses abandoned->complete (a concurrent `forge cancel` won the race) and
+// complete->complete (redundant re-finalization double-notifying / clobbering
+// completed_at). Returns true iff this call completed it. Mirrors
+// store/tasks.ts's markTaskComplete CAS shape.
+//
+// The status read + guarded UPDATE run inside ONE transaction so no
+// concurrent writer can interleave between "read previous status" and
+// "write" — better-sqlite3 transactions serialize against the same
+// connection. The notification fires strictly AFTER that transaction
+// commits, and only when the write actually applied, so a refused call never
+// emits a false "complete" push and no interleaving can double-notify.
+//
+// opts.onApplied runs INSIDE the same transaction as the status write, before
+// commit — callers (finalizeRunIfSettled) use it to make their own paired
+// run.completed/run.reconciled events atomic with the status write (FG-463).
+export function completeRun(id: string, opts?: { onApplied?: () => void }): boolean {
+  const completedAt = nowIso();
+  const { applied, prevStatus } = getDb().transaction(() => {
+    const prev = getDb()
+      .prepare(`SELECT status FROM runs WHERE id = ?`)
+      .get(id) as { status: string } | undefined;
+    const info = getDb()
+      .prepare(`UPDATE runs SET status = 'complete', completed_at = ? WHERE id = ? AND status = 'active'`)
+      .run(completedAt, id);
+    const applied = info.changes === 1;
+    if (applied) opts?.onApplied?.();
+    return { applied, prevStatus: prev?.status };
+  })();
+
+  if (!applied) return false;
+
+  const updated = getRun(id);
+  if (updated) {
+    void notifyOnRunTransition(updated, "complete", prevStatus);
+  }
+  return true;
+}
+
 export function updateRunStatus(id: string, status: RunStatus): void {
-  // Read the previous status so notifyOnRunTransition can short-circuit on
-  // idempotent re-saves (same-status writes). Cheap — same row we're about to
-  // update.
-  const prev = getDb()
-    .prepare(`SELECT status FROM runs WHERE id = ?`)
-    .get(id) as { status: string } | undefined;
-  const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
-  getDb()
-    .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
-    .run(status, completedAt, id);
+  // Read the previous status and (for a "complete" write) apply the FG-484
+  // universal backstop in the SAME transaction as the write, so no concurrent
+  // writer can interleave between the read and the UPDATE. This is the store
+  // layer's own guard — it holds regardless of which caller reaches it,
+  // unlike relying on every call site to route through completeRun.
+  const { applied, prevStatus } = getDb().transaction(() => {
+    const prev = getDb()
+      .prepare(`SELECT status FROM runs WHERE id = ?`)
+      .get(id) as { status: string } | undefined;
+
+    // FG-484: abandoned is authoritatively terminal. No caller — including
+    // ones that bypass completeRun/finalizeRunIfSettled entirely — may
+    // resurrect an abandoned run to "complete".
+    if (prev?.status === "abandoned" && status === "complete") {
+      return { applied: false, prevStatus: prev?.status };
+    }
+
+    const completedAt = status === "complete" || status === "abandoned" ? nowIso() : null;
+    getDb()
+      .prepare(`UPDATE runs SET status = ?, completed_at = ? WHERE id = ?`)
+      .run(status, completedAt, id);
+    return { applied: true, prevStatus: prev?.status };
+  })();
+
+  if (!applied) return;
 
   // Notification: fires on terminal transitions only (complete/abandoned).
   // Reads the just-updated row so durationMs reflects the completed_at write.
@@ -138,7 +193,7 @@ export function updateRunStatus(id: string, status: RunStatus): void {
   if (status === "complete" || status === "abandoned") {
     const updated = getRun(id);
     if (updated) {
-      void notifyOnRunTransition(updated, status, prev?.status);
+      void notifyOnRunTransition(updated, status, prevStatus);
     }
   }
 }
