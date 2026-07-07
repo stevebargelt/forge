@@ -1,9 +1,11 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
+import { insertHostVerification } from "../store/host-verifications.js";
 import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
 import {
   createCampaign,
@@ -43,10 +45,78 @@ let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 let projectDir: string;
 
+// FG-483: real git plumbing for the evidence eligibility executor.ts now
+// requires (composeOutOfBandEligibility) — the pre-FG-483 fake "abc123"
+// closedCommit string every test below used to fabricate a ship no longer
+// passes checkClosedCommitReachableOnBase. Same gitExec pattern as
+// reconcile.integration.test.ts.
+function gitExec(args: string[], cwd: string): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 10000,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "Test",
+      GIT_AUTHOR_EMAIL: "t@t.com",
+      GIT_COMMITTER_NAME: "Test",
+      GIT_COMMITTER_EMAIL: "t@t.com",
+    },
+  });
+}
+
+// Real, reachable, non-code commit — satisfies composeOutOfBandEligibility's
+// non_code_diff out-of-band lane (reconcile-outofband-collect.ts) with no
+// host-verification row needed. Used everywhere a test only cares that an
+// item ships, not about the code-vs-docs lane split (see
+// fg483-quick-invoke-evidence-gate.integration.test.ts for that matrix).
+function makeShipCommit(label: string): string {
+  writeFileSync(join(projectDir, `${label.replace(/[^A-Za-z0-9_-]/g, "_")}-ship.md`), `${label} shipped`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", `ship ${label}`], projectDir);
+  return gitExec(["rev-parse", "HEAD"], projectDir).trim();
+}
+
+// Convenience wrapper for the common case: ship a ticket with a real,
+// reachable, non-code commit in one call.
+function shipTicket(ticketId: string): string {
+  const commit = makeShipCommit(ticketId);
+  closeTicket(projectDir, ticketId, commit);
+  return commit;
+}
+
+// Real, reachable, CODE-touching commit + a covering passing host-verification
+// row — satisfies composeOutOfBandEligibility's host_verification out-of-band
+// lane, for lanes that touch real code (e.g. quick_implementation's
+// engineer/test-engineer chain), as opposed to makeShipCommit/shipTicket's
+// docs-only non_code_diff lane.
+function shipTicketWithHostVerification(ticketId: string): string {
+  const label = ticketId.replace(/[^A-Za-z0-9_-]/g, "_");
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", `${label}.ts`), `export const ${label} = 1;\n`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", `feat: ${ticketId}`], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, ticketId, commit);
+  insertHostVerification({
+    ticketId,
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  return commit;
+}
+
 beforeEach(() => {
   db = makeInMemoryDb();
   prev = setDbForTest(db);
   projectDir = mkdtempSync(join(tmpdir(), "executor-unit-"));
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
 
   writeTicket(projectDir, {
     id: "FG-100",
@@ -74,6 +144,11 @@ beforeEach(() => {
     created: "2024-01-02",
     body: "## Problem\nStory Two needs implementation.\n\n## Goal\nComplete story two.\n\n## Acceptance Criteria\n- Story two is complete\n",
   });
+
+  // Base commit so the first makeShipCommit call has exactly one parent — a
+  // root commit is ambiguous and safe-denies in commitTouchesOnlyNonCodePaths.
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "init"], projectDir);
 });
 
 afterEach(() => {
@@ -224,7 +299,7 @@ test("happy path two-item: sequential ordering, items dispatched one at a time",
     dispatchLog.push({ ticketId: args.runTitle ?? "", itemSnapshotBefore: snapshot });
     // Simulate the agent shipping the ticket as part of completing the dispatch —
     // required for the item to reach lifecycleStatus 'complete' (FG-442 review Finding 1).
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -318,14 +393,33 @@ test("FG-442 review Finding 1: complete but ticket not done → outcome undefine
   assert.equal(result.itemRecords[0]?.outcome, undefined, "outcome must be undefined when ticket is not done");
 });
 
-test("shipped with evidence: ticket done + closedCommit → outcome='shipped'", async () => {
+test("shipped with evidence: ticket done + a real reachable closedCommit (non_code_diff lane) → outcome='shipped'", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
   );
   approveCampaign(campaign.id, { rationale: "Approved" });
 
-  // Pre-close the ticket so it looks done after dispatch
+  // Pre-close the ticket so it looks done after dispatch — FG-483: the
+  // closedCommit must be real and reachable on base (or eligibility refuses).
+  shipTicket("FG-101");
+
+  const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
+  assert.equal(result.stopReason, "complete");
+  assert.equal(result.itemRecords[0]?.outcome, "shipped", "outcome must be 'shipped' when ticket is done with a real, reachable closedCommit");
+});
+
+test("FG-483 negative (review F4 spoof shape): ticket done with a FABRICATED closedCommit (not a real commit) → outcome stays undefined, item parks awaiting_gate — today's frontmatter-only check would have shipped this", async () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "Approved" });
+
+  // Simulates an agent (or anyone with backlog write access) self-closing its
+  // own ticket with a fabricated commit sha that was never actually committed —
+  // the exact spoof the review flagged. checkClosedCommitReachableOnBase must
+  // refuse this (git has no such commit), so eligibility must be ineligible.
   writeTicket(projectDir, {
     id: "FG-101",
     type: "story",
@@ -333,13 +427,17 @@ test("shipped with evidence: ticket done + closedCommit → outcome='shipped'", 
     title: "Story One",
     epic: "FG-100",
     created: "2024-01-01",
-    closedCommit: "abc123",
+    closedCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
   });
 
   const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
-  assert.equal(result.stopReason, "complete");
-  assert.equal(result.itemRecords[0]?.outcome, "shipped", "outcome must be 'shipped' when ticket is done with closedCommit");
+  assert.notEqual(result.stopReason, "complete", "a fabricated closedCommit must never let the campaign report complete");
+  assert.equal(result.itemRecords[0]?.lifecycleStatus, "awaiting_gate", "item must park awaiting_gate, not ship, on a fabricated closedCommit");
+  assert.equal(result.itemRecords[0]?.outcome, undefined, "outcome must not be 'shipped' for a fabricated/unreachable closedCommit");
+
+  const items = listCampaignItems(campaign.id);
+  assert.equal(items[0]!.outcome, undefined, "durable DB state must also show no shipped outcome");
 });
 
 // ── FG-433: campaign run.metadata drives the shipping-reviewer ticket-aware preflight ──
@@ -554,7 +652,7 @@ test("no double-dispatch: concurrent startCampaign calls, only one dispatch fn i
       dispatch: async (args: InvokeArgs): Promise<InvokeResult> => {
         firstDispatchCount++;
         await Promise.resolve(); // yield so second call's sync section can run
-        closeTicket(projectDir, "FG-101", "abc123");
+        closeTicket(projectDir, "FG-101", makeShipCommit("FG-101"));
         return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
       },
     }),
@@ -650,7 +748,7 @@ test("stale-plan check: mutating a DIFFERENT directory does not affect the hash 
 
     // startCampaign has no projectDirOverride — it always uses campaign.projectDir.
     // Mutating otherDir does NOT make the plan stale for the original projectDir.
-    closeTicket(projectDir, "FG-101", "abc123");
+    closeTicket(projectDir, "FG-101", makeShipCommit("FG-101"));
     const result = await startCampaign(campaign.id, { dispatch: fakeDispatch("complete") });
     assert.equal(
       result.stopReason,
@@ -836,7 +934,7 @@ test("driver skips terminal items: item1 complete, item2 pending — only item2 
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -901,7 +999,7 @@ test("resumeCampaign: transitions paused->running, skips completed item1, dispat
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1153,7 +1251,7 @@ test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1175,7 +1273,7 @@ test("skip terminal 3-item: item1=complete, item2=failed, item3=pending → ONLY
 
 // ── FG-394: edge — pause landing exactly after the LAST item ─────────────────────
 
-test("edge: pause after last item — campaign stays paused, subsequent resume transitions to complete", async () => {
+test("edge: pause after last item — campaign stays paused, item parks awaiting_gate (CAS lost the race), subsequent resume ships it via the FG-441 reattach path and transitions to complete", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -1183,10 +1281,11 @@ test("edge: pause after last item — campaign stays paused, subsequent resume t
   approveCampaign(campaign.id, { rationale: "Approved" });
 
   // item1 dispatch: pause campaign, then return complete (simulates cooperative pause
-  // landing exactly after the last item's execution)
+  // landing exactly after the last item's execution, racing the evidence-eligibility
+  // check finalizeInvokeLaneOutcome performs immediately after dispatch returns)
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
-    closeTicket(projectDir, "FG-101", "abc123");
+    closeTicket(projectDir, "FG-101", makeShipCommit("FG-101"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1199,11 +1298,22 @@ test("edge: pause after last item — campaign stays paused, subsequent resume t
   const afterPause = getCampaign(campaign.id)!;
   assert.equal(afterPause.status, "paused", "campaign must be paused with all items complete");
 
-  // item1 must be complete (the outcome was written before the pause-check returned)
-  const dbItem1 = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
-  assert.equal(dbItem1.lifecycle_status, "complete", "item1 must be complete even though campaign is paused");
+  // FG-483: the evidence eligibility check found real evidence (the ticket really is
+  // done with a reachable closedCommit), but the campaign-running-gated CAS
+  // (updateCampaignItemIfCampaignRunning) lost the race — the pause landed between
+  // the check and the write — so this must be a no-op, never an optimistic ship.
+  // The item parks at awaiting_gate (the SAME shape the FG-441 reattach branch
+  // recognizes), never silently left at 'running'.
+  const dbItem1 = db.prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = 'FG-101'").get() as {
+    lifecycle_status: string; outcome: string | null; blocker_kind: string | null;
+  };
+  assert.equal(dbItem1.lifecycle_status, "awaiting_gate", "item must park awaiting_gate — CAS loss must never leave an optimistic 'complete'");
+  assert.notEqual(dbItem1.outcome, "shipped", "outcome must not be 'shipped' when the campaign-running CAS was lost");
+  assert.equal(dbItem1.blocker_kind, null, "no blockerKind — this is the out-of-band shape the FG-441 reattach branch expects");
 
-  // Subsequent resume: all items are complete → driveRemainingItems skips all → finalCheck → complete
+  // Subsequent resume: item1 is awaiting_gate with a runId and no blockerKind — the
+  // FG-441 reattach branch re-evaluates the SAME evidence (now genuinely eligible,
+  // no race) and ships it directly, without calling dispatch again.
   let resumeDispatchCount = 0;
   const resumeDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
     resumeDispatchCount++;
@@ -1211,11 +1321,15 @@ test("edge: pause after last item — campaign stays paused, subsequent resume t
   };
 
   const resumeResult = await resumeCampaign(campaign.id, { dispatch: resumeDispatch });
-  assert.equal(resumeResult.stopReason, "complete", "resume must reach complete (all items already done)");
-  assert.equal(resumeDispatchCount, 0, "resume must not dispatch anything (all items terminal)");
+  assert.equal(resumeResult.stopReason, "complete", "resume must reach complete via the FG-441 reattach evidence path");
+  assert.equal(resumeDispatchCount, 0, "resume must not dispatch anything — the reattach path ships directly from evidence");
 
   const afterResume = getCampaign(campaign.id)!;
   assert.equal(afterResume.status, "complete", "campaign must transition to complete after resume");
+
+  const finalItem1 = listCampaignItems(campaign.id)[0]!;
+  assert.equal(finalItem1.lifecycleStatus, "complete", "item1 must be complete after the reattach-path ship");
+  assert.equal(finalItem1.outcome, "shipped", "item1 outcome must be 'shipped' after the reattach-path ship");
 });
 
 // ── FG-394: illegal pause transitions ────────────────────────────────────────────
@@ -1393,7 +1507,7 @@ test("TOCTOU failure path via throw: dispatch pauses AND throws — returns paus
 
 // ── last-item pause boundary ──────────────────────────────────────────────────────────────────────
 
-test("last-item pause boundary: pause lands after final item completes — driver returns paused, subsequent resume reaches complete", async () => {
+test("last-item pause boundary: pause lands after final item completes — driver returns paused, item parks awaiting_gate (CAS lost the race), subsequent resume ships it via the FG-441 reattach path and reaches complete", async () => {
   const { campaign } = planCampaign(
     { kind: "list", ticketIds: ["FG-101"] },
     { projectDir, mode: "sequential" }
@@ -1402,7 +1516,7 @@ test("last-item pause boundary: pause lands after final item completes — drive
 
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
-    closeTicket(projectDir, "FG-101", "abc123");
+    closeTicket(projectDir, "FG-101", makeShipCommit("FG-101"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1412,10 +1526,15 @@ test("last-item pause boundary: pause lands after final item completes — drive
   const afterPause = getCampaign(campaign.id)!;
   assert.equal(afterPause.status, "paused", "campaign must be paused, not complete");
 
+  // FG-483: real evidence existed, but the campaign-running-gated CAS lost the
+  // race (pause landed between the evidence check and the write) — must be a
+  // no-op, never an optimistic ship. Parks awaiting_gate for the FG-441
+  // reattach branch to finish, never silently left at 'running'.
   const dbItem = db.prepare("SELECT lifecycle_status FROM campaign_items WHERE ticket_id = 'FG-101'").get() as { lifecycle_status: string };
-  assert.equal(dbItem.lifecycle_status, "complete", "item1 must be complete even though campaign is paused");
+  assert.equal(dbItem.lifecycle_status, "awaiting_gate", "item must park awaiting_gate — CAS loss must never leave an optimistic 'complete'");
 
-  // Resume drives zero pending items → post-loop CAS running→complete succeeds
+  // Resume: item1 is awaiting_gate/no blockerKind/runId set — the FG-441 reattach
+  // branch re-evaluates the SAME evidence (now genuinely eligible) and ships it.
   let resumeDispatched = 0;
   const resumeDispatch = async (_args: InvokeArgs): Promise<InvokeResult> => {
     resumeDispatched++;
@@ -1423,8 +1542,8 @@ test("last-item pause boundary: pause lands after final item completes — drive
   };
 
   const resumeResult = await resumeCampaign(campaign.id, { dispatch: resumeDispatch });
-  assert.equal(resumeResult.stopReason, "complete", "resume with all-complete items must reach complete");
-  assert.equal(resumeDispatched, 0, "resume must not dispatch anything — all items are terminal");
+  assert.equal(resumeResult.stopReason, "complete", "resume must reach complete via the FG-441 reattach evidence path");
+  assert.equal(resumeDispatched, 0, "resume must not dispatch anything — the reattach path ships directly from evidence");
 
   const afterResume = getCampaign(campaign.id)!;
   assert.equal(afterResume.status, "complete", "campaign must be complete after resume");
@@ -1550,7 +1669,7 @@ test("FG-394-fix: clean paused campaign (some complete, rest pending, no in-flig
   const dispatchLog: string[] = [];
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -1996,7 +2115,7 @@ test("FG-393 T4: unknown relation CONTINUES in PILOT (later item dispatches)", a
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
-    closeTicket(projectDir, ticketId, "abc123");
+    closeTicket(projectDir, ticketId, makeShipCommit(ticketId));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2036,7 +2155,7 @@ test("FG-393 T5: explicit INDEPENDENT relation continues (reason is exact string
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
-    closeTicket(projectDir, ticketId, "abc123");
+    closeTicket(projectDir, ticketId, makeShipCommit(ticketId));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2156,7 +2275,7 @@ test("FG-393 T8: resume after blocker resolution reconsiders held items, dispatc
   const dispatchLog: string[] = [];
   const phase3Dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchLog.push(args.runTitle ?? "");
-    if (args.runTitle) closeTicket(projectDir, args.runTitle, "abc123");
+    if (args.runTitle) closeTicket(projectDir, args.runTitle, makeShipCommit(args.runTitle));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2284,7 +2403,7 @@ test("FG-393 T4-reason: pilot-continued item has exact reason string 'continued 
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
-    closeTicket(projectDir, ticketId, "abc123");
+    closeTicket(projectDir, ticketId, makeShipCommit(ticketId));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2332,7 +2451,7 @@ test("FG-393 multi-blocker v2: two local blocks; item dependent on first held; i
       seedLocalFailure("task-fake");
       return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "scope error" };
     }
-    closeTicket(projectDir, ticketId, "abc123");
+    closeTicket(projectDir, ticketId, makeShipCommit(ticketId));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2409,7 +2528,7 @@ test("FG-393 report verdict: complete campaign with blocked item → verdict=com
     }
     // FG-302 must actually ship (FG-442 review Finding 1) for the campaign to reach
     // 'complete' — otherwise it would park at awaiting_gate and the campaign would pause.
-    closeTicket(projectDir, "FG-302", "abc123");
+    closeTicket(projectDir, "FG-302", makeShipCommit("FG-302"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2503,7 +2622,7 @@ test("FG-413: ready ticket → dispatched normally (readiness gate does not inte
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
-    closeTicket(projectDir, "FG-101", "abc123");
+    closeTicket(projectDir, "FG-101", makeShipCommit("FG-101"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2532,7 +2651,7 @@ test("FG-413: exploratory ticket (spike marker in title) → dispatched without 
   let dispatchCallCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCallCount++;
-    closeTicket(projectDir, "FG-802", "abc123");
+    closeTicket(projectDir, "FG-802", makeShipCommit("FG-802"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2561,7 +2680,7 @@ test("FG-413: resume — readiness-held item refined to ready → re-dispatched 
   let dispatchCount = 0;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
     dispatchCount++;
-    closeTicket(projectDir, "FG-811", "abc123");
+    closeTicket(projectDir, "FG-811", makeShipCommit("FG-811"));
     return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "complete" };
   };
 
@@ -2797,11 +2916,9 @@ test("FG-442 docs_only: single invoke dispatch to the stored agentRole; ships wh
   );
   approveCampaign(campaign.id, { rationale: "ok" });
 
-  writeTicket(projectDir, {
-    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
-    created: "2024-01-01", closedCommit: "abc123",
-    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
-  });
+  // FG-483: docs_only ships via the non_code_diff out-of-band lane — a real,
+  // reachable, docs-only commit — with no host-verification row required.
+  shipTicket("FG-101");
 
   let calledWithRole: string | undefined;
   const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => {
@@ -2860,11 +2977,10 @@ test("FG-442 quick_implementation: dispatches engineer then test-engineer on the
   );
   approveCampaign(campaign.id, { rationale: "ok" });
 
-  writeTicket(projectDir, {
-    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
-    created: "2024-01-01", closedCommit: "abc123",
-    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
-  });
+  // FG-483: quick_implementation is a code-touching lane — ships via a real,
+  // reachable, code-touching commit PLUS a covering passing host-verification
+  // row (the host_verification out-of-band lane), not a docs-only commit.
+  shipTicketWithHostVerification("FG-101");
 
   const rolesCalled: string[] = [];
   const runIdsSeen = new Set<string>();
@@ -2880,6 +2996,38 @@ test("FG-442 quick_implementation: dispatches engineer then test-engineer on the
   assert.equal(result.stopReason, "complete");
   assert.equal(result.itemRecords[0]!.lifecycleStatus, "complete");
   assert.equal(result.itemRecords[0]!.outcome, "shipped");
+});
+
+test("FG-483 negative (review F4 spoof shape, quick_implementation lane): ticket done with a FABRICATED closedCommit (no real commit, no host-verification row) → item parks awaiting_gate, never ships — today's frontmatter-only check would have shipped this", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "quick_implementation", laneRationale: "test" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "ok" });
+
+  // Simulates an engineer (or test-engineer) agent self-closing its own ticket
+  // with a commit sha that was never actually committed — the review's exact
+  // spoof shape (backlog/structured.ts's closeTicket accepts any --commit
+  // string unvalidated). No git commit, no host-verification row.
+  writeTicket(projectDir, {
+    id: "FG-101", type: "story", status: "done", title: "Story One", epic: "FG-100",
+    created: "2024-01-01", closedCommit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    body: "## Problem\nStory One needs implementation.\n\n## Goal\nComplete story one.\n\n## Acceptance Criteria\n- Story one is complete\n",
+  });
+
+  const dispatch = async (args: InvokeArgs): Promise<InvokeResult> => ({
+    runId: args.runId ?? "run-quick-spoof",
+    taskId: `task-${args.agentRole}-spoof`,
+    status: "complete",
+  });
+
+  const result = await startCampaign(campaign.id, { dispatch });
+  assert.notEqual(result.stopReason, "complete", "a fabricated closedCommit must never let the campaign report complete");
+  assert.equal(result.itemRecords[0]!.lifecycleStatus, "awaiting_gate", "item must park awaiting_gate on a fabricated closedCommit");
+  assert.equal(result.itemRecords[0]!.outcome, undefined, "outcome must not be 'shipped' for a fabricated closedCommit");
 });
 
 test("FG-442 review Finding 1: quick_implementation both invokes complete but ticket is NOT closed (no closedCommit) → item parks awaiting_gate, campaign pauses, never reports complete", async () => {
