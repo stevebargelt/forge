@@ -1,9 +1,17 @@
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import Database from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertRun, getRun, setRunProjectDir, listRunsForWorkspace, uniqueProjectDirs } from "./runs.js";
+import {
+  insertRun,
+  getRun,
+  setRunProjectDir,
+  listRunsForWorkspace,
+  uniqueProjectDirs,
+  updateRunStatus,
+  completeRun,
+} from "./runs.js";
 import { insertTask } from "./tasks.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -178,6 +186,147 @@ test("uniqueProjectDirs: mixed project — counts only the genuinely in-flight r
   const [agg] = uniqueProjectDirs();
   assert.equal(agg!.runCount, 3);
   assert.equal(agg!.inFlightCount, 1, "only run-a has a non-terminal task on a non-orchestrator run");
+});
+
+// ── completeRun (FG-484) ────────────────────────────────────────────────────
+// Store-layer CAS: abandoned runs must never resurrect to complete, and the
+// completion notification must never fire for a refused write. Proving
+// "notifyOnRunTransition wasn't invoked" requires actually enabling a
+// provider (ntfy) and mocking the network call it makes — under the test
+// suite's default NO_NOTIFY=true (test-setup.ts), notifyOnRunTransition
+// itself would short-circuit either way, silently. ESM named exports can't
+// be monkey-patched via mock.method (module namespace properties aren't
+// configurable) and `mock.module()` needs a Node flag this project's test
+// script doesn't pass — so global fetch, a plain writable global, is the
+// mockable seam that ntfy.ts's transport actually goes through.
+
+const NOTIFY_ENV_KEYS = ["FORGE_NOTIFY", "NTFY_URL", "NTFY_TOKEN", "NTFY_PRIORITY", "NO_NOTIFY"];
+
+function withNtfyEnabledAndFetchMocked(fn: (fetchMock: ReturnType<typeof mock.method>) => Promise<void>) {
+  return async () => {
+    const saved: Record<string, string | undefined> = {};
+    for (const k of NOTIFY_ENV_KEYS) saved[k] = process.env[k];
+    process.env["FORGE_NOTIFY"] = "ntfy";
+    process.env["NTFY_URL"] = "https://ntfy.example.invalid/forge-test";
+    delete process.env["NO_NOTIFY"];
+
+    const fetchMock = mock.method(globalThis, "fetch", async () => new Response("", { status: 200 }));
+    try {
+      await fn(fetchMock);
+    } finally {
+      fetchMock.mock.restore();
+      for (const k of NOTIFY_ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  };
+}
+
+test(
+  "completeRun: completes an active run, sets a fresh completedAt, and fires exactly one notification",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-complete-active", status: "active" });
+
+    const ok = completeRun("run-complete-active");
+    assert.equal(ok, true);
+
+    const run = getRun("run-complete-active");
+    assert.equal(run?.status, "complete");
+    assert.ok(run?.completedAt, "completedAt must be set");
+
+    // notifyOnRunTransition is fired async/fire-and-forget; flush the
+    // microtask queue so its chained awaits (dispatch -> notifyNtfy -> fetch)
+    // resolve before asserting.
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 1, "expected exactly one notification dispatch");
+  }),
+);
+
+test(
+  "completeRun: refuses the abandoned->complete transition — status, completedAt, and notification all untouched",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-complete-abandoned", status: "active" });
+    updateRunStatus("run-complete-abandoned", "abandoned"); // simulates a concurrent `forge cancel` winning the race
+    const abandonedAt = getRun("run-complete-abandoned")?.completedAt;
+    assert.ok(abandonedAt, "abandon should have set completedAt");
+
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls(); // discard the abandon transition's own notification; isolate completeRun's attempt
+
+    const ok = completeRun("run-complete-abandoned");
+    assert.equal(ok, false, "completeRun must refuse an abandoned run");
+
+    const run = getRun("run-complete-abandoned");
+    assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to complete");
+    assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged from the abandon-time value");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "a refused write must never fire a completion notification");
+  }),
+);
+
+test(
+  "completeRun: refuses complete->complete re-finalization — no double notification, completedAt not clobbered",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-complete-twice", status: "active" });
+
+    const first = completeRun("run-complete-twice");
+    assert.equal(first, true, "first completeRun call must succeed from active");
+    const completedAt = getRun("run-complete-twice")?.completedAt;
+    assert.ok(completedAt, "completedAt must be set by the first call");
+
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls(); // isolate the second call's (non-)notification
+
+    const second = completeRun("run-complete-twice");
+    assert.equal(second, false, "completeRun must refuse a second call on an already-complete run");
+
+    const run = getRun("run-complete-twice");
+    assert.equal(run?.status, "complete");
+    assert.equal(run?.completedAt, completedAt, "completedAt must not be bumped by the refused re-finalization");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "a refused complete->complete re-finalization must never double-notify");
+  }),
+);
+
+test(
+  "updateRunStatus: refuses the abandoned->complete transition at the store layer — universal backstop, independent of any caller migrating to completeRun",
+  withNtfyEnabledAndFetchMocked(async (fetchMock) => {
+    insertRun({ ...RUN, id: "run-update-abandoned", status: "active" });
+    updateRunStatus("run-update-abandoned", "abandoned"); // simulates a concurrent `forge cancel` winning the race
+    const abandonedAt = getRun("run-update-abandoned")?.completedAt;
+    assert.ok(abandonedAt, "abandon should have set completedAt");
+
+    await new Promise((r) => setImmediate(r));
+    fetchMock.mock.resetCalls(); // discard the abandon transition's own notification
+
+    // A caller that bypasses completeRun/finalizeRunIfSettled entirely (e.g.
+    // src/cli/commands/design.ts, src/cli/commands/claude.ts) and calls
+    // updateRunStatus(id, "complete") directly from a child-exit handler must
+    // still be refused — the guard lives in the store layer, not in every caller.
+    updateRunStatus("run-update-abandoned", "complete");
+
+    const run = getRun("run-update-abandoned");
+    assert.equal(run?.status, "abandoned", "status must stay abandoned, never flipped to complete");
+    assert.equal(run?.completedAt, abandonedAt, "completedAt must be unchanged from the abandon-time value");
+
+    await new Promise((r) => setImmediate(r));
+    assert.equal(fetchMock.mock.calls.length, 0, "a refused abandoned->complete write must never fire a completion notification");
+  }),
+);
+
+test("updateRunStatus: 'active' still flips an abandoned run back to active (the #201 reactivation path)", () => {
+  insertRun({ ...RUN, id: "run-reactivate", status: "active" });
+  updateRunStatus("run-reactivate", "abandoned");
+  assert.equal(getRun("run-reactivate")?.status, "abandoned");
+
+  updateRunStatus("run-reactivate", "active");
+
+  const run = getRun("run-reactivate");
+  assert.equal(run?.status, "active", "updateRunStatus must still allow abandoned->active reactivation");
+  assert.equal(run?.completedAt, undefined, "reactivating to a non-terminal status clears completedAt");
 });
 
 test("schema migration: re-running the migration is a noop", () => {

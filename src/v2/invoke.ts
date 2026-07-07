@@ -31,6 +31,7 @@ import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
+import { finalizeRunIfSettled } from "./run-finalize.js";
 import { logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { resolvePolicyPath } from "../raci/project.js";
@@ -128,13 +129,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
     );
     if (inFlight) return;
-    // Don't override a terminal run. complete = already closed (idempotent);
-    // abandoned = a concurrent `forge cancel` won the race — its cancellation is
-    // authoritative, so completion must not flip it back to complete (AWN-2).
-    const st = getRun(runId)?.status;
-    if (st === "complete" || st === "abandoned") return;
-    updateRunStatus(runId, "complete");
-    logEvent("run.completed", { runId, payload: { source: "invoke", succeeded, owned: ownsRun } });
+    // finalizeRunIfSettled re-reads the run and only writes when it's still
+    // "active" — a no-op (false, no write, no event) when it's already
+    // complete (idempotent close) or abandoned (a concurrent `forge cancel`
+    // won the race; its cancellation is authoritative and must not be
+    // flipped back to complete, AWN-2/FG-484).
+    finalizeRunIfSettled(runId, "invoke", { source: "invoke", succeeded, owned: ownsRun });
   };
 
   // Build a synthetic single-step workflow + step. The runner machinery

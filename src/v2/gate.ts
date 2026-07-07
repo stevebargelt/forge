@@ -27,7 +27,7 @@ import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, 
 import { getDb } from "../store/db.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
-import { getRun, updateRunStatus } from "../store/runs.js";
+import { getRun } from "../store/runs.js";
 import { logEvent } from "../store/events.js";
 import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { loadWorkflow } from "./loader.js";
@@ -35,6 +35,7 @@ import type { Workflow, Step } from "./schema.js";
 import { tasksForRun } from "../store/tasks.js";
 import { failTask, classify } from "./failure-kind.js";
 import { isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
+import { finalizeRunIfSettled } from "./run-finalize.js";
 
 export type GateOptions = {
   force?: boolean;
@@ -350,12 +351,14 @@ export function findStep(workflow: Workflow, stepId: string): Step | undefined {
 // pending or running, flip the run to "complete". The runner already does
 // this, but gate runs in the user's foreground call — without finalizing
 // here, the run row would still say "active" until the user runs `forge next`
-// or `forge status` again.
+// or `forge status` again. finalizeRunIfSettled carries the abandoned re-read
+// (FG-484): a concurrent `forge cancel` may have abandoned the run between
+// this gate decision and here, and an abandoned run must never be resurrected
+// to complete.
 function finalizeRunIfDone(runId: string, workflow: Workflow): void {
   const tasks = tasksForRun(runId);
   if (!isRunSettled(workflow, tasks)) return;
-  updateRunStatus(runId, "complete");
-  logEvent("run.completed", { runId, payload: { via: "gate" } });
+  finalizeRunIfSettled(runId, "gate");
 }
 
 export type BatchGateResult = {

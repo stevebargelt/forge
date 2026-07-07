@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertRun, getRun } from "../store/runs.js";
+import { insertRun, getRun, updateRunStatus } from "../store/runs.js";
 import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
@@ -1297,4 +1297,36 @@ test("FG-461: attachedExitEvidence with no worktreePath falls back to the shared
   } finally {
     rmSync(proj, { recursive: true, force: true });
   }
+});
+
+// FG-484: reconcileRun's run-level completion check reads `run.status ===
+// "active"` early, then does the task-level passes above (each of which can
+// take real time — worktree scans, docker calls), and only THEN calls
+// finalizeRunIfSettled. A concurrent `forge cancel` can abandon the run
+// anywhere in that window; the early "active" read is just this function's
+// stale local snapshot. gate.ts and runNext.ts's finalize sites have their own
+// dedicated race tests (runNext.test.ts's "gate: FG-484" / "AWN-2" cases);
+// this is reconcile.ts's — using the same injectable-writers seam FG-459's
+// SQLITE_BUSY tests use, to land the concurrent abandon deterministically
+// between the task-level write and the run-level finalize check.
+test("FG-484: a concurrent cancel abandoning the run between reconcile's task-level pass and its run-level finalize check must not resurrect it to complete", () => {
+  insertContainerized(mkTask("t-race", { status: "running" }));
+  const raceWriters: ReconcileWriters = {
+    ...defaultReconcileWriters,
+    markTaskFailed: (id, error, result) => {
+      defaultReconcileWriters.markTaskFailed(id, error, result);
+      // The concurrent `forge cancel` — lands after the task-level orphan
+      // write above, before reconcileRun reaches its run-level check.
+      updateRunStatus(RUN.id, "abandoned");
+    },
+  };
+
+  const r = reconcileRun(RUN.id, GONE, defaultContainerReap, defaultContainerExitInfo, raceWriters);
+
+  assert.equal(getTask("t-race")!.status, "failed", "the task-level orphan write still applies");
+  assert.equal(getRun(RUN.id)!.status, "abandoned", "FG-484: the run must stay abandoned, never resurrected to complete");
+  assert.equal(r.runChange, undefined, "no run-level completion change reported");
+  const eventTypes = eventsForRun(RUN.id).map((e) => e.eventType);
+  assert.ok(!eventTypes.includes("run.completed"), "no run.completed event for a finalize refused by the abandoned re-read");
+  assert.ok(!eventTypes.includes("run.reconciled"), "onCompleted's paired run.reconciled event must not fire when the write is refused");
 });

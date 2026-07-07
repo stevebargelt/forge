@@ -34,7 +34,8 @@ import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
 import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
-import { getRun, updateRunStatus } from "../store/runs.js";
+import { getRun } from "../store/runs.js";
+import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
@@ -150,26 +151,17 @@ export async function runNext(args: {
     if (isRunSettled(args.workflow, tasks)) {
       // AWN-2 cancel-vs-completion race: a concurrent `forge cancel` may have
       // abandoned the run between the getRun at the top of runNext and this
-      // write. Re-read the current status before flipping to complete — an
-      // abandoned run is authoritatively terminal and must never be resurrected.
-      const currentStatus = getRun(args.runId)?.status ?? run.status;
-      if (currentStatus === "abandoned") {
-        return {
-          dispatchedSteps: [],
-          completedSteps: [],
-          awaitingGate: [],
-          failedSteps: [],
-          runStatus: "abandoned",
-        };
-      }
-      updateRunStatus(args.runId, "complete");
-      logEvent("run.completed", { runId: args.runId, payload: { via: "runNext-settled-no-dispatch" } });
+      // write. finalizeRunIfSettled re-reads the run before flipping it to
+      // complete — an abandoned run is authoritatively terminal and must
+      // never be resurrected.
+      const finalized = finalizeRunIfSettled(args.runId, "runNext-settled-no-dispatch");
+      const currentStatus = finalized ? "complete" : (getRun(args.runId)?.status ?? run.status);
       return {
         dispatchedSteps: [],
         completedSteps: [],
         awaitingGate: [],
         failedSteps: [],
-        runStatus: "complete",
+        runStatus: currentStatus,
       };
     }
     return {
@@ -223,11 +215,7 @@ export async function runNext(args: {
   const readyAfter = computeReadyQueue(args.workflow, tasksAfter);
 
   let runStatus: string = run.status;
-  // Re-read the status: a concurrent `forge cancel` may have abandoned the run
-  // while this wave ran. An abandoned run is authoritatively terminal — don't
-  // flip it back to complete (AWN-2 cancel-vs-completion coherence).
-  const currentStatus = getRun(args.runId)?.status ?? run.status;
-  if (currentStatus !== "abandoned" && readyAfter.length === 0 && isRunSettled(args.workflow, tasksAfter)) {
+  if (readyAfter.length === 0 && isRunSettled(args.workflow, tasksAfter)) {
     // RunStatus union is "active" | "complete" | "abandoned" — there's no
     // "failed" state for runs. Mark complete regardless; the human / orchestrator
     // reads task statuses to know whether the run failed. Aligns with how the
@@ -241,10 +229,18 @@ export async function runNext(args: {
         t.status === "failed" &&
         !topLevelByPhase.some((other) => other.phase === t.phase && other.status !== "failed"),
     );
-    runStatus = "complete";
-    updateRunStatus(args.runId, "complete");
-    logEvent("run.completed", { runId: args.runId, payload: { anyFailed } });
-  } else if (currentStatus === "abandoned") {
+    // finalizeRunIfSettled re-reads the run before writing: a concurrent
+    // `forge cancel` may have abandoned it while this wave ran, and an
+    // abandoned run must never be resurrected to complete (AWN-2).
+    if (finalizeRunIfSettled(args.runId, "runNext-wave-complete", { anyFailed })) {
+      runStatus = "complete";
+    }
+  }
+  // Re-read once more for reporting: a concurrent `forge cancel` may have
+  // abandoned the run either before or during the block above (including
+  // when it was never settled enough to attempt finalization at all) — the
+  // returned runStatus must reflect that authoritatively.
+  if (getRun(args.runId)?.status === "abandoned") {
     runStatus = "abandoned";
   }
 

@@ -6,7 +6,7 @@
 //   - Run completes when all steps done
 //   - manual: true creates a pending task without spawn
 
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2014,6 +2014,220 @@ test("runNext: AWN-2 — an abandoned run in the settled/zero-ready shape must n
 
   const events = eventsForRun(runId).map((e) => e.eventType);
   assert.ok(!events.includes("run.completed"), "run.completed must never fire for an abandoned run via the settled-path early return");
+});
+
+// FG-484: gate.ts's finalizeRunIfDone used to call updateRunStatus(runId,
+// "complete") with no re-read at all — unlike the AWN-2 sites above. A
+// concurrent `forge cancel` landing between the human's gate decision and
+// finalizeRunIfDone's write could resurrect an abandoned run back to
+// complete. Mirrors the AWN-2 test above but drives the completion through
+// gate() (the human-gate path), not runNext(), and additionally proves no
+// completion notification fires for the refused write.
+//
+// SYNTHETIC / store-level guard test — NOT a reachable real-cancel state.
+// This primes the task at "awaiting_gate" (untouched) while the run is
+// already "abandoned"; today's real `forge cancel` (cli/commands/cancel.ts)
+// always fails every non-terminal task BEFORE marking the run abandoned, so
+// a real cancel could never leave this exact combination. It's kept anyway
+// because it is the only way to drive gate()'s internal task-complete write
+// all the way through to finalizeRunIfDone/completeRun's CAS (a cancel that
+// goes through cancel.ts's real fail-then-abandon sequence would instead
+// fail this very task, and gate()'s own `status !== "awaiting_gate"` guard
+// would then throw before ever reaching the CAS — see the realistic variant
+// below, which proves that path). This test is the direct proof that the
+// store-layer CAS itself refuses the resurrection, independent of gate.ts's
+// upfront guard — defense-in-depth for any future caller that reaches
+// finalizeRunIfDone without that guard in front of it.
+test("gate: FG-484 (synthetic store-level guard) — gate-path finalize interleaved with a concurrent cancel must not resurrect the run to complete", async () => {
+  const { gate } = await import("./gate.js");
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfName = "fg484-gate-finalize-cancel-race-test";
+  const wfPath = join(forgeHome, "workflows", `${wfName}.yml`);
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: ${wfName}
+description: FG-484 gate-path finalize vs. concurrent cancel regression test
+inputs: []
+steps:
+  - id: needs-review
+    agent: test-agent
+    gate: human
+    manual: false
+    depends_on: []
+    runtime: claude
+    reds: []
+`,
+  );
+  const wf: Workflow = {
+    name: wfName,
+    description: "FG-484 gate-path finalize vs. concurrent cancel regression test",
+    inputs: [],
+    steps: [
+      { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    ],
+  };
+
+  const { runId } = startRun({
+    workflow: wf,
+    title: "fg484 gate-path cancel race test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  await runNext({ runId, workflow: wf, dockerExec: stub });
+
+  const task = tasksForRun(runId).find((t) => t.phase === "needs-review")!;
+  assert.equal(task.status, "awaiting_gate");
+
+  // A concurrent `forge cancel` wins the race: by the time the human's gate
+  // decision lands, the run is already abandoned.
+  updateRunStatus(runId, "abandoned");
+
+  // Enable a notification provider + mock fetch so "no completion
+  // notification fires" is actually provable — under the suite's default
+  // NO_NOTIFY=true, notifyOnRunTransition short-circuits either way,
+  // silently. Mirrors store/runs.test.ts's withNtfyEnabledAndFetchMocked.
+  const NOTIFY_ENV_KEYS = ["FORGE_NOTIFY", "NTFY_URL", "NTFY_TOKEN", "NTFY_PRIORITY", "NO_NOTIFY"];
+  const saved: Record<string, string | undefined> = {};
+  for (const k of NOTIFY_ENV_KEYS) saved[k] = process.env[k];
+  process.env["FORGE_NOTIFY"] = "ntfy";
+  process.env["NTFY_URL"] = "https://ntfy.example.invalid/forge-test";
+  delete process.env["NO_NOTIFY"];
+  const fetchMock = mock.method(globalThis, "fetch", async () => new Response("", { status: 200 }));
+
+  try {
+    await gate(task.id, "advance", undefined);
+  } finally {
+    fetchMock.mock.restore();
+    for (const k of NOTIFY_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+
+  // notifyOnRunTransition is fired async/fire-and-forget when it does fire;
+  // flush the microtask queue before asserting its absence.
+  await new Promise((r) => setImmediate(r));
+
+  const run = getRun(runId);
+  assert.equal(
+    run!.status,
+    "abandoned",
+    "FG-484: the run must stay abandoned — gate-path finalize must not resurrect it to complete",
+  );
+
+  const events = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(
+    !events.includes("run.completed"),
+    "FG-484: no run.completed event may fire for an abandoned run via the gate path",
+  );
+  assert.equal(
+    fetchMock.mock.calls.length,
+    0,
+    "FG-484: no completion notification may fire for a refused gate-path finalize",
+  );
+});
+
+// FG-484 realistic variant: drives the SAME race through the real
+// `forge cancel` semantics (src/cli/commands/cancel.ts's performCancel)
+// instead of directly abandoning the run underneath an untouched task. Real
+// cancel always fails every non-terminal task BEFORE marking the run
+// abandoned, so by the time the human's stale gate() call lands, the task is
+// no longer "awaiting_gate" — gate()'s own status guard refuses it outright.
+// This is the reachable real-world shape: the run stays abandoned, no
+// run.completed fires, no notification fires — proven end to end through the
+// real cancel + real gate code paths, not by hand-priming an impossible DB
+// state (see the synthetic test above for the direct store-CAS proof).
+test("gate: FG-484 realistic — a real `forge cancel` (fails the awaiting task, then abandons the run) leaves a stale gate() advance unable to resurrect the run", async () => {
+  const { gate } = await import("./gate.js");
+  const { performCancel } = await import("../cli/commands/cancel.js");
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const forgeHome = process.env.FORGE_HOME!;
+  const wfName = "fg484-gate-realcancel-race-test";
+  const wfPath = join(forgeHome, "workflows", `${wfName}.yml`);
+  mkdirSync(dirname(wfPath), { recursive: true });
+  writeFileSync(
+    wfPath,
+    `name: ${wfName}
+description: FG-484 realistic gate-path finalize vs. real forge-cancel regression test
+inputs: []
+steps:
+  - id: needs-review
+    agent: test-agent
+    gate: human
+    manual: false
+    depends_on: []
+    runtime: claude
+    reds: []
+`,
+  );
+  const wf: Workflow = {
+    name: wfName,
+    description: "FG-484 realistic gate-path finalize vs. real forge-cancel regression test",
+    inputs: [],
+    steps: [
+      { id: "needs-review", agent: "test-agent", gate: "human", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    ],
+  };
+
+  const { runId } = startRun({
+    workflow: wf,
+    title: "fg484 gate-path real-cancel race test",
+    inputs: { brief: "x" },
+    projectDir: "/tmp/test-project",
+  });
+
+  const stub = makeStubExec({ status: "complete" });
+  await runNext({ runId, workflow: wf, dockerExec: stub });
+
+  const task = tasksForRun(runId).find((t) => t.phase === "needs-review")!;
+  assert.equal(task.status, "awaiting_gate");
+
+  // The real concurrent `forge cancel --abandon-run`, wins the race for real:
+  // it fails the still-awaiting task, then (no non-terminal tasks remaining)
+  // marks the run abandoned.
+  performCancel(runId, { abandonRun: true }, () => { /* no real containers to kill in this test */ });
+  assert.equal(getTask(task.id)!.status, "failed", "real cancel must fail the awaiting task before abandoning the run");
+  assert.equal(getRun(runId)!.status, "abandoned");
+
+  const NOTIFY_ENV_KEYS = ["FORGE_NOTIFY", "NTFY_URL", "NTFY_TOKEN", "NTFY_PRIORITY", "NO_NOTIFY"];
+  const saved: Record<string, string | undefined> = {};
+  for (const k of NOTIFY_ENV_KEYS) saved[k] = process.env[k];
+  process.env["FORGE_NOTIFY"] = "ntfy";
+  process.env["NTFY_URL"] = "https://ntfy.example.invalid/forge-test";
+  delete process.env["NO_NOTIFY"];
+  const fetchMock = mock.method(globalThis, "fetch", async () => new Response("", { status: 200 }));
+
+  try {
+    // The human's gate decision, made against the now-stale in-hand task
+    // reference, lands after the real cancel already won — gate() must
+    // refuse rather than silently no-op or resurrect anything.
+    await assert.rejects(
+      () => gate(task.id, "advance", undefined),
+      /not awaiting_gate/,
+      "gate() must refuse a stale advance on a task the real cancel already failed",
+    );
+  } finally {
+    fetchMock.mock.restore();
+    for (const k of NOTIFY_ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+
+  await new Promise((r) => setImmediate(r));
+
+  const run = getRun(runId);
+  assert.equal(run!.status, "abandoned", "FG-484 realistic: the run must stay abandoned");
+
+  const events = eventsForRun(runId).map((e) => e.eventType);
+  assert.ok(!events.includes("run.completed"), "FG-484 realistic: no run.completed event may fire");
+  assert.equal(fetchMock.mock.calls.length, 0, "FG-484 realistic: no completion notification may fire");
 });
 
 test("gate: FG-475 reject on a step with no on_reject finalizes the run synchronously (parity with the advance branch's finalizeRunIfDone)", async () => {
