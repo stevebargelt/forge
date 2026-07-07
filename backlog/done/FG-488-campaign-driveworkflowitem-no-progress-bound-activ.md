@@ -1,9 +1,11 @@
 ---
 id: FG-488
 type: story
-status: active
+status: done
 title: "campaign driveWorkflowItem no-progress bound: active run + zero dispatch + unchanged state returns recovery_needed instead of spinning (review F2b)"
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: 2f910b6
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md), finding F2b / backlog rec #7. Sibling of the shipped FG-476 fix (F2a); this is the class-level backstop.
