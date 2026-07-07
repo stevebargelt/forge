@@ -452,6 +452,72 @@ for (const failureKind of ["orphaned", "orphaned_work_may_persist", "oom_killed"
   });
 }
 
+// ── FG-486: invoke_chain runs are NOT pipeline runs — --continue adopts ─────
+//
+// Campaign quick lanes create workflow "invoke_chain" runs whose tasks are
+// dispatched via plain v2/invoke.ts — no worktree merge, no integration gate,
+// no reds. There is no finalize to bypass, so --continue must treat them
+// exactly like invoke runs (the FG-481 refusal wrongly swept them up).
+
+const INVOKE_CHAIN_RUN: Run = { id: "run-invoke-chain-continue", workflow: "invoke_chain", title: "quick lane recover test", status: "active", createdAt: "2026-06-01T00:00:00Z" };
+
+for (const failureKind of ["orphaned", "orphaned_work_may_persist", "oom_killed"]) {
+  test(`FG-486: recover --continue ADOPTS an invoke_chain-run task in CONTINUABLE_KIND '${failureKind}' (same semantics as invoke)`, () => {
+    insertRun(INVOKE_CHAIN_RUN);
+    const gitDir = trackedDirtyGitRepo();
+    const taskId = `t-continue-chain-${failureKind}`;
+    insertTask(mkTask(taskId, { runId: INVOKE_CHAIN_RUN.id, status: "failed", worktreePath: gitDir }));
+    logEvent("task.failed", { runId: INVOKE_CHAIN_RUN.id, taskId, payload: { failure_kind: failureKind, error: "boom" } });
+
+    const outcome = performContinue(taskId);
+    assert.equal(outcome.kind, "continued", `invoke_chain '${failureKind}' must be adoptable — there is no finalize to bypass`);
+    if (outcome.kind !== "continued") return;
+    assert.equal(outcome.adoptedFrom, "diff_adopted");
+    assert.equal(getTask(taskId)!.status, "complete");
+  });
+}
+
+test("FG-486: recover inspect recommends --continue for an invoke_chain-run task with recoverable work", () => {
+  insertRun(INVOKE_CHAIN_RUN);
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-chain-recommend";
+  insertTask(mkTask(taskId, { runId: INVOKE_CHAIN_RUN.id, status: "failed", worktreePath: gitDir }));
+  logEvent("task.failed", { runId: INVOKE_CHAIN_RUN.id, taskId, payload: { failure_kind: "orphaned_work_may_persist", error: "boom" } });
+
+  const outcome = performInspect(taskId);
+  assert.equal(outcome.kind, "inspect-task");
+  if (outcome.kind !== "inspect-task") return;
+  assert.match(outcome.task.recommendation, new RegExp(`forge recover ${taskId} --continue`), "invoke_chain must be recommended --continue again");
+});
+
+// FG-486 review finding: the invoke_chain "adopts like invoke" claim above
+// only exercised the dedicated-worktree path. An invoke_chain task with NO
+// dedicated worktree (quick lanes can share the run's projectDir) must still
+// hit the same project_dir_shared --force gate as an invoke-run task —
+// taskHasPipelineFinalize only controls the pipeline-refusal branch, not the
+// shared-dir ambiguity check that runs after it.
+test("FG-486: recover --continue on an invoke_chain-run task refuses a project_dir_shared diff without --force, allows it with --force", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-chain-shared";
+  const run: Run = { ...INVOKE_CHAIN_RUN, id: "run-invoke-chain-shared-continue", projectDir: gitDir };
+  insertRun(run);
+  insertTask(mkTask(taskId, { runId: run.id, status: "failed" })); // no dedicated worktree -> shared
+  logEvent("task.failed", { runId: run.id, taskId, payload: { failure_kind: "orphaned_work_may_persist", error: "boom" } });
+
+  const eventsBefore = getEvents(taskId).length;
+  const refused = performContinue(taskId);
+  assert.equal(refused.kind, "continue-refused");
+  if (refused.kind === "continue-refused") {
+    assert.match(refused.reason, /project_dir_shared/, "reason names the shared-dir rationale");
+  }
+  assert.equal(getTask(taskId)!.status, "failed", "no write on refusal");
+  assert.equal(getEvents(taskId).length, eventsBefore, "no event on refusal");
+
+  const forced = performContinue(taskId, { force: true });
+  assert.equal(forced.kind, "continued");
+  assert.equal(getTask(taskId)!.status, "complete");
+});
+
 // retry-policy.ts (untouched by FG-481) governs whether the retry fallback
 // needs --force: "orphaned" alone is retryable without it (no persisted-work
 // signal), while "orphaned_work_may_persist" / "oom_killed" require --force

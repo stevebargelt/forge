@@ -278,6 +278,43 @@ test("integ forge show <taskId> --json: an invoke-run task's recovery guidance s
   assert.match(message!, /continue from it or retry with --force/);
 });
 
+// FG-486 review finding: show.ts/status.ts thread taskHasPipelineFinalize()
+// into orphanRecoveryMessage's isInvokeRun param for EVERY run, but the only
+// direct coverage of that wiring was invoke vs. pipeline (build). invoke_chain
+// is the other NO_PIPELINE_FINALIZE_WORKFLOWS member (run-kind.ts) and an
+// AC-named surface — recover.ts's recommendationFor is regression-tested for
+// it (recover.test.ts), but show.ts/status.ts's own guidance wiring was not.
+
+test("integ forge show <taskId> --json: an invoke_chain-run task's recovery guidance still suggests continue-or-retry (same as invoke)", () => {
+  const runId = "run-fg486-show-chain";
+  const taskId = "t-fg486-show-chain";
+  insertRunRow({ id: runId, workflow: "invoke_chain", title: "invoke_chain show guidance integ test" });
+  insertTaskRow({ id: taskId, runId, status: "failed" });
+  insertFailedEvent({ runId, taskId, failureKind: "oom_killed", evidence: ORPHAN_EVIDENCE });
+
+  const result = runForge(["show", taskId, "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as { diagnostic: { orphanRecovery: { message: string } | null } };
+  const message = output.diagnostic.orphanRecovery?.message;
+  assert.ok(message, "orphanRecovery must be present for a failed task with recorded evidence");
+  assert.match(message!, /continue from it or retry with --force/, "invoke_chain must get the same guidance as invoke, not the pipeline retry-only wording");
+});
+
+test("integ forge status <runId> --json: an invoke_chain-run task's recovery guidance still suggests continue-or-retry (same as invoke)", () => {
+  const runId = "run-fg486-status-chain";
+  const taskId = "t-fg486-status-chain";
+  insertRunRow({ id: runId, workflow: "invoke_chain", title: "invoke_chain status guidance integ test" });
+  insertTaskRow({ id: taskId, runId, status: "failed" });
+  insertFailedEvent({ runId, taskId, failureKind: "oom_killed", evidence: ORPHAN_EVIDENCE });
+
+  const result = runForge(["status", runId, "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const output = JSON.parse(result.stdout) as { tasks: { id: string; orphanRecovery: { message: string } | null }[] };
+  const task = output.tasks.find((t) => t.id === taskId);
+  assert.ok(task?.orphanRecovery, "orphanRecovery must be present for a failed task with recorded evidence");
+  assert.match(task!.orphanRecovery!.message, /continue from it or retry with --force/, "invoke_chain must get the same guidance as invoke, not the pipeline retry-only wording");
+});
+
 test("integ forge status <runId> --json: a pipeline-run task's recovery guidance never suggests --continue", () => {
   const runId = "run-fg481-status-pipeline";
   const taskId = "t-fg481-status-pipeline";
