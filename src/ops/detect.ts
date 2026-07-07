@@ -138,7 +138,7 @@ export function detectReconcileCandidate(
           autonomy: "ask",
           command: `forge show ${c.taskId} --json`,
           reason: finished
-            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task as complete. Detection is read-only — confirm before reconciling."
+            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task — an invoke task with a valid result completes; a pipeline step lands fail-safe as orphaned_needs_finalize for re-dispatch (FG-479). Detection is read-only — confirm before reconciling."
             : "run a lifecycle command (forge show/status/next) to let reconcile finalize this orphaned task as failed. Detection is read-only — confirm before reconciling.",
         },
       });
@@ -151,7 +151,10 @@ type FailedRow = { taskId: string; runId: string; phase: string; payload: string
 // hold real work" shape as orphaned_work_may_persist (mirrors ORPHAN_EVIDENCE_KINDS
 // in failure-kind.ts and CONTINUABLE_KINDS in recover.ts) — excluding it here left
 // an OOM-killed task with a dirty worktree invisible to `forge ops check`.
-const WORK_MAY_PERSIST_KINDS = new Set(["orphaned_work_may_persist", "oom_killed", "container_crash", "idle_timeout"]);
+// FG-479 review finding 1: orphaned_needs_finalize carries the same OrphanEvidence
+// shape (reconcile.ts's container-gone evidence path) — a pipeline step stuck
+// fail-safe in this state never raised an incident here either.
+const WORK_MAY_PERSIST_KINDS = new Set(["orphaned_work_may_persist", "oom_killed", "container_crash", "idle_timeout", "orphaned_needs_finalize"]);
 // FG-461: the attached-exit kinds only carry recovery evidence when it was
 // actually recorded (invoke.ts / runNext.ts). A pre-FG-461 crash — or any
 // read-only-dispatch crash — has no evidence payload, and container_crash /
@@ -208,7 +211,11 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
     // reconcile.ts), unlike orphaned_work_may_persist which only fires when the
     // worktree is dirty — so a clean-worktree oom_killed task has no persisted
     // work at risk and shouldn't raise this incident.
-    if (evidence && evidence.changedFiles.length === 0) continue;
+    // FG-479: orphaned_needs_finalize is exempt from the clean-worktree skip —
+    // its at-risk artifact is the preserved unfinalized RESULT, not dirty files
+    // (e.g. a crash after the worktree merge leaves changedFiles empty while the
+    // integration gate and reds still never ran).
+    if (evidence && evidence.changedFiles.length === 0 && failureKind !== "orphaned_needs_finalize") continue;
     // FG-461: an attached-exit container_crash / idle_timeout only rises to an
     // incident when it recorded persisted-work evidence — skip the evidence-less
     // ones (pre-FG-461 events, read-only-dispatch crashes) so common crashes
@@ -224,10 +231,12 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
           ? `task ${row.taskId} (${row.phase}) crashed (exit ${evidence?.exitCode ?? "?"}) with no recoverable result`
           : failureKind === "idle_timeout"
             ? `task ${row.taskId} (${row.phase}) idle-timed-out (killed after no output) with no recoverable result`
-            : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
+            : failureKind === "orphaned_needs_finalize"
+              ? `task ${row.taskId} (${row.phase}) finished with a usable result, but the pipeline's host-side finalize (merge → integration gate → reds) never ran`
+              : `task ${row.taskId} (${row.phase}) failed with container gone and no recoverable result`;
     incidents.push(
       makeIncident({
-        kind: failureKind === "oom_killed" ? "oom_killed" : "orphaned_work_may_persist",
+        kind: failureKind === "oom_killed" ? "oom_killed" : failureKind === "orphaned_needs_finalize" ? "orphaned_needs_finalize" : "orphaned_work_may_persist",
         severity: "high",
         confidence: "db-confirmed",
         runId: row.runId,

@@ -33,10 +33,19 @@ test("retryPolicy: transient kinds are retryable; outcome kinds are not", () => 
   for (const k of ["idle_timeout", "container_crash", "orphaned", "result_missing", "result_malformed", "model_error", "tool_error", "cancelled", "unknown", "integration_gate_timeout"]) {
     assert.equal(retryPolicy(k).retryable, true, `${k} should be retryable`);
   }
-  for (const k of ["gate_rejected", "red_blocked", "integration_gate_crashed"]) {
+  for (const k of ["gate_rejected", "red_blocked", "integration_gate_crashed", "orphaned_needs_finalize"]) {
     assert.equal(retryPolicy(k).retryable, false, `${k} should NOT be retryable`);
     assert.ok(retryPolicy(k).advice, `${k} should carry advice`);
   }
+});
+
+// FG-479: a pipeline step whose finalize never ran holds a preserved result —
+// a blind retry would clobber it, so the advice must route through --force.
+test("retryPolicy: orphaned_needs_finalize advice points at inspect-then---force, not a blind re-dispatch", () => {
+  const d = retryPolicy("orphaned_needs_finalize");
+  assert.equal(d.retryable, false);
+  assert.match(d.advice ?? "", /--force/);
+  assert.match(d.advice ?? "", /forge show/);
 });
 
 // FG-424: integration_gate_crashed's advice must point the operator at

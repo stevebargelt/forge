@@ -256,6 +256,25 @@ test("recover inspect: run id lists recoverable tasks and fanout parents", () =>
   assert.match(parentView.recommendation, /--re-drive/);
 });
 
+// FG-479 review finding 2: forge recover <runId> (bulk run-level inspection)
+// must surface an orphaned_needs_finalize task too — single-task `forge
+// recover <taskId>` already does (buildTaskView has no kind filter), but the
+// run-level listing filtered to CONTINUABLE_KINDS silently dropped it.
+test("recover inspect: run id lists an orphaned_needs_finalize task even though it's not a CONTINUABLE_KIND", () => {
+  const taskId = "t-run-needs-finalize";
+  insertTask(mkTask(taskId, { status: "failed" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId,
+    payload: { failure_kind: "orphaned_needs_finalize", error: "orphaned_needs_finalize: ..." },
+  });
+
+  const outcome = performInspect(RUN.id);
+  assert.equal(outcome.kind, "inspect-run");
+  if (outcome.kind !== "inspect-run") return;
+  assert.ok(outcome.tasks.some((t) => t.taskId === taskId), "orphaned_needs_finalize task must be listed for the run, not silently omitted");
+});
+
 test("recover inspect: unknown id", () => {
   const outcome = performInspect("no-such-id");
   assert.equal(outcome.kind, "unknown");

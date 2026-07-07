@@ -222,6 +222,34 @@ export function reconcileRun(
   const taskChanges: TaskReconcileChange[] = [];
   if (!run) return { runId, taskChanges };
 
+  // FG-479: "container gone + usable result ⇒ complete" is only sound for
+  // single-step invoke runs, where completion IS the end of the task's
+  // lifecycle. In a pipeline the task stays `running` through the entire
+  // post-container host-side sequence (persistence check → worktree merge →
+  // integration gate → reds → finalizePrimary, runNext.ts dispatchSingleStep),
+  // so a valid result.json proves only that the AGENT finished — none of the
+  // trust gates have run. Completing it here would skip reds, verdict/human
+  // gates, and (in worktree mode) the merge-back. Shared predicate with the
+  // run-level completion guard below — one definition of "invoke run".
+  const isInvokeRun = run.workflow === "invoke";
+
+  // FG-479: the fail-safe landing for a pipeline task whose container finished
+  // with a usable result but whose host-side finalize never ran. Preserves the
+  // result (task row + disk) as evidence and points the operator at the real
+  // re-drive path. `forge recover --continue` deliberately refuses this kind —
+  // adopting the result as complete would recreate the exact bypass.
+  const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence) => {
+    const error =
+      "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
+      `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry --force\`.`;
+    getDb().transaction(() => { // FG-463: fail write + its events atomic
+      markTaskFailed(taskId, error, result);
+      logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence } });
+      logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence } });
+    })();
+    taskChanges.push({ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" });
+  };
+
   for (const t of tasksForRun(runId)) {
     if (t.status !== "running") continue;
     // FG-459: never-throw guard. A DB-write throw (markTaskComplete/Failed,
@@ -372,16 +400,22 @@ export function reconcileRun(
       // container-gone outcomes — it must carry the same durable evidence
       // tuple as the other three, not just an empty payload.
       const evidence: OrphanEvidence = { ...baseEvidence, resultState: "valid", recoverableStdoutResult: false };
-      // FG-463: the complete write + its paired events commit atomically. The
-      // markTaskComplete no-op (already complete concurrently) rolls back to
-      // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
-      const completed = getDb().transaction(() => {
-        if (!markTaskComplete(t.id, result)) return false;
-        logEvent("task.completed", { runId, taskId: t.id });
-        logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
-        return true;
-      })();
-      if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
+      if (!isInvokeRun) {
+        // FG-479: pipeline task — the agent finished but merge/gate/reds never
+        // ran. Never complete it here; land fail-safe with the result preserved.
+        failPipelineUnfinalized(t.id, result, evidence);
+      } else {
+        // FG-463: the complete write + its paired events commit atomically. The
+        // markTaskComplete no-op (already complete concurrently) rolls back to
+        // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
+        const completed = getDb().transaction(() => {
+          if (!markTaskComplete(t.id, result)) return false;
+          logEvent("task.completed", { runId, taskId: t.id });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
+          return true;
+        })();
+        if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
+      }
     } else if (result === undefined) {
       // FG-455: an empty/absent result.json used to collapse straight to
       // "orphaned" — discarding any work the agent actually persisted before the
@@ -429,15 +463,22 @@ export function reconcileRun(
         } catch {
           evidence.resultWriteFailed = true;
         }
-        // FG-463: complete write + its events atomic (the result.json write above
-        // is best-effort and deliberately stays OUTSIDE the transaction).
-        const completed = getDb().transaction(() => {
-          if (!markTaskComplete(t.id, inferred)) return false;
-          logEvent("task.completed", { runId, taskId: t.id });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
-          return true;
-        })();
-        if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
+        if (!isInvokeRun) {
+          // FG-479: same guard as the valid-result branch above — a recovered
+          // stdout result proves the agent finished, not that the pipeline's
+          // host-side finalize ran.
+          failPipelineUnfinalized(t.id, inferred, evidence);
+        } else {
+          // FG-463: complete write + its events atomic (the result.json write above
+          // is best-effort and deliberately stays OUTSIDE the transaction).
+          const completed = getDb().transaction(() => {
+            if (!markTaskComplete(t.id, inferred)) return false;
+            logEvent("task.completed", { runId, taskId: t.id });
+            logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
+            return true;
+          })();
+          if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
+        }
       } else if (exitInfo.oomKilled === true || exitInfo.exitCode === 137) {
         // FG-455 p4: a positively-identified OOM/SIGKILL death is a distinct,
         // more specific cause than the generic orphaned/orphaned_work_may_persist
@@ -602,15 +643,28 @@ export function reconcileRun(
     }
 
     if (allComplete) {
-      // FG-463: complete write + its events atomic (the parent result.json write
-      // above is best-effort and stays outside the transaction).
-      const completed = getDb().transaction(() => {
-        if (!markTaskComplete(parent.id, parentResult)) return false;
-        logEvent("task.completed", { runId, taskId: parent.id });
-        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered", childSummary: { total: children.length, complete: completeChildren.length } } });
-        return true;
+      // FG-479 review finding 4: all children finished, but that only proves the
+      // WAVE finished — the parent's own host-side finalize (integration merge
+      // → post-merge gate → reds, runNext.ts dispatchFanoutStep ~1446-1590) never
+      // ran, because dispatchFanoutStep never gave the parent a container to
+      // crash out of (see the container.started gate above). Completing the
+      // parent purely from child aggregation would silently skip that whole
+      // sequence — the exact single-step bypass this ticket fixed for a PIPELINE
+      // primary (failPipelineUnfinalized above), just on the fanout-parent
+      // lifecycle. Land fail-safe instead: reuse fanout_wave_orphaned (same
+      // recover --re-drive path already re-drives the whole wave coherently;
+      // retryPolicy/recover.ts already refuse a bare `forge retry` for it) with
+      // a distinct message so an operator isn't told children "failed or never
+      // finished" when in fact every one of them succeeded.
+      const error =
+        `fanout parent unfinalized: all ${children.length} children completed, but the parent's own merge/integration-gate/reds sequence never ran ` +
+        `(the process died before it started) — inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
+      getDb().transaction(() => { // FG-463: fail write + its events atomic
+        markTaskFailed(parent.id, error, parentResult);
+        logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
+        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_unfinalized", childSummary: { total: children.length, complete: completeChildren.length } } });
       })();
-      if (completed) taskChanges.push({ taskId: parent.id, from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" });
+      taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_unfinalized" });
     } else {
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
@@ -647,7 +701,7 @@ export function reconcileRun(
   // FG-459: guard the run-level status write + its events so a DB throw here
   // does not propagate out of reconcileRun after the task passes succeeded.
   try {
-    if (run.status === "active" && run.workflow === "invoke") {
+    if (run.status === "active" && isInvokeRun) {
       const after = tasksForRun(runId);
       const anyNonTerminal = after.some((t) => !TERMINAL_TASK.has(t.status));
       if (after.length > 0 && !anyNonTerminal) {

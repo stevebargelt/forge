@@ -411,6 +411,12 @@ export function deriveNextCommandForTask(
     if (failureKind === "fanout_wave_orphaned") {
       return `forge show ${taskId} --json  # inspect which children completed, then \`forge recover ${taskId} --re-drive\``;
     }
+    // FG-479: an unfinalized pipeline step — retry-policy.ts refuses a bare
+    // `forge retry` (the preserved result/worktree would be re-dispatched over),
+    // and recover --continue refuses it too. Inspect-then-force is the only path.
+    if (failureKind === "orphaned_needs_finalize") {
+      return `forge show ${taskId} --json  # inspect the preserved result and diff, then \`forge retry ${taskId} --force\` to re-run the step through the real finalize path`;
+    }
     // FG-455 p4: a positively-identified OOM/SIGKILL death — distinct from the
     // generic orphaned kinds above, surfaced so the operator knows a bigger
     // memory allowance (not just a re-dispatch) may be needed. Same posture as
@@ -493,6 +499,11 @@ export function orphanRecoveryMessage(
   } else if (kind === "idle_timeout") {
     // FG-461: the idle watchdog SIGKILLed a hung agent — partial edits may remain.
     headline = "agent idle-timed-out (killed after no output within the idle window)" + changedClause;
+  } else if (kind === "orphaned_needs_finalize") {
+    // FG-479: the agent finished (usable result preserved), but the pipeline's
+    // host-side finalize never ran — the step must not be trusted complete.
+    headline =
+      "step finished but was never finalized — container gone with a usable result; the pipeline's host-side finalize (worktree merge → integration gate → reds) did not run, so the step cannot be trusted complete.";
   } else {
     headline = foundChangedFiles
       ? "work may have persisted — container gone, no recoverable result, but changed files were found."
@@ -505,7 +516,12 @@ export function orphanRecoveryMessage(
   const guidance =
     kind === "container_crash" || kind === "idle_timeout"
       ? `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then \`forge retry ${taskId}\` (retryable without --force)`
-      : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
+      : kind === "orphaned_needs_finalize"
+        // FG-479: recover --continue refuses this kind (adopting the result as
+        // complete would skip merge/integration gate/reds) — retry --force is
+        // the only path that re-runs the step through the real finalize.
+        ? `inspect the preserved result and the diff at ${evidence.worktreePathChecked ?? "the task dir"}, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\``
+        : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
   return (
     `${headline}\n` +
     sourceLine +
