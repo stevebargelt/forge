@@ -69,6 +69,10 @@ export function registerStatus(program: Command): void {
       if (!run) throw new Error(`Run not found: ${runId}`);
 
       const tasks = tasksForRun(runId);
+      // FG-481: recover.ts's --continue now refuses unconditionally for a
+      // pipeline-run task — thread that same signal into orphanRecoveryMessage
+      // so `forge status` doesn't steer the operator toward a refused command.
+      const runIsInvokeRun = run.workflow === "invoke";
 
       if (opts.json) {
         // Structured output for the orchestrator. One JSON object per call.
@@ -92,7 +96,7 @@ export function registerStatus(program: Command): void {
             error: t.error ?? null,
             failureKind: taskFailureKind ?? null,
             orphanRecovery: orphanEvidence
-              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind ?? "orphaned_work_may_persist") }
+              ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind ?? "orphaned_work_may_persist", runIsInvokeRun) }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
@@ -153,7 +157,7 @@ export function registerStatus(program: Command): void {
             const orphanEvidence = getOrphanEvidenceFromEvents(events);
             if (orphanEvidence) {
               const kind = failureKindFromEvents(events) ?? "orphaned_work_may_persist";
-              console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind)}`);
+              console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind, runIsInvokeRun)}`);
             }
           }
         }

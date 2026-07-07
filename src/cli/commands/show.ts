@@ -453,7 +453,11 @@ export function deriveNextCommandForTask(
  *  to lead with the OOM/kill cause instead of the generic dirty-worktree framing —
  *  branch on the failure KIND (not evidence.oomKilled/exitCode alone), since the
  *  valid-result/orphaned branches also carry those fields on baseEvidence and a
- *  plain orphaned task that happened to exit 137 must not read as an OOM. */
+ *  plain orphaned task that happened to exit 137 must not read as an OOM.
+ *  `isInvokeRun` defaults to true so existing callers (and tests) keep their
+ *  prior "continue from it or retry with --force" wording byte-identical —
+ *  pass false (FG-481) for a pipeline-run task, whose --continue recover.ts
+ *  now refuses unconditionally, to route the guidance at retry --force instead. */
 export function orphanRecoveryMessage(
   runId: string,
   taskId: string,
@@ -462,6 +466,7 @@ export function orphanRecoveryMessage(
   // same evidence and get their own headline; anything else (incl. the reconcile
   // orphaned_work_may_persist default) uses the generic "work may have persisted".
   kind: string = "orphaned_work_may_persist",
+  isInvokeRun: boolean = true,
 ): string {
   const dir = taskDir(runId, taskId);
   const files = evidence.changedFiles.length > 0
@@ -521,7 +526,14 @@ export function orphanRecoveryMessage(
         // complete would skip merge/integration gate/reds) — retry --force is
         // the only path that re-runs the step through the real finalize.
         ? `inspect the preserved result and the diff at ${evidence.worktreePathChecked ?? "the task dir"}, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\``
-        : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
+        // FG-481: this branch also covers a plain "orphaned"/"orphaned_work_may_persist"
+        // task, and oom_killed (whose guidance falls through here too) — all
+        // CONTINUABLE_KINDS. On a pipeline run, recover.ts's --continue now refuses
+        // unconditionally (same rationale as orphaned_needs_finalize above), so the
+        // guidance must not suggest --continue; mirror that branch's wording instead.
+        : isInvokeRun
+          ? `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`
+          : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\``;
   return (
     `${headline}\n` +
     sourceLine +
@@ -636,6 +648,12 @@ export function registerShow(program: Command): void {
 
       if (result.kind === "task") {
         const { task, verdicts, events } = result;
+        // FG-481: recover.ts's --continue now refuses unconditionally for a
+        // pipeline-run task (any workflow other than "invoke") — thread that
+        // same signal into orphanRecoveryMessage's guidance so it doesn't
+        // steer the operator toward a command that will be refused.
+        const taskRun = getRun(task.runId);
+        const taskIsInvokeRun = taskRun?.workflow === "invoke";
         const tDir = taskDir(task.runId, task.id);
         const runtimeMeta = getManifestRuntime(tDir);
         const stdoutLog = join(tDir, "container.stdout.log");
@@ -683,7 +701,7 @@ export function registerShow(program: Command): void {
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
                   orphanRecovery: orphanEvidence
-                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist") }
+                    ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist", taskIsInvokeRun) }
                     : null,
                   fanoutWaveRecovery: fanoutWaveEvidence
                     ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence) }
@@ -736,7 +754,7 @@ export function registerShow(program: Command): void {
         // FG-455: don't let this collapse into a generic "failed" — the worktree
         // may hold real, unreviewed work.
         if (orphanEvidence) {
-          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist")}`);
+          console.log(`  recovery:  ${orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist", taskIsInvokeRun)}`);
         }
         // FG-455 p2/p3 review finding 2: same distinct treatment for a fanout
         // parent orphaned mid-wave — don't let it collapse into a generic failure.
@@ -748,7 +766,7 @@ export function registerShow(program: Command): void {
         // #246: surfaces are project-configurable via <project>/.forge/docs-surfaces.yml.
         const docsSuggest = docsImpactSuggestion(
           getResultFilesModified(tDir),
-          loadOperatorSurfaces(getRun(task.runId)?.projectDir)
+          loadOperatorSurfaces(taskRun?.projectDir)
         );
         if (docsSuggest) console.log(`  docs impact: ${docsSuggest}`);
         console.log(`  container: forge-${task.id}`);
