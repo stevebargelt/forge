@@ -1,9 +1,11 @@
 ---
 id: FG-482
 type: story
-status: active
+status: done
 title: blocked_by_red is a non-atomic 4-write sequence that transits through awaiting_gate — crash mid-sequence lets an authoritative red block be advanced without --force (review F3)
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: 718ef12
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md, finding F3 — CRITICAL). Review of main @ fbb070c.
