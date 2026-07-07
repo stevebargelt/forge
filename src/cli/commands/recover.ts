@@ -103,13 +103,21 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
   return { worktreePathChecked: worktreePathChecked ?? null, source, changedFiles, validResult, stdoutInferredResult };
 }
 
+// FG-481: mirrors reconcile.ts:234's isInvokeRun predicate/rationale — only a
+// single-step invoke run's completion IS the end of the task's lifecycle.
+// A pipeline task's host-side finalize (worktree merge -> integration gate ->
+// reds -> gates) never runs here, so --continue must never adopt one.
+function isInvokeRun(run: Run): boolean {
+  return run.workflow === "invoke";
+}
+
 // FG-455 p4 review finding 2: only recommend --continue for a failure_kind
 // performContinue will actually accept (CONTINUABLE_KINDS) — otherwise this
 // recommended a command performContinue then refused (e.g. a container_crash
 // task that happened to have a dirty worktree). A non-continuable kind falls
 // back to the plain retry recommendation instead.
-function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: string | undefined): string {
-  const continuable = CONTINUABLE_KINDS.has(failureKind ?? "");
+function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: string | undefined, run: Run): string {
+  const continuable = CONTINUABLE_KINDS.has(failureKind ?? "") && isInvokeRun(run);
   const hasRecoverableWork =
     evidence.validResult !== undefined || evidence.stdoutInferredResult !== undefined || evidence.changedFiles.length > 0;
   if (continuable && hasRecoverableWork) {
@@ -161,7 +169,7 @@ function buildTaskView(task: Task, run: Run): TaskEvidenceView {
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
     hasStdoutRecoverableResult: evidence.stdoutInferredResult !== undefined,
-    recommendation: recommendationFor(task, evidence, failureKind),
+    recommendation: recommendationFor(task, evidence, failureKind, run),
     verification: VERIFICATION_HINT,
   };
 }
@@ -253,6 +261,23 @@ export function performContinue(taskId: string, opts: { force?: boolean } = {}):
   if (!task) return { kind: "continue-refused", id: taskId, reason: `unknown task '${taskId}'` };
   const run = getRun(task.runId);
   if (!run) return { kind: "continue-refused", id: taskId, reason: `run ${task.runId} not found for task ${taskId}` };
+
+  // FG-481: refuse unconditionally (ignoring failure_kind and --force) for any
+  // pipeline-run task. Adopting persisted work here would complete the step
+  // without host-side finalize (worktree merge -> integration gate -> reds ->
+  // gates) ever running — the same bypass class FG-479 closed on the silent
+  // reconcile path, now closed on the explicit operator path too.
+  if (!isInvokeRun(run)) {
+    return {
+      kind: "continue-refused",
+      id: taskId,
+      reason:
+        `task ${taskId}'s run (workflow=${run.workflow}) is a pipeline run, not invoke — --continue never adopts a pipeline task's ` +
+        "persisted work, because host-side finalize (worktree merge → integration gate → reds → gates) never ran for it and the step " +
+        "cannot be trusted complete. --force does not override this refusal. Re-drive through the real finalize path with " +
+        `\`forge retry ${taskId} --force\`.`,
+    };
+  }
 
   const failureKind = failureKindForTask(taskId);
   if (task.status !== "failed" || !CONTINUABLE_KINDS.has(failureKind ?? "")) {

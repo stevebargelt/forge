@@ -351,6 +351,43 @@ test("orphanRecoveryMessage: kind defaults to orphaned_work_may_persist wording 
   assert.doesNotMatch(msg, /container killed/);
 });
 
+// ── orphanRecoveryMessage: FG-481 — isInvokeRun param, pipeline-run guidance ──
+//
+// recover.ts's --continue now refuses unconditionally for a pipeline-run task
+// (any workflow other than "invoke") for every CONTINUABLE_KIND (orphaned,
+// orphaned_work_may_persist, oom_killed). orphanRecoveryMessage's guidance
+// must not steer such an operator toward a command that will be refused.
+
+test("orphanRecoveryMessage: isInvokeRun omitted (default true) — invoke-run guidance is unchanged, byte-identical to pre-FG-481 wording", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-invoke-default", {
+    containerName: "forge-task-invoke-default", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+  });
+  assert.match(msg, /continue from it or retry with --force/);
+});
+
+for (const kind of ["orphaned", "orphaned_work_may_persist", "oom_killed"]) {
+  test(`orphanRecoveryMessage: isInvokeRun=false + kind='${kind}' — never suggests continue, routes to forge retry <id> --force`, () => {
+    const msg = orphanRecoveryMessage(RUN.id, `task-pipeline-${kind}`, {
+      containerName: `forge-task-pipeline-${kind}`, containerLiveness: "gone", resultState: "absent",
+      recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+      exitCode: 137, oomKilled: true,
+    }, kind, false);
+    assert.doesNotMatch(msg, /--continue/, "guidance must not mention --continue for a pipeline-run task");
+    assert.doesNotMatch(msg, /continue from it/, "guidance must not suggest continuing for a pipeline-run task");
+    assert.match(msg, new RegExp(`forge retry task-pipeline-${kind} --force`), "guidance falls back to forge retry --force");
+  });
+}
+
+test("orphanRecoveryMessage: isInvokeRun=true (explicit) + kind=oom_killed — keeps the invoke-run continue-or-retry wording", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-invoke-oom", {
+    containerName: "forge-task-invoke-oom", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+    exitCode: 137, oomKilled: true,
+  }, "oom_killed", true);
+  assert.match(msg, /continue from it or retry with --force/);
+});
+
 // ── orphanRecoveryMessage: FG-455 p4 re-review — oom_killed headline must not
 // contradict the changed-files line for a CLEAN worktree ───────────────────
 

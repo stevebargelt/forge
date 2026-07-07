@@ -412,6 +412,101 @@ test("recover --continue: refuses a fanout parent (fanout_wave_orphaned is a --r
   assert.equal(outcome.kind, "continue-refused");
 });
 
+// ── FG-481: pipeline-run tasks are never continuable ────────────────────────
+//
+// A task whose run's workflow isn't "invoke" must be refused by --continue
+// unconditionally — regardless of failure_kind (even a CONTINUABLE_KIND) and
+// regardless of --force. Adopting here would complete the step without the
+// host-side finalize (worktree merge -> integration gate -> reds -> gates)
+// ever running, recreating the exact bypass FG-479 closed on the silent
+// reconcile path.
+
+const PIPELINE_RUN: Run = { id: "run-pipeline-continue", workflow: "build", title: "pipeline recover test", status: "active", createdAt: "2026-06-01T00:00:00Z" };
+
+for (const failureKind of ["orphaned", "orphaned_work_may_persist", "oom_killed"]) {
+  test(`recover --continue: refuses a pipeline-run task in CONTINUABLE_KIND '${failureKind}' — and --force does not override`, () => {
+    insertRun(PIPELINE_RUN);
+    const gitDir = trackedDirtyGitRepo();
+    const taskId = `t-continue-pipeline-${failureKind}`;
+    insertTask(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "failed", worktreePath: gitDir }));
+    logEvent("task.failed", { runId: PIPELINE_RUN.id, taskId, payload: { failure_kind: failureKind, error: "boom" } });
+
+    const before = getTask(taskId)!;
+    const eventsBefore = getEvents(taskId).length;
+
+    const refused = performContinue(taskId);
+    assert.equal(refused.kind, "continue-refused");
+    if (refused.kind === "continue-refused") {
+      assert.match(refused.reason, /pipeline/i, "reason names the pipeline rationale");
+      assert.match(refused.reason, /finalize|merge|integration gate|reds|gates/i, "reason names the host-side finalize rationale");
+      assert.match(refused.reason, /forge retry/, "reason points at forge retry");
+      assert.match(refused.reason, /--force/, "reason points at --force as the re-drive path");
+    }
+    assert.deepEqual(getTask(taskId), before, "no write on refusal");
+    assert.equal(getEvents(taskId).length, eventsBefore, "no event on refusal");
+
+    const forcedRefused = performContinue(taskId, { force: true });
+    assert.equal(forcedRefused.kind, "continue-refused", "--force must not override the pipeline refusal");
+    assert.deepEqual(getTask(taskId), before, "no write on refusal even with --force");
+    assert.equal(getEvents(taskId).length, eventsBefore, "no event on refusal even with --force");
+  });
+}
+
+// retry-policy.ts (untouched by FG-481) governs whether the retry fallback
+// needs --force: "orphaned" alone is retryable without it (no persisted-work
+// signal), while "orphaned_work_may_persist" / "oom_killed" require --force
+// since a blind retry could clobber recoverable work. All three are still
+// CONTINUABLE_KINDS that must never be recommended via --continue on a
+// pipeline run.
+const PIPELINE_RETRY_REQUIRES_FORCE: Record<string, boolean> = {
+  orphaned: false,
+  orphaned_work_may_persist: true,
+  oom_killed: true,
+};
+
+for (const failureKind of ["orphaned", "orphaned_work_may_persist", "oom_killed"]) {
+  test(`recover inspect: a pipeline-run task in CONTINUABLE_KIND '${failureKind}' is NOT recommended --continue`, () => {
+    insertRun(PIPELINE_RUN);
+    const gitDir = trackedDirtyGitRepo();
+    const taskId = `t-inspect-pipeline-noncontinuable-${failureKind}`;
+    insertTask(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "failed", worktreePath: gitDir }));
+    logEvent("task.failed", { runId: PIPELINE_RUN.id, taskId, payload: { failure_kind: failureKind, error: "boom" } });
+
+    const outcome = performInspect(taskId);
+    assert.equal(outcome.kind, "inspect-task");
+    if (outcome.kind !== "inspect-task") return;
+    assert.equal(outcome.task.failureKind, failureKind);
+    assert.doesNotMatch(
+      outcome.task.recommendation,
+      /^forge recover \S+ --continue/,
+      "performContinue refuses a pipeline-run task — must not be the recommended command",
+    );
+    const expectForce = PIPELINE_RETRY_REQUIRES_FORCE[failureKind];
+    assert.match(outcome.task.recommendation, /^forge retry \S+/, "pipeline task falls back to a retry recommendation");
+    if (expectForce) {
+      assert.match(outcome.task.recommendation, /^forge retry \S+ --force/, "non-retryable-without-force kind requires --force");
+    } else {
+      assert.doesNotMatch(outcome.task.recommendation, /^forge retry \S+ --force/, "'orphaned' is retryable without --force per retry-policy.ts");
+    }
+  });
+}
+
+test("recover inspect: forge recover <runId> and <taskId> still surface a pipeline task in a CONTINUABLE_KIND (FG-479 surfacing unchanged)", () => {
+  insertRun(PIPELINE_RUN);
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-inspect-pipeline-surfaced";
+  insertTask(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "failed", worktreePath: gitDir }));
+  logEvent("task.failed", { runId: PIPELINE_RUN.id, taskId, payload: { failure_kind: "oom_killed", error: "boom" } });
+
+  const singleTask = performInspect(taskId);
+  assert.equal(singleTask.kind, "inspect-task", "single-task view still surfaces the pipeline task");
+
+  const runView = performInspect(PIPELINE_RUN.id);
+  assert.equal(runView.kind, "inspect-run");
+  if (runView.kind !== "inspect-run") return;
+  assert.ok(runView.tasks.some((t) => t.taskId === taskId), "run-level listing still surfaces the pipeline task");
+});
+
 // ── --re-drive ───────────────────────────────────────────────────────────────
 
 test("recover --re-drive: mints a fresh pending primary for a failed fanout parent, leaves audit trail, no double-dispatch", () => {
