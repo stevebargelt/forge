@@ -137,3 +137,8 @@ Design artifact produced per the four shaping constraints (pure derivation / lin
 - high: Slice 3 (runNext dispatch hot path) is where a wrong lineage classification does the most damage — mitigation: Ship slice 3 only after slices 1-2 have run through the full worktree+integration test tier with zero regressions. Keep the old heuristics compiled but dead (not deleted) for one release so a revert i
 - medium: Slice 4's verdict-aggregation convergence is a real behavior change for at least one workflow shape, not a pure refactor — mitigation: Audit shipped workflow YAMLs (security-audit.yml, feature-ui-design-needed.yml, feature.yml, and any other seeds/workflows/*.yml with authoritative reds) for gate_on_verdict:false + authority:authorit
 - medium: During the multi-slice migration window, the four-heuristics problem is temporarily FIVE heuristics (old x4 + new x1), and a new lineage bug fix landed mid-migration could get patched into a legacy site about to be delet — mitigation: Freeze new lineage-heuristic edits to the legacy call sites for the migration's duration — route any new lineage-adjacent bug fix through classifyTaskLineage immediately, even out of the planned slice
+
+
+## Slice-7 addendum (2026-07-07, FG-485 closeout)
+
+FG-485 (merge dc7d725) added one more executor.ts call site for slice 7 to absorb: the liveness-first probe ahead of evaluateInvokeLaneEligibility in driveRemainingItems' awaiting_gate reattach branch. It deliberately reuses the pure primitives (computeReadyQueue + taskHasPipelineFinalize + the existing getRun/status check) and invents no new lineage/state vocabulary, per this ticket's migration-freeze guidance — when the evaluator lands, redirect that probe to the evaluator's run-liveness/dispatchability derivation.
