@@ -443,16 +443,20 @@ test("workflow requiring 'brief' input — executor derives brief from ticket an
   assert.equal(campaignRow?.status, "complete");
 });
 
-// ── Test 8: startRun validation failure → failed/blocked/campaign_system, campaign paused ──
+// ── Test 8: startRun validation failure → failed/blocked/infrastructure, campaign paused ──
 // Regression guard for finding 1: a startRun throw must NEVER leave campaign 'running'.
 
-// FG-490 (review F7): a thrown startRun no longer leaves the campaign stuck
-// 'running' with the item silently marked terminal-failed — the campaign
-// parks (running->paused) with the item in a recoverable, non-terminal state
-// (awaiting_gate, the same shape `campaign resume`'s reattach path uses
-// elsewhere), and the ORIGINAL thrown error is rethrown to the caller with
-// next-action guidance rather than swallowed into the returned result.
-test("startRun input validation failure — campaign paused with a recoverable item, original error rethrown", async () => {
+// FG-490 review (round 2, F1): a thrown startRun no longer leaves the campaign
+// stuck 'running' with the item silently marked terminal-failed — the campaign
+// parks (running->paused) with the ORIGINAL thrown error rethrown to the
+// caller with next-action guidance rather than swallowed into the returned
+// result. Unlike a thrown runNext (which parks the recoverable awaiting_gate
+// shape, since a live run already exists), a thrown startRun never dispatched
+// anything — there is no live run to reattach to, only a synthetic 'abandoned'
+// row for traceability — so the item parks DIRECTLY at its true terminal
+// state: failed/blocked/infrastructure, recoverable via `forge campaign
+// retry` (see executor.ts's parkCampaignOnStartRunThrow).
+test("startRun input validation failure — campaign paused with the item parked failed/blocked/infrastructure, original error rethrown", async () => {
   const campaign = setupCampaign();
 
   const runNextFn = async (): Promise<RunNextResult> => {
@@ -467,6 +471,7 @@ test("startRun input validation failure — campaign paused with a recoverable i
       }),
     (err: Error) => {
       assert.match(err.message, /custom_required_input/, "original startRun error must survive in the rethrown error");
+      assert.match(err.message, /forge campaign retry/, "rethrown error must name the actual recovery verb (retry)");
       assert.match(err.message, /forge campaign resume/, "rethrown error must carry next-action guidance");
       return true;
     }
@@ -478,8 +483,9 @@ test("startRun input validation failure — campaign paused with a recoverable i
 
   const items = listCampaignItems(campaign.id);
   const item = items[0]!;
-  assert.equal(item.lifecycleStatus, "awaiting_gate", "item must land in a recoverable, non-terminal state, never stranded 'running'");
-  assert.equal(item.outcome, undefined);
+  assert.equal(item.lifecycleStatus, "failed", "a thrown startRun never dispatched work — no live run to reattach to, so it parks directly at its true terminal state");
+  assert.equal(item.outcome, "blocked");
+  assert.equal(item.blockerKind, "infrastructure", "a dispatch-time failure is the transient host/environment blocker kind, making it retryable");
   assert.ok(item.requestedHumanAction?.includes("custom_required_input"), "requestedHumanAction must name the validation error");
 });
 

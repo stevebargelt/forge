@@ -70,15 +70,22 @@ function blockedItemsGuidance(campaignId: string, blocked: { ticketId: string; b
 // top-level catch as a bare non-JSON stderr line. Renders it the same way:
 // --json gets a machine-readable object, human output keeps the wrapped
 // message text (unchanged wording — it already carries the resume guidance).
-// ticketId/runId come from the campaign item the executor parked at
-// 'awaiting_gate' with this exact reason (set by parkCampaignOnDriveThrow
-// before it rethrows) — undefined only in the rare case the park write itself
-// failed, in which case nothing was recorded to look up.
+// ticketId/runId come from the campaign item the executor parked with this
+// exact reason before it rethrows — undefined only in the rare case the park
+// write itself failed, in which case nothing was recorded to look up. Two
+// park shapes exist: a thrown runNext parks the (still-live) item at
+// 'awaiting_gate' (parkCampaignOnDriveThrow); a thrown startRun has no live
+// run to reattach to and parks directly at its true terminal state instead —
+// failed/blocked/infrastructure (parkCampaignOnStartRunThrow). Match both by
+// reason so --json carries ticketId/runId regardless of which shape parked.
 function renderDriveErrorAndExit(campaignId: string, err: unknown, json: boolean | undefined): never {
   const message = err instanceof Error ? err.message : String(err);
   const original = err instanceof Error && err.cause instanceof Error ? err.cause.message : message;
   const parked = listCampaignItems(campaignId).find(
-    (item) => item.lifecycleStatus === "awaiting_gate" && item.reason === original
+    (item) =>
+      item.reason === original &&
+      (item.lifecycleStatus === "awaiting_gate" ||
+        (item.lifecycleStatus === "failed" && item.outcome === "blocked" && item.blockerKind === "infrastructure"))
   );
 
   if (json) {
