@@ -504,6 +504,8 @@ function parkCampaignOnDriveThrow(
     updateCampaignItem(itemId, {
       runId,
       lifecycleStatus: "awaiting_gate",
+      outcome: undefined,
+      blockerKind: undefined,
       reason: message,
       requestedHumanAction: `drive loop threw while dispatching ${ticketId} on run ${runId}: ${message}. Inspect the run (forge show ${runId}), resolve the issue, then run \`forge campaign resume\`.`,
     });

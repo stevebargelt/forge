@@ -3680,6 +3680,54 @@ test("FG-490: thrown runNextFn parks the campaign (running->paused) with a recov
   assert.notEqual(resumeResult.stopReason, "not_paused", "forge campaign resume must succeed (not refuse) after the F7 park");
 });
 
+test("FG-490 review F8: parkCampaignOnDriveThrow clears a stale outcome/blockerKind from a prior blocked attempt — a re-thrown item must not look terminally blocked while lifecycleStatus is the recoverable awaiting_gate", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F8 stale outcome/blockerKind" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-490 F8 repro" });
+
+  const item = listCampaignItems(campaign.id).find((i) => i.ticketId === "FG-101")!;
+  // Simulate a prior blocked attempt (e.g. a resolved scope block) whose outcome/blockerKind
+  // were never cleared before the item was re-dispatched and threw again.
+  db.prepare("UPDATE campaign_items SET outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?").run(item.id);
+
+  const RUN_ID = "run-fg490-f8-stale-blocked";
+  const startRunFn = (args: StartRunArgs): { runId: string } => {
+    insertRun({
+      id: RUN_ID,
+      workflow: args.workflow.name,
+      title: args.title,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+      projectDir: args.projectDir,
+    });
+    return { runId: RUN_ID };
+  };
+
+  await assert.rejects(() =>
+    startCampaign(campaign.id, {
+      loadWorkflowFn: FG488_WORKFLOW,
+      startRunFn,
+      runNextFn: async () => {
+        throw new Error("docker spawn failed: no such image");
+      },
+    })
+  );
+
+  const dbItem = db.prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE id = ?").get(item.id) as {
+    lifecycle_status: string;
+    outcome: string | null;
+    blocker_kind: string | null;
+  };
+  assert.equal(dbItem.lifecycle_status, "awaiting_gate");
+  assert.equal(dbItem.outcome, null, "stale 'blocked' outcome from the prior attempt must be cleared — awaiting_gate is the recoverable shape, not a terminal block");
+  assert.equal(dbItem.blocker_kind, null, "stale blockerKind from the prior attempt must be cleared alongside outcome");
+});
+
 test("FG-490: thrown startRunFn parks the campaign (running->paused) with a recoverable item and rethrows the original error", async () => {
   const itemOverrides: Record<string, ItemModeOverride> = {
     "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F7 thrown startRunFn" },
