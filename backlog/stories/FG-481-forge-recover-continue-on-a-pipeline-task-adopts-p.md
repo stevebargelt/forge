@@ -26,4 +26,5 @@ performContinue (src/cli/commands/recover.ts) adopts persisted work and marks a 
 - [ ] Invoke-run tasks keep today's --continue behavior exactly (existing recover tests stay green).
 - [ ] Negative tests: pipeline task in each CONTINUABLE_KIND (orphaned / orphaned_work_may_persist / oom_killed) with --continue and with --continue --force — assert refused, task status unchanged, no markTaskRecovered write, no events beyond the refusal path.
 - [ ] `forge recover <runId>` run-level listing and single-task view still SURFACE pipeline tasks (FG-479 behavior unchanged); only adoption is refused.
+- [ ] Read-side recommendation parity: recommendationFor (via buildTaskView, used by run-level listing and single-task view) never recommends `forge recover <id> --continue` for a pipeline-run task — it recommends the retry --force re-drive path instead; negative recommendation test per CONTINUABLE_KIND mirroring recover.test.ts:183-207 (red-wide architect-phase finding: recommendation/refusal drift, FG-455 p4 class).
 - [ ] docs/concepts.md --continue bullet states the pipeline refusal and why.
