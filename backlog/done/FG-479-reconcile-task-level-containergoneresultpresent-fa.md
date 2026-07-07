@@ -1,9 +1,11 @@
 ---
 id: FG-479
 type: story
-status: active
+status: done
 title: "reconcile: task-level container_gone_result_present falsely completes crashed PIPELINE tasks, bypassing reds/integration gate/human gates/worktree merge-back"
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: de566fd
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md, finding F1 — CRITICAL). Review of main @ fbb070c.
