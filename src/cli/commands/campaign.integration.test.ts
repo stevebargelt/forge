@@ -4212,6 +4212,136 @@ test("integ RED-WIDE follow-on: `campaign escalate-lane` with an unrelated/unkno
   assert.equal(campaignAfter.approved_plan_hash, planHashBefore, "approved_plan_hash must be unchanged since the rejected escalate never re-approved anything");
 });
 
+// ── FG-489: `campaign retry` — supported reset-to-pending for transiently-failed items ──
+
+test("integ FG-489: real `campaign retry` resets an auth-blocked item to pending; a subsequent `campaign resume` re-dispatches it to complete", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaignId) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'auth', run_id = 'run-auth-dead', reason = 'auth token expired' WHERE id = ?"
+  ).run(items[0]!.id);
+  db.close();
+
+  const retryResult = runForge(["campaign", "retry", campaignId, "FG-101", "--json"]);
+  assert.equal(retryResult.status, 0, `retry failed\nstdout: ${retryResult.stdout}\nstderr: ${retryResult.stderr}`);
+  const retryOutput = JSON.parse(retryResult.stdout) as { lifecycleStatus: string };
+  assert.equal(retryOutput.lifecycleStatus, "pending");
+
+  const dbAfterRetry = new Database(dbPath, { readonly: true });
+  const itemAfterRetry = dbAfterRetry.prepare(
+    "SELECT lifecycle_status, outcome, blocker_kind, run_id FROM campaign_items WHERE id = ?"
+  ).get(items[0]!.id) as { lifecycle_status: string; outcome: string | null; blocker_kind: string | null; run_id: string | null };
+  dbAfterRetry.close();
+  assert.equal(itemAfterRetry.lifecycle_status, "pending", "retry must reset the item to pending");
+  assert.equal(itemAfterRetry.outcome, null, "retry must clear the blocked outcome");
+  assert.equal(itemAfterRetry.blocker_kind, null, "retry must clear the auth blockerKind");
+  assert.equal(itemAfterRetry.run_id, null, "retry must clear the dead run's linkage for a clean re-dispatch");
+
+  // Simulate the re-dispatched item completing under a fresh run (no real agent dispatch in this test).
+  const dbComplete = new Database(dbPath);
+  dbComplete.prepare("UPDATE campaign_items SET lifecycle_status = 'complete', outcome = 'shipped' WHERE id = ?").run(items[0]!.id);
+  dbComplete.close();
+
+  const resumeResult = runForge(["campaign", "resume", campaignId, "--json"]);
+  assert.equal(resumeResult.status, 0, `resume failed\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`);
+  const resumeOutput = JSON.parse(resumeResult.stdout) as Record<string, unknown>;
+  assert.equal(resumeOutput["stopReason"], "complete", "resume must proceed to complete once the retried item is re-dispatched");
+});
+
+test("integ FG-489: `campaign retry` refuses a running campaign", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+  runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(campaignId);
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaignId) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'auth' WHERE id = ?").run(items[0]!.id);
+  db.close();
+
+  const retryResult = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.notEqual(retryResult.status, 0, "retry must refuse a running campaign");
+  assert.match(retryResult.stderr.toLowerCase(), /paused/);
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const itemAfter = dbAfter.prepare("SELECT lifecycle_status FROM campaign_items WHERE id = ?").get(items[0]!.id) as { lifecycle_status: string };
+  dbAfter.close();
+  assert.equal(itemAfter.lifecycle_status, "failed", "a refused retry must not mutate the item");
+});
+
+test("integ FG-489: `campaign retry` refuses a scope-blocked item and names the escalate-lane path for a lane_escalation blocker", () => {
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101,FG-102",
+    "--project", projectDir,
+    "--mode", "sequential",
+    "--json",
+  ]);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+  const campaignId = planOutput.campaignId;
+  runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const items = db.prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaignId) as {
+    id: string;
+    ticket_id: string;
+  }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?").run(items[0]!.id);
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'lane_escalation' WHERE id = ?").run(items[1]!.id);
+  db.close();
+
+  const scopeRetryResult = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.notEqual(scopeRetryResult.status, 0, "retry must refuse a scope-blocked item");
+  assert.match(scopeRetryResult.stderr.toLowerCase(), /scope/);
+
+  const laneRetryResult = runForge(["campaign", "retry", campaignId, "FG-102"]);
+  assert.notEqual(laneRetryResult.status, 0, "retry must refuse a lane_escalation-blocked item");
+  assert.match(laneRetryResult.stderr.toLowerCase(), /escalate-lane/);
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const item1After = dbAfter.prepare("SELECT lifecycle_status, blocker_kind FROM campaign_items WHERE id = ?").get(items[0]!.id) as {
+    lifecycle_status: string;
+    blocker_kind: string;
+  };
+  const item2After = dbAfter.prepare("SELECT lifecycle_status, blocker_kind FROM campaign_items WHERE id = ?").get(items[1]!.id) as {
+    lifecycle_status: string;
+    blocker_kind: string;
+  };
+  dbAfter.close();
+  assert.equal(item1After.lifecycle_status, "failed");
+  assert.equal(item1After.blocker_kind, "scope");
+  assert.equal(item2After.lifecycle_status, "failed");
+  assert.equal(item2After.blocker_kind, "lane_escalation");
+});
+
 // ── FG-442 review (PR #11 follow-up), Finding 2: paused-approve plan-hash scoping ──
 
 test("integ FG-442 Finding 2: campaign approve refuses a paused campaign parked at awaiting_gate with an unchanged plan_hash (campaign-922 shape)", () => {

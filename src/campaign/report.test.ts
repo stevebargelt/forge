@@ -1408,6 +1408,74 @@ test("FG-393 consistency: blocked-paused campaign — all three surfaces agree, 
   assert.notEqual(report.nextOperatorAction, "resume the campaign when ready", "nextOperatorAction must not be bare resume for blocked-paused campaign");
 });
 
+// ── FG-489: show/report guidance for a transiently-blocked item names `campaign retry` ──
+
+test("FG-489: show.nextAction and report.nextOperatorAction name `campaign retry` for an auth-blocked item (retryable)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'auth' WHERE id = ?").run(items[0]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const report = assembleCampaignReport(campaign.id)!;
+
+  assert.ok(show.nextAction.includes("forge campaign retry"), `show.nextAction must name the retry verb for an auth-blocked item, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes(campaign.id), `show.nextAction must include the campaign id, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("FG-101"), `show.nextAction must include the ticket id, got: ${show.nextAction}`);
+  assert.ok(report.nextOperatorAction.includes("forge campaign retry"), `nextOperatorAction must name the retry verb for an auth-blocked item, got: ${report.nextOperatorAction}`);
+  assert.doesNotMatch(show.nextAction, /hand-edit|edit the db/i, "guidance must never instruct manual DB edits");
+});
+
+test("FG-489: show.nextAction and report.nextOperatorAction do NOT name `campaign retry` for a scope-blocked item (non-retryable)", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope' WHERE id = ?").run(items[0]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const report = assembleCampaignReport(campaign.id)!;
+
+  assert.ok(!show.nextAction.includes("forge campaign retry"), `show.nextAction must not offer retry for a scope-blocked item, got: ${show.nextAction}`);
+  assert.ok(!report.nextOperatorAction.includes("forge campaign retry"), `nextOperatorAction must not offer retry for a scope-blocked item, got: ${report.nextOperatorAction}`);
+  assert.ok(show.nextAction.includes("resolve blocker"), `show.nextAction must still say resolve blocker, got: ${show.nextAction}`);
+});
+
+test("FG-489: recovery_needed guidance (stuck in-flight item) names `forge show`/`campaign retry`, never instructs a manual DB edit", () => {
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-101"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', run_id = 'run-stuck-fg489' WHERE id = ?").run(items[0]!.id);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  const report = assembleCampaignReport(campaign.id)!;
+
+  for (const guidance of [show.nextAction, report.nextOperatorAction]) {
+    assert.ok(guidance.includes("forge show"), `guidance must point at forge show, got: ${guidance}`);
+    assert.ok(guidance.includes("forge campaign retry"), `guidance must name the retry verb, got: ${guidance}`);
+    assert.ok(guidance.includes(campaign.id), `guidance must include the campaign id, got: ${guidance}`);
+    assert.doesNotMatch(guidance, /reset the item to pending or mark it failed/, "guidance must not use the old hand-edit-implying phrasing");
+    assert.doesNotMatch(guidance, /hand-edit|edit the db/i, "guidance must never instruct manual DB edits");
+  }
+});
+
 // ── FG-411: plan_unresolvable — deleted source ticket ─────────────────────────
 
 function deleteTicketFile(dir: string, ticketId: string): void {

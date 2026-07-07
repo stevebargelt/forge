@@ -6,7 +6,7 @@ import type { PlannerInput, PlanMode, ItemModeOverride, ExecutionLane } from "..
 import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
-import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation } from "../../campaign/executor.js";
+import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem } from "../../campaign/executor.js";
 import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, formatOutOfBandEligibleHint } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
@@ -23,12 +23,44 @@ function makeRouteLookupClassifier(routes: Record<string, string>): ClassifyTick
   return (ticket) => routes[ticket.id] ?? "unclassified";
 }
 
+// FG-489: recovery_needed fires on an item stuck in an indeterminate lifecycle
+// state (e.g. still 'running' after a crash never recorded a terminal
+// outcome) — distinct from a cleanly-terminal 'failed' item, which is what
+// `forge campaign retry` acts on. This message must not tell the operator to
+// hand-edit the DB to force a state; it points at the durable inspection
+// surface (forge show) and, once the run is confirmed dead, `forge campaign
+// retry` is the supported path IF the item ends up failed with a transient
+// (auth/infrastructure) blockerKind — never a raw reset.
 function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: string; runId?: string | undefined } | undefined): string {
   if (rec) {
-    const runPart = rec.runId ? ` (run ${rec.runId})` : "";
-    return `recovery needed: item ${rec.ticketId} is ${rec.lifecycleStatus}${runPart} — inspect the run; reset the item to pending or mark it failed before retrying`;
+    const runPart = rec.runId ? ` run ${rec.runId}` : "the run";
+    return `recovery needed: item ${rec.ticketId} is ${rec.lifecycleStatus} — inspect ${runPart} (forge show${rec.runId ? ` ${rec.runId}` : ""}); if it turns out to be a transient failure (auth/infrastructure), \`forge campaign retry <campaign-id> ${rec.ticketId}\` once the campaign is paused will reset it for a clean re-dispatch`;
   }
   return "recovery needed: campaign has an in-flight item that must be resolved before retrying";
+}
+
+// FG-489: the message shown for 'paused'-with-blocked-items — the actual shape
+// a transient (auth/infrastructure) failure produces. Splits retryable items
+// (name the supported `forge campaign retry` verb) from everything else
+// (scope/verdict failures and other blockers, which retry refuses — re-plan,
+// escalate the lane, or abandon instead).
+const RETRYABLE_BLOCKER_KINDS = new Set(["auth", "infrastructure"]);
+
+function blockedItemsGuidance(campaignId: string, blocked: { ticketId: string; blockerKind?: string }[]): string {
+  const retryable = blocked.filter((r) => r.blockerKind && RETRYABLE_BLOCKER_KINDS.has(r.blockerKind));
+  const other = blocked.filter((r) => !r.blockerKind || !RETRYABLE_BLOCKER_KINDS.has(r.blockerKind));
+  const parts: string[] = [];
+  if (retryable.length) {
+    const ids = retryable.map((r) => r.ticketId).join(", ");
+    parts.push(
+      `${retryable.length} item(s) blocked on a transient failure (${ids}) — run \`forge campaign retry ${campaignId} <ticket-id>\` for each, then resume`
+    );
+  }
+  if (other.length) {
+    const ids = other.map((r) => r.ticketId).join(", ");
+    parts.push(`${other.length} item(s) blocked (${ids}) — inspect and re-plan or abandon`);
+  }
+  return `campaign paused — ${parts.join("; ")}`;
 }
 
 export function registerCampaign(program: Command): void {
@@ -401,7 +433,7 @@ export function registerCampaign(program: Command): void {
             const reasonPart = dependencyHeld.length === 1 && dependencyHeld[0]?.reason ? ` (${dependencyHeld[0].reason})` : "";
             console.error(`campaign paused — ${dependencyHeld.length} item(s) held pending an unresolved blocker: ${heldIds}${reasonPart}; resolve the blocker (see forge campaign show/report) then resume`);
           } else if (blocked.length) {
-            console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
+            console.error(blockedItemsGuidance(campaignId, blocked));
           } else {
             console.log("campaign paused between items — run resume to continue");
           }
@@ -515,7 +547,7 @@ export function registerCampaign(program: Command): void {
             const reasonPart = dependencyHeld.length === 1 && dependencyHeld[0]?.reason ? ` (${dependencyHeld[0].reason})` : "";
             console.error(`campaign paused — ${dependencyHeld.length} item(s) held pending an unresolved blocker: ${heldIds}${reasonPart}; resolve the blocker (see forge campaign show/report) then resume`);
           } else if (blocked.length) {
-            console.error(`campaign paused — ${blocked.length} item(s) blocked; resolve and resume`);
+            console.error(blockedItemsGuidance(campaignId, blocked));
           } else {
             console.log("campaign paused between items — run resume again to continue");
           }
@@ -572,6 +604,28 @@ export function registerCampaign(program: Command): void {
         console.log(`Escalated ${ticketId} in campaign ${campaignId} to lane '${opts.newLane}'.`);
         console.log(`Fresh plan hash: ${result.planHash}`);
         console.log(`Run: forge campaign approve ${campaignId} --rationale <text>  (then forge campaign resume ${campaignId})`);
+      }
+    });
+
+  campaign
+    .command("retry <campaign-id> <ticket-id>")
+    .description(
+      "Reset a transiently-failed campaign item (auth/infrastructure) back to pending for a clean re-dispatch — campaign must be paused; a scope/verdict-failed item is refused. Run `forge campaign resume` afterward to re-dispatch."
+    )
+    .option("--json", "machine-readable JSON output")
+    .action((campaignId: string, ticketId: string, opts: { json?: boolean }) => {
+      const result = retryCampaignItem(campaignId, ticketId);
+
+      if (!result.ok) {
+        process.stderr.write(`Error: ${result.reason}\n`);
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ campaignId, ticketId, lifecycleStatus: "pending" }, null, 2));
+      } else {
+        console.log(`Reset ${ticketId} in campaign ${campaignId} to pending.`);
+        console.log(`Run: forge campaign resume ${campaignId}`);
       }
     });
 
