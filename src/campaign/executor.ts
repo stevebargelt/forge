@@ -481,6 +481,48 @@ type RunNextFn = (args: { runId: string; workflow: Workflow }) => Promise<RunNex
 type StartRunFn = (args: StartRunArgs) => { runId: string };
 type LoadWorkflowFn = (name: string, ctx: LoadContext) => Workflow;
 
+// FG-490 (review F7): a thrown drive-path error (runNext/startRun) must never
+// leave the campaign stranded at 'running' with no way back but DB surgery —
+// the same dead end F6 reached via a stalled loop instead of an exception.
+// Parks the item at 'awaiting_gate' (the SAME recoverable shape F2b's
+// no-progress backstop uses below, so `campaign resume` reattaches to this
+// run instead of campaignBlocker refusing outright) and the campaign at
+// 'paused', durably records the failure, then rethrows the ORIGINAL error
+// (wrapped with next-action guidance via `cause`) so it still reaches the
+// CLI's top-level handler. If the park itself throws (e.g. a DB error), that
+// secondary failure is swallowed — the original drive error must always be
+// what propagates, never masked by a failure in the recovery path itself.
+function parkCampaignOnDriveThrow(
+  campaignId: string,
+  itemId: string,
+  ticketId: string,
+  runId: string,
+  err: unknown
+): never {
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    updateCampaignItem(itemId, {
+      runId,
+      lifecycleStatus: "awaiting_gate",
+      reason: message,
+      requestedHumanAction: `drive loop threw while dispatching ${ticketId} on run ${runId}: ${message}. Inspect the run (forge show ${runId}), resolve the issue, then run \`forge campaign resume\`.`,
+    });
+    logEvent("campaign_item.drive_error", {
+      runId,
+      payload: { campaignId, itemId, ticketId, error: message, decidedAt: nowIso() },
+    });
+    tryTransitionCampaign(campaignId, "running", "paused");
+  } catch {
+    // park failed — original drive error below still propagates unmasked.
+  }
+  throw err instanceof Error
+    ? new Error(
+        `campaign ${campaignId} paused after a drive error on ${ticketId} (run ${runId}) — resolve the issue, then \`forge campaign resume ${campaignId}\`: ${err.message}`,
+        { cause: err }
+      )
+    : err;
+}
+
 // Drive a workflow run until it reaches a terminal state (complete/abandoned) or parks
 // at a gate (awaiting_gate / blocked_by_red). Updates campaign item state in the DB.
 //
@@ -651,7 +693,12 @@ async function driveWorkflowItem(
       runStatus: currentRun.status,
       tasks: tasks.map((t) => ({ id: t.id, status: t.status })).sort((a, b) => a.id.localeCompare(b.id)),
     });
-    const nextResult = await fns.runNextFn({ runId, workflow });
+    let nextResult: RunNextResult;
+    try {
+      nextResult = await fns.runNextFn({ runId, workflow });
+    } catch (err) {
+      parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+    }
     const dispatchedNothing =
       nextResult.dispatchedSteps.length === 0 &&
       nextResult.completedSteps.length === 0 &&
@@ -1211,40 +1258,23 @@ async function driveRemainingItems(
         });
         runId = startResult.runId;
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
         const failRunId = newRunId(item.ticketId);
-        insertRun({
-          id: failRunId,
-          workflow: workflowName,
-          title: item.ticketId,
-          status: "abandoned",
-          createdAt: nowIso(),
-          metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
-          projectDir: opts.projectDir,
-        });
-        updateCampaignItem(item.id, {
-          runId: failRunId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-          blockerKind: "campaign_system",
-          requestedHumanAction: `workflow input validation failed: ${reason}`,
-        });
-        itemRecords.push({
-          itemId: item.id,
-          ticketId: item.ticketId,
-          runId: failRunId,
-          lifecycleStatus: "failed",
-          outcome: "blocked",
-          blockerKind: "campaign_system",
-        });
-        if (tryTransitionCampaign(campaignId, "running", "paused")) {
-          return { stopReason: "paused", itemRecords };
+        try {
+          insertRun({
+            id: failRunId,
+            workflow: workflowName,
+            title: item.ticketId,
+            status: "abandoned",
+            createdAt: nowIso(),
+            metadata: { campaignId, ticketId: item.ticketId, itemId: item.id },
+            projectDir: opts.projectDir,
+          });
+        } catch {
+          // best-effort synthetic run row for traceability — a failure here must
+          // not stop parkCampaignOnDriveThrow below from recording and rethrowing
+          // the ORIGINAL startRun error.
         }
-        const postStartFail = getCampaign(campaignId);
-        return {
-          stopReason: postStartFail?.status === "abandoned" ? "abandoned" : "paused",
-          itemRecords,
-        };
+        parkCampaignOnDriveThrow(campaignId, item.id, item.ticketId, failRunId, err);
       }
 
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });

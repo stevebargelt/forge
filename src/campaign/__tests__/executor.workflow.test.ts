@@ -446,24 +446,31 @@ test("workflow requiring 'brief' input — executor derives brief from ticket an
 // ── Test 8: startRun validation failure → failed/blocked/campaign_system, campaign paused ──
 // Regression guard for finding 1: a startRun throw must NEVER leave campaign 'running'.
 
-test("startRun input validation failure — item marked failed/blocked and campaign paused, not stuck running", async () => {
+// FG-490 (review F7): a thrown startRun no longer leaves the campaign stuck
+// 'running' with the item silently marked terminal-failed — the campaign
+// parks (running->paused) with the item in a recoverable, non-terminal state
+// (awaiting_gate, the same shape `campaign resume`'s reattach path uses
+// elsewhere), and the ORIGINAL thrown error is rethrown to the caller with
+// next-action guidance rather than swallowed into the returned result.
+test("startRun input validation failure — campaign paused with a recoverable item, original error rethrown", async () => {
   const campaign = setupCampaign();
 
   const runNextFn = async (): Promise<RunNextResult> => {
     return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" };
   };
 
-  const result = await startCampaign(campaign.id, {
-    loadWorkflowFn: () => REQUIRES_UNMET_INPUT_WORKFLOW,
-    runNextFn,
-  });
-
-  assert.equal(result.stopReason, "paused", "startRun failure must pause campaign, never leave it running");
-
-  const itemRecord = result.itemRecords[0]!;
-  assert.equal(itemRecord.lifecycleStatus, "failed");
-  assert.equal(itemRecord.outcome, "blocked");
-  assert.equal(itemRecord.blockerKind, "campaign_system");
+  await assert.rejects(
+    () =>
+      startCampaign(campaign.id, {
+        loadWorkflowFn: () => REQUIRES_UNMET_INPUT_WORKFLOW,
+        runNextFn,
+      }),
+    (err: Error) => {
+      assert.match(err.message, /custom_required_input/, "original startRun error must survive in the rethrown error");
+      assert.match(err.message, /forge campaign resume/, "rethrown error must carry next-action guidance");
+      return true;
+    }
+  );
 
   const campaignRow = getCampaign(campaign.id);
   assert.notEqual(campaignRow?.status, "running", "campaign_status must NOT be 'running' after startRun failure");
@@ -471,7 +478,9 @@ test("startRun input validation failure — item marked failed/blocked and campa
 
   const items = listCampaignItems(campaign.id);
   const item = items[0]!;
-  assert.ok(item.requestedHumanAction?.includes("input validation failed"), "requestedHumanAction must name the validation error");
+  assert.equal(item.lifecycleStatus, "awaiting_gate", "item must land in a recoverable, non-terminal state, never stranded 'running'");
+  assert.equal(item.outcome, undefined);
+  assert.ok(item.requestedHumanAction?.includes("custom_required_input"), "requestedHumanAction must name the validation error");
 });
 
 // ── Test 9: done-audit fail — passing verdict with failing done-audit → blocked, not shipped ──
