@@ -23,6 +23,8 @@ import type { PlannerInput, PlanMode, ExecutionLane, ItemModeOverride } from "./
 import { listTickets } from "../backlog/structured.js";
 import type { StructuredTicket } from "../backlog/structured.js";
 import { getRun, insertRun, updateRunStatus } from "../store/runs.js";
+import { computeReadyQueue } from "../v2/ready-queue.js";
+import { taskHasPipelineFinalize } from "../v2/run-kind.js";
 import { newRunId, nowIso } from "../util/ids.js";
 import { failureKindForTask } from "../v2/failure-kind.js";
 import {
@@ -780,6 +782,12 @@ async function driveRemainingItems(
     // back to paused (running→paused is valid) before returning recovery_needed. This
     // preserves the invariant that a paused campaign can always be safely re-examined.
     if (item.lifecycleStatus === "awaiting_gate" || item.lifecycleStatus === "blocked_by_red") {
+      // Populated by the FG-485 liveness probe below when it successfully loads
+      // the active run's workflow, so the driveWorkflowItem call further down
+      // reuses that fetch instead of re-deriving the same run/workflow.
+      let preloadedRun: Run | undefined;
+      let preloadedWorkflow: Workflow | undefined;
+
       // FG-441: an awaiting_gate item with no blockerKind can have been driven
       // manually OUTSIDE this loop after the campaign attached its run — through
       // gates/fixers/red/host-verification/PR-merge/backlog-close — leaving the
@@ -789,76 +797,127 @@ async function driveRemainingItems(
       // fires for the manually-driven shape: blocked_by_red and any item WITH a
       // blockerKind are FG-428/other lanes and must reach driveWorkflowItem unchanged.
       if (item.lifecycleStatus === "awaiting_gate" && !item.blockerKind && item.runId) {
-        // FG-460: evaluate this reattach with the SAME shared out-of-band
-        // composition `forge campaign reconcile` uses (reconcile.ts's isOutOfBand
-        // branch) — MINUS reconcile's host-verification capture, which is
-        // reconcile-only. Previously resume used evaluateReconcileEvidence, whose
-        // fixed host_verification requirement wrongly refused a docs-only
-        // (non_code_diff) item that reconcile ships (FG-452's lane needs no host
-        // gate). Now both paths reach the same verdict for the same evidence by
-        // construction: resume ships a docs-only item, still refuses an
-        // unresolved authoritative fail, and — because it never captures — still
-        // refuses any code-touching item that lacks a passing host-verification
-        // row (it never starts shipping un-verified code; the widening is scoped
-        // to the non_code_diff lane).
-        const evaluated = evaluateInvokeLaneEligibility(opts.projectDir, item);
-        if (evaluated.eligible) {
-          // Atomic: same paused-guard pattern reconcile.ts uses, gated on 'running'
-          // instead of 'paused' — resumeCampaign already transitioned the campaign
-          // to 'running' before driveRemainingItems runs, so a paused-only guard
-          // would make this write a permanent no-op. A concurrent pause/abandon
-          // between the evidence check and this write still lands as a no-op here,
-          // never an optimistic ship.
-          const shipped = getDb().transaction(() => {
-            const applied = updateCampaignItemIfCampaignRunning(item.id, campaignId, {
-              lifecycleStatus: "complete",
-              outcome: "shipped",
-              blockerKind: undefined,
-              reason: undefined,
-              requestedHumanAction: undefined,
-            });
-            if (!applied) return false;
-            logEvent("campaign_item.evidence_reconciled", {
+        // FG-485: liveness-first. An awaiting_gate item with no blockerKind can
+        // ALSO mean the operator decided the gate in-run (forge gate <task>
+        // request-changes / advance) and then called campaign resume — that
+        // seeds either a pending replacement primary in the same phase
+        // (request-changes) or clears the way for the next phase to become
+        // ready (advance), and the run is still 'active' with real dispatchable
+        // work. Treating that the same as a genuinely manually-driven/terminal
+        // run and jumping straight to out-of-band evidence evaluation is
+        // exactly the FG-485 bug: the pending replacement never gets dispatched
+        // and the item is re-parked on missing ship evidence that was never
+        // going to exist yet. Check liveness BEFORE evidence: if the run is
+        // active and computeReadyQueue (the same ready-queue runNext/gate.ts
+        // use to decide what's dispatchable right now) finds a ready step,
+        // skip the evidence path entirely and fall through to the
+        // getRun/driveWorkflowItem path below so this resume re-enters the
+        // drive loop. Only a run that's absent, not active, or settled with
+        // nothing left to dispatch reaches the evidence fallback.
+        //
+        // FG-483/FG-486: this probe only applies to pipeline runs (taskHasPipelineFinalize
+        // true) — those have a YAML workflow that must load and a drive loop
+        // (computeReadyQueue) that can have more dispatchable work. invoke-family
+        // runs ("invoke" / "invoke_chain") have no loadable workflow and no drive
+        // loop to re-enter at all, so for those the probe is skipped entirely and
+        // this reattach falls straight through to the out-of-band evidence path
+        // below, exactly as it did before the FG-485 liveness check existed.
+        let hasDispatchableWork = false;
+        const liveRun = getRun(item.runId);
+        if (liveRun && liveRun.status === "active" && taskHasPipelineFinalize(liveRun)) {
+          let liveWorkflow: Workflow;
+          try {
+            liveWorkflow = doLoadWorkflow(liveRun.workflow, { projectDir: opts.projectDir });
+          } catch {
+            // The run is ACTIVE but its workflow failed to load — an infra/load
+            // failure, not a manually-driven/settled run. This must never reach
+            // the evidence path below (that would emit a false
+            // evidence_reconcile_refused for a live run). Route directly to the
+            // same recovery_needed handling the shared block further down uses.
+            itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
+            tryTransitionCampaign(campaignId, "running", "paused");
+            return { stopReason: "recovery_needed", itemRecords };
+          }
+          const liveTasks = tasksForRun(item.runId);
+          hasDispatchableWork = computeReadyQueue(liveWorkflow, liveTasks).length > 0;
+          preloadedRun = liveRun;
+          preloadedWorkflow = liveWorkflow;
+        }
+
+        if (!hasDispatchableWork) {
+          // FG-460: evaluate this reattach with the SAME shared out-of-band
+          // composition `forge campaign reconcile` uses (reconcile.ts's isOutOfBand
+          // branch) — MINUS reconcile's host-verification capture, which is
+          // reconcile-only. Previously resume used evaluateReconcileEvidence, whose
+          // fixed host_verification requirement wrongly refused a docs-only
+          // (non_code_diff) item that reconcile ships (FG-452's lane needs no host
+          // gate). Now both paths reach the same verdict for the same evidence by
+          // construction: resume ships a docs-only item, still refuses an
+          // unresolved authoritative fail, and — because it never captures — still
+          // refuses any code-touching item that lacks a passing host-verification
+          // row (it never starts shipping un-verified code; the widening is scoped
+          // to the non_code_diff lane).
+          const evaluated = evaluateInvokeLaneEligibility(opts.projectDir, item);
+          if (evaluated.eligible) {
+            // Atomic: same paused-guard pattern reconcile.ts uses, gated on 'running'
+            // instead of 'paused' — resumeCampaign already transitioned the campaign
+            // to 'running' before driveRemainingItems runs, so a paused-only guard
+            // would make this write a permanent no-op. A concurrent pause/abandon
+            // between the evidence check and this write still lands as a no-op here,
+            // never an optimistic ship.
+            const shipped = getDb().transaction(() => {
+              const applied = updateCampaignItemIfCampaignRunning(item.id, campaignId, {
+                lifecycleStatus: "complete",
+                outcome: "shipped",
+                blockerKind: undefined,
+                reason: undefined,
+                requestedHumanAction: undefined,
+              });
+              if (!applied) return false;
+              logEvent("campaign_item.evidence_reconciled", {
+                runId: item.runId,
+                payload: {
+                  campaignId,
+                  itemId: item.id,
+                  ticketId: item.ticketId,
+                  evidence: evaluated.evidence,
+                  decidedBy: "campaign_resume",
+                  decidedAt: nowIso(),
+                },
+              });
+              return true;
+            })();
+            if (shipped) {
+              itemRecords.push({
+                itemId: item.id,
+                ticketId: item.ticketId,
+                runId: item.runId,
+                lifecycleStatus: "complete",
+                outcome: "shipped",
+              });
+              continue;
+            }
+            // Campaign left 'running' between the evidence check and the write —
+            // fall through; the cooperative-pause checks below will stop cleanly.
+          } else {
+            console.error(
+              `campaign resume: ${item.ticketId} is awaiting_gate on a manually-driven run but evidence is incomplete — refusing to ship and re-parking (missing: ${evaluated.missing.join(", ")})`
+            );
+            logEvent("campaign_item.evidence_reconcile_refused", {
               runId: item.runId,
               payload: {
                 campaignId,
                 itemId: item.id,
                 ticketId: item.ticketId,
-                evidence: evaluated.evidence,
+                missing: evaluated.missing,
                 decidedBy: "campaign_resume",
                 decidedAt: nowIso(),
               },
             });
-            return true;
-          })();
-          if (shipped) {
-            itemRecords.push({
-              itemId: item.id,
-              ticketId: item.ticketId,
-              runId: item.runId,
-              lifecycleStatus: "complete",
-              outcome: "shipped",
-            });
-            continue;
           }
-          // Campaign left 'running' between the evidence check and the write —
-          // fall through; the cooperative-pause checks below will stop cleanly.
-        } else {
-          console.error(
-            `campaign resume: ${item.ticketId} is awaiting_gate on a manually-driven run but evidence is incomplete — refusing to ship and re-parking (missing: ${evaluated.missing.join(", ")})`
-          );
-          logEvent("campaign_item.evidence_reconcile_refused", {
-            runId: item.runId,
-            payload: {
-              campaignId,
-              itemId: item.id,
-              ticketId: item.ticketId,
-              missing: evaluated.missing,
-              decidedBy: "campaign_resume",
-              decidedAt: nowIso(),
-            },
-          });
         }
+        // else: the run has live dispatchable work — fall through below to
+        // re-enter the drive loop instead of evaluating ship evidence.
       }
 
       if (!item.runId) {
@@ -866,19 +925,23 @@ async function driveRemainingItems(
         tryTransitionCampaign(campaignId, "running", "paused");
         return { stopReason: "recovery_needed", itemRecords };
       }
-      const runForItem = getRun(item.runId);
+      const runForItem = preloadedRun ?? getRun(item.runId);
       if (!runForItem) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
         tryTransitionCampaign(campaignId, "running", "paused");
         return { stopReason: "recovery_needed", itemRecords };
       }
       let workflowForItem: Workflow;
-      try {
-        workflowForItem = doLoadWorkflow(runForItem.workflow, { projectDir: opts.projectDir });
-      } catch {
-        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-        tryTransitionCampaign(campaignId, "running", "paused");
-        return { stopReason: "recovery_needed", itemRecords };
+      if (preloadedWorkflow) {
+        workflowForItem = preloadedWorkflow;
+      } else {
+        try {
+          workflowForItem = doLoadWorkflow(runForItem.workflow, { projectDir: opts.projectDir });
+        } catch {
+          itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
+          tryTransitionCampaign(campaignId, "running", "paused");
+          return { stopReason: "recovery_needed", itemRecords };
+        }
       }
 
       // Cooperative pause before reattaching
