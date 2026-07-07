@@ -1,9 +1,11 @@
 ---
 id: FG-483
 type: story
-status: active
+status: done
 title: campaign quick/invoke lanes mark items shipped from hand-editable ticket frontmatter, bypassing the host-verification/evidence gate every other ship path enforces (review F4)
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: cb748c8
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md, finding F4 — HIGH). Review of main @ fbb070c.
