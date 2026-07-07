@@ -411,6 +411,12 @@ export function deriveNextCommandForTask(
     if (failureKind === "fanout_wave_orphaned") {
       return `forge show ${taskId} --json  # inspect which children completed, then \`forge recover ${taskId} --re-drive\``;
     }
+    // FG-479: an unfinalized pipeline step — retry-policy.ts refuses a bare
+    // `forge retry` (the preserved result/worktree would be re-dispatched over),
+    // and recover --continue refuses it too. Inspect-then-force is the only path.
+    if (failureKind === "orphaned_needs_finalize") {
+      return `forge show ${taskId} --json  # inspect the preserved result and diff, then \`forge retry ${taskId} --force\` to re-run the step through the real finalize path`;
+    }
     // FG-455 p4: a positively-identified OOM/SIGKILL death — distinct from the
     // generic orphaned kinds above, surfaced so the operator knows a bigger
     // memory allowance (not just a re-dispatch) may be needed. Same posture as

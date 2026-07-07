@@ -906,6 +906,17 @@ test("deriveNextCommandForTask: failed+fanout_wave_orphaned → forge recover --
   assert.doesNotMatch(cmd, /^forge retry task-abc$/, "must not be a bare blind retry");
 });
 
+// FG-479 review: retry-policy.ts refuses a bare `forge retry` for
+// orphaned_needs_finalize (and recover --continue refuses it too) — the Next
+// hint must point at inspect-then-force, never the generic bare-retry fallthrough.
+test("deriveNextCommandForTask: failed+orphaned_needs_finalize → inspect before retry --force, not a bare retry", () => {
+  const cmd = deriveNextCommandForTask("failed", "orphaned_needs_finalize", "task-abc");
+  assert.match(cmd, /forge show task-abc/);
+  assert.match(cmd, /forge retry task-abc --force/);
+  assert.match(cmd, /finalize/);
+  assert.doesNotMatch(cmd, /forge retry task-abc(?! --force)/, "must never recommend a bare forge retry without --force");
+});
+
 // FG-455 p4 review finding 5: exit 137 alone doesn't confirm OOM (an external
 // kill can also send SIGKILL) — the hint must not over-claim "out-of-memory".
 //
