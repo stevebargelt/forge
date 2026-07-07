@@ -25,6 +25,7 @@ An `abandoned` run can never become `complete`: the store refuses the transition
 ## Acceptance criteria
 
 - [ ] Store-layer protection: the abandoned -> complete transition is refused at the store (CAS/guarded UPDATE); unit test proves it (write refused, status stays abandoned, no completion notification fired).
-- [ ] All run-finalize sites (both runNext.ts checks and gate.ts finalizeRunIfDone) share one settled-finalization helper carrying the abandoned re-read — no site-local copies left.
-- [ ] Race test: gate-path finalize interleaved with cancel abandoning the run — the run stays abandoned, no run.completed event, no completion notification.
+- [ ] All run-finalize sites share one settled-finalization helper carrying the abandoned re-read — both runNext.ts checks, gate.ts finalizeRunIfDone, AND reconcile.ts's invoke-run active->complete write (same stale-run TOCTOU shape; architect openQuestion 1 answered: fold in, it is a mechanical helper swap). No site-local copies left.
+- [ ] Race test: gate-path finalize interleaved with cancel abandoning the run — the run stays abandoned, no run.completed event, no completion notification. Must include the CAMPAIGN shape: executor.ts driveWorkflowItem auto-advancing a gate (gate() with no operator present) while cancel abandons — the unattended caller that widens this window (red-architect finding).
+- [ ] Store guard scope is NARROW (abandoned -> complete refused), not a blanket once-terminal-refuse-all rule — invoke.ts's intentional abandoned/complete -> active reactivation (#201) keeps working, with a test pinning it (architect openQuestion 2 answered).
 - [ ] Legitimate active -> complete finalization unchanged (existing tests stay green).
