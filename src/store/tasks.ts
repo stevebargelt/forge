@@ -131,6 +131,19 @@ export function markTaskComplete(id: string, result: unknown): boolean {
   return info.changes === 1;
 }
 
+// FG-482: single-write CAS that moves a task straight to blocked_by_red with
+// its result, never passing through awaiting_gate. Mirrors markTaskComplete's
+// CAS shape above — guarded on status = 'awaiting_red' so a concurrent
+// forge-cancel (or any other terminal/competing write) can't be resurrected
+// into blocked_by_red out from under it (AWN-2-style race guard).
+export function markTaskBlockedByRed(id: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(`UPDATE tasks SET status = 'blocked_by_red', result = ?, completed_at = NULL
+              WHERE id = ? AND status = 'awaiting_red'`)
+    .run(JSON.stringify(result), id);
+  return info.changes === 1;
+}
+
 // FG-455 p3: `forge recover --continue` explicitly completes a task the
 // operator has confirmed is safe to adopt — a DIFFERENT transition than
 // markTaskComplete's compare-and-set above, which deliberately BLOCKS

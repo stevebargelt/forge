@@ -36,7 +36,7 @@ import { analyzeProviderFailure } from "./provider-failure.js";
 import { tasksForRun } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -613,12 +613,20 @@ async function dispatchSingleStep(args: {
     //   - otherwise (verdict gate) ⇒ awaiting_gate (orchestrator/human reads verdicts)
     //   - gate: auto with no authoritative fail ⇒ complete
     if (aggregate.authoritativeFail) {
-      setTaskStatus(taskId, "blocked_by_red");
-      logEvent("task.blocked_by_red", { runId: args.runId, taskId });
-      // Persist the result.json content too (test assertions need it).
-      markTaskAwaitingGate(taskId, result);
-      // markTaskAwaitingGate just wrote status=awaiting_gate; restore the block.
-      setTaskStatus(taskId, "blocked_by_red");
+      // FG-482: status + result written together in one CAS'd UPDATE — the
+      // task is never observable as awaiting_gate mid-transition. If the CAS
+      // lost a race (task no longer awaiting_red), report its actual status
+      // rather than logging/notifying a transition that didn't happen.
+      let blockedByRedApplied = false;
+      getDb().transaction(() => {
+        blockedByRedApplied = markTaskBlockedByRed(taskId, result);
+        if (blockedByRedApplied) {
+          logEvent("task.blocked_by_red", { runId: args.runId, taskId });
+        }
+      })();
+      if (!blockedByRedApplied) {
+        return getTask(taskId)?.status ?? "failed";
+      }
       // Fire-and-forget SMS notification (no-op unless FORGE_NOTIFY=twilio).
       const runForNotify = getRun(args.runId);
       if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
@@ -1533,11 +1541,20 @@ async function dispatchFanoutStep(args: {
     });
 
     if (aggregate.authoritativeFail) {
-      // Save result via markTaskAwaitingGate (sets awaiting_gate), then restore
-      // the blocked_by_red status. Single setTaskStatus avoids double-setting churn.
-      markTaskAwaitingGate(parentId, parentResult);
-      setTaskStatus(parentId, "blocked_by_red");
-      logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
+      // FG-482: status + result written together in one CAS'd UPDATE — the
+      // task is never observable as awaiting_gate mid-transition. If the CAS
+      // lost a race (task no longer awaiting_red), report its actual status
+      // rather than logging/notifying a transition that didn't happen.
+      let blockedByRedApplied = false;
+      getDb().transaction(() => {
+        blockedByRedApplied = markTaskBlockedByRed(parentId, parentResult);
+        if (blockedByRedApplied) {
+          logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
+        }
+      })();
+      if (!blockedByRedApplied) {
+        return getTask(parentId)?.status ?? "failed";
+      }
       const runForNotify = getRun(args.runId);
       if (runForNotify) void notifyOnTaskBlockedByRed(runForNotify);
       // Integration branch + child worktrees retained for inspection on blocked_by_red.

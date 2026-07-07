@@ -13,8 +13,11 @@
 //   - request-changes   → mark task failed + insert pending task in SAME step
 //                         with `requestedChanges` in inputs (rationale)
 //
-// Verdict re-check on advance mirrors v1 behavior (#110):
-//   - verdict-gated step + authoritative fail → block unless --force
+// Verdict re-check on advance mirrors v1 behavior (#110), widened by FG-482
+// so it isn't scoped to gate: "verdict" steps only — an authoritative red
+// fail must block advance under any gate mode (auto/human/verdict), since
+// blocked_by_red is reachable regardless of the step's declared gate:
+//   - any authoritative fail → block unless --force
 //   - any specialist fail → require --rationale
 //
 // blocked_by_red also requires --force to advance.
@@ -103,7 +106,7 @@ export async function gate(
   if (decision === "advance" && !opts.force) {
     const verdicts = verdictsForTask(taskId);
     const agg = aggregateVerdicts(verdicts);
-    if (step.gate === "verdict" && agg.verdict === "fail") {
+    if (agg.verdict === "fail") {
       throw new Error(
         `Cannot advance ${taskId}: verdict aggregation = fail. Authoritative fails: ${agg.authoritativeFails
           .map((v) => v.redRole)
