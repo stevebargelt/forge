@@ -76,7 +76,7 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
   // AWN-3: consult the per-failure_kind retry policy. Non-retryable kinds (gate
   // rejection, red block) would just re-run identical work — refuse unless --force.
   const failureKind = failureKindForTask(taskId);
-  const disposition = retryPolicy(failureKind);
+  const disposition = retryPolicy(failureKind, taskId);
   if (!disposition.retryable && !opts?.force) {
     throw new RetryNotAllowedError(taskId, disposition);
   }

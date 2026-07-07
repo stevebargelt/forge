@@ -43,8 +43,16 @@ const POLICY: Record<string, RetryDisposition> = {
 
 const NO_KIND: RetryDisposition = { retryable: true, reason: "no recorded failure kind; re-dispatch" };
 
-/** The retry disposition for a failure kind (undefined → no recorded kind). */
-export function retryPolicy(failureKind: string | undefined): RetryDisposition {
-  if (failureKind === undefined) return NO_KIND;
-  return POLICY[failureKind] ?? { retryable: true, reason: `unrecognized failure kind '${failureKind}'; re-dispatch` };
+/**
+ * The retry disposition for a failure kind (undefined → no recorded kind).
+ * When `taskId` is given, any `<id>` placeholder in the advice is replaced
+ * with it so operator guidance (`forge retry <id> --force`, `forge show <id>`)
+ * names the actual task instead of a literal placeholder.
+ */
+export function retryPolicy(failureKind: string | undefined, taskId?: string): RetryDisposition {
+  const disposition = failureKind === undefined
+    ? NO_KIND
+    : POLICY[failureKind] ?? { retryable: true, reason: `unrecognized failure kind '${failureKind}'; re-dispatch` };
+  if (taskId === undefined || disposition.advice === undefined) return disposition;
+  return { ...disposition, advice: disposition.advice.replaceAll("<id>", taskId) };
 }
