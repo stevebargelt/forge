@@ -1,9 +1,10 @@
 ---
 id: FG-480
 type: story
-status: active
+status: done
 title: fanoutWaveRecoveryMessage renders the generic M/N-orphaned wording for an all-children-complete (fanout_wave_unfinalized) parent — add the distinct unfinalized headline + a total===complete test
 created: 2026-07-07
+closed: 2026-07-07
 ---
 
 FG-479 review-loop pass-level observation (non-blocking, cosmetic/fail-safe only).
