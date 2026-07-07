@@ -18,6 +18,10 @@ A crash between writes 3 and 4 persists the task as awaiting_gate with its resul
 
 A single-transaction markTaskBlockedByRed(id, result) in the store layer that writes status + result in one UPDATE and never passes through awaiting_gate; use it at both sites (single-step and fanout).
 
+## Goal
+
+A task can never be observed in `awaiting_gate` while becoming `blocked_by_red`: the transition is one atomic store-layer write (status + result together), used by both the single-step and fanout sites, so no crash window exists in which an authoritative red block is advanceable without --force.
+
 ## Acceptance criteria
 
 - [ ] One store-layer write (single UPDATE or one transaction) moves a task to blocked_by_red with its result; the task is never observable as awaiting_gate at any point in that transition.

@@ -18,6 +18,10 @@ An abandoned run flipping to complete re-enters reconcileTerminalOutcome as a re
 
 Extract ONE shared finalizeRunIfSettled with the abandoned re-read used by all three finalize sites (two in runNext.ts, one in gate.ts); additionally make updateRunStatus (or a completeRun wrapper) a store-layer CAS that refuses abandoned -> complete so no future caller can bypass it.
 
+## Goal
+
+An `abandoned` run can never become `complete`: the store refuses the transition (CAS/guarded write, no completion notification), and every run-finalize site shares one settled-finalization helper carrying the abandoned re-read.
+
 ## Acceptance criteria
 
 - [ ] Store-layer protection: the abandoned -> complete transition is refused at the store (CAS/guarded UPDATE); unit test proves it (write refused, status stays abandoned, no completion notification fired).
