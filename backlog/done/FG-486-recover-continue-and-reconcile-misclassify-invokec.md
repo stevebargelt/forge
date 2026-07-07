@@ -1,9 +1,11 @@
 ---
 id: FG-486
 type: story
-status: active
+status: done
 title: recover --continue and reconcile misclassify invoke_chain runs as pipeline runs — quick-lane orphans are wrongly refused adoption / landed orphaned_needs_finalize (FG-481/FG-479 follow-up)
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: 690bd1b
 ---
 
 Operator review finding on the shipped FG-481/FG-479 work (2026-07-07).
