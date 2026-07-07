@@ -1,9 +1,11 @@
 ---
 id: FG-484
 type: story
-status: active
+status: done
 title: "abandoned runs can be resurrected to complete: gate-path finalization lacks the abandoned guard and updateRunStatus is an unconditional write (review F5)"
 created: 2026-07-07
+closed: 2026-07-07
+closed_commit: 703332e
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md, finding F5 — HIGH). Review of main @ fbb070c.
