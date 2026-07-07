@@ -138,7 +138,7 @@ export function detectReconcileCandidate(
           autonomy: "ask",
           command: `forge show ${c.taskId} --json`,
           reason: finished
-            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task as complete. Detection is read-only — confirm before reconciling."
+            ? "run a lifecycle command (forge show/status/next) to let reconcile finalize this task — an invoke task with a valid result completes; a pipeline step lands fail-safe as orphaned_needs_finalize for re-dispatch (FG-479). Detection is read-only — confirm before reconciling."
             : "run a lifecycle command (forge show/status/next) to let reconcile finalize this orphaned task as failed. Detection is read-only — confirm before reconciling.",
         },
       });

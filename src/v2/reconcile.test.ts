@@ -235,6 +235,82 @@ test("FG-455: worktree_path takes precedence over run.projectDir when both are s
   }
 });
 
+// ----- FG-479: container-gone-with-result must NEVER complete a PIPELINE task -----
+// In a pipeline the task stays `running` through the post-container host-side
+// sequence (worktree merge → integration gate → reds → finalizePrimary), so a
+// valid result.json only proves the AGENT finished. Completing it from reconcile
+// would silently skip reds, verdict/human gates, and the worktree merge-back.
+
+const PIPELINE_RUN: Run = { id: "run-rec-pipeline", workflow: "feature", title: "pipeline rec", status: "active", createdAt: "2026-05-30T00:00:00Z" };
+
+test("FG-479: PIPELINE run, container gone WITH a valid result → failed orphaned_needs_finalize, NOT complete; reds/gates not skipped; result preserved; run stays active", () => {
+  insertRun(PIPELINE_RUN);
+  const taskId = "t-pipe-result";
+  insertContainerized(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "running", phase: "build",
+    taskPackage: { taskId, runId: PIPELINE_RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" } }));
+  const dir = taskDir(PIPELINE_RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  const result = { status: "complete", output: "agent finished but finalize never ran" };
+  writeFileSync(join(dir, "result.json"), JSON.stringify(result));
+
+  const r = reconcileRun(PIPELINE_RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "a pipeline task must never be reconciled to complete — that skips reds, the integration gate, human gates, and merge-back");
+  assert.match(t.error ?? "", /orphaned_needs_finalize/);
+  assert.match(t.error ?? "", /forge retry --force/);
+  assert.deepEqual(t.result, result, "the agent's result is preserved on the row as evidence, not discarded");
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")), result, "result.json on disk is untouched");
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"), "no task.completed — completion (and reds dispatch after it) belongs to the real runNext path");
+  assert.ok(types.includes("task.failed") && types.includes("task.reconciled"));
+
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  const payload = failed.payload as Record<string, unknown>;
+  assert.equal(payload.failure_kind, "orphaned_needs_finalize");
+  const evidence = payload.evidence as OrphanEvidence;
+  assert.equal(evidence.containerLiveness, "gone");
+  assert.equal(evidence.resultState, "valid");
+
+  // Run-level: pipelines are finalized by forge next, never by reconcile.
+  assert.equal(r.runChange, undefined);
+  assert.equal(getRun(PIPELINE_RUN.id)!.status, "active");
+});
+
+test("FG-479: PIPELINE run, stdout-recoverable result (no result.json) → failed orphaned_needs_finalize, NOT complete; inferred result preserved", () => {
+  insertRun(PIPELINE_RUN);
+  const taskId = "t-pipe-stdout";
+  insertContainerized(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "running", agentRole: "research-specialist", phase: "build",
+    taskPackage: { taskId, runId: PIPELINE_RUN.id, phase: "build", role: "research-specialist", inputs: {}, composedSystemPrompt: "" } }));
+  const dir = taskDir(PIPELINE_RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writePiManifest(dir);
+  const text = "Recovered narrative output from stdout.";
+  writeFileSync(join(dir, "container.stdout.log"), piCleanEndStdout(text));
+  // result.json intentionally absent.
+
+  const r = reconcileRun(PIPELINE_RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" }]);
+
+  const t = getTask(taskId)!;
+  assert.equal(t.status, "failed", "a recovered stdout result proves the agent finished, not that the finalize ran");
+  assert.deepEqual(t.result, { contract: "inferred", summary: text, status: "complete" }, "the inferred result is preserved on the row as evidence");
+
+  const types = eventsForTask(taskId).map((e) => e.eventType);
+  assert.ok(!types.includes("task.completed"), "must NOT be completed");
+
+  const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
+  const payload = failed.payload as Record<string, unknown>;
+  assert.equal(payload.failure_kind, "orphaned_needs_finalize");
+  assert.equal((payload.evidence as OrphanEvidence).recoverableStdoutResult, true);
+
+  // The inferred result is persisted to disk too (evidence for forge show/recover).
+  const onDisk = JSON.parse(readFileSync(join(dir, "result.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(onDisk.summary, text);
+});
+
 // ----- FG-455 red-review finding 2: honest evidence source on the projectDir fallback -----
 
 test("FG-455 finding2: no worktree_path, dirty run.projectDir → orphaned_work_may_persist, but evidence/message disclose SHARED-projectDir ambiguity (not task-exclusive)", () => {

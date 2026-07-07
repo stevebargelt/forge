@@ -324,6 +324,20 @@ test("orphanRecoveryMessage: kind=oom_killed with exitCode=137 but oomKilled not
   assert.match(msg, /exit 137 — possibly OOM or an external kill/);
 });
 
+// ── orphanRecoveryMessage: FG-479 — orphaned_needs_finalize wording ──
+
+test("orphanRecoveryMessage: kind=orphaned_needs_finalize leads with the unfinalized-pipeline-step cause and routes to retry --force (never recover --continue)", () => {
+  const msg = orphanRecoveryMessage(RUN.id, "task-needs-finalize", {
+    containerName: "forge-task-needs-finalize", containerLiveness: "gone", resultState: "valid",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? new.txt"],
+  }, "orphaned_needs_finalize");
+  assert.match(msg, /never finalized/);
+  assert.match(msg, /cannot be trusted complete/);
+  assert.doesNotMatch(msg, /^work may have persisted/);
+  assert.match(msg, /forge retry task-needs-finalize --force/);
+  assert.doesNotMatch(msg, /continue from it/, "recover --continue refuses this kind — the guidance must not suggest it");
+});
+
 test("orphanRecoveryMessage: kind defaults to orphaned_work_may_persist wording when omitted, even if evidence carries exitCode/oomKilled", () => {
   // FG-455 p4 review finding 1: the valid-result/orphaned branches now also
   // carry exitCode/oomKilled on baseEvidence — the OOM headline must be gated
@@ -1074,7 +1088,11 @@ test("#298: --reconcile is the explicit mutating path — finalizes + emits task
   setupStaleRunning("task-reconcile-298", true);
   const { reconciled } = showReconcileStep("task-reconcile-298", { reconcile: true }, { containerAlive: () => false });
   assert.equal(reconciled, true);
-  assert.equal(getTask("task-reconcile-298")!.status, "complete");
+  // FG-479: RUN is a feature (pipeline) run, so a container-gone-with-result
+  // task finalizes fail-safe (orphaned_needs_finalize), never straight to
+  // complete — that would skip reds/gates/merge-back.
+  assert.equal(getTask("task-reconcile-298")!.status, "failed");
+  assert.match(getTask("task-reconcile-298")!.error ?? "", /orphaned_needs_finalize/);
   assert.equal(eventsForTask("task-reconcile-298").filter((e) => e.eventType === "task.reconciled").length, 1);
 });
 
@@ -1122,6 +1140,8 @@ test("#298: forge show <run> --reconcile finalizes the run's stale tasks", () =>
   setupStaleRunning("task-run-stale-2", true);
   const { reconciled } = showReconcileStep(RUN.id, { reconcile: true }, { containerAlive: () => false });
   assert.equal(reconciled, true);
-  assert.equal(getTask("task-run-stale-2")!.status, "complete");
+  // FG-479: pipeline run — fail-safe finalize, not complete (see above).
+  assert.equal(getTask("task-run-stale-2")!.status, "failed");
+  assert.match(getTask("task-run-stale-2")!.error ?? "", /orphaned_needs_finalize/);
   assert.equal(eventsForTask("task-run-stale-2").filter((e) => e.eventType === "task.reconciled").length, 1);
 });

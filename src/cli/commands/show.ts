@@ -493,6 +493,11 @@ export function orphanRecoveryMessage(
   } else if (kind === "idle_timeout") {
     // FG-461: the idle watchdog SIGKILLed a hung agent — partial edits may remain.
     headline = "agent idle-timed-out (killed after no output within the idle window)" + changedClause;
+  } else if (kind === "orphaned_needs_finalize") {
+    // FG-479: the agent finished (usable result preserved), but the pipeline's
+    // host-side finalize never ran — the step must not be trusted complete.
+    headline =
+      "step finished but was never finalized — container gone with a usable result; the pipeline's host-side finalize (worktree merge → integration gate → reds) did not run, so the step cannot be trusted complete.";
   } else {
     headline = foundChangedFiles
       ? "work may have persisted — container gone, no recoverable result, but changed files were found."
@@ -505,7 +510,12 @@ export function orphanRecoveryMessage(
   const guidance =
     kind === "container_crash" || kind === "idle_timeout"
       ? `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then \`forge retry ${taskId}\` (retryable without --force)`
-      : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
+      : kind === "orphaned_needs_finalize"
+        // FG-479: recover --continue refuses this kind (adopting the result as
+        // complete would skip merge/integration gate/reds) — retry --force is
+        // the only path that re-runs the step through the real finalize.
+        ? `inspect the preserved result and the diff at ${evidence.worktreePathChecked ?? "the task dir"}, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\``
+        : `inspect the diff at ${evidence.worktreePathChecked ?? "the task dir"}, verify it, then continue from it or retry with --force`;
   return (
     `${headline}\n` +
     sourceLine +

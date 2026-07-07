@@ -39,7 +39,7 @@ export type ReconcileClassification =
 
 /** Sub-reason, only meaningful for `reconcile_candidate`. */
 export type ReconcileReason =
-  | "container_gone_result_present" // finished; DB write was lost — likely complete
+  | "container_gone_result_present" // finished; DB write was lost — reconcile completes invoke tasks; pipeline steps land fail-safe as orphaned_needs_finalize (FG-479)
   | "container_gone_no_result" // orphaned; container died with nothing — likely failed
   | null;
 
