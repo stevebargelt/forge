@@ -1,9 +1,11 @@
 ---
 id: FG-476
 type: story
-status: active
+status: done
 title: on_reject recovery task targeting an already-complete phase is never dispatched (computeReadyQueue skips phases with a complete primary) — run hangs active forever after a reject; security-audit.yml audit->investigate is live-exposed
 created: 2026-07-06
+closed: 2026-07-06
+closed_commit: 0879b7a
 ---
 
 ## Problem

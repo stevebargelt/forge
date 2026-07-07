@@ -22,6 +22,14 @@ import type { Task } from "../types/index.js";
 
 const COMPLETE_LIKE: ReadonlySet<string> = new Set(["complete"]);
 
+// True for a task inserted by gate.ts's reject->on_reject branch: parented to
+// the rejected task (lineage, not fanout) AND carrying the explicit marker
+// gate.ts stamps on every recovery task's inputs. A parentId-tagged task
+// WITHOUT the marker is a genuine fanout/red child, never a recovery task.
+export function isOnRejectRecoveryTask(task: Task): boolean {
+  return task.parentId !== undefined && task.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
+}
+
 export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
   const tasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
@@ -42,7 +50,19 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
     // redundant wave; treating the complete primary as authoritative ignores the
     // orphan. Legit retries never hit this: there the old primary is `failed`,
     // not `complete`, so there's no complete primary to skip on.
-    if (hasCompletePrimary(existing)) continue;
+    //
+    // EXCEPTION (FG-476): a live pending on_reject recovery task targeting this
+    // phase means gate.ts's reject branch fired on_reject back at an already-
+    // complete step (security-audit.yml's audit->investigate shape). That
+    // recovery task must still be admitted to the ready set so it actually
+    // dispatches — otherwise it sits pending forever (isRunSettled correctly
+    // keeps the run "active" per FG-475, but nothing ever runs to settle it).
+    // A fanout/red child (parentId-tagged, no marker) does NOT qualify — this
+    // must never broaden to "any parentId-tagged task re-admits the phase".
+    const hasLiveRecovery = existing.some(
+      (t) => t.status === "pending" && isOnRejectRecoveryTask(t),
+    );
+    if (hasCompletePrimary(existing) && !hasLiveRecovery) continue;
 
     // No complete primary. If a task row exists but none is pending, the step is
     // in progress or terminally failed-without-retry — not ready. A pending row
@@ -116,8 +136,7 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
   const recoveryTasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
     if (t.parentId !== undefined) {
-      const isOnRejectRecovery = t.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
-      if (!isOnRejectRecovery) continue; // red/fanout child — ignore
+      if (!isOnRejectRecoveryTask(t)) continue; // red/fanout child — ignore
       const arr = recoveryTasksByPhase.get(t.phase) ?? [];
       arr.push(t);
       recoveryTasksByPhase.set(t.phase, arr);
