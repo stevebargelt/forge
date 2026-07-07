@@ -487,6 +487,12 @@ type LoadWorkflowFn = (name: string, ctx: LoadContext) => Workflow;
 // Returns 'paused' when the campaign must stop (human gate, blocked reviewer, or
 // shared-blocker terminal outcome). Returns 'continue' for terminal outcomes that
 // do not require halting the campaign (shipped or scope-fail — caller handles policy).
+// Returns 'recovery_needed' when the loop detects no progress (F2b): the run stays
+// active but two consecutive passes dispatch nothing and observe no state change —
+// the class-level backstop for the FG-476 on_reject-recovery shape (one instance of
+// this pattern) and any future lifecycle bug that produces the same "active but
+// nothing is dispatchable" mismatch. Without this bound the loop spins at 100% CPU
+// (the FG-475/FG-476 incident) instead of parking cooperatively.
 async function driveWorkflowItem(
   campaignId: string,
   item: CampaignItem,
@@ -497,10 +503,13 @@ async function driveWorkflowItem(
     gateFn?: typeof gate;
     projectDir?: string;
   } = { runNextFn: runNext },
-): Promise<{ outcome: "continue" | "paused"; itemRecord: CampaignItemRecord }> {
+): Promise<{ outcome: "continue" | "paused" | "recovery_needed"; itemRecord: CampaignItemRecord }> {
   const itemId = item.id;
   const ticketId = item.ticketId;
   const doGate = fns.gateFn ?? gate;
+  const NO_PROGRESS_LIMIT = 2;
+  let noProgressStreak = 0;
+  let lastSnapshot: string | null = null;
 
   while (true) {
     // Step 1/2: Re-read run from DB; check for terminal status.
@@ -638,7 +647,43 @@ async function driveWorkflowItem(
     }
 
     // Step 5: No parked tasks — call runNext to dispatch the next wave.
-    await fns.runNextFn({ runId, workflow });
+    const snapshot = JSON.stringify({
+      runStatus: currentRun.status,
+      tasks: tasks.map((t) => ({ id: t.id, status: t.status })).sort((a, b) => a.id.localeCompare(b.id)),
+    });
+    const nextResult = await fns.runNextFn({ runId, workflow });
+    const dispatchedNothing =
+      nextResult.dispatchedSteps.length === 0 &&
+      nextResult.completedSteps.length === 0 &&
+      nextResult.awaitingGate.length === 0 &&
+      nextResult.failedSteps.length === 0 &&
+      nextResult.runStatus === "active";
+    noProgressStreak = dispatchedNothing && snapshot === lastSnapshot ? noProgressStreak + 1 : 0;
+    lastSnapshot = snapshot;
+
+    if (noProgressStreak >= NO_PROGRESS_LIMIT) {
+      // F2b: run active, nothing dispatched, no observable state change across
+      // two passes — park like the existing gate:human shape (awaiting_gate, no
+      // blockerKind) so the FG-441 reattach liveness probe re-examines this exact
+      // run on resume instead of the campaign refusing outright via campaignBlocker.
+      updateCampaignItem(itemId, {
+        lifecycleStatus: "awaiting_gate",
+        requestedHumanAction: `drive loop made no progress on run ${runId}: it is active but nothing is dispatchable. Inspect the run's tasks (forge show ${runId}), resolve the blockage, then resume.`,
+      });
+      tryTransitionCampaign(campaignId, "running", "paused");
+      const updatedItem = getCampaignItem(itemId);
+      return {
+        outcome: "recovery_needed",
+        itemRecord: {
+          itemId,
+          ticketId,
+          runId,
+          lifecycleStatus: updatedItem?.lifecycleStatus ?? "awaiting_gate",
+          outcome: updatedItem?.outcome,
+          blockerKind: updatedItem?.blockerKind,
+        },
+      };
+    }
     // Loop continues: re-read run status and tasks at the top.
   }
 }
@@ -957,6 +1002,10 @@ async function driveRemainingItems(
       });
       itemRecords.push(driveResult.itemRecord);
 
+      if (driveResult.outcome === "recovery_needed") {
+        return { stopReason: "recovery_needed", itemRecords };
+      }
+
       if (driveResult.outcome === "paused") {
         const c = getCampaign(campaignId);
         return { stopReason: c?.status === "abandoned" ? "abandoned" : "paused", itemRecords };
@@ -1207,6 +1256,10 @@ async function driveRemainingItems(
         projectDir: opts.projectDir,
       });
       itemRecords.push(driveResult.itemRecord);
+
+      if (driveResult.outcome === "recovery_needed") {
+        return { stopReason: "recovery_needed", itemRecords };
+      }
 
       if (driveResult.outcome === "paused") {
         const c = getCampaign(campaignId);

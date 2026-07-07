@@ -26,6 +26,7 @@ import { logEvent } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
 import { updateRunStatus, getRun, insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
+import type { StartRunArgs } from "../v2/startRun.js";
 import { assembleReviewerContextPacket } from "../v2/reviewer-context-packet.js";
 
 // All tests in this file use the invoke dispatch path (pre-FG-423 behavior).
@@ -3375,4 +3376,94 @@ test("RED-WIDE fix 3: legacy pre-FG-442 stored planContent entry (no lane field)
   assert.notEqual(result.stopReason, "stale_plan", "stripping the display-only planContent copy must not trip the staleness check");
   assert.equal(loadWorkflowCalled, false, "legacy invoke entry must NOT dispatch via the full_feature workflow path");
   assert.equal(dispatchCalled, true, "legacy invoke entry must dispatch via the single-invoke path it was actually approved for");
+});
+
+// FG-488 (review F2b): driveWorkflowItem's drive loop is a `while (true)` with no
+// iteration bound, sleep, or no-progress detection. FG-476 fixed the one known
+// producer of "run active + nothing dispatchable" (an on_reject recovery task
+// invisible to the ready queue), but the loop itself stayed unbounded — the next
+// projection mismatch of that shape spins at 100% CPU instead of pausing (the
+// live FG-475/FG-476 incident: `forge campaign resume` over a wedged run burned
+// a core). This drives a full_feature item over a run seeded with a pending task
+// that never becomes dispatchable, through the REAL drive path (startCampaign ->
+// driveRemainingItems -> driveWorkflowItem), with only runNextFn stubbed to
+// dispatch nothing — proving the loop itself now bounds and parks instead of
+// relying on runNext ever changing behavior.
+const FG488_WORKFLOW = () => ({
+  name: "feature",
+  description: "",
+  inputs: [],
+  steps: [{ id: "engineer", agent: "engineer", runtime: "claude" as const, depends_on: [], gate: "auto" as const, reds: [], manual: false }],
+});
+
+test("FG-488: drive loop no-progress bound — active run + zero dispatch + unchanged task state returns recovery_needed, not a spin (review F2b)", async () => {
+  const itemOverrides: Record<string, ItemModeOverride> = {
+    "FG-101": { lane: "full_feature", workflowName: "feature", laneRationale: "test: F2b no-progress bound" },
+  };
+  const { campaign } = _planCampaign(
+    { kind: "list", ticketIds: ["FG-101"], itemOverrides },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved for FG-488 repro" });
+
+  const STUCK_RUN_ID = "run-fg488-stuck";
+  // Seed the run with a single pending task that runNextFn (stubbed below) never
+  // touches — the undispatchable-pending-task shape the FG-476 family produces.
+  const startRunFn = (args: StartRunArgs): { runId: string } => {
+    insertRun({
+      id: STUCK_RUN_ID,
+      workflow: args.workflow.name,
+      title: args.title,
+      status: "active",
+      createdAt: "2026-01-01T00:00:00Z",
+      projectDir: args.projectDir,
+    });
+    insertTask({
+      id: "task-fg488-stuck",
+      runId: STUCK_RUN_ID,
+      phase: "engineer",
+      agentRole: "engineer",
+      status: "pending",
+      taskPackage: { taskId: "task-fg488-stuck", runId: STUCK_RUN_ID, phase: "engineer", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+      createdAt: "2026-01-01T00:00:01Z",
+    });
+    return { runId: STUCK_RUN_ID };
+  };
+
+  let runNextCallCount = 0;
+  const result = await startCampaign(campaign.id, {
+    loadWorkflowFn: FG488_WORKFLOW,
+    startRunFn,
+    runNextFn: async () => {
+      runNextCallCount += 1;
+      // Mirrors runNext.ts's real "ready.length === 0 && !isRunSettled" shape:
+      // nothing dispatched, nothing parked, run stays active.
+      return { dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" };
+    },
+  });
+
+  assert.equal(result.stopReason, "recovery_needed", "no-progress bound must return recovery_needed, not spin forever");
+  assert.ok(runNextCallCount <= 10, `drive loop must be bounded — runNextFn was called ${runNextCallCount} times`);
+
+  const dbItem = db.prepare(
+    "SELECT lifecycle_status, blocker_kind, run_id, requested_human_action FROM campaign_items WHERE ticket_id = 'FG-101'"
+  ).get() as { lifecycle_status: string; blocker_kind: string | null; run_id: string; requested_human_action: string | null };
+  assert.equal(dbItem.lifecycle_status, "awaiting_gate", "item must park in a recoverable, non-terminal state");
+  assert.equal(dbItem.blocker_kind, null, "no blockerKind — matches the FG-441 reattach shape so a later resume re-examines run liveness");
+  assert.equal(dbItem.run_id, STUCK_RUN_ID);
+  assert.ok(
+    dbItem.requested_human_action?.includes(STUCK_RUN_ID),
+    `pause reason must name the run so the operator can inspect it, got: ${dbItem.requested_human_action}`
+  );
+
+  assert.equal(getCampaign(campaign.id)!.status, "paused", "campaign must cooperatively pause, not stay running or get killed");
+
+  // Resumable, not wedged: campaignBlocker's inFlight check explicitly excludes
+  // awaiting_gate, so resume must not refuse outright the way it would for a
+  // stuck 'running' item (compare the FG-394-fix recovery_needed tests above).
+  const resumeResult = await resumeCampaign(campaign.id, {
+    loadWorkflowFn: FG488_WORKFLOW,
+    runNextFn: async () => ({ dispatchedSteps: [], completedSteps: [], awaitingGate: [], failedSteps: [], runStatus: "active" }),
+  });
+  assert.notEqual(resumeResult.stopReason, "not_paused", "campaign must accept a resume attempt after the no-progress pause");
 });
