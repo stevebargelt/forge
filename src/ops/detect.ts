@@ -256,7 +256,7 @@ export function detectOrphanedWorkMayPersist(db: DatabaseInstance, opts: OpsChec
           autonomy: "manual-only",
           command: `forge show ${row.taskId} --json`,
           reason:
-            "the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with `forge retry --force`.",
+            `the worktree may hold real, unreviewed work — inspect the diff before deciding whether to salvage it or re-dispatch with \`forge retry ${row.taskId} --force\`.`,
         },
       })
     );

@@ -241,7 +241,7 @@ export function reconcileRun(
   const failPipelineUnfinalized = (taskId: string, result: unknown, evidence: OrphanEvidence) => {
     const error =
       "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
-      `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry --force\`.`;
+      `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
     getDb().transaction(() => { // FG-463: fail write + its events atomic
       markTaskFailed(taskId, error, result);
       logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence } });
@@ -491,7 +491,7 @@ export function reconcileRun(
               (source === "project_dir_shared"
                 ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
                 : "") +
-              "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`."
+              `work may have persisted. Inspect the diff, verify it, then continue from it or \`forge retry ${t.id} --force\`.`
             : " (reconciled after crash)");
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
@@ -505,7 +505,7 @@ export function reconcileRun(
           (source === "project_dir_shared"
             ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
             : "") +
-          "work may have persisted. Inspect the diff, verify it, then continue from it or `forge retry --force`.";
+          `work may have persisted. Inspect the diff, verify it, then continue from it or \`forge retry ${t.id} --force\`.`;
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });

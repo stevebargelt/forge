@@ -194,7 +194,8 @@ test("FG-455: container gone, empty result, no recoverable stdout, but a dirty w
     const t = getTask(taskId)!;
     assert.equal(t.status, "failed");
     assert.match(t.error ?? "", /orphaned_work_may_persist/);
-    assert.match(t.error ?? "", /--force/);
+    // Runnable command — task id included, not a bare `forge retry --force`.
+    assert.match(t.error ?? "", new RegExp(`forge retry ${taskId} --force`));
 
     const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
     const payload = failed.payload as Record<string, unknown>;
@@ -260,7 +261,8 @@ test("FG-479: PIPELINE run, container gone WITH a valid result → failed orphan
   const t = getTask(taskId)!;
   assert.equal(t.status, "failed", "a pipeline task must never be reconciled to complete — that skips reds, the integration gate, human gates, and merge-back");
   assert.match(t.error ?? "", /orphaned_needs_finalize/);
-  assert.match(t.error ?? "", /forge retry --force/);
+  // Runnable command — task id included, not a bare `forge retry --force`.
+  assert.match(t.error ?? "", new RegExp(`forge retry ${taskId} --force`));
   assert.deepEqual(t.result, result, "the agent's result is preserved on the row as evidence, not discarded");
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "result.json"), "utf8")), result, "result.json on disk is untouched");
 
