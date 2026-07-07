@@ -490,6 +490,34 @@ test("FG-486: recover inspect recommends --continue for an invoke_chain-run task
   assert.match(outcome.task.recommendation, new RegExp(`forge recover ${taskId} --continue`), "invoke_chain must be recommended --continue again");
 });
 
+// FG-486 review finding: the invoke_chain "adopts like invoke" claim above
+// only exercised the dedicated-worktree path. An invoke_chain task with NO
+// dedicated worktree (quick lanes can share the run's projectDir) must still
+// hit the same project_dir_shared --force gate as an invoke-run task —
+// taskHasPipelineFinalize only controls the pipeline-refusal branch, not the
+// shared-dir ambiguity check that runs after it.
+test("FG-486: recover --continue on an invoke_chain-run task refuses a project_dir_shared diff without --force, allows it with --force", () => {
+  const gitDir = trackedDirtyGitRepo();
+  const taskId = "t-continue-chain-shared";
+  const run: Run = { ...INVOKE_CHAIN_RUN, id: "run-invoke-chain-shared-continue", projectDir: gitDir };
+  insertRun(run);
+  insertTask(mkTask(taskId, { runId: run.id, status: "failed" })); // no dedicated worktree -> shared
+  logEvent("task.failed", { runId: run.id, taskId, payload: { failure_kind: "orphaned_work_may_persist", error: "boom" } });
+
+  const eventsBefore = getEvents(taskId).length;
+  const refused = performContinue(taskId);
+  assert.equal(refused.kind, "continue-refused");
+  if (refused.kind === "continue-refused") {
+    assert.match(refused.reason, /project_dir_shared/, "reason names the shared-dir rationale");
+  }
+  assert.equal(getTask(taskId)!.status, "failed", "no write on refusal");
+  assert.equal(getEvents(taskId).length, eventsBefore, "no event on refusal");
+
+  const forced = performContinue(taskId, { force: true });
+  assert.equal(forced.kind, "continued");
+  assert.equal(getTask(taskId)!.status, "complete");
+});
+
 // retry-policy.ts (untouched by FG-481) governs whether the retry fallback
 // needs --force: "orphaned" alone is retryable without it (no persisted-work
 // signal), while "orphaned_work_may_persist" / "oom_killed" require --force
