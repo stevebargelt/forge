@@ -808,6 +808,45 @@ test("FG-455 p4: container gone, no recoverable result, CLEAN worktree, containe
   assert.equal(evidence.oomKilled, undefined);
 });
 
+test("FG-481: pipeline-run task, dirty worktree, oomKilled → persisted error never says 'continue from it' (recover --continue refuses pipeline tasks unconditionally)", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    insertRun(PIPELINE_RUN);
+    const taskId = "t-oom-pipeline";
+    insertContainerized(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "running", worktreePath: gitDir }));
+    const exitInfo = () => ({ oomKilled: true, exitCode: 137 });
+
+    reconcileRun(PIPELINE_RUN.id, GONE, undefined, exitInfo);
+
+    const t = getTask(taskId)!;
+    assert.match(t.error ?? "", /oom_killed/);
+    assert.match(t.error ?? "", /work may have persisted/);
+    assert.doesNotMatch(t.error ?? "", /continue from it/, "pipeline-run guidance must not recommend --continue — recover.ts refuses it unconditionally");
+    assert.match(t.error ?? "", /forge retry .* --force/);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-481: pipeline-run task, dirty worktree, no oom evidence → orphaned_work_may_persist error never says 'continue from it'", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    insertRun(PIPELINE_RUN);
+    const taskId = "t-orphaned-pipeline";
+    insertContainerized(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "running", worktreePath: gitDir }));
+
+    reconcileRun(PIPELINE_RUN.id, GONE, undefined, UNKNOWN_EXIT_INFO);
+
+    const t = getTask(taskId)!;
+    assert.match(t.error ?? "", /orphaned_work_may_persist/);
+    assert.match(t.error ?? "", /work may have persisted/);
+    assert.doesNotMatch(t.error ?? "", /continue from it/, "pipeline-run guidance must not recommend --continue — recover.ts refuses it unconditionally");
+    assert.match(t.error ?? "", /forge retry .* --force/);
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
 test("FG-455 p4 NEGATIVE: containerExitInfo returns {} (unknown) → classification UNCHANGED — still orphaned_work_may_persist on a dirty worktree", () => {
   const gitDir = makeDirtyGitRepo();
   try {
