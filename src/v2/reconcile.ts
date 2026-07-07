@@ -643,15 +643,28 @@ export function reconcileRun(
     }
 
     if (allComplete) {
-      // FG-463: complete write + its events atomic (the parent result.json write
-      // above is best-effort and stays outside the transaction).
-      const completed = getDb().transaction(() => {
-        if (!markTaskComplete(parent.id, parentResult)) return false;
-        logEvent("task.completed", { runId, taskId: parent.id });
-        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered", childSummary: { total: children.length, complete: completeChildren.length } } });
-        return true;
+      // FG-479 review finding 4: all children finished, but that only proves the
+      // WAVE finished — the parent's own host-side finalize (integration merge
+      // → post-merge gate → reds, runNext.ts dispatchFanoutStep ~1446-1590) never
+      // ran, because dispatchFanoutStep never gave the parent a container to
+      // crash out of (see the container.started gate above). Completing the
+      // parent purely from child aggregation would silently skip that whole
+      // sequence — the exact single-step bypass this ticket fixed for a PIPELINE
+      // primary (failPipelineUnfinalized above), just on the fanout-parent
+      // lifecycle. Land fail-safe instead: reuse fanout_wave_orphaned (same
+      // recover --re-drive path already re-drives the whole wave coherently;
+      // retryPolicy/recover.ts already refuse a bare `forge retry` for it) with
+      // a distinct message so an operator isn't told children "failed or never
+      // finished" when in fact every one of them succeeded.
+      const error =
+        `fanout parent unfinalized: all ${children.length} children completed, but the parent's own merge/integration-gate/reds sequence never ran ` +
+        `(the process died before it started) — inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
+      getDb().transaction(() => { // FG-463: fail write + its events atomic
+        markTaskFailed(parent.id, error, parentResult);
+        logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
+        logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_unfinalized", childSummary: { total: children.length, complete: completeChildren.length } } });
       })();
-      if (completed) taskChanges.push({ taskId: parent.id, from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" });
+      taskChanges.push({ taskId: parent.id, from: "running", to: "failed", reason: "fanout_wave_unfinalized" });
     } else {
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +

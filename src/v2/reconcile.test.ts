@@ -7,13 +7,14 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun, getRun } from "../store/runs.js";
-import { insertTask, getTask } from "../store/tasks.js";
+import { insertTask, getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun, logEvent } from "../store/events.js";
 import { taskDir } from "../util/paths.js";
 import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo, attachedExitEvidence } from "./reconcile.js";
 import type { ReconcileWriters } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
 import { orphanRecoveryMessage } from "../cli/commands/show.js";
+import { performReDrive } from "../cli/commands/recover.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -267,6 +268,12 @@ test("FG-479: PIPELINE run, container gone WITH a valid result → failed orphan
   assert.ok(!types.includes("task.completed"), "no task.completed — completion (and reds dispatch after it) belongs to the real runNext path");
   assert.ok(types.includes("task.failed") && types.includes("task.reconciled"));
 
+  // Reds NOT skipped: reconcileRun must never itself spawn a red — the only way
+  // a red gets dispatched is dispatchReds (runNext.ts), which inserts a new task
+  // row with parentId === the primary's id. Assert none exists, rather than only
+  // inferring "no reds ran" from the absence of task.completed above.
+  assert.deepEqual(tasksForRun(PIPELINE_RUN.id).filter((t) => t.parentId === taskId), [], "reconcileRun must never spawn/skip reds for this primary");
+
   const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
   const payload = failed.payload as Record<string, unknown>;
   assert.equal(payload.failure_kind, "orphaned_needs_finalize");
@@ -300,6 +307,10 @@ test("FG-479: PIPELINE run, stdout-recoverable result (no result.json) → faile
 
   const types = eventsForTask(taskId).map((e) => e.eventType);
   assert.ok(!types.includes("task.completed"), "must NOT be completed");
+
+  // Reds NOT skipped: see the sibling test above for why this checks task rows
+  // directly rather than only inferring it from the absence of task.completed.
+  assert.deepEqual(tasksForRun(PIPELINE_RUN.id).filter((t) => t.parentId === taskId), [], "reconcileRun must never spawn/skip reds for this primary");
 
   const failed = eventsForTask(taskId).find((e) => e.eventType === "task.failed")!;
   const payload = failed.payload as Record<string, unknown>;
@@ -513,7 +524,13 @@ test("reconcile: a completed-phase child (red) task is never treated as an orpha
 
 // ----- FG-455 p2: fanout PARENT stuck `running` after its children settle -----
 
-test("FG-455 p2: fanout parent stuck running, all children complete → parent reconciled to complete", () => {
+// FG-479 review finding 4: all children finishing only proves the WAVE
+// finished — the parent's own host-side finalize (integration merge →
+// integration gate → reds, runNext.ts dispatchFanoutStep) never ran, so
+// reconcile must not complete the parent from child aggregation alone. Same
+// bypass class as the PIPELINE single-step fix above, just on the fanout
+// parent lifecycle — land fail-safe (re-drivable), never complete.
+test("FG-479 review finding 4: fanout parent stuck running, all children complete → parent still lands FAILED (finalize never ran), not complete", () => {
   insertTask(mkTask("fanout-parent-a", { status: "running" }));
   insertTask(mkTask("fanout-child-a1", { parentId: "fanout-parent-a", status: "complete" }));
   insertTask(mkTask("fanout-child-a2", { parentId: "fanout-parent-a", status: "complete" }));
@@ -522,11 +539,23 @@ test("FG-455 p2: fanout parent stuck running, all children complete → parent r
 
   assert.deepEqual(
     r.taskChanges.find((c) => c.taskId === "fanout-parent-a"),
-    { taskId: "fanout-parent-a", from: "running", to: "complete", reason: "fanout_wave_orphaned_recovered" },
+    { taskId: "fanout-parent-a", from: "running", to: "failed", reason: "fanout_wave_unfinalized" },
   );
-  assert.equal(getTask("fanout-parent-a")!.status, "complete");
+  const parent = getTask("fanout-parent-a")!;
+  assert.equal(parent.status, "failed", "must never complete purely from child aggregation — the parent's own merge/integration-gate/reds never ran");
+  assert.match(parent.error ?? "", /forge recover fanout-parent-a --re-drive/);
   const types = eventsForTask("fanout-parent-a").map((e) => e.eventType);
-  assert.ok(types.includes("task.completed") && types.includes("task.reconciled"));
+  assert.ok(!types.includes("task.completed"), "no task.completed — completing here would skip the parent's own finalize sequence");
+  assert.ok(types.includes("task.failed") && types.includes("task.reconciled"));
+
+  const failed = eventsForTask("fanout-parent-a").find((e) => e.eventType === "task.failed")!;
+  const payload = failed.payload as Record<string, unknown>;
+  assert.equal(payload.failure_kind, "fanout_wave_orphaned", "reuses the existing recoverable kind — same recover --re-drive path already re-drives the whole wave");
+  assert.deepEqual(payload.childSummary, { total: 2, complete: 2 });
+
+  // The existing re-drive mechanism must still be able to recover it.
+  const outcome = performReDrive("fanout-parent-a");
+  assert.equal(outcome.kind, "re-drive-done");
 });
 
 test("FG-455 p2: fanout parent stuck running, one child orphaned (container gone) → parent reconciled to failed, pointing at recovery", () => {
@@ -1068,16 +1097,18 @@ test("FG-459: a backfillTaskResult throw (complete-empty backfill pass) does not
 
 test("FG-459: a write throw inside the fanout-parent pass does not propagate and does not abort the run-level check", () => {
   // A fanout parent stuck running with all children complete → the fanout pass
-  // calls markTaskComplete(parent). Force that write to throw.
+  // lands it fail-safe via markTaskFailed (FG-479: never complete from child
+  // aggregation alone — the parent's own finalize never ran). Force that write
+  // to throw.
   insertTask(mkTask("fp-busy", { status: "running" }));
   insertTask(mkTask("fp-child-1", { parentId: "fp-busy", status: "complete" }));
   insertTask(mkTask("fp-child-2", { parentId: "fp-busy", status: "complete" }));
 
   let r: ReturnType<typeof reconcileRun> | undefined;
   assert.doesNotThrow(() => {
-    r = reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskComplete", "fp-busy"));
+    r = reconcileRun(RUN.id, ALIVE, defaultContainerReap, defaultContainerExitInfo, busyOn("markTaskFailed", "fp-busy"));
   }, "a throw finalizing a fanout parent must not propagate");
-  assert.equal(getTask("fp-busy")!.status, "running", "the parent-completing write threw → left running");
+  assert.equal(getTask("fp-busy")!.status, "running", "the parent-failing write threw → left running");
   assert.equal(r!.taskChanges.filter((c) => c.taskId === "fp-busy").length, 0);
   // The run-level completion check still ran to a verdict (no escaping throw): the
   // parent is non-terminal so the run is NOT completed.

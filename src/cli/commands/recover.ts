@@ -28,6 +28,13 @@ import { inferredResultFrom, type InferredResult } from "../../v2/inferred-resul
 // container-gone evidence path) and is legitimately continuable when work
 // persisted despite the OOM/kill.
 const CONTINUABLE_KINDS = new Set(["orphaned", "orphaned_work_may_persist", "oom_killed"]);
+// FG-479 review finding 2: run-level inspect must surface orphaned_needs_finalize
+// tasks too (single-task `forge recover <taskId>` already does, via buildTaskView
+// unconditionally) — it is deliberately NOT in CONTINUABLE_KINDS (performContinue
+// must keep refusing it; adopting the result as complete would recreate the exact
+// bypass this failure kind exists to prevent), so a separate, wider set gates the
+// run-level listing only.
+const RUN_INSPECT_KINDS = new Set([...CONTINUABLE_KINDS, "orphaned_needs_finalize"]);
 const TERMINAL = new Set(["complete", "failed"]);
 const VERIFICATION_HINT =
   "Before adopting: review the diff at the path below, then run this project's verification (e.g. `npm run typecheck` and `npm run test:all` on the host).";
@@ -230,7 +237,7 @@ export function performInspect(id: string): RecoverOutcome {
   if (run) {
     const allTasks = tasksForRun(run.id);
     const tasks = allTasks
-      .filter((t) => t.status === "failed" && CONTINUABLE_KINDS.has(failureKindForTask(t.id) ?? ""))
+      .filter((t) => t.status === "failed" && RUN_INSPECT_KINDS.has(failureKindForTask(t.id) ?? ""))
       .map((t) => buildTaskView(t, run));
     const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks));
     return { kind: "inspect-run", runId: run.id, tasks, fanoutParents };

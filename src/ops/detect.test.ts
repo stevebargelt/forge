@@ -252,6 +252,60 @@ test("detectOrphanedWorkMayPersist: a CLEAN-worktree oom_killed task produces no
   assert.deepEqual(detectOrphanedWorkMayPersist(db), [], "clean worktree — no work at risk, no incident");
 });
 
+// FG-479 review finding 1: a pipeline task stuck fail-safe as orphaned_needs_finalize
+// (container finished with a usable result, but the host-side finalize never ran)
+// must raise an incident too, not just orphaned_work_may_persist/oom_killed.
+test("detectOrphanedWorkMayPersist: flags an orphaned_needs_finalize task, distinguishing the unfinalized cause", () => {
+  insertRun(mkRun("run-needs-finalize", "active"));
+  insertTask(mkTask("task-needs-finalize", "run-needs-finalize", "failed"));
+  const evidence = {
+    containerName: "forge-task-needs-finalize",
+    containerLiveness: "gone",
+    resultState: "valid",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: ["?? new-file.txt"],
+  };
+  logEvent("task.failed", {
+    runId: "run-needs-finalize", taskId: "task-needs-finalize",
+    payload: { failure_kind: "orphaned_needs_finalize", error: "orphaned_needs_finalize: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "orphaned_needs_finalize");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.severity, "high");
+  assert.equal(i.recommendedAction.autonomy, "manual-only");
+  assert.match(i.evidence[0]!, /finished with a usable result/);
+});
+
+// FG-479: unlike oom_killed, a CLEAN worktree must NOT suppress the incident for
+// this kind — the at-risk artifact is the preserved unfinalized result, not
+// dirty files (a crash after the worktree merge leaves changedFiles empty while
+// the integration gate and reds still never ran).
+test("detectOrphanedWorkMayPersist: a CLEAN-worktree orphaned_needs_finalize task still raises an incident", () => {
+  insertRun(mkRun("run-nf-clean", "active"));
+  insertTask(mkTask("task-nf-clean", "run-nf-clean", "failed"));
+  const evidence = {
+    containerName: "forge-task-nf-clean",
+    containerLiveness: "gone",
+    resultState: "valid",
+    recoverableStdoutResult: false,
+    worktreePathChecked: "/tmp/some/worktree",
+    changedFiles: [],
+  };
+  logEvent("task.failed", {
+    runId: "run-nf-clean", taskId: "task-nf-clean",
+    payload: { failure_kind: "orphaned_needs_finalize", error: "orphaned_needs_finalize: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1, "clean worktree must not hide an unfinalized result");
+  assert.equal(incidents[0]!.kind, "orphaned_needs_finalize");
+});
+
 // ── detectStuckRun (FG-414) ─────────────────────────────────────────────────
 
 test("detectStuckRun: flags an active run whose tasks are all terminal", () => {
