@@ -108,3 +108,8 @@ The shared evaluator should return structured state such as:
 ## Notes
 
 This should follow the immediate bug fixes for FG-475 and FG-476. The intent is to stop future lifecycle fixes from adding one-off interpretations in `gate.ts`, `runNext.ts`, or `executor.ts`; new lifecycle behavior should extend the shared evaluator.
+
+
+## Architecture pass (2026-07-07, autonomous session)
+
+Design artifact produced per the four shaping constraints (pure derivation / lineage classifier first / verdict-aggregation fold-in / seam-at-a-time adoption): `~/.forge/runs/run-fg-477-lifecycle-evaluator-architecture-f151d7/task-architecture-advisor-705984/result.json` — module boundary, full classifier decision table (primary | retry_replacement | on_reject_recovery | fanout_child | red_review), aggregation fold-in shape, ordered independently-shippable slices, migration risks+mitigations. Read against post-FG-479/481/482/483/484 code, not the review's stale line numbers. Implementation NOT started (deliberate session bound). Next step: review the slice plan, then dispatch slice 1 (the classifier) as its own ticketed implementation.
