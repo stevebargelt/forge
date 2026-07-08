@@ -101,13 +101,15 @@ Use `forge doctor` any time you want to recheck readiness without touching files
 Run these to confirm the host is a clean, portable forge-on-forge release candidate. All commands are **read-only** — no agent dispatch, no DB mutation, no live provider spend.
 
 ```bash
-npm run typecheck            # types clean
-NO_NOTIFY=true npm test      # full suite green (no real notifications fire)
-forge setup --dry-run        # readiness: image, runtime CLIs, per-profile auth, model+routing policy, Codex review-loop path — no writes, no agent run
-forge doctor                 # same release check, also usable outside a setup context
-git status --short           # expect a clean working tree
+npm run typecheck              # types clean
+NO_NOTIFY=true npm run test:all       # fast canonical gate green (unit tier, no real notifications fire)
+NO_NOTIFY=true npm run test:extended  # integration + worktree + dashboard-integration green
+forge setup --dry-run          # readiness: image, runtime CLIs, per-profile auth, model+routing policy, Codex review-loop path — no writes, no agent run
+forge doctor                   # same release check, also usable outside a setup context
+git status --short             # expect a clean working tree
 ```
 
 - `forge setup --dry-run` and `forge doctor` both run the release check introduced in #229.
+- `npm test` alone is the fast unit tier only (~2s) — it does not cover integration, worktree, or dashboard-integration tests, so it isn't sufficient evidence for a release. Run `test:all` and `test:extended` (or confirm CI's `test` and `test-extended` jobs are both green on the release commit) instead.
 - Opt-in providers (Bedrock, Pi-Groq, Anthropic-API) reporting as warnings is **expected and not a blocker** — only hard fails block a release.
-- All five commands must pass before tagging a release on this host.
+- All six commands must pass before tagging a release on this host.
