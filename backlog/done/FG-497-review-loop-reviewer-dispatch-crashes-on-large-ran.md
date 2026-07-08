@@ -1,9 +1,11 @@
 ---
 id: FG-497
 type: story
-status: active
+status: done
 title: "review-loop reviewer dispatch crashes on large ranges: agent-entrypoint exec fails with 'argument list too long' (packet passed inline instead of file-mounted)"
 created: 2026-07-08
+closed: 2026-07-08
+closed_commit: acf4846
 ---
 
 ## Problem
