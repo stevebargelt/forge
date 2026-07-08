@@ -22,7 +22,8 @@ description: |
 # prompt handling key off these, not the provider name. log_format: pi-jsonl
 # selects pi's usage parser (#262), independent of the upstream provider.
 # prompt_strategy: message-arg — system prompt via --append-system-prompt, task
-# package as a positional message (the injection mapping itself is #263).
+# package via pi's `@file` message syntax referencing /task/package.md (the
+# injection mapping itself is #263; FG-497 moved the package off argv).
 runtime_kind: pi
 log_format: pi-jsonl
 prompt_strategy: message-arg
