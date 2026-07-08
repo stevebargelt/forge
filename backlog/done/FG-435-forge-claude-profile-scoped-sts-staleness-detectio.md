@@ -1,9 +1,11 @@
 ---
 id: FG-435
 type: story
-status: active
+status: done
 title: "forge claude: profile-scoped STS staleness detection + profile-named message (fix global-detection false positives)"
 created: 2026-07-02
+closed: 2026-07-08
+closed_commit: 9e2b307f30cb32d2cf217fa3409ccad79d383817
 ---
 
 ## Problem
