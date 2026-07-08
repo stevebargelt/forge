@@ -323,6 +323,81 @@ test("FG-491: persistenceErrorMessage shows raw claims, normalized paths, missin
   assert.match(msg, /unparseable|could not be parsed|no parseable path token/i);
 });
 
+// FG-491 (reopened): normalizeClaim previously accepted ANY non-empty first
+// token as a path claim, so arbitrary prose whose first word happened to name
+// an existing file/dir counted as proof of persistence. Only the annotation
+// shapes above (empty / dash-led / paren-led remainder) should parse as path
+// claims — everything else is unparseable prose.
+
+test("FG-491 reopened: prose `README.md updated the real file elsewhere` is NOT a path claim → loss when it's the only claim", async () => {
+  touch("README.md");
+  const result = { status: "complete", files_modified: ["README.md updated the real file elsewhere"] };
+  const c = await checkResultPersistence(projectDir, result, { sleepFn: fakeSleep() });
+  assert.equal(c.ok, false, "prose must never count as proof of persistence just because its first word names a real file");
+  if (!c.ok) {
+    assert.deepEqual(c.unparseable, result.files_modified);
+    assert.deepEqual(c.missing, []);
+  }
+});
+
+test("FG-491 reopened: prose `src is where the code lives` is NOT a path claim → loss even though `src` exists as a directory", async () => {
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  const result = { status: "complete", files_modified: ["src is where the code lives"] };
+  const c = await checkResultPersistence(projectDir, result, { sleepFn: fakeSleep() });
+  assert.equal(c.ok, false, "a first-word directory match must not turn prose into a path claim");
+  if (!c.ok) {
+    assert.deepEqual(c.unparseable, result.files_modified);
+    assert.deepEqual(c.missing, []);
+  }
+});
+
+test("FG-491 reopened: prose claim alongside a real path claim → ok (partial presence via the real claim)", async () => {
+  touch("src/real.ts");
+  const c = await checkResultPersistence(projectDir, {
+    status: "complete",
+    files_modified: ["README.md updated the real file elsewhere", "src/real.ts"],
+  });
+  assert.equal(c.ok, true, "the genuine path claim should still carry partial presence even alongside unparseable prose");
+});
+
+test("FG-491 reopened: dash-variant annotations (em dash, hyphen) still parse as path claims", async () => {
+  touch("src/dash.ts");
+  const emDash = await checkResultPersistence(projectDir, {
+    status: "complete",
+    files_modified: ["src/dash.ts:1-5 — annotated with an em dash"],
+  });
+  assert.equal(emDash.ok, true);
+  const hyphen = await checkResultPersistence(projectDir, {
+    status: "complete",
+    files_modified: ["src/dash.ts - annotated with a plain hyphen"],
+  });
+  assert.equal(hyphen.ok, true);
+});
+
+test("FG-491 reopened: normalizeClaim direct assertions — clear path shapes vs. unparseable prose", () => {
+  assert.equal(normalizeClaim("README.md updated the real file elsewhere"), null, "bare-word remainder is prose, not a path claim");
+  assert.equal(normalizeClaim("src is where the code lives"), null, "bare-word remainder is prose, not a path claim");
+  assert.equal(normalizeClaim("path/to/file.ts"), "path/to/file.ts", "empty remainder is a clear path claim");
+  assert.equal(normalizeClaim("path/to/file.ts:10-20"), "path/to/file.ts", "line-spec with empty remainder is a clear path claim");
+  assert.equal(normalizeClaim("path/to/file.ts:10-20 — why"), "path/to/file.ts", "em-dash-led remainder is a clear path claim");
+  assert.equal(normalizeClaim("path/to/file.ts - why"), "path/to/file.ts", "hyphen-led remainder is a clear path claim");
+  assert.equal(normalizeClaim("path/to/file.ts (new)"), "path/to/file.ts", "paren-led remainder is a clear path claim");
+  assert.equal(normalizeClaim("Makefile updated"), null, "a bare legitimate filename with a trailing bare-word remainder is still prose");
+});
+
+test("FG-491 reopened: persistenceErrorMessage still surfaces the unparseable note for prose-style claims", async () => {
+  touch("README.md");
+  const c = await checkResultPersistence(
+    projectDir,
+    { status: "complete", files_modified: ["README.md updated the real file elsewhere"] },
+    { sleepFn: fakeSleep() },
+  );
+  assert.equal(c.ok, false);
+  if (c.ok) return;
+  const msg = persistenceErrorMessage(c);
+  assert.match(msg, /unparseable|could not be parsed|no parseable path token/i);
+});
+
 test("FG-491: FG-377 settle window applies to normalized paths, not raw annotated claims", async () => {
   const rel = "src/late-sync.ts";
   let statCalls = 0;

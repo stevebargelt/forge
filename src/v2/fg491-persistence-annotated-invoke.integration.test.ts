@@ -189,3 +189,82 @@ test("FG-491 (invoke): partial presence — one annotated claim resolves to a re
     rmSync(projectDir, { recursive: true, force: true });
   }
 });
+
+// FG-491 (reopened): prose whose first word happens to name a real file must
+// not count as proof of persistence through the real invoke() seam either —
+// normalizeClaim() only recognizes empty/dash-led/paren-led remainders as
+// path claims now, so this prose is unparseable and must fail closed exactly
+// like a genuine loss.
+
+test("FG-491 (reopened, invoke): complete + prose-only files_modified whose first word names a real file → downgraded to failed, error lists the claim as unparseable", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "fg491-prose-only-"));
+  try {
+    touch(projectDir, "README.md");
+    const agentResult = {
+      status: "complete",
+      files_modified: ["README.md updated the real file elsewhere"],
+    };
+
+    const r = await invoke({
+      agentRole: "test-engineer",
+      task: "write integration tests",
+      projectDir,
+      dockerExec: stubExecWriting(agentResult),
+    });
+
+    assert.equal(
+      r.status,
+      "failed",
+      "prose must never count as proof of persistence just because its first word names a real file",
+    );
+    assert.match(r.error ?? "", /work not persisted/);
+    assert.match(r.error ?? "", /README\.md updated the real file elsewhere/, "error must name the raw prose claim");
+    assert.match(r.error ?? "", /unparseable|no parseable path token/i, "error must call out the claim as unparseable");
+
+    assert.equal(failureKindForTask(r.taskId), "work_not_persisted");
+
+    const task = getTask(r.taskId);
+    assert.ok(task);
+    assert.equal(task!.status, "failed", "task must be downgraded to failed, not left complete");
+    assert.deepEqual(task!.result, agentResult);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-491 (reopened, invoke): prose claim alongside a real existing path claim → completes (partial presence via the real claim only)", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "fg491-prose-plus-real-"));
+  try {
+    touch(projectDir, "src/real.ts");
+    const agentResult = {
+      status: "complete",
+      files_modified: ["README.md updated the real file elsewhere", "src/real.ts"],
+    };
+
+    const r = await invoke({
+      agentRole: "test-engineer",
+      task: "write integration tests",
+      projectDir,
+      dockerExec: stubExecWriting(agentResult),
+    });
+
+    assert.equal(
+      r.status,
+      "complete",
+      "the genuine path claim must carry partial presence even alongside unparseable prose",
+    );
+    assert.deepEqual(r.result, agentResult, "result must be returned intact, not nulled/discarded");
+    assert.notEqual(failureKindForTask(r.taskId), "work_not_persisted");
+
+    const task = getTask(r.taskId);
+    assert.ok(task);
+    assert.equal(task!.status, "complete");
+    assert.deepEqual((task!.result as typeof agentResult).files_modified, agentResult.files_modified);
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
