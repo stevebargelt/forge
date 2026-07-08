@@ -616,3 +616,20 @@ test("FG-500 deps.verify: a project with test:extended — covering rows for BOT
   assert.equal(result.ok, true);
   assert.match(result.reusedEvidence ?? "", /host_verifications row/);
 });
+
+test("FG-500 regression: deps.verify's no-reuse fallback never runs test:extended for a CUSTOM requiredHostGate project, even when the script exists — behaves exactly as before FG-500", async () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add custom requiredHostGate + an (irrelevant) test:extended script"], projectDir);
+
+  const { deps } = buildReviewLoopDeps(ctx({ scripts, checkStatusProvider: () => null }));
+  const result = await deps.verify();
+  assert.deepEqual(
+    result.steps.map((s) => s.name), ["typecheck", "test"],
+    "test:extended must be dropped from the fallback list — requiredHostGate is custom, not the project default"
+  );
+  assert.equal(result.ok, true, "a failing test:extended must not affect the result since it must never have run");
+});
