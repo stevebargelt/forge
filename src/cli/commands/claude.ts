@@ -34,6 +34,7 @@ import {
   detectStaleStsCache,
   exportCredsOverridesStaleness,
   hasFreshProfileSsoCache,
+  resolveProfileSsoIdentity,
 } from "../../util/creds.js";
 import { startSsoWatchdog } from "../../util/sso-watchdog.js";
 import { insertRun, updateRunStatus } from "../../store/runs.js";
@@ -116,7 +117,17 @@ export function registerClaude(program: Command): void {
         // check above as {stale: false}. Check this profile's own SSO token
         // freshness directly; export-credentials remains authoritative over a
         // stale/missing finding for the same reason as above.
-        if (!hasFreshProfileSsoCache(awsConfigDir(), resolvedProfile)) {
+        //
+        // Gate on resolveProfileSsoIdentity first: it returns null when the
+        // profile has no sso_session / sso_start_url at all (e.g. a plain
+        // aws_access_key_id/aws_secret_access_key bedrock profile), which is
+        // "SSO not applicable," not "SSO expired" — hasFreshProfileSsoCache
+        // can't tell those apart on its own, so a non-SSO profile must never
+        // reach the export-credentials call or the hard block below.
+        if (
+          resolveProfileSsoIdentity(awsConfigDir(), resolvedProfile) &&
+          !hasFreshProfileSsoCache(awsConfigDir(), resolvedProfile)
+        ) {
           if (exportCredsOverridesStaleness(resolvedProfile)) {
             console.log(
               `forge claude: ⚠ SSO session for '${resolvedProfile}' looks expired or missing ` +

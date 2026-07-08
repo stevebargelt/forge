@@ -537,3 +537,41 @@ test("integ FG-435 round 2: a fresh OTHER profile does not mask the resolved pro
   assert.match(result.stderr, /profile 'forge-fg435r2-expired-target'/);
   assert.doesNotMatch(result.stderr, /forge-fg435r2-fresh-other/);
 });
+
+test("integ FG-435 round 2 fix: forge claude does NOT hard-block a plain (non-SSO) static-credential bedrock profile, and never shells out to export-credentials for it", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  mkdirSync(awsDir, { recursive: true });
+  writeFileSync(
+    join(awsDir, "config"),
+    `[profile forge-fg435r2-static-profile]\nregion = us-east-1\n`,
+  );
+  writeFileSync(
+    join(awsDir, "credentials"),
+    `[forge-fg435r2-static-profile]\naws_access_key_id = AKIAFAKE\naws_secret_access_key = fakesecret\n`,
+  );
+
+  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-static-profile", FORGE_AWS_DIR: awsDir };
+  // No FORGE_AWS_CREDS_FOR_TEST override and no real `aws` binary reachable in
+  // this shape — if the fix regresses and this profile is treated as SSO, the
+  // export-credentials call fails and the process hard-blocks (status 1).
+  delete testEnv.FORGE_AWS_CREDS_FOR_TEST;
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  // Don't assert on result.status here — if `claude` itself isn't on PATH in
+  // this test environment, the spawn ("error") handler exits 1 for reasons
+  // unrelated to the preflight check. What matters is that the SSO-expiry
+  // hard-block message never appears for a non-SSO profile.
+  assert.doesNotMatch(
+    result.stderr,
+    /no SSO session mapping could be resolved/,
+    `must not treat a non-SSO profile as an unresolvable SSO mapping; stderr=${result.stderr}`,
+  );
+  assert.doesNotMatch(result.stderr, /aws sso login/, `must not hard-block a non-SSO profile; stderr=${result.stderr}`);
+});
