@@ -1,9 +1,11 @@
 ---
 id: FG-493
 type: story
-status: active
+status: done
 title: "review-loop classifies a well-formed red-schema reviewer result (verdict: fail) as reviewer_failed/invalid — verdict-vocabulary mismatch at the loop boundary blocks closeability"
 created: 2026-07-07
+closed: 2026-07-08
+closed_commit: bf017688af5d4fe277ab802cceb556c74b8a9389
 ---
 
 ## Problem
