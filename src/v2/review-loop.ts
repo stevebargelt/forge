@@ -70,20 +70,21 @@ export function resolveCommitRange(
 
 export type ReviewerVerdict = "pass" | "needs_fix" | "blocked";
 
-// A finding must be ANCHORED (BOTH file AND line — so the fixer handoff points at
-// an exact spot) or explicitly flagged `unanchored: true`. A bare `file` with no
-// `line` is rejected: either give the line or mark it unanchored.
+// A finding is ANCHORED when it carries BOTH file AND line (so the fixer handoff
+// points at an exact spot). A finding missing either is coerced to
+// `unanchored: true` rather than rejected — FG-493: red-wide's own native
+// contract (seeds/agents/red-wide/CLAUDE.md) tells the reviewer to "cite real
+// code or omit file/line/quoted_text entirely" for a concern that isn't tied to
+// one line; it never asks the reviewer to set an explicit `unanchored` flag. A
+// well-formed reviewer result that follows ITS OWN contract must not fail the
+// LOOP's stricter contract wholesale — that turned a real fail verdict into a
+// false structural "reviewer_failed".
 const FindingSchema = z.object({
   summary: z.string().min(1),
   file: z.string().min(1).optional(),
   line: z.number().int().positive().optional(),
   unanchored: z.boolean().optional(),
-}).superRefine((f, ctx) => {
-  const anchored = f.file !== undefined && f.line !== undefined;
-  if (!anchored && f.unanchored !== true) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "finding must be anchored (both `file` and `line`) or `unanchored: true`" });
-  }
-});
+}).transform((f) => (f.file !== undefined && f.line !== undefined ? f : { ...f, unanchored: true }));
 
 // red-wide (the reviewer agent — see module header) writes the RED vocabulary
 // verdict:"fail"|"inconclusive" rather than the native needs_fix|blocked. Both

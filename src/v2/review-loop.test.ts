@@ -72,10 +72,10 @@ test("#301 verdict: needs_fix with a fully anchored finding (file AND line)", as
   assert.equal((r as { findings: Finding[] }).findings[0]!.line, 42);
 });
 
-test("#301 verdict: a file with no line is rejected (anchored needs both)", async () => {
+test("#301 verdict: a file with no line is coerced to unanchored (anchored needs both, but isn't rejected)", async () => {
   const r = parseReviewerVerdict({ verdict: "needs_fix", findings: [{ summary: "somewhere in x", file: "src/x.ts" }] });
-  assert.equal(r.ok, false);
-  assert.match((r as { error: string }).error, /both `file` and `line`.*or.*unanchored/);
+  assert.equal(r.ok, true);
+  assert.deepEqual((r as { findings: Finding[] }).findings, [{ summary: "somewhere in x", file: "src/x.ts", unanchored: true }]);
 });
 
 test("#301 verdict: explicitly unanchored finding is accepted", async () => {
@@ -127,6 +127,40 @@ test("#457 verdict: red-style fail with ZERO findings is still an error (empty f
   const r = parseReviewerVerdict({ verdict: "fail", findings: [] });
   assert.equal(r.ok, false);
   assert.match((r as { error: string }).error, /needs_fix requires at least one finding/);
+});
+
+// ── FG-493: a well-formed red-schema fail (findings following red's OWN
+// omit-anchor-entirely convention, not the loop's `unanchored: true` flag) must
+// parse as needs_fix, not fail the whole result ────────────────────────────────
+
+test("#493 verdict: red-style fail with findings that omit file/line/unanchored entirely (red's native 'omit or cite' convention) still parses", async () => {
+  // Mirrors the real red-wide docs_drift finding shape from the FG-493 evidence:
+  // extra red-native keys (finding_type, severity, evidence, hypothesis) alongside
+  // a concern that isn't pinned to one line, and NO explicit `unanchored: true` —
+  // red's seed says to omit file/line entirely for such a concern, never to set a flag.
+  const r = parseReviewerVerdict({
+    status: "complete",
+    verdict: "fail",
+    confidence: 0.8,
+    findings: [
+      { severity: "medium", summary: "doc describes the old flag name", finding_type: "docs_drift" },
+      { severity: "low", summary: "README still documents the removed command", finding_type: "docs_drift" },
+    ],
+    invariants_verified: ["x"],
+    notes: "some notes",
+  });
+  assert.equal(r.ok, true);
+  assert.equal((r as { verdict: string }).verdict, "needs_fix");
+  assert.deepEqual(
+    (r as { findings: Finding[] }).findings.map((f) => f.unanchored),
+    [true, true],
+  );
+});
+
+test("#493 verdict: a genuinely unparseable reviewer result is still rejected — negative half preserved", async () => {
+  assert.equal(parseReviewerVerdict({ status: "complete", findings: [{ summary: "x" }] } /* verdict key missing entirely */).ok, false);
+  assert.equal(parseReviewerVerdict({ verdict: "lgtm", findings: [] } /* verdict outside the accepted vocabulary */).ok, false);
+  assert.equal(parseReviewerVerdict(undefined).ok, false);
 });
 
 // ── FG-462: closeout-finding partition ───────────────────────────────────────
@@ -632,6 +666,43 @@ test("#457 loop e2e: reviewer returning RED-style fail (+ findings) never yields
   assert.equal(r.stopReason, "needs_fix_max_rounds");
   assert.equal(r.rounds[0]!.verdict, "needs_fix");
   assert.deepEqual(r.rounds[0]!.findings, [{ summary: "off-by-one", file: "a.ts", line: 3 }]);
+});
+
+// ── FG-493: a well-formed red-schema fail, with findings that follow red's OWN
+// omit-anchor convention (no `unanchored: true` flag), drives a real needs_fix
+// round + fixer dispatch through the real loop path — not a false reviewer_failed ──
+
+test("#493 loop e2e: reviewer returning a well-formed red-schema fail (unpinned docs-drift findings) produces needs_fix + fixer dispatch, not reviewer_failed", async () => {
+  const fixCalls: Finding[][] = [];
+  const r = await runReviewLoop({ maxRounds: 2, ticketId: "FG-489" }, deps({
+    review: () => {
+      // The exact shape from the FG-493 evidence: extra red-native top-level keys
+      // (status, confidence, invariants_verified, notes) and two docs-drift
+      // findings that are real concerns but aren't pinned to one line — red's own
+      // seed contract says to omit file/line entirely here, not set a flag.
+      const raw = {
+        status: "complete",
+        verdict: "fail",
+        confidence: 0.8,
+        findings: [
+          { severity: "medium", summary: "doc still describes the removed --legacy flag", finding_type: "docs_drift" },
+          { severity: "low", summary: "README quickstart references the old command name", finding_type: "docs_drift" },
+        ],
+        invariants_verified: ["reviewer read the working tree"],
+        notes: "2 docs-drift findings, both real",
+      };
+      const parsed = parseReviewerVerdict(raw);
+      return parsed.ok ? { ok: true, verdict: parsed.verdict, findings: parsed.findings } : { ok: false, error: parsed.error };
+    },
+    fix: (findings) => { fixCalls.push(findings); return { ok: true, committedSha: "deadbeef" }; },
+  }));
+
+  assert.notEqual(r.stopReason, "reviewer_failed");
+  assert.equal(r.rounds[0]!.verdict, "needs_fix");
+  assert.equal(r.rounds[0]!.findings.length, 2);
+  assert.equal(r.rounds[0]!.fixAttempted, true, "a real fail verdict with findings must dispatch the fixer");
+  assert.equal(fixCalls.length, 1);
+  assert.equal(fixCalls[0]!.length, 2);
 });
 
 // ── FG-457: renderReviewLoopNote disambiguates absent-verdict causes ─────────
