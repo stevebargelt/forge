@@ -176,12 +176,16 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
         primary.verified === true && primary.detailRow?.source === "ci" ? primary.detailRow : null;
 
       let hostVerifiedLocal: boolean | null;
-      let detailRow: HostVerificationRow | null;
+      // FG-500 review finding: a passing item's audit string must cite EVERY
+      // gate-list member's evidence, not just the last one — a single row (or a
+      // single failing row) still renders as a one-element list, so the format
+      // below is unchanged for single-gate projects (regression).
+      let detailRows: HostVerificationRow[];
       let failureCount: number;
 
       if (primaryCiPassingRow) {
         hostVerifiedLocal = true;
-        detailRow = primaryCiPassingRow;
+        detailRows = [primaryCiPassingRow];
         failureCount = primary.failureCount;
       } else {
         const perGate = gateList.map((gate, i) =>
@@ -192,34 +196,39 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
           // FG-453: a real, provable gap on ANY list member must never be
           // laundered into a pass by another member's success.
           hostVerifiedLocal = false;
-          detailRow = failing.detailRow;
+          detailRows = failing.detailRow ? [failing.detailRow] : [];
           failureCount = failing.failureCount;
         } else if (perGate.every((g) => g.verified === true)) {
           hostVerifiedLocal = true;
-          detailRow = perGate[perGate.length - 1]!.detailRow;
+          detailRows = perGate.map((g) => g.detailRow!);
           failureCount = perGate.reduce((sum, g) => sum + g.failureCount, 0);
         } else {
           // No member proven to have failed, but at least one has no covering
           // evidence at all yet — incomplete, not a proven gap (unknown, per the
           // single-gate "no matching rows" convention).
           hostVerifiedLocal = null;
-          detailRow = null;
+          detailRows = [];
           failureCount = 0;
         }
       }
 
       hostVerified = hostVerifiedLocal;
-      if (detailRow) {
-        // Evidence must match the verdict: a true verdict shows the passing row that
-        // establishes it (latest one), a false verdict shows a failing row — never the
-        // reverse. Earlier covering failures are retained as visible audit history.
+      if (detailRows.length > 0) {
+        // Evidence must match the verdict: a true verdict shows the passing row(s)
+        // that establish it (one per gate-list member), a false verdict shows the
+        // failing row — never the reverse. Earlier covering failures are retained
+        // as visible audit history.
         // FG-474: source distinguishes a real host exec ('host') from evidence
         // sourced from a green required CI check ('ci') — ci_url is present only
         // for the latter.
+        const rowSegments = detailRows.map(
+          (row) =>
+            `gate: ${row.gateName}; command: ${row.command}; exit_code: ${row.exitCode}; ` +
+            `commit: ${row.commitSha}; recorded_at: ${row.recordedAt}; source: ${row.source ?? "host"}` +
+            (row.source === "ci" && row.ciUrl ? `; ci_url: ${row.ciUrl}` : "")
+        );
         hostVerificationDetail =
-          `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}; source: ${detailRow.source ?? "host"}` +
-          (detailRow.source === "ci" && detailRow.ciUrl ? `; ci_url: ${detailRow.ciUrl}` : "") +
+          rowSegments.join(" | ") +
           (hostVerifiedLocal && failureCount > 0 ? `; earlier_covering_failures: ${failureCount}` : "");
       }
     } catch {

@@ -831,6 +831,24 @@ describe("findCoveringGateEvidence (FG-500: derived gate list)", () => {
     assert.equal((evidence as { rows: { command: string }[] }).rows.length, 2, "rows must carry a covering row per list member");
   });
 
+  test("describeGateEvidence cites EVERY covering row, not just the fast tier (FG-500 review finding)", () => {
+    insertHostVerification({
+      ticketId: "FG-500E", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    insertHostVerification({
+      ticketId: "FG-500E", projectDir, commitSha: GATE_SHA,
+      gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 0, recordedAt: "2026-01-01T00:00:01Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500E", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: unreachableProvider,
+    })!;
+    const desc = describeGateEvidence(evidence);
+    assert.match(desc, /host_verifications row #\d+.*command: npm run test:all/, "must cite the fast-tier row");
+    assert.match(desc, /host_verifications row #\d+.*command: npm run test:extended/, "must cite the extended-tier row");
+  });
+
   test("a passing fast-tier row + a FAILING extended row does not satisfy (negative)", () => {
     insertHostVerification({
       ticketId: "FG-500C", projectDir, commitSha: GATE_SHA,

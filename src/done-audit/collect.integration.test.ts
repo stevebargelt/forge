@@ -1329,6 +1329,18 @@ test("collect FG-500: passing rows for BOTH the fast and extended gate satisfy d
   const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-BOTHPASS");
   assert.equal(input.verification.hostVerified, true, "both list members covered by passing rows must satisfy done-audit");
 
+  // FG-500 review finding: the audit string for a passing item must not silently
+  // drop the fast-tier row — both gate-list members' evidence must be present.
+  assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("command: npm run test:all"),
+    `detail must include the fast-tier row\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("command: npm run test:extended"),
+    `detail must include the extended-tier row\ndetail: ${input.verification.hostVerificationDetail}`
+  );
+
   const result = evaluateDoneAudit(input);
   assert.equal(result.checks.find((c) => c.name === "host_verification")?.status, "pass");
 });
@@ -1402,4 +1414,13 @@ test("collect FG-500 regression: NO test:extended script -> single-gate behavior
 
   const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-REGSINGLE");
   assert.equal(input.verification.hostVerified, true, "single-gate project (no test:extended script) — a fast-tier-only pass row still satisfies, unchanged");
+
+  // Regression: a single-gate project's detail string renders exactly as it did
+  // before FG-500's multi-row join — one row, no " | " separator.
+  assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
+  assert.ok(!input.verification.hostVerificationDetail!.includes(" | "), "single-gate detail must not carry a multi-row join separator");
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("gate: npm run test:all; command: npm run test:all; exit_code: 0"),
+    `detail must render the single row in the pre-existing format\ndetail: ${input.verification.hostVerificationDetail}`
+  );
 });

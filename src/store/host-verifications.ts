@@ -476,9 +476,14 @@ export function findCoveringGateEvidence(opts: {
 }
 
 /** Human-readable description of WHAT covered a reuse — used in place of raw run
- *  output wherever verification is reported (the review-loop note, CLI logs). */
+ *  output wherever verification is reported (the review-loop note, CLI logs).
+ *  FG-500: host_row evidence.rows carries a covering row per derived gate list
+ *  member, not just the fast tier — every row is cited so the note attests to
+ *  the FULL verified set, not a single (possibly fast-tier-only) row. */
 export function describeGateEvidence(evidence: GateEvidence): string {
   return evidence.source === "host_row"
-    ? `host_verifications row #${evidence.row.id} (sha ${evidence.row.commitSha}, command: ${evidence.row.command})`
+    ? evidence.rows
+        .map((row) => `host_verifications row #${row.id} (sha ${row.commitSha}, command: ${row.command})`)
+        .join("; ")
     : `CI check "${REQUIRED_CI_CHECK_CONTEXT}" (sha ${evidence.sha})${evidence.checkUrl ? ` — ${evidence.checkUrl}` : ""}`;
 }
