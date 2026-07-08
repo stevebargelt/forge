@@ -15,6 +15,7 @@ import {
   describeGateEvidence,
   aggregateCiCheckRuns,
   projectCiRunsCommand,
+  projectCiWorkflowJobIds,
   REQUIRED_CI_CHECK_CONTEXT,
   type CiCheckStatus,
 } from "./host-verifications.js";
@@ -459,6 +460,48 @@ test("projectCiRunsCommand: multiple workflow files where a NON-'CI' workflow co
   });
 });
 
+// ── FG-495 review finding: projectCiWorkflowJobIds — enumerates every job id
+// of a matched workflow so findCoveringGateEvidence can require the WHOLE
+// workflow green at a sha, not just the one job paired to opts.command ──────
+
+test("projectCiWorkflowJobIds: a workflow with two jobs -> both job ids returned", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(
+      dir,
+      "ci.yml",
+      "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n  test-extended:\n    steps:\n      - run: npm run test:extended\n"
+    );
+    assert.deepEqual(new Set(projectCiWorkflowJobIds(dir, "CI")), new Set(["test", "test-extended"]));
+  });
+});
+
+test("projectCiWorkflowJobIds: a single-job workflow -> just that one job id (back-compat)", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n");
+    assert.deepEqual(projectCiWorkflowJobIds(dir, "CI"), ["test"]);
+  });
+});
+
+test("projectCiWorkflowJobIds: no .github/workflows directory at all -> null (fail closed)", () => {
+  withTempProjectDir((dir) => {
+    assert.equal(projectCiWorkflowJobIds(dir, "CI"), null);
+  });
+});
+
+test("projectCiWorkflowJobIds: no workflow with that name -> null (fail closed)", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: Build\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n");
+    assert.equal(projectCiWorkflowJobIds(dir, "CI"), null);
+  });
+});
+
+test("projectCiWorkflowJobIds: unparseable YAML with no other matching workflow -> null (fail closed)", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps: [\n");
+    assert.equal(projectCiWorkflowJobIds(dir, "CI"), null);
+  });
+});
+
 // ── FG-474: findCoveringGateEvidence / describeGateEvidence ────────────────────
 //
 // projectDir here is a REAL temp directory with a matching .github/workflows/ci.yml
@@ -610,6 +653,73 @@ describe("findCoveringGateEvidence / describeGateEvidence (real per-project ci.y
       checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
     });
     assert.equal(evidence, null, "a green check reported for a DIFFERENT sha (e.g. a stale branch head) must never cover the requested sha");
+  });
+
+  // ── FG-495 review finding: the WHOLE workflow must be green at the sha, not
+  // just the one job paired to opts.command — a split-suite project (e.g.
+  // `test` + `test-extended`) must not mint CI-sourced coverage off a green
+  // `test` alone while a sibling required job is red, pending, or missing.
+  describe("whole-workflow coverage (FG-495): a second required job in the same workflow", () => {
+    beforeEach(() => {
+      rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+      writeWorkflowFile(
+        projectDir,
+        "ci.yml",
+        `name: CI\njobs:\n  test:\n    steps:\n      - run: ${GATE_CMD}\n  test-extended:\n    steps:\n      - run: npm run test:extended\n`
+      );
+    });
+
+    test("both jobs green at the sha -> covers (row minted)", () => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-714", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/paired" }),
+      });
+      assert.ok(evidence, "both jobs green must cover");
+      assert.equal(evidence!.source, "ci");
+      assert.equal((evidence as { source: "ci"; checkUrl?: string }).checkUrl, "https://example.com/run/paired", "checkUrl must be the PAIRED job's, not an arbitrary sibling's");
+    });
+
+    test("paired job green + other job failed -> no coverage", () => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-715", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) =>
+          opts.checkContext === "CI / test"
+            ? { sha: GATE_SHA, state: "success" }
+            : { sha: GATE_SHA, state: "failure" },
+      });
+      assert.equal(evidence, null, "a red sibling required job must block CI-sourced coverage even though the paired job is green");
+    });
+
+    test("other job queued/in_progress -> no coverage (pending)", () => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-716", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) =>
+          opts.checkContext === "CI / test"
+            ? { sha: GATE_SHA, state: "success" }
+            : { sha: GATE_SHA, state: "pending" },
+      });
+      assert.equal(evidence, null, "a still-running sibling job is not covering evidence — must not mint a row while the workflow is mid-flight");
+    });
+
+    test("other job has NO check run at the sha -> no coverage", () => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-717", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "success" } : null),
+      });
+      assert.equal(evidence, null, "a sibling job with no check run at all at this sha must not be assumed green");
+    });
+
+    test("unparseable workflow -> no coverage, provider never consulted (both pairing and job enumeration fail closed)", () => {
+      rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+      writeWorkflowFile(projectDir, "ci.yml", "name: CI\njobs:\n  test:\n    steps: [\n");
+      let called = false;
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-718", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+      });
+      assert.equal(evidence, null, "an unparseable workflow means neither pairing nor job coverage can be established — fail closed");
+      assert.equal(called, false, "the provider must never be consulted when the workflow can't be parsed");
+    });
   });
 
   test("describeGateEvidence: host_row and ci evidence render distinct, informative descriptions", () => {
