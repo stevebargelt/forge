@@ -4,8 +4,8 @@ type: story
 status: done
 title: "campaign drive catch-and-park: a thrown runNext/startRun transitions running->paused with a recoverable item instead of stranding the campaign (review F7)"
 created: 2026-07-07
-closed: 2026-07-07
-closed_commit: 1f8ced8
+closed: 2026-07-08
+closed_commit: b1d9c09
 ---
 
 Source: independent engineering review 2026-07-06 (notes/forge-engineering-review-2026-07-06.md), finding F7 / backlog rec #9. Observed live 2026-07-07 ~16:03Z: an externally-killed drive process left campaign-4e43b64871d3 stranded in `running` (recovered manually via `forge campaign pause`).
@@ -33,3 +33,7 @@ The invariant that matters — every drive-path throw leaves the campaign paused
 ## Ship record
 
 PR #63 (merge 1f8ced8; commits 58238f3 catch-and-park, 26b8693 structured drive_error JSON, f7b6161 loop round-1 blockerKind cleanup, b6349f4 startRun retry-composition). Three review rounds; verification green at every round.
+
+## Reopen record (2026-07-08)
+
+Reopened same-session on an operator-reported HIGH: the drive_error `--json` `guidance` field was unconditionally `forge campaign resume <id>`, but the startRun-throw shape parks failed/blocked/infrastructure and resume SKIPS failed items — an orchestrator following the guidance would let the campaign reach complete_with_issues instead of recovering the item (docs encoded the same mismatch, so tests had "consciously accepted" it). Fix: guidance now branches on the parked shape (retry-then-resume for the infrastructure park; bare resume for awaiting_gate and the unreachable no-parked-item fallback), with CLI-boundary tests for both reachable shapes across start and resume, plus a verify-only test-engineer trace proving the fallback branch has no in-process producer. PR #64, merge b1d9c09. The earlier "proven end-to-end" claim in this ticket applied to the executor recovery cycle — the CLI guidance surface above it was the part review rounds and tests had not pinned.
