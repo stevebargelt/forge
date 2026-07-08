@@ -405,6 +405,14 @@ test("integ FG-499: forge claude does NOT hard-block (advisory only), naming the
   assert.match(result.stderr, /profile 'forge-fg435-test-profile'/);
   assert.match(result.stderr, /aws sso login --profile forge-fg435-test-profile/);
   assert.match(result.stderr, /advisory only/);
+  // Prove launch actually proceeds past the credential check: the status
+  // banner is only printed (step 7 of claude.ts) after both preflight checks
+  // above have run to completion without a process.exit call.
+  assert.match(
+    result.stdout,
+    /Launching as '.*' orchestrator.*bedrock:forge-fg435-test-profile/,
+    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
+  );
 });
 
 // ─── (7) FG-435 round 2: profile-scoped SSO-expiry check (no STS cache at all) ─
@@ -453,6 +461,13 @@ test("integ FG-499: forge claude does NOT hard-block (advisory only) on expired 
   assert.match(result.stderr, /profile 'forge-fg435r2-test-profile'/);
   assert.match(result.stderr, /aws sso login --profile forge-fg435r2-test-profile/);
   assert.match(result.stderr, /advisory only/);
+  // Prove launch actually proceeds past the credential check (see note above
+  // the STS-stale test's equivalent assertion).
+  assert.match(
+    result.stdout,
+    /Launching as '.*' orchestrator.*bedrock:forge-fg435r2-test-profile/,
+    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
+  );
 });
 
 test("integ FG-435 round 2: forge claude does NOT hard-block on expired SSO session when export-credentials succeeds (advisory only)", () => {
@@ -548,6 +563,13 @@ test("integ FG-435 round 2: a fresh OTHER profile does not mask the resolved pro
   assert.match(result.stderr, /profile 'forge-fg435r2-expired-target'/);
   assert.doesNotMatch(result.stderr, /forge-fg435r2-fresh-other/);
   assert.match(result.stderr, /advisory only/);
+  // Prove launch actually proceeds past the credential check (see note above
+  // the STS-stale test's equivalent assertion).
+  assert.match(
+    result.stdout,
+    /Launching as '.*' orchestrator.*bedrock:forge-fg435r2-expired-target/,
+    `expected the status banner in stdout, proving launch proceeded past the credential preflight; got stdout=${result.stdout} stderr=${result.stderr}`,
+  );
 });
 
 test("integ FG-435 round 2 fix: forge claude does NOT hard-block a plain (non-SSO) static-credential bedrock profile, and never shells out to export-credentials for it", () => {
