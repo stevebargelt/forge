@@ -24,7 +24,7 @@ Build a bounded review/fix loop so the user is not the relay between implementer
 **Guardrails:**
 - Never auto-run live spend, credential creation, live DB migration, destructive commands, or ambiguous product decisions.
 - Never auto-close tickets unless reviewer passes and deterministic verification passes.
-- Findings must be file/line anchored or explicitly marked unanchored.
+- Findings must be file/line anchored or explicitly marked unanchored. (MVP contract as first shipped; since FG-493 the loop COERCES a finding missing either anchor half to unanchored:true instead of rejecting the reviewer result — red-wide's native contract omits file/line for non-line-tied concerns.)
 - Route resolution preflight applies before every dispatch.
 - Orchestrator may initiate the loop only after presenting ticket, route, commit range, max rounds, and stop conditions.
 
