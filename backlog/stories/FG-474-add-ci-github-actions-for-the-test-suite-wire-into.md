@@ -37,3 +37,8 @@ User-visible operator pain (invisible multi-minute host waits + repeated runs), 
 
 ## Reference
 Merge policy "required CI checks green" (orchestrator template / CLAUDE.md). `.nvmrc`=24. better-sqlite3 ABI issue observed this session (login-shell nvm default = v131 vs project v137). test scripts: package.json `test` (root), `test:all` (root + dashboard).
+
+
+## Evidence addendum (2026-07-08 autonomous session — operator: "the review loop re-running tests when you just ran tests is a waste of time")
+
+One night's quick-lane shipping (FG-485/488/489/490 + one reopen) ran the full host suite ~10 times (~8 min each). Breakdown per ticket: orchestrator pre-loop test:all + the review-loop's round-1 verification of the SAME commit + a post-merge run at main for the host_verifications row. Orchestrator process change (immediate): drop the pre-loop run — the loop's verification is the gate. Remaining structural need this ticket owns: (a) CI as the required merge check so local suites stop being the bottleneck; (b) review-loop consumes covering verification evidence (CI status or a host_verifications row at the same sha) instead of re-running; (c) the post-merge evidence run comes from CI/reconcile-capture rather than a manual host run.
