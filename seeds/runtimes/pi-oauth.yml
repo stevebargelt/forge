@@ -78,7 +78,13 @@ invocation:
     - "${MODEL}"
     - --append-system-prompt
     - "${SYSTEM_PROMPT}"
-    - "${TASK_PACKAGE_MARKDOWN}"      # task package as the positional message
+    # FG-497: reference the task package FILE (already written to /task/package.md
+    # by invoke.ts, unbounded) via pi's `@file` message syntax, instead of
+    # embedding ${TASK_PACKAGE_MARKDOWN} verbatim as a positional argv string —
+    # that breached Linux's MAX_ARG_STRLEN (131072 bytes) on large packets
+    # (e.g. a review-loop reviewer packet), the same defect fixed for the
+    # system prompt above.
+    - "@/task/package.md"
   # No --api-key: auth comes from PI_CODING_AGENT_DIR/auth.json (OAuth).
   # No `stdin:` — pi reads the prompt from args (message-arg).
 

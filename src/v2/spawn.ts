@@ -92,6 +92,25 @@ export type BuildArgsResult = {
   stdin: string | undefined;
 };
 
+// FG-497: Linux caps a single argv/env string at MAX_ARG_STRLEN (131072 bytes,
+// include/uapi/linux/binfmts.h). A composed prompt or env value that breaches
+// this makes the container's exec() die with E2BIG before the agent starts —
+// no result.json, no stdout, just a bare exit. Guard well under the real limit
+// so an oversized embed fails loud on the host with a diagnostic instead of
+// surfacing as an unexplained container crash.
+const MAX_SINGLE_ARG_BYTES = 120_000;
+
+function assertWithinArgLimit(label: string, value: string): void {
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes > MAX_SINGLE_ARG_BYTES) {
+    throw new Error(
+      `FG-497: ${label} is ${bytes} bytes, exceeding MAX_SINGLE_ARG_BYTES (${MAX_SINGLE_ARG_BYTES}) — ` +
+        `a single argv/env string this large risks E2BIG at container exec (Linux MAX_ARG_STRLEN is 131072 bytes). ` +
+        `Move this content onto stdin instead of argv/env.`,
+    );
+  }
+}
+
 export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsResult {
   const args: string[] = ["run", "--rm", "-i"];
 
@@ -373,6 +392,14 @@ export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsR
   const stdin = runtime.invocation.stdin
     ? substitute(runtime.invocation.stdin, ctx)
     : undefined;
+
+  // FG-497: fail fast, on the host, before exec — not with a bare E2BIG death
+  // inside the container. Checks every argv string, including each "-e
+  // KEY=VALUE" env pair (labeled by KEY for a useful diagnostic).
+  for (let i = 0; i < args.length; i++) {
+    const label = args[i - 1] === "-e" ? `env ${args[i]!.split("=")[0]}` : `argv[${i}] ("${args[i - 1] ?? ""}")`;
+    assertWithinArgLimit(label, args[i]!);
+  }
 
   return { args, stdin };
 }

@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Runtime } from "./schema.js";
-import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, type SpawnContext } from "./spawn.js";
+import { buildDockerArgs, buildProvisionerDockerArgs, resolveProjectContainerPath, _internal, type SpawnContext } from "./spawn.js";
 import { lockfileHash, planDependencyVolumes } from "./dependency-provisioning.js";
 
 // A browser-tools dir that actually contains the auth injector (#181 pin check).
@@ -673,9 +673,12 @@ test("#261: buildDockerArgs runs pi with -p --mode json and substitutes prompt +
   assert.ok(cmd.includes("--no-context-files"));
   assert.deepEqual(cmd.slice(cmd.indexOf("--provider"), cmd.indexOf("--provider") + 2), ["--provider", "anthropic"]);
   assert.deepEqual(cmd.slice(cmd.indexOf("--model"), cmd.indexOf("--model") + 2), ["--model", "claude-sonnet-4-6"]);
-  // system prompt via flag; task package as the trailing positional message.
+  // system prompt via flag; task package as the trailing positional message —
+  // FG-497: a file reference (@/task/package.md), not the embedded markdown,
+  // so an oversized task package never breaches Linux's argv byte limit.
   assert.deepEqual(cmd.slice(cmd.indexOf("--append-system-prompt"), cmd.indexOf("--append-system-prompt") + 2), ["--append-system-prompt", "SYS-PROMPT"]);
-  assert.equal(cmd[cmd.length - 1], "PKG-MD", "task package is the positional message arg");
+  assert.equal(cmd[cmd.length - 1], "@/task/package.md", "task package is referenced by file, as the positional message arg");
+  assert.ok(!cmd.includes("PKG-MD"), "the raw task package markdown must never be embedded in argv");
   assert.equal(stdin, undefined, "pi reads the prompt from args, not stdin");
 });
 
@@ -708,8 +711,10 @@ test("#263: pi command delivers the system prompt and task package exactly once 
   // seed+constraints: exactly one --append-system-prompt, carrying it once.
   assert.equal(cmd.filter((a) => a === "--append-system-prompt").length, 1);
   assert.equal(cmd.filter((a) => a === "SEED-AND-CONSTRAINTS").length, 1);
-  // task package: exactly one occurrence (the positional message).
-  assert.equal(cmd.filter((a) => a === "TASK-PACKAGE").length, 1);
+  // task package: exactly one occurrence, as a file reference (FG-497) — the
+  // raw markdown must never land in argv.
+  assert.equal(cmd.filter((a) => a === "@/task/package.md").length, 1);
+  assert.equal(cmd.filter((a) => a === "TASK-PACKAGE").length, 0);
   // --no-context-files present so pi doesn't ALSO auto-load /project context.
   assert.ok(cmd.includes("--no-context-files"));
   // single delivery channel: nothing on stdin to duplicate it.
@@ -848,6 +853,36 @@ function pickProvisionerEnv(args: string[]): Record<string, string> {
   }
   return out;
 }
+
+// ── FG-497: fail-fast guard against an oversized single argv/env string ──────
+
+test("buildDockerArgs: FG-497 throws a named error when SYSTEM_PROMPT (argv, via --append-system-prompt) exceeds MAX_SINGLE_ARG_BYTES", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const rt: Runtime = {
+    ...BASE_RUNTIME,
+    invocation: {
+      command: "claude",
+      args: ["--model", "${MODEL}", "--append-system-prompt", "${SYSTEM_PROMPT}", "--print"],
+    },
+  };
+  const oversizedSystemPrompt = "x".repeat(140_000); // > Linux's 131072-byte MAX_ARG_STRLEN
+  // Exercised via _internal.buildDockerArgs (the same function buildDockerArgs
+  // re-exports) so the guard is unit-testable at its documented seam.
+  assert.throws(
+    () => _internal.buildDockerArgs(rt, { ...BASE_CTX, SYSTEM_PROMPT: oversizedSystemPrompt }),
+    /FG-497.*argv\[\d+\].*140000 bytes/s,
+  );
+});
+
+test("buildDockerArgs: FG-497 the guard does NOT trip on a legitimate bounded prompt (current seeds are ~10-20KB)", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const boundedSystemPrompt = "y".repeat(20_000); // representative seed+constraints size
+  assert.doesNotThrow(() => buildDockerArgs(BASE_RUNTIME, { ...BASE_CTX, SYSTEM_PROMPT: boundedSystemPrompt }));
+});
 
 test("buildProvisionerDockerArgs: mounts the repo READ-ONLY, mounts every plan volume READ-WRITE, sets the install env, and execs a trivial no-op (not the agent)", () => {
   const repo = mkdtempSync(join(tmpdir(), "forge-fg376-provisioner-"));

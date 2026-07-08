@@ -1,25 +1,39 @@
 #!/usr/bin/env bash
-# #263 — prove the pi-apikey prompt strategy delivers forge context EXACTLY ONCE.
+# #263 / FG-497 — prove the pi-apikey prompt/task-delivery contract EXACTLY.
 #
 # The pi-apikey runtime (seeds/runtimes/pi-apikey.yml) injects forge's composed
-# system prompt via `--append-system-prompt`, the task package as a positional
-# message, and sets `--no-context-files` so pi does NOT also auto-load the
-# project's CLAUDE.md/AGENTS.md (a second, leaked context source).
+# system prompt via `--append-system-prompt`, sets `--no-context-files` so pi
+# does NOT also auto-load the project's CLAUDE.md/AGENTS.md (a second, leaked
+# context source), and — since FG-497 — passes the task package as a FILE
+# REFERENCE (`@/task/package.md`, pi's `@file` message syntax) rather than an
+# embedded positional argv string, because the raw markdown could breach
+# Linux's MAX_ARG_STRLEN (131072 bytes) on large packets (e.g. a review-loop
+# reviewer packet). invoke.ts writes the rendered package to
+# TASK_DIR/package.md, which the runtime mounts at /task.
 #
-# This harness validates that claim against the REAL pi binary in the agent image,
-# deterministically and offline: it points pi at a local mock endpoint (via a
-# custom models.json provider) and inspects the actual outbound request body. No
-# provider credential, no network, no token spend.
+# pi's REAL @file processor (vendored cli/file-processor.js) does not inline
+# the file's raw bytes into the message — it wraps them in a
+# `<file name="...">...</file>` element. So the task sentinel must be asserted
+# in ITS WRAPPED FORM, not as raw positional text.
 #
-# Asserts, with forge's flags (--no-context-files):
+# This harness validates both claims against the REAL pi binary in the agent
+# image, deterministically and offline: it points pi at a local mock endpoint
+# (via a custom models.json provider) and inspects the actual outbound request
+# body. No provider credential, no network, no token spend.
+#
+# Asserts, with forge's flags (--no-context-files, @/task/package.md):
 #   - the system-prompt sentinel appears exactly once  (seed+constraints, once)
 #   - the task sentinel appears exactly once            (task package, once)
+#   - the task sentinel arrives wrapped in pi's <file name="/task/package.md">
+#     element exactly once (the actual @file delivery contract, not just "the
+#     bytes are in there somewhere")
 #   - the project-context-file sentinel does NOT appear (no double-load)
 # and as a control (without --no-context-files) the project file IS loaded —
 # proving the flag is what suppresses it.
 #
 # Re-run after bumping pi (PI_CLI_VERSION in docker/agent-dev-worker.Dockerfile)
-# to confirm --no-context-files semantics still hold. Requires the agent image:
+# to confirm --no-context-files and @file-wrapping semantics still hold.
+# Requires the agent image:
 #   ./docker/build.sh && ./scripts/pi-context-proof.sh
 set -euo pipefail
 
@@ -40,6 +54,14 @@ http.createServer((req, res) => {
   });
 }).listen(8899, "127.0.0.1", () => console.error("mock up"));
 JS
+
+# Task package delivered exactly the way invoke.ts + the runtime mount deliver
+# it for real: written to a host dir, bind-mounted at /task, referenced by pi
+# via "@/task/package.md". Written host-side (not by the container) because
+# the runtime's real mount is host-writable / container-readable, same shape.
+mkdir -p "$H/task"
+printf 'SENTINEL_TASK_MARKER_99\n' > "$H/task/package.md"
+chmod -R a+rX "$H/task"
 
 cat > "$H/harness.sh" <<'SH'
 set -e
@@ -63,14 +85,21 @@ seed_files(){ rm -f ~/proj/CLAUDE.md ~/proj/AGENTS.md
     claude) printf 'PROJECT CLAUDE\n%s\n' "$CLA" > ~/proj/CLAUDE.md;;
     agents) printf 'PROJECT AGENTS\n%s\n' "$AGE" > ~/proj/AGENTS.md;;
   esac; done; }
+# Task package argv shape mirrors seeds/runtimes/pi-*.yml exactly:
+# "@/task/package.md" (a file reference), not the rendered markdown inline.
 run_pi(){ pi -p --mode json --no-session --provider mock --model mock-model \
-  "$@" --append-system-prompt "$SYS" "$TASK" >/dev/null 2>&1 || true; }
+  "$@" --append-system-prompt "$SYS" "@/task/package.md" >/dev/null 2>&1 || true; }
 n(){ grep -oh "$1" /tmp/reqs.log 2>/dev/null | wc -l | tr -d ' '; }
+# Fixed-string count (the wrapped form has regex metacharacters: < " \).
+nf(){ grep -oFh "$1" /tmp/reqs.log 2>/dev/null | wc -l | tr -d ' '; }
+# pi's real @file processor (cli/file-processor.js) wraps file content as
+# <file name="ABS_PATH">\nCONTENT\n</file> — asserted verbatim, JSON-escaped.
+WRAP='<file name=\"/task/package.md\">\n'"$TASK"
 
 # Treatment: BOTH context files present + forge's flag → both must be suppressed.
 seed_files claude agents; : > /tmp/reqs.log; run_pi --no-context-files
-T_SYS=$(n "$SYS"); T_TASK=$(n "$TASK"); T_CLA=$(n "$CLA"); T_AGE=$(n "$AGE")
-echo "with --no-context-files (both files present): sys=$T_SYS task=$T_TASK claude=$T_CLA agents=$T_AGE"
+T_SYS=$(n "$SYS"); T_TASK=$(n "$TASK"); T_CLA=$(n "$CLA"); T_AGE=$(n "$AGE"); T_WRAP=$(nf "$WRAP")
+echo "with --no-context-files (both files present): sys=$T_SYS task=$T_TASK claude=$T_CLA agents=$T_AGE wrapped=$T_WRAP"
 
 # Controls: each file ALONE, no flag → it must load (isolated because pi loads
 # only the first context candidate per directory).
@@ -81,11 +110,12 @@ echo "without --no-context-files (controls): claude=$C_CLA agents=$C_AGE"
 fail=0
 [ "$T_SYS" = "1" ]   || { echo "FAIL: seed+constraints not delivered exactly once (got $T_SYS)"; fail=1; }
 [ "$T_TASK" = "1" ]  || { echo "FAIL: task package not delivered exactly once (got $T_TASK)"; fail=1; }
+[ "$T_WRAP" = "1" ]  || { echo "FAIL: task package not delivered via pi's @file <file> wrapper exactly once (got $T_WRAP) — @file delivery contract broken"; fail=1; }
 [ "$T_CLA" = "0" ]   || { echo "FAIL: project CLAUDE.md leaked despite --no-context-files (got $T_CLA)"; fail=1; }
 [ "$T_AGE" = "0" ]   || { echo "FAIL: project AGENTS.md leaked despite --no-context-files (got $T_AGE)"; fail=1; }
 [ "$C_CLA" -ge "1" ] || { echo "FAIL: control did not load CLAUDE.md — flag proof inconclusive (got $C_CLA)"; fail=1; }
 [ "$C_AGE" -ge "1" ] || { echo "FAIL: control did not load AGENTS.md — flag proof inconclusive (got $C_AGE)"; fail=1; }
-[ "$fail" = "0" ] && echo "PASS: forge context delivered exactly once; --no-context-files suppresses both CLAUDE.md and AGENTS.md." || exit 1
+[ "$fail" = "0" ] && echo "PASS: forge context delivered exactly once; task package delivered via @file wrapping exactly once; --no-context-files suppresses both CLAUDE.md and AGENTS.md." || exit 1
 SH
 
-docker run --rm --user 1000 -e FORGE_NO_BROWSER=1 -v "$H:/h:ro" --entrypoint bash "$IMAGE" /h/harness.sh
+docker run --rm --user 1000 -e FORGE_NO_BROWSER=1 -v "$H:/h:ro" -v "$H/task:/task:ro" --entrypoint bash "$IMAGE" /h/harness.sh

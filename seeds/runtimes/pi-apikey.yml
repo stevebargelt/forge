@@ -22,7 +22,8 @@ description: |
 # prompt handling key off these, not the provider name. log_format: pi-jsonl
 # selects pi's usage parser (#262), independent of the upstream provider.
 # prompt_strategy: message-arg — system prompt via --append-system-prompt, task
-# package as a positional message (the injection mapping itself is #263).
+# package via pi's `@file` message syntax referencing /task/package.md (the
+# injection mapping itself is #263; FG-497 moved the package off argv).
 runtime_kind: pi
 log_format: pi-jsonl
 prompt_strategy: message-arg
@@ -82,7 +83,13 @@ invocation:
     - "${MODEL}"
     - --append-system-prompt
     - "${SYSTEM_PROMPT}"
-    - "${TASK_PACKAGE_MARKDOWN}"      # task package as the positional message
+    # FG-497: reference the task package FILE (already written to /task/package.md
+    # by invoke.ts, unbounded) via pi's `@file` message syntax, instead of
+    # embedding ${TASK_PACKAGE_MARKDOWN} verbatim as a positional argv string —
+    # that breached Linux's MAX_ARG_STRLEN (131072 bytes) on large packets
+    # (e.g. a review-loop reviewer packet), the same defect fixed for the
+    # system prompt above.
+    - "@/task/package.md"
   # No `stdin:` — pi reads the prompt from args (message-arg), unlike claude/codex.
 
 container:

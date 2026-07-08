@@ -4,13 +4,14 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
+import { invoke, type InvokeArgs, type InvokeResult, type DockerExecFn } from "../../v2/invoke.js";
 import { buildReviewLoopDeps, assertCleanWorkingTree, type ReviewLoopContext } from "./review-loop.js";
+import { runReviewLoop, type VerificationResult } from "../../v2/review-loop.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification } from "../../store/host-verifications.js";
 
@@ -632,4 +633,227 @@ test("FG-500 regression: deps.verify's no-reuse fallback never runs test:extende
     "test:extended must be dropped from the fallback list — requiredHostGate is custom, not the project default"
   );
   assert.equal(result.ok, true, "a failing test:extended must not affect the result since it must never have run");
+});
+
+// ── FG-497: the REAL invoke() dispatch, through the review-loop reviewer path ──
+//
+// Every test above injects a FAKE invokeFn that returns a canned InvokeResult —
+// it never calls invoke() at all. That approximates the wiring (task text
+// shape, runId threading) but never exercises reviewTask()'s packet
+// construction feeding the REAL composeSystemPrompt / buildDockerArgs (incl.
+// the MAX_SINGLE_ARG_BYTES guard) / stdin+package.md payload — i.e. never
+// exercises the actual FG-497 acceptance path (an oversized review-loop
+// packet dispatched through `forge review-loop`'s reviewer). These tests wrap
+// the REAL invoke() — only its docker-exec boundary is stubbed — so the full
+// reviewTask() -> invoke() -> buildDockerArgs() chain runs end-to-end.
+
+// A runtime stub mirroring claude-oauth's real prompt-delivery shape (system
+// prompt via an argv flag, task package via stdin) — the same split
+// invoke.integration.test.ts's FG-497 test uses, reproduced here so this file
+// doesn't depend on that file's private helper.
+function setupArgvBoundedReviewRuntimeStub(): void {
+  const fhome = process.env.FORGE_HOME!;
+  const p = join(fhome, "runtimes", "claude-argv-bounded-rl.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `
+name: claude-argv-bounded-rl
+description: test stub mirroring claude-oauth's argv+stdin prompt delivery (review-loop FG-497 tests)
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["--append-system-prompt", "\${SYSTEM_PROMPT}"]
+  stdin: "\${TASK_PACKAGE_MARKDOWN}"
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+// Wraps the REAL invoke() (not a fake) so buildReviewLoopDeps's `review` dep
+// drives the actual dispatch path; only the docker-exec boundary is stubbed.
+function realInvokeThroughDocker(dockerExec: DockerExecFn): (a: InvokeArgs) => Promise<InvokeResult> {
+  return (a) => invoke({ ...a, runtimeName: "claude-argv-bounded-rl", dockerExec });
+}
+
+test("FG-497 review-loop integration: reviewer dispatch with a >131072-byte diff survives the REAL invoke()+reviewTask() path — argv/env stay bounded, full packet rides stdin/package.md", async () => {
+  setupArgvBoundedReviewRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // A synthetic diff comfortably larger than Linux's MAX_ARG_STRLEN
+  // (131072 bytes) on its own — mirrors a real oversized review-loop packet.
+  // Pre-FG-497, embedding this into the composed system prompt (argv) would
+  // have breached MAX_ARG_STRLEN and died with E2BIG before the agent started.
+  const bigDiff = "+// line of synthetic diff content\n".repeat(6000) + "\nFG-497-RL-BIG-DIFF-MARKER\n";
+  assert.ok(Buffer.byteLength(bigDiff, "utf8") > 131_072, "fixture diff must itself exceed MAX_ARG_STRLEN");
+
+  let capturedArgs: string[] = [];
+  let capturedStdin: string | undefined;
+  let capturedDir = "";
+  const inspectExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath }) => {
+    capturedArgs = args;
+    capturedStdin = stdin;
+    capturedDir = dirname(stdoutPath);
+    if (!existsSync(capturedDir)) mkdirSync(capturedDir, { recursive: true });
+    writeFileSync(join(capturedDir, "result.json"), JSON.stringify({ verdict: "pass", findings: [] }));
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const { deps } = buildReviewLoopDeps(
+    ctx({ ticketId: "FG-497", acceptance: "FG-497 — bound argv/env for review-loop packets", diffProvider: () => bigDiff }),
+    realInvokeThroughDocker(inspectExec),
+  );
+
+  const r = await deps.review({ ok: true, steps: [{ name: "typecheck", ok: true, output: "" }] });
+
+  assert.equal(r.ok, true, `expected the oversized reviewer dispatch to succeed, got: ${JSON.stringify(r)}`);
+  assert.equal((r as { verdict: string }).verdict, "pass");
+
+  // Every docker argv string buildDockerArgs produced (incl. every "-e"
+  // env pair) must stay under Linux's real MAX_ARG_STRLEN. The guard's own
+  // threshold (MAX_SINGLE_ARG_BYTES=120000) is tighter still, so this also
+  // confirms the fail-fast guard never tripped on a legitimate dispatch.
+  const MAX_ARG_STRLEN = 131_072;
+  for (const [i, a] of capturedArgs.entries()) {
+    assert.ok(
+      Buffer.byteLength(a, "utf8") < MAX_ARG_STRLEN,
+      `argv[${i}] is ${Buffer.byteLength(a, "utf8")} bytes — must stay under MAX_ARG_STRLEN`,
+    );
+  }
+
+  // The FULL reviewer packet — acceptance, the oversized diff, and the
+  // rubric — must reach the agent via stdin (unbounded) and land on disk in
+  // package.md, verbatim, not truncated or dropped.
+  assert.ok(capturedStdin, "stdin payload must be present");
+  assert.match(capturedStdin!, /FG-497-RL-BIG-DIFF-MARKER/);
+  assert.ok(capturedStdin!.includes(bigDiff), "stdin must carry the full diff verbatim");
+  assert.match(capturedStdin!, /REVIEWER/);
+  assert.match(capturedStdin!, /FG-497 — bound argv\/env for review-loop packets/);
+
+  const packageMd = readFileSync(join(capturedDir, "package.md"), "utf8");
+  assert.ok(packageMd.includes(bigDiff), "package.md on disk must carry the full diff verbatim");
+});
+
+test("FG-497 review-loop integration: normal-size reviewer packet is unchanged through the REAL invoke() path — acceptance + diff + verification block all reach the reviewer", async () => {
+  setupArgvBoundedReviewRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const smallDiff = "diff --git a/src.ts b/src.ts\n+// small fixture diff\n";
+  let capturedStdin: string | undefined;
+  let capturedDir = "";
+  const inspectExec: DockerExecFn = async ({ stdin, stdoutPath, stderrPath }) => {
+    capturedStdin = stdin;
+    capturedDir = dirname(stdoutPath);
+    if (!existsSync(capturedDir)) mkdirSync(capturedDir, { recursive: true });
+    writeFileSync(join(capturedDir, "result.json"), JSON.stringify({ verdict: "needs_fix", findings: [{ summary: "x", file: "a.ts", line: 1 }] }));
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const { deps } = buildReviewLoopDeps(
+    ctx({ ticketId: "FG-497-small", acceptance: "FG-497-small — normal-size packet", diffProvider: () => smallDiff }),
+    realInvokeThroughDocker(inspectExec),
+  );
+
+  const verification: VerificationResult = { ok: true, steps: [{ name: "test", ok: true, output: "5 passed" }] };
+  const r = await deps.review(verification);
+
+  assert.equal(r.ok, true);
+  assert.equal((r as { verdict: string }).verdict, "needs_fix");
+
+  assert.ok(capturedStdin, "stdin payload must be present");
+  assert.match(capturedStdin!, /FG-497-small — normal-size packet/, "acceptance must reach the packet");
+  assert.ok(capturedStdin!.includes(smallDiff), "diff must reach the packet verbatim");
+  assert.match(capturedStdin!, /- test: passed/, "the deterministic-verification block must reach the packet");
+
+  const packageMd = readFileSync(join(capturedDir, "package.md"), "utf8");
+  assert.ok(packageMd.includes(smallDiff), "package.md on disk must carry the diff");
+  assert.match(packageMd, /- test: passed/, "package.md on disk must carry the verification block");
+});
+
+// ── FG-493 fence, exercised against the REAL dispatch (not a canned result) ──
+//
+// review-loop.test.ts's FG-493 tests pin the ENGINE's tolerance for red-wide's
+// OWN well-formed vocabulary (a schema-valid "fail" with native findings) —
+// that a well-formed-but-red-flavored verdict is NOT misread as
+// reviewer_failed. These tests pin the opposite edge: a genuinely broken
+// reviewer dispatch (no result.json at all, or unparseable JSON) — produced by
+// the REAL invoke() docker-exec path, not a hand-built ParsedVerdict — must
+// still surface as reviewer_failed, never a silent pass or skip.
+
+test("FG-493 fence (real dispatch): an ABSENT result.json from the REAL invoke() path fails deps.review and stops runReviewLoop as reviewer_failed", async () => {
+  setupArgvBoundedReviewRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  // Agent process exits 0 but never wrote result.json at all — a genuinely
+  // absent reviewer output.
+  const noResultExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0; // no result.json written
+  };
+
+  const { deps } = buildReviewLoopDeps(ctx({ ticketId: "FG-493-absent" }), realInvokeThroughDocker(noResultExec));
+  const r = await deps.review({ ok: true, steps: [] });
+
+  assert.equal(r.ok, false, "an absent result.json must never be treated as a valid/passing verdict");
+  assert.match((r as { error: string }).error, /reviewer dispatch failed|no_result_json/);
+
+  // Drive the real (failing) review dep through the actual loop engine to pin
+  // the FG-493 fence end-to-end: a genuine dispatch failure stops the loop as
+  // reviewer_failed — never advances as if the reviewer passed or was skipped,
+  // and never reaches the fixer.
+  const outcome = await runReviewLoop(
+    { maxRounds: 1, ticketId: "FG-493-absent" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: deps.review,
+      fix: () => { throw new Error("fix must never be dispatched on reviewer_failed"); },
+    },
+  );
+  assert.equal(outcome.stopReason, "reviewer_failed");
+  assert.equal(outcome.closeable, false);
+});
+
+test("FG-493 fence (real dispatch): an UNPARSEABLE result.json from the REAL invoke() path fails deps.review and stops runReviewLoop as reviewer_failed", async () => {
+  setupArgvBoundedReviewRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+  const malformedExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), "not json at all");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const { deps } = buildReviewLoopDeps(ctx({ ticketId: "FG-493-malformed" }), realInvokeThroughDocker(malformedExec));
+  const r = await deps.review({ ok: true, steps: [] });
+
+  assert.equal(r.ok, false, "an unparseable result.json must never be treated as a valid/passing verdict");
+  assert.match((r as { error: string }).error, /reviewer dispatch failed|malformed/);
+
+  const outcome = await runReviewLoop(
+    { maxRounds: 1, ticketId: "FG-493-malformed" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: deps.review,
+      fix: () => { throw new Error("fix must never be dispatched on reviewer_failed"); },
+    },
+  );
+  assert.equal(outcome.stopReason, "reviewer_failed");
+  assert.equal(outcome.closeable, false);
 });
