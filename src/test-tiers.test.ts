@@ -5,20 +5,25 @@ import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SRC_ROOT = fileURLToPath(new URL(".", import.meta.url));
+// FG-495 review: dashboard is part of the canonical gate (`npm run test:all`
+// runs `npm test -w dashboard`), so the content guard below must scan it too
+// — a dashboard test spawning a subprocess or sleeping on a real clock is
+// just as much a fast-tier violation as one under src/.
+const DASHBOARD_SRC_ROOT = fileURLToPath(new URL("../dashboard/src/", import.meta.url));
 
-function gatherTestFiles(dir: string): string[] {
+function gatherTestFiles(dir: string, root: string = dir): string[] {
   const results: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...gatherTestFiles(fullPath));
+      results.push(...gatherTestFiles(fullPath, root));
     } else if (
       entry.isFile() &&
       entry.name.endsWith(".test.ts") &&
       entry.name !== "test-setup.ts" &&
       entry.name !== "test-tiers.test.ts"
     ) {
-      results.push(relative(SRC_ROOT, fullPath));
+      results.push(relative(root, fullPath));
     }
   }
   return results;
@@ -89,15 +94,22 @@ function isUnitTierSubprocessViolator(filePath: string): { violation: boolean; r
 }
 
 test("unit-tier files must not spawn subprocesses or run git/sleep", () => {
-  const all = gatherTestFiles(SRC_ROOT);
+  const all = [
+    ...gatherTestFiles(SRC_ROOT).map((rel) => ({ root: SRC_ROOT, rel, label: rel })),
+    ...gatherTestFiles(DASHBOARD_SRC_ROOT).map((rel) => ({
+      root: DASHBOARD_SRC_ROOT,
+      rel,
+      label: join("dashboard/src", rel),
+    })),
+  ];
   const unitFiles = all.filter(
-    (f) => !f.endsWith(".integration.test.ts") && !f.endsWith(".worktree.test.ts"),
+    ({ label }) => !label.endsWith(".integration.test.ts") && !label.endsWith(".worktree.test.ts"),
   );
   const violations: string[] = [];
-  for (const rel of unitFiles) {
-    const full = join(SRC_ROOT, rel);
+  for (const { root, rel, label } of unitFiles) {
+    const full = join(root, rel);
     const { violation, reason } = isUnitTierSubprocessViolator(full);
-    if (violation) violations.push(`${rel}: ${reason}`);
+    if (violation) violations.push(`${label}: ${reason}`);
   }
   assert.deepEqual(
     violations,
