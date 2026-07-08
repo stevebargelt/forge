@@ -892,3 +892,26 @@ test("validateCredsForNewRun: SSO cache looks expired AND export-credentials als
     (err: Error) => err.message.includes("profile 'adx-dev'") && err.message.includes("aws sso login --profile adx-dev"),
   );
 });
+
+// ----- FG-499 regression pin -----
+//
+// FG-499 made `forge claude`'s interactive preflight advisory-only — it never
+// exits non-zero for stale/expired credentials anymore, because an
+// interactive `claude` session handles its own auth failure natively. That
+// change must NOT leak into validateCredsForNewRun: container dispatch
+// (`forge next` / `forge new`) spawns non-interactively, so a bad credential
+// still has to be caught before the container starts, not discovered as a
+// 403 mid-run. This test pins that a failed export-credentials for an SSO
+// profile still throws here, independent of any changes to claude.ts.
+test("FG-499 regression: validateCredsForNewRun still blocks container dispatch when export-credentials fails for an SSO profile", () => {
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "adx-dev";
+  configureLegacySsoProfile("adx-dev", { startUrl: "https://example.awsapps.com/start", accountId: "111", roleName: "R" });
+  writeProfileSsoToken("adx-dev", Date.now() - 1000, new Date(Date.now() - 3600 * 1000).toISOString());
+  delete process.env.FORGE_AWS_CREDS_FOR_TEST; // export-credentials has nothing to fall back on → fails
+  assert.throws(
+    () => validateCredsForNewRun(),
+    (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("profile 'adx-dev'"),
+    "advisory-only semantics from FG-499's claude.ts change must never reach validateCredsForNewRun",
+  );
+});

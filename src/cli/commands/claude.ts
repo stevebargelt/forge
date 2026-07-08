@@ -92,7 +92,13 @@ export function registerClaude(program: Command): void {
         // because some OTHER profile on the host looks fresh or stale. A stale
         // finding here is just a coarse mtime heuristic; `aws configure
         // export-credentials` (the same credential path forge injects into the
-        // container) is authoritative, so we confirm against it before blocking.
+        // container) is authoritative, so we confirm against it before warning.
+        //
+        // FG-499: this is advisory only. An interactive `claude` session
+        // handles its own auth failure natively, so forge must never exit
+        // non-zero here — only warn and proceed to launch. (Contrast
+        // validateCredsForNewRun in util/creds.ts, which still hard-blocks —
+        // container dispatch has no interactive fallback if creds are bad.)
         const staleness = detectStaleStsCache({ profile: resolvedProfile });
         if (staleness?.stale) {
           if (exportCredsOverridesStaleness(resolvedProfile)) {
@@ -101,11 +107,11 @@ export function registerClaude(program: Command): void {
             );
           } else {
             console.error(
-              `forge claude: ${staleness.reason}\n` +
+              `forge claude: ⚠ ${staleness.reason}\n` +
               `  Credential export also failed for '${resolvedProfile}' — its SSO session likely needs a fresh login.\n` +
-              `  Run: aws sso login --profile ${resolvedProfile}`
+              `  Run: aws sso login --profile ${resolvedProfile}\n` +
+              `  (advisory only — continuing; \`claude\` will handle any auth failure itself)`
             );
-            process.exit(1);
           }
         }
 
@@ -123,7 +129,10 @@ export function registerClaude(program: Command): void {
         // aws_access_key_id/aws_secret_access_key bedrock profile), which is
         // "SSO not applicable," not "SSO expired" — hasFreshProfileSsoCache
         // can't tell those apart on its own, so a non-SSO profile must never
-        // reach the export-credentials call or the hard block below.
+        // reach the export-credentials call or the warning below.
+        //
+        // FG-499: advisory only, same rationale as the staleness check above —
+        // warn and proceed, never exit non-zero.
         if (
           resolveProfileSsoIdentity(awsConfigDir(), resolvedProfile) &&
           !hasFreshProfileSsoCache(awsConfigDir(), resolvedProfile)
@@ -134,8 +143,10 @@ export function registerClaude(program: Command): void {
               `(advisory — \`aws configure export-credentials\` succeeded, continuing)`
             );
           } else {
-            console.error(`forge claude: ${describeExpiredSsoSession(awsConfigDir(), resolvedProfile)}`);
-            process.exit(1);
+            console.error(
+              `forge claude: ⚠ ${describeExpiredSsoSession(awsConfigDir(), resolvedProfile)}\n` +
+              `  (advisory only — continuing; \`claude\` will handle any auth failure itself)`
+            );
           }
         }
 

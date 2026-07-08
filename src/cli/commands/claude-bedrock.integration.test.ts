@@ -380,7 +380,7 @@ test("integ FG-435: forge claude does NOT hard-block when STS cache looks stale 
   );
 });
 
-test("integ FG-435: forge claude DOES hard-block, naming the resolved profile, when STS cache is stale and export-credentials also fails", () => {
+test("integ FG-499: forge claude does NOT hard-block (advisory only), naming the resolved profile, when STS cache is stale and export-credentials also fails", () => {
   mkdirSync(join(tmp, ".git"));
   const awsDir = join(tmp, "fake-aws");
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435-test-profile");
@@ -396,9 +396,15 @@ test("integ FG-435: forge claude DOES hard-block, naming the resolved profile, w
     timeout: 15_000,
   });
 
-  assert.equal(result.status, 1, `expected exit 1; stdout=${result.stdout} stderr=${result.stderr}`);
+  // FG-499: an interactive claude session handles its own auth failure
+  // natively, so this preflight condition must never exit non-zero — only
+  // warn (naming the profile + remediation) and proceed past preflight. If
+  // `claude` itself isn't on PATH in this test environment, the spawn
+  // ("error") handler exits 1 for reasons unrelated to the preflight check —
+  // that's why we assert on stderr content rather than the exit code.
   assert.match(result.stderr, /profile 'forge-fg435-test-profile'/);
   assert.match(result.stderr, /aws sso login --profile forge-fg435-test-profile/);
+  assert.match(result.stderr, /advisory only/);
 });
 
 // ─── (7) FG-435 round 2: profile-scoped SSO-expiry check (no STS cache at all) ─
@@ -425,7 +431,7 @@ function writeExpiredSsoOnlyForProfile(awsDir: string, profile: string): void {
   // Deliberately no ~/.aws/cli/cache entry — the SSO-direct shape.
 }
 
-test("integ FG-435 round 2: forge claude hard-blocks on expired SSO session with no STS cache, naming the profile + sso login remediation", () => {
+test("integ FG-499: forge claude does NOT hard-block (advisory only) on expired SSO session with no STS cache, naming the profile + sso login remediation", () => {
   mkdirSync(join(tmp, ".git"));
   const awsDir = join(tmp, "fake-aws");
   writeAwsConfigForFakeProfile(awsDir, "forge-fg435r2-test-profile");
@@ -441,9 +447,12 @@ test("integ FG-435 round 2: forge claude hard-blocks on expired SSO session with
     timeout: 15_000,
   });
 
-  assert.equal(result.status, 1, `expected exit 1; stdout=${result.stdout} stderr=${result.stderr}`);
+  // FG-499: advisory only — must proceed past preflight, never exit non-zero
+  // for this condition. See the note in the STS-stale test above for why we
+  // assert on stderr content rather than the exit code.
   assert.match(result.stderr, /profile 'forge-fg435r2-test-profile'/);
   assert.match(result.stderr, /aws sso login --profile forge-fg435r2-test-profile/);
+  assert.match(result.stderr, /advisory only/);
 });
 
 test("integ FG-435 round 2: forge claude does NOT hard-block on expired SSO session when export-credentials succeeds (advisory only)", () => {
@@ -533,9 +542,12 @@ test("integ FG-435 round 2: a fresh OTHER profile does not mask the resolved pro
     timeout: 15_000,
   });
 
-  assert.equal(result.status, 1, `expected exit 1 (target profile's own expiry must not be masked); stdout=${result.stdout} stderr=${result.stderr}`);
+  // FG-499: advisory only — the target profile's own expiry must still be
+  // named (not masked by the fresh other profile) in the warning, but this
+  // must never exit non-zero.
   assert.match(result.stderr, /profile 'forge-fg435r2-expired-target'/);
   assert.doesNotMatch(result.stderr, /forge-fg435r2-fresh-other/);
+  assert.match(result.stderr, /advisory only/);
 });
 
 test("integ FG-435 round 2 fix: forge claude does NOT hard-block a plain (non-SSO) static-credential bedrock profile, and never shells out to export-credentials for it", () => {
