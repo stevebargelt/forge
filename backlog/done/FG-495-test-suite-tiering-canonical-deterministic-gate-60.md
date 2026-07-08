@@ -1,9 +1,11 @@
 ---
 id: FG-495
 type: story
-status: active
+status: done
 title: "test suite tiering: canonical deterministic gate <=60s (hard ceiling 120s); move slow integration/control-plane/stress coverage to an explicit extended CI tier"
 created: 2026-07-08
+closed: 2026-07-08
+closed_commit: 63f342dff911e34ed92c21126b635d1eee33593f
 ---
 
 ## Problem
