@@ -4,6 +4,38 @@ import { readdirSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { getDb } from "./db.js";
 
+// FG-500: the project default gate is a single command, but a project may also
+// split its suite across an extended tier (see reconcile-collect.ts's
+// getRequiredHostGate + the project's package.json test:extended script).
+// Matches the literal default reconcile-collect.ts/done-audit/collect.ts fall
+// back to when .forge/config.json has no requiredHostGate configured.
+const DEFAULT_REQUIRED_HOST_GATE = "npm run test:all";
+const EXTENDED_GATE_COMMAND = "npm run test:extended";
+
+/** The full required-gate LIST for a project: just [requiredGate], UNLESS
+ *  requiredGate is still the project default AND the project's package.json
+ *  demonstrably defines a test:extended script — in which case the extended
+ *  tier joins the list too. A project with a custom requiredHostGate, or no
+ *  test:extended script, gets single-gate behavior, unchanged (FG-500's
+ *  regression guard — no new false blocks on other managed projects). Every
+ *  consumer of "the deterministic gate" (evidence-reuse, reconcile's real-exec
+ *  capture, done-audit) must treat this LIST, not requiredGate alone, as what
+ *  "the gate" means. */
+export function deriveRequiredGateList(projectDir: string, requiredGate: string): string[] {
+  if (requiredGate !== DEFAULT_REQUIRED_HOST_GATE) return [requiredGate];
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(projectDir, "package.json"), "utf8")) as {
+      scripts?: Record<string, unknown>;
+    };
+    if (typeof pkg.scripts?.["test:extended"] === "string") {
+      return [requiredGate, EXTENDED_GATE_COMMAND];
+    }
+  } catch {
+    // missing or malformed package.json — single-gate behavior stands
+  }
+  return [requiredGate];
+}
+
 // FG-431: LOOKUP exact-matches project_dir, but callers (the CLI recorder, the
 // reconcile-time auto-capture writer) may hand in a relative or otherwise
 // non-canonical path. Canonicalizing to the same absolute form on both the
@@ -367,19 +399,24 @@ function defaultCheckStatusProvider(opts: { projectDir: string; sha: string; che
 }
 
 export type GateEvidence =
-  | { source: "host_row"; row: HostVerificationRow }
+  | { source: "host_row"; row: HostVerificationRow; rows: HostVerificationRow[] }
   | { source: "ci"; sha: string; checkUrl?: string };
 
 const SHA_LOOKUP_RE = /^[0-9a-f]{7,40}$/i;
 
 /** Does covering deterministic-gate evidence already exist for (ticketId,
- *  projectDir, sha, command)? Command match is EXACT — every host_verifications row
- *  is written with the single canonical requiredHostGate string as both its
- *  gate_name and command (see reconcile-collect.ts's getRequiredHostGate), so exact
- *  equality is the correct (and only currently meaningful) "covers" relation; a row
+ *  projectDir, sha, command)? opts.command is the project's requiredHostGate —
+ *  FG-500: the actual covering set is deriveRequiredGateList(opts.projectDir,
+ *  opts.command), not opts.command alone, so a fast-tier-only row can never
+ *  stand in for a project's whole deterministic set (single-gate/custom-gate
+ *  projects derive a one-element list, so behavior there is unchanged). Command
+ *  match per row is EXACT — every host_verifications row is written with one
+ *  canonical gate string as both its gate_name and command (see
+ *  reconcile-collect.ts's getRequiredHostGate/runAndRecordHostVerification), so
+ *  exact equality is the correct "covers" relation for a single row; a row
  *  recorded under a different command (e.g. a narrower `npm run test` vs the
- *  required `npm run test:all`) must never satisfy a broader requirement. Returns
- *  null (fail closed) when neither source covers the exact sha. */
+ *  required `npm run test:all`) must never satisfy a broader requirement.
+ *  Returns null (fail closed) when neither source covers the exact sha. */
 export function findCoveringGateEvidence(opts: {
   ticketId: string;
   projectDir: string;
@@ -389,11 +426,20 @@ export function findCoveringGateEvidence(opts: {
 }): GateEvidence | null {
   if (!SHA_LOOKUP_RE.test(opts.sha)) return null;
 
-  const rows = queryHostVerificationRowsForGate(opts.ticketId, opts.projectDir, opts.command);
-  const coveringRow = rows.find(
-    (r) => r.commitSha === opts.sha && r.command === opts.command && r.exitCode === 0
-  );
-  if (coveringRow) return { source: "host_row", row: coveringRow };
+  // FG-500: host-row coverage requires a PASSING row for EVERY member of the
+  // derived gate list at this exact sha — stops at the first uncovered member,
+  // never partially credits a fast-tier-only row against a broader list.
+  const gateList = deriveRequiredGateList(opts.projectDir, opts.command);
+  const coveringRows: HostVerificationRow[] = [];
+  for (const gate of gateList) {
+    const rows = queryHostVerificationRowsForGate(opts.ticketId, opts.projectDir, gate);
+    const row = rows.find((r) => r.commitSha === opts.sha && r.command === gate && r.exitCode === 0);
+    if (!row) break;
+    coveringRows.push(row);
+  }
+  if (coveringRows.length === gateList.length) {
+    return { source: "host_row", row: coveringRows[0]!, rows: coveringRows };
+  }
 
   // forge is host-global — opts.projectDir is an ARBITRARY managed project, so
   // the only thing that can prove a green REQUIRED_CI_CHECK_CONTEXT ran

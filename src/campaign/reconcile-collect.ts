@@ -10,6 +10,7 @@ import {
   queryHostVerificationRowsForGate,
   insertHostVerification,
   findCoveringGateEvidence,
+  deriveRequiredGateList,
   type CheckStatusProvider,
 } from "../store/host-verifications.js";
 import { eventsForRun } from "../store/events.js";
@@ -302,7 +303,15 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *  project's matched CI workflow is green at that sha (FG-495, via
  *  findCoveringGateEvidence) — a green fast job with another job red, pending,
  *  or absent does not cover. Only when neither covers does this fall through to
- *  the real host exec, unchanged. */
+ *  the real host exec.
+ *
+ *  FG-500: when it falls through, it runs and records EVERY member of
+ *  deriveRequiredGateList(projectDir, requiredGate), in order — not just
+ *  requiredGate — fail-closed on the first failing member (that member's row
+ *  is still recorded with its real exit code; remaining members are never run,
+ *  so a failing extended run blocks exactly like a failing fast run). Each
+ *  member gets its own row under its OWN command string (never requiredGate's
+ *  label) — the FG-419 gate_name spoofing guard applies per member. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,
@@ -383,49 +392,60 @@ export function runAndRecordHostVerification(
     return { status: "recorded", exitCode: 0, commitSha: evidence.sha, source: "ci", ciUrl: evidence.checkUrl };
   }
 
-  const runnable = checkGateRunnable(projectDir, requiredGate);
-  if (!runnable.runnable) {
-    return { status: "skipped", reason: runnable.reason ?? "required gate not runnable in projectDir" };
-  }
+  const gateList = deriveRequiredGateList(projectDir, requiredGate);
 
-  const argv = requiredGate.trim().split(/\s+/).filter(Boolean);
-  const [cmd, ...args] = argv;
-  let exitCode: number;
-  try {
-    execFileSync(cmd!, args, {
-      cwd: projectDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: hostGateTimeoutMs(),
-      maxBuffer: 20 * 1024 * 1024,
+  for (const gate of gateList) {
+    const runnable = checkGateRunnable(projectDir, gate);
+    if (!runnable.runnable) {
+      return { status: "skipped", reason: runnable.reason ?? `required gate not runnable in projectDir: ${gate}` };
+    }
+
+    const argv = gate.trim().split(/\s+/).filter(Boolean);
+    const [cmd, ...args] = argv;
+    let exitCode: number;
+    try {
+      execFileSync(cmd!, args, {
+        cwd: projectDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: hostGateTimeoutMs(),
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      exitCode = 0;
+    } catch (e) {
+      const err = e as { status?: number | null };
+      exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
+    }
+
+    // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
+    // running — re-confirm projectDir is still exactly the sha/state we
+    // snapshotted before the run. If it moved, the exit code above no longer
+    // corresponds to any stable committed sha; discard rather than record it.
+    if (!projectSnapshotStillValid(projectDir, headSha)) {
+      return {
+        status: "skipped",
+        reason: "projectDir HEAD or working tree changed during the gate run — discarding the result rather than recording it against a sha that may no longer reflect what was tested",
+      };
+    }
+
+    insertHostVerification({
+      ticketId,
+      projectDir,
+      commitSha: headSha,
+      gateName: gate,
+      command: gate,
+      exitCode,
+      runId: opts.runId ?? null,
+      recordedAt: nowIso(),
+      source: "host",
     });
-    exitCode = 0;
-  } catch (e) {
-    const err = e as { status?: number | null };
-    exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
+
+    // FG-500: fail closed on the first failing member — a failing extended run
+    // blocks exactly like a failing fast run, and remaining list members
+    // (if any) are never run once the gate has already failed.
+    if (exitCode !== 0) {
+      return { status: "recorded", exitCode, commitSha: headSha, source: "host" };
+    }
   }
 
-  // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
-  // running — re-confirm projectDir is still exactly the sha/state we
-  // snapshotted before the run. If it moved, the exit code above no longer
-  // corresponds to any stable committed sha; discard rather than record it.
-  if (!projectSnapshotStillValid(projectDir, headSha)) {
-    return {
-      status: "skipped",
-      reason: "projectDir HEAD or working tree changed during the gate run — discarding the result rather than recording it against a sha that may no longer reflect what was tested",
-    };
-  }
-
-  insertHostVerification({
-    ticketId,
-    projectDir,
-    commitSha: headSha,
-    gateName: requiredGate,
-    command: requiredGate,
-    exitCode,
-    runId: opts.runId ?? null,
-    recordedAt: nowIso(),
-    source: "host",
-  });
-
-  return { status: "recorded", exitCode, commitSha: headSha, source: "host" };
+  return { status: "recorded", exitCode: 0, commitSha: headSha, source: "host" };
 }

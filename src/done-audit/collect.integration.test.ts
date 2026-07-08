@@ -1274,3 +1274,132 @@ test("collect: malformed .forge/config.json → falls back to default gate and r
     "hostVerified must be true — malformed config falls back to default gate and matches pass evidence"
   );
 });
+
+// ── FG-500: done-audit host_verification coverage requires the FULL derived
+// gate list (fast + test:extended, when the project defines it) — a
+// fast-tier-only row must not ship a project with an extended tier.
+
+function writePackageJsonWithTestExtended(): void {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", scripts: { "test:all": "exit 0", "test:extended": "exit 0" } }, null, 2)
+  );
+}
+
+test("collect FG-500: a passing fast-tier row ALONE does NOT satisfy a project with a test:extended script (negative — fast-only row does not ship)", () => {
+  writePackageJsonWithTestExtended();
+  const commitSha = makeCommit("hv-500-fast-only");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-500-FASTONLY", type: "story", status: "done", closedCommit: commitSha,
+    title: "HV 500 fast only", body: "done", related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-500-FASTONLY", projectDir, commitSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-FASTONLY");
+  assert.equal(input.verification.hostVerified, null, "a fast-tier-only row must not satisfy done-audit on a project with a test:extended script");
+});
+
+test("collect FG-500: passing rows for BOTH the fast and extended gate satisfy done-audit (positive)", () => {
+  writePackageJsonWithTestExtended();
+  const commitSha = makeCommit("hv-500-both-pass");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-500-BOTHPASS", type: "story", status: "done", closedCommit: commitSha,
+    title: "HV 500 both pass", body: "done", related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-500-BOTHPASS", projectDir, commitSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-500-BOTHPASS", projectDir, commitSha,
+    gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 0, recordedAt: "2026-01-01T00:00:01Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-BOTHPASS");
+  assert.equal(input.verification.hostVerified, true, "both list members covered by passing rows must satisfy done-audit");
+
+  const result = evaluateDoneAudit(input);
+  assert.equal(result.checks.find((c) => c.name === "host_verification")?.status, "pass");
+});
+
+test("collect FG-500: a passing fast-tier row + a FAILING extended row -> hostVerified false (a failing extended run blocks like a failing fast run)", () => {
+  writePackageJsonWithTestExtended();
+  const commitSha = makeCommit("hv-500-ext-fail");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-500-EXTFAIL", type: "story", status: "done", closedCommit: commitSha,
+    title: "HV 500 extended fail", body: "done", related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-500-EXTFAIL", projectDir, commitSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-HV-500-EXTFAIL", projectDir, commitSha,
+    gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 1, recordedAt: "2026-01-01T00:00:01Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-EXTFAIL");
+  assert.equal(input.verification.hostVerified, false, "a proven failure on the extended tier must report false, not unknown");
+
+  const result = evaluateDoneAudit(input);
+  assert.equal(result.outcome, "fail");
+});
+
+test("collect FG-500: a ci-sourced passing row for the primary gate satisfies the FULL list on its own (whole-workflow evidence — no double-charging CI)", () => {
+  writePackageJsonWithTestExtended();
+  const commitSha = makeCommit("hv-500-ci-covers-all");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-500-CIALL", type: "story", status: "done", closedCommit: commitSha,
+    title: "HV 500 CI covers all", body: "done", related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  // Only ONE row, ci-sourced, under the primary gate — no separate row for
+  // test:extended (matches how runAndRecordHostVerification records CI-sourced
+  // evidence: a single row under requiredGate, source:'ci').
+  insertHostVerification({
+    ticketId: "FG-HV-500-CIALL", projectDir, commitSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    source: "ci", ciUrl: "https://github.com/acme/forge/actions/runs/500",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-CIALL");
+  assert.equal(input.verification.hostVerified, true, "ci row does — a ci-sourced passing row for the primary gate must ship the full list");
+  assert.ok(input.verification.hostVerificationDetail!.includes("source: ci"));
+});
+
+test("collect FG-500 regression: NO test:extended script -> single-gate behavior unchanged (a fast-tier-only pass still satisfies)", () => {
+  const commitSha = makeCommit("hv-500-regression-single");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-500-REGSINGLE", type: "story", status: "done", closedCommit: commitSha,
+    title: "HV 500 regression single-gate", body: "done", related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-500-REGSINGLE", projectDir, commitSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-500-REGSINGLE");
+  assert.equal(input.verification.hostVerified, true, "single-gate project (no test:extended script) — a fast-tier-only pass row still satisfies, unchanged");
+});

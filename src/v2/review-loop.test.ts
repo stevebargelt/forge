@@ -276,6 +276,38 @@ test("#301 verify: no discoverable scripts → ok false, no steps", async () => 
   assert.equal(r.steps.length, 0);
 });
 
+// ── FG-500: fallback verification adds test:extended when the script exists ──
+
+test("FG-500 verify: runs typecheck, test, THEN test:extended when all three scripts exist; ok when all pass", async () => {
+  const calls: string[][] = [];
+  const run: CommandRunner = (cmd, args) => { calls.push([cmd, ...args]); return { ok: true, output: "ok" }; };
+  const r = runVerification({ typecheck: "tsc --noEmit", test: "node --test", "test:extended": "npm run test:integration" }, { run });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.steps.map((s) => s.name), ["typecheck", "test", "test:extended"]);
+  assert.deepEqual(calls, [
+    ["npm", "run", "--silent", "typecheck"],
+    ["npm", "run", "--silent", "test"],
+    ["npm", "run", "--silent", "test:extended"],
+  ]);
+});
+
+test("FG-500 verify: a failing test:extended step → ok false, even though typecheck+test passed", async () => {
+  const run: CommandRunner = (_cmd, args) =>
+    args.includes("test:extended") ? { ok: false, output: "1 failing" } : { ok: true, output: "ok" };
+  const r = runVerification({ typecheck: "x", test: "y", "test:extended": "z" }, { run });
+  assert.equal(r.ok, false);
+  assert.equal(r.steps.find((s) => s.name === "test:extended")!.ok, false);
+});
+
+test("FG-500 verify regression: no test:extended script → unchanged (only typecheck+test run)", async () => {
+  const calls: string[][] = [];
+  const run: CommandRunner = (cmd, args) => { calls.push([cmd, ...args]); return { ok: true, output: "ok" }; };
+  const r = runVerification({ typecheck: "tsc --noEmit", test: "node --test" }, { run });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.steps.map((s) => s.name), ["typecheck", "test"], "no test:extended script — the fallback list stays the same as before FG-500");
+  assert.equal(calls.length, 2);
+});
+
 // ── Slice 4: runReviewLoop ───────────────────────────────────────────────────
 
 const VERIFY_OK: VerificationResult = { ok: true, steps: [{ name: "test", ok: true, output: "" }] };
