@@ -673,9 +673,12 @@ test("#261: buildDockerArgs runs pi with -p --mode json and substitutes prompt +
   assert.ok(cmd.includes("--no-context-files"));
   assert.deepEqual(cmd.slice(cmd.indexOf("--provider"), cmd.indexOf("--provider") + 2), ["--provider", "anthropic"]);
   assert.deepEqual(cmd.slice(cmd.indexOf("--model"), cmd.indexOf("--model") + 2), ["--model", "claude-sonnet-4-6"]);
-  // system prompt via flag; task package as the trailing positional message.
+  // system prompt via flag; task package as the trailing positional message —
+  // FG-497: a file reference (@/task/package.md), not the embedded markdown,
+  // so an oversized task package never breaches Linux's argv byte limit.
   assert.deepEqual(cmd.slice(cmd.indexOf("--append-system-prompt"), cmd.indexOf("--append-system-prompt") + 2), ["--append-system-prompt", "SYS-PROMPT"]);
-  assert.equal(cmd[cmd.length - 1], "PKG-MD", "task package is the positional message arg");
+  assert.equal(cmd[cmd.length - 1], "@/task/package.md", "task package is referenced by file, as the positional message arg");
+  assert.ok(!cmd.includes("PKG-MD"), "the raw task package markdown must never be embedded in argv");
   assert.equal(stdin, undefined, "pi reads the prompt from args, not stdin");
 });
 
@@ -708,8 +711,10 @@ test("#263: pi command delivers the system prompt and task package exactly once 
   // seed+constraints: exactly one --append-system-prompt, carrying it once.
   assert.equal(cmd.filter((a) => a === "--append-system-prompt").length, 1);
   assert.equal(cmd.filter((a) => a === "SEED-AND-CONSTRAINTS").length, 1);
-  // task package: exactly one occurrence (the positional message).
-  assert.equal(cmd.filter((a) => a === "TASK-PACKAGE").length, 1);
+  // task package: exactly one occurrence, as a file reference (FG-497) — the
+  // raw markdown must never land in argv.
+  assert.equal(cmd.filter((a) => a === "@/task/package.md").length, 1);
+  assert.equal(cmd.filter((a) => a === "TASK-PACKAGE").length, 0);
   // --no-context-files present so pi doesn't ALSO auto-load /project context.
   assert.ok(cmd.includes("--no-context-files"));
   // single delivery channel: nothing on stdin to duplicate it.
