@@ -31,7 +31,7 @@ not just CI.
 | `npm run test:all` | unit tier + dashboard workspace — **unchanged command string** (still `npm test && npm test -w dashboard`), now fast because `npm test` is now unit-only | ~2.5s |
 | `npm run test:integration` | 64 files, 1238 tests | ~93s |
 | `npm run test:worktree` | 14 files, 107 tests | ~1.9s |
-| `npm run test:extended` (new) | integration + worktree combined | ~94s |
+| `npm run test:extended` (new) | integration + worktree + dashboard's integration tier (`npm run test:integration -w dashboard`) combined | ~95s (93s + 1.9s + 0.7s) |
 
 `npm run test:all` — the literal string CI's `test` job runs, and the string
 hardcoded as `REQUIRED_CI_GATE_COMMAND` in `src/store/host-verifications.ts`
@@ -140,4 +140,9 @@ split exactly: `dashboard/package.json`'s `"test"` now excludes
 a new `"test:integration"` script runs just the excluded file(s), and the
 root's `test:extended` now also runs `npm run test:integration -w
 dashboard` so that coverage rejoins the required `test-extended` merge
-check instead of running nowhere.
+check instead of running nowhere. That leg is currently one file
+(`routes-backlog.integration.test.ts`) and measures ~0.7s wall (280ms of
+test execution), bringing `test:extended`'s total to ~95s
+(93s integration + 1.9s worktree + 0.7s dashboard-integration) — the
+dashboard workspace now has its own two-tier fast/integration split,
+mirroring the root.

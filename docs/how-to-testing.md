@@ -9,7 +9,7 @@ The suite is split into three tiers selected by **filename suffix**. Every `*.te
 | Unit (canonical/default) | `*.test.ts` (excluding the two below) | `npm test` / `npm run test:unit` | ~2s |
 | Integration | `*.integration.test.ts` | `npm run test:integration` | ~93s |
 | Worktree | `*.worktree.test.ts` | `npm run test:worktree` | ~2s |
-| Extended (integration + worktree) | — | `npm run test:extended` | ~94s |
+| Extended (integration + worktree + dashboard integration) | — | `npm run test:extended` | ~95s |
 | Canonical deterministic gate | unit + dashboard workspace | `npm run test:all` | ~2.5s |
 
 **FG-495 review fix: the dashboard workspace has the same two-tier split as the root.** Round 1 of FG-495 renamed `dashboard/src/routes-backlog.integration.test.ts` but left `dashboard/package.json`'s `"test"` script matching every `*.test.ts` file, so the "integration" name was cosmetic — that file (which boots a real HTTP server on a real port against a real fixture backlog) still ran inside `npm test -w dashboard`, and therefore inside `npm run test:all`, the canonical gate. `dashboard/package.json`'s `"test"` script now excludes `*.integration.test.ts` (mirroring `test:unit`'s `find` exclusion above), and a new `"test:integration"` script runs just that file. The dashboard integration tier runs in `npm run test:extended`, alongside the root's integration/worktree tiers; the canonical gate (`npm run test:all` → `npm test -w dashboard`) now runs only dashboard's fast tier.
@@ -23,7 +23,7 @@ The suite is split into three tiers selected by **filename suffix**. Every `*.te
 `.github/workflows/ci.yml` has two jobs:
 
 - **`test`** (check name `CI / test`) — a **required** merge-gate check. Runs `npm run test:all` (unit tier + dashboard workspace, plus `npm run typecheck`) on every push and on every PR into `main`, pinned to the Node version in `.nvmrc` (24) so the better-sqlite3 native module always matches the runner's ABI. This is the fast, per-round gate: the review-loop's own verification step re-runs `npm run test:all` on every round, so it needs to stay under the <=60s target / <=120s ceiling. Now completes in ~2.5s server-side, where the pre-FG-495 version took ~107s.
-- **`test-extended`** (check name `CI / test-extended`) — also a **required** merge-gate check, not informational. Runs `npm run test:extended` (integration + worktree tiers) on the same push/PR triggers. Branch protection carries both `test` and `test-extended` as required contexts (applied host-side by the orchestrator); a red `test-extended` run blocks merge exactly like a red `test` run. What FG-495 changed is *where* this coverage runs (CI, off-host, in parallel with `test` and with review-loop verification) and how often the operator pays for it interactively — never per round, since the review-loop's per-round verification only re-runs the fast `test:all` gate. Merge happens once per ticket, so the ~94s extended job running in parallel with review is affordable at that boundary even though it would be too slow to re-run every round.
+- **`test-extended`** (check name `CI / test-extended`) — also a **required** merge-gate check, not informational. Runs `npm run test:extended` (root integration + worktree tiers, plus the dashboard workspace's own integration tier via `npm run test:integration -w dashboard`) on the same push/PR triggers. Dashboard's slow/integration coverage only runs here — its share of the canonical `test` gate (`npm run test:all` → `npm test -w dashboard`) is the fast tier only, mirroring how the root's own integration/worktree tiers are kept out of `test`. Branch protection carries both `test` and `test-extended` as required contexts (applied host-side by the orchestrator); a red `test-extended` run blocks merge exactly like a red `test` run. What FG-495 changed is *where* this coverage runs (CI, off-host, in parallel with `test` and with review-loop verification) and how often the operator pays for it interactively — never per round, since the review-loop's per-round verification only re-runs the fast `test:all` gate. Merge happens once per ticket, so the ~95s extended job (93s root integration + 1.9s root worktree + 0.7s dashboard integration) running in parallel with review is affordable at that boundary even though it would be too slow to re-run every round.
 
 Running the aggregate on the host is still normal during local iteration (`forge-test --all`, or `npm run test:all` directly); what changed with FG-474 is that the merge decision reads CI's result rather than triggering a second, invisible host run of the same suite. What changed with FG-495 is that the per-round host/CI cost is now fast (canonical gate is unit-only), while full coverage — including the slow integration/worktree tiers — still gates the actual merge via the parallel `test-extended` check.
 
@@ -57,7 +57,8 @@ npm run test:integration
 # Git worktree, dispatch/fanout orchestration
 npm run test:worktree
 
-# Both slow tiers together — what CI's required test-extended merge check runs
+# Root integration + worktree tiers, plus dashboard's integration tier —
+# what CI's required test-extended merge check runs
 npm run test:extended
 
 # Canonical deterministic gate: unit tier + dashboard workspace
