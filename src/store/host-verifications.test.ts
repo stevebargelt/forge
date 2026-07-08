@@ -8,6 +8,7 @@ import {
   queryHostVerificationRowsForGate,
   findCoveringGateEvidence,
   describeGateEvidence,
+  aggregateCiCheckRuns,
   REQUIRED_CI_CHECK_CONTEXT,
   type CiCheckStatus,
 } from "./host-verifications.js";
@@ -512,4 +513,88 @@ test("describeGateEvidence: host_row and ci evidence render distinct, informativ
   const ciDesc = describeGateEvidence(ciEvidence);
   assert.match(ciDesc, /CI check/);
   assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
+});
+
+// ── FG-474: aggregateCiCheckRuns — pure check-runs response parsing/aggregation ─
+//
+// Exercises the check-runs API aggregation WITHOUT invoking gh: defaultCheckStatusProvider
+// is gh-backed and untestable directly, but its response handling is factored into this
+// pure function (raw parsed JSON -> CiCheckStatus | null) precisely so these rules are
+// covered here.
+
+const CR_SHA = "3a1ff5d90af281c731a2a047d6a138daa7b38d66";
+const CR_OPTS = { sha: CR_SHA, checkName: "test" };
+
+function checkRun(overrides: Record<string, unknown>): Record<string, unknown> {
+  return { head_sha: CR_SHA, name: "test", status: "completed", conclusion: "success", ...overrides };
+}
+
+test("aggregateCiCheckRuns: a single completed successful run aggregates to success", () => {
+  const result = aggregateCiCheckRuns(
+    { check_runs: [checkRun({ html_url: "https://github.com/acme/forge/actions/runs/1" })] },
+    CR_OPTS
+  );
+  assert.deepEqual(result, { sha: CR_SHA, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/1" });
+});
+
+test("aggregateCiCheckRuns: duplicate successful runs (push + pull_request) still aggregate to success", () => {
+  const result = aggregateCiCheckRuns(
+    {
+      check_runs: [
+        checkRun({ html_url: "https://github.com/acme/forge/actions/runs/1" }),
+        checkRun({ html_url: "https://github.com/acme/forge/actions/runs/2" }),
+      ],
+    },
+    CR_OPTS
+  );
+  assert.ok(result);
+  assert.equal(result!.state, "success");
+});
+
+test("aggregateCiCheckRuns: one success + one failure for the same sha aggregates to failure (disagreement is never covering evidence)", () => {
+  const result = aggregateCiCheckRuns(
+    {
+      check_runs: [
+        checkRun({ conclusion: "success", html_url: "https://github.com/acme/forge/actions/runs/1" }),
+        checkRun({ conclusion: "failure", html_url: "https://github.com/acme/forge/actions/runs/2" }),
+      ],
+    },
+    CR_OPTS
+  );
+  assert.ok(result);
+  assert.equal(result!.state, "failure");
+  assert.equal(result!.detailsUrl, "https://github.com/acme/forge/actions/runs/2");
+});
+
+test("aggregateCiCheckRuns: a queued/in_progress run with no failures aggregates to pending", () => {
+  const result = aggregateCiCheckRuns(
+    { check_runs: [checkRun({ status: "in_progress", conclusion: null })] },
+    CR_OPTS
+  );
+  assert.deepEqual(result, { sha: CR_SHA, state: "pending" });
+});
+
+test("aggregateCiCheckRuns: a completed run for a DIFFERENT sha does not satisfy — sha mismatch means no matching run", () => {
+  const result = aggregateCiCheckRuns(
+    { check_runs: [checkRun({ head_sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" })] },
+    CR_OPTS
+  );
+  assert.equal(result, null);
+});
+
+test("aggregateCiCheckRuns: malformed JSON shape (check_runs missing/not an array) returns null", () => {
+  assert.equal(aggregateCiCheckRuns({}, CR_OPTS), null);
+  assert.equal(aggregateCiCheckRuns({ check_runs: "not-an-array" }, CR_OPTS), null);
+  assert.equal(aggregateCiCheckRuns(null, CR_OPTS), null);
+  assert.equal(aggregateCiCheckRuns("a string", CR_OPTS), null);
+});
+
+test("aggregateCiCheckRuns: no runs matching the requested check name returns null", () => {
+  const result = aggregateCiCheckRuns({ check_runs: [checkRun({ name: "lint" })] }, CR_OPTS);
+  assert.equal(result, null);
+});
+
+test("aggregateCiCheckRuns: a completed run with a non-success/failure conclusion (e.g. cancelled) and no other runs aggregates to other", () => {
+  const result = aggregateCiCheckRuns({ check_runs: [checkRun({ conclusion: "cancelled" })] }, CR_OPTS);
+  assert.deepEqual(result, { sha: CR_SHA, state: "other" });
 });

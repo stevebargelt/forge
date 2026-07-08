@@ -159,16 +159,69 @@ export type CheckStatusProvider = (opts: {
 // The required merge-gate check FG-474 wired up: workflow "CI", job "test".
 export const REQUIRED_CI_CHECK_CONTEXT = "CI / test";
 
-type GhCombinedStatusResponse = {
-  sha?: unknown;
-  statuses?: Array<{ context?: unknown; state?: unknown; target_url?: unknown }>;
+type GhCheckRun = {
+  head_sha?: unknown;
+  name?: unknown;
+  status?: unknown;
+  conclusion?: unknown;
+  html_url?: unknown;
+  details_url?: unknown;
 };
 
-function normalizeCiState(raw: unknown): CiCheckState {
-  if (raw === "success") return "success";
-  if (raw === "pending") return "pending";
-  if (raw === "failure" || raw === "error") return "failure";
-  return "other";
+type GhCheckRunsResponse = {
+  check_runs?: unknown;
+};
+
+function checkRunNameFromContext(checkContext: string): string {
+  const idx = checkContext.lastIndexOf("/");
+  return (idx === -1 ? checkContext : checkContext.slice(idx + 1)).trim();
+}
+
+function checkRunDetailsUrl(run: GhCheckRun): string | undefined {
+  if (typeof run.html_url === "string") return run.html_url;
+  if (typeof run.details_url === "string") return run.details_url;
+  return undefined;
+}
+
+// Aggregates a GitHub check-runs API response (GET .../commits/<sha>/check-runs)
+// into a single CiCheckStatus for one check name. Pure — no gh invocation — so
+// tests exercise the aggregation rules directly. The workflow triggers on both
+// push and pull_request, so the same sha legitimately carries MULTIPLE runs of
+// the same-named check; this is where that gets collapsed to one verdict, fail-
+// closed: any completed failure wins outright (disagreement on the same sha is a
+// flake signal, never covering evidence), then any still-running run means
+// pending, then a completed success, else "other".
+//
+// Matching is by run name only (e.g. "test"), not by workflow — the check-runs
+// API doesn't cheaply expose the parent workflow name per run without an extra
+// API call, so this assumes no OTHER workflow in this repo defines a same-named
+// job. True today (only the "CI" workflow exists); revisit if that changes.
+export function aggregateCiCheckRuns(parsed: unknown, opts: { sha: string; checkName: string }): CiCheckStatus | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const runsRaw = (parsed as GhCheckRunsResponse).check_runs;
+  if (!Array.isArray(runsRaw)) return null;
+
+  // The sha each run covers comes from the response body itself, never assumed
+  // from the request — a run reporting a different head_sha (e.g. a stale or
+  // ambiguous lookup) must never be trusted as covering the requested commit.
+  const matching = runsRaw.filter((r): r is GhCheckRun => {
+    if (typeof r !== "object" || r === null) return false;
+    const run = r as GhCheckRun;
+    return run.head_sha === opts.sha && run.name === opts.checkName;
+  });
+  if (matching.length === 0) return null;
+
+  const completed = matching.filter((r) => r.status === "completed");
+  const failed = completed.find((r) => r.conclusion === "failure");
+  if (failed) return { sha: opts.sha, state: "failure", detailsUrl: checkRunDetailsUrl(failed) };
+
+  const incomplete = matching.some((r) => r.status !== "completed");
+  if (incomplete) return { sha: opts.sha, state: "pending" };
+
+  const succeeded = completed.find((r) => r.conclusion === "success");
+  if (succeeded) return { sha: opts.sha, state: "success", detailsUrl: checkRunDetailsUrl(succeeded) };
+
+  return { sha: opts.sha, state: "other" };
 }
 
 // The real, gh-backed default provider. Only ever invoked LAZILY, per lookup call,
@@ -180,35 +233,34 @@ function normalizeCiState(raw: unknown): CiCheckState {
 // evidence available", never as a crash. Real callers on the operator's host (which
 // has `gh` authenticated) get the real check status; tests always inject a stub via
 // opts.checkStatusProvider so they never depend on this path.
+//
+// Uses the check-runs API, not the legacy combined-status API: GitHub Actions
+// publishes check runs, not legacy commit statuses, so the status endpoint always
+// reports "pending" with zero statuses for an Actions-only repo (FG-474).
 function defaultCheckStatusProvider(opts: { projectDir: string; sha: string; checkContext: string }): CiCheckStatus | null {
+  const checkName = checkRunNameFromContext(opts.checkContext);
   let raw: string;
   try {
-    raw = execFileSync("gh", ["api", `repos/{owner}/{repo}/commits/${opts.sha}/status`], {
-      cwd: opts.projectDir,
-      encoding: "utf8",
-      timeout: 15000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    raw = execFileSync(
+      "gh",
+      ["api", `repos/{owner}/{repo}/commits/${opts.sha}/check-runs?check_name=${encodeURIComponent(checkName)}`],
+      {
+        cwd: opts.projectDir,
+        encoding: "utf8",
+        timeout: 15000,
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
   } catch {
     return null;
   }
-  let parsed: GhCombinedStatusResponse;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as GhCombinedStatusResponse;
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  // The sha this status covers comes from the API response body itself, never from
-  // the requested opts.sha — a mismatched response (e.g. a stale/ambiguous lookup)
-  // must never be trusted as covering the requested commit.
-  if (typeof parsed.sha !== "string" || parsed.sha !== opts.sha) return null;
-  const match = (parsed.statuses ?? []).find((s) => s.context === opts.checkContext);
-  if (!match) return null;
-  return {
-    sha: parsed.sha,
-    state: normalizeCiState(match.state),
-    detailsUrl: typeof match.target_url === "string" ? match.target_url : undefined,
-  };
+  return aggregateCiCheckRuns(parsed, { sha: opts.sha, checkName });
 }
 
 export type GateEvidence =
