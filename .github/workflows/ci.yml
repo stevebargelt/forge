@@ -1,0 +1,43 @@
+name: CI
+
+# The required merge-gate check (FG-474). Runs the deterministic suite ONCE,
+# off-host and visibly, so the orchestrator/review-loop stop re-running
+# `npm run test:all` on the host as their merge gate — see CLAUDE.md's
+# "Merge authorization" section and docs/how-to-testing.md.
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node pinned to .nvmrc (24) — the better-sqlite3 NODE_MODULE_VERSION
+      # ABI mismatch (137 vs 131) seen with a login-shell nvm default only
+      # happens when the running Node version drifts from the version the
+      # native module was built for. Pinning removes that class of failure.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Defensive: guarantees better-sqlite3's native binding matches the
+      # pinned Node ABI even if a cached/prebuilt binary was restored.
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test (root + dashboard workspace)
+        run: npm run test:all

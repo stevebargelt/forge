@@ -14,6 +14,10 @@ The suite is split into three tiers selected by **filename suffix**. Every `*.te
 
 `npm test` (root aggregate) runs the full root suite and is the regression gate. `npm run test:all` additionally runs the dashboard workspace (`npm test -w dashboard`) and is the gate to run before claiming work shipped.
 
+## Continuous Integration (FG-474)
+
+`.github/workflows/ci.yml` (job `test`, check name `CI / test`) runs `npm run test:all` (plus `npm run typecheck`) on every push and on every PR into `main`, pinned to the Node version in `.nvmrc` (24) so the better-sqlite3 native module always matches the runner's ABI. This is the merge gate: the orchestrator confirms the PR's CI check is green instead of re-running `npm run test:all` on the host before merging — see CLAUDE.md's "Merge authorization" section. Running the aggregate on the host is still normal during local iteration (`forge-test --all`, or `npm run test:all` directly); what changed is that the merge decision reads CI's result rather than triggering a second, invisible host run of the same suite.
+
 ## What belongs in each tier
 
 **Unit** — pure functions and in-memory logic only. No subprocess spawning, no real filesystem I/O beyond `os.tmpdir()` scratch, no SQLite on disk, no git operations, no `sleep` or deliberately long-running operations. Use `new Database(':memory:')` for any schema tests. If a test needs to verify that a CLI command parses correctly or that the database persists across a reconnect, it belongs in integration or worktree — not unit.
@@ -56,7 +60,7 @@ Within an agent's in-loop validation, use `forge-test` at the right tier:
 - **`forge-test --worktree`** — when the change touches git-worktree operations, dispatch-fanout, or orchestration paths.
 - **`forge-test <file.test.ts>`** or **`forge-test --test <pattern>`** — run a specific file or pattern regardless of tier.
 
-**A green unit tier is in-loop confidence, not a shipped claim.** The orchestrator runs `npm run test:all` (the shipped-claim aggregate: root suite + dashboard workspace) on the host before a run is called complete. Agents must report their validation tier honestly in their result — `status: "complete"` means the diff was validated at the level appropriate for its change; it does not mean the full aggregate has been verified.
+**A green unit tier is in-loop confidence, not a shipped claim.** The shipped-claim aggregate (`npm run test:all`: root suite + dashboard workspace) is enforced by CI (`CI / test`, see above) before merge, rather than by a second host run. Agents must report their validation tier honestly in their result — `status: "complete"` means the diff was validated at the level appropriate for its change; it does not mean the full aggregate has been verified.
 
 ## Naming a new test file
 
