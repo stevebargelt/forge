@@ -124,8 +124,8 @@ Design artifact produced per the four shaping constraints (pure derivation / lin
 **Ordered slices:**
 1. Add lifecycle-evaluator.ts with classifyTaskLineage only — files: ['src/v2/lifecycle-evaluator.ts (new)', 'src/v2/lifecycle-evaluator.test.ts (new)']
 2. Migrate ready-queue.ts's internal predicates to the classifier — files: ['src/v2/ready-queue.ts', 'src/v2/ready-queue.test.ts']
-3. Migrate retry.ts's fanoutParentOf and reconcile.ts's fanout-parent-orphan detection — files: ['src/v2/retry.ts', 'src/v2/reconcile.ts', 'src/v2/retry.test.ts', 'src/v2/reconcile.test.ts']
-4. Migrate runNext.ts's dispatch-time pending-row-reuse sites — files: ["src/v2/runNext.ts (dispatchSingleStep, dispatchManualStep, dispatchFanoutStep's existingParent/activeWithChildren/pendingHasChildren)", 'src/v2/runNext.test.ts', 'src/v2/runNext-spec.test.ts', 'worktree/integration fg-suites exercising fanout+manual+reject']
+3. Migrate retry.ts's fanoutParentOf and reconcile.ts's fanout-parent-orphan detection — files: ['src/v2/retry.ts', 'src/v2/reconcile.ts', 'src/v2/retry.test.ts', 'src/v2/reconcile.integration.test.ts']
+4. Migrate runNext.ts's dispatch-time pending-row-reuse sites — files: ["src/v2/runNext.ts (dispatchSingleStep, dispatchManualStep, dispatchFanoutStep's existingParent/activeWithChildren/pendingHasChildren)", 'src/v2/runNext.integration.test.ts', 'src/v2/runNext-spec.test.ts', 'worktree/integration fg-suites exercising fanout+manual+reject']
 5. Fold verdict/gate aggregation into the evaluator — files: ['src/v2/lifecycle-evaluator.ts (add aggregateStepVerdicts)', 'src/v2/gate.ts (aggregateVerdicts call site)', "src/v2/runNext.ts (dispatchReds authoritative-fail loop only — separate region from slice 3's changes)"]
 6. Migrate gate.ts's isFanoutParent to workflow.steps[phase].fanout — files: ['src/v2/gate.ts']
 7. Migrate campaign's terminal-outcome and authoritative-outcome derivations — files: ["src/campaign/executor.ts (reconcileTerminalOutcome's failedPrimaries derivation)", "src/campaign/reconcile-evidence.ts (evaluateAuthoritativeOutcome's per-task bucketing, now calling aggregateStepVerdicts)", 'their tests']
