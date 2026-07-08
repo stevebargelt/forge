@@ -150,9 +150,16 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     gate: "auto",
     manual: false,
     reds: [],
+    // FG-497: do NOT embed args.task here — workflow_additions folds into the
+    // composed system prompt, which every claude/pi runtime passes as a single
+    // argv string (--append-system-prompt), capped by Linux's 128KB
+    // MAX_ARG_STRLEN. A large task (e.g. a >120KB review-loop packet) blew past
+    // that limit and crashed the container exec with E2BIG before the agent even
+    // started. The task reaches the agent instead via TASK_PACKAGE_MARKDOWN,
+    // piped over stdin (unbounded) — see renderInvokeTaskPackage below.
     workflow_additions:
-      `You are receiving a single freeform task. Read the user's task description below carefully and produce a result.\n\n` +
-      `## Task\n\n${args.task}\n`,
+      `You are receiving a single freeform task. The task description arrives as ` +
+      `your input message (the task package). Read it carefully and produce a result.\n`,
   };
 
   const workflow: Workflow = {

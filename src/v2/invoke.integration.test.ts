@@ -484,17 +484,24 @@ test("invoke: malformed result.json marks failed", async () => {
   assert.match(r.error ?? "", /malformed/);
 });
 
-test("invoke: composes task description into the agent's system prompt", async () => {
+// FG-497: the task description must reach the agent via the task package
+// (package.md / stdin) — an unbounded channel — NOT via the composed system
+// prompt (CLAUDE.md), which every claude/pi runtime passes as a single
+// bounded argv string.
+test("invoke: composes task description into the task package (package.md/stdin), NOT the system prompt", async () => {
   setupRuntimeStub();
   process.env.ANTHROPIC_API_KEY = "sk-stub";
 
-  let capturedStdin = "";
-  const inspectExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+  let capturedClaudeMd = "";
+  let capturedPackageMd = "";
+  const inspectExec: DockerExecFn = async ({ stdin, stdoutPath, stderrPath }) => {
     const dir = dirname(stdoutPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    // Read the CLAUDE.md the task dir got written with
     const claudePath = join(dir, "CLAUDE.md");
-    capturedStdin = existsSync(claudePath) ? readFileSync(claudePath, "utf8") : "";
+    capturedClaudeMd = existsSync(claudePath) ? readFileSync(claudePath, "utf8") : "";
+    const packagePath = join(dir, "package.md");
+    capturedPackageMd = existsSync(packagePath) ? readFileSync(packagePath, "utf8") : "";
+    void stdin;
     writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
@@ -508,7 +515,8 @@ test("invoke: composes task description into the agent's system prompt", async (
     dockerExec: inspectExec,
   });
 
-  assert.match(capturedStdin, /THIS-IS-THE-TASK-MARKER/);
+  assert.doesNotMatch(capturedClaudeMd, /THIS-IS-THE-TASK-MARKER/, "the task must NOT be embedded in the composed system prompt (argv-bounded)");
+  assert.match(capturedPackageMd, /THIS-IS-THE-TASK-MARKER/, "the task must reach the agent via package.md (stdin-bounded, unlimited size)");
 });
 
 test("invoke: readOnlyProject sets PROJECT_MODE=ro in docker args", async () => {
@@ -1410,4 +1418,97 @@ test("FG-461: a read-only-project crash records NO evidence (a red/audit can't p
   // Read-only dispatch: the operator's own dirty files are not this task's work,
   // so no recovery evidence is recorded.
   assert.equal(getOrphanEvidenceFromEvents(eventsForTask(r.taskId)), undefined);
+});
+
+// ── FG-497: oversized task dispatch must not breach Linux's argv/env limit ──
+// Root cause: invoke.ts used to embed the FULL task string into
+// workflow_additions, which composeSystemPrompt folds into the composed
+// system prompt — passed to every claude/pi runtime as a SINGLE argv string
+// (--append-system-prompt). Linux caps a single argv/env string at
+// MAX_ARG_STRLEN (131072 bytes); a large review-loop packet breached it and
+// the container's exec() died with E2BIG before the agent even started. The
+// fix routes the task exclusively through the task package (stdin + package.md
+// on disk), which has no such limit.
+
+// A runtime stub mirroring claude-oauth's real prompt-delivery shape: system
+// prompt via an argv flag, task package via stdin — the exact split that made
+// this bug reproducible.
+function setupArgvBoundedRuntimeStub(): void {
+  const fhome = process.env.FORGE_HOME!;
+  const p = join(fhome, "runtimes", "claude-argv-bounded.yml");
+  if (existsSync(p)) return;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, `
+name: claude-argv-bounded
+description: test stub mirroring claude-oauth's argv+stdin prompt delivery
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["--append-system-prompt", "\${SYSTEM_PROMPT}"]
+  stdin: "\${TASK_PACKAGE_MARKDOWN}"
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+}
+
+test("FG-497: an oversized task (>131072 bytes) dispatches cleanly through the real invoke() path — argv/env stay bounded, full content rides stdin + package.md", async () => {
+  setupArgvBoundedRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg497-oversized-"));
+
+  // Larger than Linux's MAX_ARG_STRLEN (131072 bytes) — mirrors a >120KB
+  // review-loop reviewer packet (FG-497's actual trigger).
+  const oversizedTask = "T".repeat(140_000) + "\n## marker\nFG-497-OVERSIZED-TASK-MARKER";
+
+  let capturedArgs: string[] = [];
+  let capturedStdin: string | undefined;
+  const inspectExec: DockerExecFn = async ({ args, stdin, stdoutPath, stderrPath }) => {
+    capturedArgs = args;
+    capturedStdin = stdin;
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(stdoutPath, "");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: oversizedTask,
+    projectDir,
+    runtimeName: "claude-argv-bounded",
+    dockerExec: inspectExec,
+  });
+
+  // (a) the dispatch succeeds — no E2BIG-shaped failure, no guard trip.
+  assert.equal(r.status, "complete", `expected the oversized task to dispatch cleanly, got: ${JSON.stringify(r)}`);
+
+  // (b) every string in the built docker argv (incl. every -e env value, which
+  // is itself a single argv string) is under Linux's MAX_ARG_STRLEN.
+  const MAX_ARG_STRLEN = 131_072;
+  for (const [i, a] of capturedArgs.entries()) {
+    assert.ok(
+      Buffer.byteLength(a, "utf8") < MAX_ARG_STRLEN,
+      `argv[${i}] is ${Buffer.byteLength(a, "utf8")} bytes — must stay under MAX_ARG_STRLEN (${MAX_ARG_STRLEN})`,
+    );
+  }
+
+  // (c) the stdin payload carries the FULL synthetic task content.
+  assert.ok(capturedStdin, "stdin payload must be present");
+  assert.match(capturedStdin!, /FG-497-OVERSIZED-TASK-MARKER/);
+  assert.ok(capturedStdin!.includes(oversizedTask), "stdin must carry the task verbatim, in full");
+
+  // (d) the written package.md on disk also contains it in full.
+  const dir = taskDir(r.runId, r.taskId);
+  const packageMd = readFileSync(join(dir, "package.md"), "utf8");
+  assert.ok(packageMd.includes(oversizedTask), "package.md must carry the full task content");
 });
