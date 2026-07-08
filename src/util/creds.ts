@@ -613,7 +613,7 @@ export function formatExpiryForDisplay(iso: string): string {
 // interpretation, and the current-time basis — so the operator (and any
 // future debugging of this message) can see exactly what evidence backed the
 // claim rather than trusting a guess across profiles.
-function describeExpiredSsoSession(configDir: string, profile: string): string {
+export function describeExpiredSsoSession(configDir: string, profile: string): string {
   const nowIso = new Date().toISOString();
   const identity = resolveProfileSsoIdentity(configDir, profile);
   if (!identity) {

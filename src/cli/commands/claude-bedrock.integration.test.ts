@@ -400,3 +400,140 @@ test("integ FG-435: forge claude DOES hard-block, naming the resolved profile, w
   assert.match(result.stderr, /profile 'forge-fg435-test-profile'/);
   assert.match(result.stderr, /aws sso login --profile forge-fg435-test-profile/);
 });
+
+// ─── (7) FG-435 round 2: profile-scoped SSO-expiry check (no STS cache at all) ─
+//
+// detectStaleStsCache only fires when the profile has its OWN ~/.aws/cli/cache
+// STS entry to compare mtimes against. A profile authenticating SSO-direct
+// (FORGE-DEC-013 — the common bedrock case) never populates cli/cache, so an
+// expired SSO session with no STS cache used to sail through as {stale:
+// false} and forge claude would silently launch a doomed session. These tests
+// cover the gap: write an expired SSO token cache file with NO corresponding
+// STS cache file at all.
+
+function writeExpiredSsoOnlyForProfile(awsDir: string, profile: string): void {
+  const identity = resolveProfileSsoIdentity(awsDir, profile);
+  assert.ok(identity, "test setup bug: profile identity not resolved");
+  const ssoDir = join(awsDir, "sso", "cache");
+  mkdirSync(ssoDir, { recursive: true });
+  const ssoFile = join(ssoDir, ssoTokenCacheFilename(identity!));
+  writeFileSync(ssoFile, JSON.stringify({
+    accessToken: "fake-expired-token",
+    startUrl: identity!.startUrl,
+    expiresAt: new Date(Date.now() - 3600 * 1000).toISOString(), // 1h in the past
+  }));
+  // Deliberately no ~/.aws/cli/cache entry — the SSO-direct shape.
+}
+
+test("integ FG-435 round 2: forge claude hard-blocks on expired SSO session with no STS cache, naming the profile + sso login remediation", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  writeAwsConfigForFakeProfile(awsDir, "forge-fg435r2-test-profile");
+  writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-test-profile");
+
+  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435r2-test-profile", FORGE_AWS_DIR: awsDir };
+  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  assert.equal(result.status, 1, `expected exit 1; stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.stderr, /profile 'forge-fg435r2-test-profile'/);
+  assert.match(result.stderr, /aws sso login --profile forge-fg435r2-test-profile/);
+});
+
+test("integ FG-435 round 2: forge claude does NOT hard-block on expired SSO session when export-credentials succeeds (advisory only)", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  writeAwsConfigForFakeProfile(awsDir, "forge-fg435r2-test-profile");
+  writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-test-profile");
+
+  const testEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "forge-fg435r2-test-profile",
+    FORGE_AWS_DIR: awsDir,
+    FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t",
+  };
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  assert.match(
+    result.stdout,
+    /advisory.*continuing|continuing.*advisory/s,
+    `expected an advisory (non-blocking) message in stdout; got stdout=${result.stdout} stderr=${result.stderr}`,
+  );
+  assert.doesNotMatch(
+    result.stderr,
+    /profile 'forge-fg435r2-test-profile'/,
+    `must not hard-block when export-credentials succeeded; stderr=${result.stderr}`,
+  );
+});
+
+test("integ FG-435 round 2: a fresh OTHER profile does not mask the resolved profile's expired SSO session (cross-profile isolation)", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  mkdirSync(awsDir, { recursive: true });
+  writeFileSync(
+    join(awsDir, "config"),
+    [
+      "[profile forge-fg435r2-fresh-other]",
+      "sso_start_url = https://other.awsapps.com/start",
+      "sso_account_id = 222222222222",
+      "sso_role_name = OtherRole",
+      "region = us-east-1",
+      "",
+      "[profile forge-fg435r2-expired-target]",
+      "sso_start_url = https://example.awsapps.com/start",
+      "sso_account_id = 111111111111",
+      "sso_role_name = TestRole",
+      "region = us-east-1",
+      "",
+    ].join("\n"),
+  );
+
+  // OTHER profile: fresh SSO session (expiresAt far in the future).
+  const otherIdentity = resolveProfileSsoIdentity(awsDir, "forge-fg435r2-fresh-other");
+  assert.ok(otherIdentity, "test setup bug: other-profile identity not resolved");
+  const ssoDir = join(awsDir, "sso", "cache");
+  mkdirSync(ssoDir, { recursive: true });
+  writeFileSync(
+    join(ssoDir, ssoTokenCacheFilename(otherIdentity!)),
+    JSON.stringify({
+      accessToken: "fake-fresh-token",
+      startUrl: otherIdentity!.startUrl,
+      expiresAt: new Date(Date.now() + 8 * 3600 * 1000).toISOString(),
+    }),
+  );
+
+  // Resolved (target) profile: expired SSO session, no STS cache.
+  writeExpiredSsoOnlyForProfile(awsDir, "forge-fg435r2-expired-target");
+
+  const testEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "forge-fg435r2-expired-target",
+    FORGE_AWS_DIR: awsDir,
+  };
+  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials fails for the target profile
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  assert.equal(result.status, 1, `expected exit 1 (target profile's own expiry must not be masked); stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.stderr, /profile 'forge-fg435r2-expired-target'/);
+  assert.doesNotMatch(result.stderr, /forge-fg435r2-fresh-other/);
+});

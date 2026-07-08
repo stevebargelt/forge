@@ -28,7 +28,13 @@ import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSyn
 import { basename, dirname, join, resolve as pathResolve } from "node:path";
 import { homedir } from "node:os";
 import { resolveProjectMeta, readProjectAuth } from "../../util/project-meta.js";
-import { detectStaleStsCache, exportCredsOverridesStaleness } from "../../util/creds.js";
+import {
+  awsConfigDir,
+  describeExpiredSsoSession,
+  detectStaleStsCache,
+  exportCredsOverridesStaleness,
+  hasFreshProfileSsoCache,
+} from "../../util/creds.js";
 import { startSsoWatchdog } from "../../util/sso-watchdog.js";
 import { insertRun, updateRunStatus } from "../../store/runs.js";
 import { insertTask, markTaskComplete } from "../../store/tasks.js";
@@ -98,6 +104,26 @@ export function registerClaude(program: Command): void {
               `  Credential export also failed for '${resolvedProfile}' — its SSO session likely needs a fresh login.\n` +
               `  Run: aws sso login --profile ${resolvedProfile}`
             );
+            process.exit(1);
+          }
+        }
+
+        // FG-435 round 2: detectStaleStsCache only fires when this profile has
+        // its own ~/.aws/cli/cache STS entry to compare against its SSO token's
+        // mtime. A profile authenticating SSO-direct (FORGE-DEC-013 — bedrock
+        // reads ~/.aws/sso/cache directly and never populates cli/cache) has no
+        // such entry, so a genuinely expired SSO session sails through the
+        // check above as {stale: false}. Check this profile's own SSO token
+        // freshness directly; export-credentials remains authoritative over a
+        // stale/missing finding for the same reason as above.
+        if (!hasFreshProfileSsoCache(awsConfigDir(), resolvedProfile)) {
+          if (exportCredsOverridesStaleness(resolvedProfile)) {
+            console.log(
+              `forge claude: ⚠ SSO session for '${resolvedProfile}' looks expired or missing ` +
+              `(advisory — \`aws configure export-credentials\` succeeded, continuing)`
+            );
+          } else {
+            console.error(`forge claude: ${describeExpiredSsoSession(awsConfigDir(), resolvedProfile)}`);
             process.exit(1);
           }
         }
