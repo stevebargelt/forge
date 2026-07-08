@@ -1,9 +1,11 @@
 ---
 id: FG-500
 type: story
-status: active
+status: done
 title: "host-run gate evidence can ship on the fast tier only: requiredHostGate host rows + reconcile/review-loop no-CI fallbacks bypass the extended tier (FG-495 gap, host branch)"
 created: 2026-07-08
+closed: 2026-07-08
+closed_commit: f99e7f4f2126c7d826d39b495e5b138ebc2760a7
 ---
 
 ## Problem
