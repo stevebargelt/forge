@@ -544,3 +544,112 @@ test("collectOutOfBandEvidence: FG-452 AC3 (negative) — a row whose tested sha
     "closedCommit IS an ancestor of offBranchHead, but offBranchHead itself was never merged to base — must not satisfy the lane"
   );
 });
+
+// ── FG-500 round 2: the collectOutOfBandEvidence host_verification lane must
+// cover the FULL derived gate list, not just requiredGate — same shared
+// evaluator reconcile-collect.ts's pre-check and done-audit/collect.ts use.
+
+function writePackageJsonWithGateScripts(): void {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify(
+      { name: "synthetic", version: "0.0.0", scripts: { "test:all": "exit 0", "test:extended": "exit 0" } },
+      null,
+      2
+    )
+  );
+}
+
+test("FG-500 round 2: a fast-only passing row on a tiered project does NOT satisfy the host_verification lane", () => {
+  writePackageJsonWithGateScripts();
+  commitFile("README.md", "root", "root");
+  const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-460 tiered, fast-only");
+  writeTicket(projectDir, { id: "FG-460", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-460",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-460" }));
+  assert.equal(
+    result.laneEvidence,
+    null,
+    "fast-tier-only evidence must not satisfy a tiered project's lane — the extended tier has no covering row yet"
+  );
+});
+
+test("FG-500 round 2: passing rows for BOTH the fast and extended gate satisfy the host_verification lane", () => {
+  writePackageJsonWithGateScripts();
+  commitFile("README.md", "root", "root");
+  const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-461 tiered, both pass");
+  writeTicket(projectDir, { id: "FG-461", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-461",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-461",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:extended",
+    command: "npm run test:extended",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:01Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-461" }));
+  assert.deepEqual(result.laneEvidence, { kind: "host_verification", recorded: true, allExitZero: true });
+});
+
+test("FG-500 round 2: a ci-sourced passing row for the primary gate alone satisfies the host_verification lane (whole-workflow evidence)", () => {
+  writePackageJsonWithGateScripts();
+  commitFile("README.md", "root", "root");
+  const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-462 tiered, ci-sourced primary only");
+  writeTicket(projectDir, { id: "FG-462", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-462",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+    source: "ci",
+    ciUrl: "https://example.test/run/1",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-462" }));
+  assert.deepEqual(
+    result.laneEvidence,
+    { kind: "host_verification", recorded: true, allExitZero: true },
+    "a ci-sourced primary pass is whole-workflow evidence — no separate extended-tier row is needed"
+  );
+});
+
+test("FG-500 round 2 regression: a single-gate project (no test:extended) still satisfies the lane from one row, unchanged", () => {
+  commitFile("README.md", "root", "root");
+  const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-463 single-gate regression");
+  writeTicket(projectDir, { id: "FG-463", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-463",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-463" }));
+  assert.deepEqual(result.laneEvidence, { kind: "host_verification", recorded: true, allExitZero: true });
+});

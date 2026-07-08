@@ -3,34 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
 import { tasksForRun } from "../store/tasks.js";
-import { queryHostVerificationRowsForGate, deriveRequiredGateList, type HostVerificationRow } from "../store/host-verifications.js";
-import { checkClosedCommitCoveredByTestedSha } from "../campaign/reconcile-collect.js";
+import { deriveRequiredGateList, type HostVerificationRow } from "../store/host-verifications.js";
+import { resolveGateCoverage, evaluateGateListCoverage } from "../campaign/reconcile-collect.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
-
-// FG-500: per-gate resolution mirrors the single-gate rule this replaces —
-// null (unknown) when no covering row exists at all for this gate, false
-// (a real, provable gap) when every covering row failed, true when at least
-// one covering row for this gate passed (a later real pass ships over an
-// earlier covering failure — FG-453's passing-row model).
-type GateCoverage = { verified: boolean | null; detailRow: HostVerificationRow | null; failureCount: number };
-
-function resolveGateCoverage(
-  ticketId: string,
-  projectDir: string,
-  gate: string,
-  closedCommit: string,
-  baseBranch: string
-): GateCoverage {
-  const rows = queryHostVerificationRowsForGate(ticketId, projectDir, gate);
-  const covering = rows.filter((r) => checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch));
-  if (covering.length === 0) return { verified: null, detailRow: null, failureCount: 0 };
-  const passingRows = covering.filter((r) => r.exitCode === 0);
-  const verified = passingRows.length > 0;
-  const failureCount = covering.length - passingRows.length;
-  const detailRow = verified ? passingRows[passingRows.length - 1]! : covering[covering.length - 1]!;
-  return { verified, detailRow, failureCount };
-}
 
 // Host-local operational state (operator notes, scratch dirs) that must not block
 // shipped-work audits — done-audit cares about the merge/closed commit + ticket
@@ -163,17 +139,17 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
         // missing or malformed config — defaults stand
       }
 
-      // FG-500: "the deterministic gate" is the FULL derived gate list, not just
-      // requiredGate — a fast-tier-only row must not satisfy a project with an
-      // extended tier. A ci-sourced passing row for the PRIMARY gate is
-      // whole-workflow evidence (runAndRecordHostVerification only ever writes
-      // source:'ci' when EVERY required CI job is green — see
+      // FG-500 round 2: "the deterministic gate" is the FULL derived gate list,
+      // not just requiredGate, evaluated via the SAME shared evaluator
+      // reconcile-collect.ts's and reconcile-outofband-collect.ts's pre-checks
+      // use, so the three consumers cannot drift. A ci-sourced passing row for
+      // the PRIMARY gate is whole-workflow evidence (runAndRecordHostVerification
+      // only ever writes source:'ci' when EVERY required CI job is green — see
       // findCoveringGateEvidence) and covers the full list on its own, without
       // needing a separate row per extended-tier member (no double-charging CI).
       const gateList = deriveRequiredGateList(projectDir, requiredGate);
-      const primary = resolveGateCoverage(ticketId, projectDir, gateList[0]!, closedCommit, baseBranch);
-      const primaryCiPassingRow =
-        primary.verified === true && primary.detailRow?.source === "ci" ? primary.detailRow : null;
+      const perGate = gateList.map((gate) => resolveGateCoverage(ticketId, projectDir, gate, closedCommit, baseBranch));
+      const { passed, anyFailed, ciShortcutRow } = evaluateGateListCoverage(perGate);
 
       let hostVerifiedLocal: boolean | null;
       // FG-500 review finding: a passing item's audit string must cite EVERY
@@ -183,33 +159,28 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
       let detailRows: HostVerificationRow[];
       let failureCount: number;
 
-      if (primaryCiPassingRow) {
+      if (ciShortcutRow) {
         hostVerifiedLocal = true;
-        detailRows = [primaryCiPassingRow];
-        failureCount = primary.failureCount;
+        detailRows = [ciShortcutRow];
+        failureCount = perGate[0]!.failureCount;
+      } else if (anyFailed) {
+        // FG-453: a real, provable gap on ANY list member must never be
+        // laundered into a pass by another member's success.
+        const failing = perGate.find((g) => g.verified === false)!;
+        hostVerifiedLocal = false;
+        detailRows = failing.detailRow ? [failing.detailRow] : [];
+        failureCount = failing.failureCount;
+      } else if (passed) {
+        hostVerifiedLocal = true;
+        detailRows = perGate.map((g) => g.detailRow!);
+        failureCount = perGate.reduce((sum, g) => sum + g.failureCount, 0);
       } else {
-        const perGate = gateList.map((gate, i) =>
-          i === 0 ? primary : resolveGateCoverage(ticketId, projectDir, gate, closedCommit, baseBranch)
-        );
-        const failing = perGate.find((g) => g.verified === false);
-        if (failing) {
-          // FG-453: a real, provable gap on ANY list member must never be
-          // laundered into a pass by another member's success.
-          hostVerifiedLocal = false;
-          detailRows = failing.detailRow ? [failing.detailRow] : [];
-          failureCount = failing.failureCount;
-        } else if (perGate.every((g) => g.verified === true)) {
-          hostVerifiedLocal = true;
-          detailRows = perGate.map((g) => g.detailRow!);
-          failureCount = perGate.reduce((sum, g) => sum + g.failureCount, 0);
-        } else {
-          // No member proven to have failed, but at least one has no covering
-          // evidence at all yet — incomplete, not a proven gap (unknown, per the
-          // single-gate "no matching rows" convention).
-          hostVerifiedLocal = null;
-          detailRows = [];
-          failureCount = 0;
-        }
+        // No member proven to have failed, but at least one has no covering
+        // evidence at all yet — incomplete, not a proven gap (unknown, per the
+        // single-gate "no matching rows" convention).
+        hostVerifiedLocal = null;
+        detailRows = [];
+        failureCount = 0;
       }
 
       hostVerified = hostVerifiedLocal;

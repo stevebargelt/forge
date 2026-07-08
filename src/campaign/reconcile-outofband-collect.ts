@@ -15,9 +15,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
-import { queryHostVerificationRowsForGate } from "../store/host-verifications.js";
+import { deriveRequiredGateList } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
-import { checkClosedCommitCoveredByTestedSha, checkClosedCommitReachableOnBase } from "./reconcile-collect.js";
+import { resolveGateCoverage, evaluateGateListCoverage, checkClosedCommitReachableOnBase } from "./reconcile-collect.js";
 import type { OutOfBandEvidenceInput, OutOfBandLaneEvidence } from "./reconcile-outofband-evidence.js";
 
 // Intentionally duplicated from reconcile-collect.ts (same pattern report.ts uses
@@ -152,20 +152,24 @@ export function collectOutOfBandEvidence(projectDir: string, item: CampaignItem)
         // same rule reconcile-collect.ts's scope-blocked lane uses. FG-440 records
         // the tested CURRENT BASE HEAD (projectDir's HEAD at capture time), which is
         // typically a later commit than ticketClosedCommit itself, so an exact-sha
-        // match can never find a reconcile-captured row. checkClosedCommitCoveredByTestedSha
-        // proves ticketClosedCommit is an ancestor of the row's testedSha AND that
-        // testedSha is itself reachable on the configured base branch — never asserted,
-        // always proven by git.
-        const rows = queryHostVerificationRowsForGate(item.ticketId, projectDir, requiredGate);
-        const covering = rows.filter((r) =>
-          checkClosedCommitCoveredByTestedSha(projectDir, ticketClosedCommit!, r.commitSha, baseBranch)
+        // match can never find a reconcile-captured row. resolveGateCoverage proves
+        // ticketClosedCommit is an ancestor of each row's testedSha AND that testedSha
+        // is itself reachable on the configured base branch — never asserted, always
+        // proven by git.
+        //
+        // FG-500 round 2: covers the FULL derived gate list, not just requiredGate —
+        // the SAME shared evaluator reconcile-collect.ts's pre-check and
+        // done-audit/collect.ts use, so the three consumers cannot drift. A
+        // fast-tier-only passing row must never satisfy a tiered project's lane.
+        const gateList = deriveRequiredGateList(projectDir, requiredGate);
+        const perGate = gateList.map((gate) =>
+          resolveGateCoverage(item.ticketId, projectDir, gate, ticketClosedCommit!, baseBranch)
         );
         // Passing-row model (FG-440): any covering PASSING row satisfies the lane,
         // regardless of how many earlier covering rows failed — a historical
         // failure must never permanently outrank a later real pass.
-        const recorded = covering.length > 0;
-        const passed = covering.some((r) => r.exitCode === 0);
-        if (recorded && passed) {
+        const { passed, recordedAny } = evaluateGateListCoverage(perGate);
+        if (recordedAny && passed) {
           laneEvidence = { kind: "host_verification", recorded: true, allExitZero: true };
         }
       } catch {

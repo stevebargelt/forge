@@ -971,3 +971,98 @@ test("runAndRecordHostVerification FG-500 regression: a CUSTOM requiredHostGate 
   assert.equal(verifyRows.length, 1);
   assert.equal(extendedRows.length, 0, "a custom requiredHostGate must never pull in test:extended, even though the script exists");
 });
+
+// ── FG-500 round 2: the collectReconcileEvidence PRE-CHECK (hostVerification)
+// must cover the FULL derived gate list, not just requiredGate — otherwise a
+// tiered project could report passed:true on a fast-tier-only row, letting
+// reconcile.ts skip capture and ship without ever running test:extended.
+
+test("FG-500 round 2: scope-blocked pre-check — a fast-only passing row on a tiered project does NOT satisfy hostVerification (capture path must still run)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, fast-only row recorded");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: true, passed: false },
+    "fast-tier-only evidence must not report passed:true — the extended tier has no covering row yet"
+  );
+});
+
+test("FG-500 round 2: scope-blocked pre-check — passing rows for BOTH the fast and extended gate satisfy hostVerification (capture skipped)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, both rows recorded");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:extended",
+    command: "npm run test:extended",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:01Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});
+
+test("FG-500 round 2: scope-blocked pre-check — a ci-sourced passing row for the primary gate alone satisfies the full list (whole-workflow evidence)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, ci-sourced primary row only");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+    source: "ci",
+    ciUrl: "https://example.test/run/1",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: true, passed: true },
+    "a ci-sourced primary pass is whole-workflow evidence — no separate extended-tier row is needed"
+  );
+});
+
+test("FG-500 round 2 regression: a single-gate project (no test:extended) still resolves hostVerification from one row, unchanged", () => {
+  const commit = makeCommit("single-gate-regression");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});
