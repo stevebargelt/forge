@@ -781,3 +781,28 @@ test("runAndRecordHostVerification: a green CI check for a DIFFERENT sha does no
   assert.equal((result as { source: string }).source, "host");
   assert.equal(existsSync(markerPath()), true, "a green CI check reported for a DIFFERENT sha must never satisfy the requested sha — the gate must actually run");
 });
+
+test("runAndRecordHostVerification: FG-474 red-review fix — a configured requiredHostGate OTHER than REQUIRED_CI_GATE_COMMAND is never covered by a green required CI check, even at the exact HEAD sha — the gate actually executes", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", version: "0.0.0", scripts: { verify: execMarkerScript() } }, null, 2)
+  );
+  const commit = commitAll("add verify gate script with exec marker (custom-gate CI-spoof negative)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-712", {
+    checkStatusProvider: () => ({ sha: commit, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/999" }),
+  });
+
+  assert.equal(result.status, "recorded", "no covering evidence for the configured gate — the real gate must run");
+  assert.equal((result as { source: string }).source, "host", "must never be labeled 'ci' — CI never ran the configured 'npm run verify' command");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.equal(existsSync(markerPath()), true, "a green CI check for an uncovered command must never short-circuit exec — the gate must actually run");
+
+  const rows = queryHostVerificationRowsForGate("FG-712", projectDir, "npm run verify");
+  assert.equal(rows.length, 1, "no CI-sourced row must have been written in addition to the real host row");
+  assert.equal(rows[0]!.source, "host");
+  assert.equal(rows[0]!.ciUrl, null, "a real host row must never carry a ci_url");
+  assert.equal(rows[0]!.exitCode, 0, "the real exec's actual exit code");
+});

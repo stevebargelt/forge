@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND } from "../store/host-verifications.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
@@ -66,6 +67,16 @@ test("FG-474: ci.yml has a job whose steps run the full deterministic gate", () 
   assert.ok(
     runCommands.some((r) => r.includes("npm run test:all")),
     "must run the shipped-claim aggregate (root + dashboard workspace), not just the root suite"
+  );
+});
+
+test("FG-474 red-review fix: ci.yml's test job actually runs REQUIRED_CI_GATE_COMMAND — the command CI-sourced host_verifications evidence is pinned to", () => {
+  const wf = loadWorkflow();
+  const steps = Object.values(wf.jobs ?? {})[0]?.steps ?? [];
+  const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    runCommands.some((r) => r.includes(REQUIRED_CI_GATE_COMMAND)),
+    `ci.yml must run REQUIRED_CI_GATE_COMMAND ("${REQUIRED_CI_GATE_COMMAND}") — a green "${REQUIRED_CI_CHECK_CONTEXT}" check only ever proves this command ran; if the workflow's actual command drifts from this constant, a CI-sourced host_verifications row would mislabel a command CI never ran (the FG-419 gate_name spoofing vector)`
   );
 });
 

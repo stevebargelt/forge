@@ -159,6 +159,13 @@ export type CheckStatusProvider = (opts: {
 // The required merge-gate check FG-474 wired up: workflow "CI", job "test".
 export const REQUIRED_CI_CHECK_CONTEXT = "CI / test";
 
+// FG-474 red-review fix: the ONE command a green REQUIRED_CI_CHECK_CONTEXT
+// actually proves ran. MUST match what .github/workflows/ci.yml's test job
+// executes as its deterministic-suite step — the pairing is verified by
+// src/v2/ci-workflow.test.ts, so drift between this constant and the workflow
+// breaks a test rather than silently mislabeling evidence.
+export const REQUIRED_CI_GATE_COMMAND = "npm run test:all";
+
 type GhCheckRun = {
   head_sha?: unknown;
   name?: unknown;
@@ -291,6 +298,13 @@ export function findCoveringGateEvidence(opts: {
     (r) => r.commitSha === opts.sha && r.command === opts.command && r.exitCode === 0
   );
   if (coveringRow) return { source: "host_row", row: coveringRow };
+
+  // The CI check only ever proves REQUIRED_CI_GATE_COMMAND ran (that's the one
+  // command ci.yml's test job executes). A different configured command — e.g.
+  // a per-project requiredHostGate override — can NEVER be covered by CI; fall
+  // through to null so the caller runs the real gate rather than mislabeling a
+  // command CI never ran as covered (the FG-419 gate_name spoofing vector).
+  if (opts.command !== REQUIRED_CI_GATE_COMMAND) return null;
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext: REQUIRED_CI_CHECK_CONTEXT });

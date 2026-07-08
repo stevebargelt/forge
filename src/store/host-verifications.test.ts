@@ -1,7 +1,9 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
-import { makeInMemoryDb, setDbForTest } from "./db.js";
+import { makeInMemoryDb, setDbForTest, applyMigrations } from "./db.js";
+import { SCHEMA_SQL } from "./schema.js";
 import {
   insertHostVerification,
   queryHostVerificationRows,
@@ -454,6 +456,16 @@ test("findCoveringGateEvidence: a FAILING row (exitCode != 0) at the exact sha+c
   assert.equal(evidence, null, "a failing covering row must never satisfy the lookup");
 });
 
+test("findCoveringGateEvidence: a green required CI check at the exact sha but a DIFFERENT command never satisfies — CI only ever proves REQUIRED_CI_GATE_COMMAND ran (FG-419 gate_name spoofing guard)", () => {
+  let called = false;
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-711", projectDir: "/home/test/project", sha: GATE_SHA, command: "npm run verify",
+    checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+  });
+  assert.equal(evidence, null, "a green CI check must never cover a command CI never ran");
+  assert.equal(called, false, "the provider must not even be consulted for a command CI can never cover");
+});
+
 test("findCoveringGateEvidence: a green required CI check at the exact sha is covering evidence (source ci)", () => {
   const evidence = findCoveringGateEvidence({
     ticketId: "FG-705", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
@@ -597,4 +609,53 @@ test("aggregateCiCheckRuns: no runs matching the requested check name returns nu
 test("aggregateCiCheckRuns: a completed run with a non-success/failure conclusion (e.g. cancelled) and no other runs aggregates to other", () => {
   const result = aggregateCiCheckRuns({ check_runs: [checkRun({ conclusion: "cancelled" })] }, CR_OPTS);
   assert.deepEqual(result, { sha: CR_SHA, state: "other" });
+});
+
+// ── FG-474 red-review fix (low #3): pre-FG-474 shape migration ─────────────────
+//
+// A host_verifications row written before FG-474 added source/ci_url has
+// neither column. applyMigrations's ALTER ... DEFAULT 'host' must backfill it
+// to classify as a real host-run row (source='host', ci_url=null) — the same
+// classification a fresh-schema host row gets — and the migration must be
+// idempotent (a second open must not throw or reclassify anything).
+
+test("applyMigrations: a pre-FG-474 host_verifications row (no source/ci_url columns) migrates to source='host'/ci_url=null, and re-running migrations is idempotent", () => {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SQL);
+  // Re-shape to the pre-FG-474 CREATE — no source/ci_url columns at all.
+  db.exec("DROP TABLE host_verifications");
+  db.exec(`CREATE TABLE host_verifications (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id   TEXT NOT NULL,
+    project_dir TEXT NOT NULL,
+    commit_sha  TEXT NOT NULL,
+    gate_name   TEXT NOT NULL,
+    command     TEXT NOT NULL,
+    exit_code   INTEGER NOT NULL,
+    run_id      TEXT REFERENCES runs(id),
+    recorded_at TEXT NOT NULL
+  )`);
+  db.prepare(
+    `INSERT INTO host_verifications (ticket_id, project_dir, commit_sha, gate_name, command, exit_code, run_id, recorded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run("FG-720", "/home/test/project", "abc123", "npm run test:all", "npm run test:all", 0, null, "2026-01-01T00:00:00Z");
+
+  applyMigrations(db);
+
+  const prev = setDbForTest(db);
+  try {
+    const rows = queryHostVerificationRows("FG-720", "/home/test/project", "abc123", "npm run test:all");
+    assert.equal(rows.length, 1, "the pre-existing row must survive the migration");
+    assert.equal(rows[0]!.source, "host", "a pre-FG-474 row must backfill to source='host'");
+    assert.equal(rows[0]!.ciUrl, null, "a pre-FG-474 row must backfill to ci_url=null");
+  } finally {
+    setDbForTest(prev as DatabaseInstance);
+  }
+
+  assert.doesNotThrow(() => applyMigrations(db), "re-running migrations on an already-migrated DB must be a no-op, not throw");
+  const cols = new Set((db.prepare("PRAGMA table_info(host_verifications)").all() as { name: string }[]).map((r) => r.name));
+  assert.ok(cols.has("source"));
+  assert.ok(cols.has("ci_url"));
+  db.close();
 });
