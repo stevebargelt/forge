@@ -1,9 +1,20 @@
 name: CI
 
-# The required merge-gate check (FG-474). Runs the deterministic suite ONCE,
-# off-host and visibly, so the orchestrator/review-loop stop re-running
-# `npm run test:all` on the host as their merge gate — see CLAUDE.md's
+# job `test` is the required merge-gate check (FG-474): `npm run test:all`
+# (unit tier + dashboard workspace) is now the FAST canonical gate (FG-495,
+# <=60s target / <=120s ceiling) so the orchestrator/review-loop don't pay
+# minutes re-running it on the host as their merge gate — see CLAUDE.md's
 # "Merge authorization" section and docs/how-to-testing.md.
+#
+# job `test-extended` (FG-495) runs the integration + worktree tiers moved
+# out of the fast gate — real subprocess/git/DB coverage that's still
+# trust-sensitive and IS a required merge check, same as `test`. Branch
+# protection carries both contexts ("test" and "test-extended"; the
+# orchestrator applies that host-side, see CLAUDE.md's branch-protection
+# note). It runs on the same triggers, in parallel with `test` and with
+# review-loop verification, so the ~94s extended tier is paid once per
+# merge rather than per round — the fast `test:all` gate stays the
+# per-round cost the orchestrator/review-loop actually re-pay.
 on:
   push:
   pull_request:
@@ -41,3 +52,27 @@ jobs:
 
       - name: Test (root + dashboard workspace)
         run: npm run test:all
+
+  test-extended:
+    runs-on: ubuntu-latest
+    # Required merge check (FG-495), same as `test`: a red run here blocks
+    # merge exactly like a red `test` run. This job exists to move the slow
+    # integration/worktree coverage off the per-round path, not to make it
+    # optional — trust-sensitive coverage (FG-419/FG-440/FG-474 gate-
+    # enforcement tests) must keep gating merges.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test extended (integration + worktree tiers)
+        run: npm run test:extended

@@ -1,6 +1,6 @@
 // FG-434: `forge dependency-cache prune` — human/JSON rendering + dry-run
 // wiring. The prune logic itself (docker/fs seams, in-use vs removed vs
-// error, marker handling) is covered in dependency-provisioning.test.ts;
+// error, marker handling) is covered in dependency-provisioning.integration.test.ts;
 // these tests cover this command's own surface.
 
 import { test } from "node:test";

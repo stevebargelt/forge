@@ -27,13 +27,13 @@
 // still-"awaiting_gate" task BEFORE abandoning the run, and gate()'s own
 // `status !== "awaiting_gate"` guard would then refuse the auto-advance call
 // outright, before it ever reaches finalizeRunIfDone/completeRun's CAS (see
-// src/v2/runNext.test.ts's "realistic" FG-484 gate variant, which proves
+// src/v2/runNext.integration.test.ts's "realistic" FG-484 gate variant, which proves
 // exactly that path — a real cancel makes the CAS itself unreachable for
 // gate.ts's call site). Priming the run's abandon directly, with the task left
 // untouched at awaiting_gate, is the only way to drive gate()'s auto-advance
 // all the way through its internal task-complete write to finalizeRunIfDone,
 // which is what actually exercises the CAS this ticket is about — mirroring
-// the synthetic/store-level-guard convention runNext.test.ts already uses for
+// the synthetic/store-level-guard convention runNext.integration.test.ts already uses for
 // the same reason (see that file's "(synthetic store-level guard)" test).
 // Sanity-checked: this test fails against the pre-fix tree (the run gets
 // resurrected to "complete" and a second, spurious completion notification

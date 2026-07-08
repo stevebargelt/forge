@@ -47,28 +47,43 @@ function t_indexOf(text: string, needle: string): number {
   return text.indexOf(needle);
 }
 
-test("FG-474: merge authorization requires the CI check green as a blocking condition", () => {
-  const t = SURFACES[1]!.text; // CLAUDE.md — the live authorization language
-  const authIdx = t.indexOf("Merge authorization");
-  assert.ok(authIdx >= 0, "must have a 'Merge authorization' section");
-  const blockedIdx = t.indexOf("Auto-merge is BLOCKED", authIdx);
-  assert.ok(blockedIdx >= 0, "must have an 'Auto-merge is BLOCKED' clause after merge authorization");
-  const blockedSection = t.slice(blockedIdx, blockedIdx + 600);
-  assert.match(
-    blockedSection,
-    /required CI check is not green/i,
-    "the CI check not being green must be listed as a blocking condition for auto-merge"
-  );
-});
+for (const surface of SURFACES) {
+  test(`FG-474/FG-495: ${surface.name} merge authorization requires BOTH required CI checks green as a blocking condition`, () => {
+    const t = surface.text;
+    const authIdx = t.indexOf("Merge authorization");
+    assert.ok(authIdx >= 0, "must have a 'Merge authorization' section");
+    const blockedIdx = t.indexOf("Auto-merge is BLOCKED", authIdx);
+    assert.ok(blockedIdx >= 0, "must have an 'Auto-merge is BLOCKED' clause after merge authorization");
+    const authSection = t.slice(authIdx, blockedIdx);
+    const blockedSection = t.slice(blockedIdx, blockedIdx + 600);
 
-test("FG-474: the review-loop's own host verification is distinguished from the CI merge gate", () => {
-  // Regression target: a future edit could conflate "the loop verifies on the
-  // host" with "so the orchestrator doesn't need CI" — the two must stay
-  // explicitly separate so neither silently absorbs the other's job.
-  const t = SURFACES[1]!.text;
-  assert.match(
-    t,
-    /CI vs review-loop verification/i,
-    "must carry an explicit section distinguishing the loop's host verification from CI's merge-gate role"
-  );
-});
+    assert.match(
+      blockedSection,
+      /any required CI check .*is not green/i,
+      "any required CI check not being green must be listed as a blocking condition for auto-merge"
+    );
+
+    assert.match(
+      authSection,
+      /`test-extended`/,
+      "the authorization text must name the test-extended check, not just `test` (FG-495 dual required checks)"
+    );
+    assert.match(
+      authSection,
+      /a red `test-extended` blocks merge exactly like a red `test`/,
+      "must state that a red test-extended blocks merge exactly like a red test — otherwise test-extended reads as advisory, not a required gate"
+    );
+  });
+
+  test(`FG-474: ${surface.name} the review-loop's own host verification is distinguished from the CI merge gate`, () => {
+    // Regression target: a future edit could conflate "the loop verifies on the
+    // host" with "so the orchestrator doesn't need CI" — the two must stay
+    // explicitly separate so neither silently absorbs the other's job.
+    const t = surface.text;
+    assert.match(
+      t,
+      /CI vs review-loop verification/i,
+      "must carry an explicit section distinguishing the loop's host verification from CI's merge-gate role"
+    );
+  });
+}

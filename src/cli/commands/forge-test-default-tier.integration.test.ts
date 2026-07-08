@@ -14,6 +14,7 @@ const ALL_SCRIPTS = {
   "test:unit": "node --import tsx --test src/unit",
   "test:integration": "node --import tsx --test src/integration",
   "test:worktree": "node --import tsx --test src/worktree",
+  "test:extended": "npm run test:integration && npm run test:worktree",
   "test:all": "npm test",
 };
 
@@ -69,6 +70,11 @@ test("--integration -> npm run test:integration", () => {
 test("--worktree -> npm run test:worktree", () => {
   const dir = mkFixture(ALL_SCRIPTS);
   assert.equal(run(["--worktree"], dir), "npm run test:worktree");
+});
+
+test("--extended -> npm run test:extended", () => {
+  const dir = mkFixture(ALL_SCRIPTS);
+  assert.equal(run(["--extended"], dir), "npm run test:extended");
 });
 
 test("--all -> npm run test:all", () => {

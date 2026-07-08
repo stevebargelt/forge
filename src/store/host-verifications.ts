@@ -174,6 +174,39 @@ type WorkflowStep = { run?: unknown };
 type WorkflowJob = { name?: unknown; steps?: unknown };
 type WorkflowFile = { name?: unknown; jobs?: unknown };
 
+// Reads <projectDir>/.github/workflows/*.y[a]ml and returns the `jobs` object
+// of every workflow file whose top-level `name` equals workflowName — the
+// parsing projectCiRunsCommand and projectCiWorkflowJobIds both need. Fails
+// closed with null (not []) only when the workflows dir itself can't be read
+// (missing dir, permissions) — the distinction matters to callers that must
+// tell "no workflow files at all" apart from "workflows dir exists but none
+// of them are named workflowName" (both cases still yield no jobs, but the
+// null case is the "we couldn't even look" signal).
+function matchingWorkflowJobs(projectDir: string, workflowName: string): Record<string, unknown>[] | null {
+  const workflowsDir = path.join(projectDir, ".github", "workflows");
+  let files: string[];
+  try {
+    files = readdirSync(workflowsDir).filter((f) => /\.ya?ml$/i.test(f));
+  } catch {
+    return null;
+  }
+
+  const matches: Record<string, unknown>[] = [];
+  for (const file of files) {
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(readFileSync(path.join(workflowsDir, file), "utf8"));
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const workflow = parsed as WorkflowFile;
+    if (workflow.name !== workflowName) continue;
+    matches.push(typeof workflow.jobs === "object" && workflow.jobs !== null ? (workflow.jobs as Record<string, unknown>) : {});
+  }
+  return matches;
+}
+
 /** Does <projectDir>/.github/workflows/*.y[a]ml define a workflow whose name
  *  matches the workflow half of checkContext ("<workflow> / <job>", e.g.
  *  "CI / test") with a job (matched by job id or job `name`) matching the job
@@ -188,26 +221,10 @@ export function projectCiRunsCommand(projectDir: string, checkContext: string, c
   const [workflowName, jobName] = checkContext.split("/").map((s) => s.trim());
   if (!workflowName || !jobName) return false;
 
-  const workflowsDir = path.join(projectDir, ".github", "workflows");
-  let files: string[];
-  try {
-    files = readdirSync(workflowsDir).filter((f) => /\.ya?ml$/i.test(f));
-  } catch {
-    return false;
-  }
+  const jobsList = matchingWorkflowJobs(projectDir, workflowName);
+  if (!jobsList) return false;
 
-  for (const file of files) {
-    let parsed: unknown;
-    try {
-      parsed = parseYaml(readFileSync(path.join(workflowsDir, file), "utf8"));
-    } catch {
-      continue;
-    }
-    if (typeof parsed !== "object" || parsed === null) continue;
-    const workflow = parsed as WorkflowFile;
-    if (workflow.name !== workflowName) continue;
-
-    const jobs = typeof workflow.jobs === "object" && workflow.jobs !== null ? (workflow.jobs as Record<string, unknown>) : {};
+  for (const jobs of jobsList) {
     for (const [jobId, jobRaw] of Object.entries(jobs)) {
       if (typeof jobRaw !== "object" || jobRaw === null) continue;
       const job = jobRaw as WorkflowJob;
@@ -222,6 +239,27 @@ export function projectCiRunsCommand(projectDir: string, checkContext: string, c
     }
   }
   return false;
+}
+
+/** Every job id defined under the workflow(s) named workflowName in
+ *  <projectDir>/.github/workflows/*.y[a]ml — the same parsing
+ *  projectCiRunsCommand uses. This is what lets findCoveringGateEvidence
+ *  require the WHOLE workflow green at a sha (FG-495 review finding), not
+ *  just the one job paired to opts.command: post-FG-495, forge's own CI
+ *  workflow splits the suite across `test` + `test-extended`, so a green
+ *  "CI / test" alone no longer proves the whole gate passed. Fails closed
+ *  with null — not [] — when the workflows dir can't be read, or no workflow
+ *  named workflowName exists, or it exists with no jobs: callers must never
+ *  treat "couldn't enumerate the jobs" as "there are zero jobs to check". */
+export function projectCiWorkflowJobIds(projectDir: string, workflowName: string): string[] | null {
+  const jobsList = matchingWorkflowJobs(projectDir, workflowName);
+  if (!jobsList || jobsList.length === 0) return null;
+
+  const ids = new Set<string>();
+  for (const jobs of jobsList) {
+    for (const jobId of Object.keys(jobs)) ids.add(jobId);
+  }
+  return ids.size > 0 ? Array.from(ids) : null;
 }
 
 type GhCheckRun = {
@@ -364,14 +402,31 @@ export function findCoveringGateEvidence(opts: {
   // prove pairing with forge's own ci.yml (task-red-wide-16933b) — never with
   // the project actually being gated. Fall through to null (never consult the
   // provider) when this project's ci.yml doesn't demonstrably run opts.command.
+  const [workflowName, pairedJobId] = REQUIRED_CI_CHECK_CONTEXT.split("/").map((s) => s.trim());
+  if (!workflowName || !pairedJobId) return null;
   if (!projectCiRunsCommand(opts.projectDir, REQUIRED_CI_CHECK_CONTEXT, opts.command)) return null;
 
+  // FG-495 review finding: pairing alone only proves ONE job of this workflow
+  // runs opts.command. Post-FG-495 the suite is split across sibling required
+  // jobs (e.g. `test` + `test-extended`), so a green paired job no longer
+  // proves the whole gate passed — every job in the workflow must be green at
+  // this exact sha, or this is not covering evidence. Enumeration failure
+  // (unparseable workflow, etc.) fails closed: no coverage, and since this
+  // check runs BEFORE the provider is consulted, an enumeration failure means
+  // the provider is never even reached.
+  const jobIds = projectCiWorkflowJobIds(opts.projectDir, workflowName);
+  if (!jobIds) return null;
+
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
-  const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext: REQUIRED_CI_CHECK_CONTEXT });
-  if (status && status.state === "success" && status.sha === opts.sha) {
-    return { source: "ci", sha: status.sha, checkUrl: status.detailsUrl };
+  let pairedStatus: CiCheckStatus | null = null;
+  for (const jobId of jobIds) {
+    const checkContext = `${workflowName} / ${jobId}`;
+    const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
+    if (!status || status.state !== "success" || status.sha !== opts.sha) return null;
+    if (jobId === pairedJobId) pairedStatus = status;
   }
-  return null;
+  if (!pairedStatus) return null;
+  return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl };
 }
 
 /** Human-readable description of WHAT covered a reuse — used in place of raw run

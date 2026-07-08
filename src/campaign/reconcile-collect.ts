@@ -297,9 +297,12 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *
  *  FG-474: before exec, consults findCoveringGateEvidence for HEAD — a passing
  *  host_verifications row already covering the exact sha+command short-circuits
- *  with "reused" (no exec, no duplicate row); a green required CI check for the
- *  exact sha short-circuits with a fresh 'ci'-sourced row (no exec). Only when
- *  neither covers does this fall through to the real host exec, unchanged. */
+ *  with "reused" (no exec, no duplicate row); CI evidence for the exact sha only
+ *  short-circuits (with a fresh 'ci'-sourced row, no exec) when EVERY job of the
+ *  project's matched CI workflow is green at that sha (FG-495, via
+ *  findCoveringGateEvidence) — a green fast job with another job red, pending,
+ *  or absent does not cover. Only when neither covers does this fall through to
+ *  the real host exec, unchanged. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,

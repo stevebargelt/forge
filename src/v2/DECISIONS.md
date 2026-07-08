@@ -160,7 +160,7 @@ runDocker function. ~50 LoC.
 
 - `ready-queue.test.ts`: 8 cases covering linear, parallel, diamond, retry-pending, dep-not-met.
 - `inputs.test.ts`: 7 cases covering empty deps, multi-dep, latest-primary, child task filtering, missing/malformed result.json.
-- `runNext.test.ts`: 12 cases — linear two-step, human gate, manual step, parallel-within-wave (diamond), empty queue, failed step; reds all-pass, reds authoritative-fail (blocked_by_red), reds specialist-fail (advisory only); fanout success aggregation, fanout fail-phase short-circuit, fanout missing-array.
+- `runNext.integration.test.ts`: 12 cases — linear two-step, human gate, manual step, parallel-within-wave (diamond), empty queue, failed step; reds all-pass, reds authoritative-fail (blocked_by_red), reds specialist-fail (advisory only); fanout success aggregation, fanout fail-phase short-circuit, fanout missing-array.
 - `startRun.test.ts`: 4 cases covering input validation, designDir metadata.
 
 All run with stubbed docker exec. No real containers spawned.

@@ -36,7 +36,7 @@ import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { assembleCampaignReport, assembleCampaignShow, renderCampaignReportHuman } from "./report.js";
 
-// Same wrapper as executor.test.ts: forces executionMode:'invoke' for list-type
+// Same wrapper as executor.integration.test.ts: forces executionMode:'invoke' for list-type
 // campaigns so resumeCampaign's dispatch path is trivially mockable.
 function planCampaign(input: PlannerInput, opts: { projectDir: string; mode?: PlanMode }) {
   if (input.kind === "list" && !input.itemOverrides) {
@@ -248,7 +248,7 @@ test("concurrent flip: campaign leaves 'paused' between the up-front check and t
   // status any time after. collectReconcileEvidence is a real per-item seam called
   // strictly after the up-front check and strictly before the guarded write, so
   // mutating the DB from inside it deterministically lands "another process's"
-  // write in that exact gap — the same technique executor.test.ts's TOCTOU tests
+  // write in that exact gap — the same technique executor.integration.test.ts's TOCTOU tests
   // use with `dispatch`.
   const ticketId = "FG-260";
   const { campaignId, itemId, runId } = setupBlockedCampaign(ticketId);

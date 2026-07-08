@@ -393,7 +393,7 @@ test("runNext: FG-455 attached exit 137 marks the pipeline task failed with oom_
 
 // ── FG-461: runNext attached-exit recovery evidence ─────────────────────────
 // runNext.ts wires the same recoveryEvidenceFor/attachedExitEvidence call as
-// invoke.ts (see invoke.test.ts's FG-461 block); cover it independently since
+// invoke.ts (see invoke.integration.test.ts's FG-461 block); cover it independently since
 // runNext dispatches via the real docker-args/task-manifest path, not invoke's.
 
 // A dirty git project dir so changedWorktreeFiles returns a non-empty diff.
@@ -1574,7 +1574,7 @@ test("runNext: reds receive force-level anti-prompts as failureModes (forge-site
   }
 });
 
-// ── #264: pi attribution on the WORKFLOW/runNext path (mirrors invoke.test.ts) ─
+// ── #264: pi attribution on the WORKFLOW/runNext path (mirrors invoke.integration.test.ts) ─
 const PI_ATTR_WORKFLOW: Workflow = {
   name: "test-pi-attr",
   description: "single pi step",
