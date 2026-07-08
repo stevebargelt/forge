@@ -122,3 +122,22 @@ pre-FG-495 is *where* this coverage runs (CI, off-host, in parallel with
 for it interactively (never per round — the per-round gate the review-loop
 re-runs is the fast unit tier via `npm run test:all`). Nothing was deleted,
 skipped, or downgraded to non-blocking.
+
+## Review finding: the dashboard workspace had no real tier split
+
+Round 1 renamed `dashboard/src/routes-backlog.integration.test.ts` to carry
+the `.integration.test.ts` suffix, but `dashboard/package.json`'s `"test"`
+script was `tsx --test $(find src -name '*.test.ts' -type f)` — a glob that
+also matches `*.integration.test.ts`, since that filename still ends in
+`.test.ts`. The rename was cosmetic: the file (which boots a real HTTP
+server on a real port against a real fixture backlog) kept running inside
+`npm test -w dashboard`, and therefore inside `npm run test:all`, the
+canonical gate — exactly the integration-shaped work the root tiering was
+built to keep out of the fast path. Nothing anywhere ran a dashboard
+integration tier, in or out of `test:extended`. The fix mirrors the root
+split exactly: `dashboard/package.json`'s `"test"` now excludes
+`*.integration.test.ts` via the same `-not -name` clause `test:unit` uses,
+a new `"test:integration"` script runs just the excluded file(s), and the
+root's `test:extended` now also runs `npm run test:integration -w
+dashboard` so that coverage rejoins the required `test-extended` merge
+check instead of running nowhere.

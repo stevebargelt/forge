@@ -141,3 +141,27 @@ test("test tiers are pairwise disjoint and their union equals the full suite", (
     assert.ok(union.has(f), `${f} is not in any tier`);
   }
 });
+
+// FG-495 review: the dashboard workspace's own "test" script (not this file's
+// unit-tier definition) is the tier boundary for dashboard — it must exclude
+// *.integration.test.ts the same way the root "test:unit" script does, and a
+// "test:integration" script must exist to run only those files. A string-level
+// check of dashboard/package.json is the right level here: the actual
+// partition of dashboard/src files is already covered by the content-guard
+// test above, which excludes any label ending in ".integration.test.ts"
+// (dashboard or root) from the unit-tier purity scan.
+test("FG-495: dashboard/package.json's test script excludes *.integration.test.ts and a test:integration script exists", () => {
+  const dashboardPkg = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../dashboard/package.json", import.meta.url)), "utf8"),
+  );
+  const testScript = dashboardPkg.scripts?.test ?? "";
+  assert.ok(
+    testScript.includes("-not -name '*.integration.test.ts'"),
+    `dashboard's "test" script must exclude *.integration.test.ts so it stays fast-tier only, got: ${testScript}`,
+  );
+  const testIntegrationScript = dashboardPkg.scripts?.["test:integration"] ?? "";
+  assert.ok(
+    testIntegrationScript.includes("*.integration.test.ts"),
+    `dashboard must define a "test:integration" script that runs *.integration.test.ts files, got: ${testIntegrationScript}`,
+  );
+});
