@@ -191,7 +191,18 @@ required credential is unavailable.
 Runtime YAML should grow explicit metadata fields, or an equivalent typed shape,
 so Forge does not infer behavior from provider names:
 
+> **Draft, not shipped shape.** Like the "Core Decision" example above, this
+> `pi-apikey` sketch predates implementation and does not match the shipped
+> runtime. See `seeds/runtimes/pi-apikey.yml` and
+> [pi prompt/context injection](../../learnings/decisions/2026-06-05_pi-prompt-injection.md)
+> for the actual invocation: `prompt_strategy` is `message-arg`, the composed
+> system prompt goes via `--append-system-prompt "${SYSTEM_PROMPT}"`, and the
+> task package is delivered as a file reference — `@/task/package.md` (pi's
+> `@file` message syntax, since FG-497) — not inlined as `${TASK_PACKAGE_MARKDOWN}`
+> via `-p`.
+
 ```yaml
+# draft vocabulary — see note above
 name: pi-apikey
 runtime: pi
 log_format: pi-jsonl
