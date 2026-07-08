@@ -6,7 +6,15 @@ title: "review-loop classifies a well-formed red-schema reviewer result (verdict
 created: 2026-07-07
 ---
 
+## Problem
+
+The review-loop classifies a well-formed red-schema reviewer result carrying `verdict: "fail"` as `reviewer_failed` (invalid or absent result) — a verdict-vocabulary mismatch at the loop boundary. A real fail verdict with substantiated findings is reported as a STRUCTURAL failure, which blocks closeability and misleads the operator (reviewer_failed reads as infra, not as a genuine failing review).
+
 Observed 2026-07-07, run-review-loop-fg-489-072ea8 (ticket FG-489, route implementation_quick).
+
+## Goal
+
+A reviewer result that is well-formed under the red schema and carries `verdict: "fail"` with findings is consumed as a real review outcome (a needs_fix round with fixer dispatch), while genuinely absent/unparseable reviewer results still stop as reviewer_failed. Loop stop reasons stay trustworthy.
 
 ## Evidence
 
