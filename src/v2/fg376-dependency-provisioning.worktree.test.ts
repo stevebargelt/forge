@@ -1,7 +1,7 @@
 // FG-376 dispatch-level integration tests: agent worktree dependency parity.
 //
 // Covers the END-TO-END wiring (not exercised by the module-level unit tests
-// in dependency-provisioning.test.ts / spawn.test.ts) for the TWO-PHASE
+// in dependency-provisioning.integration.test.ts / spawn.test.ts) for the TWO-PHASE
 // provisioning model:
 //   (a) A missing marker triggers exactly one short-lived PROVISIONER
 //       container (rw named volumes, FORGE_NM_INSTALL_ROOT set, a distinct

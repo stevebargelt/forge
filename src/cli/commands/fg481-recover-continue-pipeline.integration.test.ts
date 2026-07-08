@@ -1,7 +1,7 @@
 // FG-481 integration tests: `forge recover --continue` on a PIPELINE-run task
 // must be refused end to end through the REAL CLI subprocess (commander
 // parsing, JSON/plain rendering, process.exit code), not just at the
-// performContinue() function level (already covered by recover.test.ts).
+// performContinue() function level (already covered by recover.integration.test.ts).
 // Proves the full path — real subprocess, real on-disk sqlite db — so a
 // regression in registerRecover's action wiring (e.g. --json/--force plumbed
 // past the refusal, or the wrong exit code) would be caught here even if the
@@ -283,7 +283,7 @@ test("integ forge show <taskId> --json: an invoke-run task's recovery guidance s
 // direct coverage of that wiring was invoke vs. pipeline (build). invoke_chain
 // is the other NO_PIPELINE_FINALIZE_WORKFLOWS member (run-kind.ts) and an
 // AC-named surface — recover.ts's recommendationFor is regression-tested for
-// it (recover.test.ts), but show.ts/status.ts's own guidance wiring was not.
+// it (recover.integration.test.ts), but show.ts/status.ts's own guidance wiring was not.
 
 test("integ forge show <taskId> --json: an invoke_chain-run task's recovery guidance still suggests continue-or-retry (same as invoke)", () => {
   const runId = "run-fg486-show-chain";

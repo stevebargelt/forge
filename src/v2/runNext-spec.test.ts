@@ -21,7 +21,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { taskDir } from "../util/paths.js";
 import type { Workflow } from "./schema.js";
 
-// ─── helpers (mirrors runNext.test.ts patterns) ────────────────────────────
+// ─── helpers (mirrors runNext.integration.test.ts patterns) ────────────────────────────
 
 function makeRoutingExec(
   rules: Array<{ matches: (taskId: string) => boolean; result: unknown; exitCode?: number }>,

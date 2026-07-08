@@ -25,16 +25,28 @@ function gatherTestFiles(dir: string): string[] {
 }
 
 // Heuristic: a unit-tier file is a violator when it (a) has a non-type
-// import from node:child_process AND (b) calls execSync/spawnSync/spawn/execFile
-// as a standalone function. Known safe patterns that must NOT trip this guard:
+// import from node:child_process AND (b) calls
+// execSync/spawnSync/spawn/execFile/execFileSync as a standalone function, OR
+// (c) contains a promisified setTimeout sleep (`new Promise((r) =>
+// setTimeout(r, ...))`) regardless of child_process usage. Known safe
+// patterns that must NOT trip this guard:
 //   - `typeof import("node:child_process").execFile` — inline type ref, no
 //     top-level import statement (docker-exec.test.ts).
 //   - `"npm run e2e:auth"` strings in YAML fixtures — no child_process import
 //     at all (project-auth.test.ts).
 //   - `db.exec(` / `legacy.exec(` — SQLite method calls, dot-prefixed; the
 //     guard only flags standalone function identifiers (runs/tasks tests).
+//   - `mock.timers.enable(...)` + `mock.timers.tick(...)` — node:test's fake
+//     timers never touch a real clock, so files using them (idle-watchdog)
+//     don't match the promisified-sleep pattern in the first place.
 // Limits: commented-out spawn() calls would trigger a false positive; dynamic
-// spawn via a variable (const cmd = "sleep"; spawn(cmd)) would escape detection.
+// spawn via a variable (const cmd = "sleep"; spawn(cmd)) would escape detection;
+// a sleep hidden behind a helper function (not the inline `new Promise(...)`
+// idiom) would also escape detection.
+// FG-495: execFileSync was a real gap — the pattern list omitted it, so 8
+// unit-tier files spawned real `git` subprocesses undetected, and 2 more slept
+// on a real clock via the promisified-setTimeout idiom below (c). All 10 were
+// reclassified to integration/worktree; see docs/test-suite-timing-fg495.md.
 function isUnitTierSubprocessViolator(filePath: string): { violation: boolean; reason: string } {
   const content = readFileSync(filePath, "utf8");
 
@@ -44,11 +56,13 @@ function isUnitTierSubprocessViolator(filePath: string): { violation: boolean; r
 
   if (hasChildProcessImport) {
     // Detect standalone function calls (not method calls preceded by a dot).
-    // \b ensures we don't match partial identifiers.
+    // \b ensures we don't match partial identifiers. execFileSync is checked
+    // before execFile so the more specific pattern reports first.
     const callPatterns = [
       /\bexecSync\s*\(/,
       /\bspawnSync\s*\(/,
       /\bspawn\s*\(/,
+      /\bexecFileSync\s*\(/,
       /\bexecFile\s*\(/,
       /\bexec\s*\(/,
     ];
@@ -62,6 +76,13 @@ function isUnitTierSubprocessViolator(filePath: string): { violation: boolean; r
   // Detect literal sleep spawn regardless of import (belt-and-suspenders).
   if (/\bspawn\s*\(\s*["']sleep["']/.test(content)) {
     return { violation: true, reason: "spawns sleep" };
+  }
+
+  // Detect a real (non-fake-timer) sleep: `new Promise((r) => setTimeout(r, N))`
+  // or equivalent. node:test's `mock.timers` stubs setTimeout so it never
+  // reaches this idiom, hence no allowlist needed for fake-timer files.
+  if (/new Promise\(\s*\([^)]*\)\s*=>\s*setTimeout\(/.test(content)) {
+    return { violation: true, reason: "promisified setTimeout sleep" };
   }
 
   return { violation: false, reason: "" };

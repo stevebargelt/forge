@@ -2221,7 +2221,7 @@ test("FG-416 integ: forge campaign resume — readiness-held pause still prints 
 // integration test without a live dispatch (the executor requires real item execution to
 // produce a failed+blocked item before the dependency-held hold fires at start-time).
 // The start handler uses identical branch logic to the resume handler (same diff applied);
-// unit-level coverage via executor.test.ts (FG-393 T1/T3) exercises the itemRecord
+// unit-level coverage via executor.integration.test.ts (FG-393 T1/T3) exercises the itemRecord
 // shape that the CLI branches against.
 
 // ── FG-416: start handler dependency-held branch — DB injection ──────────────────────────────
@@ -2877,7 +2877,7 @@ test("integ campaign show --json (real CLI, after reconcile): reflects the recon
 // blocker_kind (the ONLY shape executor.ts's gate:human path produces — e.g. an item
 // re-routed to a non-pipeline lane whose ticket shipped outside the feature run). The
 // unit/direct-import tests for this path already live in reconcile.integration.test.ts
-// and report.test.ts; these tests prove the same behavior holds through the actual
+// and report.integration.test.ts; these tests prove the same behavior holds through the actual
 // `forge campaign reconcile|show|report` commands, spawned as real child processes
 // against the on-disk forge.db — the operator's actual interface.
 
@@ -4483,7 +4483,7 @@ function writeDriveErrorForcingWorkflow(): void {
 // The shared beforeEach's FG-101 has an empty body, so it never clears the
 // readiness gate (evaluateReadiness) and the item parks on outcome=held
 // before it ever reaches dispatch. Rewrite it with Problem/Goal/Acceptance
-// Criteria sections — same shape executor.test.ts's real-dispatch fixtures
+// Criteria sections — same shape executor.integration.test.ts's real-dispatch fixtures
 // use — so the item actually dispatches and hits the drive-error fixture.
 function writeReadyTicket(): void {
   writeTicket(projectDir, {

@@ -1,7 +1,7 @@
 // Integration tests for task-manifest (#197, learnings/decisions/observability.md Crawl §5).
 // Verify the manifest end-to-end across the dispatch → task-manifest → show boundary.
 //
-// Unit tests in invoke.test.ts, runNext.test.ts, show.test.ts cover each layer in
+// Unit tests in invoke.integration.test.ts, runNext.integration.test.ts, show.test.ts cover each layer in
 // isolation. These integration tests add:
 //   1. invoke dispatch → manifest written with correct shape (full chain assertion)
 //   2. invoke WITH real auth profile → secrets discipline when stateMounted=true

@@ -22,7 +22,7 @@ import { assembleCampaignShow, assembleCampaignReport } from "./report.js";
 // is exercised without needing workflow YAML or container infrastructure.
 // The readiness evaluator and hold/continue policy are shared across execution
 // modes; invoke is a valid and stable path for testing them (same approach used
-// in executor.test.ts).
+// in executor.integration.test.ts).
 function planCampaign(input: PlannerInput, opts: { projectDir: string; mode?: PlanMode }) {
   if (input.kind === "list" && !input.itemOverrides) {
     const overrides = Object.fromEntries(
@@ -41,7 +41,7 @@ let projectDir: string;
 // requires (composeOutOfBandEligibility) — the pre-FG-483 fake "abc123"
 // closedCommit string makeDispatchSpy used to fabricate a ship no longer
 // passes checkClosedCommitReachableOnBase. Same gitExec pattern as
-// executor.test.ts/reconcile.integration.test.ts.
+// executor.integration.test.ts/reconcile.integration.test.ts.
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,

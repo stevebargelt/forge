@@ -1,9 +1,17 @@
 name: CI
 
-# The required merge-gate check (FG-474). Runs the deterministic suite ONCE,
-# off-host and visibly, so the orchestrator/review-loop stop re-running
-# `npm run test:all` on the host as their merge gate — see CLAUDE.md's
+# job `test` is the required merge-gate check (FG-474): `npm run test:all`
+# (unit tier + dashboard workspace) is now the FAST canonical gate (FG-495,
+# <=60s target / <=120s ceiling) so the orchestrator/review-loop don't pay
+# minutes re-running it on the host as their merge gate — see CLAUDE.md's
 # "Merge authorization" section and docs/how-to-testing.md.
+#
+# job `test-extended` (FG-495) runs the integration + worktree tiers moved
+# out of the fast gate — real subprocess/git/DB coverage that's still
+# trust-sensitive but too slow for every commit's blocking check. It runs on
+# the same triggers so it's visible on every push/PR, but is NOT a required
+# status check (only `test` is, per CLAUDE.md's branch-protection note) and
+# is marked continue-on-error so a red run surfaces without blocking merge.
 on:
   push:
   pull_request:
@@ -41,3 +49,27 @@ jobs:
 
       - name: Test (root + dashboard workspace)
         run: npm run test:all
+
+  test-extended:
+    runs-on: ubuntu-latest
+    # Informational, not a required check (FG-495): surfaces failures on
+    # every push/PR without blocking merge — only `test` gates branch
+    # protection. Promote to required (drop this line) if the extended tier
+    # ever needs to become a hard merge gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild better-sqlite3 native module
+        run: npm rebuild better-sqlite3
+
+      - name: Test extended (integration + worktree tiers)
+        run: npm run test:extended

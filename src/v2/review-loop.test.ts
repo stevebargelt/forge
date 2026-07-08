@@ -371,7 +371,7 @@ test("#462 loop: FG-459 shape — reviewer flags the active backlog file + a rea
   let given: Finding[] = [];
   const mixed: Finding[] = [
     { summary: "FG-459 still active in the backlog — move to done", file: "backlog/stories/FG-459-x.md", line: 3 }, // closeout
-    { summary: "reconcile.test.ts missing a case", file: "src/v2/reconcile.test.ts", line: 42 },                // fixable
+    { summary: "reconcile.integration.test.ts missing a case", file: "src/v2/reconcile.integration.test.ts", line: 42 },                // fixable
   ];
   const r = await runReviewLoop({ maxRounds: 2, ticketId: "FG-459" }, deps({
     review: () => (++round === 1
@@ -381,7 +381,7 @@ test("#462 loop: FG-459 shape — reviewer flags the active backlog file + a rea
   }));
   assert.equal(r.stopReason, "passed");
   // The fixer received ONLY the legitimate code finding — never the backlog close/move.
-  assert.deepEqual(given.map((f) => f.summary), ["reconcile.test.ts missing a case"]);
+  assert.deepEqual(given.map((f) => f.summary), ["reconcile.integration.test.ts missing a case"]);
   // The closeout finding is surfaced on the round, not dropped silently.
   assert.deepEqual(r.rounds[0]!.closeoutFindings?.map((f) => f.file), ["backlog/stories/FG-459-x.md"]);
 });

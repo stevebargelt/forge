@@ -1307,7 +1307,7 @@ test("FG-463: Mode-A backfill rollback — backfillTaskResult commits then a lat
 });
 
 // FG-461 (review round): attachedExitEvidence's source disambiguation. The
-// attached-exit dispatch tests (invoke.test.ts / runNext.test.ts) all run
+// attached-exit dispatch tests (invoke.integration.test.ts / runNext.integration.test.ts) all run
 // against a shared project dir, so they only cover source: "project_dir_shared".
 // This exercises the source: "worktree" branch directly — a dedicated
 // worktreePath is task-exclusive, confident evidence, and flips both `source`
@@ -1349,7 +1349,7 @@ test("FG-461: attachedExitEvidence with no worktreePath falls back to the shared
 // finalizeRunIfSettled. A concurrent `forge cancel` can abandon the run
 // anywhere in that window; the early "active" read is just this function's
 // stale local snapshot. gate.ts and runNext.ts's finalize sites have their own
-// dedicated race tests (runNext.test.ts's "gate: FG-484" / "AWN-2" cases);
+// dedicated race tests (runNext.integration.test.ts's "gate: FG-484" / "AWN-2" cases);
 // this is reconcile.ts's — using the same injectable-writers seam FG-459's
 // SQLITE_BUSY tests use, to land the concurrent abandon deterministically
 // between the task-level write and the run-level finalize check.

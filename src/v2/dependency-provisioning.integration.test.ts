@@ -357,7 +357,7 @@ function cacheLockPathForTest(cacheKey: string): string {
   return join(process.env.FORGE_HOME!, "dependency-cache", `${cacheKey}.lock`);
 }
 
-// Deterministic pid-liveness fakes — same convention as run-lock.test.ts:
+// Deterministic pid-liveness fakes — same convention as run-lock.integration.test.ts:
 // never rely on a real OS pid (999999 is "almost certainly dead" but not
 // guaranteed), always inject.
 const DEAD = () => false;

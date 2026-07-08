@@ -16,7 +16,8 @@
 #   forge-test --unit                 # npm run test:unit
 #   forge-test --integration          # npm run test:integration
 #   forge-test --worktree             # npm run test:worktree
-#   forge-test --all                  # npm run test:all (full aggregate incl. dashboard)
+#   forge-test --extended             # npm run test:extended (integration + worktree, slow, CI tier — FG-495)
+#   forge-test --all                  # npm run test:all (canonical CI gate: unit + dashboard, fast — FG-495)
 #   forge-test src/spine/foo.test.ts  # run a single test file directly with tsx
 #   forge-test --test pattern         # any flags passed to tsx/node:test
 #
@@ -61,6 +62,8 @@ if [[ "${FORGE_TEST_PRINT_CMD:-}" == "1" ]]; then
     echo "npm run test:integration"
   elif [[ "$1" == "--worktree" ]]; then
     echo "npm run test:worktree"
+  elif [[ "$1" == "--extended" ]]; then
+    echo "npm run test:extended"
   elif [[ "$1" == "--all" ]]; then
     echo "npm run test:all"
   else
@@ -98,7 +101,7 @@ _has_script() {
 # ── TIER FLAGS (first arg only) ─────────────────────────────────────────────
 if [[ $# -ge 1 ]]; then
   case "$1" in
-    --unit|--integration|--worktree|--all)
+    --unit|--integration|--worktree|--extended|--all)
       _npm_script="test:${1#--}"
       if ! _has_script "$_npm_script"; then
         echo "forge-test: no \"$_npm_script\" script in $WORK_DIR/package.json" >&2

@@ -125,7 +125,7 @@ steps:
 }
 
 // Real git plumbing for evaluateInvokeLaneEligibility's composeOutOfBandEligibility
-// check — mirrors executor.test.ts's gitExec/makeShipCommit helpers.
+// check — mirrors executor.integration.test.ts's gitExec/makeShipCommit helpers.
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
@@ -425,7 +425,7 @@ test(
   "FG-486: an awaiting_gate item on an ACTIVE invoke-family run skips the liveness probe entirely and still reaches the evidence path",
   { timeout: 20000 },
   async () => {
-    // Same last-item-pause-boundary shape as executor.test.ts's FG-441 test
+    // Same last-item-pause-boundary shape as executor.integration.test.ts's FG-441 test
     // (CAS lost the race: item ships-eligible but the campaign-running-gated
     // write is a no-op because dispatch already paused the campaign, so the
     // item parks awaiting_gate/no blockerKind with its run left 'active') —
@@ -436,7 +436,7 @@ test(
     gitExec(["init", "-b", "main"], projectDir);
     // Base commit so the ship commit below has exactly one parent — a root
     // commit is ambiguous and safe-denies in commitTouchesOnlyNonCodePaths
-    // (see executor.test.ts's beforeEach, which does the same for makeShipCommit).
+    // (see executor.integration.test.ts's beforeEach, which does the same for makeShipCommit).
     writeFileSync(join(projectDir, "base.txt"), "base");
     gitExec(["add", "."], projectDir);
     gitExec(["commit", "-m", "init"], projectDir);
