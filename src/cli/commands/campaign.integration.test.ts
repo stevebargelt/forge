@@ -4526,7 +4526,23 @@ test("integ FG-490 review: campaign start --json renders a drive-error as struct
   assert.equal(parsed.ticketId, "FG-101");
   assert.ok(parsed.runId, "runId must be derivable from the parked campaign item");
   assert.match(parsed.error, /required input 'drive-error-fixture-field' missing/, "error must carry the ORIGINAL drive-path error, not the wrapped guidance text");
-  assert.match(parsed.guidance, /forge campaign resume/);
+  // FG-490 reopen: this fixture parks failed/blocked/infrastructure (the
+  // startRun-throw shape) — bare resume SKIPS failed items, so the guidance
+  // must lead with retry (targeting this exact campaign+ticket) before resume,
+  // never recommend bare resume alone.
+  assert.ok(
+    parsed.guidance.includes(`forge campaign retry ${planOutput.campaignId} FG-101`),
+    `guidance must recommend retry for the parked ticket, got: ${parsed.guidance}`
+  );
+  assert.ok(
+    parsed.guidance.includes(`forge campaign resume ${planOutput.campaignId}`),
+    `guidance must still chain into resume, got: ${parsed.guidance}`
+  );
+  assert.notEqual(
+    parsed.guidance,
+    `forge campaign resume ${planOutput.campaignId}`,
+    "guidance must not be bare resume alone — that silently skips the failed item"
+  );
 });
 
 test("integ FG-490 review: campaign start (human) still prints the wrapped drive-error message with resume guidance", () => {
@@ -4598,7 +4614,17 @@ test("integ FG-490 review: campaign resume --json renders a fresh drive-error as
   assert.equal(parsed.ticketId, "FG-101");
   assert.ok(parsed.runId, "runId must be derivable from the parked campaign item");
   assert.match(parsed.error, /required input 'drive-error-fixture-field' missing/);
-  assert.match(parsed.guidance, /forge campaign resume/);
+  // FG-490 reopen: same startRun-throw shape as the `start` case above — resume
+  // must also lead with retry, not bare resume.
+  assert.ok(
+    parsed.guidance.includes(`forge campaign retry ${planOutput.campaignId} FG-101`),
+    `guidance must recommend retry for the parked ticket, got: ${parsed.guidance}`
+  );
+  assert.notEqual(
+    parsed.guidance,
+    `forge campaign resume ${planOutput.campaignId}`,
+    "guidance must not be bare resume alone — that silently skips the failed item"
+  );
 });
 
 test("integ FG-490 review: campaign resume (human) still prints the wrapped drive-error message with resume guidance", () => {
@@ -4634,5 +4660,98 @@ test("integ FG-490 review: campaign resume (human) still prints the wrapped driv
   assert.ok(
     combined.includes(`forge campaign resume ${planOutput.campaignId}`),
     `human output must keep the resume guidance\nstdout: ${resumeResult.stdout}\nstderr: ${resumeResult.stderr}`
+  );
+});
+
+// ── FG-490 reopen: the runNext-throw (awaiting_gate) shape, exercised at the
+// CLI layer ──────────────────────────────────────────────────────────────
+//
+// startRun succeeds (only `brief` is required, and the executor always
+// supplies it) but runNext throws while resolving the model for the
+// `architect` step's role: the model-policy fixture below defines a profile
+// whose `map` covers `review` but not `reasoning` (architecture-advisor's
+// default capability, per DEFAULT_ACTIVITY_BY_ROLE) and has no `default`
+// fallback — resolveModel (src/v2/model-resolution.ts) throws synchronously,
+// uncaught inside runNext, which driveWorkflowItem's runNextFn try/catch
+// (src/campaign/executor.ts) hands to parkCampaignOnDriveThrow. That parks
+// the item at 'awaiting_gate' (not failed/blocked/infrastructure) — the
+// shape a real `forge campaign resume` reattaches to and re-drives, so the
+// bare resume guidance is correct here (unlike the startRun-throw shape
+// above, which needs retry first).
+function writeRunNextThrowWorkflow(): void {
+  mkdirSync(join(projectDir, ".forge", "workflows"), { recursive: true });
+  const yaml = [
+    "name: feature",
+    "description: FG-490 reopen fixture — startRun succeeds; runNext throws resolving the model for `architect`.",
+    "inputs:",
+    "  - name: brief",
+    "    required: true",
+    "    type: text",
+    "steps:",
+    "  - id: architect",
+    "    agent: architecture-advisor",
+    "",
+  ].join("\n");
+  writeFileSync(join(projectDir, ".forge", "workflows", "feature.yml"), yaml);
+
+  const policyYaml = [
+    "model_profiles:",
+    "  main:",
+    "    provider: anthropic",
+    "    auth: subscription",
+    "    map:",
+    "      review:",
+    "        model: claude-sonnet-4",
+    "        cost_tier: standard",
+    "defaults:",
+    "  profile: main",
+    "",
+  ].join("\n");
+  writeFileSync(join(projectDir, ".forge", "model-policy.yml"), policyYaml);
+}
+
+test("FG-490 reopen integ: campaign start --json (runNext-throw / awaiting_gate shape) guidance stays bare resume, not retry", () => {
+  writeRunNextThrowWorkflow();
+  writeReadyTicket();
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", "FG-101",
+    "--mode", "sequential",
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+
+  const startResult = runForge(["campaign", "start", planOutput.campaignId, "--json"]);
+  assert.notEqual(startResult.status, 0, "a drive-error must still exit non-zero");
+
+  let parsed: { stopReason: string; ticketId?: string; runId?: string; error: string; guidance: string };
+  assert.doesNotThrow(
+    () => { parsed = JSON.parse(startResult.stdout); },
+    `--json output must be parseable JSON, not a bare 'forge: ...' line\nstdout: ${startResult.stdout}\nstderr: ${startResult.stderr}`
+  );
+  parsed = JSON.parse(startResult.stdout);
+  assert.equal(parsed.stopReason, "drive_error");
+  assert.equal(parsed.ticketId, "FG-101");
+  assert.ok(parsed.runId, "runId must be derivable from the parked campaign item");
+  assert.match(parsed.error, /has no mapping for capability 'reasoning'/, "error must carry the ORIGINAL runNext-path error");
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const item = db
+    .prepare("SELECT lifecycle_status, outcome, blocker_kind FROM campaign_items WHERE ticket_id = ? AND campaign_id = ?")
+    .get("FG-101", planOutput.campaignId) as { lifecycle_status: string; outcome: string | null; blocker_kind: string | null };
+  db.close();
+  assert.equal(item.lifecycle_status, "awaiting_gate", "runNext-throw must park at awaiting_gate, not the failed/blocked/infrastructure shape");
+
+  assert.equal(
+    parsed.guidance,
+    `forge campaign resume ${planOutput.campaignId}`,
+    "awaiting_gate parks reattach cleanly on resume — guidance must stay the bare resume command, not retry"
   );
 });

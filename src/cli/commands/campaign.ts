@@ -89,13 +89,17 @@ function renderDriveErrorAndExit(campaignId: string, err: unknown, json: boolean
   );
 
   if (json) {
+    const guidance =
+      parked && parked.lifecycleStatus === "failed" && parked.outcome === "blocked" && parked.blockerKind === "infrastructure"
+        ? `forge campaign retry ${campaignId} ${parked.ticketId} && forge campaign resume ${campaignId}`
+        : `forge campaign resume ${campaignId}`;
     console.log(JSON.stringify({
       stopReason: "drive_error",
       campaignId,
       ticketId: parked?.ticketId,
       runId: parked?.runId,
       error: original,
-      guidance: `forge campaign resume ${campaignId}`,
+      guidance,
     }, null, 2));
   } else {
     console.error(message);
