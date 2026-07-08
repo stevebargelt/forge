@@ -666,14 +666,17 @@ export function validateCredsForNewRun(): void {
         `${AUTH_ERROR_PREFIX}Bedrock mode active but no SSO cache found at ${cacheDir}. Run \`aws sso login --profile ${profile}\` and try again.`
       );
     }
-    if (!hasFreshSsoCache(cacheDir)) {
-      // FG-435: the mtime/expiresAt heuristic thinks this profile's SSO
-      // session is gone, but that heuristic misreads the "2026-07-07
-      // orchestrator" recurrence — a `aws sso login` refresh a few minutes
-      // earlier can still look expired to a stale/misread cache entry. A
-      // successful export-credentials probe is the same credential path
-      // forge injects into containers, so it's authoritative over the cache
-      // guess; only hard-block when the export ALSO fails.
+    if (!hasFreshProfileSsoCache(awsConfigDir(), profile)) {
+      // FG-435: scoped to THIS profile's own SSO token cache file (via
+      // resolveProfileSsoIdentity), not a freshest-across-all-profiles scan —
+      // a fresh session on another profile must never mask this profile
+      // looking expired, or vice versa. Even so, the expiresAt heuristic can
+      // misread the "2026-07-07 orchestrator" recurrence — a `aws sso login`
+      // refresh a few minutes earlier can still look expired to a
+      // stale/misread cache entry. A successful export-credentials probe is
+      // the same credential path forge injects into containers, so it's
+      // authoritative over the cache guess; only hard-block when the export
+      // ALSO fails.
       if (!exportCredsOverridesStaleness(profile)) {
         throw new Error(`${AUTH_ERROR_PREFIX}${describeExpiredSsoSession(awsConfigDir(), profile)}`);
       }
@@ -782,9 +785,8 @@ export function getAuthState(): AuthState {
   if (mode === "bedrock") {
     const profile = resolveAwsProfile();
     const region = resolveAwsRegion();
-    const cacheDir = join(awsConfigDir(), "sso", "cache");
     const profileConfig = parseAwsProfile(profile);
-    const session = existsSync(cacheDir) ? readFreshSsoSession(cacheDir) : null;
+    const session = readProfileSsoSession(awsConfigDir(), profile);
     const detail: AuthDetail = {
       profile,
       region,
@@ -914,6 +916,33 @@ export function readFreshSsoSession(cacheDir: string): SsoSessionSnapshot | null
 // Boolean wrapper kept for back-compat with existing call sites.
 export function hasFreshSsoCache(cacheDir: string): boolean {
   return readFreshSsoSession(cacheDir) !== null;
+}
+
+// FG-435: profile-scoped counterpart to readFreshSsoSession/hasFreshSsoCache
+// above. Those scan the whole SSO cache dir for the freshest session across
+// ALL profiles — exactly the cross-profile confusion FG-435 is about: fresh
+// activity on profile A can mask a missing/expired session on profile B, or
+// vice versa. This resolves `profile`'s own SSO identity (same as
+// detectStaleStsCache) and reads only the one cache file that identity maps
+// to, so the verdict is scoped to the profile actually being launched.
+export function readProfileSsoSession(configDir: string, profile: string): SsoSessionSnapshot | null {
+  const identity = resolveProfileSsoIdentity(configDir, profile);
+  if (!identity) return null;
+  const cacheFile = join(configDir, "sso", "cache", ssoTokenCacheFilename(identity));
+  let parsed: { expiresAt?: string; startUrl?: string; accessToken?: string };
+  try {
+    parsed = JSON.parse(readFileSync(cacheFile, "utf8")) as typeof parsed;
+  } catch {
+    return null;
+  }
+  if (!parsed.startUrl || !parsed.accessToken || !parsed.expiresAt) return null;
+  const expiry = Date.parse(parsed.expiresAt);
+  if (!Number.isFinite(expiry) || expiry <= Date.now()) return null;
+  return { startUrl: parsed.startUrl, expiresAt: parsed.expiresAt };
+}
+
+export function hasFreshProfileSsoCache(configDir: string, profile: string): boolean {
+  return readProfileSsoSession(configDir, profile) !== null;
 }
 
 // #119 / FG-435: Detect when AWS has revoked the cached STS credentials even

@@ -335,22 +335,16 @@ test("hasFreshSsoCache: tolerates corrupt JSON in one file without failing", () 
 test("validateCredsForNewRun: bedrock + fresh SSO cache → no throw", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "test";
-  writeSsoCache("session.json", {
-    startUrl: "https://example.awsapps.com/start/",
-    accessToken: "tok-abc",
-    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
-  });
+  configureLegacySsoProfile("test", { startUrl: "https://example.awsapps.com/start/", accountId: "111", roleName: "R" });
+  writeProfileSsoToken("test", Date.now(), new Date(Date.now() + 3600 * 1000).toISOString());
   assert.doesNotThrow(() => validateCredsForNewRun());
 });
 
 test("validateCredsForNewRun: bedrock + expired SSO cache → throws with AUTH_ERROR_PREFIX", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "test";
-  writeSsoCache("session.json", {
-    startUrl: "https://example.awsapps.com/start/",
-    accessToken: "tok-abc",
-    expiresAt: new Date(Date.now() - 3600 * 1000).toISOString(),
-  });
+  configureLegacySsoProfile("test", { startUrl: "https://example.awsapps.com/start/", accountId: "111", roleName: "R" });
+  writeProfileSsoToken("test", Date.now(), new Date(Date.now() - 3600 * 1000).toISOString());
   assert.throws(
     () => validateCredsForNewRun(),
     (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("aws sso login")
@@ -364,6 +358,33 @@ test("validateCredsForNewRun: bedrock + no cache dir → throws with AUTH_ERROR_
   assert.throws(
     () => validateCredsForNewRun(),
     (err: Error) => err.message.startsWith(AUTH_ERROR_PREFIX) && err.message.includes("no SSO cache")
+  );
+});
+
+test("validateCredsForNewRun: cross-profile isolation — profile A's fresh SSO cache does not mask resolved profile B having no session of its own", () => {
+  // FG-435 finding: hasFreshSsoCache(cacheDir) used to scan for the freshest
+  // session file across ALL profiles in ~/.aws/sso/cache. A fresh
+  // `aws sso login` on profile A could therefore mask profile B — the
+  // profile actually being launched — having no session token of its own at
+  // all, producing a false "ready" verdict for B. The gate must be scoped to
+  // the resolved profile's own cache file (same association detectStaleStsCache
+  // already uses), so B's absence can never be papered over by A's freshness.
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "adx-dev-target";
+  configureLegacySsoProfile("adx-dev-other", { startUrl: "https://example.awsapps.com/start-a", accountId: "111", roleName: "RA" });
+  configureLegacySsoProfile("adx-dev-target", { startUrl: "https://example.awsapps.com/start-b", accountId: "222", roleName: "RB" });
+  // Profile A (not the one being launched): very fresh SSO session — would
+  // have satisfied the old freshest-across-all-profiles scan.
+  writeProfileSsoToken("adx-dev-other", Date.now(), new Date(Date.now() + 3600 * 1000).toISOString());
+  // Profile B (the resolved/launched profile): no session token of its own,
+  // and export-credentials has nothing to fall back on either.
+  assert.throws(
+    () => validateCredsForNewRun(),
+    (err: Error) =>
+      err.message.startsWith(AUTH_ERROR_PREFIX) &&
+      err.message.includes("profile 'adx-dev-target'") &&
+      err.message.includes("aws sso login --profile adx-dev-target"),
+    "profile B must be judged on its own SSO cache, not profile A's freshness"
   );
 });
 
@@ -448,11 +469,8 @@ test("getAuthState: apikey mode → health=ok, no identity", () => {
 test("getAuthState: bedrock + fresh SSO → health=ok with identity", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "sgws-poc";
-  writeSsoCache("session.json", {
-    startUrl: "https://example.awsapps.com/start/",
-    accessToken: "tok-abc",
-    expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
-  });
+  configureLegacySsoProfile("sgws-poc", { startUrl: "https://example.awsapps.com/start/", accountId: "111", roleName: "R" });
+  writeProfileSsoToken("sgws-poc", Date.now(), new Date(Date.now() + 3600 * 1000).toISOString());
   const s = getAuthState();
   assert.equal(s.mode, "bedrock");
   assert.equal(s.health, "ok");
@@ -462,11 +480,8 @@ test("getAuthState: bedrock + fresh SSO → health=ok with identity", () => {
 test("getAuthState: bedrock + expired SSO → health=expired with remediation", () => {
   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
   process.env.AWS_PROFILE = "sgws-poc";
-  writeSsoCache("session.json", {
-    startUrl: "https://example.awsapps.com/start/",
-    accessToken: "tok-abc",
-    expiresAt: new Date(Date.now() - 1000).toISOString(),
-  });
+  configureLegacySsoProfile("sgws-poc", { startUrl: "https://example.awsapps.com/start/", accountId: "111", roleName: "R" });
+  writeProfileSsoToken("sgws-poc", Date.now(), new Date(Date.now() - 1000).toISOString());
   const s = getAuthState();
   assert.equal(s.mode, "bedrock");
   assert.equal(s.health, "expired");
