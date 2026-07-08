@@ -666,7 +666,14 @@ export function validateCredsForNewRun(): void {
         `${AUTH_ERROR_PREFIX}Bedrock mode active but no SSO cache found at ${cacheDir}. Run \`aws sso login --profile ${profile}\` and try again.`
       );
     }
-    if (!hasFreshProfileSsoCache(awsConfigDir(), profile)) {
+    // FG-435 round 2 fix: gate on resolveProfileSsoIdentity first — it
+    // returns null when the profile has no sso_session / sso_start_url at all
+    // (e.g. a plain aws_access_key_id/aws_secret_access_key bedrock profile),
+    // which is "SSO not applicable," not "SSO expired." hasFreshProfileSsoCache
+    // can't tell those apart on its own, so a non-SSO profile must never reach
+    // the export-credentials call or the hard block below. Mirrors the same
+    // gate in `forge claude`'s preflight (src/cli/commands/claude.ts).
+    if (resolveProfileSsoIdentity(awsConfigDir(), profile) && !hasFreshProfileSsoCache(awsConfigDir(), profile)) {
       // FG-435: scoped to THIS profile's own SSO token cache file (via
       // resolveProfileSsoIdentity), not a freshest-across-all-profiles scan —
       // a fresh session on another profile must never mask this profile

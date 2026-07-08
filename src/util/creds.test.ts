@@ -388,6 +388,31 @@ test("validateCredsForNewRun: cross-profile isolation — profile A's fresh SSO 
   );
 });
 
+test("validateCredsForNewRun: bedrock + static-credential (non-SSO) profile → no SSO block, matches pre-FG-435 behavior", () => {
+  // FG-435 round 2 fix: a plain aws_access_key_id/aws_secret_access_key
+  // bedrock profile has no sso_session / sso_start_url, so resolveProfileSsoIdentity
+  // returns null — "SSO not applicable," not "SSO expired." Mirrors the same
+  // regression covered for `forge claude`'s preflight in
+  // claude-bedrock.integration.test.ts (FG-435 round 2 fix).
+  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+  process.env.AWS_PROFILE = "static-profile";
+  writeAwsConfig(`[profile static-profile]\nregion = us-east-1\n`);
+  writeFileSync(
+    join(tmpAwsDir, "credentials"),
+    `[static-profile]\naws_access_key_id = AKIAFAKE\naws_secret_access_key = fakesecret\n`
+  );
+  // sso/cache dir exists (empty) — this profile has never done an SSO login,
+  // which is expected and must not be conflated with an expired session.
+  mkdirSync(join(tmpAwsDir, "sso", "cache"), { recursive: true });
+  // No FORGE_AWS_CREDS_FOR_TEST override: if the gate regresses and this
+  // profile is treated as SSO, hasFreshProfileSsoCache reports it as
+  // stale/missing and validateCredsForNewRun falls through to
+  // exportCredsOverridesStaleness, which shells out to `aws` and — with no
+  // override and no real SSO session — fails, producing a throw.
+  delete process.env.FORGE_AWS_CREDS_FOR_TEST;
+  assert.doesNotThrow(() => validateCredsForNewRun());
+});
+
 test("validateCredsForNewRun: apikey + ANTHROPIC_API_KEY set → no throw", () => {
   process.env.ANTHROPIC_API_KEY = "sk-test";
   assert.doesNotThrow(() => validateCredsForNewRun());
