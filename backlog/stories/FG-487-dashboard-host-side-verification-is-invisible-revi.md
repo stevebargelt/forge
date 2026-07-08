@@ -32,3 +32,15 @@ Verification activity and evidence are first-class on the dashboard: an operator
 - [ ] Campaign reconcile's host-gate execution is visible while it runs.
 - [ ] host_verifications evidence is viewable per ticket/campaign item on the dashboard.
 - [ ] No new lifecycle state table — render from events + existing tables (FG-477 constraint discipline).
+
+
+## Evidence addendum (2026-07-07/08 autonomous session — operator escalation: "invisible work like this is bad. We need to fix it.")
+
+The operator hit the gap three separate times in one session, each time asking what was running because the dashboard showed nothing:
+1. FG-489 closing gate (`npm run test:all`, ~8 min host process) — nothing anywhere in the dashboard.
+2. FG-490 pre-merge gate + review-loop chain (~25 min total; the loop's verification phase is silent even though the loop run row exists).
+3. FG-490-reopen gate+loop (same shape, third ask).
+
+Session totals that were all invisible: 10+ full `test:all` runs (~8 min each), 6 review-loop launches with quiet verification phases, plus `forge campaign reconcile` evidence passes. The orchestrator narrated each manually — the dashboard should make that narration unnecessary.
+
+**Operator confirmation (2026-07-08): the gap matters and needs fixing ("invisible work like this is bad"), but it was explicitly NOT prioritized as the next work item — scheduling is an open operator call.** Minimum bar from tonight's pain: every long-running host-side activity forge itself initiates or knows about (review-loop phases incl. verification, campaign reconcile gates, host_verifications rows as they land) is visible with liveness (started-at / still-running). Orchestrator-run bare gates (npm test:all) need at least a breadcrumb — e.g. the orchestrator records a host-verification-in-progress marker, or the dashboard surfaces recent host_verifications rows so a completed gate is discoverable even if the in-flight window isn't.
