@@ -16,6 +16,7 @@ Consequences (both observed on a real multi-profile work laptop):
 
 - Multi-profile false positive: recent activity on profile adx-dev (fresh SSO) makes its session the global "current" one; the check flags stale and tells the operator to refresh adx-dev-poweruser, but nothing conveys WHICH profile is actually stale or why. The operator ran the STS refresh against the wrong (working) profile and it did nothing.
 - Pure-SSO-profile false positive: a profile authenticating via SSO-direct that never populates ~/.aws/cli/cache has a vestigial/stale cli/cache by construction, so SSO is permanently newer than STS -> permanent false "stale," with no bypass flag. Running `forge claude` sessions on the same machine authenticate fine (bedrock reads the SSO cache directly per FORGE-DEC-013), proving the creds are valid.
+- 2026-07-07 work-laptop recurrence: `aws sts get-caller-identity --profile adx-dev` and `aws configure export-credentials --profile adx-dev --format env-no-export` succeeded, but `forge claude --bedrock --aws-profile adx-dev` still hard-blocked on "AWS STS credentials are stale" until the operator manually touched `~/.aws/cli/cache/*.json` to satisfy the mtime heuristic. That proves the AWS chain was usable and Forge's mtime check was the blocker.
 
 There is no env/flag bypass for the preflight; the only current workaround is deleting ~/.aws/cli/cache or manually refreshing the exact resolved profile.
 
@@ -33,7 +34,10 @@ Scope STS-staleness detection to the RESOLVED profile and make the message accur
 - If the profile -> sso_session mapping or profile-specific STS cache association cannot be resolved confidently, the check degrades safely: do NOT hard-block. Prefer not-stale with an advisory/fallback reason over introducing a new false positive.
 - Legacy/global freshest-cache behavior is not used for blocking decisions. If retained for diagnostics, it must be non-blocking and clearly labeled as global/advisory.
 - When genuinely stale (the resolved profile's own STS cache predates its own SSO session), the message names the profile in the DIAGNOSIS line (not just the Run: line) and states other profiles are unaffected, e.g. "STS credentials for profile '<p>' are stale — its cached STS creds predate its current SSO session (other profiles are unaffected). Refresh: aws sts get-caller-identity --profile <p>".
+- `forge claude --bedrock --aws-profile <p>` must not hard-block on the stale-cache mtime heuristic when `aws configure export-credentials --profile <p> --format env-no-export` succeeds. A successful export-credentials probe is authoritative for launch readiness because it is the same credential path Forge uses for container env-snapshot injection; any mtime stale finding after that is advisory only.
+- The operator remediation must not require manual cache timestamp manipulation (`touch ~/.aws/cli/cache/*.json`) or hand-editing/removing AWS cache files when the profile's real credential export succeeds.
 - Unit tests cover: profile-scoped stale, profile-scoped fresh, cross-profile isolation, SSO-only profile with no profile-associated cli/cache -> not-stale/non-blocking, unresolvable mapping safe-degrade, and preservation of existing FG-119/FG-120 single-profile stale detection behavior where profile association is clear.
+- Tests cover the work-laptop recurrence: SSO cache mtime newer than STS cache mtime, but `export-credentials` succeeds for the resolved profile -> `forge claude` preflight allows launch and surfaces at most an advisory warning.
 
 ## Non-Goals
 
