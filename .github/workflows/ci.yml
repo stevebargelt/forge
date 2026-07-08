@@ -8,10 +8,13 @@ name: CI
 #
 # job `test-extended` (FG-495) runs the integration + worktree tiers moved
 # out of the fast gate — real subprocess/git/DB coverage that's still
-# trust-sensitive but too slow for every commit's blocking check. It runs on
-# the same triggers so it's visible on every push/PR, but is NOT a required
-# status check (only `test` is, per CLAUDE.md's branch-protection note) and
-# is marked continue-on-error so a red run surfaces without blocking merge.
+# trust-sensitive and IS a required merge check, same as `test`. Branch
+# protection carries both contexts ("test" and "test-extended"; the
+# orchestrator applies that host-side, see CLAUDE.md's branch-protection
+# note). It runs on the same triggers, in parallel with `test` and with
+# review-loop verification, so the ~94s extended tier is paid once per
+# merge rather than per round — the fast `test:all` gate stays the
+# per-round cost the orchestrator/review-loop actually re-pay.
 on:
   push:
   pull_request:
@@ -52,11 +55,11 @@ jobs:
 
   test-extended:
     runs-on: ubuntu-latest
-    # Informational, not a required check (FG-495): surfaces failures on
-    # every push/PR without blocking merge — only `test` gates branch
-    # protection. Promote to required (drop this line) if the extended tier
-    # ever needs to become a hard merge gate.
-    continue-on-error: true
+    # Required merge check (FG-495), same as `test`: a red run here blocks
+    # merge exactly like a red `test` run. This job exists to move the slow
+    # integration/worktree coverage off the per-round path, not to make it
+    # optional — trust-sensitive coverage (FG-419/FG-440/FG-474 gate-
+    # enforcement tests) must keep gating merges.
     steps:
       - uses: actions/checkout@v4
 

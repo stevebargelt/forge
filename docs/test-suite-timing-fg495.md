@@ -115,6 +115,10 @@ subprocess/sleep tests can't silently land in the unit tier going forward.
 
 Every relocated test still runs, unmodified, in `test:integration` or
 `test:worktree`. Those tiers run in CI on every push/PR via the new
-`test-extended` job (`.github/workflows/ci.yml`) — informational
-(`continue-on-error: true`, not a required status check), but routine and
-visible. Nothing was deleted or skipped.
+`test-extended` job (`.github/workflows/ci.yml`) — a **required** merge
+check, same as `test`, and not merely informational. What changed vs
+pre-FG-495 is *where* this coverage runs (CI, off-host, in parallel with
+`test` and with review-loop verification) and how often the operator pays
+for it interactively (never per round — the per-round gate the review-loop
+re-runs is the fast unit tier via `npm run test:all`). Nothing was deleted,
+skipped, or downgraded to non-blocking.

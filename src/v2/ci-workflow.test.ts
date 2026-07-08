@@ -16,9 +16,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
 
 type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown> };
+type Job = { "runs-on"?: string; "continue-on-error"?: boolean; steps?: Step[] };
 type Workflow = {
   on?: { push?: unknown; pull_request?: { branches?: string[] } };
-  jobs?: Record<string, { "runs-on"?: string; steps?: Step[] }>;
+  jobs?: Record<string, Job>;
 };
 
 function loadWorkflow(): Workflow {
@@ -109,4 +110,52 @@ test("FG-474: ci.yml pins Node via the repo's .nvmrc rather than a hardcoded/lat
 test("FG-474: .nvmrc pins the Node major version the better-sqlite3 ABI note references", () => {
   const nvmrc = readFileSync(join(root, ".nvmrc"), "utf8").trim();
   assert.equal(nvmrc, "24", ".nvmrc must stay pinned to 24 — the ABI mismatch this workflow guards against was observed against this exact version");
+});
+
+// FG-495 regression guard: the slow integration/worktree coverage moved out of
+// the fast `test` gate must still run somewhere routine and visible — the
+// `test-extended` job. If a future edit drops this job, mistargets its run
+// command, or silently reintroduces continue-on-error, the trust-sensitive
+// coverage it carries (FG-419/FG-440/FG-474 gate-enforcement tests, among
+// others) would stop gating merges without anyone deciding that on purpose.
+test("FG-495: ci.yml has a test-extended job that runs npm run test:extended", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.["test-extended"];
+  assert.ok(job, "ci.yml must define a test-extended job for the slow integration+worktree tiers");
+  const steps = job!.steps ?? [];
+  const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    runCommands.some((r) => r.includes("npm run test:extended")),
+    "test-extended job must run npm run test:extended (the integration+worktree tiers moved out of the canonical gate)"
+  );
+});
+
+// FG-495 disposition fix: test-extended is a REQUIRED merge check, same as
+// `test` — the ticket's own AC ("do not weaken trust-sensitive coverage")
+// forbids marking the entire job continue-on-error, since that would stop
+// every integration/worktree test (including FG-419/FG-440/FG-474 trust-gate
+// enforcement tests) from gating merges. Branch protection carries both
+// "test" and "test-extended" as required contexts (applied host-side by the
+// orchestrator); this guard just proves the workflow YAML doesn't undercut
+// that by silently reintroducing continue-on-error on this job.
+test("FG-495: the test-extended job is a required merge check — no continue-on-error key", () => {
+  const wf = loadWorkflow();
+  const job = wf.jobs?.["test-extended"];
+  assert.ok(job, "ci.yml must define a test-extended job");
+  assert.equal(
+    job!["continue-on-error"],
+    undefined,
+    "test-extended must NOT have a continue-on-error key — it is a required merge check alongside `test`, not informational; a red run must block merge"
+  );
+});
+
+test("FG-495: the fast `test` job's run command is unaffected by the test-extended job (still runs npm run test:all only)", () => {
+  const wf = loadWorkflow();
+  const testJob = wf.jobs?.["test"];
+  assert.ok(testJob, "ci.yml must still define the required `test` job");
+  const runCommands = (testJob!.steps ?? []).map((s) => s.run).filter((r): r is string => typeof r === "string");
+  assert.ok(
+    !runCommands.some((r) => r.includes("test:extended")),
+    "the required test job must not itself run the slow extended tier — that would defeat FG-495's speed fix"
+  );
 });
