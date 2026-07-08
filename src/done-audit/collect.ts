@@ -155,9 +155,13 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
           ? passingRows[passingRows.length - 1]!
           : covering[covering.length - 1]!;
         const failureCount = covering.length - passingRows.length;
+        // FG-474: source distinguishes a real host exec ('host') from evidence
+        // sourced from a green required CI check ('ci') — ci_url is present only
+        // for the latter.
         hostVerificationDetail =
           `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}` +
+          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}; source: ${detailRow.source ?? "host"}` +
+          (detailRow.source === "ci" && detailRow.ciUrl ? `; ci_url: ${detailRow.ciUrl}` : "") +
           (hostVerified && failureCount > 0 ? `; earlier_covering_failures: ${failureCount}` : "");
       }
     } catch {

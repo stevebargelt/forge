@@ -6,7 +6,12 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
-import { queryHostVerificationRowsForGate, insertHostVerification } from "../store/host-verifications.js";
+import {
+  queryHostVerificationRowsForGate,
+  insertHostVerification,
+  findCoveringGateEvidence,
+  type CheckStatusProvider,
+} from "../store/host-verifications.js";
 import { eventsForRun } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
 import type { CampaignItem, GateDecision } from "../types/index.js";
@@ -215,11 +220,17 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
 //     confirmed unchanged and the tree still clean immediately afterward.
 //     Writes exactly one row with the REAL exit code and the REAL tested sha
 //     — a timeout/crash is recorded as a non-zero sentinel, never fabricated
-//     as 0.
+//     as 0. "source" is 'host' for a real exec here, or 'ci' when the row was
+//     written from a green required CI check instead (see the evidence-reuse
+//     consult below) — never fabricated as 'host' for CI-sourced evidence.
+//   - "reused": covering evidence ALREADY existed as a passing host_verifications
+//     row for this exact sha+command — no exec, no duplicate row written;
+//     coveringRowId references the row that satisfied it.
 
 export type HostVerificationCaptureResult =
   | { status: "skipped"; reason: string }
-  | { status: "recorded"; exitCode: number; commitSha: string };
+  | { status: "recorded"; exitCode: number; commitSha: string; source: "host" | "ci"; ciUrl?: string }
+  | { status: "reused"; commitSha: string; coveringRowId: number };
 
 const HOST_GATE_TIMEOUT_MS_DEFAULT = 10 * 60 * 1000;
 // A timed-out or signal-killed gate must still record a real non-zero exit —
@@ -282,11 +293,17 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *  working tree, against a HEAD not reachable on the configured base branch,
  *  or if the tree/HEAD changed out from under the run before the result is
  *  written — an operator's uncommitted or off-branch state must never be
- *  recorded as the tested result for a base HEAD sha. */
+ *  recorded as the tested result for a base HEAD sha.
+ *
+ *  FG-474: before exec, consults findCoveringGateEvidence for HEAD — a passing
+ *  host_verifications row already covering the exact sha+command short-circuits
+ *  with "reused" (no exec, no duplicate row); a green required CI check for the
+ *  exact sha short-circuits with a fresh 'ci'-sourced row (no exec). Only when
+ *  neither covers does this fall through to the real host exec, unchanged. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,
-  opts: { runId?: string | null } = {}
+  opts: { runId?: string | null; checkStatusProvider?: CheckStatusProvider } = {}
 ): HostVerificationCaptureResult {
   let statusOutput: string;
   try {
@@ -330,6 +347,39 @@ export function runAndRecordHostVerification(
   }
 
   const requiredGate = getRequiredHostGate(projectDir);
+
+  // FG-474: one canonical gate result per commit — reuse covering evidence
+  // instead of re-running. Consulted AFTER the dirty/off-branch checks above
+  // (so those refusal reasons still take priority for a genuinely bad state)
+  // but BEFORE actually executing anything.
+  const evidence = findCoveringGateEvidence({
+    ticketId,
+    projectDir,
+    sha: headSha,
+    command: requiredGate,
+    checkStatusProvider: opts.checkStatusProvider,
+  });
+  if (evidence) {
+    if (evidence.source === "host_row") {
+      return { status: "reused", commitSha: headSha, coveringRowId: evidence.row.id! };
+    }
+    // CI-sourced: the CI check already proves the gate passed for this exact sha —
+    // record it as a real row (source: 'ci') rather than re-executing.
+    insertHostVerification({
+      ticketId,
+      projectDir,
+      commitSha: evidence.sha,
+      gateName: requiredGate,
+      command: requiredGate,
+      exitCode: 0,
+      runId: opts.runId ?? null,
+      recordedAt: nowIso(),
+      source: "ci",
+      ciUrl: evidence.checkUrl ?? null,
+    });
+    return { status: "recorded", exitCode: 0, commitSha: evidence.sha, source: "ci", ciUrl: evidence.checkUrl };
+  }
+
   const runnable = checkGateRunnable(projectDir, requiredGate);
   if (!runnable.runnable) {
     return { status: "skipped", reason: runnable.reason ?? "required gate not runnable in projectDir" };
@@ -371,7 +421,8 @@ export function runAndRecordHostVerification(
     exitCode,
     runId: opts.runId ?? null,
     recordedAt: nowIso(),
+    source: "host",
   });
 
-  return { status: "recorded", exitCode, commitSha: headSha };
+  return { status: "recorded", exitCode, commitSha: headSha, source: "host" };
 }

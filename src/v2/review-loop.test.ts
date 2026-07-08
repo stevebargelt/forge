@@ -474,6 +474,38 @@ test("#301 note: a skipped review (verification failed) is shown", () => {
   assert.match(note, /typecheck=FAIL/);
 });
 
+// FG-474: reused covering evidence renders WHAT covered it (row id / CI url + sha)
+// in place of run output.
+test("FG-474 note: reused verification evidence is shown in the round detail", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [
+        {
+          round: 1,
+          verification: { ok: true, steps: [{ name: "reused", ok: true, output: "host_verifications row #7 (sha abc123, command: npm run test:all)" }], reusedEvidence: "host_verifications row #7 (sha abc123, command: npm run test:all)" },
+          verdict: "pass", findings: [], fixAttempted: false,
+        },
+      ],
+    },
+  );
+  assert.match(note, /verification reused evidence: host_verifications row #7/);
+});
+
+// Existing behavior preserved: a round with no reusedEvidence renders exactly as
+// before (no extra line).
+test("FG-474 note: a round with NO reusedEvidence renders unchanged — no reuse line", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{ round: 1, verification: { ok: true, steps: [{ name: "test", ok: true, output: "" }] }, verdict: "pass", findings: [], fixAttempted: false }],
+    },
+  );
+  assert.doesNotMatch(note, /verification reused evidence/);
+});
+
 test("#301 loop: verification ok:false with NO failed steps (no checks) → verification_failed, fixer NOT called", async () => {
   let fixed = false;
   const r = await runReviewLoop({ maxRounds: 2 }, deps({

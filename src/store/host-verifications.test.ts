@@ -2,7 +2,15 @@ import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "./db.js";
-import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "./host-verifications.js";
+import {
+  insertHostVerification,
+  queryHostVerificationRows,
+  queryHostVerificationRowsForGate,
+  findCoveringGateEvidence,
+  describeGateEvidence,
+  REQUIRED_CI_CHECK_CONTEXT,
+  type CiCheckStatus,
+} from "./host-verifications.js";
 import { insertRun } from "./runs.js";
 import type { Run } from "../types/index.js";
 
@@ -369,4 +377,139 @@ test("FG-431: canonicalization does not loosen matching — a genuinely differen
 
   const rows = queryHostVerificationRowsForGate("FG-017", "/home/test/project-b", "npm run test:all");
   assert.equal(rows.length, 0, "a different project directory must never match, canonicalized or not");
+});
+
+// ── FG-474: findCoveringGateEvidence / describeGateEvidence ────────────────────
+
+const GATE_SHA = "abc123def456abc123def456abc123def456abc";
+const GATE_CMD = "npm run test:all";
+
+// A stub that throws if invoked — proves the CI provider was never consulted
+// (the host-row match short-circuited before reaching it).
+function unreachableProvider(): CiCheckStatus | null {
+  throw new Error("checkStatusProvider must not be called — a covering host row already satisfied the lookup");
+}
+
+test("findCoveringGateEvidence: a passing row at the exact sha+command is covering evidence (source host_row), CI provider never consulted", () => {
+  insertHostVerification({
+    ticketId: "FG-700", projectDir: "/home/test/project", commitSha: GATE_SHA,
+    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-700", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: unreachableProvider,
+  });
+  assert.ok(evidence);
+  assert.equal(evidence!.source, "host_row");
+  assert.equal((evidence as { source: "host_row"; row: { commitSha: string } }).row.commitSha, GATE_SHA);
+});
+
+test("findCoveringGateEvidence: no rows and provider returns null → no covering evidence (fail closed)", () => {
+  let called = false;
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-701", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => { called = true; return null; },
+  });
+  assert.equal(evidence, null);
+  assert.equal(called, true, "provider must be consulted when no host row covers");
+});
+
+test("findCoveringGateEvidence: a row at a DIFFERENT sha does not satisfy — falls through to the provider", () => {
+  insertHostVerification({
+    ticketId: "FG-702", projectDir: "/home/test/project", commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  let called = false;
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-702", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => { called = true; return null; },
+  });
+  assert.equal(evidence, null);
+  assert.equal(called, true, "a different-sha row must not satisfy the lookup — must fall through to CI");
+});
+
+test("findCoveringGateEvidence: a row for a DIFFERENT command does not satisfy — command mismatch never covers", () => {
+  insertHostVerification({
+    ticketId: "FG-703", projectDir: "/home/test/project", commitSha: GATE_SHA,
+    gateName: "npm run test", command: "npm run test", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-703", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => null,
+  });
+  assert.equal(evidence, null, "a row recorded for a lesser/different command must never satisfy a broader required gate");
+});
+
+test("findCoveringGateEvidence: a FAILING row (exitCode != 0) at the exact sha+command does not satisfy", () => {
+  insertHostVerification({
+    ticketId: "FG-704", projectDir: "/home/test/project", commitSha: GATE_SHA,
+    gateName: GATE_CMD, command: GATE_CMD, exitCode: 1, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-704", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => null,
+  });
+  assert.equal(evidence, null, "a failing covering row must never satisfy the lookup");
+});
+
+test("findCoveringGateEvidence: a green required CI check at the exact sha is covering evidence (source ci)", () => {
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-705", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: (opts) => {
+      assert.equal(opts.checkContext, REQUIRED_CI_CHECK_CONTEXT);
+      assert.equal(opts.sha, GATE_SHA);
+      return { sha: GATE_SHA, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/999" };
+    },
+  });
+  assert.ok(evidence);
+  assert.equal(evidence!.source, "ci");
+  assert.equal((evidence as { source: "ci"; sha: string }).sha, GATE_SHA);
+  assert.equal((evidence as { source: "ci"; checkUrl?: string }).checkUrl, "https://github.com/acme/forge/actions/runs/999");
+});
+
+test("findCoveringGateEvidence: a PENDING CI check does not satisfy", () => {
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-706", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => ({ sha: GATE_SHA, state: "pending" }),
+  });
+  assert.equal(evidence, null);
+});
+
+test("findCoveringGateEvidence: a FAILED CI check does not satisfy", () => {
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-707", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => ({ sha: GATE_SHA, state: "failure" }),
+  });
+  assert.equal(evidence, null);
+});
+
+test("findCoveringGateEvidence: a green CI check for a DIFFERENT sha does not satisfy (spoof/staleness guard)", () => {
+  const evidence = findCoveringGateEvidence({
+    ticketId: "FG-708", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
+  });
+  assert.equal(evidence, null, "a green check reported for a DIFFERENT sha (e.g. a stale branch head) must never cover the requested sha");
+});
+
+test("describeGateEvidence: host_row and ci evidence render distinct, informative descriptions", () => {
+  insertHostVerification({
+    ticketId: "FG-709", projectDir: "/home/test/project", commitSha: GATE_SHA,
+    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const rowEvidence = findCoveringGateEvidence({
+    ticketId: "FG-709", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: unreachableProvider,
+  })!;
+  const rowDesc = describeGateEvidence(rowEvidence);
+  assert.match(rowDesc, /host_verifications row #\d+/);
+  assert.match(rowDesc, new RegExp(GATE_SHA));
+
+  const ciEvidence = findCoveringGateEvidence({
+    ticketId: "FG-710", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
+    checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/1" }),
+  })!;
+  const ciDesc = describeGateEvidence(ciEvidence);
+  assert.match(ciDesc, /CI check/);
+  assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
 });

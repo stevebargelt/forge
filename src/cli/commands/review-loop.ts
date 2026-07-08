@@ -16,6 +16,8 @@ import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
 } from "../../v2/review-loop.js";
+import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
+import { findCoveringGateEvidence, describeGateEvidence, type CheckStatusProvider } from "../../store/host-verifications.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
 
@@ -86,6 +88,9 @@ export type ReviewLoopContext = {
   reviewProfile?: string;
   implementProfile?: string;
   runId?: string;
+  /** FG-474: injectable for tests — see buildReviewLoopDeps.verify. Defaults to
+   *  the real gh-backed provider when omitted. */
+  checkStatusProvider?: CheckStatusProvider;
 };
 
 /** Build the engine's deps from real invoke + host verification. `invokeFn` is
@@ -113,8 +118,33 @@ export function buildReviewLoopDeps(
 
   const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README/;
 
+  // FG-474: one canonical deterministic gate per commit — before actually running
+  // typecheck+test, check whether covering evidence for HEAD already exists (a
+  // passing host_verifications row, or a green required CI check) and reuse it.
+  // Reuse REQUIRES a clean working tree (a dirty tree never reuses — the diff under
+  // review wouldn't match what any recorded/CI evidence actually covers). Falls
+  // back to a real run whenever evidence is absent, stale, or ambiguous.
+  const verifyWithReuse = (): VerificationResult => {
+    const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
+    if (!dirty) {
+      const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
+      const evidence = findCoveringGateEvidence({
+        ticketId: ctx.ticketId,
+        projectDir: ctx.projectDir,
+        sha: headSha,
+        command: getRequiredHostGate(ctx.projectDir),
+        checkStatusProvider: ctx.checkStatusProvider,
+      });
+      if (evidence) {
+        const description = describeGateEvidence(evidence);
+        return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
+      }
+    }
+    return runVerification(ctx.scripts, { cwd: ctx.projectDir });
+  };
+
   const deps: ReviewLoopDeps = {
-    verify: () => runVerification(ctx.scripts, { cwd: ctx.projectDir }),
+    verify: () => verifyWithReuse(),
     review: async (verification) => {
       preflight();
       const res = await invokeFn({

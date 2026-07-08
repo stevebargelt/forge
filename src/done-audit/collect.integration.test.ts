@@ -413,6 +413,46 @@ test("collect: required-gate pass row → hostVerified: true", () => {
   assert.ok(input.verification.hostVerificationDetail !== null, "detail must be set");
   assert.ok(input.verification.hostVerificationDetail!.includes("npm run test:all"), "detail must include gate/command");
   assert.ok(input.verification.hostVerificationDetail!.includes("exit_code: 0"), "detail must include exit_code");
+  assert.ok(input.verification.hostVerificationDetail!.includes("source: host"), "a real host exec must be labeled source: host");
+});
+
+// FG-474: done-audit must be able to distinguish ci-sourced evidence (recorded
+// via evidence reuse — no real host exec) from a real host-run row.
+test("collect FG-474: a CI-sourced covering row → hostVerified: true, detail carries source: ci + the CI run URL", () => {
+  const commitSha = makeCommit("hv-ci-sourced");
+
+  writeTicket(projectDir, {
+    id: "FG-HV-CI-1",
+    type: "story",
+    status: "done",
+    closedCommit: commitSha,
+    title: "HV CI-sourced",
+    body: "done",
+    related: [],
+  });
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "ticket"], projectDir);
+
+  insertHostVerification({
+    ticketId: "FG-HV-CI-1",
+    projectDir,
+    commitSha,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+    source: "ci",
+    ciUrl: "https://github.com/acme/forge/actions/runs/123",
+  });
+
+  const input = collectDoneAuditInputFor(projectDir, "FG-HV-CI-1");
+
+  assert.equal(input.verification.hostVerified, true);
+  assert.ok(input.verification.hostVerificationDetail!.includes("source: ci"), "must be distinguishable from a real host exec");
+  assert.ok(
+    input.verification.hostVerificationDetail!.includes("https://github.com/acme/forge/actions/runs/123"),
+    "the CI run URL must be surfaced in the detail"
+  );
 });
 
 test("collect FG-452: a row recorded at a later commit than closedCommit still covers it — ancestry, not exact-sha equality", () => {
