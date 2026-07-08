@@ -42,6 +42,16 @@ reuse and gate-spoofing guards, and the branch-protection required-check
 context (`CI / test`), needed zero changes: same command, same check name,
 now backed by fast content.
 
+That command-matching pairing is necessary but no longer sufficient on its
+own. A later FG-495 review finding (commit f59b47b) closed a gap where a
+green paired `CI / test` check alone could mint `source: 'ci'` evidence even
+if the sibling `test-extended` job was red, pending, or had no check run at
+that sha. `findCoveringGateEvidence` now enumerates every job in the matched
+CI workflow (via the new `projectCiWorkflowJobIds`) and requires all of them
+— `test` and `test-extended` — green at the exact same sha before minting
+CI-sourced coverage; enumeration failure or any non-green sibling fails
+closed to no CI coverage.
+
 The review-loop's own per-round verification (`runVerification` → `npm run
 --silent test`) is fixed by the same change, since it calls the `test` script
 by name.
