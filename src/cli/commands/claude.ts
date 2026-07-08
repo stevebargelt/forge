@@ -28,7 +28,7 @@ import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSyn
 import { basename, dirname, join, resolve as pathResolve } from "node:path";
 import { homedir } from "node:os";
 import { resolveProjectMeta, readProjectAuth } from "../../util/project-meta.js";
-import { detectStaleStsCache } from "../../util/creds.js";
+import { detectStaleStsCache, exportCredsOverridesStaleness } from "../../util/creds.js";
 import { startSsoWatchdog } from "../../util/sso-watchdog.js";
 import { insertRun, updateRunStatus } from "../../store/runs.js";
 import { insertTask, markTaskComplete } from "../../store/tasks.js";
@@ -80,14 +80,26 @@ export function registerClaude(program: Command): void {
         // Profile resolution order: --aws-profile flag > project.json.awsProfile > AWS_PROFILE env > "default"
         resolvedProfile = awsProfileFlag ?? projectAuth?.awsProfile ?? process.env.AWS_PROFILE ?? "default";
 
-        // STS pre-flight: detect stale STS credentials before spending a session on them.
-        const staleness = detectStaleStsCache();
+        // STS pre-flight: detect stale STS credentials before spending a session on
+        // them. Scoped to resolvedProfile only (FG-435) — this must never fire
+        // because some OTHER profile on the host looks fresh or stale. A stale
+        // finding here is just a coarse mtime heuristic; `aws configure
+        // export-credentials` (the same credential path forge injects into the
+        // container) is authoritative, so we confirm against it before blocking.
+        const staleness = detectStaleStsCache({ profile: resolvedProfile });
         if (staleness?.stale) {
-          console.error(
-            `forge claude: AWS STS credentials are stale — the STS cache predates the current SSO session.\n` +
-            `  Run: aws sts get-caller-identity --profile ${resolvedProfile}`
-          );
-          process.exit(1);
+          if (exportCredsOverridesStaleness(resolvedProfile)) {
+            console.log(
+              `forge claude: ⚠ ${staleness.reason} (advisory — \`aws configure export-credentials\` succeeded for '${resolvedProfile}', continuing)`
+            );
+          } else {
+            console.error(
+              `forge claude: ${staleness.reason}\n` +
+              `  Credential export also failed for '${resolvedProfile}' — its SSO session likely needs a fresh login.\n` +
+              `  Run: aws sso login --profile ${resolvedProfile}`
+            );
+            process.exit(1);
+          }
         }
 
         // Arm the child env without mutating the parent shell.

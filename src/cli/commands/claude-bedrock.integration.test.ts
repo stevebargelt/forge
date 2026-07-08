@@ -25,6 +25,8 @@ import {
   stripNameFromArgs,
 } from "./claude.js";
 import { readProjectAuth } from "../../util/project-meta.js";
+import { resolveProfileSsoIdentity, ssoTokenCacheFilename, stsCacheFilename } from "../../util/creds.js";
+import { utimesSync } from "node:fs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 // From src/cli/commands/ go up two to src/, then into cli/index.ts.
@@ -299,4 +301,102 @@ test("integ FG-158: readProjectAuth returns null for project.json containing mal
   mkdirSync(join(tmp, ".forge"), { recursive: true });
   writeFileSync(join(tmp, ".forge", "project.json"), "{ broken json ");
   assert.equal(readProjectAuth(tmp), null);
+});
+
+// ─── (6) FG-435: `forge claude` STS pre-flight is profile-scoped ─────────────
+//
+// Reproduces the real work-laptop recurrence: the mtime heuristic looks stale
+// for the resolved profile, but `aws configure export-credentials` (the same
+// credential path forge injects into containers) succeeds — launch must not
+// be hard-blocked, only advised. Uses FORGE_AWS_DIR + FORGE_AWS_CREDS_FOR_TEST
+// (creds.ts's existing test seams) so no real AWS CLI or network is involved.
+
+function writeAwsConfigForFakeProfile(awsDir: string, profile: string): void {
+  mkdirSync(awsDir, { recursive: true });
+  writeFileSync(
+    join(awsDir, "config"),
+    `[profile ${profile}]\nsso_start_url = https://example.awsapps.com/start\nsso_account_id = 111111111111\nsso_role_name = TestRole\nregion = us-east-1\n`,
+  );
+}
+
+// Writes this profile's own SSO token + STS cache files at the EXACT
+// filenames botocore computes for it (mirrors the hashing approach
+// creds.ts:detectStaleStsCache now uses), with the SSO token newer than the
+// STS cache — i.e. the mtime heuristic's stale shape.
+function writeStaleCachesForProfile(awsDir: string, profile: string): void {
+  const identity = resolveProfileSsoIdentity(awsDir, profile);
+  assert.ok(identity?.accountId && identity.roleName, "test setup bug: profile identity incomplete");
+  const now = Date.now();
+
+  const ssoDir = join(awsDir, "sso", "cache");
+  mkdirSync(ssoDir, { recursive: true });
+  const ssoFile = join(ssoDir, ssoTokenCacheFilename(identity!));
+  writeFileSync(ssoFile, JSON.stringify({
+    accessToken: "fake-token",
+    startUrl: identity!.startUrl,
+    expiresAt: new Date(now + 8 * 3600 * 1000).toISOString(),
+  }));
+  const ssoTime = (now - 5_000) / 1000;
+  utimesSync(ssoFile, ssoTime, ssoTime);
+
+  const stsDir = join(awsDir, "cli", "cache");
+  mkdirSync(stsDir, { recursive: true });
+  const stsFile = join(stsDir, stsCacheFilename({ accountId: identity!.accountId!, roleName: identity!.roleName!, startUrl: identity!.startUrl }));
+  writeFileSync(stsFile, JSON.stringify({ Credentials: { Expiration: "2099-01-01T00:00:00Z" } }));
+  const stsTime = (now - 60_000) / 1000;
+  utimesSync(stsFile, stsTime, stsTime);
+}
+
+test("integ FG-435: forge claude does NOT hard-block when STS cache looks stale but export-credentials succeeds (work-laptop recurrence)", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  writeAwsConfigForFakeProfile(awsDir, "forge-fg435-test-profile");
+  writeStaleCachesForProfile(awsDir, "forge-fg435-test-profile");
+
+  const testEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    CLAUDE_CODE_USE_BEDROCK: "1",
+    AWS_PROFILE: "forge-fg435-test-profile",
+    FORGE_AWS_DIR: awsDir,
+    FORGE_AWS_CREDS_FOR_TEST: "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t",
+  };
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  assert.match(
+    result.stdout,
+    /advisory.*continuing|continuing.*advisory/s,
+    `expected an advisory (non-blocking) message in stdout; got stdout=${result.stdout} stderr=${result.stderr}`,
+  );
+  assert.doesNotMatch(
+    result.stderr,
+    /Credential export also failed/,
+    `must not hard-block when export-credentials succeeded; stderr=${result.stderr}`,
+  );
+});
+
+test("integ FG-435: forge claude DOES hard-block, naming the resolved profile, when STS cache is stale and export-credentials also fails", () => {
+  mkdirSync(join(tmp, ".git"));
+  const awsDir = join(tmp, "fake-aws");
+  writeAwsConfigForFakeProfile(awsDir, "forge-fg435-test-profile");
+  writeStaleCachesForProfile(awsDir, "forge-fg435-test-profile");
+
+  const testEnv: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: "forge-fg435-test-profile", FORGE_AWS_DIR: awsDir };
+  delete testEnv.FORGE_AWS_CREDS_FOR_TEST; // no override → export-credentials shells out to the real (absent) `aws` binary and fails
+
+  const result = spawnSync(tsx, [entry, "claude"], {
+    cwd: tmp,
+    env: testEnv,
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  assert.equal(result.status, 1, `expected exit 1; stdout=${result.stdout} stderr=${result.stderr}`);
+  assert.match(result.stderr, /profile 'forge-fg435-test-profile'/);
+  assert.match(result.stderr, /aws sso login --profile forge-fg435-test-profile/);
 });

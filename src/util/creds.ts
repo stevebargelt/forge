@@ -17,6 +17,7 @@
 // agent run mounts the same volume read-only at /home/agent/.claude.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -148,7 +149,14 @@ export function exportAwsCreds(profile: string): ExportedAwsCreds {
 // the named section doesn't exist. Cheap: existsSync + read + plain-string
 // scan. No INI library dependency.
 export function parseAwsProfile(profileName: string): Record<string, string> {
-  const configPath = join(awsConfigDir(), "config");
+  return parseAwsProfileAt(awsConfigDir(), profileName);
+}
+
+// configDir-parameterized core shared by parseAwsProfile and the FG-435
+// profile-scoped staleness detector (which needs to parse a test-injected
+// configDir rather than always reading awsConfigDir()).
+function parseIniSectionAt(configDir: string, matchHeader: (line: string) => boolean): Record<string, string> {
+  const configPath = join(configDir, "config");
   if (!existsSync(configPath)) return {};
   let text: string;
   try {
@@ -156,14 +164,13 @@ export function parseAwsProfile(profileName: string): Record<string, string> {
   } catch {
     return {};
   }
-  const targetHeader = profileName === "default" ? "[default]" : `[profile ${profileName}]`;
   const lines = text.split(/\r?\n/);
   const out: Record<string, string> = {};
   let inTarget = false;
   for (const raw of lines) {
     const line = raw.trim();
     if (line.startsWith("[")) {
-      inTarget = line === targetHeader;
+      inTarget = matchHeader(line);
       continue;
     }
     if (!inTarget) continue;
@@ -175,6 +182,98 @@ export function parseAwsProfile(profileName: string): Record<string, string> {
     out[key] = value;
   }
   return out;
+}
+
+function parseAwsProfileAt(configDir: string, profileName: string): Record<string, string> {
+  const targetHeader = profileName === "default" ? "[default]" : `[profile ${profileName}]`;
+  return parseIniSectionAt(configDir, (line) => line === targetHeader);
+}
+
+// AWS's newer config form declares a reusable [sso-session X] block (start
+// URL, region, registration scopes) that profiles reference via `sso_session
+// = X` instead of inlining sso_start_url themselves.
+function parseAwsSsoSessionAt(configDir: string, sessionName: string): Record<string, string> {
+  return parseIniSectionAt(configDir, (line) => line === `[sso-session ${sessionName}]`);
+}
+
+// FG-435: the SSO identity (start URL + account/role) a specific profile
+// resolves to, handling both the legacy form (sso_start_url inline in the
+// profile) and the newer form (sso_session referencing a [sso-session X]
+// block). This is what lets the staleness detector compute — rather than
+// guess — exactly which cache files belong to this profile: AWS's own SSO
+// token cache and STS credential cache are keyed by hashes of these same
+// values (see ssoTokenCacheFilename / stsCacheFilename below).
+//
+// Returns null when the profile has no SSO configured at all, or when a
+// sso_session reference can't be resolved to a [sso-session X] block — both
+// cases mean "nothing to confidently compare," not "assume SSO."
+export type ProfileSsoIdentity = {
+  startUrl: string;
+  accountId?: string;
+  roleName?: string;
+  // Which value the SSO token cache filename is a sha1 of — the session name
+  // for sso_session-based profiles, the start URL for legacy ones. Botocore's
+  // SSOTokenProvider picks the same source for its cache key.
+  ssoCacheKeySource: "session" | "start_url";
+  ssoCacheKeyValue: string;
+};
+
+export function resolveProfileSsoIdentity(configDir: string, profile: string): ProfileSsoIdentity | null {
+  const profileConfig = parseAwsProfileAt(configDir, profile);
+  const accountId = profileConfig["sso_account_id"] || undefined;
+  const roleName = profileConfig["sso_role_name"] || undefined;
+  const sessionName = profileConfig["sso_session"];
+  if (sessionName) {
+    const session = parseAwsSsoSessionAt(configDir, sessionName);
+    if (!session["sso_start_url"]) return null;
+    return {
+      startUrl: session["sso_start_url"],
+      accountId,
+      roleName,
+      ssoCacheKeySource: "session",
+      ssoCacheKeyValue: sessionName,
+    };
+  }
+  if (profileConfig["sso_start_url"]) {
+    return {
+      startUrl: profileConfig["sso_start_url"],
+      accountId,
+      roleName,
+      ssoCacheKeySource: "start_url",
+      ssoCacheKeyValue: profileConfig["sso_start_url"],
+    };
+  }
+  return null;
+}
+
+function sha1Hex(input: string): string {
+  return createHash("sha1").update(input, "utf8").digest("hex");
+}
+
+// Matches botocore's SSOTokenProvider._cache_key(): sha1 of the sso_session
+// name when the profile uses one, else sha1 of the raw start URL (legacy
+// form). This is the exact filename `aws sso login` writes under
+// ~/.aws/sso/cache/, so we can read this profile's own token — not "whichever
+// token file happens to be newest" — directly.
+export function ssoTokenCacheFilename(identity: Pick<ProfileSsoIdentity, "ssoCacheKeyValue">): string {
+  return `${sha1Hex(identity.ssoCacheKeyValue)}.json`;
+}
+
+// Matches botocore's SSOCredentialFetcher._create_cache_key(): sha1 of
+// {"accountId":...,"roleName":...,"startUrl":...} with sorted keys and no
+// whitespace. JSON.stringify on an object built with keys in that exact order
+// produces the identical byte string Python's
+// json.dumps(..., sort_keys=True, separators=(",", ":")) does, since
+// "accountId" < "roleName" < "startUrl" alphabetically. This is the exact
+// filename `aws sts get-caller-identity` / `export-credentials` reads and
+// writes under ~/.aws/cli/cache/ for this profile's derived STS credentials.
+export function stsCacheFilename(identity: { accountId: string; roleName: string; startUrl: string }): string {
+  const key = JSON.stringify({
+    accountId: identity.accountId,
+    roleName: identity.roleName,
+    startUrl: identity.startUrl,
+  });
+  return `${sha1Hex(key)}.json`;
 }
 
 // True when the *active* profile has SSO configured (either the AWS v2 form
@@ -494,6 +593,62 @@ or set ANTHROPIC_API_KEY for API-key mode).`
 // the string without a separate IPC contract.
 export const AUTH_ERROR_PREFIX = "Auth error: ";
 
+// FG-435: render an ISO timestamp with explicit timezone context — both the
+// UTC form (labeled, so a "Z" suffix is never mistaken for local time) and
+// the local wall-clock equivalent (Date#toString() includes the local zone
+// name/offset). Any message that claims a token "expired at X" must use this
+// rather than echoing the raw ISO string, so the operator can't misread a
+// UTC instant as local time (the exact confusion in the 2026-07-07 recurrence).
+export function formatExpiryForDisplay(iso: string): string {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return iso;
+  const utcLabel = iso.endsWith("Z") ? `${iso} (UTC)` : iso;
+  return `${utcLabel} — local: ${new Date(ms).toString()}`;
+}
+
+// FG-435: build an evidence-backed description of why bedrock mode considers
+// profile `profile`'s SSO session unusable, instead of a bare "expired"
+// claim. Names the profile, the sso_session/start_url mapping used, the exact
+// cache file (or its absence), the raw expiresAt, its timezone-safe
+// interpretation, and the current-time basis — so the operator (and any
+// future debugging of this message) can see exactly what evidence backed the
+// claim rather than trusting a guess across profiles.
+function describeExpiredSsoSession(configDir: string, profile: string): string {
+  const nowIso = new Date().toISOString();
+  const identity = resolveProfileSsoIdentity(configDir, profile);
+  if (!identity) {
+    return (
+      `Bedrock mode active but no SSO session mapping could be resolved for profile '${profile}' ` +
+      `(checked ~/.aws/config for sso_session / sso_start_url). Current time: ${nowIso} (UTC). ` +
+      `Run \`aws sso login --profile ${profile}\` and try again.`
+    );
+  }
+  const mapping =
+    identity.ssoCacheKeySource === "session"
+      ? `sso_session '${identity.ssoCacheKeyValue}'`
+      : `sso_start_url '${identity.ssoCacheKeyValue}'`;
+  const cacheFile = join(configDir, "sso", "cache", ssoTokenCacheFilename(identity));
+  if (!existsSync(cacheFile)) {
+    return (
+      `AWS SSO token for profile '${profile}' (${mapping}) was not found — expected cache file ${cacheFile}. ` +
+      `Current time: ${nowIso} (UTC). Run \`aws sso login --profile ${profile}\` and try again.`
+    );
+  }
+  let rawExpiresAt: string | undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(cacheFile, "utf8")) as { expiresAt?: string };
+    rawExpiresAt = parsed.expiresAt;
+  } catch {
+    // Corrupt cache file; fall through with rawExpiresAt undefined.
+  }
+  const interpreted = rawExpiresAt ? formatExpiryForDisplay(rawExpiresAt) : "unknown (cache file unreadable)";
+  return (
+    `AWS SSO token for profile '${profile}' (${mapping}, cache file ${cacheFile}) is expired — ` +
+    `raw expiresAt=${rawExpiresAt ?? "unknown"}, interpreted as ${interpreted}, current time ${nowIso} (UTC). ` +
+    `Run \`aws sso login --profile ${profile}\` and try again.`
+  );
+}
+
 // Pre-flight check at run-creation time (#79 part 2). Catches the failure mode
 // where bedrock mode is active but the SSO cache is empty/expired — without
 // this, the run is created, dispatch starts, and the first container fails
@@ -504,24 +659,40 @@ export const AUTH_ERROR_PREFIX = "Auth error: ";
 export function validateCredsForNewRun(): void {
   const mode = detectCredsMode();
   if (mode === "bedrock") {
+    const profile = resolveAwsProfile();
     const cacheDir = join(awsConfigDir(), "sso", "cache");
     if (!existsSync(cacheDir)) {
       throw new Error(
-        `${AUTH_ERROR_PREFIX}Bedrock mode active but no SSO cache found at ${cacheDir}. Run \`aws sso login --profile ${resolveAwsProfile()}\` and try again.`
+        `${AUTH_ERROR_PREFIX}Bedrock mode active but no SSO cache found at ${cacheDir}. Run \`aws sso login --profile ${profile}\` and try again.`
       );
     }
     if (!hasFreshSsoCache(cacheDir)) {
-      throw new Error(
-        `${AUTH_ERROR_PREFIX}Bedrock mode active but the AWS SSO token is expired (or no session cache exists yet). Run \`aws sso login --profile ${resolveAwsProfile()}\` and try again.`
-      );
+      // FG-435: the mtime/expiresAt heuristic thinks this profile's SSO
+      // session is gone, but that heuristic misreads the "2026-07-07
+      // orchestrator" recurrence — a `aws sso login` refresh a few minutes
+      // earlier can still look expired to a stale/misread cache entry. A
+      // successful export-credentials probe is the same credential path
+      // forge injects into containers, so it's authoritative over the cache
+      // guess; only hard-block when the export ALSO fails.
+      if (!exportCredsOverridesStaleness(profile)) {
+        throw new Error(`${AUTH_ERROR_PREFIX}${describeExpiredSsoSession(awsConfigDir(), profile)}`);
+      }
+      return;
     }
-    // #119: even with a clock-valid SSO + STS cache, AWS may have revoked the
-    // STS chain server-side (typically after a manual `aws sso login` minted a
-    // new session while the prior one was still cached). Catch this here
-    // rather than letting the agent burn a spawn to discover 403.
-    const staleness = detectStaleStsCache();
-    if (staleness?.stale) {
-      throw new Error(`${AUTH_ERROR_PREFIX}${staleness.reason}`);
+    // #119 / FG-435: even with a clock-valid SSO + STS cache, AWS may have
+    // revoked the STS chain server-side (typically after a manual
+    // `aws sso login` minted a new session while the prior one was still
+    // cached). Catch this here rather than letting the agent burn a spawn to
+    // discover 403. Scoped to THIS profile only (see detectStaleStsCache);
+    // a successful export-credentials probe overrides a stale finding
+    // because it's the same credential path forge actually injects into the
+    // container.
+    const staleness = detectStaleStsCache({ profile });
+    if (staleness?.stale && !exportCredsOverridesStaleness(profile)) {
+      throw new Error(
+        `${AUTH_ERROR_PREFIX}${staleness.reason}\n` +
+        `Credential export also failed for '${profile}' — run \`aws sso login --profile ${profile}\` and try again.`
+      );
     }
     return;
   }
@@ -745,81 +916,132 @@ export function hasFreshSsoCache(cacheDir: string): boolean {
   return readFreshSsoSession(cacheDir) !== null;
 }
 
-// #119: Detect when AWS has revoked the cached STS credentials even though
-// they're still clock-valid. Failure mode: a fresh `aws sso login` mints a new
-// SSO session, AWS server-side-invalidates the prior STS chain, but
-// ~/.aws/cli/cache/*.json still holds STS creds derived from the OLD session.
-// First container call returns 403 with no signal to the human that auth-stale
-// (not agent-broken) was the cause.
+// #119 / FG-435: Detect when AWS has revoked the cached STS credentials even
+// though they're still clock-valid. Failure mode: a fresh `aws sso login`
+// mints a new SSO session, AWS server-side-invalidates the prior STS chain,
+// but ~/.aws/cli/cache/*.json still holds STS creds derived from the OLD
+// session. First container call returns 403 with no signal to the human that
+// auth-stale (not agent-broken) was the cause.
 //
-// Heuristic: if any SSO session token file is newer than the freshest STS
-// cache file, the STS cache is stale. Doesn't catch every failure mode but
-// catches the common one (manual `aws sso login` after the watchdog let SSO
-// age out) without making an AWS call.
+// FG-435: this used to compare the freshest SSO session mtime across ALL
+// profiles against the freshest STS cache mtime across ALL profiles — not
+// scoped to the profile actually being launched. On a multi-profile host that
+// produced two false-positive shapes: (1) fresh activity on profile A made
+// its SSO session "the current one" and flagged profile B's STS cache stale
+// even though B was untouched, and (2) a pure SSO-direct profile (bedrock
+// reads ~/.aws/sso/cache directly per FORGE-DEC-013 and never populates
+// ~/.aws/cli/cache) always looked "stale" by construction, with no bypass.
 //
-// Returns null when the check can't be made (cache dirs missing). Returns
-// `{stale: false}` when the chain looks consistent. Returns `{stale: true,
-// reason}` when SSO is newer than STS.
-export function detectStaleStsCache(opts?: { configDir?: string }): { stale: boolean; reason: string } | null {
-  const configDir = opts?.configDir ?? awsConfigDir();
-  const ssoCacheDir = join(configDir, "sso", "cache");
-  const stsCacheDir = join(configDir, "cli", "cache");
-  if (!existsSync(ssoCacheDir) || !existsSync(stsCacheDir)) return null;
+// Fix: resolve the RESOLVED profile's own SSO identity (start URL / account /
+// role, via resolveProfileSsoIdentity) and recompute the exact filenames
+// botocore uses for that profile's SSO token cache and STS credential cache
+// (ssoTokenCacheFilename / stsCacheFilename — same sha1 formulas the AWS CLI
+// itself uses). That lets us read exactly this profile's own two files
+// instead of guessing from whichever files happen to be newest. When the
+// mapping or either file can't be confidently resolved, we degrade to
+// non-blocking rather than risk a new false positive (see acceptance criteria
+// on FG-435: prefer not-stale/advisory over guessing).
+//
+// Returns null when the profile isn't SSO-configured at all (nothing to
+// compare — never a blocking concern here). Returns `{stale: false}` when the
+// chain looks consistent, cache files are missing, or the mapping can't be
+// resolved confidently (advisory=true marks the latter). Returns
+// `{stale: true, reason}`, naming the profile, when this profile's own SSO
+// session is confirmed newer than this profile's own STS cache.
+export type StsStalenessResult = {
+  stale: boolean;
+  reason: string;
+  profile: string;
+  // True when this result is informational only (mapping/cache association
+  // couldn't be confidently resolved) and must never be used to block launch.
+  advisory?: boolean;
+};
 
-  const ssoMtime = freshestSessionMtime(ssoCacheDir);
-  if (ssoMtime === 0) return null;  // no real SSO session; nothing to compare
+export function detectStaleStsCache(opts: { configDir?: string; profile: string }): StsStalenessResult | null {
+  const configDir = opts.configDir ?? awsConfigDir();
+  const profile = opts.profile;
 
-  const stsMtime = freshestFileMtime(stsCacheDir);
-  if (stsMtime === 0) return { stale: false, reason: "" };  // no STS cache yet → nothing to be stale
+  const identity = resolveProfileSsoIdentity(configDir, profile);
+  if (!identity) {
+    // Not an SSO profile (or its sso_session reference doesn't resolve) —
+    // nothing for this check to compare. Not this detector's concern.
+    return null;
+  }
+  if (!identity.accountId || !identity.roleName) {
+    // Can't compute this profile's STS cache filename without both — degrade
+    // safe rather than fall back to a cross-profile guess.
+    return {
+      stale: false,
+      profile,
+      advisory: true,
+      reason:
+        `Could not confidently associate an STS cache with profile '${profile}' ` +
+        `(~/.aws/config is missing sso_account_id/sso_role_name for it) — skipping the staleness check.`,
+    };
+  }
+
+  const stsFile = join(configDir, "cli", "cache", stsCacheFilename({
+    accountId: identity.accountId,
+    roleName: identity.roleName,
+    startUrl: identity.startUrl,
+  }));
+  if (!existsSync(stsFile)) {
+    // No STS cache entry of this profile's own. Either it authenticates
+    // SSO-direct and has never populated ~/.aws/cli/cache (bedrock reads the
+    // SSO cache directly — FORGE-DEC-013), or it just hasn't been used via
+    // the CLI yet. Either way there's nothing of this profile's own to be
+    // stale against — not a false-positive vestigial-cache flag.
+    return { stale: false, profile, reason: "" };
+  }
+  let stsMtime: number;
+  try {
+    stsMtime = statSync(stsFile).mtimeMs;
+  } catch {
+    return { stale: false, profile, reason: "" };
+  }
+
+  const ssoFile = join(configDir, "sso", "cache", ssoTokenCacheFilename(identity));
+  if (!existsSync(ssoFile)) {
+    // Can't find this profile's own SSO session token to compare against —
+    // don't block on a guess.
+    return { stale: false, profile, reason: "" };
+  }
+  let ssoMtime: number;
+  try {
+    ssoMtime = statSync(ssoFile).mtimeMs;
+  } catch {
+    return { stale: false, profile, reason: "" };
+  }
 
   // 1s slack handles filesystem-mtime jitter (refreshing SSO and STS within
   // the same second shouldn't trip the check).
   if (ssoMtime > stsMtime + 1000) {
-    const profile = resolveAwsProfile();
     return {
       stale: true,
+      profile,
       reason:
-        `STS credential cache predates the current SSO session — AWS has likely revoked the cached creds even though they're still clock-valid. ` +
-        `Refresh with: aws sts get-caller-identity --profile ${profile}`,
+        `STS credentials for profile '${profile}' are stale — its cached STS creds predate its current SSO session ` +
+        `(other profiles are unaffected). Refresh: aws sts get-caller-identity --profile ${profile}`,
     };
   }
-  return { stale: false, reason: "" };
+  return { stale: false, profile, reason: "" };
 }
 
-// Newest mtime among files in dir that actually contain an SSO session
-// (top-level accessToken). Client-registration files are skipped — their
-// year-long expiry would always dominate. Returns 0 when nothing qualifies.
-function freshestSessionMtime(dir: string): number {
-  let entries: string[];
-  try { entries = readdirSync(dir); } catch { return 0; }
-  let max = 0;
-  for (const name of entries) {
-    if (!name.endsWith(".json")) continue;
-    const path = join(dir, name);
-    try {
-      const parsed = JSON.parse(readFileSync(path, "utf8")) as { accessToken?: string };
-      if (!parsed.accessToken) continue;
-      const mt = statSync(path).mtimeMs;
-      if (mt > max) max = mt;
-    } catch { /* skip unreadable */ }
+// FG-435: `aws configure export-credentials` exercises the exact credential
+// path forge uses to inject env vars into a container (exportAwsCreds, #121)
+// — a success there is authoritative proof this profile's chain works right
+// now, overriding a mtime-based stale finding for that profile. A stale
+// finding alongside a successful export means the mtime heuristic was a false
+// positive (or is now moot); callers should treat it as advisory only. A
+// failed export alongside a stale finding means the profile's SSO session
+// really does need a fresh login.
+export function exportCredsOverridesStaleness(profile: string): boolean {
+  try {
+    exportAwsCreds(profile);
+    return true;
+  } catch {
+    return false;
   }
-  return max;
-}
-
-// Newest mtime among .json files in dir (no JSON parse). Returns 0 if dir is
-// empty / unreadable.
-function freshestFileMtime(dir: string): number {
-  let entries: string[];
-  try { entries = readdirSync(dir); } catch { return 0; }
-  let max = 0;
-  for (const name of entries) {
-    if (!name.endsWith(".json")) continue;
-    try {
-      const mt = statSync(join(dir, name)).mtimeMs;
-      if (mt > max) max = mt;
-    } catch { /* skip */ }
-  }
-  return max;
 }
 
 // #120b: actively exercise the AWS credential chain by calling

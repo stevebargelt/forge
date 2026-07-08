@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   detectStaleStsCache,
+  formatExpiryForDisplay,
   getAuthState,
   legacyOauthVolumeName,
   oauthVolumeName,
@@ -129,15 +130,21 @@ export function registerAuth(program: Command): void {
         if (d.roleName)    console.log(`Role:         ${d.roleName}`);
         if (d.region)      console.log(`Region:       ${d.region}`);
         if (d.ssoPortal)   console.log(`SSO portal:   ${d.ssoPortal}`);
-        if (d.expiresAt)   console.log(`SSO expires:  ${d.expiresAt}`);
+        if (d.expiresAt)   console.log(`SSO expires:  ${formatExpiryForDisplay(d.expiresAt)}`);
         console.log(`Watchdog:     ${d.watchdogRunning ? "running" : "not running"}`);
 
-        // #119: surface STS-cache staleness even when SSO + STS are both
-        // clock-valid. Catches the "manual `aws sso login` revoked the old
-        // STS chain" case before the user spawns a doomed agent.
-        const staleness = detectStaleStsCache();
-        if (staleness?.stale) {
-          console.log(`\n⚠ ${staleness.reason}`);
+        // #119 / FG-435: surface STS-cache staleness even when SSO + STS are
+        // both clock-valid. Catches the "manual `aws sso login` revoked the
+        // old STS chain" case before the user spawns a doomed agent. Scoped
+        // to this profile only — a stale STS cache on some other profile
+        // must never show up here.
+        if (d.profile) {
+          const staleness = detectStaleStsCache({ profile: d.profile });
+          if (staleness?.stale) {
+            console.log(`\n⚠ ${staleness.reason}`);
+          } else if (staleness?.advisory) {
+            console.log(`\n(info) ${staleness.reason}`);
+          }
         }
 
         if (opts.deep && d.profile) {
