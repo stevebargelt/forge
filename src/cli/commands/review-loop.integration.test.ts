@@ -577,3 +577,59 @@ test("FG-474 deps.verify: a host_verifications row at a DIFFERENT sha does not r
   assert.equal(result.reusedEvidence, undefined);
   assert.equal(result.ok, false);
 });
+
+// ── FG-500: deps.verify's reuse consults findCoveringGateEvidence, which is now
+// derived-gate-list-aware — a project whose package.json defines test:extended
+// needs a covering row for BOTH gates before reuse fires (unchanged for
+// projects without that script — see the plain FG-474 reuse test above, whose
+// ctx().scripts/projectDir carry no test:extended script).
+
+test("FG-500 deps.verify: a project with test:extended — a fast-tier-only covering row does NOT reuse, falls back to a real run", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { "test:all": "exit 0", "test:extended": "exit 0" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json with test:extended"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => null }));
+  const result = await deps.verify();
+  assert.equal(result.reusedEvidence, undefined, "a fast-tier-only row must not reuse — the extended tier is also required");
+});
+
+test("FG-500 deps.verify: a project with test:extended — covering rows for BOTH gates reuse — ok:true, reusedEvidence set", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { "test:all": "exit 0", "test:extended": "exit 0" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json with test:extended"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 0, recordedAt: "2026-01-01T00:00:01Z",
+  });
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => { throw new Error("must not be called — both host rows already cover"); } }));
+  const result = await deps.verify();
+  assert.equal(result.ok, true);
+  assert.match(result.reusedEvidence ?? "", /host_verifications row/);
+});
+
+test("FG-500 regression: deps.verify's no-reuse fallback never runs test:extended for a CUSTOM requiredHostGate project, even when the script exists — behaves exactly as before FG-500", async () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add custom requiredHostGate + an (irrelevant) test:extended script"], projectDir);
+
+  const { deps } = buildReviewLoopDeps(ctx({ scripts, checkStatusProvider: () => null }));
+  const result = await deps.verify();
+  assert.deepEqual(
+    result.steps.map((s) => s.name), ["typecheck", "test"],
+    "test:extended must be dropped from the fallback list — requiredHostGate is custom, not the project default"
+  );
+  assert.equal(result.ok, true, "a failing test:extended must not affect the result since it must never have run");
+});

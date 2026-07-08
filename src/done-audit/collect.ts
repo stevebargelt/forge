@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readTicket } from "../backlog/structured.js";
 import { tasksForRun } from "../store/tasks.js";
-import { queryHostVerificationRowsForGate } from "../store/host-verifications.js";
-import { checkClosedCommitCoveredByTestedSha } from "../campaign/reconcile-collect.js";
+import { deriveRequiredGateList, type HostVerificationRow } from "../store/host-verifications.js";
+import { resolveGateCoverage, evaluateGateListCoverage } from "../campaign/reconcile-collect.js";
 import type { CampaignItem } from "../types/index.js";
 import type { DoneAuditInput } from "./done-audit.js";
 
@@ -139,30 +139,68 @@ export function collectDoneAuditInputFor(projectDir: string, ticketId: string, r
         // missing or malformed config — defaults stand
       }
 
-      const rows = queryHostVerificationRowsForGate(ticketId, projectDir, requiredGate);
-      const covering = rows.filter((r) =>
-        checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch)
-      );
-      if (covering.length > 0) {
-        // FG-453: passing-row model, mirroring reconcile-collect.ts's hostVerification.passed —
-        // one real covering pass ships regardless of earlier covering failures (FG-440).
-        const passingRows = covering.filter((r) => r.exitCode === 0);
-        hostVerified = passingRows.length > 0;
-        // Evidence must match the verdict: a true verdict shows the passing row that
-        // establishes it (latest one), a false verdict shows a failing row — never the
-        // reverse. Earlier covering failures are retained as visible audit history.
-        const detailRow = hostVerified
-          ? passingRows[passingRows.length - 1]!
-          : covering[covering.length - 1]!;
-        const failureCount = covering.length - passingRows.length;
+      // FG-500 round 2: "the deterministic gate" is the FULL derived gate list,
+      // not just requiredGate, evaluated via the SAME shared evaluator
+      // reconcile-collect.ts's and reconcile-outofband-collect.ts's pre-checks
+      // use, so the three consumers cannot drift. A ci-sourced passing row for
+      // the PRIMARY gate is whole-workflow evidence (runAndRecordHostVerification
+      // only ever writes source:'ci' when EVERY required CI job is green — see
+      // findCoveringGateEvidence) and covers the full list on its own, without
+      // needing a separate row per extended-tier member (no double-charging CI).
+      const gateList = deriveRequiredGateList(projectDir, requiredGate);
+      const perGate = gateList.map((gate) => resolveGateCoverage(ticketId, projectDir, gate, closedCommit, baseBranch));
+      const { passed, anyFailed, ciShortcutRow } = evaluateGateListCoverage(perGate);
+
+      let hostVerifiedLocal: boolean | null;
+      // FG-500 review finding: a passing item's audit string must cite EVERY
+      // gate-list member's evidence, not just the last one — a single row (or a
+      // single failing row) still renders as a one-element list, so the format
+      // below is unchanged for single-gate projects (regression).
+      let detailRows: HostVerificationRow[];
+      let failureCount: number;
+
+      if (ciShortcutRow) {
+        hostVerifiedLocal = true;
+        detailRows = [ciShortcutRow];
+        failureCount = perGate[0]!.failureCount;
+      } else if (anyFailed) {
+        // FG-453: a real, provable gap on ANY list member must never be
+        // laundered into a pass by another member's success.
+        const failing = perGate.find((g) => g.verified === false)!;
+        hostVerifiedLocal = false;
+        detailRows = failing.detailRow ? [failing.detailRow] : [];
+        failureCount = failing.failureCount;
+      } else if (passed) {
+        hostVerifiedLocal = true;
+        detailRows = perGate.map((g) => g.detailRow!);
+        failureCount = perGate.reduce((sum, g) => sum + g.failureCount, 0);
+      } else {
+        // No member proven to have failed, but at least one has no covering
+        // evidence at all yet — incomplete, not a proven gap (unknown, per the
+        // single-gate "no matching rows" convention).
+        hostVerifiedLocal = null;
+        detailRows = [];
+        failureCount = 0;
+      }
+
+      hostVerified = hostVerifiedLocal;
+      if (detailRows.length > 0) {
+        // Evidence must match the verdict: a true verdict shows the passing row(s)
+        // that establish it (one per gate-list member), a false verdict shows the
+        // failing row — never the reverse. Earlier covering failures are retained
+        // as visible audit history.
         // FG-474: source distinguishes a real host exec ('host') from evidence
         // sourced from a green required CI check ('ci') — ci_url is present only
         // for the latter.
+        const rowSegments = detailRows.map(
+          (row) =>
+            `gate: ${row.gateName}; command: ${row.command}; exit_code: ${row.exitCode}; ` +
+            `commit: ${row.commitSha}; recorded_at: ${row.recordedAt}; source: ${row.source ?? "host"}` +
+            (row.source === "ci" && row.ciUrl ? `; ci_url: ${row.ciUrl}` : "")
+        );
         hostVerificationDetail =
-          `gate: ${detailRow.gateName}; command: ${detailRow.command}; exit_code: ${detailRow.exitCode}; ` +
-          `commit: ${detailRow.commitSha}; recorded_at: ${detailRow.recordedAt}; source: ${detailRow.source ?? "host"}` +
-          (detailRow.source === "ci" && detailRow.ciUrl ? `; ci_url: ${detailRow.ciUrl}` : "") +
-          (hostVerified && failureCount > 0 ? `; earlier_covering_failures: ${failureCount}` : "");
+          rowSegments.join(" | ") +
+          (hostVerifiedLocal && failureCount > 0 ? `; earlier_covering_failures: ${failureCount}` : "");
       }
     } catch {
       // hostVerified stays null on any store error

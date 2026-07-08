@@ -17,7 +17,7 @@ import {
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
 } from "../../v2/review-loop.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
-import { findCoveringGateEvidence, describeGateEvidence, type CheckStatusProvider } from "../../store/host-verifications.js";
+import { findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, type CheckStatusProvider } from "../../store/host-verifications.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
 
@@ -118,6 +118,21 @@ export function buildReviewLoopDeps(
 
   const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README/;
 
+  // FG-500 regression fix: runVerification adds test:extended whenever the
+  // script is present in `scripts`, with no notion of "is this project's
+  // required gate still the default". Gate it here — the same way
+  // findCoveringGateEvidence / reconcile's real-exec fallback / done-audit do
+  // via deriveRequiredGateList — so a CUSTOM requiredHostGate project that
+  // happens to define an unrelated test:extended script still gets
+  // single-gate (typecheck+test) fallback verification, unchanged.
+  const scriptsForVerification = (): Record<string, unknown> => {
+    const requiredGate = getRequiredHostGate(ctx.projectDir);
+    const extendedIsRequired = deriveRequiredGateList(ctx.projectDir, requiredGate).length > 1;
+    if (extendedIsRequired) return ctx.scripts;
+    const { "test:extended": _dropped, ...rest } = ctx.scripts;
+    return rest;
+  };
+
   // FG-474: one canonical deterministic gate per commit — before actually running
   // typecheck+test, check whether covering evidence for HEAD already exists (a
   // passing host_verifications row, or a green required CI check) and reuse it.
@@ -140,7 +155,7 @@ export function buildReviewLoopDeps(
         return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
       }
     }
-    return runVerification(ctx.scripts, { cwd: ctx.projectDir });
+    return runVerification(scriptsForVerification(), { cwd: ctx.projectDir });
   };
 
   const deps: ReviewLoopDeps = {
@@ -211,7 +226,7 @@ export function buildReviewLoopDeps(
       }
 
       // All changed paths are in scope — run verification before committing.
-      const verification = runVerification(ctx.scripts, { cwd: ctx.projectDir });
+      const verification = runVerification(scriptsForVerification(), { cwd: ctx.projectDir });
       if (!verification.ok) {
         // Leave the diff for inspection; do NOT commit or revert.
         return { ok: false, verificationFailed: true, dirtyPaths: changed };

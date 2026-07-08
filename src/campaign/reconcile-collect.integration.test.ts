@@ -848,3 +848,221 @@ test("runAndRecordHostVerification: FG-474 red-review fix — a configured requi
   assert.equal(rows[0]!.ciUrl, null, "a real host row must never carry a ci_url");
   assert.equal(rows[0]!.exitCode, 0, "the real exec's actual exit code");
 });
+
+// ── FG-500: real-exec fallback runs+records EVERY member of the derived gate
+// list (fast tier + test:extended, when the project's package.json defines
+// it), fail-closed on the first failing member — a failing extended run
+// blocks exactly like a failing fast run.
+
+function writePackageJsonWithGateScripts(testAllBody: string, testExtendedBody: string): void {
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify(
+      { name: "synthetic", version: "0.0.0", scripts: { "test:all": testAllBody, "test:extended": testExtendedBody } },
+      null,
+      2
+    )
+  );
+}
+
+test("runAndRecordHostVerification FG-500: a project with test:extended runs+records BOTH gates on real exec — both passing", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("add passing fast+extended gate scripts");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-BOTH-PASS");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 0);
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+
+  const fastRows = queryHostVerificationRowsForGate("FG-500-BOTH-PASS", projectDir, "npm run test:all");
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-BOTH-PASS", projectDir, "npm run test:extended");
+  assert.equal(fastRows.length, 1, "the fast gate must be run and recorded under its own command");
+  assert.equal(fastRows[0]!.exitCode, 0);
+  assert.equal(extendedRows.length, 1, "the extended gate must ALSO be run and recorded under its own command");
+  assert.equal(extendedRows[0]!.exitCode, 0);
+  assert.equal(extendedRows[0]!.commitSha, commit);
+});
+
+test("runAndRecordHostVerification FG-500: a failing extended run blocks exactly like a failing fast run — the fast pass is still recorded, the extended failure is recorded, exec stops there", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 3");
+  const commit = commitAll("add passing fast + failing extended gate scripts");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-EXT-FAIL");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 3, "the overall recorded result reflects the extended failure — it blocks like a failing fast run");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+
+  const fastRows = queryHostVerificationRowsForGate("FG-500-EXT-FAIL", projectDir, "npm run test:all");
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-EXT-FAIL", projectDir, "npm run test:extended");
+  assert.equal(fastRows.length, 1, "the fast gate still ran (it's earlier in the list) and its real passing result is recorded");
+  assert.equal(fastRows[0]!.exitCode, 0);
+  assert.equal(extendedRows.length, 1);
+  assert.equal(extendedRows[0]!.exitCode, 3, "the extended gate's real failing exit code, never fabricated");
+});
+
+test("runAndRecordHostVerification FG-500: a failing FAST run never even attempts the extended gate — fail-closed on first failure", () => {
+  writePackageJsonWithGateScripts("exit 1", "exit 0");
+  commitAll("add failing fast + passing extended gate scripts");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-FAST-FAIL");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 1);
+
+  const fastRows = queryHostVerificationRowsForGate("FG-500-FAST-FAIL", projectDir, "npm run test:all");
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-FAST-FAIL", projectDir, "npm run test:extended");
+  assert.equal(fastRows.length, 1);
+  assert.equal(fastRows[0]!.exitCode, 1);
+  assert.equal(extendedRows.length, 0, "the extended gate must never run once the fast gate has already failed");
+});
+
+test("runAndRecordHostVerification FG-500: reuse requires BOTH gates already covering the exact sha — a fast-only passing row does not short-circuit, the extended gate still actually runs", () => {
+  writePackageJsonWithGateScripts(execMarkerScript(), "exit 0");
+  const commit = commitAll("add fast gate script with exec marker + extended gate script");
+
+  insertHostVerification({
+    ticketId: "FG-500-PARTIAL-REUSE", projectDir, commitSha: commit,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-PARTIAL-REUSE");
+  assert.equal(result.status, "recorded", "not a full-list reuse — the fast-only row does not cover the derived list");
+  assert.equal(existsSync(markerPath()), true, "the fast gate must actually run (a fast-only prior row is insufficient coverage)");
+
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-PARTIAL-REUSE", projectDir, "npm run test:extended");
+  assert.equal(extendedRows.length, 1, "the extended gate must be run and recorded too");
+  assert.equal(extendedRows[0]!.exitCode, 0);
+});
+
+test("runAndRecordHostVerification FG-500 regression: NO test:extended script in package.json -> single-gate behavior unchanged (only the configured gate runs/records)", () => {
+  writePackageJsonWithGateScript("exit 0");
+  const commit = commitAll("add passing gate script (no test:extended)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-REGRESSION-SINGLE");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 0);
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+
+  const fastRows = queryHostVerificationRowsForGate("FG-500-REGRESSION-SINGLE", projectDir, "npm run test:all");
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-REGRESSION-SINGLE", projectDir, "npm run test:extended");
+  assert.equal(fastRows.length, 1);
+  assert.equal(extendedRows.length, 0, "no test:extended script exists — the derived list must stay single-gate, no phantom row written");
+});
+
+test("runAndRecordHostVerification FG-500 regression: a CUSTOM requiredHostGate is never expanded, even when test:extended exists in package.json", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify(
+      { name: "synthetic", version: "0.0.0", scripts: { verify: "exit 0", "test:extended": "exit 0" } },
+      null,
+      2
+    )
+  );
+  const commit = commitAll("add verify gate script + an (irrelevant) test:extended script");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-500-REGRESSION-CUSTOM");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 0);
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+
+  const verifyRows = queryHostVerificationRowsForGate("FG-500-REGRESSION-CUSTOM", projectDir, "npm run verify");
+  const extendedRows = queryHostVerificationRowsForGate("FG-500-REGRESSION-CUSTOM", projectDir, "npm run test:extended");
+  assert.equal(verifyRows.length, 1);
+  assert.equal(extendedRows.length, 0, "a custom requiredHostGate must never pull in test:extended, even though the script exists");
+});
+
+// ── FG-500 round 2: the collectReconcileEvidence PRE-CHECK (hostVerification)
+// must cover the FULL derived gate list, not just requiredGate — otherwise a
+// tiered project could report passed:true on a fast-tier-only row, letting
+// reconcile.ts skip capture and ship without ever running test:extended.
+
+test("FG-500 round 2: scope-blocked pre-check — a fast-only passing row on a tiered project does NOT satisfy hostVerification (capture path must still run)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, fast-only row recorded");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: true, passed: false },
+    "fast-tier-only evidence must not report passed:true — the extended tier has no covering row yet"
+  );
+});
+
+test("FG-500 round 2: scope-blocked pre-check — passing rows for BOTH the fast and extended gate satisfy hostVerification (capture skipped)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, both rows recorded");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:extended",
+    command: "npm run test:extended",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:01Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});
+
+test("FG-500 round 2: scope-blocked pre-check — a ci-sourced passing row for the primary gate alone satisfies the full list (whole-workflow evidence)", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  const commit = commitAll("tiered project, ci-sourced primary row only");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+    source: "ci",
+    ciUrl: "https://example.test/run/1",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(
+    result.hostVerification,
+    { recorded: true, passed: true },
+    "a ci-sourced primary pass is whole-workflow evidence — no separate extended-tier row is needed"
+  );
+});
+
+test("FG-500 round 2 regression: a single-gate project (no test:extended) still resolves hostVerification from one row, unchanged", () => {
+  const commit = makeCommit("single-gate-regression");
+  writeTicket(projectDir, { id: "FG-200", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-200",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = collectReconcileEvidence(projectDir, item());
+  assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});

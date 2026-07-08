@@ -251,16 +251,17 @@ function makeDefaultRunner(cwd?: string): CommandRunner {
 }
 
 /** Run the project's discoverable deterministic checks. `scripts` are the
- *  package.json scripts present; we run typecheck then test when each exists, IN
- *  `cwd` (the project dir — not the launch dir). Runner injectable for tests.
- *  `ok` is true only if every run step passed. */
+ *  package.json scripts present; we run typecheck, test, then test:extended
+ *  (FG-500 — the extended tier joins the fallback whenever the project defines
+ *  it) when each exists, IN `cwd` (the project dir — not the launch dir).
+ *  Runner injectable for tests. `ok` is true only if every run step passed. */
 export function runVerification(
   scripts: Record<string, unknown>,
   opts: { run?: CommandRunner; cwd?: string } = {},
 ): VerificationResult {
   const run = opts.run ?? makeDefaultRunner(opts.cwd);
   const steps: VerificationStep[] = [];
-  for (const name of ["typecheck", "test"]) {
+  for (const name of ["typecheck", "test", "test:extended"]) {
     if (typeof scripts[name] !== "string") continue;
     const { ok, output } = run("npm", ["run", "--silent", name]);
     steps.push({ name, ok, output });

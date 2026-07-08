@@ -13,6 +13,7 @@ import {
   queryHostVerificationRowsForGate,
   findCoveringGateEvidence,
   describeGateEvidence,
+  deriveRequiredGateList,
   aggregateCiCheckRuns,
   projectCiRunsCommand,
   projectCiWorkflowJobIds,
@@ -742,6 +743,136 @@ describe("findCoveringGateEvidence / describeGateEvidence (real per-project ci.y
     const ciDesc = describeGateEvidence(ciEvidence);
     assert.match(ciDesc, /CI check/);
     assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
+  });
+});
+
+// ── FG-500: deriveRequiredGateList ──────────────────────────────────────────
+
+function writePackageJson(dir: string, scripts: Record<string, string>): void {
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "synthetic", scripts }, null, 2));
+}
+
+describe("deriveRequiredGateList", () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), "hv-gate-list-"));
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  test("default gate + a test:extended script -> both join the list", () => {
+    writePackageJson(projectDir, { "test:all": "echo ok", "test:extended": "echo ok" });
+    assert.deepEqual(deriveRequiredGateList(projectDir, "npm run test:all"), ["npm run test:all", "npm run test:extended"]);
+  });
+
+  test("default gate + NO test:extended script -> single-gate list (regression)", () => {
+    writePackageJson(projectDir, { "test:all": "echo ok" });
+    assert.deepEqual(deriveRequiredGateList(projectDir, "npm run test:all"), ["npm run test:all"]);
+  });
+
+  test("default gate + no package.json at all -> single-gate list (fail closed on unreadable config)", () => {
+    assert.deepEqual(deriveRequiredGateList(projectDir, "npm run test:all"), ["npm run test:all"]);
+  });
+
+  test("a CUSTOM requiredHostGate is never expanded, even when test:extended exists (regression)", () => {
+    writePackageJson(projectDir, { "test:all": "echo ok", "test:extended": "echo ok", verify: "echo ok" });
+    assert.deepEqual(deriveRequiredGateList(projectDir, "npm run verify"), ["npm run verify"]);
+  });
+});
+
+// ── FG-500: findCoveringGateEvidence — host-row coverage requires EVERY member
+// of the derived gate list, not just the fast/primary gate. A project whose
+// package.json defines test:extended must have BOTH a fast row and an
+// extended row (or a single ci-sourced whole-workflow row) before exact-sha
+// reuse fires — a fast-tier-only row must never satisfy it.
+
+describe("findCoveringGateEvidence (FG-500: derived gate list)", () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), "hv-gate-list-evidence-"));
+    writePackageJson(projectDir, { "test:all": "echo ok", "test:extended": "echo ok" });
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  test("a passing fast-tier row ALONE does not satisfy a project with a test:extended script (negative)", () => {
+    insertHostVerification({
+      ticketId: "FG-500A", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500A", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => null,
+    });
+    assert.equal(evidence, null, "a fast-tier-only row must not cover a project with an extended tier");
+  });
+
+  test("passing rows for BOTH the fast and extended gate satisfy exact-sha reuse (positive)", () => {
+    insertHostVerification({
+      ticketId: "FG-500B", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    insertHostVerification({
+      ticketId: "FG-500B", projectDir, commitSha: GATE_SHA,
+      gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 0, recordedAt: "2026-01-01T00:00:01Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500B", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: unreachableProvider,
+    });
+    assert.ok(evidence, "both list members covered by passing rows must satisfy");
+    assert.equal(evidence!.source, "host_row");
+    assert.equal((evidence as { rows: { command: string }[] }).rows.length, 2, "rows must carry a covering row per list member");
+  });
+
+  test("describeGateEvidence cites EVERY covering row, not just the fast tier (FG-500 review finding)", () => {
+    insertHostVerification({
+      ticketId: "FG-500E", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    insertHostVerification({
+      ticketId: "FG-500E", projectDir, commitSha: GATE_SHA,
+      gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 0, recordedAt: "2026-01-01T00:00:01Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500E", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: unreachableProvider,
+    })!;
+    const desc = describeGateEvidence(evidence);
+    assert.match(desc, /host_verifications row #\d+.*command: npm run test:all/, "must cite the fast-tier row");
+    assert.match(desc, /host_verifications row #\d+.*command: npm run test:extended/, "must cite the extended-tier row");
+  });
+
+  test("a passing fast-tier row + a FAILING extended row does not satisfy (negative)", () => {
+    insertHostVerification({
+      ticketId: "FG-500C", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    insertHostVerification({
+      ticketId: "FG-500C", projectDir, commitSha: GATE_SHA,
+      gateName: "npm run test:extended", command: "npm run test:extended", exitCode: 1, recordedAt: "2026-01-01T00:00:01Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500C", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => null,
+    });
+    assert.equal(evidence, null, "a failing extended row must block reuse exactly like a failing fast row would");
+  });
+
+  test("whole-workflow-green CI evidence covers the full list on its own — no extended row needed (positive, no double-charging CI)", () => {
+    writeWorkflowFile(projectDir, "ci.yml", `name: CI\njobs:\n  test:\n    steps:\n      - run: ${GATE_CMD}\n`);
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-500D", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/500" }),
+    });
+    assert.ok(evidence, "whole-workflow-green CI evidence must cover a project with an extended tier without a separate extended row");
+    assert.equal(evidence!.source, "ci");
   });
 });
 

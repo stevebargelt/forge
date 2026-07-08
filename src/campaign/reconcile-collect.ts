@@ -10,7 +10,9 @@ import {
   queryHostVerificationRowsForGate,
   insertHostVerification,
   findCoveringGateEvidence,
+  deriveRequiredGateList,
   type CheckStatusProvider,
+  type HostVerificationRow,
 } from "../store/host-verifications.js";
 import { eventsForRun } from "../store/events.js";
 import { nowIso } from "../util/ids.js";
@@ -104,6 +106,66 @@ export function checkClosedCommitCoveredByTestedSha(
   return checkClosedCommitReachableOnBase(projectDir, testedSha, baseBranch) === true;
 }
 
+// FG-500 round 2: per-gate-list-member coverage for a single gate command —
+// the ONE place ancestry-filtered host_verifications rows for a gate are
+// reduced to a verdict, shared by every consumer that needs to know "is THIS
+// gate list member covered" (both reconcile pre-checks below, and
+// done-audit/collect.ts). verified is null when no covering row exists yet
+// for this gate (unknown/not-yet-run, distinct from a proven failure), false
+// when every covering row failed, true when at least one covering row passed
+// (a later real pass ships over an earlier covering failure — FG-453's
+// passing-row model).
+export type GateCoverage = { verified: boolean | null; detailRow: HostVerificationRow | null; failureCount: number };
+
+export function resolveGateCoverage(
+  ticketId: string,
+  projectDir: string,
+  gate: string,
+  closedCommit: string,
+  baseBranch: string
+): GateCoverage {
+  const rows = queryHostVerificationRowsForGate(ticketId, projectDir, gate);
+  const covering = rows.filter((r) => checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch));
+  if (covering.length === 0) return { verified: null, detailRow: null, failureCount: 0 };
+  const passingRows = covering.filter((r) => r.exitCode === 0);
+  const verified = passingRows.length > 0;
+  const failureCount = covering.length - passingRows.length;
+  const detailRow = verified ? passingRows[passingRows.length - 1]! : covering[covering.length - 1]!;
+  return { verified, detailRow, failureCount };
+}
+
+// FG-500 round 2: the SINGLE decision of whether a derived gate LIST is fully
+// covered, given each member's already-resolved GateCoverage (in gate-list
+// order, index 0 = the primary/fast gate). Used by reconcile-collect's and
+// reconcile-outofband-collect's pre-checks AND done-audit/collect.ts, so the
+// three consumers cannot drift on what "the gate list passed" means.
+//   - passed requires EVERY member to have its own covering passing row
+//     (perGate[i].verified === true), UNLESS the primary member (index 0) was
+//     satisfied by a source:'ci' row — runAndRecordHostVerification only ever
+//     writes source:'ci' when EVERY required CI job is green (see
+//     findCoveringGateEvidence above), so a ci-sourced primary pass IS
+//     whole-workflow evidence and covers the rest of the list on its own.
+//   - recordedAny is true once ANY member has seen a covering row (pass or
+//     fail) — "some real evidence exists" — as distinct from "nothing has
+//     run yet" (every member's verified === null).
+//   - anyFailed is true only when a member has a proven failure and the ci
+//     shortcut doesn't apply — a real, provable gap on any member must never
+//     be laundered into a pass by another member's success (FG-453).
+export function evaluateGateListCoverage(perGate: GateCoverage[]): {
+  passed: boolean;
+  anyFailed: boolean;
+  recordedAny: boolean;
+  ciShortcutRow: HostVerificationRow | null;
+} {
+  const primary = perGate[0];
+  const ciShortcutRow =
+    primary && primary.verified === true && primary.detailRow?.source === "ci" ? primary.detailRow : null;
+  const passed = !!ciShortcutRow || perGate.every((g) => g.verified === true);
+  const anyFailed = !ciShortcutRow && perGate.some((g) => g.verified === false);
+  const recordedAny = !!ciShortcutRow || perGate.some((g) => g.verified !== null);
+  return { passed, anyFailed, recordedAny, ciShortcutRow };
+}
+
 // FG-427: the SINGLE events->ReconcileRunEvent[] translation, shared by
 // collectReconcileEvidence (the `forge campaign reconcile` command) and by
 // executor.ts's drive-path reconciliation — one source of truth for how a
@@ -160,18 +222,19 @@ export function collectReconcileEvidence(projectDir: string, item: CampaignItem)
     // at projectDir's current HEAD, not a checkout of closedCommit, so the row's
     // commit_sha is the tested base HEAD, which closedCommit merely needs to be an
     // ancestor of, and which must itself be on the base branch.
+    //
+    // FG-500 round 2: this pre-check must cover the FULL derived gate list, not
+    // just requiredGate — the capture path below and findCoveringGateEvidence
+    // already enforce this; a fast-tier-only passing row must never let a
+    // tiered project's pre-check report "passed" and skip capture (which would
+    // then let reconcile.ts ship without ever running test:extended).
     try {
-      const rows = queryHostVerificationRowsForGate(item.ticketId, projectDir, requiredGate);
-      const covering = rows.filter((r) =>
-        checkClosedCommitCoveredByTestedSha(projectDir, ticketClosedCommit!, r.commitSha, baseBranch)
+      const gateList = deriveRequiredGateList(projectDir, requiredGate);
+      const perGate = gateList.map((gate) =>
+        resolveGateCoverage(item.ticketId, projectDir, gate, ticketClosedCommit!, baseBranch)
       );
-      // FG-440: a passing-row model — one real green covering row is enough to
-      // ship, regardless of how many earlier covering rows failed. A historical
-      // failure must never permanently outrank a later real pass.
-      hostVerification = {
-        recorded: covering.length > 0,
-        passed: covering.some((r) => r.exitCode === 0),
-      };
+      const { passed, recordedAny } = evaluateGateListCoverage(perGate);
+      hostVerification = { recorded: recordedAny, passed };
     } catch {
       hostVerification = null;
     }
@@ -302,7 +365,15 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *  project's matched CI workflow is green at that sha (FG-495, via
  *  findCoveringGateEvidence) — a green fast job with another job red, pending,
  *  or absent does not cover. Only when neither covers does this fall through to
- *  the real host exec, unchanged. */
+ *  the real host exec.
+ *
+ *  FG-500: when it falls through, it runs and records EVERY member of
+ *  deriveRequiredGateList(projectDir, requiredGate), in order — not just
+ *  requiredGate — fail-closed on the first failing member (that member's row
+ *  is still recorded with its real exit code; remaining members are never run,
+ *  so a failing extended run blocks exactly like a failing fast run). Each
+ *  member gets its own row under its OWN command string (never requiredGate's
+ *  label) — the FG-419 gate_name spoofing guard applies per member. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,
@@ -383,49 +454,60 @@ export function runAndRecordHostVerification(
     return { status: "recorded", exitCode: 0, commitSha: evidence.sha, source: "ci", ciUrl: evidence.checkUrl };
   }
 
-  const runnable = checkGateRunnable(projectDir, requiredGate);
-  if (!runnable.runnable) {
-    return { status: "skipped", reason: runnable.reason ?? "required gate not runnable in projectDir" };
-  }
+  const gateList = deriveRequiredGateList(projectDir, requiredGate);
 
-  const argv = requiredGate.trim().split(/\s+/).filter(Boolean);
-  const [cmd, ...args] = argv;
-  let exitCode: number;
-  try {
-    execFileSync(cmd!, args, {
-      cwd: projectDir,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: hostGateTimeoutMs(),
-      maxBuffer: 20 * 1024 * 1024,
+  for (const gate of gateList) {
+    const runnable = checkGateRunnable(projectDir, gate);
+    if (!runnable.runnable) {
+      return { status: "skipped", reason: runnable.reason ?? `required gate not runnable in projectDir: ${gate}` };
+    }
+
+    const argv = gate.trim().split(/\s+/).filter(Boolean);
+    const [cmd, ...args] = argv;
+    let exitCode: number;
+    try {
+      execFileSync(cmd!, args, {
+        cwd: projectDir,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: hostGateTimeoutMs(),
+        maxBuffer: 20 * 1024 * 1024,
+      });
+      exitCode = 0;
+    } catch (e) {
+      const err = e as { status?: number | null };
+      exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
+    }
+
+    // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
+    // running — re-confirm projectDir is still exactly the sha/state we
+    // snapshotted before the run. If it moved, the exit code above no longer
+    // corresponds to any stable committed sha; discard rather than record it.
+    if (!projectSnapshotStillValid(projectDir, headSha)) {
+      return {
+        status: "skipped",
+        reason: "projectDir HEAD or working tree changed during the gate run — discarding the result rather than recording it against a sha that may no longer reflect what was tested",
+      };
+    }
+
+    insertHostVerification({
+      ticketId,
+      projectDir,
+      commitSha: headSha,
+      gateName: gate,
+      command: gate,
+      exitCode,
+      runId: opts.runId ?? null,
+      recordedAt: nowIso(),
+      source: "host",
     });
-    exitCode = 0;
-  } catch (e) {
-    const err = e as { status?: number | null };
-    exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
+
+    // FG-500: fail closed on the first failing member — a failing extended run
+    // blocks exactly like a failing fast run, and remaining list members
+    // (if any) are never run once the gate has already failed.
+    if (exitCode !== 0) {
+      return { status: "recorded", exitCode, commitSha: headSha, source: "host" };
+    }
   }
 
-  // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
-  // running — re-confirm projectDir is still exactly the sha/state we
-  // snapshotted before the run. If it moved, the exit code above no longer
-  // corresponds to any stable committed sha; discard rather than record it.
-  if (!projectSnapshotStillValid(projectDir, headSha)) {
-    return {
-      status: "skipped",
-      reason: "projectDir HEAD or working tree changed during the gate run — discarding the result rather than recording it against a sha that may no longer reflect what was tested",
-    };
-  }
-
-  insertHostVerification({
-    ticketId,
-    projectDir,
-    commitSha: headSha,
-    gateName: requiredGate,
-    command: requiredGate,
-    exitCode,
-    runId: opts.runId ?? null,
-    recordedAt: nowIso(),
-    source: "host",
-  });
-
-  return { status: "recorded", exitCode, commitSha: headSha, source: "host" };
+  return { status: "recorded", exitCode: 0, commitSha: headSha, source: "host" };
 }
