@@ -1,9 +1,11 @@
 ---
 id: FG-474
 type: story
-status: active
+status: done
 title: Add CI (GitHub Actions) for the test suite + wire into the merge gate as the required check; stop running the full host suite repeatedly (offload + visibility)
 created: 2026-07-06
+closed: 2026-07-08
+closed_commit: 7ae74c20dd9d136b11882a3b5ebfe0b8c027c7dd
 ---
 
 ## Problem

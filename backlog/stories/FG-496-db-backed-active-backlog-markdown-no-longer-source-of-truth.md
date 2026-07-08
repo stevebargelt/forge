@@ -29,6 +29,8 @@ Move Forge's active backlog/work queue to Forge DB-backed storage. The DB become
 - `forge backlog file`, `edit`, `close`, `show`, and `list` operate on DB-backed tickets, not on `backlog/*.md` files as the source of truth.
 - Backlog CRUD works in a project with no `backlog/` directory present.
 - Existing repo-backed markdown backlog files can be imported/migrated into the DB with at least id, type, status, title, body, created date, closed date, relations, and relevant frontmatter preserved where present.
+- Tickets have an explicit `type` field in the DB schema, not just a directory convention. Initial supported types include at least `bug`, `story`, `epic`, and `idea`, with room for future workflow-specific types.
+- Existing markdown imports preserve the current file/frontmatter-derived type (`story`, `epic`, `idea`) and can map future bug files or imported external issues to `bug`.
 - Campaign planning reads ticket definitions from the DB-backed backlog.
 - Review-loop and shipping-reviewer ticket lookup read from the DB-backed backlog.
 - Autonomous runs and handoff/orient read the same DB-backed backlog state across Forge worktrees.
@@ -44,7 +46,7 @@ Move Forge's active backlog/work queue to Forge DB-backed storage. The DB become
 - Markdown export is not required for the first cut. If human-readable snapshots are wanted later, make export an explicit optional command.
 - This story does not solve multi-machine remote synchronization beyond the existing Forge DB/host model. It must make same-host multi-worktree behavior reliable first.
 - This story does not move operational handoff/orient/session notes; FG-380 owns host-local operational state. This story owns active backlog/work-queue source of truth.
-- This story does not require GitHub Issues/Jira integration.
+- This story does not require GitHub Issues or Jira integration.
 
 ## Design Notes
 
@@ -60,5 +62,5 @@ Important product decision already made: do not make markdown export a core requ
 
 - FG-380: host-local operational state for handoff/orient/session notes.
 - FG-474 / FG-495: verification speed work depends on durable backlog coordination for autonomous runs.
+- FG-498: GitHub Issues ingestion into the DB-backed backlog.
 - Gas City / Beads lesson: the active work item should be a durable store primitive, not whichever markdown file exists in the current worktree.
-
