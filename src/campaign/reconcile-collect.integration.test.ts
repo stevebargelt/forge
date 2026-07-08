@@ -374,6 +374,21 @@ function writePackageJsonWithGateScript(scriptBody: string): void {
   );
 }
 
+// FG-474 red-review fix (task-red-wide-16933b): the CI-sourced evidence branch
+// now content-verifies the pairing against THIS projectDir's own ci.yml
+// (projectCiRunsCommand) rather than a hardcoded constant — so a stubbed green
+// check only reaches (or is correctly rejected before reaching) the provider
+// when the project actually has a workflow named "CI" whose "test" job runs
+// the given command. Committed alongside the gate script so the tree stays
+// clean for runAndRecordHostVerification's dirty-tree guard.
+function writeMatchingCiWorkflow(command: string): void {
+  mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".github", "workflows", "ci.yml"),
+    `name: CI\njobs:\n  test:\n    steps:\n      - run: ${command}\n`
+  );
+}
+
 function commitAll(label: string): string {
   gitExec(["add", "."], projectDir);
   gitExec(["commit", "-m", label], projectDir);
@@ -675,6 +690,7 @@ test("runAndRecordHostVerification: reuse — an existing PASSING host_verificat
 
 test("runAndRecordHostVerification: CI reuse — a stubbed green required CI check at HEAD's exact sha records a source='ci' row, skips exec", () => {
   writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
   const commit = commitAll("add gate script with exec marker (CI reuse case)");
 
   const stub = (opts: { projectDir: string; sha: string; checkContext: string }): CiCheckStatus | null =>
@@ -748,6 +764,7 @@ test("runAndRecordHostVerification: a FAILING covering row at the exact sha+comm
 
 test("runAndRecordHostVerification: a PENDING CI check does not satisfy — falls back to a real exec", () => {
   writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
   const commit = commitAll("add gate script (CI pending negative)");
 
   const result = runAndRecordHostVerification(projectDir, "FG-705", {
@@ -760,6 +777,7 @@ test("runAndRecordHostVerification: a PENDING CI check does not satisfy — fall
 
 test("runAndRecordHostVerification: a FAILED CI check does not satisfy — falls back to a real exec", () => {
   writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
   commitAll("add gate script (CI failed negative)");
 
   const result = runAndRecordHostVerification(projectDir, "FG-706", {
@@ -772,6 +790,7 @@ test("runAndRecordHostVerification: a FAILED CI check does not satisfy — falls
 
 test("runAndRecordHostVerification: a green CI check for a DIFFERENT sha does not satisfy — falls back to a real exec (spoof/staleness guard)", () => {
   writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
   commitAll("add gate script (CI different-sha negative)");
 
   const result = runAndRecordHostVerification(projectDir, "FG-707", {
@@ -780,6 +799,29 @@ test("runAndRecordHostVerification: a green CI check for a DIFFERENT sha does no
   assert.equal(result.status, "recorded");
   assert.equal((result as { source: string }).source, "host");
   assert.equal(existsSync(markerPath()), true, "a green CI check reported for a DIFFERENT sha must never satisfy the requested sha — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: FG-474 red re-check (task-red-wide-16933b) — a green required CI check at the exact sha, but THIS projectDir's own ci.yml runs a DIFFERENT command — falls back to a real exec, provider never consulted", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run something-else");
+  const commit = commitAll("add gate script (ci.yml pairing mismatch negative)");
+
+  let providerCalled = false;
+  const result = runAndRecordHostVerification(projectDir, "FG-714", {
+    checkStatusProvider: () => {
+      providerCalled = true;
+      return { sha: commit, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/1" };
+    },
+  });
+  assert.equal(providerCalled, false, "the pairing check runs BEFORE the provider — a project whose ci.yml never ran opts.command must never even consult it");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host", "must never be labeled 'ci' — THIS project's ci.yml never ran the required command");
+  assert.equal(existsSync(markerPath()), true, "no covering evidence — the gate must actually run");
+
+  const rows = queryHostVerificationRowsForGate("FG-714", projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.source, "host");
+  assert.equal(rows[0]!.ciUrl, null);
 });
 
 test("runAndRecordHostVerification: FG-474 red-review fix — a configured requiredHostGate OTHER than REQUIRED_CI_GATE_COMMAND is never covered by a green required CI check, even at the exact HEAD sha — the gate actually executes", () => {

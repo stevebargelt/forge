@@ -1,7 +1,10 @@
-import { test, beforeEach, afterEach } from "node:test";
+import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import type { Database as DatabaseInstance } from "better-sqlite3";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { makeInMemoryDb, setDbForTest, applyMigrations } from "./db.js";
 import { SCHEMA_SQL } from "./schema.js";
 import {
@@ -11,6 +14,7 @@ import {
   findCoveringGateEvidence,
   describeGateEvidence,
   aggregateCiCheckRuns,
+  projectCiRunsCommand,
   REQUIRED_CI_CHECK_CONTEXT,
   type CiCheckStatus,
 } from "./host-verifications.js";
@@ -382,149 +386,253 @@ test("FG-431: canonicalization does not loosen matching — a genuinely differen
   assert.equal(rows.length, 0, "a different project directory must never match, canonicalized or not");
 });
 
+// ── FG-474 (task-red-wide-16933b): projectCiRunsCommand — per-project,
+// content-verified pairing between a CI check name and the command it runs ──
+//
+// forge is host-global: opts.projectDir in findCoveringGateEvidence is an
+// ARBITRARY managed project, never forge's own repo. So the pairing between a
+// green "CI / test" check and the command it proves ran can only be verified
+// by reading THAT project's own .github/workflows content at lookup time —
+// never by a hardcoded constant (which only pairs with forge's OWN ci.yml).
+
+function writeWorkflowFile(dir: string, filename: string, yamlContent: string): void {
+  const workflowsDir = join(dir, ".github", "workflows");
+  mkdirSync(workflowsDir, { recursive: true });
+  writeFileSync(join(workflowsDir, filename), yamlContent);
+}
+
+function withTempProjectDir(fn: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "hv-ci-fixture-"));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("projectCiRunsCommand: an exact-matching run step -> true", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), true);
+  });
+});
+
+test("projectCiRunsCommand: the command as a substring of a longer run line -> false", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run test:all -- --coverage\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false, "must be an EXACT match, not a substring/prefix match");
+  });
+});
+
+test("projectCiRunsCommand: matching workflow but a DIFFERENT job -> false", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  lint:\n    steps:\n      - run: npm run test:all\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false);
+  });
+});
+
+test("projectCiRunsCommand: a DIFFERENT workflow name -> false", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: Build\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false);
+  });
+});
+
+test("projectCiRunsCommand: no .github/workflows directory at all -> false", () => {
+  withTempProjectDir((dir) => {
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false);
+  });
+});
+
+test("projectCiRunsCommand: unparseable YAML -> false", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps: [\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false);
+  });
+});
+
+test("projectCiRunsCommand: multiple workflow files where a NON-'CI' workflow contains the command -> false", () => {
+  withTempProjectDir((dir) => {
+    writeWorkflowFile(dir, "build.yml", "name: Build\njobs:\n  test:\n    steps:\n      - run: npm run test:all\n");
+    writeWorkflowFile(dir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run lint\n");
+    assert.equal(projectCiRunsCommand(dir, "CI / test", "npm run test:all"), false, "only the workflow actually named 'CI' may satisfy the pairing");
+  });
+});
+
 // ── FG-474: findCoveringGateEvidence / describeGateEvidence ────────────────────
+//
+// projectDir here is a REAL temp directory with a matching .github/workflows/ci.yml
+// (workflow "CI", job "test", running GATE_CMD) — not the pre-fix "/home/test/project"
+// placeholder — so these tests exercise the real per-project pairing gate end to end,
+// not just the provider dispatch downstream of it.
 
 const GATE_SHA = "abc123def456abc123def456abc123def456abc";
 const GATE_CMD = "npm run test:all";
 
 // A stub that throws if invoked — proves the CI provider was never consulted
-// (the host-row match short-circuited before reaching it).
+// (the host-row match, or the pairing gate itself, short-circuited before reaching it).
 function unreachableProvider(): CiCheckStatus | null {
   throw new Error("checkStatusProvider must not be called — a covering host row already satisfied the lookup");
 }
 
-test("findCoveringGateEvidence: a passing row at the exact sha+command is covering evidence (source host_row), CI provider never consulted", () => {
-  insertHostVerification({
-    ticketId: "FG-700", projectDir: "/home/test/project", commitSha: GATE_SHA,
-    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+describe("findCoveringGateEvidence / describeGateEvidence (real per-project ci.yml pairing)", () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), "hv-evidence-project-"));
+    writeWorkflowFile(projectDir, "ci.yml", `name: CI\njobs:\n  test:\n    steps:\n      - run: ${GATE_CMD}\n`);
   });
 
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-700", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: unreachableProvider,
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
   });
-  assert.ok(evidence);
-  assert.equal(evidence!.source, "host_row");
-  assert.equal((evidence as { source: "host_row"; row: { commitSha: string } }).row.commitSha, GATE_SHA);
-});
 
-test("findCoveringGateEvidence: no rows and provider returns null → no covering evidence (fail closed)", () => {
-  let called = false;
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-701", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => { called = true; return null; },
-  });
-  assert.equal(evidence, null);
-  assert.equal(called, true, "provider must be consulted when no host row covers");
-});
+  test("a passing row at the exact sha+command is covering evidence (source host_row), CI provider never consulted", () => {
+    insertHostVerification({
+      ticketId: "FG-700", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
 
-test("findCoveringGateEvidence: a row at a DIFFERENT sha does not satisfy — falls through to the provider", () => {
-  insertHostVerification({
-    ticketId: "FG-702", projectDir: "/home/test/project", commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-700", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: unreachableProvider,
+    });
+    assert.ok(evidence);
+    assert.equal(evidence!.source, "host_row");
+    assert.equal((evidence as { source: "host_row"; row: { commitSha: string } }).row.commitSha, GATE_SHA);
   });
-  let called = false;
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-702", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => { called = true; return null; },
-  });
-  assert.equal(evidence, null);
-  assert.equal(called, true, "a different-sha row must not satisfy the lookup — must fall through to CI");
-});
 
-test("findCoveringGateEvidence: a row for a DIFFERENT command does not satisfy — command mismatch never covers", () => {
-  insertHostVerification({
-    ticketId: "FG-703", projectDir: "/home/test/project", commitSha: GATE_SHA,
-    gateName: "npm run test", command: "npm run test", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  test("no rows and provider returns null → no covering evidence (fail closed)", () => {
+    let called = false;
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-701", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return null; },
+    });
+    assert.equal(evidence, null);
+    assert.equal(called, true, "provider must be consulted when no host row covers and this project's ci.yml pairs the check with the command");
   });
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-703", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => null,
-  });
-  assert.equal(evidence, null, "a row recorded for a lesser/different command must never satisfy a broader required gate");
-});
 
-test("findCoveringGateEvidence: a FAILING row (exitCode != 0) at the exact sha+command does not satisfy", () => {
-  insertHostVerification({
-    ticketId: "FG-704", projectDir: "/home/test/project", commitSha: GATE_SHA,
-    gateName: GATE_CMD, command: GATE_CMD, exitCode: 1, recordedAt: "2026-01-01T00:00:00Z",
+  test("a row at a DIFFERENT sha does not satisfy — falls through to the provider", () => {
+    insertHostVerification({
+      ticketId: "FG-702", projectDir, commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    let called = false;
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-702", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return null; },
+    });
+    assert.equal(evidence, null);
+    assert.equal(called, true, "a different-sha row must not satisfy the lookup — must fall through to CI");
   });
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-704", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => null,
-  });
-  assert.equal(evidence, null, "a failing covering row must never satisfy the lookup");
-});
 
-test("findCoveringGateEvidence: a green required CI check at the exact sha but a DIFFERENT command never satisfies — CI only ever proves REQUIRED_CI_GATE_COMMAND ran (FG-419 gate_name spoofing guard)", () => {
-  let called = false;
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-711", projectDir: "/home/test/project", sha: GATE_SHA, command: "npm run verify",
-    checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+  test("a row for a DIFFERENT command does not satisfy — command mismatch never covers", () => {
+    insertHostVerification({
+      ticketId: "FG-703", projectDir, commitSha: GATE_SHA,
+      gateName: "npm run test", command: "npm run test", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-703", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => null,
+    });
+    assert.equal(evidence, null, "a row recorded for a lesser/different command must never satisfy a broader required gate");
   });
-  assert.equal(evidence, null, "a green CI check must never cover a command CI never ran");
-  assert.equal(called, false, "the provider must not even be consulted for a command CI can never cover");
-});
 
-test("findCoveringGateEvidence: a green required CI check at the exact sha is covering evidence (source ci)", () => {
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-705", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: (opts) => {
-      assert.equal(opts.checkContext, REQUIRED_CI_CHECK_CONTEXT);
-      assert.equal(opts.sha, GATE_SHA);
-      return { sha: GATE_SHA, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/999" };
-    },
+  test("a FAILING row (exitCode != 0) at the exact sha+command does not satisfy", () => {
+    insertHostVerification({
+      ticketId: "FG-704", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 1, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-704", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => null,
+    });
+    assert.equal(evidence, null, "a failing covering row must never satisfy the lookup");
   });
-  assert.ok(evidence);
-  assert.equal(evidence!.source, "ci");
-  assert.equal((evidence as { source: "ci"; sha: string }).sha, GATE_SHA);
-  assert.equal((evidence as { source: "ci"; checkUrl?: string }).checkUrl, "https://github.com/acme/forge/actions/runs/999");
-});
 
-test("findCoveringGateEvidence: a PENDING CI check does not satisfy", () => {
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-706", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => ({ sha: GATE_SHA, state: "pending" }),
+  test("a green required CI check at the exact sha but a DIFFERENT command never satisfies — this project's ci.yml never ran that command (FG-419 gate_name spoofing guard)", () => {
+    let called = false;
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-711", projectDir, sha: GATE_SHA, command: "npm run verify",
+      checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+    });
+    assert.equal(evidence, null, "a green CI check must never cover a command this project's ci.yml never ran");
+    assert.equal(called, false, "the provider must not even be consulted for a command the pairing gate rejects");
   });
-  assert.equal(evidence, null);
-});
 
-test("findCoveringGateEvidence: a FAILED CI check does not satisfy", () => {
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-707", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => ({ sha: GATE_SHA, state: "failure" }),
+  test("a green required CI check at the exact sha is covering evidence (source ci)", () => {
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-705", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: (opts) => {
+        assert.equal(opts.checkContext, REQUIRED_CI_CHECK_CONTEXT);
+        assert.equal(opts.sha, GATE_SHA);
+        return { sha: GATE_SHA, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/999" };
+      },
+    });
+    assert.ok(evidence);
+    assert.equal(evidence!.source, "ci");
+    assert.equal((evidence as { source: "ci"; sha: string }).sha, GATE_SHA);
+    assert.equal((evidence as { source: "ci"; checkUrl?: string }).checkUrl, "https://github.com/acme/forge/actions/runs/999");
   });
-  assert.equal(evidence, null);
-});
 
-test("findCoveringGateEvidence: a green CI check for a DIFFERENT sha does not satisfy (spoof/staleness guard)", () => {
-  const evidence = findCoveringGateEvidence({
-    ticketId: "FG-708", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
+  test("a green required CI check at the exact sha but a projectDir whose ci.yml runs something else -> null, and the provider is never consulted", () => {
+    rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+    writeWorkflowFile(projectDir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run something-else\n");
+
+    let called = false;
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-713", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+    });
+    assert.equal(evidence, null, "a green check on a project whose ci.yml runs a DIFFERENT command must never be labeled as covering evidence");
+    assert.equal(called, false, "the pairing check runs BEFORE the provider — a failed pairing must never even reach it");
   });
-  assert.equal(evidence, null, "a green check reported for a DIFFERENT sha (e.g. a stale branch head) must never cover the requested sha");
-});
 
-test("describeGateEvidence: host_row and ci evidence render distinct, informative descriptions", () => {
-  insertHostVerification({
-    ticketId: "FG-709", projectDir: "/home/test/project", commitSha: GATE_SHA,
-    gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  test("a PENDING CI check does not satisfy", () => {
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-706", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "pending" }),
+    });
+    assert.equal(evidence, null);
   });
-  const rowEvidence = findCoveringGateEvidence({
-    ticketId: "FG-709", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: unreachableProvider,
-  })!;
-  const rowDesc = describeGateEvidence(rowEvidence);
-  assert.match(rowDesc, /host_verifications row #\d+/);
-  assert.match(rowDesc, new RegExp(GATE_SHA));
 
-  const ciEvidence = findCoveringGateEvidence({
-    ticketId: "FG-710", projectDir: "/home/test/project", sha: GATE_SHA, command: GATE_CMD,
-    checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/1" }),
-  })!;
-  const ciDesc = describeGateEvidence(ciEvidence);
-  assert.match(ciDesc, /CI check/);
-  assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
+  test("a FAILED CI check does not satisfy", () => {
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-707", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "failure" }),
+    });
+    assert.equal(evidence, null);
+  });
+
+  test("a green CI check for a DIFFERENT sha does not satisfy (spoof/staleness guard)", () => {
+    const evidence = findCoveringGateEvidence({
+      ticketId: "FG-708", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
+    });
+    assert.equal(evidence, null, "a green check reported for a DIFFERENT sha (e.g. a stale branch head) must never cover the requested sha");
+  });
+
+  test("describeGateEvidence: host_row and ci evidence render distinct, informative descriptions", () => {
+    insertHostVerification({
+      ticketId: "FG-709", projectDir, commitSha: GATE_SHA,
+      gateName: GATE_CMD, command: GATE_CMD, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+    });
+    const rowEvidence = findCoveringGateEvidence({
+      ticketId: "FG-709", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: unreachableProvider,
+    })!;
+    const rowDesc = describeGateEvidence(rowEvidence);
+    assert.match(rowDesc, /host_verifications row #\d+/);
+    assert.match(rowDesc, new RegExp(GATE_SHA));
+
+    const ciEvidence = findCoveringGateEvidence({
+      ticketId: "FG-710", projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/1" }),
+    })!;
+    const ciDesc = describeGateEvidence(ciEvidence);
+    assert.match(ciDesc, /CI check/);
+    assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
+  });
 });
 
 // ── FG-474: aggregateCiCheckRuns — pure check-runs response parsing/aggregation ─

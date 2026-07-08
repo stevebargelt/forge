@@ -1,5 +1,7 @@
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { getDb } from "./db.js";
 
 // FG-431: LOOKUP exact-matches project_dir, but callers (the CLI recorder, the
@@ -159,12 +161,68 @@ export type CheckStatusProvider = (opts: {
 // The required merge-gate check FG-474 wired up: workflow "CI", job "test".
 export const REQUIRED_CI_CHECK_CONTEXT = "CI / test";
 
-// FG-474 red-review fix: the ONE command a green REQUIRED_CI_CHECK_CONTEXT
-// actually proves ran. MUST match what .github/workflows/ci.yml's test job
-// executes as its deterministic-suite step — the pairing is verified by
-// src/v2/ci-workflow.test.ts, so drift between this constant and the workflow
-// breaks a test rather than silently mislabeling evidence.
+// FG-474 red-review fix (task-red-wide-16933b): forge is host-global — this
+// constant describes what THIS repo's own ci.yml runs, and is only meaningful
+// to src/v2/ci-workflow.test.ts's structural self-check. The general-purpose
+// lookup gate (findCoveringGateEvidence below) does NOT use this constant: it
+// reads the ARBITRARY managed project's own ci.yml via projectCiRunsCommand,
+// because a green REQUIRED_CI_CHECK_CONTEXT on some other project only proves
+// that project's own workflow ran opts.command — never that it ran this one.
 export const REQUIRED_CI_GATE_COMMAND = "npm run test:all";
+
+type WorkflowStep = { run?: unknown };
+type WorkflowJob = { name?: unknown; steps?: unknown };
+type WorkflowFile = { name?: unknown; jobs?: unknown };
+
+/** Does <projectDir>/.github/workflows/*.y[a]ml define a workflow whose name
+ *  matches the workflow half of checkContext ("<workflow> / <job>", e.g.
+ *  "CI / test") with a job (matched by job id or job `name`) matching the job
+ *  half, one of whose steps has a `run:` string that (trimmed) exactly equals
+ *  `command`? This is what actually pins a green check named checkContext to
+ *  proof that `command` ran — a check name alone proves nothing about which
+ *  command backs it (the FG-419/FG-474 spoofing vector). Fails closed: no
+ *  workflows dir, no matching workflow/job, unparseable YAML, or no exactly-
+ *  matching run step all return false — never assume coverage we couldn't
+ *  actually verify from the project's own workflow content. */
+export function projectCiRunsCommand(projectDir: string, checkContext: string, command: string): boolean {
+  const [workflowName, jobName] = checkContext.split("/").map((s) => s.trim());
+  if (!workflowName || !jobName) return false;
+
+  const workflowsDir = path.join(projectDir, ".github", "workflows");
+  let files: string[];
+  try {
+    files = readdirSync(workflowsDir).filter((f) => /\.ya?ml$/i.test(f));
+  } catch {
+    return false;
+  }
+
+  for (const file of files) {
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(readFileSync(path.join(workflowsDir, file), "utf8"));
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const workflow = parsed as WorkflowFile;
+    if (workflow.name !== workflowName) continue;
+
+    const jobs = typeof workflow.jobs === "object" && workflow.jobs !== null ? (workflow.jobs as Record<string, unknown>) : {};
+    for (const [jobId, jobRaw] of Object.entries(jobs)) {
+      if (typeof jobRaw !== "object" || jobRaw === null) continue;
+      const job = jobRaw as WorkflowJob;
+      if (jobId !== jobName && job.name !== jobName) continue;
+
+      const steps = Array.isArray(job.steps) ? job.steps : [];
+      for (const stepRaw of steps) {
+        if (typeof stepRaw !== "object" || stepRaw === null) continue;
+        const step = stepRaw as WorkflowStep;
+        if (typeof step.run === "string" && step.run.trim() === command.trim()) return true;
+      }
+    }
+  }
+  return false;
+}
 
 type GhCheckRun = {
   head_sha?: unknown;
@@ -299,12 +357,14 @@ export function findCoveringGateEvidence(opts: {
   );
   if (coveringRow) return { source: "host_row", row: coveringRow };
 
-  // The CI check only ever proves REQUIRED_CI_GATE_COMMAND ran (that's the one
-  // command ci.yml's test job executes). A different configured command — e.g.
-  // a per-project requiredHostGate override — can NEVER be covered by CI; fall
-  // through to null so the caller runs the real gate rather than mislabeling a
-  // command CI never ran as covered (the FG-419 gate_name spoofing vector).
-  if (opts.command !== REQUIRED_CI_GATE_COMMAND) return null;
+  // forge is host-global — opts.projectDir is an ARBITRARY managed project, so
+  // the only thing that can prove a green REQUIRED_CI_CHECK_CONTEXT ran
+  // opts.command is THAT PROJECT'S OWN workflow content, read fresh at lookup
+  // time. A REQUIRED_CI_GATE_COMMAND-style constant-equality check would only
+  // prove pairing with forge's own ci.yml (task-red-wide-16933b) — never with
+  // the project actually being gated. Fall through to null (never consult the
+  // provider) when this project's ci.yml doesn't demonstrably run opts.command.
+  if (!projectCiRunsCommand(opts.projectDir, REQUIRED_CI_CHECK_CONTEXT, opts.command)) return null;
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext: REQUIRED_CI_CHECK_CONTEXT });

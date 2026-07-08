@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND } from "../store/host-verifications.js";
+import { REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND, projectCiRunsCommand } from "../store/host-verifications.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const WORKFLOW_PATH = join(root, ".github", "workflows", "ci.yml");
@@ -70,13 +70,27 @@ test("FG-474: ci.yml has a job whose steps run the full deterministic gate", () 
   );
 });
 
-test("FG-474 red-review fix: ci.yml's test job actually runs REQUIRED_CI_GATE_COMMAND — the command CI-sourced host_verifications evidence is pinned to", () => {
+// task-red-wide-16933b: this is a structural self-check of FORGE'S OWN ci.yml
+// ONLY. It does NOT establish the general command-pairing guarantee — forge is
+// host-global and the pairing gate (host-verifications.ts's
+// findCoveringGateEvidence, via projectCiRunsCommand) is verified per-project,
+// at lookup time, against whatever project is actually being gated. This test
+// merely proves forge's own ci.yml passes that same per-project check.
+test("FG-474: ci.yml's test job actually runs REQUIRED_CI_GATE_COMMAND — proves forge's OWN ci.yml passes the general per-project pairing check (see projectCiRunsCommand), not a general guarantee about other projects", () => {
   const wf = loadWorkflow();
   const steps = Object.values(wf.jobs ?? {})[0]?.steps ?? [];
   const runCommands = steps.map((s) => s.run).filter((r): r is string => typeof r === "string");
   assert.ok(
     runCommands.some((r) => r.includes(REQUIRED_CI_GATE_COMMAND)),
-    `ci.yml must run REQUIRED_CI_GATE_COMMAND ("${REQUIRED_CI_GATE_COMMAND}") — a green "${REQUIRED_CI_CHECK_CONTEXT}" check only ever proves this command ran; if the workflow's actual command drifts from this constant, a CI-sourced host_verifications row would mislabel a command CI never ran (the FG-419 gate_name spoofing vector)`
+    `ci.yml must run REQUIRED_CI_GATE_COMMAND ("${REQUIRED_CI_GATE_COMMAND}") — a green "${REQUIRED_CI_CHECK_CONTEXT}" check on FORGE's own repo only ever proves this command ran here; other projects are verified independently via projectCiRunsCommand against their own workflow content`
+  );
+});
+
+test("FG-474 (task-red-wide-16933b): forge's own ci.yml passes the general-purpose per-project pairing check (projectCiRunsCommand) used by findCoveringGateEvidence for ANY managed project", () => {
+  assert.equal(
+    projectCiRunsCommand(root, REQUIRED_CI_CHECK_CONTEXT, REQUIRED_CI_GATE_COMMAND),
+    true,
+    "projectCiRunsCommand(forge's own repo root, ...) must find the exact-matching run step — proving the general lookup mechanism works against forge's own workflow, not just this file's bespoke YAML assertions"
   );
 });
 

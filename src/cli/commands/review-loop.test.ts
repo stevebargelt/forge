@@ -48,6 +48,20 @@ afterEach(() => {
   if (existsSync(projectDir)) rmSync(projectDir, { recursive: true, force: true });
 });
 
+// FG-474 red-review fix (task-red-wide-16933b): findCoveringGateEvidence's CI
+// branch now content-verifies the pairing against THIS projectDir's own
+// ci.yml (projectCiRunsCommand) instead of a hardcoded constant — a stubbed
+// green check only reaches (or is correctly rejected before reaching) the
+// provider when projectDir actually has a workflow named "CI" whose "test"
+// job runs the configured required gate command.
+function writeMatchingCiWorkflow(command = "npm run test:all"): void {
+  mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".github", "workflows", "ci.yml"),
+    `name: CI\njobs:\n  test:\n    steps:\n      - run: ${command}\n`
+  );
+}
+
 function ctx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
   return {
     ticketId: "301", acceptance: "#301 — do the thing", diffProvider: () => "diff --git ...",
@@ -509,6 +523,9 @@ test("FG-474 deps.verify: a passing host_verifications row at HEAD's exact sha+c
 });
 
 test("FG-474 deps.verify: CI reuse — a stubbed green required CI check at HEAD's exact sha reuses — ok:true, reusedEvidence set", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
   const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
   const { deps } = buildReviewLoopDeps(ctx({
     checkStatusProvider: (opts) => (opts.sha === headSha ? { sha: headSha, state: "success", detailsUrl: "https://example.com/run/7" } : null),
@@ -535,6 +552,9 @@ test("FG-474 deps.verify: dirty worktree NEVER reuses, even with covering eviden
 });
 
 test("FG-474 deps.verify: no covering evidence (no row, provider returns null) → falls back to runVerification unchanged", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
   let providerCalled = false;
   const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => { providerCalled = true; return null; } }));
   const result = await deps.verify();
@@ -545,6 +565,9 @@ test("FG-474 deps.verify: no covering evidence (no row, provider returns null) �
 });
 
 test("FG-474 deps.verify: a host_verifications row at a DIFFERENT sha does not reuse — falls back to a real run", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
   insertHostVerification({
     ticketId: "301", projectDir, commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
     gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
