@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
+import { checkResultPersistence, persistenceErrorMessage, normalizeClaim } from "./persistence-check.js";
 
 let projectDir: string;
 
@@ -180,22 +180,48 @@ test("FG-491: comma-separated line-spec `path:9,90-115` — file exists on host 
 
 test("FG-491: preserved evidence shapes all resolve and pass when the referenced file exists", async () => {
   const shapes = [
-    "src/v2/invoke.ts:153-162 — workflow_additions no longer embeds args.task; now frames the task as arriving via the input message (task package), with a comment explaining the FG-497 argv-size root cause",
-    'scripts/pi-context-proof.sh:1-122 (rewritten: header updated for FG-497, task package now written to a host dir bind-mounted at /task, run_pi references "@/task/package.md" instead of a positional TASK string, new WRAP assertion added, docker run gains a second -v mount for /task)',
-    "seeds/runtimes/pi-apikey.yml:24-25",
-    "src/cli/commands/show.ts:457-471 (orphanRecoveryMessage doc comment + signature, new isInvokeRun param)",
-    "src/store/runs.ts:140-197",
-    "src/v2/run-finalize.test.ts:9,90-115",
-    "src/campaign/fg484-auto-gate-cancel-race.integration.test.ts (new)",
-    "src/campaign/executor.ts (import at ~line 26; probe comment + gating condition at lines 798-827, liveRun && liveRun.status === \"active\" && taskHasPipelineFinalize(liveRun))",
+    {
+      claim:
+        "src/v2/invoke.ts:153-162 — workflow_additions no longer embeds args.task; now frames the task as arriving via the input message (task package), with a comment explaining the FG-497 argv-size root cause",
+      expected: "src/v2/invoke.ts",
+    },
+    {
+      claim:
+        'scripts/pi-context-proof.sh:1-122 (rewritten: header updated for FG-497, task package now written to a host dir bind-mounted at /task, run_pi references "@/task/package.md" instead of a positional TASK string, new WRAP assertion added, docker run gains a second -v mount for /task)',
+      expected: "scripts/pi-context-proof.sh",
+    },
+    {
+      claim: "seeds/runtimes/pi-apikey.yml:24-25",
+      expected: "seeds/runtimes/pi-apikey.yml",
+    },
+    {
+      claim: "src/cli/commands/show.ts:457-471 (orphanRecoveryMessage doc comment + signature, new isInvokeRun param)",
+      expected: "src/cli/commands/show.ts",
+    },
+    {
+      claim: "src/store/runs.ts:140-197",
+      expected: "src/store/runs.ts",
+    },
+    {
+      claim: "src/v2/run-finalize.test.ts:9,90-115",
+      expected: "src/v2/run-finalize.test.ts",
+    },
+    {
+      claim: "src/campaign/fg484-auto-gate-cancel-race.integration.test.ts (new)",
+      expected: "src/campaign/fg484-auto-gate-cancel-race.integration.test.ts",
+    },
+    {
+      claim:
+        'src/campaign/executor.ts (import at ~line 26; probe comment + gating condition at lines 798-827, liveRun && liveRun.status === "active" && taskHasPipelineFinalize(liveRun))',
+      expected: "src/campaign/executor.ts",
+    },
   ];
-  for (const claim of shapes) {
+  for (const { claim, expected } of shapes) {
+    assert.equal(normalizeClaim(claim), expected, `expected normalizeClaim to yield ${expected} for claim: ${claim}`);
     projectDir = mkdtempSync(join(tmpdir(), "forge-persist-"));
-    const firstToken = claim.trim().split(/\s+/)[0] ?? "";
-    const normalized = firstToken.replace(/[:,;()]+$/, "").replace(/:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/, "");
-    touch(normalized);
+    touch(expected);
     const c = await checkResultPersistence(projectDir, { status: "complete", files_modified: [claim] });
-    assert.equal(c.ok, true, `expected ok:true for claim: ${claim} (normalized: ${normalized})`);
+    assert.equal(c.ok, true, `expected ok:true for claim: ${claim} (expected: ${expected})`);
     rmSync(projectDir, { recursive: true, force: true });
   }
   projectDir = mkdtempSync(join(tmpdir(), "forge-persist-"));
