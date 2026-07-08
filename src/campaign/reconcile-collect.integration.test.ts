@@ -4,7 +4,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,11 +14,13 @@ import { writeTicket } from "../backlog/structured.js";
 import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import { logEvent } from "../store/events.js";
 import { collectReconcileEvidence, collectAuthoritativeEvents, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
+import type { CiCheckStatus } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
 let projectDir: string;
+let markerDir: string;
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -60,11 +62,17 @@ beforeEach(() => {
   gitExec(["init", "-b", "main"], projectDir);
   gitExec(["config", "user.email", "t@t.com"], projectDir);
   gitExec(["config", "user.name", "Test"], projectDir);
+  // FG-474: OUTSIDE projectDir on purpose — a marker written INSIDE the repo
+  // would itself dirty the working tree and trip runAndRecordHostVerification's
+  // own TOCTOU guard (post-run tree-changed check), defeating the "did the gate
+  // actually execute" assertion the marker exists to make.
+  markerDir = mkdtempSync(join(tmpdir(), "reconcile-collect-marker-"));
   db = makeInMemoryDb();
   prev = setDbForTest(db);
 });
 
 afterEach(() => {
+  rmSync(markerDir, { recursive: true, force: true });
   setDbForTest(prev as DatabaseInstance);
   db.close();
   rmSync(projectDir, { recursive: true, force: true });
@@ -366,6 +374,21 @@ function writePackageJsonWithGateScript(scriptBody: string): void {
   );
 }
 
+// FG-474 red-review fix (task-red-wide-16933b): the CI-sourced evidence branch
+// now content-verifies the pairing against THIS projectDir's own ci.yml
+// (projectCiRunsCommand) rather than a hardcoded constant — so a stubbed green
+// check only reaches (or is correctly rejected before reaching) the provider
+// when the project actually has a workflow named "CI" whose "test" job runs
+// the given command. Committed alongside the gate script so the tree stays
+// clean for runAndRecordHostVerification's dirty-tree guard.
+function writeMatchingCiWorkflow(command: string): void {
+  mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".github", "workflows", "ci.yml"),
+    `name: CI\njobs:\n  test:\n    steps:\n      - run: ${command}\n`
+  );
+}
+
 function commitAll(label: string): string {
   gitExec(["add", "."], projectDir);
   gitExec(["commit", "-m", label], projectDir);
@@ -621,4 +644,207 @@ test("runAndRecordHostVerification: TOCTOU — HEAD moves DURING the gate run it
     0,
     "a gate result observed against a HEAD that moved mid-run must never be recorded against the stale pre-run sha"
   );
+});
+
+// ── FG-474: evidence-reuse consult (findCoveringGateEvidence) ──────────────────
+//
+// One canonical deterministic gate per commit: runAndRecordHostVerification
+// consults covering evidence BEFORE executing anything. The gate script below
+// writes a marker file when it actually runs, so "the gate must never have
+// executed" is a real, observable assertion — not just an inference from the
+// returned status.
+
+function markerPath(): string {
+  return join(markerDir, "executed.marker");
+}
+
+// Quoted so a marker path is safe even if the platform tmpdir ever contains a
+// space; the marker lives outside projectDir (see beforeEach).
+function execMarkerScript(): string {
+  return `touch "${markerPath()}" && exit 0`;
+}
+
+test("runAndRecordHostVerification: reuse — an existing PASSING host_verifications row at HEAD's exact sha+command short-circuits: no exec, no duplicate row", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  const commit = commitAll("add gate script with exec marker");
+
+  insertHostVerification({
+    ticketId: "FG-700",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-700");
+  assert.equal(result.status, "reused");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.ok((result as { coveringRowId: number }).coveringRowId > 0);
+  assert.equal(existsSync(markerPath()), false, "the gate script must never have executed — evidence was reused");
+
+  const rows = queryHostVerificationRowsForGate("FG-700", projectDir, "npm run test:all");
+  assert.equal(rows.length, 1, "no duplicate row written on reuse");
+});
+
+test("runAndRecordHostVerification: CI reuse — a stubbed green required CI check at HEAD's exact sha records a source='ci' row, skips exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
+  const commit = commitAll("add gate script with exec marker (CI reuse case)");
+
+  const stub = (opts: { projectDir: string; sha: string; checkContext: string }): CiCheckStatus | null =>
+    opts.sha === commit
+      ? { sha: commit, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/42" }
+      : null;
+
+  const result = runAndRecordHostVerification(projectDir, "FG-701", { checkStatusProvider: stub });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "ci");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.equal((result as { ciUrl?: string }).ciUrl, "https://github.com/acme/forge/actions/runs/42");
+  assert.equal(existsSync(markerPath()), false, "the gate script must never have executed — CI evidence was reused");
+
+  const rows = queryHostVerificationRowsForGate("FG-701", projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.source, "ci");
+  assert.equal(rows[0]!.ciUrl, "https://github.com/acme/forge/actions/runs/42");
+  assert.equal(rows[0]!.exitCode, 0);
+  assert.equal(rows[0]!.commitSha, commit);
+});
+
+test("runAndRecordHostVerification: a row at a DIFFERENT sha does not satisfy — falls back to a real exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  const commit = commitAll("add gate script (different-sha negative)");
+
+  insertHostVerification({
+    ticketId: "FG-702", projectDir, commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-702", { checkStatusProvider: () => null });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.equal(existsSync(markerPath()), true, "no covering evidence for this exact sha — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: a row for a DIFFERENT command does not satisfy — falls back to a real exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  const commit = commitAll("add gate script (different-command negative)");
+
+  insertHostVerification({
+    ticketId: "FG-703", projectDir, commitSha: commit,
+    gateName: "npm run test", command: "npm run test", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-703", { checkStatusProvider: () => null });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.equal(existsSync(markerPath()), true, "a row for a lesser/different command must not satisfy the required gate — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: a FAILING covering row at the exact sha+command does not satisfy — falls back to a real exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  const commit = commitAll("add gate script (failing-row negative)");
+
+  insertHostVerification({
+    ticketId: "FG-704", projectDir, commitSha: commit,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 1, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-704", { checkStatusProvider: () => null });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { exitCode: number }).exitCode, 0, "the fresh real exec passed — a stale failing row must not block a real re-run");
+  assert.equal(existsSync(markerPath()), true, "a failing covering row must not satisfy the lookup — the gate must actually run");
+
+  const rows = queryHostVerificationRowsForGate("FG-704", projectDir, "npm run test:all");
+  assert.equal(rows.length, 2, "the stale failing row AND the fresh passing row both persist (passing-row model)");
+});
+
+test("runAndRecordHostVerification: a PENDING CI check does not satisfy — falls back to a real exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
+  const commit = commitAll("add gate script (CI pending negative)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-705", {
+    checkStatusProvider: () => ({ sha: commit, state: "pending" }),
+  });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host");
+  assert.equal(existsSync(markerPath()), true, "a pending CI check must not satisfy the lookup — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: a FAILED CI check does not satisfy — falls back to a real exec", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
+  commitAll("add gate script (CI failed negative)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-706", {
+    checkStatusProvider: () => ({ sha: headSha(), state: "failure" }),
+  });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host");
+  assert.equal(existsSync(markerPath()), true, "a failed CI check must not satisfy the lookup — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: a green CI check for a DIFFERENT sha does not satisfy — falls back to a real exec (spoof/staleness guard)", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run test:all");
+  commitAll("add gate script (CI different-sha negative)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-707", {
+    checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
+  });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host");
+  assert.equal(existsSync(markerPath()), true, "a green CI check reported for a DIFFERENT sha must never satisfy the requested sha — the gate must actually run");
+});
+
+test("runAndRecordHostVerification: FG-474 red re-check (task-red-wide-16933b) — a green required CI check at the exact sha, but THIS projectDir's own ci.yml runs a DIFFERENT command — falls back to a real exec, provider never consulted", () => {
+  writePackageJsonWithGateScript(execMarkerScript());
+  writeMatchingCiWorkflow("npm run something-else");
+  const commit = commitAll("add gate script (ci.yml pairing mismatch negative)");
+
+  let providerCalled = false;
+  const result = runAndRecordHostVerification(projectDir, "FG-714", {
+    checkStatusProvider: () => {
+      providerCalled = true;
+      return { sha: commit, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/1" };
+    },
+  });
+  assert.equal(providerCalled, false, "the pairing check runs BEFORE the provider — a project whose ci.yml never ran opts.command must never even consult it");
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "host", "must never be labeled 'ci' — THIS project's ci.yml never ran the required command");
+  assert.equal(existsSync(markerPath()), true, "no covering evidence — the gate must actually run");
+
+  const rows = queryHostVerificationRowsForGate("FG-714", projectDir, "npm run test:all");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.source, "host");
+  assert.equal(rows[0]!.ciUrl, null);
+});
+
+test("runAndRecordHostVerification: FG-474 red-review fix — a configured requiredHostGate OTHER than REQUIRED_CI_GATE_COMMAND is never covered by a green required CI check, even at the exact HEAD sha — the gate actually executes", () => {
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "config.json"), JSON.stringify({ requiredHostGate: "npm run verify" }));
+  writeFileSync(
+    join(projectDir, "package.json"),
+    JSON.stringify({ name: "synthetic", version: "0.0.0", scripts: { verify: execMarkerScript() } }, null, 2)
+  );
+  const commit = commitAll("add verify gate script with exec marker (custom-gate CI-spoof negative)");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-712", {
+    checkStatusProvider: () => ({ sha: commit, state: "success", detailsUrl: "https://github.com/acme/forge/actions/runs/999" }),
+  });
+
+  assert.equal(result.status, "recorded", "no covering evidence for the configured gate — the real gate must run");
+  assert.equal((result as { source: string }).source, "host", "must never be labeled 'ci' — CI never ran the configured 'npm run verify' command");
+  assert.equal((result as { commitSha: string }).commitSha, commit);
+  assert.equal(existsSync(markerPath()), true, "a green CI check for an uncovered command must never short-circuit exec — the gate must actually run");
+
+  const rows = queryHostVerificationRowsForGate("FG-712", projectDir, "npm run verify");
+  assert.equal(rows.length, 1, "no CI-sourced row must have been written in addition to the real host row");
+  assert.equal(rows[0]!.source, "host");
+  assert.equal(rows[0]!.ciUrl, null, "a real host row must never carry a ci_url");
+  assert.equal(rows[0]!.exitCode, 0, "the real exec's actual exit code");
 });

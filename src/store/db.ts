@@ -120,6 +120,20 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveCampaigns.has("project_dir")) {
     db.exec(`ALTER TABLE campaigns ADD COLUMN project_dir TEXT`);
   }
+
+  // FG-474: source/ci_url on host_verifications — distinguishes a row backed by a
+  // real host command execution ('host') from one backed by a green required CI
+  // check ('ci'). DEFAULT 'host' so every pre-existing row (all host-run, by
+  // construction — CI-sourced rows didn't exist before this) classifies correctly
+  // without a backfill.
+  const hostVerificationsCols = db.prepare(`PRAGMA table_info(host_verifications)`).all() as { name: string }[];
+  const haveHostVerifications = new Set(hostVerificationsCols.map((r) => r.name));
+  if (!haveHostVerifications.has("source")) {
+    db.exec(`ALTER TABLE host_verifications ADD COLUMN source TEXT NOT NULL DEFAULT 'host'`);
+  }
+  if (!haveHostVerifications.has("ci_url")) {
+    db.exec(`ALTER TABLE host_verifications ADD COLUMN ci_url TEXT`);
+  }
 }
 
 // Separate caches for readonly vs writable handles. The earlier single-cache

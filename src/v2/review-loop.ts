@@ -229,7 +229,12 @@ export function parseReviewerVerdict(raw: unknown): ParsedVerdict {
 // ── Slice 3: deterministic verification ──────────────────────────────────────
 
 export type VerificationStep = { name: string; ok: boolean; output: string };
-export type VerificationResult = { ok: boolean; steps: VerificationStep[] };
+// FG-474: reusedEvidence is set ONLY when verification was satisfied by covering
+// evidence (a host_verifications row or green CI check) instead of actually
+// running typecheck/test — see buildReviewLoopDeps.verify in
+// cli/commands/review-loop.ts. Human-readable description of WHAT covered it,
+// surfaced in the loop report in place of run output.
+export type VerificationResult = { ok: boolean; steps: VerificationStep[]; reusedEvidence?: string };
 
 export type CommandRunner = (cmd: string, args: string[]) => { ok: boolean; output: string };
 function makeDefaultRunner(cwd?: string): CommandRunner {
@@ -459,6 +464,11 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
     L.push(`## Round ${r.round}`);
     const checks = r.verification.steps.map((s) => `${s.name}=${s.ok ? "ok" : "FAIL"}`).join(", ") || "(no checks)";
     L.push(`- verification: ${r.verification.ok ? "ok" : "FAILED"} (${checks})`);
+    // FG-474: reused covering evidence instead of a real host run — record WHAT
+    // covered it (row id or CI run URL + sha) in place of run output.
+    if (r.verification.reusedEvidence) {
+      L.push(`- verification reused evidence: ${r.verification.reusedEvidence}`);
+    }
     L.push(r.verdict
       ? `- reviewer verdict: ${r.verdict}`
       : r.verification.ok

@@ -146,6 +146,10 @@ CREATE INDEX IF NOT EXISTS idx_campaign_items_status ON campaign_items(lifecycle
 -- FG-419: host-side verification evidence, recorded after real host commands complete.
 -- run_id is nullable (TEXT to match runs.id type); gate_name is the logical gate being
 -- verified (default "npm run test:all", overridable via .forge/config.json).
+-- FG-474: source distinguishes a row backed by a REAL host command execution ('host',
+-- the default) from one backed by a green required CI check ('ci') — done-audit and
+-- reconcile-collect's evidence-reuse consult both need to tell the two apart. ci_url
+-- carries the CI check's details URL for ci-sourced rows (null for host-sourced ones).
 CREATE TABLE IF NOT EXISTS host_verifications (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   ticket_id   TEXT NOT NULL,
@@ -155,7 +159,9 @@ CREATE TABLE IF NOT EXISTS host_verifications (
   command     TEXT NOT NULL,
   exit_code   INTEGER NOT NULL,
   run_id      TEXT REFERENCES runs(id),
-  recorded_at TEXT NOT NULL
+  recorded_at TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'host',
+  ci_url      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_host_verifications_lookup
   ON host_verifications(ticket_id, project_dir, commit_sha, gate_name);

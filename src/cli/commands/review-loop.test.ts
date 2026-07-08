@@ -8,8 +8,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import type { Database as DatabaseInstance } from "better-sqlite3";
 import type { InvokeArgs, InvokeResult } from "../../v2/invoke.js";
 import { buildReviewLoopDeps, assertCleanWorkingTree, type ReviewLoopContext } from "./review-loop.js";
+import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
+import { insertHostVerification } from "../../store/host-verifications.js";
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -22,6 +25,8 @@ function gitExec(args: string[], cwd: string): string {
 // calls `git status --porcelain` after any completed engineer dispatch, so
 // /tmp/proj (not a git repo) would crash the old tests.
 let projectDir = "/tmp/proj";
+let db: DatabaseInstance;
+let prev: DatabaseInstance | null;
 
 beforeEach(() => {
   projectDir = mkdtempSync(join(tmpdir(), "forge-rl-"));
@@ -31,11 +36,31 @@ beforeEach(() => {
   writeFileSync(join(projectDir, "src.ts"), "// initial\n");
   gitExec(["add", "."], projectDir);
   gitExec(["commit", "-m", "initial commit"], projectDir);
+  // FG-474: buildReviewLoopDeps.verify consults findCoveringGateEvidence, which
+  // reads host_verifications from the store — give it a real in-memory DB.
+  db = makeInMemoryDb();
+  prev = setDbForTest(db);
 });
 
 afterEach(() => {
+  setDbForTest(prev as DatabaseInstance);
+  db.close();
   if (existsSync(projectDir)) rmSync(projectDir, { recursive: true, force: true });
 });
+
+// FG-474 red-review fix (task-red-wide-16933b): findCoveringGateEvidence's CI
+// branch now content-verifies the pairing against THIS projectDir's own
+// ci.yml (projectCiRunsCommand) instead of a hardcoded constant — a stubbed
+// green check only reaches (or is correctly rejected before reaching) the
+// provider when projectDir actually has a workflow named "CI" whose "test"
+// job runs the configured required gate command.
+function writeMatchingCiWorkflow(command = "npm run test:all"): void {
+  mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".github", "workflows", "ci.yml"),
+    `name: CI\njobs:\n  test:\n    steps:\n      - run: ${command}\n`
+  );
+}
 
 function ctx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
   return {
@@ -471,4 +496,84 @@ test("#415 fix dep: fixer renames disallowed→allowed path → outOfScope, old 
   // HEAD must still have docs/old.md — the rename was reverted.
   const log = gitExec(["log", "--oneline"], projectDir).trim();
   assert.ok(log.includes("add docs/old.md"), `HEAD must be unchanged: ${log}`);
+});
+
+// ── FG-474: deps.verify — evidence reuse ────────────────────────────────────
+//
+// buildReviewLoopDeps.verify consults findCoveringGateEvidence for HEAD before
+// running typecheck+test. ctx().scripts is {} in these tests, so the FALLBACK
+// path (real runVerification) is cheap and distinguishable: it always returns
+// { ok: false, steps: [] } (no discoverable scripts) with no reusedEvidence —
+// versus a reuse hit, which returns ok:true with reusedEvidence set and exactly
+// one "reused" step. That contrast is the assertion.
+
+test("FG-474 deps.verify: a passing host_verifications row at HEAD's exact sha+command reuses — ok:true, reusedEvidence set", async () => {
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => { throw new Error("must not be called — host row already covers"); } }));
+  const result = await deps.verify();
+  assert.equal(result.ok, true);
+  assert.match(result.reusedEvidence ?? "", /host_verifications row/);
+  assert.equal(result.steps.length, 1);
+  assert.equal(result.steps[0]!.name, "reused");
+  assert.equal(result.steps[0]!.ok, true);
+});
+
+test("FG-474 deps.verify: CI reuse — a stubbed green required CI check at HEAD's exact sha reuses — ok:true, reusedEvidence set", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  const { deps } = buildReviewLoopDeps(ctx({
+    checkStatusProvider: (opts) => (opts.sha === headSha ? { sha: headSha, state: "success", detailsUrl: "https://example.com/run/7" } : null),
+  }));
+  const result = await deps.verify();
+  assert.equal(result.ok, true);
+  assert.match(result.reusedEvidence ?? "", /CI check/);
+  assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/run\/7/);
+});
+
+test("FG-474 deps.verify: dirty worktree NEVER reuses, even with covering evidence for HEAD — falls back to a real run", async () => {
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  writeFileSync(join(projectDir, "uncommitted.txt"), "wip");
+
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => { throw new Error("must not be consulted on a dirty tree"); } }));
+  const result = await deps.verify();
+  assert.equal(result.reusedEvidence, undefined, "a dirty tree must never reuse, regardless of covering evidence");
+  assert.equal(result.ok, false, "falls back to the real (no-discoverable-scripts) verification result");
+  assert.equal(result.steps.length, 0);
+});
+
+test("FG-474 deps.verify: no covering evidence (no row, provider returns null) → falls back to runVerification unchanged", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  let providerCalled = false;
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => { providerCalled = true; return null; } }));
+  const result = await deps.verify();
+  assert.equal(providerCalled, true, "the provider must be consulted when no host row covers");
+  assert.equal(result.reusedEvidence, undefined);
+  assert.equal(result.ok, false);
+  assert.equal(result.steps.length, 0);
+});
+
+test("FG-474 deps.verify: a host_verifications row at a DIFFERENT sha does not reuse — falls back to a real run", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const { deps } = buildReviewLoopDeps(ctx({ checkStatusProvider: () => null }));
+  const result = await deps.verify();
+  assert.equal(result.reusedEvidence, undefined);
+  assert.equal(result.ok, false);
 });
