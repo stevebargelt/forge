@@ -1,9 +1,11 @@
 ---
 id: FG-499
 type: story
-status: active
+status: done
 title: "forge claude preflight: advisory-only, never hard-block — native claude/AWS auth owns interactive failure"
 created: 2026-07-08
+closed: 2026-07-08
+closed_commit: 3c75f9e07992c76a0d932df715378d3f7d28b994
 ---
 
 ## Problem
