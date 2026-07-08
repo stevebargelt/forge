@@ -1,11 +1,9 @@
 ---
 id: FG-491
 type: story
-status: done
+status: active
 title: "persistence watchdog false positive: complete in-run fixer downgraded to failed with 'work not persisted' while the full diff exists on the host (3+ occurrences)"
 created: 2026-07-07
-closed: 2026-07-08
-closed_commit: e4415da
 ---
 
 Queued by the 2026-07-07 overnight handoff (hit twice that night); third+ occurrence confirmed 2026-07-07 afternoon. Three more occurrences hit during the FG-497 chain on 2026-07-08. The persistence watchdog fails a genuinely-complete task with "work not persisted" when the work IS on the host project dir.
