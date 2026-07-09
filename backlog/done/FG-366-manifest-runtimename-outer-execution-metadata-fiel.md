@@ -1,9 +1,11 @@
 ---
 id: FG-366
 type: story
-status: active
+status: done
 title: "manifest runtime.name: outer execution-metadata field records the requested sentinel while controlPlane.runtime.name records the resolved concrete name (intra-manifest inconsistency)"
 created: 2026-06-22
+closed: 2026-07-09
+closed_commit: 0df6fa9
 ---
 
 **Found:** 2026-06-22, red-wide review of the FG-350 receipt-accuracy fixes.
