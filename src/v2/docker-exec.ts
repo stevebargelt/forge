@@ -147,7 +147,9 @@ export function finalizeContainerRetention(
   if (!containerName) return "retained";
   if (shouldRetainContainer(taskSucceeded)) return "retained";
   try {
-    execFileSyncFn("docker", ["rm", "-f", containerName], { stdio: ["ignore", "ignore", "ignore"] });
+    // -v: task containers no longer run --rm, so the anonymous node_modules
+    // shadow volume (DEC-019) must be removed with the container or it leaks.
+    execFileSyncFn("docker", ["rm", "-f", "-v", containerName], { stdio: ["ignore", "ignore", "ignore"] });
     return "reaped";
   } catch {
     return "reap_failed";

@@ -124,7 +124,7 @@ test("FG-492 final round: an awaiting_gate task with a retained container advanc
   assert.equal(result.task.status, "complete");
 
   const calls = readFileSync(logPath, "utf8").trim();
-  assert.equal(calls, `rm -f forge-${t.id}`, "advancing to complete must best-effort reap the container gate.ts's own dispatch retained");
+  assert.equal(calls, `rm -f -v forge-${t.id}`, "advancing to complete must best-effort reap the container gate.ts's own dispatch retained");
 });
 
 test("FG-492 final round: a blocked_by_red task force-advanced to complete also reaps its retained container", async () => {
@@ -134,7 +134,7 @@ test("FG-492 final round: a blocked_by_red task force-advanced to complete also 
   assert.equal(result.task.status, "complete");
 
   const calls = readFileSync(logPath, "utf8").trim();
-  assert.equal(calls, `rm -f forge-${t.id}`, "a forced advance to complete is just as terminal — its container must be reaped too");
+  assert.equal(calls, `rm -f -v forge-${t.id}`, "a forced advance to complete is just as terminal — its container must be reaped too");
 });
 
 test("FG-492 final round: a rejected gate leaves the task failed — its container stays retained (not reaped)", async () => {

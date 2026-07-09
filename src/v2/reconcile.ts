@@ -53,7 +53,9 @@ export type ContainerReap = (containerName: string) => ContainerReapResult;
  *  required to exercise the FG-437 recovery branch. */
 export function defaultContainerReap(containerName: string): ContainerReapResult {
   try {
-    execFileSync("docker", ["rm", "-f", containerName], { stdio: ["ignore", "ignore", "pipe"] });
+    // -v: task containers no longer run --rm (FG-492), so remove the anonymous
+    // node_modules shadow volume (DEC-019) with the container or it leaks.
+    execFileSync("docker", ["rm", "-f", "-v", containerName], { stdio: ["ignore", "ignore", "pipe"] });
     return "killed";
   } catch (e) {
     const stderr = (e as { stderr?: Buffer }).stderr?.toString() ?? "";

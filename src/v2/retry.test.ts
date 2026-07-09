@@ -287,7 +287,7 @@ test("reapRetainedContainer: attempts `docker rm -f forge-<taskId>` for the OLD 
 
   reapRetainedContainer("t-old-failed", fake);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "forge-t-old-failed"] });
+  assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "-v", "forge-t-old-failed"] });
 });
 
 test("reapRetainedContainer: never throws when docker is unreachable or the container is already gone", () => {

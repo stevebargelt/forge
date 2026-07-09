@@ -26,7 +26,7 @@ Mount an **anonymous Docker volume** at `<project>/node_modules` on darwin rw pr
 -e FORGE_NM_SHADOW=<projectContainerPath>/node_modules
 ```
 
-The container's `node_modules` becomes a container-local ext4 filesystem. Writes to it never go back through grpcfuse, and the host's arm64 modules are hidden so the agent installs correct linux ones. `--rm` (already present on all agent containers) auto-removes the anonymous volume on exit — no cleanup debt.
+The container's `node_modules` becomes a container-local ext4 filesystem. Writes to it never go back through grpcfuse, and the host's arm64 modules are hidden so the agent installs correct linux ones. Originally `--rm` (then present on all agent containers) auto-removed the anonymous volume on exit — no cleanup debt. **Update (FG-492, 2026-07-09):** task containers no longer run `--rm` (they're retained on failure for causal-evidence forensics); every reap path (`finalizeContainerRetention`, reconcile's `defaultContainerReap`, retry's pre-spawn reap) passes `docker rm -f -v` so the anonymous shadow volume is still removed with the container.
 
 **Three supporting fixes landed in the same commit (02ca0b9):**
 

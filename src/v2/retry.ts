@@ -37,7 +37,8 @@ export function reapRetainedContainer(
   execFileSyncFn: typeof execFileSync = execFileSync,
 ): void {
   try {
-    execFileSyncFn("docker", ["rm", "-f", `forge-${taskId}`], { stdio: ["ignore", "ignore", "ignore"] });
+    // -v: also remove the anonymous shadow volume (DEC-019) — no --rm anymore.
+    execFileSyncFn("docker", ["rm", "-f", "-v", `forge-${taskId}`], { stdio: ["ignore", "ignore", "ignore"] });
   } catch {
     // best-effort only — container already gone, or docker unreachable
   }

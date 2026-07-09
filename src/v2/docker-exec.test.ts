@@ -150,7 +150,7 @@ test("finalizeContainerRetention: task succeeded → reaps (docker rm -f called)
   const outcome = finalizeContainerRetention("forge-task-clean", true, fake);
   assert.equal(outcome, "reaped");
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "forge-task-clean"] });
+  assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "-v", "forge-task-clean"] });
 });
 
 test("finalizeContainerRetention: task failed → retained (docker rm never called) by default", () => {
@@ -175,7 +175,7 @@ test("finalizeContainerRetention: FORGE_CONTAINER_RETENTION=off reaps even a fai
 
   const outcome = finalizeContainerRetention("forge-task-failed-off", false, fake);
   assert.equal(outcome, "reaped");
-  assert.deepEqual(calls, ["rm -f forge-task-failed-off"]);
+  assert.deepEqual(calls, ["rm -f -v forge-task-failed-off"]);
 });
 
 test("finalizeContainerRetention: docker rm throws → 'reap_failed', not confused with 'retained'", () => {
