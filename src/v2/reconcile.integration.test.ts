@@ -158,6 +158,63 @@ test("FG-492 finding 3: container gone WITH a valid result AND a confirmed clean
   }
 });
 
+// FG-503 (review): reconcile's own reap of an already-gone container (the
+// branch above) previously discarded the outcome — unlike invoke.ts/runNext.ts/
+// gate.ts's success-path reaps, a `docker rm` error here left a leaked
+// container + DEC-019 shadow volume with no durable record and no sweep path.
+// Same container.reap_failed event, same payload shape as the other three
+// reap sites, keyed on this task.
+test("FG-503 (review): reconcile's own reap of an already-gone container failing → a container.reap_failed event is recorded, task still completes", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-clean-exit-reap-failed";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const dir = taskDir(RUN.id, taskId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+    const exitInfo = () => ({ exitCode: 0 });
+    const reap = (_name: string): "error" => "error";
+
+    const r = reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_present" }], "a reap failure must never block the task from completing");
+    assert.equal(getTask(taskId)!.status, "complete");
+
+    const types = eventsForTask(taskId).map((e) => e.eventType);
+    assert.equal(types.filter((t) => t === "container.reap_failed").length, 1, "the reconcile-path reap failure must be durably recorded exactly once");
+    const reapFailedEvent = eventsForTask(taskId).find((e) => e.eventType === "container.reap_failed")!;
+    const payload = reapFailedEvent.payload as { containerName: string; why: string };
+    assert.equal(payload.containerName, `forge-${taskId}`);
+    // FG-503 cross-path consistency: same {containerName, why} payload shape as
+    // invoke.ts/runNext.ts/gate.ts's own reap-failure logging.
+    assert.deepEqual(Object.keys(payload).sort(), ["containerName", "why"], "payload shape must match the other reap paths");
+    assert.match(payload.why, /^docker rm -f -v failed/, "why must follow the shared wording convention across all reap paths");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-503 (review): reconcile's own reap of an already-gone container succeeding emits no container.reap_failed event", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-clean-exit-reap-happy";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const dir = taskDir(RUN.id, taskId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+    const exitInfo = () => ({ exitCode: 0 });
+    const reap = (_name: string): "killed" => "killed";
+
+    const r = reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_present" }]);
+    const types = eventsForTask(taskId).map((e) => e.eventType);
+    assert.equal(types.filter((t) => t === "container.reap_failed").length, 0, "the happy path must stay silent — no new event on a successful reconcile-path reap");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
 // FG-492 review (final round): the comment above hasContainerExited's
 // computation used to claim it was "always false by the time we're here" —
 // that's not true. A real interleaving: forge logs container.exited, then

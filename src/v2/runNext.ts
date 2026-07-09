@@ -1089,7 +1089,10 @@ async function runOneRed(args: {
   // FG-492 review: a red is read-only (no merge/gate downstream) — its
   // container's fate is decided right here. Reap only if the CAS above
   // actually completed it; a lost race to a concurrent cancel retains.
-  finalizeContainerRetention(result.containerName, redCompleted);
+  // FG-503 (review): route through reapContainerAndReportFailure like the
+  // other success-path reaps in this file — a reap failure here is the same
+  // silent, unsweepable leak.
+  reapContainerAndReportFailure(result.containerName, redCompleted, args.runId, redTaskId);
   if (args.red.agent === "shipping-reviewer") {
     return {
       red: args.red,
@@ -1929,7 +1932,10 @@ async function runFanoutChild(args: {
   }
   // FG-492 review: reap only if the CAS above actually completed the child —
   // a lost race to a concurrent cancel retains its container.
-  finalizeContainerRetention(dispatchResult.containerName, childCompleted);
+  // FG-503 (review): route through reapContainerAndReportFailure like the
+  // other success-path reaps in this file — a reap failure here is the same
+  // silent, unsweepable leak.
+  reapContainerAndReportFailure(dispatchResult.containerName, childCompleted, args.runId, childTaskId);
   return {
     index: args.index,
     value: args.value,

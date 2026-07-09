@@ -922,6 +922,77 @@ test("runNext: reds — all authoritative reds pass → primary moves to awaitin
   assert.ok(verdicts.every((v) => v.verdict === "pass"));
 });
 
+// FG-503 (review): a red's own container reap — runOneRed's finalizeContainerRetention
+// call — previously discarded its outcome, unlike the primary's. Same
+// reapContainerAndReportFailure wrapper, same durability guarantee, keyed on
+// the RED's own task id (not the primary's).
+test("runNext: FG-503 — a completed red's own container reap failure is durably recorded", async () => {
+  await withFailingDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: REDS_AUTH_ALL_PASS_WORKFLOW,
+      title: "red reap-failed test",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+    });
+
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "the thing" } },
+      { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    ]);
+
+    const wave = await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+    assert.deepEqual(wave.awaitingGate, ["review"], "a red's reap failure must never block the primary reaching its gate");
+
+    const tasks = tasksForRun(runId);
+    const primary = tasks.find((t) => t.parentId === undefined)!;
+    const redTasks = tasks.filter((t) => t.parentId === primary.id);
+    assert.equal(redTasks.length, 2);
+    assert.ok(redTasks.every((t) => t.status === "complete"));
+
+    const calls = readFileSync(logPath, "utf8");
+    for (const red of redTasks) {
+      assert.match(calls, new RegExp(`rm -f -v forge-${red.id}`), "each completed red's own container reap was attempted");
+      const types = eventsForTask(red.id).map((e) => e.eventType);
+      assert.equal(types.filter((t) => t === "container.reap_failed").length, 1, "the red's own reap failure must be durably recorded on the red's own task");
+      const payload = eventsForTask(red.id).find((e) => e.eventType === "container.reap_failed")!.payload as { containerName: string; why: string };
+      assert.equal(payload.containerName, `forge-${red.id}`);
+    }
+  });
+});
+
+test("runNext: FG-503 — a completed red's own container reap succeeding emits no container.reap_failed event", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: REDS_AUTH_ALL_PASS_WORKFLOW,
+      title: "red reap-happy-path test",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+    });
+
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "the thing" } },
+      { matches: (id) => id.startsWith("task-red-review-"), result: { status: "complete", verdict: "pass", confidence: 0.9, findings: [] } },
+    ]);
+
+    const wave = await runNext({ runId, workflow: REDS_AUTH_ALL_PASS_WORKFLOW, dockerExec: exec });
+    assert.deepEqual(wave.awaitingGate, ["review"]);
+
+    const tasks = tasksForRun(runId);
+    const primary = tasks.find((t) => t.parentId === undefined)!;
+    const redTasks = tasks.filter((t) => t.parentId === primary.id);
+    assert.equal(redTasks.length, 2);
+
+    const calls = readFileSync(logPath, "utf8");
+    for (const red of redTasks) {
+      assert.match(calls, new RegExp(`rm -f -v forge-${red.id}`));
+      const types = eventsForTask(red.id).map((e) => e.eventType);
+      assert.equal(types.filter((t) => t === "container.reap_failed").length, 0, "the happy path must stay silent for a red's own reap too");
+    }
+  });
+});
+
 // AWN-7: a run-level model profile (`forge new --profile`, stored as
 // metadata.modelProfile) must pin EVERY task in the run — primary and red —
 // at the highest profile-selection precedence, beating both agent overrides
@@ -1272,6 +1343,81 @@ test("runNext: fanout — plan returns N claims, research spawns N children, par
   const wave3 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec });
   assert.deepEqual(wave3.dispatchedSteps, []);
   assert.equal(wave3.runStatus, "complete");
+});
+
+// FG-503 (review): a fanout child's own container reap — runFanoutChild's
+// finalizeContainerRetention call — previously discarded its outcome, unlike
+// the primary's. Same reapContainerAndReportFailure wrapper, keyed on the
+// CHILD's own task id (not the fanout parent's).
+test("runNext: FG-503 — a completed fanout child's own container reap failure is durably recorded", async () => {
+  await withFailingDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: FANOUT_WORKFLOW,
+      title: "fanout child reap-failed test",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+    });
+
+    const claims = ["claim-a", "claim-b"];
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", claims } },
+      { matches: (id) => id.startsWith("task-research-"), result: { status: "complete", evidence: "found stuff" } },
+    ]);
+
+    await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // plan
+    const wave2 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // research fanout
+    assert.deepEqual(wave2.completedSteps, ["research"], "a child's reap failure must never block the parent from completing");
+
+    const tasks = tasksForRun(runId);
+    const parent = tasks.find((t) => t.phase === "research" && t.parentId === undefined)!;
+    const children = tasks.filter((t) => t.phase === "research" && t.parentId === parent.id);
+    assert.equal(children.length, 2);
+    assert.ok(children.every((c) => c.status === "complete"));
+
+    const calls = readFileSync(logPath, "utf8");
+    for (const child of children) {
+      assert.match(calls, new RegExp(`rm -f -v forge-${child.id}`), "each completed fanout child's own container reap was attempted");
+      const types = eventsForTask(child.id).map((e) => e.eventType);
+      assert.equal(types.filter((t) => t === "container.reap_failed").length, 1, "the child's own reap failure must be durably recorded on the child's own task");
+      const payload = eventsForTask(child.id).find((e) => e.eventType === "container.reap_failed")!.payload as { containerName: string; why: string };
+      assert.equal(payload.containerName, `forge-${child.id}`);
+    }
+  });
+});
+
+test("runNext: FG-503 — a completed fanout child's own container reap succeeding emits no container.reap_failed event", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: FANOUT_WORKFLOW,
+      title: "fanout child reap-happy-path test",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+    });
+
+    const claims = ["claim-a", "claim-b"];
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-plan-"), result: { status: "complete", claims } },
+      { matches: (id) => id.startsWith("task-research-"), result: { status: "complete", evidence: "found stuff" } },
+    ]);
+
+    await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // plan
+    const wave2 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec }); // research fanout
+    assert.deepEqual(wave2.completedSteps, ["research"]);
+
+    const tasks = tasksForRun(runId);
+    const parent = tasks.find((t) => t.phase === "research" && t.parentId === undefined)!;
+    const children = tasks.filter((t) => t.phase === "research" && t.parentId === parent.id);
+    assert.equal(children.length, 2);
+
+    const calls = readFileSync(logPath, "utf8");
+    for (const child of children) {
+      assert.match(calls, new RegExp(`rm -f -v forge-${child.id}`));
+      const types = eventsForTask(child.id).map((e) => e.eventType);
+      assert.equal(types.filter((t) => t === "container.reap_failed").length, 0, "the happy path must stay silent for a fanout child's own reap too");
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
