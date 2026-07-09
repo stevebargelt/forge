@@ -91,10 +91,16 @@ afterEach(() => {
 });
 
 // Builds a single-item paused campaign parked in the exact shape executor.ts's
-// campaign_system producers leave behind: lifecycleStatus='failed', blockerKind=
-// 'campaign_system', WITH a runId — the same shape both reconcile.integration.test.ts
-// and report.integration.test.ts exercise in isolation.
-function setupCampaignSystemCampaign(ticketId: string): { campaignId: string; itemId: string; runId: string } {
+// campaign_system producers leave behind: blockerKind='campaign_system', WITH a
+// runId, at the given lifecycleStatus — 'failed' for the three
+// reconcileTerminalOutcome producers (salvage/gap/fallback), 'blocked_by_red' for
+// driveWorkflowItem's inconclusive-verdict park (FG-502's fourth producer). Same
+// shape both reconcile.integration.test.ts and report.integration.test.ts
+// exercise in isolation.
+function setupCampaignSystemCampaign(
+  ticketId: string,
+  lifecycleStatus: "failed" | "blocked_by_red" = "failed"
+): { campaignId: string; itemId: string; runId: string } {
   writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
   const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir, mode: "sequential" });
   approveCampaign(campaign.id, { rationale: "approved" });
@@ -102,8 +108,8 @@ function setupCampaignSystemCampaign(ticketId: string): { campaignId: string; it
   const itemId = items[0]!.id;
   const runId = `run-${itemId}`;
   db.prepare(
-    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
-  ).run(runId, itemId);
+    "UPDATE campaign_items SET lifecycle_status = ?, outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(lifecycleStatus, runId, itemId);
   db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
   return { campaignId: campaign.id, itemId, runId };
 }
@@ -187,6 +193,95 @@ test("parity: missing-evidence campaign_system shape (lane evidence absent) is r
   const result = reconcileCampaign(campaignId);
 
   assert.equal(result.items[0]!.status, "refused", `report.ts previewed no eligibility but reconcile shipped it anyway: ${JSON.stringify(result.items)}`);
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refusal");
+  assert.equal(countEvents(), beforeEvents, "no audit event logged for a refused reconcile");
+});
+
+// FG-502 round-2: the fourth producer — driveWorkflowItem's inconclusive-verdict
+// park — leaves lifecycleStatus='blocked_by_red' rather than 'failed'. Both
+// surfaces must treat this status identically to the 'failed' shape above.
+test("parity: blocked_by_red/campaign_system with full evidence previews eligible and reconciles with the campaign_system_reconciled event", () => {
+  const ticketId = "FG-592";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId, "blocked_by_red");
+
+  makeBaseCommit(`base-${ticketId}`);
+  const commit = commitDocsFile(`docs/${ticketId}.md`, `docs for ${ticketId}`, `docs: ${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+
+  const show = assembleCampaignShow(campaignId)!;
+  assert.equal(
+    show.items[0]!.campaignSystemEligible,
+    true,
+    "report.ts must preview a blocked_by_red/campaign_system item with full evidence as recoverable"
+  );
+  assert.ok(show.nextAction.includes("forge campaign reconcile"), `expected a reconcile pointer, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaignId)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, true);
+
+  const beforeEvents = countEvents();
+  const result = reconcileCampaign(campaignId, { decidedBy: "steve" });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.items[0]!.status,
+    "shipped",
+    `report.ts previewed eligible=true but reconcile refused: ${JSON.stringify(result.items)}`
+  );
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, undefined);
+
+  assert.equal(countEvents(), beforeEvents + 1);
+  const evRow = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(runId) as { event_type: string };
+  assert.equal(evRow.event_type, "campaign_item.campaign_system_reconciled");
+
+  const showAfter = assembleCampaignShow(campaignId)!;
+  assert.equal(showAfter.items[0]!.campaignSystemEligible, false, "a shipped item is no longer campaign_system-recoverable");
+});
+
+test("parity: blocked_by_red/campaign_system with missing lane evidence is refused by BOTH report's preview and reconcileCampaign's write path", () => {
+  const ticketId = "FG-593";
+  const { campaignId, itemId } = setupCampaignSystemCampaign(ticketId, "blocked_by_red");
+
+  makeBaseCommit(`base-${ticketId}`);
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", `${ticketId}.ts`), `export const x = 1;\n`);
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", `feat: ${ticketId}`], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, ticketId, commit);
+
+  const show = assembleCampaignShow(campaignId)!;
+  assert.equal(
+    show.items[0]!.campaignSystemEligible,
+    false,
+    "report.ts must not preview a missing-lane-evidence blocked_by_red shape as eligible"
+  );
+  assert.ok(
+    show.items[0]!.hostVerificationReconcileHint?.includes("lane_evidence_missing"),
+    `expected a lane_evidence_missing hint, got: ${show.items[0]!.hostVerificationReconcileHint}`
+  );
+
+  const report = assembleCampaignReport(campaignId)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, false);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+
+  assert.equal(
+    result.items[0]!.status,
+    "refused",
+    `report.ts previewed no eligibility but reconcile shipped it anyway: ${JSON.stringify(result.items)}`
+  );
   assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
 
   assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refusal");

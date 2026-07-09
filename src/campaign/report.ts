@@ -163,15 +163,20 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
 }
 
 // FG-502: mirrors reconcile.ts's isCampaignSystemRecoverable routing predicate
-// (kept independent here — this module never imports reconcile.ts) — a failed
-// item whose blockerKind is 'campaign_system' (executor.ts's run-status-
-// incomplete salvage, done-audit-gap, and unresolved-outcome-fallback
-// producers, reconcileTerminalOutcome) may have actually shipped out-of-band
-// despite the campaign-level failure. This predicate and the hints below are a
-// read-only preview mirror: they never write, and `forge campaign reconcile`
-// re-derives the same evidence independently as the sole write path.
+// (kept independent here — this module never imports reconcile.ts) — an item
+// whose blockerKind is 'campaign_system' (executor.ts's run-status-incomplete
+// salvage, done-audit-gap, and unresolved-outcome-fallback producers in
+// reconcileTerminalOutcome, all leaving lifecycleStatus:'failed'; plus
+// driveWorkflowItem's inconclusive-verdict park, which leaves lifecycleStatus:
+// 'blocked_by_red') may have actually shipped out-of-band despite the
+// campaign-level failure. This predicate and the hints below are a read-only
+// preview mirror: they never write, and `forge campaign reconcile` re-derives
+// the same evidence independently as the sole write path.
 function isCampaignSystemRecoverable(item: CampaignItem): boolean {
-  return item.lifecycleStatus === "failed" && item.blockerKind === "campaign_system";
+  return (
+    item.blockerKind === "campaign_system" &&
+    (item.lifecycleStatus === "failed" || item.lifecycleStatus === "blocked_by_red")
+  );
 }
 
 // FG-502: the campaign_system counterpart to outOfBandCompletableAction —
@@ -351,6 +356,15 @@ function computeNextShowAction(
     }
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
+      // FG-502: a blocked_by_red item can ALSO be the campaign_system shape (the
+      // fourth producer, driveWorkflowItem's inconclusive-verdict park) — route it
+      // through the same campaign_system hint the failed-shape branch above uses,
+      // same as unresolvedBlockedItem's campaign_system check, before falling
+      // through to the awaiting_gate-shaped out-of-band checks below.
+      if (gateParkedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, gateParkedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
       const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
@@ -471,6 +485,12 @@ function computeNextOperatorAction(
     // Parked at a human gate or red block: surface the specific gate/block action.
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
+      // FG-502: same campaign_system routing as computeNextShowAction above — a
+      // blocked_by_red item can be the campaign_system shape too.
+      if (gateParkedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, gateParkedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
       const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
