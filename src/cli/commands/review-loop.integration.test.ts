@@ -1620,6 +1620,34 @@ test("FG-502 fix dep: backlog/ path is unconditionally disallowed even if (erron
   assert.equal(status, "", "tree must be clean after the full-abort revert");
 });
 
+test("FG-502 fix dep: backlog/ violation MIXED with a surviving in-scope change still full-aborts the round — the hard guard is never relaxed by a legitimate co-change", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "backlog"), { recursive: true });
+    writeFileSync(join(projectDir, "backlog", "story.md"), "story\n");
+    // A NEW untracked in-scope file, distinct from the beforeEach-committed
+    // src.ts — proves the guard reverts a genuinely novel legitimate change,
+    // not just a modification of an already-tracked path.
+    writeFileSync(join(projectDir, "in-scope.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+
+  assert.equal(r.ok, false, `a backlog violation must full-abort the round even with a surviving in-scope change, got: ${JSON.stringify(r)}`);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.includes("backlog/story.md"));
+  assert.equal((r as { committedSha?: string }).committedSha, undefined, "nothing must be committed on a full-abort round");
+
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", "tree must be clean after the full-abort revert — the in-scope change must also be reverted, not just the backlog path");
+  assert.equal(existsSync(join(projectDir, "in-scope.ts")), false, "the in-scope change is reverted too — a full-round abort, not a partial one");
+});
+
 test("FG-502 fix dep: fixer renames a docs/ path OUT to an in-scope path — the whole rename is reverted as one unit (old path restored, new path removed), never left half-applied", async () => {
   mkdirSync(join(projectDir, "docs"), { recursive: true });
   writeFileSync(join(projectDir, "docs", "old.md"), "# old\n");

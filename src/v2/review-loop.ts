@@ -529,9 +529,14 @@ export type ReviewLoopNoteMeta = {
  *  per-round verdicts/verification/findings/fixes, and the stop reason. Pure. */
 export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLoopOutcome): string {
   const L: string[] = [];
+  // FG-502: the headline must agree with the remote-reachability line below —
+  // outcome.closeable alone (reviewer pass AND verification green) doesn't
+  // know about the remote-trust gate, so compose it here the same way the CLI
+  // does before printing its own closeable/not-closeable message.
+  const closeable = outcome.closeable && meta.remoteTrust.kind === "trusted";
   L.push(`# review-loop — ticket #${meta.ticketId.replace(/^#/, "")}`, "");
   L.push(`- **stop reason:** ${outcome.stopReason}`);
-  L.push(`- **closeable:** ${outcome.closeable ? "yes — reviewer pass AND verification green" : "no"}`);
+  L.push(`- **closeable:** ${closeable ? "yes — reviewer pass AND verification green" : "no"}`);
   L.push(`- **reviewed tip:** \`${meta.reviewedTipSha}\``);
   // FG-502: name the reviewed tip and flag loop-created/local commits not on
   // the remote tracking/PR branch — a closeable verdict must never silently

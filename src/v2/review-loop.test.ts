@@ -917,3 +917,43 @@ test("#502 note: remote_unavailable trust renders a distinct not-closeable/remot
   );
   assert.match(note, /remote reachability:\*\* UNAVAILABLE/);
 });
+
+// FG-502: the headline "closeable" line must agree with the remote-trust gate
+// — outcome.closeable alone (reviewer pass AND verification green) doesn't
+// know about remote reachability, so a local-only/remote-unavailable tip must
+// never render "closeable: yes" even though the round-level outcome passed.
+test("FG-502 note: headline 'closeable' says 'no' for a local-only tip, even though outcome.closeable is true", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d",
+      remoteTrust: { kind: "local_only", remoteRef: "origin/HEAD", localCommits: [{ sha: "abc1234", subject: "fix" }] },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* no/);
+  assert.doesNotMatch(note, /\*\*closeable:\*\* yes/);
+});
+
+test("FG-502 note: headline 'closeable' says 'no' when the remote is unavailable, even though outcome.closeable is true", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d", remoteTrust: { kind: "remote_unavailable" },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* no/);
+  assert.doesNotMatch(note, /\*\*closeable:\*\* yes/);
+});
+
+test("FG-502 note: headline 'closeable' says 'yes' when outcome.closeable AND the tip is remote-trusted", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d", remoteTrust: { kind: "trusted", remoteRef: "origin/HEAD" },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* yes/);
+});

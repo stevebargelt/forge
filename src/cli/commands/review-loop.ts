@@ -188,10 +188,18 @@ export type ReviewLoopContext = {
 };
 
 // FG-502: scope-guard classification. Two independent disallowed classes:
-// (a) backlog/ and ticket-closeout paths — ALWAYS hard-disallowed, unchanged
-//     FG-462 semantics, range-membership irrelevant.
+// (a) backlog/ and ticket-closeout paths — the CLASSIFICATION (always
+//     out of scope) is unchanged FG-462 semantics, range-membership
+//     irrelevant. The ROUND-LEVEL CONSEQUENCE is also unchanged: touching one
+//     always aborts the whole round (outOfScope), even when a surviving
+//     in-scope change from the same round would otherwise be committed — see
+//     the "hard" reverts check in fix() below. This is the exact guard the
+//     ticket's Non-Goals section says must never be relaxed.
 // (b) docs/, learnings/, README paths — disallowed ONLY when NOT already
 //     touched by the loop-start reviewed commit range (ctx.inRangeDocsPaths).
+//     Unlike (a), a docs-class violation mixed with a surviving in-scope
+//     change does NOT abort the round — the survivor is verified + committed
+//     and the revert is reported as guidance (see revertedPaths).
 const BACKLOG_CLOSEOUT_RE = /^backlog\//;
 const DOCS_LEARNINGS_README_RE = /^(docs\/|learnings\/)|^README/;
 
@@ -567,7 +575,7 @@ export function buildReviewLoopDeps(
       // the scoped re-verify ran. Any throw here becomes a recorded, fail-safe
       // round failure via the same scope_guard_revert_failed shape the verified
       // -failed-revert case already uses — never a false commit claim.
-      const toRevert: { path: string; existsAtHead: boolean; reason: string }[] = [];
+      const toRevert: { path: string; existsAtHead: boolean; reason: string; hard: boolean }[] = [];
       let stage = "scope-guard status scan";
       try {
         // --untracked-files=all: without it, a wholly-new untracked directory
@@ -587,14 +595,34 @@ export function buildReviewLoopDeps(
         for (const c of changes) {
           if (c.kind === "simple") {
             const reason = disallowedReason(c.path, inRangeDocsPaths);
-            if (reason) toRevert.push({ path: c.path, existsAtHead: c.existsAtHead, reason });
+            if (reason) toRevert.push({ path: c.path, existsAtHead: c.existsAtHead, reason, hard: BACKLOG_CLOSEOUT_RE.test(c.path) });
           } else {
             const reason = disallowedReason(c.newPath, inRangeDocsPaths) ?? disallowedReason(c.oldPath, inRangeDocsPaths);
             if (reason) {
-              toRevert.push({ path: c.oldPath, existsAtHead: true, reason });
-              toRevert.push({ path: c.newPath, existsAtHead: false, reason });
+              const hard = BACKLOG_CLOSEOUT_RE.test(c.oldPath) || BACKLOG_CLOSEOUT_RE.test(c.newPath);
+              toRevert.push({ path: c.oldPath, existsAtHead: true, reason, hard });
+              toRevert.push({ path: c.newPath, existsAtHead: false, reason, hard });
             }
           }
+        }
+
+        // FG-502 Non-Goals: a backlog/ticket-closeout ("hard") violation always
+        // aborts the WHOLE round — the exact pre-FG-502 (FG-462) `reset --hard
+        // HEAD` + `clean -fd` behavior, never relaxed to a per-path revert that
+        // would let a surviving in-scope change from the same round get
+        // committed anyway. Checked BEFORE any per-path revert attempt so a
+        // mixed round (hard violation + legitimate change) can never fall
+        // through to the selective-revert/commit path below.
+        if (toRevert.some((r) => r.hard)) {
+          stage = "full-round revert (hard violation)";
+          gitInDir(["reset", "--hard", "HEAD"]);
+          gitInDir(["clean", "-fd"]);
+          stage = "full-round revert re-verification";
+          const stillDirty = gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]).trim().length > 0;
+          if (stillDirty) {
+            return { ok: false, scopeGuardRevertFailed: true, failedRevertPaths: toRevert.map((r) => r.path) };
+          }
+          return { ok: false, outOfScope: true, offendingPaths: [...new Set(toRevert.map((r) => r.path))] };
         }
 
         // The clean-tree precondition + per-round commits mean HEAD is the
@@ -646,7 +674,10 @@ export function buildReviewLoopDeps(
           return { ok: false, scopeGuardRevertFailed: true, failedRevertPaths };
         }
 
+        // Only docs-class ("soft") violations reach here — any hard violation
+        // already returned via the full-round revert above.
         const revertedPaths: RevertedPathGuidance[] = toRevert.map((r) => ({ path: r.path, reason: r.reason }));
+
         stage = "remaining-changes check";
         const remaining = gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]).trim();
 
