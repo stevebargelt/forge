@@ -711,6 +711,20 @@ describe("findCoveringGateEvidence / describeGateEvidence (real per-project ci.y
       assert.equal(evidence, null, "a sibling job with no check run at all at this sha must not be assumed green");
     });
 
+    test("describeGateEvidence (FG-501): names EVERY verified check context, with its URL when available — not just the paired job", () => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: "FG-719", projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) =>
+          opts.checkContext === "CI / test"
+            ? { sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/test" }
+            : { sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/test-extended" },
+      })!;
+      assert.ok(evidence);
+      const desc = describeGateEvidence(evidence);
+      assert.match(desc, /CI check "CI \/ test" \(sha [0-9a-f]+\) — https:\/\/example\.com\/run\/test\b/);
+      assert.match(desc, /CI check "CI \/ test-extended" \(sha [0-9a-f]+\) — https:\/\/example\.com\/run\/test-extended/);
+    });
+
     test("unparseable workflow -> no coverage, provider never consulted (both pairing and job enumeration fail closed)", () => {
       rmSync(join(projectDir, ".github"), { recursive: true, force: true });
       writeWorkflowFile(projectDir, "ci.yml", "name: CI\njobs:\n  test:\n    steps: [\n");

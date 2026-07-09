@@ -52,9 +52,12 @@ CI workflow (via the new `projectCiWorkflowJobIds`) and requires all of them
 CI-sourced coverage; enumeration failure or any non-green sibling fails
 closed to no CI coverage.
 
-The review-loop's own per-round verification (`runVerification` → `npm run
---silent test`) is fixed by the same change, since it calls the `test` script
-by name.
+The review-loop's own per-round verification defaults to reusing this same
+covering evidence (or waiting for the required CI check to go green) rather
+than running anything locally (FG-501). When it does fall back to a real
+local run — dirty tree, or CI unavailable/failed-precondition/timed-out —
+that fallback (`runVerification` → `npm run --silent test`) is fixed by the
+same change, since it calls the `test` script by name.
 
 ## Why the unit tier is fast even though FG-406/408 already tiered the suite
 
@@ -129,9 +132,11 @@ Every relocated test still runs, unmodified, in `test:integration` or
 check, same as `test`, and not merely informational. What changed vs
 pre-FG-495 is *where* this coverage runs (CI, off-host, in parallel with
 `test` and with review-loop verification) and how often the operator pays
-for it interactively (never per round — the per-round gate the review-loop
-re-runs is the fast unit tier via `npm run test:all`). Nothing was deleted,
-skipped, or downgraded to non-blocking.
+for it interactively (never per round — the review-loop's per-round gate
+defaults to reusing covering evidence or waiting on the required CI check
+(FG-501), and only re-runs the fast unit tier locally as a fallback when CI
+is unavailable or the tree is dirty). Nothing was deleted, skipped, or
+downgraded to non-blocking.
 
 ## Review finding: the dashboard workspace had no real tier split
 

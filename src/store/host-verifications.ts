@@ -400,7 +400,7 @@ function defaultCheckStatusProvider(opts: { projectDir: string; sha: string; che
 
 export type GateEvidence =
   | { source: "host_row"; row: HostVerificationRow; rows: HostVerificationRow[] }
-  | { source: "ci"; sha: string; checkUrl?: string };
+  | { source: "ci"; sha: string; checkUrl?: string; checks: { context: string; url?: string }[] };
 
 const SHA_LOOKUP_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -478,14 +478,16 @@ export function findCoveringGateEvidence(opts: {
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   let pairedStatus: CiCheckStatus | null = null;
+  const checks: { context: string; url?: string }[] = [];
   for (const jobId of pairing.jobIds) {
     const checkContext = `${pairing.workflowName} / ${jobId}`;
     const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
     if (!status || status.state !== "success" || status.sha !== opts.sha) return null;
+    checks.push({ context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) });
     if (jobId === pairing.pairedJobId) pairedStatus = status;
   }
   if (!pairedStatus) return null;
-  return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl };
+  return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl, checks };
 }
 
 // ── FG-501: CI gate STATUS (not just coverage) ──────────────────────────────
@@ -549,11 +551,18 @@ export function probeCiGateStatus(opts: {
  *  output wherever verification is reported (the review-loop note, CLI logs).
  *  FG-500: host_row evidence.rows carries a covering row per derived gate list
  *  member, not just the fast tier — every row is cited so the note attests to
- *  the FULL verified set, not a single (possibly fast-tier-only) row. */
+ *  the FULL verified set, not a single (possibly fast-tier-only) row. FG-501:
+ *  ci evidence.checks likewise carries every job of the matched workflow that
+ *  was verified green (e.g. `test` AND `test-extended`), not just the one job
+ *  paired to REQUIRED_CI_CHECK_CONTEXT — the description must name every
+ *  verified check context with its URL when available (AC2), since a green
+ *  paired job alone no longer proves the whole gate passed post-FG-495. */
 export function describeGateEvidence(evidence: GateEvidence): string {
   return evidence.source === "host_row"
     ? evidence.rows
         .map((row) => `host_verifications row #${row.id} (sha ${row.commitSha}, command: ${row.command})`)
         .join("; ")
-    : `CI check "${REQUIRED_CI_CHECK_CONTEXT}" (sha ${evidence.sha})${evidence.checkUrl ? ` — ${evidence.checkUrl}` : ""}`;
+    : evidence.checks
+        .map((check) => `CI check "${check.context}" (sha ${evidence.sha})${check.url ? ` — ${check.url}` : ""}`)
+        .join("; ");
 }
