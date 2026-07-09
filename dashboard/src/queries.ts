@@ -936,15 +936,22 @@ type VerificationEventRow = {
   created_at: string;
 };
 
-function readEventsByType(types: readonly string[]): VerificationEventRow[] {
+// sinceMs bounds the scan to events created at/after that instant, pushed
+// down into SQL so it can use idx_events_type_created (event_type, created_at)
+// instead of a full-table scan — this is called 4x per dashboard poll tick
+// (2x here, 2x from reviewLoopRunPhases below) by every open tab.
+function readEventsByType(types: readonly string[], sinceMs?: number): VerificationEventRow[] {
   const placeholders = types.map(() => "?").join(",");
+  const sinceClause = sinceMs !== undefined ? `AND created_at >= ?` : ``;
+  const params: unknown[] = [...types];
+  if (sinceMs !== undefined) params.push(new Date(sinceMs).toISOString());
   return db()
     .prepare(
       `SELECT run_id, task_id, event_type, payload, created_at
-       FROM events WHERE event_type IN (${placeholders})
+       FROM events WHERE event_type IN (${placeholders}) ${sinceClause}
        ORDER BY created_at ASC, id ASC`
     )
-    .all(...types) as VerificationEventRow[];
+    .all(...params) as VerificationEventRow[];
 }
 
 function runProjectDir(runId: string | null): string | null {
@@ -1012,14 +1019,19 @@ export type InProgressVerification =
  *  finished) reports exactly the one attempt that's actually still open, not
  *  zero or two. */
 export function inProgressVerifications(nowMs: number = Date.now(), projectDir?: string): InProgressVerification[] {
+  // A finish event for an attempt whose start survives the lookback cutoff is
+  // itself always created at/after that start (finish can't precede its own
+  // start), so bounding both reads by the same cutoff is safe — it can't drop
+  // a finish that would otherwise unmatch a still-relevant start.
+  const sinceMs = nowMs - STALE_LOOKBACK_MS;
   const finishedAttemptIds = new Set<string>();
-  for (const row of readEventsByType(VERIFICATION_FINISH_TYPES)) {
+  for (const row of readEventsByType(VERIFICATION_FINISH_TYPES, sinceMs)) {
     const attemptId = readAttemptId(parseEventPayload(row.payload));
     if (attemptId) finishedAttemptIds.add(attemptId);
   }
 
   const out: InProgressVerification[] = [];
-  for (const row of readEventsByType(VERIFICATION_START_TYPES)) {
+  for (const row of readEventsByType(VERIFICATION_START_TYPES, sinceMs)) {
     const payload = parseEventPayload(row.payload);
     const attemptId = readAttemptId(payload);
     if (!attemptId || finishedAttemptIds.has(attemptId)) continue;
@@ -1094,15 +1106,19 @@ export function reviewLoopRunPhases(projectDir?: string): ReviewLoopRunPhaseEntr
   // a task row still wants to display which ticket/round it belongs to), plus
   // separately whether that latest start is still open (unmatched by a finish
   // event) — that's what actually makes it a candidate phase on its own.
+  // Same lookback bound as inProgressVerifications, for the same reason: a
+  // review-loop run whose latest verification_started event is this old has
+  // either long since finished or hung well past any phase worth displaying.
+  const sinceMs = Date.now() - STALE_LOOKBACK_MS;
   const finishedAttemptIds = new Set<string>();
-  for (const row of readEventsByType(["review_loop.verification_finished"])) {
+  for (const row of readEventsByType(["review_loop.verification_finished"], sinceMs)) {
     const attemptId = readAttemptId(parseEventPayload(row.payload));
     if (attemptId) finishedAttemptIds.add(attemptId);
   }
 
   type LatestStart = { attemptId: string; ticketId: string | null; round: number | null; mode: string | null; startedAt: string; open: boolean };
   const latestStartByRun = new Map<string, LatestStart>();
-  for (const row of readEventsByType(["review_loop.verification_started"])) {
+  for (const row of readEventsByType(["review_loop.verification_started"], sinceMs)) {
     if (!row.run_id) continue;
     const payload = parseEventPayload(row.payload);
     const attemptId = readAttemptId(payload);

@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+-- FG-487: dashboard verification-visibility queries filter by event_type IN
+-- (...) and order by created_at; without this the "in progress" / "phases"
+-- polls (4x per 2s tick per open tab) full-scan the whole table.
+CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at);
 
 -- #155: model_calls — one row per Anthropic API request (deduped by request_id).
 -- Populated by spawn.ts at task-completion (and by "forge usage backfill" for

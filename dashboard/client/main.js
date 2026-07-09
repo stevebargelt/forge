@@ -794,6 +794,9 @@ function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdCha
         />
         <button type="submit" class="tab" aria-label="Look up host verification evidence">look up</button>
       </form>
+      ${ticketId.trim() && itemId.trim()
+        ? html`<div class="muted" style="font-size: 11px; margin: -6px 0 8px;">Both fields are filled in — campaign item id takes precedence and ticket id is ignored.</div>`
+        : null}
       ${evidenceLookupState === "prompt"
         ? html`<div class="muted">Enter a ticket id or campaign item id above to view its recorded verification evidence.</div>`
         : evidenceLookupState === "empty"
