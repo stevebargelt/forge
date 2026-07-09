@@ -105,15 +105,18 @@ export function reconcileCampaign(
     // is exactly what distinguishes an out-of-band-eligible item from a scope-blocked
     // one (which always carries blockerKind: 'scope').
     const isOutOfBand = item.lifecycleStatus === "awaiting_gate" && !item.blockerKind;
-    // FG-502: executor.ts has four campaign_system producers. Three, all in
-    // reconcileTerminalOutcome (run.status!=='complete' salvage, done-audit gap
-    // after a passing verdict, unresolved-outcome fallback), leave
-    // lifecycleStatus:'failed'. The fourth, driveWorkflowItem's gate:verdict
-    // park on an inconclusive aggregate verdict, leaves lifecycleStatus:
-    // 'blocked_by_red' — so this check must cover both statuses, not just
-    // 'failed'. It stays its own check (rather than folding into
-    // RECONCILABLE_LIFECYCLE_STATUSES) because that set is scope-only by name,
-    // even though its status values happen to coincide.
+    // FG-502: the recoverable shape is blockerKind:'campaign_system' with
+    // lifecycleStatus 'failed' OR 'blocked_by_red' — not an enumerated
+    // producer list. executor.ts producers include (non-exhaustive)
+    // reconcileTerminalOutcome's run.status!=='complete' salvage, done-audit
+    // gap after a passing verdict, unresolved-outcome fallback, and
+    // infrastructure failures such as a workflow-YAML load error (all leaving
+    // lifecycleStatus:'failed'); driveWorkflowItem's gate:verdict park on an
+    // inconclusive aggregate verdict leaves lifecycleStatus:'blocked_by_red'
+    // — so this check must cover both statuses, not just 'failed'. It stays
+    // its own check (rather than folding into RECONCILABLE_LIFECYCLE_STATUSES)
+    // because that set is scope-only by name, even though its status values
+    // happen to coincide.
     const isCampaignSystemRecoverable =
       item.blockerKind === "campaign_system" &&
       (item.lifecycleStatus === "failed" || item.lifecycleStatus === "blocked_by_red");
