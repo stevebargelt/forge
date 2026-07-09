@@ -399,3 +399,140 @@ test("fg354 (dispatch-3): FORGE_WORKTREES unset → file in projectDir satisfies
     "task.worktreePath must be undefined when FORGE_WORKTREES is unset",
   );
 });
+
+// ─── (dispatch-4/5) FG-491 annotation-shape acceptance through the dispatch seam ──
+//
+// fg491-persistence-annotated-invoke.integration.test.ts pins the annotated-claim
+// fix (and the reopened prose-rejection) through invoke.ts's call site only.
+// dispatchSingleStep in runNext.ts (this file's seam) calls checkResultPersistence
+// at its own call site (runNext.ts:537) with the same primaryWorktreePath ??
+// args.projectDir signature — that wiring needs its own proof, since it's the
+// path FG-497's chain evidence actually hit.
+
+test("fg491 (dispatch-4): FORGE_WORKTREES=1 → annotated files_modified referencing a real file in the worktree → task completes (no work_not_persisted downgrade)", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg491 dispatch worktree annotated-claim pass",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const worktreePath = findProjectMountHost(args);
+    assert.ok(worktreePath, "stub: /project mount must be in docker args");
+    writeFileSync(join(worktreePath, "changed.ts"), "x");
+
+    const dir = dirname(stdoutPath);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "result.json"),
+      JSON.stringify({
+        status: "complete",
+        files_modified: ["changed.ts:1-5 — annotated claim, PR-review style"],
+      }),
+    );
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const wave = await runNext({
+    runId,
+    workflow: DISPATCH_TEST_WORKFLOW,
+    dockerExec: stubExec,
+  });
+
+  assert.deepEqual(
+    wave.completedSteps,
+    ["build"],
+    "build step must complete: annotated claim resolving to a real file in the worktree must not trip work_not_persisted",
+  );
+  assert.deepEqual(wave.failedSteps, [], "no steps must fail");
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(primary, "primary build task must exist");
+  assert.notEqual(
+    failureKindForTask(primary!.id),
+    "work_not_persisted",
+    "no persistence downgrade for a real annotated claim through the dispatch seam",
+  );
+});
+
+test("fg491 (reopened, dispatch-5): FORGE_WORKTREES=1 → prose-only claim whose first word names a real file in the worktree → task fails work_not_persisted, error reports it unparseable", async () => {
+  setPlatform("darwin");
+  process.env.FORGE_WORKTREES = "1";
+  process.env.FORGE_WORKTREE_IGNORE_DIRTY = "1";
+
+  const repo = makeTmpDir();
+  initGitRepo(repo);
+
+  const { runId } = startRun({
+    workflow: DISPATCH_TEST_WORKFLOW,
+    title: "fg491 dispatch worktree prose-rejection fail",
+    inputs: {},
+    projectDir: repo,
+  });
+
+  const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
+    const worktreePath = findProjectMountHost(args);
+    assert.ok(worktreePath, "stub: /project mount must be in docker args");
+    // The real file exists under the worktree — a naive "first token names a
+    // real file" check would wrongly treat this prose as proof of persistence.
+    writeFileSync(join(worktreePath, "README.md"), "# test\n");
+
+    const dir = dirname(stdoutPath);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "result.json"),
+      JSON.stringify({
+        status: "complete",
+        files_modified: ["README.md updated the real file elsewhere"],
+      }),
+    );
+    writeFileSync(stdoutPath, "stub stdout");
+    writeFileSync(stderrPath, "");
+    return 0;
+  };
+
+  const wave = await runNext({
+    runId,
+    workflow: DISPATCH_TEST_WORKFLOW,
+    dockerExec: stubExec,
+  });
+
+  assert.deepEqual(
+    wave.failedSteps,
+    ["build"],
+    "build step must fail: prose claim must never count as proof of persistence just because its first word names a real file",
+  );
+  assert.deepEqual(wave.completedSteps, [], "no steps must complete");
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "build" && t.parentId === undefined);
+  assert.ok(primary, "primary build task must exist");
+  assert.equal(primary!.status, "failed", "task status must be failed");
+  assert.equal(
+    failureKindForTask(primary!.id),
+    "work_not_persisted",
+    "failure kind must be work_not_persisted (not a generic failure)",
+  );
+  assert.match(primary!.error ?? "", /work not persisted/);
+  assert.match(
+    primary!.error ?? "",
+    /README\.md updated the real file elsewhere/,
+    "error must name the raw prose claim",
+  );
+  assert.match(
+    primary!.error ?? "",
+    /unparseable|no parseable path token/i,
+    "error must call out the claim as unparseable through the dispatch seam, same as the invoke seam",
+  );
+});

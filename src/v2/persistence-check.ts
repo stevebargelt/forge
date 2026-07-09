@@ -54,10 +54,23 @@ const SETTLE_DELAY_MS = 250;
 const LINE_SPEC_SUFFIX = /:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/;
 const TRAILING_PUNCTUATION = /[:,;()]+$/;
 
+// FG-491 (reopened): a bare non-empty first token isn't enough — arbitrary
+// prose ("README.md updated the real file elsewhere") has a first token that
+// can accidentally name a real file, turning unrelated prose into proof of
+// persistence. Only recognize the annotation shapes PR-review-style claims
+// actually use: nothing after the token, or an annotation introduced by a
+// dash separator (em/en dash or hyphen) or a parenthesized note. Anything
+// else after the first token means this isn't a path claim at all.
+const ANNOTATION_START = /^[—–-]|^\(/;
+
 export function normalizeClaim(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  let token = trimmed.split(/\s+/)[0] ?? "";
+  const spaceIdx = trimmed.search(/\s/);
+  const rawToken = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+  const remainder = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx).trim();
+  if (remainder !== "" && !ANNOTATION_START.test(remainder)) return null;
+  let token = rawToken;
   // Loop: stripping a line-spec can expose more trailing punctuation (and
   // vice versa), e.g. "foo.ts:9,90-115," → strip "," → strip ":9,90-115".
   for (let i = 0; i < 4; i++) {
