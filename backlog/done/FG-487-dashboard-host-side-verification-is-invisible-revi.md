@@ -1,9 +1,11 @@
 ---
 id: FG-487
 type: story
-status: active
+status: done
 title: "Dashboard: host-side verification is invisible — review-loop verification phases, campaign reconcile gates, and host_verifications rows have no dashboard representation"
 created: 2026-07-07
+closed: 2026-07-09
+closed_commit: 949eff0
 ---
 
 Operator feedback 2026-07-07 (during the overnight batch): "I don't like that the verification doesn't show in the dashboard."
