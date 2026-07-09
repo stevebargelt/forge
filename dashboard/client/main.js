@@ -7,7 +7,10 @@ import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
-import { verificationRowLabel } from "./verification-label.js";
+import {
+  eventBadgeClass, reviewLoopVerificationDetail, hostGateDetail,
+  groupVerificationRows, verificationRowBadge, evidenceState,
+} from "./verification-render.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -488,11 +491,10 @@ function VerificationRow({ v, now }) {
   const startedMs = v.startedAt ? new Date(v.startedAt).getTime() : null;
   const elapsed = startedMs != null ? now - startedMs : null;
   const isGate = v.kind === "campaign_reconcile_gate";
-  const label = verificationRowLabel(v);
-  const badgeClass = v.stale ? "status-failed" : "status-running";
+  const badge = verificationRowBadge(v);
   return html`
     <div class="item">
-      <span class="badge ${badgeClass}" title=${v.stale ? "no finish event observed past the expected timeout — may be stuck or crashed" : "host verification in progress"}>${v.stale ? "stale · " + label : label}</span>
+      <span class="badge ${badge.class}" title=${v.stale ? "no finish event observed past the expected timeout — may be stuck or crashed" : "host verification in progress"}>${badge.text}</span>
       <div>
         <div>
           <strong>${v.ticketId ?? "—"}</strong>
@@ -748,9 +750,10 @@ function TaskDetail({ taskId, onClose }) {
 // step's file scope is main.js only — the evidence lookup below is
 // self-service (enter a ticket/item id) rather than embedded in a ticket card.
 function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdChange, onItemIdChange, onLookup, evidence, now }) {
-  const loopVerifications = (inProgress || []).filter((v) => v.kind === "review_loop_verification");
-  const gateVerifications = (inProgress || []).filter((v) => v.kind === "campaign_reconcile_gate");
+  const { loop: loopVerifications, gate: gateVerifications } = groupVerificationRows(inProgress);
   const onSubmit = (e) => { e.preventDefault(); onLookup(); };
+  const evidenceLookupState = evidenceState(evidence);
+  const recentState = evidenceState(recent || []);
 
   return html`
     <section class="verify-view">
@@ -791,9 +794,9 @@ function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdCha
         />
         <button type="submit" class="tab" aria-label="Look up host verification evidence">look up</button>
       </form>
-      ${evidence === null
+      ${evidenceLookupState === "prompt"
         ? html`<div class="muted">Enter a ticket id or campaign item id above to view its recorded verification evidence.</div>`
-        : evidence.length === 0
+        : evidenceLookupState === "empty"
         ? html`<div class="muted">No host_verifications rows found for that ticket/item.</div>`
         : html`<${EvidenceTable} rows=${evidence} />`
       }
@@ -802,7 +805,7 @@ function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdCha
       <div class="muted" style="font-size: 12px; margin-bottom: 8px;">
         Discoverable evidence for orchestrator-run bare gates even when their in-flight window was missed.
       </div>
-      ${(recent || []).length === 0
+      ${recentState === "empty"
         ? html`<div class="muted">No recorded host_verifications rows yet.</div>`
         : html`<${EvidenceTable} rows=${recent} showTicket=${true} />`
       }
@@ -902,28 +905,9 @@ function formatClock(iso) {
   try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
 }
 // FG-487: review_loop.verification_* / campaign_item.host_gate_* are the new
-// host-side verification phase-boundary events (events.ts). "_started" reads
-// as in-progress; "_finished" needs the payload's outcome (exit code / CI
-// check state) to know pass vs fail, since the event type alone doesn't say —
-// eventBadgeClass takes the full event, not just the type string, for that.
-function eventBadgeClass(e) {
-  const type = e.eventType;
-  if (/verification_started|host_gate_started/.test(type)) return "status-running";
-  if (/verification_finished|host_gate_finished/.test(type)) return verificationOutcomeClass(e.payload);
-  if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
-  if (/completed|complete/.test(type)) return "status-complete";
-  if (/awaiting/.test(type)) return "status-awaiting_gate";
-  return "status-pending";
-}
-function verificationOutcomeClass(p) {
-  if (!p || typeof p !== "object") return "status-pending";
-  if (typeof p.exitCode === "number") return p.exitCode === 0 ? "status-complete" : "status-failed";
-  if (typeof p.ciOutcome === "object" && p.ciOutcome && typeof p.ciOutcome.kind === "string") {
-    return p.ciOutcome.kind === "passed" ? "status-complete" : "status-failed";
-  }
-  if (typeof p.passed === "boolean") return p.passed ? "status-complete" : "status-failed";
-  return "status-pending";
-}
+// host-side verification phase-boundary events (events.ts) — eventBadgeClass/
+// reviewLoopVerificationDetail/hostGateDetail live in verification-render.js
+// so their decision logic is unit-testable.
 function eventDetail(e) {
   const p = e.payload;
   if (!p || typeof p !== "object") return "";
@@ -935,28 +919,6 @@ function eventDetail(e) {
   if (typeof p.from === "string" && typeof p.to === "string") return `${p.from} → ${p.to}`;
   if (typeof p.containerName === "string") return p.containerName;
   return "";
-}
-// review_loop.verification_started/finished payload: round + ticketId + sha +
-// mode ("ci-wait" | "local"), plus on finish either the CI check contexts /
-// outcome or the local command + tier + exit code (src/v2/review-loop.ts).
-function reviewLoopVerificationDetail(p) {
-  const parts = [];
-  if (p.mode) parts.push(String(p.mode));
-  if (typeof p.round === "number") parts.push(`round ${p.round}`);
-  if (p.tier) parts.push(String(p.tier));
-  if (Array.isArray(p.checkContexts) && p.checkContexts.length > 0) parts.push(p.checkContexts.join(", "));
-  if (typeof p.exitCode === "number") parts.push(`exit ${p.exitCode}`);
-  if (p.reused) parts.push("reused evidence");
-  return parts.join(" · ");
-}
-// campaign_item.host_gate_started/finished payload: ticketId, item id, gate
-// command, testedSha (src/campaign/reconcile-collect.ts).
-function hostGateDetail(p) {
-  const parts = [];
-  if (p.gate) parts.push(String(p.gate));
-  if (p.command) parts.push(String(p.command));
-  if (typeof p.exitCode === "number") parts.push(`exit ${p.exitCode}`);
-  return parts.join(" · ");
 }
 function idleLine(idle) {
   if (idle.measured === false) return `awaiting start · timeout ${formatDurMs(idle.idleTimeoutMs)}`;

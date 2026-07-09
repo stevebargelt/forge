@@ -697,6 +697,21 @@ test("FG-487 deps.verify: a dirty tree — mode 'local' (verifyWithReuse never c
   assert.equal((started.payload as { mode: string }).mode, "local");
 });
 
+test("FG-487 deps.verify: a dirty tree's finish event carries AC2's command + tier (what actually ran locally)", async () => {
+  writeFileSync(join(projectDir, "dirty.txt"), "wip");
+  const { deps } = buildReviewLoopDeps(ctx({
+    runId: "run-487-d2",
+    scripts: { typecheck: "true", test: "true" },
+    runVerification: (scripts) => ({ ok: true, steps: Object.keys(scripts).map((name) => ({ name, ok: true, output: "" })) }),
+  }));
+  await deps.verify();
+  const events = eventsForRun("run-487-d2");
+  const finished = events.find((e) => e.eventType === "review_loop.verification_finished")!;
+  const payload = finished.payload as { command: string | null; tier: string | null };
+  assert.equal(payload.command, "npm run typecheck && npm run test");
+  assert.equal(payload.tier, "fast");
+});
+
 test("FG-487 deps.verify: a clean tree — mode 'ci_wait' (the CI-consuming path), even when it resolves via instant reuse", async () => {
   const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
   insertHostVerification({
@@ -711,6 +726,10 @@ test("FG-487 deps.verify: a clean tree — mode 'ci_wait' (the CI-consuming path
   assert.equal((started.payload as { mode: string }).mode, "ci_wait");
   const finished = events.find((e) => e.eventType === "review_loop.verification_finished")!;
   assert.ok((finished.payload as { reusedEvidence?: string }).reusedEvidence, "finish event carries the reuse outcome");
+  assert.equal(
+    (finished.payload as { checkContexts: string[] | null }).checkContexts, null,
+    "a host_verifications-row reuse has no CI check contexts to report — never invented",
+  );
 });
 
 test("FG-487 deps.verify: CI unavailable → local fallback — finish event's ciOutcome.kind is 'local_fallback'", async () => {
@@ -1028,6 +1047,14 @@ function noopSleep(): { calls: number[]; fn: NonNullable<ReviewLoopContext["slee
   return { calls, fn };
 }
 
+// AC2 fields (checkContexts / command / tier) are event/telemetry detail, not
+// part of VerificationResult's declared contract (see review-loop.ts's local
+// VerificationResultWithDetail) — cast to read them off deps.verify()'s result.
+type ResultDetail = { checkContexts?: string[] | null; command?: string | null; tier?: string | null };
+function detail(result: unknown): ResultDetail {
+  return result as ResultDetail;
+}
+
 test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reuses, no local run, reusedEvidence names check+url, renders in the report", async () => {
   writeMatchingCiWorkflow();
   gitExec(["add", "."], projectDir);
@@ -1055,6 +1082,7 @@ test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reu
   assert.match(result.reusedEvidence ?? "", new RegExp(REQUIRED_CI_CHECK_CONTEXT.replace(/\//g, "\\/")));
   assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-9/);
   assert.equal(result.ciOutcome?.kind, "reused_after_wait");
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: the finish event must carry the required CI check contexts consulted for reuse");
 
   // Renders in the report: drive a canned round through the real loop + note renderer.
   const outcome = await runReviewLoop(
@@ -1095,6 +1123,7 @@ test("FG-501 verifyWithReuse: CI pending then failed -> verification fails citin
   assert.equal(result.ciOutcome?.kind, "ci_failed");
   assert.equal((result.ciOutcome as { context: string }).context, REQUIRED_CI_CHECK_CONTEXT);
   assert.equal((result.ciOutcome as { url?: string }).url, "https://example.com/ci/run-fail");
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: the finish event must carry the failing check's context");
   assert.equal(result.steps.length, 1);
   assert.equal(result.steps[0]!.ok, false);
   assert.match(result.steps[0]!.output, /https:\/\/example\.com\/ci\/run-fail/);
@@ -1120,6 +1149,8 @@ test("FG-501 verifyWithReuse: CI unavailable -> local fallback runs, citing the 
   const outcome = result.ciOutcome as { reason: string; extendedDelegatedToCi: boolean };
   assert.match(outcome.reason, /no CI status available/);
   assert.equal(outcome.extendedDelegatedToCi, true);
+  assert.equal(detail(result).command, "npm run typecheck && npm run test", "AC2: the finish event must carry the local fallback's command");
+  assert.equal(detail(result).tier, "fast", "AC2: the finish event must carry the local fallback's tier");
 });
 
 test("FG-501 verifyWithReuse: --local-extended restores test:extended in the CI-unavailable local fallback", async () => {
@@ -1139,6 +1170,7 @@ test("FG-501 verifyWithReuse: --local-extended restores test:extended in the CI-
   assert.ok(runner.calls[0]!.includes("test:extended"), `--local-extended must restore test:extended, got: ${JSON.stringify(runner.calls[0])}`);
   const outcome = result.ciOutcome as { extendedDelegatedToCi: boolean };
   assert.equal(outcome.extendedDelegatedToCi, false);
+  assert.equal(detail(result).tier, "extended", "AC2: --local-extended's finish event must report tier 'extended'");
 });
 
 test("FG-501 verifyWithReuse: CI wait times out -> local fallback, citing the timeout reason", async () => {
@@ -1183,6 +1215,7 @@ test("FG-501 verifyWithReuse: CI already green -> immediate reuse, no waiting, n
   assert.equal(sleep.calls.length, 0, "already-green CI must never wait");
   assert.equal(result.ciOutcome, undefined, "immediate reuse carries no ciOutcome — that's reserved for the wait/fallback paths");
   assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-immediate/);
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: an immediate CI-sourced reuse must still report the required check contexts");
 });
 
 test("FG-501 verifyWithReuse: CI reports all-green but the covering-evidence re-check still misses (race) -> local fallback citing the race-condition reason, never invents evidence", async () => {

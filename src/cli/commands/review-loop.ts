@@ -53,6 +53,26 @@ function describeCiChecks(checks: { context: string; url?: string }[]): string {
   return checks.map((c) => (c.url ? `${c.context} (${c.url})` : c.context)).join(", ");
 }
 
+// FG-487 AC2: the verification_finished event must carry the required CI check
+// contexts (ci_wait) or the command/tier actually run (local) — not just
+// ok/ciOutcome — so the dashboard can render what was actually verified.
+// Kept as a local extension of VerificationResult (not a change to the shared
+// v2/review-loop.ts contract) since these fields are event/telemetry detail,
+// not part of the engine's own pass/fail decision.
+type VerificationResultWithDetail = VerificationResult & {
+  checkContexts?: string[];
+  command?: string;
+  tier?: "fast" | "extended";
+};
+
+function tierFromSteps(steps: { name: string }[]): "fast" | "extended" | undefined {
+  if (steps.length === 0) return undefined;
+  return steps.some((s) => s.name === "test:extended") ? "extended" : "fast";
+}
+function commandFromSteps(steps: { name: string }[]): string | undefined {
+  return steps.length === 0 ? undefined : steps.map((s) => `npm run ${s.name}`).join(" && ");
+}
+
 // ── task templates ───────────────────────────────────────────────────────────
 
 function reviewTask(acceptance: string, diff: string, v: VerificationResult): string {
@@ -217,28 +237,36 @@ export function buildReviewLoopDeps(
   // wait/poll (bounded) and reuse once green. Failed → report the deterministic
   // failure directly from CI evidence, no local run. Only a genuinely unavailable
   // CI setup (or a wait that times out) falls back to a real local run.
-  const verifyWithReuse = async (): Promise<VerificationResult> => {
+  const verifyWithReuse = async (): Promise<VerificationResultWithDetail> => {
     const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
     if (dirty) {
       console.log("review-loop: dirty tree — local verification");
-      return runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
+      const result = runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
+      return { ...result, command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps) };
     }
 
     const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
     const requiredGate = getRequiredHostGate(ctx.projectDir);
 
-    const tryReuse = (): VerificationResult | null => {
+    // Populated whenever a CI check context becomes known (pending poll, a
+    // failing check, or CI-sourced covering evidence) so the finish event can
+    // report what was actually required — never invented for the host_row /
+    // local-only paths, where no CI check context exists.
+    let checkContexts: string[] | undefined;
+
+    const tryReuse = (): VerificationResultWithDetail | null => {
       const evidence = findCoveringGateEvidence({
         ticketId: ctx.ticketId, projectDir: ctx.projectDir, sha: headSha,
         command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
       });
       if (!evidence) return null;
+      if (evidence.source === "ci") checkContexts = evidence.checks.map((c) => c.context);
       const description = describeGateEvidence(evidence);
       return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
     };
 
     const immediate = tryReuse();
-    if (immediate) return immediate;
+    if (immediate) return checkContexts ? { ...immediate, checkContexts } : immediate;
 
     const probe = (): CiGateStatus => probeCiGateStatus({
       projectDir: ctx.projectDir, sha: headSha, command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
@@ -250,6 +278,7 @@ export function buildReviewLoopDeps(
     let waited = false;
 
     while (status.kind === "pending") {
+      checkContexts = status.checks.map((c) => c.context);
       const elapsedSeconds = Math.round((now() - startedAt) / 1000);
       console.log(
         `review-loop: CI pending for ${shortSha} — waiting on: ${describeCiChecks(status.checks)} ` +
@@ -267,7 +296,7 @@ export function buildReviewLoopDeps(
     if (status.kind === "success") {
       const reused = tryReuse();
       if (reused) {
-        return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" } } : reused;
+        return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" }, checkContexts } : { ...reused, checkContexts };
       }
       // CI reports every job green but the covering-evidence lookup still fails
       // closed (e.g. a race between the check going green and the row landing) —
@@ -276,6 +305,7 @@ export function buildReviewLoopDeps(
     }
 
     if (status.kind === "failed") {
+      checkContexts = [status.failing.context];
       const urlSuffix = status.failing.url ? ` — ${status.failing.url}` : "";
       const message = `required CI check "${status.failing.context}" failed for ${shortSha}${urlSuffix}`;
       console.log(`review-loop: ${message} (no local run)`);
@@ -283,13 +313,17 @@ export function buildReviewLoopDeps(
         ok: false,
         steps: [{ name: status.failing.context, ok: false, output: message }],
         ciOutcome: { kind: "ci_failed", context: status.failing.context, url: status.failing.url },
+        checkContexts,
       };
     }
 
     console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
     const extendedDelegatedToCi = !ctx.localExtended;
     const result = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
-    return { ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi } };
+    return {
+      ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi },
+      command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps),
+    };
   };
 
   // FG-487: every round's verification (the FG-501 CI-wait poll, or the local
@@ -329,6 +363,12 @@ export function buildReviewLoopDeps(
         ok: result.ok,
         reusedEvidence: result.reusedEvidence ?? null,
         ciOutcome: result.ciOutcome ?? null,
+        // AC2: ci_wait's required check contexts, local's command/tier — the
+        // dashboard detail line these fields exist for (see main.js's
+        // reviewLoopVerificationDetail).
+        checkContexts: result.checkContexts ?? null,
+        command: result.command ?? null,
+        tier: result.tier ?? null,
         steps: result.steps.map((s) => ({ name: s.name, ok: s.ok })),
       },
     });

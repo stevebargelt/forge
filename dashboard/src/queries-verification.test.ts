@@ -51,9 +51,16 @@ db.prepare(`INSERT INTO runs VALUES ('run-matched','review-loop #FG-901','invoke
 insertEvent("run-matched", "review_loop.verification_started", { attemptId: "attempt-matched", round: 1, ticketId: "FG-901", sha: "def5678", mode: "local" }, iso(120_000));
 insertEvent("run-matched", "review_loop.verification_finished", { attemptId: "attempt-matched", ok: true }, iso(90_000));
 
-// ── Scenario 3: a stale unmatched start (past the 20m review-loop cutoff) ──
+// ── Scenario 3: a stale unmatched start (past the 20m review-loop cutoff, but
+// within the 24h lookback) — must be INCLUDED and flagged stale: true, not
+// dropped (the crashed/hung-verification incident this ticket was filed over).
 db.prepare(`INSERT INTO runs VALUES ('run-stale','review-loop #FG-902','invoke','/proj/a','active', ?)`).run(iso(30 * 60_000));
 insertEvent("run-stale", "review_loop.verification_started", { attemptId: "attempt-stale", round: 1, ticketId: "FG-902", sha: "aaa0000", mode: "local" }, iso(30 * 60_000));
+
+// ── Scenario 3b: an ANCIENT unmatched start (beyond the 24h lookback) — must
+// be dropped so a long-dead process doesn't accumulate forever.
+db.prepare(`INSERT INTO runs VALUES ('run-ancient','review-loop #FG-904','invoke','/proj/a','active', ?)`).run(iso(25 * 60 * 60_000));
+insertEvent("run-ancient", "review_loop.verification_started", { attemptId: "attempt-ancient", round: 1, ticketId: "FG-904", sha: "eee9999", mode: "local" }, iso(25 * 60 * 60_000));
 
 // ── Scenario 4: same-identity double-start (crash + restart) — one attemptId
 // finished, the other still open. Must report exactly ONE in-progress item.
@@ -67,7 +74,8 @@ insertEvent(null, "campaign_item.host_gate_started", {
   attemptId: "attempt-gate-1", campaignId: "camp-1", itemId: "item-1", ticketId: "FG-910", command: "npm run test:all", testedSha: "ccc2222",
 }, iso(2 * 60_000));
 
-// ── Scenario 6: a campaign reconcile host-gate exec, stale (past the 10m cutoff)
+// ── Scenario 6: a campaign reconcile host-gate exec, stale (past the 10m cutoff,
+// within the 24h lookback) — INCLUDED and flagged stale: true.
 insertEvent(null, "campaign_item.host_gate_started", {
   attemptId: "attempt-gate-stale", campaignId: "camp-1", itemId: "item-2", ticketId: "FG-911", command: "npm run test:all", testedSha: "ddd3333",
 }, iso(15 * 60_000));
@@ -116,9 +124,22 @@ test("inProgressVerifications: a matched start+finish is excluded", () => {
   assert.equal(rows.find((r) => r.attemptId === "attempt-matched"), undefined);
 });
 
-test("inProgressVerifications: a stale unmatched start (past the cutoff) is excluded", () => {
+test("inProgressVerifications: a past-cutoff unmatched start is INCLUDED and flagged stale, not dropped", () => {
   const rows = inProgressVerifications(NOW);
-  assert.equal(rows.find((r) => r.attemptId === "attempt-stale"), undefined);
+  const row = rows.find((r) => r.attemptId === "attempt-stale");
+  assert.ok(row, "a past-cutoff start must still be reported, flagged stale — not silently vanish");
+  assert.equal(row!.stale, true);
+});
+
+test("inProgressVerifications: an ancient unmatched start (beyond the 24h lookback) is dropped", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.equal(rows.find((r) => r.attemptId === "attempt-ancient"), undefined);
+});
+
+test("inProgressVerifications: a fresh unmatched start is NOT flagged stale", () => {
+  const rows = inProgressVerifications(NOW);
+  const row = rows.find((r) => r.attemptId === "attempt-fresh");
+  assert.equal(row!.stale, false);
 });
 
 test("inProgressVerifications: same-identity double-start reports exactly ONE in-progress item, not zero or two", () => {
@@ -142,9 +163,11 @@ test("inProgressVerifications: a fresh campaign reconcile host-gate start is in 
   }
 });
 
-test("inProgressVerifications: a stale campaign reconcile host-gate start (past the 10m cutoff) is excluded", () => {
+test("inProgressVerifications: a past-cutoff campaign reconcile host-gate start is INCLUDED and flagged stale, not dropped", () => {
   const rows = inProgressVerifications(NOW);
-  assert.equal(rows.find((r) => r.attemptId === "attempt-gate-stale"), undefined);
+  const row = rows.find((r) => r.attemptId === "attempt-gate-stale");
+  assert.ok(row, "a past-cutoff gate start must still be reported, flagged stale — not silently vanish");
+  assert.equal(row!.stale, true);
 });
 
 test("reviewLoopRunPhases: a run whose verification finished and now has a running red-wide task shows phase 'reviewing'", () => {

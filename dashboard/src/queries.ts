@@ -921,6 +921,12 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
 const REVIEW_LOOP_VERIFICATION_STALE_MS = 20 * 60 * 1000;
 // Mirrors src/campaign/reconcile-collect.ts's HOST_GATE_TIMEOUT_MS_DEFAULT.
 const CAMPAIGN_HOST_GATE_STALE_MS = 10 * 60 * 1000;
+// FG-487 incident fix: a past-cutoff unmatched start used to be dropped
+// entirely, so a crashed/hung verification vanished instead of being flagged
+// — the exact gap this ticket was filed over. Past-cutoff starts are now
+// INCLUDED with stale: true, bounded by this lookback so ancient rows (a
+// process that crashed days ago) don't accumulate forever.
+const STALE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 type VerificationEventRow = {
   run_id: string | null;
@@ -968,6 +974,7 @@ export type InProgressVerification =
       mode: string | null;
       round: number | null;
       startedAt: string;
+      stale: boolean;
     }
   | {
       kind: "campaign_reconcile_gate";
@@ -979,6 +986,7 @@ export type InProgressVerification =
       command: string | null;
       testedSha: string | null;
       startedAt: string;
+      stale: boolean;
     };
 
 /** Every start event whose attemptId has no matching finish yet, minus any
@@ -1001,8 +1009,8 @@ export function inProgressVerifications(nowMs: number = Date.now()): InProgressV
     if (!attemptId || finishedAttemptIds.has(attemptId)) continue;
 
     const ageMs = nowMs - new Date(row.created_at).getTime();
+    if (ageMs > STALE_LOOKBACK_MS) continue;
     if (row.event_type === "review_loop.verification_started") {
-      if (ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS) continue;
       out.push({
         kind: "review_loop_verification",
         attemptId,
@@ -1012,9 +1020,9 @@ export function inProgressVerifications(nowMs: number = Date.now()): InProgressV
         mode: typeof payload.mode === "string" ? payload.mode : null,
         round: typeof payload.round === "number" ? payload.round : null,
         startedAt: row.created_at,
+        stale: ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS,
       });
     } else {
-      if (ageMs > CAMPAIGN_HOST_GATE_STALE_MS) continue;
       out.push({
         kind: "campaign_reconcile_gate",
         attemptId,
@@ -1026,6 +1034,7 @@ export function inProgressVerifications(nowMs: number = Date.now()): InProgressV
           typeof payload.command === "string" ? payload.command : typeof payload.gate === "string" ? payload.gate : null,
         testedSha: typeof payload.testedSha === "string" ? payload.testedSha : null,
         startedAt: row.created_at,
+        stale: ageMs > CAMPAIGN_HOST_GATE_STALE_MS,
       });
     }
   }
