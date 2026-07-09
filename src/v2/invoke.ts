@@ -26,7 +26,7 @@ import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
-import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
+import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -459,6 +459,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const containerName = `forge-${taskId}`;
   logEvent("container.started", { runId, taskId, payload: { containerName } });
   let exitCode: number;
+  // FG-492: populated by docker-exec.ts's capture-at-close, just before it
+  // decides whether to reap or retain the container. Attached onto every
+  // terminal container event below so `forge show`/`status`/`ops check` can
+  // render "confirmed container exit — exit N, signal S, OOMKilled=B" instead
+  // of an unproven "killed" label.
+  let containerEvidence: ContainerCausalEvidence | undefined;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
@@ -466,6 +472,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
+      onContainerEvidence: (e) => { containerEvidence = e; },
     });
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed
@@ -518,7 +525,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
-    logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
+    logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     const kind = classify({ exitCode });
     failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
@@ -534,14 +541,14 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // generic crash.
   if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode } });
+    logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
-  logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode } });
+  logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
 
   // Read result.json.
   const resultPath = join(dir, "result.json");

@@ -10,7 +10,8 @@ import type { Run, Task, TaskStatus, RunStatus } from "../../types/index.js";
 import type { LivenessState } from "../../ops/reconcile-candidate.js";
 import { RunBusyError } from "../../util/run-lock.js";
 import { runDir } from "../../util/paths.js";
-import { performOpsRepairCommand } from "./ops.js";
+import { performOpsRepairCommand, performOpsReapContainers } from "./ops.js";
+import type { ContainerReap } from "../../v2/reconcile.js";
 
 let db: DatabaseInstance;
 let prev: DatabaseInstance | null;
@@ -90,4 +91,68 @@ test("performOpsRepairCommand: --dry-run never acquires a lock, even on an alrea
   assert.equal(outcome.kind, "repaired");
   assert.equal((outcome as { dryRun: boolean }).dryRun, true);
   assert.equal(getTask("t-cmd-dry")!.status, "pending", "dry-run writes nothing");
+});
+
+// ── FG-492: forge ops reap-containers ───────────────────────────────────────
+
+test("performOpsReapContainers: reaps a retained failed-task container, never touches a running one", () => {
+  insertRun(mkRun("run-reap-1", "active"));
+  insertTask(mkTask("t-reap-failed", "run-reap-1", "failed"));
+  insertTask(mkTask("t-reap-running", "run-reap-1", "running"));
+
+  const calls: string[] = [];
+  const reap: ContainerReap = (name) => {
+    calls.push(name);
+    return "killed";
+  };
+
+  const outcome = performOpsReapContainers({}, reap);
+  assert.equal(outcome.scanned, 1, "only the failed task is a candidate — never a running one's container");
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-failed"]);
+  assert.deepEqual(calls, ["forge-t-reap-failed"]);
+  assert.equal(outcome.retained.length, 0);
+  assert.equal(outcome.errors.length, 0);
+});
+
+test("performOpsReapContainers: --dry-run reports without calling the reaper", () => {
+  insertRun(mkRun("run-reap-2", "active"));
+  insertTask(mkTask("t-reap-dry", "run-reap-2", "failed"));
+
+  let called = false;
+  const reap: ContainerReap = () => {
+    called = true;
+    return "killed";
+  };
+
+  const outcome = performOpsReapContainers({ dryRun: true }, reap);
+  assert.equal(outcome.dryRun, true);
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-dry"]);
+  assert.equal(called, false, "dry-run must never invoke the reaper");
+});
+
+test("performOpsReapContainers: reap 'error' (not confirmed gone) is reported distinctly from 'retained'", () => {
+  insertRun(mkRun("run-reap-3", "active"));
+  insertTask(mkTask("t-reap-error", "run-reap-3", "failed"));
+
+  const reap: ContainerReap = () => "error";
+  const outcome = performOpsReapContainers({}, reap);
+  assert.deepEqual(outcome.errors, ["forge-t-reap-error"]);
+  assert.equal(outcome.reaped.length, 0);
+  assert.equal(outcome.retained.length, 0, "a reap failure is not the same as a deliberate retention decision");
+});
+
+test("performOpsReapContainers: --older-than-minutes leaves a recently-failed task's container alone", () => {
+  insertRun(mkRun("run-reap-4", "active"));
+  const recent: Task = { ...mkTask("t-reap-recent", "run-reap-4", "failed"), completedAt: new Date().toISOString() };
+  insertTask(recent);
+  const old: Task = { ...mkTask("t-reap-old", "run-reap-4", "failed"), completedAt: "2020-01-01T00:00:00Z" };
+  insertTask(old);
+
+  let called = 0;
+  const reap: ContainerReap = () => { called++; return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap);
+  assert.deepEqual(outcome.retained, ["forge-t-reap-recent"], "still within the retention window");
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-old"]);
+  assert.equal(called, 1, "only the old one's container is actually reaped");
 });

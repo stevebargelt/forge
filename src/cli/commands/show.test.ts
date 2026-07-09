@@ -1,9 +1,10 @@
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { taskDir } from "../../util/paths.js";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
@@ -32,6 +33,7 @@ import {
   groupFailedByKind,
   getBlockerTasks,
   showReconcileStep,
+  registerShow,
 } from "./show.js";
 import { getTask } from "../../store/tasks.js";
 import { eventsForTask } from "../../store/events.js";
@@ -1192,4 +1194,162 @@ test("#298: forge show <run> --reconcile finalizes the run's stale tasks", () =>
   assert.equal(getTask("task-run-stale-2")!.status, "failed");
   assert.match(getTask("task-run-stale-2")!.error ?? "", /orphaned_needs_finalize/);
   assert.equal(eventsForTask("task-run-stale-2").filter((e) => e.eventType === "task.reconciled").length, 1);
+});
+
+// ─── FG-492 finding 1: `forge show <id> --diagnostic` (CLI-level) ──────────
+//
+// The ticket's own AC, diff_summary, and docs/autonomous-run-prompt.md all
+// name `forge show <id> --diagnostic` as the way to inspect container causal
+// evidence — but the flag was never registered on the command, so running it
+// errored with "unknown option '--diagnostic'". Every other FG-492 test in
+// this file exercises the pure rendering helpers directly; none of them ever
+// actually ran the documented CLI invocation, which is exactly how the miss
+// slipped through. These tests register the real command on a real Command()
+// and parse the real argv, the way a user's shell invocation would.
+
+function captureConsoleLog(): string[] {
+  const lines: string[] = [];
+  mock.method(console, "log", (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  return lines;
+}
+
+test("CLI: `forge show <id> --diagnostic` is a registered option — does not throw 'unknown option'", async () => {
+  insertTask(makeTask("task-diag-registered", { status: "failed" }));
+  const program = new Command();
+  registerShow(program);
+  await assert.doesNotReject(
+    () => program.parseAsync(["show", "task-diag-registered", "--diagnostic"], { from: "user" }),
+  );
+});
+
+test("CLI: `forge show <id> --diagnostic` prints a focused causal-evidence report — confirmed exit with code/signal/OOM, and what's still missing", async () => {
+  const taskId = "task-diag-confirmed";
+  insertTask(makeTask(taskId, { status: "failed", completedAt: "2026-05-29T11:00:00Z" }));
+  logEvent("container.exited", {
+    runId: RUN.id,
+    taskId,
+    payload: {
+      containerName: `forge-${taskId}`,
+      exitCode: 137,
+      containerEvidence: {
+        containerName: `forge-${taskId}`,
+        containerExitedEventObserved: true,
+        dockerExitCode: 137,
+        signal: "SIGKILL",
+        oomKilled: true,
+      },
+    },
+  });
+  logEvent("task.failed", { runId: RUN.id, taskId, payload: { failure_kind: "oom_killed", error: "oom_killed: ..." } });
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId, "--diagnostic"], { from: "user" });
+
+    const out = lines.join("\n");
+    assert.match(out, new RegExp(`Container causal evidence for task ${taskId}`));
+    assert.match(out, /confirmed container exit/);
+    assert.match(out, /exit code 137/);
+    assert.match(out, /signal SIGKILL/);
+    assert.match(out, /OOMKilled=true/);
+    // A FOCUSED report, not the whole `forge show` dump.
+    assert.doesNotMatch(out, /Timeline:/);
+    assert.doesNotMatch(out, /^Next:/m);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("CLI: `forge show <id> --diagnostic` names what's missing when the container disappeared with no terminal event", async () => {
+  const taskId = "task-diag-missing";
+  insertTask(makeTask(taskId, { status: "failed" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId,
+    payload: {
+      failure_kind: "orphaned",
+      error: "orphaned: container gone with no result (reconciled after crash)",
+      containerEvidence: { containerName: `forge-${taskId}`, containerExitedEventObserved: false },
+    },
+  });
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId, "--diagnostic"], { from: "user" });
+
+    const out = lines.join("\n");
+    assert.match(out, /container disappeared without terminal evidence/);
+    assert.match(out, /missing:.*container\.exited event was ever recorded/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("CLI: `forge show <id> --diagnostic --json` emits ONLY the causal-evidence diagnostic as structured JSON", async () => {
+  const taskId = "task-diag-json";
+  insertTask(makeTask(taskId, { status: "failed" }));
+  logEvent("container.exited", {
+    runId: RUN.id,
+    taskId,
+    payload: {
+      containerName: `forge-${taskId}`,
+      exitCode: 1,
+      containerEvidence: { containerName: `forge-${taskId}`, containerExitedEventObserved: true, dockerExitCode: 1 },
+    },
+  });
+  logEvent("task.failed", { runId: RUN.id, taskId, payload: { failure_kind: "container_crash", error: "container_crash (exit 1)" } });
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId, "--diagnostic", "--json"], { from: "user" });
+
+    const parsed = JSON.parse(lines.join("\n")) as Record<string, unknown>;
+    assert.equal(parsed.taskId, taskId);
+    assert.equal(parsed.isFanoutParent, false);
+    const containerEvidence = parsed.containerEvidence as Record<string, unknown>;
+    assert.equal(containerEvidence.dockerExitCode, 1);
+    assert.match(parsed.containerEvidenceSummary as string, /confirmed container exit/);
+    assert.ok(Array.isArray(parsed.missingContainerEvidence));
+    // Focused payload — not the whole task/events/diagnostic blob `--json` alone emits.
+    assert.equal(parsed.task, undefined);
+    assert.equal(parsed.events, undefined);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("CLI: `forge show <id> --diagnostic` marks a fanout parent's derived failure as n/a, never a killed agent", async () => {
+  const taskId = "task-diag-fanout-parent";
+  insertTask(makeTask(taskId, { status: "failed" }));
+  logEvent("task.failed", {
+    runId: RUN.id,
+    taskId,
+    payload: {
+      failure_kind: "fanout_wave_orphaned",
+      error: "fanout wave orphaned: 1/3 children complete, the rest failed or never finished",
+      childSummary: { total: 3, complete: 1 },
+    },
+  });
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId, "--diagnostic"], { from: "user" });
+
+    const out = lines.join("\n");
+    assert.match(out, /n\/a — this is a fanout parent/);
+    assert.match(out, /not from a killed agent/);
+    assert.match(out, /fanout wave: 1\/3 children completed/);
+  } finally {
+    mock.restoreAll();
+  }
 });

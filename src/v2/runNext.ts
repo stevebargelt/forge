@@ -39,7 +39,7 @@ import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
-import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
+import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
 import { getDb } from "../store/db.js";
@@ -2152,6 +2152,11 @@ async function runContainer(args: {
           stdoutPath: provisionStdoutPath,
           stderrPath: provisionStderrPath,
           idleTimeoutMs: DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+          // FG-492 finding 2: the provisioner keeps its own --rm lifecycle
+          // (FG-437) — skip docker-exec.ts's capture-at-close/reap policy so a
+          // clean provisioner run doesn't `docker inspect`/`docker rm -f` a
+          // container the daemon has likely already auto-removed.
+          isProvisionerExec: true,
         });
         const stderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
         return { exitCode: provisionerExitCode, stderrTail };
@@ -2231,6 +2236,10 @@ async function runContainer(args: {
   const containerName = `forge-${args.taskId}`;
   logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
   let exitCode: number;
+  // FG-492: populated by docker-exec.ts's capture-at-close, just before it
+  // decides whether to reap or retain the container. Attached onto every
+  // terminal container event below (mirrors invoke.ts).
+  let containerEvidence: ContainerCausalEvidence | undefined;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
@@ -2238,6 +2247,7 @@ async function runContainer(args: {
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
+      onContainerEvidence: (e) => { containerEvidence = e; },
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
@@ -2283,7 +2293,7 @@ async function runContainer(args: {
   // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
   // Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
-    logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+    logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     const kind = classify({ exitCode });
     failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
@@ -2298,13 +2308,13 @@ async function runContainer(args: {
   // branch below.
   if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.dependency_provisioning_failed", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+    logEvent("container.dependency_provisioning_failed", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const msg = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
     return { kind: "failed", error: msg };
   }
 
-  logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+  logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";

@@ -34,8 +34,10 @@ import { removeWorktreeIfSafe } from "./worktree-lifecycle.js";
 import { getManifestRuntime } from "./task-manifest.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { inferredResultFrom } from "./inferred-result.js";
-import type { OrphanEvidence, ContainerExitInfo } from "./failure-kind.js";
+import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
+import { parseDockerInspectState } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
+import { shouldRetainContainer } from "./docker-exec.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
 
@@ -100,21 +102,18 @@ export function defaultContainerAlive(name: string): boolean {
   }
 }
 
-/** FG-455 p4: best-effort exit-code/OOM probe for a container we've already
- *  confirmed is gone (see defaultContainerAlive above). Never throws: any
- *  docker error (daemon hiccup, "No such object" for a genuinely-gone
- *  container) or unparseable output returns `{}` — unknown, not a guess. */
-export function defaultContainerExitInfo(name: string): { exitCode?: number; oomKilled?: boolean } {
+/** FG-455 p4 / FG-492: best-effort exit-code/OOM/signal/timing probe for a
+ *  container we've already confirmed is gone (see defaultContainerAlive
+ *  above) — the container may still be briefly inspectable in the window
+ *  between "not Running" and the daemon actually reaping it. Never throws:
+ *  any docker error (daemon hiccup, "No such object" for a genuinely-gone
+ *  container) or unparseable output returns `{}` — unknown, not a guess.
+ *  Shares its parsing with docker-exec.ts's capture-at-close probe
+ *  (parseDockerInspectState) so the two never drift on field names. */
+export function defaultContainerExitInfo(name: string): ReturnType<ContainerExitInfo> {
   try {
-    const out = execFileSync(
-      "docker",
-      ["inspect", "-f", "{{.State.ExitCode}} {{.State.OOMKilled}}", name],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    ).toString().trim();
-    const [exitCodeRaw, oomRaw] = out.split(/\s+/);
-    const exitCode = exitCodeRaw !== undefined ? Number(exitCodeRaw) : NaN;
-    if (!Number.isFinite(exitCode) || (oomRaw !== "true" && oomRaw !== "false")) return {};
-    return { exitCode, oomKilled: oomRaw === "true" };
+    const out = execFileSync("docker", ["inspect", name], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+    return parseDockerInspectState(out);
   } catch {
     return {};
   }
@@ -205,8 +204,35 @@ export function attachedExitEvidence(opts: {
     worktreePathChecked: pathChecked,
     changedFiles: changedWorktreeFiles(pathChecked),
     source,
+    // FG-492: the attached path (invoke.ts / runNext.ts) called this because it
+    // just watched the container's process exit itself — a confirmed exit, not
+    // a disappearance discovered later. Distinct from reconcile's own
+    // container-gone evidence below, which always sets this false.
+    containerExitedEventObserved: true,
     ...(opts.exitCode !== undefined ? { exitCode: opts.exitCode } : {}),
     ...(opts.oomKilled !== undefined ? { oomKilled: opts.oomKilled } : {}),
+  };
+}
+
+// FG-492: project reconcile's OrphanEvidence (which carries the container
+// fields inline, alongside worktree/changed-files evidence) into the
+// standalone ContainerCausalEvidence shape docker-exec.ts's attached-exit path
+// emits, so `getContainerCausalEvidenceFromEvents` — the single reader `forge
+// show`/`status`/`ops check` use — finds the SAME `containerEvidence` payload
+// key regardless of which path produced it. Recorded ALONGSIDE `evidence` on
+// the container-gone task.failed/task.reconciled events below, never
+// replacing it — OrphanEvidence's worktree/changed-files fields have no home
+// in ContainerCausalEvidence.
+function toContainerCausalEvidence(evidence: OrphanEvidence): ContainerCausalEvidence {
+  return {
+    containerName: evidence.containerName,
+    containerExitedEventObserved: evidence.containerExitedEventObserved ?? false,
+    ...(evidence.exitCode !== undefined ? { dockerExitCode: evidence.exitCode } : {}),
+    ...(evidence.oomKilled !== undefined ? { oomKilled: evidence.oomKilled } : {}),
+    ...(evidence.dockerStateError !== undefined ? { dockerStateError: evidence.dockerStateError } : {}),
+    ...(evidence.signal !== undefined ? { signal: evidence.signal } : {}),
+    ...(evidence.startedAt !== undefined ? { startedAt: evidence.startedAt } : {}),
+    ...(evidence.finishedAt !== undefined ? { finishedAt: evidence.finishedAt } : {}),
   };
 }
 
@@ -251,10 +277,11 @@ export function reconcileRun(
     const error =
       "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
       `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
+    const containerEvidence = toContainerCausalEvidence(evidence);
     getDb().transaction(() => { // FG-463: fail write + its events atomic
       markTaskFailed(taskId, error, result);
-      logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence } });
-      logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence } });
+      logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence, containerEvidence } });
+      logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence, containerEvidence } });
     })();
     taskChanges.push({ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" });
   };
@@ -276,6 +303,21 @@ export function reconcileRun(
     try {
     const taskEvents = eventsForTask(t.id);
     const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
+    // FG-492: explicit — record whether Forge itself ever observed this task's
+    // container exit (any attached-exit terminal container event), rather than
+    // just implying "no" from reaching this branch at all. In practice this is
+    // always false by the time we're here (a task only stays `running` with its
+    // container confirmed gone below if the process that would have logged one
+    // of these never got the chance to), but recording it explicitly — instead
+    // of relying on that inference — is exactly what distinguishes "container
+    // disappeared without terminal evidence" from a confirmed exit for
+    // `forge show`/`status`/`ops check`.
+    const hasContainerExited = taskEvents.some(
+      (e) =>
+        e.eventType === "container.exited" ||
+        e.eventType === "container.idle_timeout" ||
+        e.eventType === "container.dependency_provisioning_failed",
+    );
 
     // FG-437: a task can crash between task.started and container.started —
     // while its dependency provisioner (a SEPARATE, differently-named
@@ -388,7 +430,7 @@ export function reconcileRun(
     // FG-455 p4: gathered once alongside the rest of the container-gone evidence
     // tuple — never throws (see defaultContainerExitInfo), so a daemon hiccup
     // just yields {} (unknown), same as today's behavior.
-    let exitInfo: { exitCode?: number; oomKilled?: boolean };
+    let exitInfo: ReturnType<ContainerExitInfo>;
     try {
       exitInfo = containerExitInfo(containerName);
     } catch {
@@ -402,6 +444,16 @@ export function reconcileRun(
       source,
       exitCode: exitInfo.exitCode,
       oomKilled: exitInfo.oomKilled,
+      // FG-492: architecturally separate from exitCode/oomKilled above — this
+      // records what FORGE observed (nothing — no prior container.exited event),
+      // never collapsed with what docker inspect currently reports. The two can
+      // legitimately disagree (docker still has exit info even though Forge
+      // never saw the event), and that disagreement is itself diagnostic.
+      containerExitedEventObserved: hasContainerExited,
+      dockerStateError: exitInfo.dockerStateError,
+      signal: exitInfo.signal,
+      startedAt: exitInfo.startedAt,
+      finishedAt: exitInfo.finishedAt,
     };
 
     if (result !== undefined) {
@@ -502,10 +554,11 @@ export function reconcileRun(
                 : "") +
               `work may have persisted. Inspect the diff, verify it, then ${workMayPersistAdvice(t.id)}.`
             : " (reconciled after crash)");
+        const containerEvidence = toContainerCausalEvidence(evidence);
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence } });
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence, containerEvidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence, containerEvidence } });
         })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_oom_killed" });
       } else if (changedFiles.length > 0) {
@@ -515,22 +568,47 @@ export function reconcileRun(
             ? "in the SHARED project directory (no dedicated worktree for this task) — this may include unrelated uncommitted changes, evidence to inspect, not proof of task work. "
             : "") +
           `work may have persisted. Inspect the diff, verify it, then ${workMayPersistAdvice(t.id)}.`;
+        const containerEvidence = toContainerCausalEvidence(evidence);
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence } });
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence, containerEvidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence, containerEvidence } });
         })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_worktree_dirty" });
       } else {
         const error = "orphaned: container gone with no result (reconciled after crash)";
+        const containerEvidence = toContainerCausalEvidence(evidence);
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
-          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error } });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence } });
+          logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error, containerEvidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence, containerEvidence } });
         })();
         taskChanges.push({ taskId: t.id, from: "running", to: "failed", reason: "container_gone_no_result" });
       }
     }
+
+    // FG-492 finding 3: a clean-exit (0) task container leaks permanently if
+    // the forge process dies before docker-exec.ts's own close handler can
+    // reap it (spawn.ts no longer runs task containers with --rm — see
+    // finalizeContainerRetention) — reconcile is the only other place that
+    // ever observes this container again, and `forge ops reap-containers`
+    // only ever scans FAILED tasks, so a task that reconciles to COMPLETE here
+    // (container_gone_result_present / container_gone_result_recovered_from_stdout
+    // above) would otherwise never be swept. Mirror docker-exec.ts's own
+    // shouldRetainContainer policy exactly — a genuine failure stays retained
+    // for `forge show` / `forge ops reap-containers` diagnosis, same as if the
+    // attached-exit close handler itself had run; only a CONFIRMED clean exit
+    // is reaped here. An unknown exit code (docker inspect failed/ambiguous,
+    // exitInfo.exitCode undefined) is left alone — never guess. Best-effort,
+    // never throws, never blocks the reconcile pass on a daemon hiccup.
+    if (exitInfo.exitCode !== undefined && !shouldRetainContainer(exitInfo.exitCode)) {
+      try {
+        reapContainer(containerName);
+      } catch {
+        // best-effort — a later reconcile pass or `forge ops reap-containers` can retry
+      }
+    }
+
     // AWN-8: reconciliation is a terminal transition too — don't leave the staged
     // bearer token behind (no-op when there's no auth file).
     cleanupStagedAuth(taskDir(t.runId, t.id));

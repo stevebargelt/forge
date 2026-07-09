@@ -5,10 +5,10 @@ import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage } from "./show.js";
+import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage, describeContainerEvidence } from "./show.js";
 import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
 import { eventsForTask } from "../../store/events.js";
-import { failureKindFromEvents, getOrphanEvidenceFromEvents } from "../../v2/failure-kind.js";
+import { failureKindFromEvents, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "../../v2/failure-kind.js";
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 
 export function registerStatus(program: Command): void {
@@ -86,6 +86,10 @@ export function registerStatus(program: Command): void {
           const events = eventsForTask(t.id);
           const taskFailureKind = t.status === "failed" ? failureKindFromEvents(events) : undefined;
           const orphanEvidence = t.status === "failed" ? getOrphanEvidenceFromEvents(events) : undefined;
+          // FG-492: causal container evidence, same source `forge show` reads —
+          // distinguishes a confirmed exit from a container that disappeared
+          // with no terminal event, without asserting an unproven "killed" cause.
+          const containerEvidence = t.status === "failed" ? getContainerCausalEvidenceFromEvents(events) : undefined;
           return {
             id: t.id,
             phase: t.phase,
@@ -99,6 +103,9 @@ export function registerStatus(program: Command): void {
             failureKind: taskFailureKind ?? null,
             orphanRecovery: orphanEvidence
               ? { evidence: orphanEvidence, message: orphanRecoveryMessage(t.runId, t.id, orphanEvidence, taskFailureKind ?? "orphaned_work_may_persist", runIsInvokeRun) }
+              : null,
+            containerEvidence: containerEvidence
+              ? { evidence: containerEvidence, message: describeContainerEvidence(containerEvidence) }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
@@ -160,6 +167,12 @@ export function registerStatus(program: Command): void {
             if (orphanEvidence) {
               const kind = failureKindFromEvents(events) ?? "orphaned_work_may_persist";
               console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind, runIsInvokeRun)}`);
+            }
+            // FG-492: same causal-evidence line `forge show` prints — a confirmed
+            // container exit vs. one that disappeared with no terminal event.
+            const containerEvidence = getContainerCausalEvidenceFromEvents(events);
+            if (containerEvidence) {
+              console.log(`      container evidence: ${describeContainerEvidence(containerEvidence)}`);
             }
           }
         }

@@ -11,8 +11,8 @@ import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provision
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
-import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
-import { orphanRecoveryMessage } from "../cli/commands/show.js";
+import { failureKindForTask, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { orphanRecoveryMessage, describeContainerEvidence } from "../cli/commands/show.js";
 import { execFileSync } from "node:child_process";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
@@ -1511,4 +1511,51 @@ test("FG-497: an oversized task (>131072 bytes) dispatches cleanly through the r
   const dir = taskDir(r.runId, r.taskId);
   const packageMd = readFileSync(join(dir, "package.md"), "utf8");
   assert.ok(packageMd.includes(oversizedTask), "package.md must carry the full task content");
+});
+
+// ── FG-492: container causal-evidence wiring ────────────────────────────────
+
+// A dockerExec fake standing in for docker-exec.ts's real capture-at-close:
+// it reports the container causal evidence via onContainerEvidence exactly
+// like the real executor does, but writes no result.json (exit 0, clean
+// container exit, agent just never produced usable output).
+function makeCleanExitNoResultExec(): DockerExecFn {
+  return async ({ stdoutPath, stderrPath, onContainerEvidence }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "agent produced no result.json");
+    writeFileSync(stderrPath, "");
+    onContainerEvidence?.({
+      containerName: "forge-stub",
+      containerExitedEventObserved: true,
+      dockerExitCode: 0,
+      oomKilled: false,
+    });
+    return 0;
+  };
+}
+
+test("FG-492: result missing after a CLEAN container exit is rendered as a confirmed exit, never conflated with a disappeared container", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg492-clean-"));
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeCleanExitNoResultExec() });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "result_missing", "distinct failure_kind from container_crash/orphaned — the container exited cleanly");
+
+  const events = eventsForTask(r.taskId);
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+  assert.ok(containerEvidence, "container.exited must carry the causal evidence even when the task then fails on a missing result");
+  assert.equal(containerEvidence.containerExitedEventObserved, true, "Forge directly observed this exit — not a disappearance");
+  assert.equal(containerEvidence.dockerExitCode, 0);
+
+  const summary = describeContainerEvidence(containerEvidence);
+  assert.match(summary, /confirmed container exit/, "a clean exit is a CONFIRMED exit, not a disappearance");
+  assert.doesNotMatch(summary, /disappeared without terminal evidence/, "must not read as the same state as a container that vanished with no terminal event");
+
+  // Sanity: the exited event itself (not a later event) is what carries it.
+  const exitedEvent = events.find((e) => e.eventType === "container.exited")!;
+  assert.ok(exitedEvent, "container.exited must have fired before the result_missing classification");
+  assert.equal((exitedEvent.payload as Record<string, unknown>).exitCode, 0);
 });

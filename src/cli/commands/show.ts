@@ -10,7 +10,7 @@ import { eventsForTask, eventsForRun } from "../../store/events.js";
 import type { Event } from "../../store/events.js";
 import type { Task, Run, VerdictRow } from "../../types/index.js";
 import { resolveIdleTimeoutMs } from "../../v2/idle-watchdog.js";
-import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents, type OrphanEvidence, type FanoutWaveEvidence } from "../../v2/failure-kind.js";
+import { failureKindFromEvents as getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents, getContainerCausalEvidenceFromEvents, type OrphanEvidence, type FanoutWaveEvidence, type ContainerCausalEvidence } from "../../v2/failure-kind.js";
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 import { reconcileRun, type ContainerAlive } from "../../v2/reconcile.js";
 import { getManifestRuntime } from "../../v2/task-manifest.js";
@@ -76,7 +76,67 @@ export function showReconcileStep(
 // of truth, also consumed by the notification layer). Imported + re-exported
 // here under its long-standing name so forge show / watch importers and tests
 // stay stable.
-export { getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents };
+export { getFailureKindFromEvents, getOrphanEvidenceFromEvents, getFanoutWaveEvidenceFromEvents, getContainerCausalEvidenceFromEvents };
+
+// ─── FG-492: container causal-evidence diagnostic rendering ─────────────────
+//
+// Renders the four distinguishable states the ticket requires operator text to
+// tell apart, without ever asserting an unproven "killed" cause:
+//   1. confirmed container exit with code/signal/OOM evidence (containerEvidence
+//      present, containerExitedEventObserved: true — Forge itself watched this
+//      container exit and ran `docker inspect` before it could be removed).
+//   2. container missing with no terminal event recorded (containerEvidence
+//      present, containerExitedEventObserved: false — reconcile found the
+//      container gone with no prior container.exited for this task).
+//   3. fanout parent derived failure with no agent container (isFanoutParent —
+//      dispatchFanoutStep never gives the parent its own container; its
+//      failure is derived from child outcomes, never an agent that was killed).
+//   4. result missing after clean container exit (containerEvidence present,
+//      containerExitedEventObserved: true, dockerExitCode 0 — distinct from #2:
+//      the container is confirmed to have exited cleanly, it just never wrote a
+//      usable result.json).
+
+export function describeContainerEvidence(evidence: ContainerCausalEvidence | undefined): string {
+  if (!evidence) return "no container evidence recorded for this task";
+  if (evidence.containerExitedEventObserved) {
+    const parts: string[] = [];
+    if (evidence.dockerExitCode !== undefined) parts.push(`exit code ${evidence.dockerExitCode}`);
+    if (evidence.signal) parts.push(`signal ${evidence.signal}`);
+    if (evidence.oomKilled !== undefined) parts.push(`OOMKilled=${evidence.oomKilled}`);
+    if (evidence.dockerStateError) parts.push(`docker error: ${evidence.dockerStateError}`);
+    return parts.length > 0
+      ? `confirmed container exit (${evidence.containerName}) — ${parts.join(", ")}`
+      : `confirmed container exit (${evidence.containerName}) — no further docker evidence available`;
+  }
+  // containerExitedEventObserved === false: reconcile's container-gone path —
+  // no prior container.exited event exists for this task. Say so explicitly
+  // rather than naming an unproven cause (the ticket's central requirement).
+  const parts: string[] = [];
+  if (evidence.dockerExitCode !== undefined) parts.push(`docker inspect (after the fact) showed exit code ${evidence.dockerExitCode}`);
+  if (evidence.oomKilled !== undefined) parts.push(`OOMKilled=${evidence.oomKilled}`);
+  if (evidence.dockerStateError) parts.push(`docker error: ${evidence.dockerStateError}`);
+  return parts.length > 0
+    ? `container disappeared without terminal evidence (${evidence.containerName}) — no container.exited event was ever recorded; best-effort docker inspect found: ${parts.join(", ")}`
+    : `container disappeared without terminal evidence (${evidence.containerName}) — no container.exited event was ever recorded, and docker inspect found nothing (daemon hiccup, or the container was already reaped)`;
+}
+
+/** What's still unknown about this task's container causal evidence — the
+ *  ticket's "explicitly list what evidence is missing" requirement. Never
+ *  fabricates an answer; each line names a specific gap. */
+export function missingContainerEvidence(evidence: ContainerCausalEvidence | undefined): string[] {
+  if (!evidence) {
+    return ["no container evidence recorded at all — no container.started event, or this task never ran a container"];
+  }
+  const missing: string[] = [];
+  if (!evidence.containerExitedEventObserved) {
+    missing.push("no container.exited event was ever recorded — the process dispatching this task never observed a clean exit");
+  }
+  if (evidence.dockerExitCode === undefined) missing.push("docker exit code unavailable (docker inspect failed, or the container was already gone)");
+  if (evidence.oomKilled === undefined) missing.push("OOMKilled flag unavailable");
+  if (evidence.startedAt === undefined) missing.push("container start time unavailable");
+  if (evidence.finishedAt === undefined) missing.push("container finish time unavailable");
+  return missing;
+}
 
 export function classifyResultFile(filePath: string): "missing" | "empty" | "malformed" | "valid" {
   let content: string;
@@ -631,7 +691,11 @@ export function registerShow(program: Command): void {
     .description("Show full details of a task or run: package, result, verdicts, timeline")
     .option("--json", "emit JSON instead of human-readable output")
     .option("--reconcile", "reconcile the target against reality before showing — the ONLY mutating path (may emit task.reconciled / run.reconciled and finalize stale state). Default show is read-only.")
-    .action((id: string, opts: { json?: boolean; reconcile?: boolean }) => {
+    .option(
+      "--diagnostic",
+      "for a task: print ONLY the container causal-evidence diagnostic — confirmed exit code/signal/OOM, a container that disappeared with no terminal event, a fanout parent's derived failure (never had a container), or a result missing after a clean exit — plus the explicit list of what evidence is missing. Combine with --json for the same data as structured output.",
+    )
+    .action((id: string, opts: { json?: boolean; reconcile?: boolean; diagnostic?: boolean }) => {
       ensureForgeDirs();
       // #298: forge show is READ-ONLY by default. A diagnostic that mutated state
       // (reconcileRun, formerly run unconditionally here) is exactly the incident
@@ -690,6 +754,48 @@ export function registerShow(program: Command): void {
         // FG-455 p2/p3 review finding 2: fanout_wave_orphaned carries a childSummary
         // (total/complete) on its task.failed event — surface it too, same as orphan evidence.
         const fanoutWaveEvidence = getFanoutWaveEvidenceFromEvents(events);
+        // FG-492: a fanout parent NEVER gets its own agent container
+        // (dispatchFanoutStep never gives it one) — its failure is derived from
+        // child outcomes, so container evidence is structurally n/a here, not a
+        // gap to report as missing.
+        const isFanoutParentFailure = fanoutWaveEvidence !== undefined;
+        const containerCausalEvidence = getContainerCausalEvidenceFromEvents(events);
+        const containerEvidenceSummary = isFanoutParentFailure
+          ? "n/a — this is a fanout parent with no agent container of its own; its failure is derived from its children's outcomes, not from a killed agent."
+          : describeContainerEvidence(containerCausalEvidence);
+        const missingEvidence = isFanoutParentFailure ? [] : missingContainerEvidence(containerCausalEvidence);
+
+        // FG-492 finding 1: `--diagnostic` — the flag the ticket's own AC, diff
+        // summary, and docs/autonomous-run-prompt.md name as THE way to inspect
+        // container causal evidence, but which was never actually registered on
+        // this command (running it errored: "unknown option '--diagnostic'").
+        // A focused report — just the causal-evidence section, not the whole
+        // `forge show` dump — mirroring what the docs promise. `--diagnostic
+        // --json` emits the same fields as structured output for scripted use.
+        if (opts.diagnostic) {
+          const diagnostic = {
+            taskId: task.id,
+            runId: task.runId,
+            status: task.status,
+            containerName: `forge-${task.id}`,
+            isFanoutParent: isFanoutParentFailure,
+            containerEvidence: containerCausalEvidence ?? null,
+            containerEvidenceSummary,
+            missingContainerEvidence: missingEvidence,
+            fanoutWaveEvidence: fanoutWaveEvidence ?? null,
+          };
+          if (opts.json) {
+            console.log(JSON.stringify(diagnostic, null, 2));
+            return;
+          }
+          console.log(`Container causal evidence for task ${task.id} (status: ${task.status})`);
+          console.log(`  ${containerEvidenceSummary}`);
+          for (const gap of missingEvidence) console.log(`    missing: ${gap}`);
+          if (fanoutWaveEvidence) {
+            console.log(`  fanout wave: ${fanoutWaveEvidence.complete}/${fanoutWaveEvidence.total} children completed before this parent was reconciled to failed`);
+          }
+          return;
+        }
 
         if (opts.json) {
           console.log(
@@ -708,6 +814,15 @@ export function registerShow(program: Command): void {
                   fanoutWaveRecovery: fanoutWaveEvidence
                     ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence) }
                     : null,
+                  // FG-492: causal container evidence — distinguishes a confirmed
+                  // exit (code/signal/OOM) from a container that disappeared with
+                  // no terminal event, from a fanout parent that never had a
+                  // container at all. `missingContainerEvidence` explicitly names
+                  // what's still unknown rather than implying more was confirmed
+                  // than actually was.
+                  containerEvidence: containerCausalEvidence ?? null,
+                  containerEvidenceSummary,
+                  missingContainerEvidence: missingEvidence,
                   elapsed,
                   lastOutputAgo,
                   idleTimeoutMs,
@@ -762,6 +877,16 @@ export function registerShow(program: Command): void {
         // parent orphaned mid-wave — don't let it collapse into a generic failure.
         if (fanoutWaveEvidence) {
           console.log(`  recovery:  ${fanoutWaveRecoveryMessage(task.id, fanoutWaveEvidence)}`);
+        }
+        // FG-492: only for a failed task — a running/complete task's container
+        // evidence isn't diagnostically interesting, and printing it for every
+        // task would bury the signal. Distinguishes a confirmed exit from a
+        // container that disappeared with no terminal event from a fanout
+        // parent that never had a container at all, and names what's still
+        // unknown rather than implying more was confirmed than actually was.
+        if (task.status === "failed") {
+          console.log(`  container evidence: ${containerEvidenceSummary}`);
+          for (const gap of missingEvidence) console.log(`    missing: ${gap}`);
         }
         // Docs-drift Walk (#241): if the completed task touched operator surfaces,
         // suggest the documentation-maintainer (advisory only — not a gate yet).

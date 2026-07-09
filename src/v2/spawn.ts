@@ -112,7 +112,17 @@ function assertWithinArgLimit(label: string, value: string): void {
 }
 
 export function buildDockerArgs(runtime: Runtime, ctx: SpawnContext): BuildArgsResult {
-  const args: string[] = ["run", "--rm", "-i"];
+  // FG-492: deliberately NO --rm for a task/reviewer agent container. Capturing
+  // causal evidence (docker inspect: exit code, signal, OOMKilled, State.Error)
+  // requires the container still exist after its process exits — --rm races
+  // the daemon's own removal against docker-exec.ts's capture-at-close read.
+  // docker-exec.ts (the shared executor) now owns the reap/retain decision
+  // instead: it removes a clean exit immediately and retains a failed one
+  // (FORGE_CONTAINER_RETENTION=off disables retention entirely). The
+  // short-lived dependency provisioner below (buildProvisionerDockerArgs) is
+  // NOT in scope for this — it's a different, always-short-lived container and
+  // keeps its own --rm.
+  const args: string[] = ["run", "-i"];
 
   // --name
   args.push("--name", substitute(runtime.container.name, ctx));

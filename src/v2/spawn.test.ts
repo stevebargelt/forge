@@ -100,6 +100,19 @@ function pickEnv(args: string[]): Record<string, string> {
   return out;
 }
 
+// FG-492: a task/reviewer agent container must NEVER run with --rm — capturing
+// causal evidence (docker inspect: exit code, signal, OOMKilled) at close
+// requires the container still exist after its process exits. docker-exec.ts
+// now owns the reap/retain decision instead (finalizeContainerRetention).
+test("buildDockerArgs: FG-492 never includes --rm on a task/reviewer agent container", () => {
+  process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
+  process.env.AWS_PROFILE = "adx-dev";
+
+  const { args } = buildDockerArgs(BASE_RUNTIME, BASE_CTX);
+  assert.ok(!args.includes("--rm"), `agent container args must not include --rm, got: ${args.join(" ")}`);
+  assert.deepEqual(args.slice(0, 2), ["run", "-i"]);
+});
+
 test("buildDockerArgs: container --name is substituted with TASK_ID", () => {
   process.env.FORGE_AWS_CREDS_FOR_TEST = "AWS_ACCESS_KEY_ID=k,AWS_SECRET_ACCESS_KEY=s,AWS_SESSION_TOKEN=t";
   process.env.AWS_PROFILE = "adx-dev";

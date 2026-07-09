@@ -2,7 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { classify, failTask, failureKindFromEvents, getOrphanEvidenceFromEvents, type FailureKind, type OrphanEvidence } from "./failure-kind.js";
+import {
+  classify,
+  failTask,
+  failureKindFromEvents,
+  getOrphanEvidenceFromEvents,
+  getContainerCausalEvidenceFromEvents,
+  parseDockerInspectState,
+  signalNameForExitCode,
+  type FailureKind,
+  type OrphanEvidence,
+  type ContainerCausalEvidence,
+} from "./failure-kind.js";
 import type { Event } from "../store/events.js";
 import { AuthProfileError } from "./auth-state.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
@@ -472,4 +483,105 @@ test("getOrphanEvidenceFromEvents: also returns the evidence recorded on an oom_
 
 test("getOrphanEvidenceFromEvents: empty event list → undefined", () => {
   assert.equal(getOrphanEvidenceFromEvents([]), undefined);
+});
+
+// ── FG-492: parseDockerInspectState / signalNameForExitCode ─────────────────
+
+test("parseDockerInspectState: parses a full docker inspect array into the shared shape", () => {
+  const raw = JSON.stringify([
+    { State: { StartedAt: "2026-01-01T00:00:00Z", FinishedAt: "2026-01-01T00:05:00Z", ExitCode: 137, OOMKilled: true, Error: "" } },
+  ]);
+  assert.deepEqual(parseDockerInspectState(raw), {
+    startedAt: "2026-01-01T00:00:00Z",
+    finishedAt: "2026-01-01T00:05:00Z",
+    exitCode: 137,
+    oomKilled: true,
+    signal: "SIGKILL",
+  });
+});
+
+test("parseDockerInspectState: a non-signal exit code (0) carries no signal field", () => {
+  const raw = JSON.stringify([{ State: { ExitCode: 0, OOMKilled: false } }]);
+  const parsed = parseDockerInspectState(raw);
+  assert.equal(parsed.exitCode, 0);
+  assert.equal(parsed.signal, undefined);
+});
+
+test("parseDockerInspectState: State.Error is surfaced as dockerStateError when non-empty", () => {
+  const raw = JSON.stringify([{ State: { Error: "OCI runtime error" } }]);
+  assert.equal(parseDockerInspectState(raw).dockerStateError, "OCI runtime error");
+});
+
+test("parseDockerInspectState: empty State.Error is omitted, not recorded as an empty string", () => {
+  const raw = JSON.stringify([{ State: { ExitCode: 0, Error: "" } }]);
+  assert.equal(parseDockerInspectState(raw).dockerStateError, undefined);
+});
+
+test("parseDockerInspectState: malformed JSON → {} (never throws)", () => {
+  assert.deepEqual(parseDockerInspectState("not json {{{"), {});
+});
+
+test("parseDockerInspectState: empty array / no State → {}", () => {
+  assert.deepEqual(parseDockerInspectState("[]"), {});
+  assert.deepEqual(parseDockerInspectState(JSON.stringify([{}])), {});
+});
+
+test("signalNameForExitCode: maps 128+signal to the POSIX name; <=128 is not a signal", () => {
+  assert.equal(signalNameForExitCode(137), "SIGKILL");
+  assert.equal(signalNameForExitCode(143), "SIGTERM");
+  assert.equal(signalNameForExitCode(128), undefined);
+  assert.equal(signalNameForExitCode(1), undefined);
+  assert.equal(signalNameForExitCode(0), undefined);
+});
+
+test("signalNameForExitCode: an above-128 code with no known mapping returns undefined (best-effort, not a guess)", () => {
+  assert.equal(signalNameForExitCode(999), undefined);
+});
+
+// ── FG-492: getContainerCausalEvidenceFromEvents ────────────────────────────
+// Deliberately reads a SEPARATE `containerEvidence` payload key from
+// getOrphanEvidenceFromEvents's `evidence` key — the explicit-match discipline
+// this ticket requires: a structurally different evidence shape must never be
+// mis-cast by the other reader.
+
+const SAMPLE_CONTAINER_EVIDENCE: ContainerCausalEvidence = {
+  containerName: "forge-t-1",
+  containerExitedEventObserved: true,
+  dockerExitCode: 0,
+};
+
+test("getContainerCausalEvidenceFromEvents: returns the evidence recorded under the containerEvidence key", () => {
+  const events: Event[] = [
+    makeEvent("container.exited", { containerName: "forge-t-1", exitCode: 0, containerEvidence: SAMPLE_CONTAINER_EVIDENCE }),
+  ];
+  assert.deepEqual(getContainerCausalEvidenceFromEvents(events), SAMPLE_CONTAINER_EVIDENCE);
+});
+
+test("getContainerCausalEvidenceFromEvents: undefined when no event carries the key", () => {
+  const events: Event[] = [makeEvent("container.exited", { containerName: "forge-t-1", exitCode: 0 })];
+  assert.equal(getContainerCausalEvidenceFromEvents(events), undefined);
+});
+
+test("getContainerCausalEvidenceFromEvents: never mis-cast from an OrphanEvidence-shaped `evidence` key on the same event stream", () => {
+  // An orphaned_work_may_persist task.failed event carries `evidence` (OrphanEvidence)
+  // but NOT `containerEvidence` unless reconcile.ts explicitly attached it — the
+  // two keys are distinct and this reader must not fall back to the other.
+  const events: Event[] = [
+    makeEvent("task.failed", { failure_kind: "orphaned_work_may_persist", error: "x", evidence: SAMPLE_EVIDENCE }),
+  ];
+  assert.equal(getContainerCausalEvidenceFromEvents(events), undefined);
+});
+
+test("getContainerCausalEvidenceFromEvents: empty event list → undefined", () => {
+  assert.equal(getContainerCausalEvidenceFromEvents([]), undefined);
+});
+
+test("getContainerCausalEvidenceFromEvents: picks the LATEST recorded evidence (newest-first)", () => {
+  const first: ContainerCausalEvidence = { containerName: "forge-t-1", containerExitedEventObserved: true, dockerExitCode: 1 };
+  const second: ContainerCausalEvidence = { containerName: "forge-t-1", containerExitedEventObserved: true, dockerExitCode: 0 };
+  const events: Event[] = [
+    makeEvent("container.exited", { containerEvidence: first }),
+    makeEvent("container.exited", { containerEvidence: second }),
+  ];
+  assert.deepEqual(getContainerCausalEvidenceFromEvents(events), second);
 });

@@ -11,12 +11,37 @@
 // (different semantics; what does "different" mean from same inputs?) and
 // not in scope.
 
+import { execFileSync } from "node:child_process";
 import type { Task } from "../types/index.js";
 import { getTask, insertTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
 import { newTaskId, nowIso } from "../util/ids.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
+
+// FG-492: the failed task's container may have been RETAINED (docker-exec.ts's
+// FORGE_CONTAINER_RETENTION policy keeps a failed task's container around for
+// `forge show` / `forge ops reap-containers` to inspect). retry() always mints
+// a brand-new task id (see below), so the new task's own container name
+// (forge-<newId>) never collides with the old one — but once an operator has
+// decided to retry, the old container's diagnostic value is spent, and leaving
+// it around is just clutter a background `forge ops reap-containers` sweep
+// would otherwise have to find later. Best-effort, never blocks the retry: a
+// daemon hiccup or an already-gone container is silently ignored.
+// Exported (mirrors docker-exec.ts's captureContainerCausalEvidence /
+// finalizeContainerRetention convention) so a test can inject a fake
+// execFileSync and assert the exact reap attempted, without a real docker
+// daemon.
+export function reapRetainedContainer(
+  taskId: string,
+  execFileSyncFn: typeof execFileSync = execFileSync,
+): void {
+  try {
+    execFileSyncFn("docker", ["rm", "-f", `forge-${taskId}`], { stdio: ["ignore", "ignore", "ignore"] });
+  } catch {
+    // best-effort only — container already gone, or docker unreachable
+  }
+}
 
 export class RetryNotAllowedError extends Error {
   constructor(public taskId: string, public disposition: RetryDisposition) {
@@ -113,6 +138,7 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     createdAt: nowIso(),
   };
   insertTask(newTask);
+  reapRetainedContainer(task.id);
 
   logEvent("task.retried", {
     runId: task.runId,

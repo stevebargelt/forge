@@ -13,7 +13,8 @@ import { taskDir } from "../util/paths.js";
 import { reconcileRun, reconcileRuns, defaultReconcileWriters, defaultContainerReap, defaultContainerExitInfo, attachedExitEvidence } from "./reconcile.js";
 import type { ReconcileWriters } from "./reconcile.js";
 import type { OrphanEvidence } from "./failure-kind.js";
-import { orphanRecoveryMessage } from "../cli/commands/show.js";
+import { getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { orphanRecoveryMessage, describeContainerEvidence, missingContainerEvidence } from "../cli/commands/show.js";
 import { performReDrive } from "../cli/commands/recover.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -108,6 +109,82 @@ test("reconcile: container gone WITH a valid result → finalized as complete (l
     assert.equal(evidence.source, "worktree");
   } finally {
     rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+// ----- FG-492 finding 3: reap a clean-exit container reconcile discovers -----
+//
+// A task container that exited 0 leaks permanently if the forge process dies
+// before docker-exec.ts's own close handler (captureContainerCausalEvidence +
+// finalizeContainerRetention) can reap it — spawn.ts no longer runs task
+// containers with --rm. `forge ops reap-containers` only ever scans FAILED
+// tasks, so a task reconcile finalizes to COMPLETE here would never be swept
+// by it. reconcile now mirrors docker-exec.ts's own shouldRetainContainer
+// policy: reap only a CONFIRMED clean exit (0); leave a genuine failure
+// retained for `forge show` / `forge ops reap-containers` diagnosis, and never
+// guess when the exit code is unknown.
+
+test("FG-492 finding 3: container gone WITH a valid result AND a confirmed clean exit (0) → the now-stopped container is reaped", () => {
+  const gitDir = makeDirtyGitRepo();
+  try {
+    const taskId = "t-clean-exit-reaped";
+    insertContainerized(mkTask(taskId, { status: "running", worktreePath: gitDir }));
+    const dir = taskDir(RUN.id, taskId);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "done" }));
+    const exitInfo = () => ({ exitCode: 0 });
+    const reaped: string[] = [];
+    const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+    const r = reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+    assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "complete", reason: "container_gone_result_present" }]);
+    assert.equal(getTask(taskId)!.status, "complete");
+    assert.deepEqual(reaped, [`forge-${taskId}`], "a confirmed clean exit is reaped, matching docker-exec.ts's own shouldRetainContainer policy");
+  } finally {
+    rmSync(gitDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-492 finding 3: container gone, no result, confirmed FAILURE exit → NOT reaped (retained for diagnosis)", () => {
+  const taskId = "t-failed-exit-retained";
+  insertContainerized(mkTask(taskId, { status: "running" })); // clean worktree — no changed files → ordinary orphaned
+  const exitInfo = () => ({ exitCode: 1 });
+  const reaped: string[] = [];
+  const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+  const r = reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }]);
+  assert.deepEqual(reaped, [], "a genuine failure stays retained — never reaped just because reconcile observed it");
+});
+
+test("FG-492 finding 3: container gone, exit code UNKNOWN (docker inspect ambiguous/failed) → NOT reaped (never guess)", () => {
+  const taskId = "t-unknown-exit-retained";
+  insertContainerized(mkTask(taskId, { status: "running" }));
+  const exitInfo = () => ({}); // unknown — no exitCode
+  const reaped: string[] = [];
+  const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+  reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+  assert.deepEqual(reaped, [], "an unconfirmed exit code must never be treated as a clean exit");
+});
+
+test("FG-492 finding 3: FORGE_CONTAINER_RETENTION=off reaps even a confirmed FAILURE exit, matching docker-exec.ts's escape hatch", () => {
+  process.env.FORGE_CONTAINER_RETENTION = "off";
+  try {
+    const taskId = "t-retention-off-reaped";
+    insertContainerized(mkTask(taskId, { status: "running" }));
+    const exitInfo = () => ({ exitCode: 137 });
+    const reaped: string[] = [];
+    const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+    reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+    assert.deepEqual(reaped, [`forge-${taskId}`]);
+  } finally {
+    delete process.env.FORGE_CONTAINER_RETENTION;
   }
 });
 
@@ -1373,4 +1450,74 @@ test("FG-484: a concurrent cancel abandoning the run between reconcile's task-le
   const eventTypes = eventsForRun(RUN.id).map((e) => e.eventType);
   assert.ok(!eventTypes.includes("run.completed"), "no run.completed event for a finalize refused by the abandoned re-read");
   assert.ok(!eventTypes.includes("run.reconciled"), "onCompleted's paired run.reconciled event must not fire when the write is refused");
+});
+
+// ── FG-492: container disappearance diagnostics ─────────────────────────────
+// Four states an operator/orchestrator must be able to tell apart without
+// forge asserting an unproven "killed" cause. See show.ts's describeContainerEvidence.
+
+test("FG-492: a started container that disappears with no container.exited event → containerExitedEventObserved=false, rendered as 'disappeared without terminal evidence', never a proven kill", () => {
+  insertContainerized(mkTask("t-disappeared", { status: "running" }));
+  const r = reconcileRun(RUN.id, GONE);
+  assert.deepEqual(r.taskChanges, [{ taskId: "t-disappeared", from: "running", to: "failed", reason: "container_gone_no_result" }]);
+
+  const events = eventsForTask("t-disappeared");
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+  assert.ok(containerEvidence, "reconcile must record container causal evidence, even for a bare no-result orphan");
+  assert.equal(containerEvidence.containerExitedEventObserved, false, "no container.exited event was ever recorded for this task");
+  assert.equal(containerEvidence.containerName, "forge-t-disappeared");
+
+  const summary = describeContainerEvidence(containerEvidence);
+  assert.match(summary, /disappeared without terminal evidence/, "must use the ticket's required phrase");
+  assert.doesNotMatch(summary, /killed/i, "must never assert an unproven kill");
+
+  const missing = missingContainerEvidence(containerEvidence);
+  assert.ok(missing.some((m) => m.includes("no container.exited event")));
+});
+
+test("FG-492: an exited container with exit code 137/OOM evidence is rendered as a CONFIRMED exit, distinct from a disappeared container", () => {
+  const proj = makeDirtyGitRepo();
+  try {
+    insertContainerized(mkTask("t-oom-evidence", { status: "running", worktreePath: proj }));
+    const exitInfo = () => ({ exitCode: 137, oomKilled: true, signal: "SIGKILL", dockerStateError: "" });
+    const r = reconcileRun(RUN.id, GONE, defaultContainerReap, exitInfo);
+    assert.equal(r.taskChanges[0]?.reason, "container_oom_killed");
+
+    const events = eventsForTask("t-oom-evidence");
+    const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+    assert.ok(containerEvidence);
+    // FG-492: architecturally separate booleans — Forge never observed a
+    // container.exited event for THIS task (that's exactly why reconcile is
+    // the one classifying it), even though docker inspect still had exit
+    // evidence to offer. The two disagreeing is itself diagnostic.
+    assert.equal(containerEvidence.containerExitedEventObserved, false);
+    assert.equal(containerEvidence.dockerExitCode, 137);
+    assert.equal(containerEvidence.oomKilled, true);
+    assert.equal(containerEvidence.signal, "SIGKILL");
+
+    const summary = describeContainerEvidence(containerEvidence);
+    assert.match(summary, /disappeared without terminal evidence/, "still a disappearance — Forge itself never observed the exit");
+    assert.match(summary, /exit code 137/);
+    assert.match(summary, /OOMKilled=true/);
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+test("FG-492: a fanout parent's derived failure carries NO container evidence and is never labeled a killed agent", () => {
+  insertTask(mkTask("fanout-parent-evidence", { status: "running" }));
+  insertTask(mkTask("fanout-child-evidence-1", { parentId: "fanout-parent-evidence", status: "complete" }));
+  insertTask(mkTask("fanout-child-evidence-2", { parentId: "fanout-parent-evidence", status: "complete" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+  assert.equal(r.taskChanges.find((c) => c.taskId === "fanout-parent-evidence")?.reason, "fanout_wave_unfinalized");
+
+  const events = eventsForTask("fanout-parent-evidence");
+  assert.ok(!events.some((e) => e.eventType === "container.started"), "a fanout parent never gets its own agent container");
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events);
+  assert.equal(containerEvidence, undefined, "no container evidence exists — there was never a container to inspect");
+
+  const failed = events.find((e) => e.eventType === "task.failed")!;
+  const errorText = (failed.payload as Record<string, unknown>).error as string;
+  assert.doesNotMatch(errorText, /killed/i, "a fanout parent's derived failure must never read as a killed agent");
 });

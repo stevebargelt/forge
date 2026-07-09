@@ -7,7 +7,111 @@ import type { Event } from "../store/events.js";
 // FG-455 p4: mirrors reconcile.ts's ContainerAlive/ContainerReap injectable-seam
 // pattern — a best-effort docker exit-code/OOM probe for a just-confirmed-gone
 // container. Never throws; an unknown/ambiguous result is `{}`.
-export type ContainerExitInfo = (containerName: string) => { exitCode?: number; oomKilled?: boolean };
+// FG-492: extended (additively) with the same best-effort fields
+// parseDockerInspectState surfaces — startedAt/finishedAt/dockerStateError/signal
+// — so reconcile's container-gone path can gather the full causal picture in one
+// probe instead of a second one. All new fields are optional; a `{}` unknown
+// result stays valid.
+export type ContainerExitInfo = (containerName: string) => {
+  exitCode?: number;
+  oomKilled?: boolean;
+  dockerStateError?: string;
+  signal?: string;
+  startedAt?: string;
+  finishedAt?: string;
+};
+
+// FG-492: best-effort parse of `docker inspect <name>`'s raw JSON array output
+// into the fields both docker-exec.ts (capture-at-close, container confirmed
+// present) and reconcile.ts (container confirmed gone, may still be
+// inspectable for a brief window) care about. Never throws — any parse error
+// or unexpected shape collapses to `{}` (unknown), never a guess. Single
+// source of truth so the two probes can't drift on field names/parsing.
+export function parseDockerInspectState(raw: string): {
+  startedAt?: string;
+  finishedAt?: string;
+  exitCode?: number;
+  oomKilled?: boolean;
+  dockerStateError?: string;
+  signal?: string;
+} {
+  try {
+    const parsed = JSON.parse(raw) as Array<{ State?: Record<string, unknown> }>;
+    const state = parsed[0]?.State;
+    if (!state) return {};
+    const out: ReturnType<typeof parseDockerInspectState> = {};
+    if (typeof state["StartedAt"] === "string") out.startedAt = state["StartedAt"];
+    if (typeof state["FinishedAt"] === "string") out.finishedAt = state["FinishedAt"];
+    if (typeof state["ExitCode"] === "number") {
+      out.exitCode = state["ExitCode"];
+      const signal = signalNameForExitCode(state["ExitCode"]);
+      if (signal) out.signal = signal;
+    }
+    if (typeof state["OOMKilled"] === "boolean") out.oomKilled = state["OOMKilled"];
+    if (typeof state["Error"] === "string" && state["Error"].length > 0) out.dockerStateError = state["Error"];
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// FG-492: exit 128+signal is the POSIX convention Docker follows for a
+// signal-terminated process (failure-kind.ts's own classify() already relies on
+// exit 137 = 128 + SIGKILL(9) for oom_killed). Best-effort label only — a
+// legitimate exit code above 128 that ISN'T a signal (unlikely but possible)
+// would mislabel; callers treat this as a hint, not proof.
+const SIGNAL_NAMES_BY_NUMBER: Record<number, string> = {
+  1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 6: "SIGABRT", 9: "SIGKILL", 11: "SIGSEGV", 15: "SIGTERM",
+};
+
+export function signalNameForExitCode(exitCode: number): string | undefined {
+  if (exitCode <= 128) return undefined;
+  return SIGNAL_NAMES_BY_NUMBER[exitCode - 128];
+}
+
+// FG-492: durable per-container causal evidence — recorded on every task
+// container's terminal path (attached-exit capture-at-close in docker-exec.ts,
+// or reconcile's container-gone probe) so an operator can tell "Forge watched
+// this container exit and here's what docker reported" (containerExitedEventObserved:
+// true) apart from "the container was already gone by the time anyone looked"
+// (containerExitedEventObserved: false) — the FG-492 ticket's central distinction.
+// Deliberately a SEPARATE shape from OrphanEvidence (recorded under a distinct
+// `containerEvidence` payload key, never the `evidence` key ORPHAN_EVIDENCE_KINDS
+// gates) so getOrphanEvidenceFromEvents never has to disambiguate between two
+// evidence shapes on the same event.
+export type ContainerCausalEvidence = {
+  containerName: string;
+  startedAt?: string;
+  finishedAt?: string;
+  dockerExitCode?: number;
+  signal?: string;
+  oomKilled?: boolean;
+  dockerStateError?: string;
+  // true: this Forge process directly observed the docker process exit
+  // (attached-exit, docker-exec.ts's capture-at-close). false: reconcile found
+  // the container already gone with no prior container.exited event for this
+  // task — "container disappeared without terminal evidence", not a confirmed
+  // exit.
+  containerExitedEventObserved: boolean;
+};
+
+// FG-492: newest-first scan for the most recently recorded ContainerCausalEvidence
+// on a task's event stream — the `containerEvidence` payload key, distinct from
+// (and never confused with) OrphanEvidence's `evidence` key above. Recorded on
+// container.exited / container.idle_timeout / container.dependency_provisioning_failed
+// (attached-exit, containerExitedEventObserved: true) and on reconcile's
+// task.failed / task.reconciled container-gone events (containerExitedEventObserved:
+// false). A task's event log belongs to exactly one dispatch attempt, so — unlike
+// getOrphanEvidenceFromEvents — there's no task.completed-supersedes-earlier-failure
+// case to guard against here.
+export function getContainerCausalEvidenceFromEvents(events: Event[]): ContainerCausalEvidence | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const payload = events[i]?.payload as Record<string, unknown> | null | undefined;
+    const evidence = payload?.["containerEvidence"];
+    if (evidence) return evidence as ContainerCausalEvidence;
+  }
+  return undefined;
+}
 
 export type FailureKind =
   | "cancelled"
@@ -163,6 +267,20 @@ export type OrphanEvidence = {
   // field existed all omit it.
   exitCode?: number;
   oomKilled?: boolean;
+  // FG-492: additional best-effort docker-inspect fields (see
+  // parseDockerInspectState) recorded alongside exitCode/oomKilled above.
+  dockerStateError?: string;
+  signal?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  // FG-492: whether Forge itself observed a container.exited event for this
+  // task BEFORE this evidence was gathered. Always false for reconcile's
+  // container-gone path (that path only runs because no such event exists —
+  // see reconcile.ts's hasContainerExited check) and always true for the
+  // attached-exit path (attachedExitEvidence below — the process calling it
+  // just watched the container exit). Optional only because evidence recorded
+  // before this field existed omits it.
+  containerExitedEventObserved?: boolean;
 };
 
 // FG-455 p4 review finding 1: oom_killed carries the same OrphanEvidence shape
