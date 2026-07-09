@@ -144,20 +144,34 @@ test("resolveProjectMeta: ignores empty string name (falls back to basename)", (
 // ----- existing tests continue -----
 
 test("resolveProjectMeta: hash fallback is deterministic across calls", () => {
-  // Use distinct projectDirs to avoid cache hits.
+  // Use a distinct projectDir to avoid cache hits.
   const dirA = mkdtempSync(join(tmpdir(), "forge-pm-determ-a-"));
-  const dirB = mkdtempSync(join(tmpdir(), "forge-pm-determ-b-"));
   try {
     const a1 = resolveProjectMeta(dirA);
     _clearCacheForTesting();
     const a2 = resolveProjectMeta(dirA);
     assert.equal(a1?.color, a2?.color);
-    const b = resolveProjectMeta(dirB);
-    // Different inputs almost certainly yield different colors.
-    assert.notEqual(a1?.color, b?.color);
   } finally {
     rmSync(dirA, { recursive: true, force: true });
-    rmSync(dirB, { recursive: true, force: true });
+  }
+});
+
+test("resolveProjectMeta: hash fallback distributes across inputs (collision-tolerant)", () => {
+  // The hue-bucket hash has finitely many outputs, so any single random pair
+  // can legitimately collide (seen in CI). Assert the distribution property
+  // instead: a set of fixed distinct names must yield more than one color.
+  const root = mkdtempSync(join(tmpdir(), "forge-pm-spread-"));
+  try {
+    const colors = new Set(
+      ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"].map((name) => {
+        const d = join(root, name);
+        mkdirSync(d, { recursive: true });
+        return resolveProjectMeta(d)?.color;
+      }),
+    );
+    assert.ok(colors.size > 1, `expected multiple distinct colors across 6 fixed inputs, got: ${[...colors].join(", ")}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

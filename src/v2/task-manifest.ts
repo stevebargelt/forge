@@ -120,10 +120,12 @@ export type TaskManifest = {
   container: { name: string; idleTimeoutMs?: number };
   auth: { profileRequested: boolean; stateMounted: boolean };
   // #292: the runtime EXECUTION metadata this task ran under, distinct from the
-  // model block below (model SELECTION). `name` is the runtime YAML; the rest are
-  // the resolved execution facts (parser/prompt/auth strategy). Optional: pre-#292
-  // manifests omit it. Surfaced by forge show so an operator can tell runtime
-  // behavior apart from upstream provider/model.
+  // model block below (model SELECTION). `name` is the resolved concrete runtime
+  // YAML (e.g. "claude-apikey", never the requested sentinel "claude" — matches
+  // controlPlane.runtime.name; FG-366 aligned the two after FG-350 made them
+  // divergeable); the rest are the resolved execution facts (parser/prompt/auth
+  // strategy). Optional: pre-#292 manifests omit it. Surfaced by forge show so an
+  // operator can tell runtime behavior apart from upstream provider/model.
   runtime?: {
     name: string;
     kind: "claude-code" | "codex" | "pi";
