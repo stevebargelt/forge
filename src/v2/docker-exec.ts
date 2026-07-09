@@ -9,10 +9,15 @@
 // orphans. We `docker kill <name>` the container itself (authoritative), then
 // kill the client to unblock the stream.
 //
-// FG-492: task containers no longer run with `--rm` (see spawn.ts) — this
-// module owns the reap/retain decision instead (see finalizeContainerRetention),
-// so a failed container survives long enough to `docker inspect` for causal
+// FG-492: task containers no longer run with `--rm` (see spawn.ts), so a
+// failed container survives long enough to `docker inspect` for causal
 // evidence and to be reviewed via `forge show` / `forge ops reap-containers`.
+// FG-492 review: this module captures that evidence at close, but does NOT
+// decide reap-vs-retain itself anymore — the container's exit code alone
+// doesn't say whether the TASK succeeded (a clean exit with no result.json is
+// exactly the case worth investigating). The caller (invoke.ts / runNext.ts /
+// reconcile.ts) makes that call once it knows the real outcome, via
+// shouldRetainContainer / finalizeContainerRetention below.
 
 import { spawn as cpSpawn, execFile, execFileSync } from "node:child_process";
 import { createWriteStream } from "node:fs";
@@ -29,27 +34,27 @@ export type DockerExecArgs = {
   // + env override are honored. Falls back to env/default when omitted.
   idleTimeoutMs?: number;
   // FG-492: called once, synchronously, with the best-effort container causal
-  // evidence gathered at capture-at-close — just before this function decides
-  // whether to reap or retain the container (see shouldRetainContainer below).
-  // Optional: DockerExecFn's return type stays `Promise<number>` (unchanged —
-  // dozens of existing test fakes construct DockerExecFn returning a bare
-  // number and must keep working), so this is the non-breaking channel invoke.ts
-  // / runNext.ts use to attach the evidence onto their container.exited /
-  // container.idle_timeout / container.dependency_provisioning_failed events. A
-  // fake DockerExecFn that doesn't care simply never calls it.
+  // evidence gathered at capture-at-close. FG-492 review: this is now the
+  // ONLY thing captured here — reap/retain is decided by the caller once it
+  // has validated result.json (see finalizeContainerRetention in invoke.ts /
+  // runNext.ts). Optional: DockerExecFn's return type stays `Promise<number>`
+  // (unchanged — dozens of existing test fakes construct DockerExecFn
+  // returning a bare number and must keep working), so this is the
+  // non-breaking channel invoke.ts / runNext.ts use to attach the evidence
+  // onto their container.exited / container.idle_timeout /
+  // container.dependency_provisioning_failed events. A fake DockerExecFn that
+  // doesn't care simply never calls it.
   onContainerEvidence?: (evidence: ContainerCausalEvidence) => void;
   // FG-492 finding 2: true for the short-lived dependency-provisioner container
   // (spawn.ts's buildProvisionerDockerArgs, invoked from runNext.ts's
   // provisionDependencyCache call site). FG-437 owns that container's own
   // lifecycle and it already runs with --rm — it was explicitly out of scope
-  // for FG-492's capture-at-close/retention policy. Left unset (the default),
+  // for FG-492's capture-at-close policy. Left unset (the default),
   // defaultDockerExec runs captureContainerCausalEvidence (a `docker inspect`)
-  // and finalizeContainerRetention (a `docker rm -f`) against a container the
-  // daemon has likely already auto-removed — wasted work, and in the reap
-  // case a no-op error swallowed silently. Set true so the close handler skips
-  // both and resolves the exit code exactly as it did before FG-492. Every
-  // other exec() caller (task/reviewer containers) leaves this unset and keeps
-  // the new capture/reap behavior unconditionally.
+  // against a container the daemon has likely already auto-removed — wasted
+  // work. Set true so the close handler skips it and resolves the exit code
+  // exactly as it did before FG-492. Every other exec() caller (task/reviewer
+  // containers) leaves this unset and keeps the capture behavior unconditionally.
   isProvisionerExec?: boolean;
 };
 
@@ -110,15 +115,19 @@ export function captureContainerCausalEvidence(
   }
 }
 
-// FG-492: retention decision for a task container after its process exits.
-// Default posture: reap a clean exit (nothing to investigate) and retain a
-// failure (evidence for `forge show --json` / `forge ops reap-containers`
+// FG-492 review: retention decision for a task container, keyed on whether the
+// TASK actually succeeded — not on the container's raw exit code. A clean
+// exit (0) that never produced a usable result.json, or a pipeline step whose
+// host-side finalize never ran, is exactly the case worth investigating; the
+// old exitCode-based check reaped it anyway, at the moment it mattered most.
+// Default posture: reap a genuine success (nothing to investigate) and retain
+// anything else (evidence for `forge show --json` / `forge ops reap-containers`
 // until an operator or the reaper cleans it up). FORGE_CONTAINER_RETENTION=off
 // disables retention entirely — an escape hatch for a host that can't afford
 // accumulating stopped containers.
-export function shouldRetainContainer(exitCode: number): boolean {
+export function shouldRetainContainer(taskSucceeded: boolean): boolean {
   if (process.env.FORGE_CONTAINER_RETENTION === "off") return false;
-  return exitCode !== 0;
+  return !taskSucceeded;
 }
 
 export type ContainerReapOutcome = "reaped" | "retained" | "reap_failed";
@@ -126,13 +135,17 @@ export type ContainerReapOutcome = "reaped" | "retained" | "reap_failed";
 // Best-effort `docker rm -f` — never throws. "reap_failed" (docker error, NOT
 // confirmed gone) is distinct from "retained" (a deliberate policy decision) so
 // a caller/test can tell a daemon hiccup apart from "we chose to keep this."
+// Callers invoke this once they know the task's real outcome (see
+// shouldRetainContainer above) — invoke.ts / runNext.ts call it right after
+// result.json is validated; reconcile.ts calls its own equivalent once it
+// knows whether the task it just reconciled actually completed.
 export function finalizeContainerRetention(
   containerName: string | undefined,
-  exitCode: number,
+  taskSucceeded: boolean,
   execFileSyncFn: typeof execFileSync = execFileSync,
 ): ContainerReapOutcome {
   if (!containerName) return "retained";
-  if (shouldRetainContainer(exitCode)) return "retained";
+  if (shouldRetainContainer(taskSucceeded)) return "retained";
   try {
     execFileSyncFn("docker", ["rm", "-f", containerName], { stdio: ["ignore", "ignore", "ignore"] });
     return "reaped";
@@ -181,14 +194,18 @@ export const defaultDockerExec: DockerExecFn = async ({ args, stdin, stdoutPath,
           const exitCode = killedForIdle ? IDLE_TIMEOUT_EXIT_CODE : (code ?? 1);
           // FG-492: capture-at-close — the container is not auto-removed
           // (spawn.ts drops --rm for task containers), so it's still
-          // inspectable right here, before the retention decision below may
-          // remove it. FG-492 finding 2: skipped for the provisioner — it
-          // keeps its own --rm (FG-437 owns its lifecycle), so by the time we
-          // get here it's typically already gone; a docker inspect/rm -f
-          // against it is wasted work, not evidence gathering.
+          // inspectable right here. FG-492 review: reap/retain is NOT decided
+          // here anymore — the exit code alone can't say whether the task
+          // succeeded (a clean exit with no result.json is the case worth
+          // investigating). The caller reaps or retains once it has validated
+          // result.json — see finalizeContainerRetention's callers in
+          // invoke.ts / runNext.ts. FG-492 finding 2: capture is skipped for
+          // the provisioner — it keeps its own --rm (FG-437 owns its
+          // lifecycle), so by the time we get here it's typically already
+          // gone; a docker inspect against it is wasted work, not evidence
+          // gathering.
           if (!isProvisionerExec) {
             onContainerEvidence?.(captureContainerCausalEvidence(containerName));
-            finalizeContainerRetention(containerName, exitCode);
           }
           resolve(exitCode);
         }

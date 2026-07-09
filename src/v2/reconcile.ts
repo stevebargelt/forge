@@ -456,6 +456,14 @@ export function reconcileRun(
       finishedAt: exitInfo.finishedAt,
     };
 
+    // FG-492 review: whether the retained/stopped container reconcile just
+    // observed is safe to reap — set true ONLY in the two branches below where
+    // the task is actually finalized to `complete` (a genuinely investigated,
+    // uninteresting outcome). Every other branch (orphaned_needs_finalize,
+    // oom_killed, orphaned_work_may_persist, orphaned, or a lost CAS race)
+    // leaves this false, so the reap check below retains it.
+    let taskCompletedSuccessfully = false;
+
     if (result !== undefined) {
       // FG-455 p1 review: the valid-result outcome is one of the four
       // container-gone outcomes — it must carry the same durable evidence
@@ -476,6 +484,7 @@ export function reconcileRun(
           return true;
         })();
         if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
+        taskCompletedSuccessfully = completed;
       }
     } else if (result === undefined) {
       // FG-455: an empty/absent result.json used to collapse straight to
@@ -539,6 +548,7 @@ export function reconcileRun(
             return true;
           })();
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });
+          taskCompletedSuccessfully = completed;
         }
       } else if (exitInfo.oomKilled === true || exitInfo.exitCode === 137) {
         // FG-455 p4: a positively-identified OOM/SIGKILL death is a distinct,
@@ -587,21 +597,22 @@ export function reconcileRun(
       }
     }
 
-    // FG-492 finding 3: a clean-exit (0) task container leaks permanently if
-    // the forge process dies before docker-exec.ts's own close handler can
-    // reap it (spawn.ts no longer runs task containers with --rm — see
-    // finalizeContainerRetention) — reconcile is the only other place that
-    // ever observes this container again, and `forge ops reap-containers`
-    // only ever scans FAILED tasks, so a task that reconciles to COMPLETE here
-    // (container_gone_result_present / container_gone_result_recovered_from_stdout
-    // above) would otherwise never be swept. Mirror docker-exec.ts's own
-    // shouldRetainContainer policy exactly — a genuine failure stays retained
-    // for `forge show` / `forge ops reap-containers` diagnosis, same as if the
-    // attached-exit close handler itself had run; only a CONFIRMED clean exit
-    // is reaped here. An unknown exit code (docker inspect failed/ambiguous,
-    // exitInfo.exitCode undefined) is left alone — never guess. Best-effort,
-    // never throws, never blocks the reconcile pass on a daemon hiccup.
-    if (exitInfo.exitCode !== undefined && !shouldRetainContainer(exitInfo.exitCode)) {
+    // FG-492 finding 3 (review): a container reconcile finds already gone (or
+    // stopped-but-retained) leaks permanently if the forge process dies before
+    // invoke.ts/runNext.ts's own reap-vs-retain decision can run — reconcile is
+    // the only other place that ever observes it, and `forge ops reap-containers`
+    // only ever scans FAILED tasks, so a task reconcile finalizes to COMPLETE
+    // here (container_gone_result_present / container_gone_result_recovered_from_stdout
+    // above) would otherwise never be swept. The decision now mirrors
+    // docker-exec.ts's shouldRetainContainer exactly, but keyed on the TASK
+    // outcome reconcile itself just decided (taskCompletedSuccessfully), not on
+    // the container's raw exit code — a clean exit (0) that reconcile still
+    // failed (orphaned_needs_finalize, oom_killed, orphaned_work_may_persist,
+    // orphaned, or a lost CAS race) must stay retained; reaping it just because
+    // the exit code was 0 would destroy the evidence at the exact moment it's
+    // worth investigating. Best-effort, never throws, never blocks the
+    // reconcile pass on a daemon hiccup.
+    if (!shouldRetainContainer(taskCompletedSuccessfully)) {
       try {
         reapContainer(containerName);
       } catch {

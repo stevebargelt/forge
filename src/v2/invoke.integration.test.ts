@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
@@ -483,6 +483,138 @@ test("invoke: malformed result.json marks failed", async () => {
 
   assert.equal(r.status, "failed");
   assert.match(r.error ?? "", /malformed/);
+});
+
+// ── FG-492 review: reap/retain now decided in invoke.ts (task outcome), not
+// docker-exec.ts (raw exit code) ─────────────────────────────────────────────
+//
+// The fake dockerExec above never calls docker itself, so `finalizeContainerRetention`'s
+// real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
+// PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
+// whether `rm -f forge-<taskId>` was actually invoked.
+function makeDockerRmStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-invoke-docker-stub-"));
+  const logPath = join(binDir, "docker-calls.log");
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  chmodSync(join(binDir, "docker"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test("invoke: FG-492 review — exit 0 + valid result.json → task completes AND the container is reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: makeStubExec({ status: "complete" }),
+    });
+
+    assert.equal(r.status, "complete");
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f forge-${r.taskId}`), "a completed task's container is reaped");
+  });
+});
+
+test("invoke: FG-492 review — exit 0 + NO result.json (state 4) → task fails result_missing AND the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    // Confirmed clean exit, but no result.json at all — exactly the state-4
+    // case a raw-exit-code-based reap policy would have destroyed.
+    const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: cleanExitNoResult,
+    });
+
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /no_result_json/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a clean exit with no result.json must be retained, never reaped just because the exit code was 0");
+  });
+});
+
+test("invoke: FG-492 review — non-zero exit (container_crash) → the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const crash: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 1;
+    };
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: crash,
+    });
+
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /container_crash/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a genuine container_crash must stay retained for diagnosis");
+  });
+});
+
+test("invoke: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a failed task", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    process.env.FORGE_CONTAINER_RETENTION = "off";
+    try {
+      const crash: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+        const dir = dirname(stdoutPath);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(stdoutPath, "");
+        writeFileSync(stderrPath, "");
+        return 1;
+      };
+
+      const r = await invoke({
+        agentRole: "engineer",
+        task: "do thing",
+        projectDir: "/tmp/x",
+        dockerExec: crash,
+      });
+
+      assert.equal(r.status, "failed");
+      const calls = readFileSync(logPath, "utf8");
+      assert.match(calls, new RegExp(`rm -f forge-${r.taskId}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
+    } finally {
+      delete process.env.FORGE_CONTAINER_RETENTION;
+    }
+  });
 });
 
 // FG-497: the task description must reach the agent via the task package

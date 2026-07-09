@@ -8,7 +8,7 @@
 
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -300,6 +300,143 @@ test("runNext: failed step (container exit nonzero + empty result.json) marks ta
   const first = tasks.find((t) => t.phase === "first");
   assert.ok(first);
   assert.equal(first!.status, "failed");
+});
+
+// ── FG-492 review: reap/retain now decided in runNext.ts (task outcome), not
+// docker-exec.ts (raw exit code) ─────────────────────────────────────────────
+//
+// The fake dockerExec above never calls docker itself, so `finalizeContainerRetention`'s
+// real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
+// PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
+// whether `rm -f forge-<taskId>` was actually invoked.
+function makeDockerRmStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-runnext-docker-stub-"));
+  const logPath = join(binDir, "docker-calls.log");
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  chmodSync(join(binDir, "docker"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test("runNext: FG-492 review — exit 0 + valid result.json → primary completes AND the container is reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "reap-on-complete test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: makeStubExec({ status: "complete" }) });
+    assert.deepEqual(wave.completedSteps, ["first"]);
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f forge-${first.id}`), "a completed primary's container is reaped");
+  });
+});
+
+test("runNext: FG-492 review — exit 0 + NO result.json (state 4) → primary fails result_missing AND the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "retain-on-result-missing test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    // Confirmed clean exit, but no result.json at all — exactly the state-4
+    // case a raw-exit-code-based reap policy would have destroyed.
+    const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: cleanExitNoResult });
+    assert.deepEqual(wave.failedSteps, ["first"]);
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    assert.match(first.error ?? "", /no_result_json/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a clean exit with no result.json must be retained, never reaped just because the exit code was 0");
+  });
+});
+
+test("runNext: FG-492 review — non-zero exit (container_crash) → the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "retain-on-crash test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const crashingExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "result.json"), "");
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "container crashed");
+      return 1;
+    };
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: crashingExec });
+    assert.deepEqual(wave.failedSteps, ["first"]);
+
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a genuine container_crash must stay retained for diagnosis");
+  });
+});
+
+test("runNext: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a failed primary", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    process.env.FORGE_CONTAINER_RETENTION = "off";
+    try {
+      const { runId } = startRun({
+        workflow: LINEAR_WORKFLOW,
+        title: "retention-off test",
+        inputs: { brief: "x" },
+        projectDir: "/tmp/test-project",
+      });
+
+      const crashingExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+        const dir = dirname(stdoutPath);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "result.json"), "");
+        writeFileSync(stdoutPath, "");
+        writeFileSync(stderrPath, "container crashed");
+        return 1;
+      };
+
+      const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: crashingExec });
+      assert.deepEqual(wave.failedSteps, ["first"]);
+
+      const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+      const calls = readFileSync(logPath, "utf8");
+      assert.match(calls, new RegExp(`rm -f forge-${first.id}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
+    } finally {
+      delete process.env.FORGE_CONTAINER_RETENTION;
+    }
+  });
 });
 
 test("runNext: idle-timeout exit code marks the pipeline task failed with idle_timeout", async () => {

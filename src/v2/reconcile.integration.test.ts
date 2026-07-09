@@ -115,15 +115,19 @@ test("reconcile: container gone WITH a valid result → finalized as complete (l
 
 // ----- FG-492 finding 3: reap a clean-exit container reconcile discovers -----
 //
-// A task container that exited 0 leaks permanently if the forge process dies
-// before docker-exec.ts's own close handler (captureContainerCausalEvidence +
-// finalizeContainerRetention) can reap it — spawn.ts no longer runs task
-// containers with --rm. `forge ops reap-containers` only ever scans FAILED
-// tasks, so a task reconcile finalizes to COMPLETE here would never be swept
-// by it. reconcile now mirrors docker-exec.ts's own shouldRetainContainer
-// policy: reap only a CONFIRMED clean exit (0); leave a genuine failure
-// retained for `forge show` / `forge ops reap-containers` diagnosis, and never
-// guess when the exit code is unknown.
+// A task container leaks permanently if the forge process dies before
+// invoke.ts/runNext.ts's own reap-vs-retain decision can run — spawn.ts no
+// longer runs task containers with --rm, and docker-exec.ts itself never
+// reaps at close anymore (FG-492 review). `forge ops reap-containers` only
+// ever scans FAILED tasks, so a task reconcile finalizes to COMPLETE here
+// would never be swept by it. reconcile mirrors docker-exec.ts's
+// shouldRetainContainer policy, but keyed on the TASK outcome reconcile
+// itself just decided — NOT on the container's raw exit code: reap only when
+// the task is actually finalized to `complete` here; leave anything else
+// (ordinary orphaned, orphaned_needs_finalize, oom_killed,
+// orphaned_work_may_persist, or a lost CAS race) retained for `forge show` /
+// `forge ops reap-containers` diagnosis, regardless of what the exit code
+// happened to be.
 
 test("FG-492 finding 3: container gone WITH a valid result AND a confirmed clean exit (0) → the now-stopped container is reaped", () => {
   const gitDir = makeDirtyGitRepo();
@@ -187,6 +191,49 @@ test("FG-492 finding 3: FORGE_CONTAINER_RETENTION=off reaps even a confirmed FAI
   } finally {
     delete process.env.FORGE_CONTAINER_RETENTION;
   }
+});
+
+// FG-492 review: the regression this fix specifically targets. Under the OLD
+// exitCode-based policy, a CONFIRMED CLEAN exit (0) was always reaped — even
+// here, where there's no result.json at all and the task is failed as
+// ordinary `orphaned`. That reaped the container at exactly the moment worth
+// investigating. The task outcome (failed, not complete), not the exit code,
+// must drive retention.
+test("FG-492 review: container gone, NO result, CONFIRMED CLEAN exit (0) → task failed orphaned AND the container is retained, not reaped", () => {
+  const taskId = "t-clean-exit-no-result-retained";
+  insertContainerized(mkTask(taskId, { status: "running" })); // clean worktree — no changed files → ordinary orphaned
+  const exitInfo = () => ({ exitCode: 0 });
+  const reaped: string[] = [];
+  const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+  const r = reconcileRun(RUN.id, GONE, reap, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }]);
+  assert.equal(getTask(taskId)!.status, "failed");
+  assert.deepEqual(reaped, [], "a clean exit code must never override a failed task outcome — this is the exact evidence-destroying bug FG-492 review fixes");
+});
+
+// FG-492 review: same regression, but for the orphaned_needs_finalize class
+// named explicitly in the finding — a pipeline step whose agent finished
+// cleanly (valid result, exit 0) but whose host-side finalize never ran must
+// stay retained too, not just the no-result case above.
+test("FG-492 review: PIPELINE run, container gone WITH a valid result AND a confirmed clean exit (0) → orphaned_needs_finalize AND the container is retained, not reaped", () => {
+  insertRun(PIPELINE_RUN);
+  const taskId = "t-pipe-clean-exit-retained";
+  insertContainerized(mkTask(taskId, { runId: PIPELINE_RUN.id, status: "running", phase: "build",
+    taskPackage: { taskId, runId: PIPELINE_RUN.id, phase: "build", role: "engineer", inputs: {}, composedSystemPrompt: "" } }));
+  const dir = taskDir(PIPELINE_RUN.id, taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", output: "agent finished but finalize never ran" }));
+  const exitInfo = () => ({ exitCode: 0 });
+  const reaped: string[] = [];
+  const reap = (name: string): "killed" => { reaped.push(name); return "killed"; };
+
+  const r = reconcileRun(PIPELINE_RUN.id, GONE, reap, exitInfo);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized" }]);
+  assert.equal(getTask(taskId)!.status, "failed");
+  assert.deepEqual(reaped, [], "a valid result + clean exit still isn't 'task complete' for a pipeline step whose finalize never ran — must stay retained");
 });
 
 // ----- FG-455: don't discard persisted work on an empty/absent result.json -----

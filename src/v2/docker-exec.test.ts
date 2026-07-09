@@ -118,21 +118,19 @@ test("captureContainerCausalEvidence: a clean exit (0) records no signal and no 
   assert.equal(evidence.signal, undefined, "exit 0 is not a signal");
 });
 
-// ── FG-492: retention decision ───────────────────────────────────────────────
+// ── FG-492 review: retention decision now keys on TASK outcome, not exit code ──
 
-test("shouldRetainContainer: retains a non-zero exit by default, reaps a clean exit", () => {
+test("shouldRetainContainer: retains a failed task by default, reaps a succeeded task", () => {
   delete process.env.FORGE_CONTAINER_RETENTION;
-  assert.equal(shouldRetainContainer(0), false, "clean exit is always reaped");
-  assert.equal(shouldRetainContainer(1), true, "a failure is retained for diagnosis by default");
-  assert.equal(shouldRetainContainer(137), true);
+  assert.equal(shouldRetainContainer(true), false, "a succeeded task is always reaped");
+  assert.equal(shouldRetainContainer(false), true, "a failed task is retained for diagnosis by default");
 });
 
 test("shouldRetainContainer: FORGE_CONTAINER_RETENTION=off disables retention entirely, even on failure", () => {
   process.env.FORGE_CONTAINER_RETENTION = "off";
   try {
-    assert.equal(shouldRetainContainer(1), false);
-    assert.equal(shouldRetainContainer(137), false);
-    assert.equal(shouldRetainContainer(0), false);
+    assert.equal(shouldRetainContainer(false), false);
+    assert.equal(shouldRetainContainer(true), false);
   } finally {
     delete process.env.FORGE_CONTAINER_RETENTION;
   }
@@ -142,32 +140,32 @@ afterEach(() => {
   delete process.env.FORGE_CONTAINER_RETENTION;
 });
 
-test("finalizeContainerRetention: clean exit → reaps (docker rm -f called)", () => {
+test("finalizeContainerRetention: task succeeded → reaps (docker rm -f called)", () => {
   const calls: Array<{ cmd: string; args: string[] }> = [];
   const fake = ((cmd: string, args: string[]) => {
     calls.push({ cmd, args });
     return Buffer.from("");
   }) as unknown as typeof import("node:child_process").execFileSync;
 
-  const outcome = finalizeContainerRetention("forge-task-clean", 0, fake);
+  const outcome = finalizeContainerRetention("forge-task-clean", true, fake);
   assert.equal(outcome, "reaped");
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "forge-task-clean"] });
 });
 
-test("finalizeContainerRetention: failed exit → retained (docker rm never called) by default", () => {
+test("finalizeContainerRetention: task failed → retained (docker rm never called) by default", () => {
   let called = false;
   const fake = (() => {
     called = true;
     return Buffer.from("");
   }) as unknown as typeof import("node:child_process").execFileSync;
 
-  const outcome = finalizeContainerRetention("forge-task-failed", 1, fake);
+  const outcome = finalizeContainerRetention("forge-task-failed", false, fake);
   assert.equal(outcome, "retained");
   assert.equal(called, false, "a retained container must never be reaped");
 });
 
-test("finalizeContainerRetention: FORGE_CONTAINER_RETENTION=off reaps even a failed exit", () => {
+test("finalizeContainerRetention: FORGE_CONTAINER_RETENTION=off reaps even a failed task", () => {
   process.env.FORGE_CONTAINER_RETENTION = "off";
   const calls: string[] = [];
   const fake = ((_cmd: string, args: string[]) => {
@@ -175,7 +173,7 @@ test("finalizeContainerRetention: FORGE_CONTAINER_RETENTION=off reaps even a fai
     return Buffer.from("");
   }) as unknown as typeof import("node:child_process").execFileSync;
 
-  const outcome = finalizeContainerRetention("forge-task-failed-off", 137, fake);
+  const outcome = finalizeContainerRetention("forge-task-failed-off", false, fake);
   assert.equal(outcome, "reaped");
   assert.deepEqual(calls, ["rm -f forge-task-failed-off"]);
 });
@@ -184,7 +182,7 @@ test("finalizeContainerRetention: docker rm throws → 'reap_failed', not confus
   const throwingFake = (() => {
     throw new Error("docker daemon unreachable");
   }) as unknown as typeof import("node:child_process").execFileSync;
-  const outcome = finalizeContainerRetention("forge-task-x", 0, throwingFake);
+  const outcome = finalizeContainerRetention("forge-task-x", true, throwingFake);
   assert.equal(outcome, "reap_failed");
 });
 
@@ -194,7 +192,7 @@ test("finalizeContainerRetention: undefined containerName → retained (nothing 
     called = true;
     return Buffer.from("");
   }) as unknown as typeof import("node:child_process").execFileSync;
-  const outcome = finalizeContainerRetention(undefined, 0, fake);
+  const outcome = finalizeContainerRetention(undefined, true, fake);
   assert.equal(outcome, "retained");
   assert.equal(called, false);
 });
@@ -238,7 +236,7 @@ async function withDockerStub<T>(fn: (logPath: string) => Promise<T>): Promise<T
   }
 }
 
-test("defaultDockerExec: a TASK exec (isProvisionerExec unset) captures evidence and finalizes retention — inspect and rm both invoked", async () => {
+test("defaultDockerExec: a TASK exec (isProvisionerExec unset) captures evidence at close but never reaps — the caller decides reap/retain once it knows the task outcome", async () => {
   await withDockerStub(async (logPath) => {
     const dir = mkdtempSync(join(tmpdir(), "forge-docker-exec-io-"));
     try {
@@ -258,14 +256,14 @@ test("defaultDockerExec: a TASK exec (isProvisionerExec unset) captures evidence
       assert.equal(exitCode, 0);
       const calls = readFileSync(logPath, "utf8");
       assert.match(calls, new RegExp(`inspect ${containerName}`), "a task exec must gather causal evidence via docker inspect");
-      assert.match(calls, new RegExp(`rm -f ${containerName}`), "a clean-exit task container is reaped via docker rm -f");
+      assert.doesNotMatch(calls, / rm /, "FG-492 review: close-time no longer reaps — even a clean exit may have no result.json, so only the caller (after validating result.json) may reap");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
-test("defaultDockerExec: a PROVISIONER exec (isProvisionerExec: true) skips capture-at-close/reap entirely — no inspect, no rm", async () => {
+test("defaultDockerExec: a PROVISIONER exec (isProvisionerExec: true) skips capture-at-close entirely — no inspect, no rm", async () => {
   await withDockerStub(async (logPath) => {
     const dir = mkdtempSync(join(tmpdir(), "forge-docker-exec-io-"));
     try {
