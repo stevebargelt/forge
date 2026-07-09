@@ -1,9 +1,11 @@
 ---
 id: FG-492
 type: story
-status: active
+status: done
 title: "Container disappearance diagnostics: preserve causal evidence before calling agent processes killed"
 created: 2026-07-07
+closed: 2026-07-09
+closed_commit: 5281ef8
 ---
 
 ## Problem
