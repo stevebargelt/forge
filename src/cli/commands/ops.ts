@@ -8,7 +8,7 @@ import type { LivenessProbe } from "../../ops/reconcile-candidate.js";
 import { getTask } from "../../store/tasks.js";
 import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-lock.js";
 import { getDb } from "../../store/db.js";
-import { defaultContainerReap, type ContainerReap } from "../../v2/reconcile.js";
+import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 
 // `forge ops check` — read-only incident detection over the blackboard (#250).
 // The orchestrator runs `--json` and decides what to act on or surface; humans
@@ -53,97 +53,121 @@ export function performOpsRepairCommand(
 // docker-exec.ts RETAINED under its FORGE_CONTAINER_RETENTION policy (a failed
 // task's container is kept for `forge show`/diagnostic inspection instead of
 // being auto-removed), once they're past the point that evidence is still
-// useful. Read-only by construction over the DB (only ever queries FAILED
-// tasks that actually launched one — a `container.started` event is required,
-// the same guard reconcile.ts/reconcile-candidate.ts use — so fanout parents
-// and host-side/manual dispatch, which structurally never had a container,
-// are never scanned or counted as "reaped"; a `running` task's container is
-// never a candidate either), and the removal itself is best-effort via the
-// same defaultContainerReap reconcile.ts already uses (never throws; "error"
-// means NOT confirmed gone, left alone for a later sweep). --dry-run reports
-// without touching anything.
+// useful. The removal itself is best-effort via the same defaultContainerReap
+// reconcile.ts already uses (never throws; "error" means NOT confirmed gone,
+// left alone for a later sweep). --dry-run reports without touching anything.
 //
-// FG-503: also scans COMPLETED (successful) tasks whose explicit cleanup at
-// close time failed — the `container.reap_failed` event docker-exec.ts's
-// callers now emit (see invoke.ts/runNext.ts/gate.ts) — so a leaked container
-// on a task that otherwise SUCCEEDED is sweepable by age too, instead of
-// sitting forever with no reap candidate (the original bug: only 'failed'
-// tasks were ever scanned). Requiring the reap_failed event (rather than
-// scanning every completed task) keeps the scan cheap and targeted, and means
-// a `not_found` reap result here is never mistaken for a leak — it just means
-// a later sweep or manual cleanup already removed it since the event fired.
+// FG-503 (redesign): candidacy is DISK-truth-driven, not event-enumeration-
+// driven. The original scan only ever looked at task/event rows — a FAILED
+// task needed a `container.started` event, a COMPLETED task additionally
+// needed a `container.reap_failed` event. That left a real gap (AC2): a task
+// that completed successfully whose forge process then died between
+// markTaskComplete and the reap call never got a `container.reap_failed`
+// event (a happy-path reap deliberately logs nothing on success) — its
+// leaked container was permanently invisible to the sweep, since
+// event-absence is ambiguous (did it reap cleanly, or never even attempt to?).
+// Instead, `listContainers` (defaultContainerList, reconcile.ts) runs
+// `docker ps -a` scoped to `forge-*` — the actual disk truth — and this scan
+// reconciles that list against task rows: a STOPPED forge-<taskId> container
+// whose task is TERMINAL (complete or failed) and past the age threshold is a
+// candidate regardless of what events were or weren't recorded. A container
+// still `running` is never touched; nor is one whose task is still
+// non-terminal (running/pending/awaiting_*) even if the container itself
+// looks stopped — that combination is left for a later reconcile pass, not
+// this sweep. A container with no matching task row at all (unknown origin)
+// is left alone too. `listContainers` returning undefined means docker itself
+// couldn't be reached — reported via `dockerUnavailable`, never thrown.
 export type ReapContainersOutcome = {
   dryRun: boolean;
   scanned: number;
   reaped: string[];
   retained: string[]; // still within --older-than-minutes, left alone
   errors: string[]; // docker reap attempt failed — NOT confirmed gone
-  // FG-503: subset of reaped/errors that came from the completed-task
-  // container.reap_failed scan, not the ordinary retained-on-failure scan —
-  // surfaced separately so a leak on an otherwise-successful task is
-  // operator-visible rather than folded silently into the normal reap count.
+  // FG-503: subset of reaped/errors whose task was COMPLETE (a leak on an
+  // otherwise-successful task) rather than the ordinary retained-on-failure
+  // case — surfaced separately so it's operator-visible, not folded silently
+  // into the normal reap count.
   completedTaskLeaks: string[];
+  // FG-503: `docker ps -a` itself couldn't be reached (daemon down, docker
+  // missing) — the scan found nothing because it couldn't look, not because
+  // there was nothing to find. Distinct from a docker error on an individual
+  // `rm -f` (still captured in `errors`).
+  dockerUnavailable: boolean;
 };
 
-type ReapCandidateRow = { taskId: string; completedAt: string | null; source: "failed_retained" | "completed_leak" };
+type ReapCandidateSource = "failed_retained" | "completed_leak";
+type TaskLookupRow = { status: string; completedAt: string | null; projectDir: string | null };
 
 export function performOpsReapContainers(
   opts: { dryRun?: boolean; olderThanMinutes?: number; projectDir?: string } = {},
   reap: ContainerReap = defaultContainerReap,
+  listContainers: ContainerLister = defaultContainerList,
 ): ReapContainersOutcome {
+  const containers = listContainers();
+  if (containers === undefined) {
+    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], dockerUnavailable: true };
+  }
+
   const db = getDb({ readOnly: true });
-  const rows = db
-    .prepare(
-      `SELECT t.id AS taskId, t.completed_at AS completedAt, 'failed_retained' AS source
-       FROM tasks t JOIN runs r ON r.id = t.run_id
-       WHERE t.status = 'failed'
-         AND EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.event_type = 'container.started')
-         AND (? IS NULL OR r.project_dir = ?)
-       UNION ALL
-       SELECT t.id AS taskId, t.completed_at AS completedAt, 'completed_leak' AS source
-       FROM tasks t JOIN runs r ON r.id = t.run_id
-       WHERE t.status = 'complete'
-         AND EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.event_type = 'container.started')
-         AND EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.event_type = 'container.reap_failed')
-         AND (? IS NULL OR r.project_dir = ?)`
-    )
-    .all(opts.projectDir ?? null, opts.projectDir ?? null, opts.projectDir ?? null, opts.projectDir ?? null) as ReapCandidateRow[];
+  const lookupTask = db.prepare(
+    `SELECT t.status AS status, t.completed_at AS completedAt, r.project_dir AS projectDir
+     FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`
+  );
 
   const cutoffMs = opts.olderThanMinutes !== undefined ? Date.now() - opts.olderThanMinutes * 60_000 : undefined;
   const reaped: string[] = [];
   const retained: string[] = [];
   const errors: string[] = [];
   const completedTaskLeaks: string[] = [];
-  for (const row of rows) {
-    const containerName = `forge-${row.taskId}`;
+  let scanned = 0;
+
+  for (const container of containers) {
+    if (container.running) continue; // never touch a live container
+    if (!container.name.startsWith("forge-")) continue;
+    const taskId = container.name.slice("forge-".length);
+    const row = lookupTask.get(taskId) as TaskLookupRow | undefined;
+    if (!row) continue; // no known task for this container — not a candidate
+    if (row.status !== "complete" && row.status !== "failed") continue; // non-terminal — never touch
+    if (opts.projectDir !== undefined && row.projectDir !== opts.projectDir) continue; // out of scope
+
+    scanned++;
+    const source: ReapCandidateSource = row.status === "complete" ? "completed_leak" : "failed_retained";
+    const containerName = container.name;
+
     if (cutoffMs !== undefined) {
-      const completedMs = row.completedAt ? new Date(row.completedAt).getTime() : undefined;
-      if (completedMs === undefined || completedMs > cutoffMs) {
+      // Disk truth (the container's own finishedAt) is preferred for the age
+      // check; the task's completedAt is the fallback when docker couldn't
+      // confirm it (still a valid signal — for the crash-window leak this
+      // fix targets, markTaskComplete already ran before the process died).
+      const anchor = container.finishedAt ?? row.completedAt;
+      const ageMs = anchor ? new Date(anchor).getTime() : undefined;
+      if (ageMs === undefined || ageMs > cutoffMs) {
         retained.push(containerName);
         continue;
       }
     }
+
     if (opts.dryRun) {
       reaped.push(containerName);
-      if (row.source === "completed_leak") completedTaskLeaks.push(containerName);
+      if (source === "completed_leak") completedTaskLeaks.push(containerName);
       continue;
     }
     // "not_found" (already gone — e.g. FORGE_CONTAINER_RETENTION=off never kept
-    // it, or a prior sweep already reaped it) is equally "nothing left behind"
-    // as "killed" — both count as reaped from this command's perspective. For
-    // a completed-task candidate specifically, "not_found" also means it was
-    // never actually a leak (see FG-503 comment above) — excluded from
+    // it, or a prior sweep already reaped it since we listed it) is equally
+    // "nothing left behind" as "killed" — both count as reaped from this
+    // command's perspective. For a completed-task candidate specifically,
+    // "not_found" also means it was never actually a leak — excluded from
     // completedTaskLeaks accordingly.
     const outcome = reap(containerName);
     if (outcome === "error") {
       errors.push(containerName);
-      if (row.source === "completed_leak") completedTaskLeaks.push(containerName);
+      if (source === "completed_leak") completedTaskLeaks.push(containerName);
     } else {
       reaped.push(containerName);
-      if (outcome === "killed" && row.source === "completed_leak") completedTaskLeaks.push(containerName);
+      if (outcome === "killed" && source === "completed_leak") completedTaskLeaks.push(containerName);
     }
   }
-  return { dryRun: !!opts.dryRun, scanned: rows.length, reaped, retained, errors, completedTaskLeaks };
+  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, dockerUnavailable: false };
 }
 
 export function registerOps(program: Command): void {
@@ -222,7 +246,7 @@ export function registerOps(program: Command): void {
     .option("--project <dir>", "scope to a specific project dir (default: cwd). Ignored with --all.")
     .option("--json", "emit structured JSON")
     .description(
-      "Remove forge-<taskId> containers retained on failure (FG-492's FORGE_CONTAINER_RETENTION policy), plus any successful task whose own cleanup failed (FG-503), once their diagnostic value has passed. Never touches a running task's container."
+      "Remove forge-<taskId> containers retained on failure (FG-492's FORGE_CONTAINER_RETENTION policy), plus any successful task whose own cleanup failed (FG-503), once their diagnostic value has passed. Candidacy is disk-truth-driven (docker ps -a), not dependent on any event having been recorded. Never touches a running task's container."
     )
     .action((opts: { dryRun?: boolean; olderThanMinutes?: number; all?: boolean; project?: string; json?: boolean }) => {
       ensureForgeDirs();
@@ -231,6 +255,11 @@ export function registerOps(program: Command): void {
 
       if (opts.json) {
         console.log(JSON.stringify(outcome, null, 2));
+        return;
+      }
+
+      if (outcome.dockerUnavailable) {
+        console.log("docker unavailable — could not list forge-* containers. No scan performed.");
         return;
       }
 

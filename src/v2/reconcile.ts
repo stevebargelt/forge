@@ -64,6 +64,63 @@ export function defaultContainerReap(containerName: string): ContainerReapResult
   }
 }
 
+export type ContainerListEntry = {
+  name: string;
+  running: boolean;
+  // Best-effort `docker inspect` State.FinishedAt for a stopped container —
+  // undefined when inspect couldn't confirm it (daemon hiccup, or the
+  // container was pruned between the `ps` and `inspect` calls). The age
+  // check in ops.ts falls back to the task's own completedAt when absent.
+  finishedAt?: string;
+};
+export type ContainerLister = () => ContainerListEntry[] | undefined;
+
+/** List every forge-<taskId> container docker actually knows about — disk
+ *  truth, not event presence. FG-503: `forge ops reap-containers` used to find
+ *  candidates purely from task-row/event state (a `container.started` event,
+ *  optionally `container.reap_failed`), which left a completed task whose
+ *  forge process died between markTaskComplete and the reap call with NO
+ *  event at all — permanently invisible to the sweep, since a happy-path reap
+ *  deliberately records nothing and event-absence is ambiguous. ops.ts
+ *  reconciles this list against task rows instead, so candidacy depends on
+ *  what's actually sitting on disk, not on which events happened to survive
+ *  the crash. Returns undefined when docker itself is unreachable (daemon
+ *  down, docker missing) so the caller can report that distinctly rather than
+ *  silently returning zero candidates. Never throws. */
+export function defaultContainerList(): ContainerListEntry[] | undefined {
+  let raw: string;
+  try {
+    raw = execFileSync(
+      "docker",
+      ["ps", "-a", "--filter", "name=^forge-", "--format", "{{.Names}}\t{{.State}}"],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ).toString();
+  } catch {
+    return undefined;
+  }
+  return raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const [name, state] = line.split("\t");
+      if (!name) return [];
+      const entry: ContainerListEntry = { name, running: state === "running" };
+      if (!entry.running) {
+        // Best-effort finishedAt — a failure here just means the caller falls
+        // back to the task's own completedAt for the age check.
+        try {
+          const inspectRaw = execFileSync("docker", ["inspect", name], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+          const finishedAt = parseDockerInspectState(inspectRaw).finishedAt;
+          if (finishedAt) entry.finishedAt = finishedAt;
+        } catch {
+          // best-effort only
+        }
+      }
+      return [entry];
+    });
+}
+
 export type TaskReconcileChange = { taskId: string; from: string; to: string; reason: string };
 export type ReconcileResult = {
   runId: string;
