@@ -119,12 +119,18 @@ export type EmitMilestoneArgs = {
 };
 
 export type EmitMilestoneResult = {
+  // FG-494 AC2: reflects actual provider delivery, not merely that a dispatch
+  // was attempted — a ByteString-throw or HTTP 500 must not read the same as
+  // a real push.
   dispatched: boolean;
   decision: MilestoneDecision;
   importance: Importance;
   // #242: advisory docs-impact warning, set only on `shipped` when the run
   // changed operator behavior without resolving docs. Never blocks delivery.
   docsImpactWarning?: string;
+  // FG-494 AC2: set when a dispatch was attempted but the provider(s) failed,
+  // so the failure is recorded distinctly from a real success.
+  dispatchError?: string;
 };
 
 // Record the milestone event (always) + apply policy/dedupe + dispatch if the
@@ -165,11 +171,15 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
       : undefined;
 
   let dispatched = false;
+  let dispatchError: string | undefined;
   if (decision.send && isAnyProviderEnabled()) {
     // FG-464: lead the pushed body with the action marker so action-needed reads
     // distinctly from FYI; the run title rides in the ntfy title.
-    await dispatch(milestoneDispatchBody(kind, args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
-    dispatched = true;
+    const result = await dispatch(milestoneDispatchBody(kind, args.body ?? args.title, docsImpactWarning), `forge: ${kind} — ${args.title}`);
+    // FG-494 AC2: `dispatched` is the provider's actual delivery outcome, not
+    // "we attempted a send" — a thrown/HTTP-failure send must read as failure.
+    dispatched = result.ok;
+    if (!result.ok) dispatchError = result.errors.join("; ");
   }
 
   // Always record — audit trail independent of delivery.
@@ -184,8 +194,15 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
       dispatched,
       reason: decision.reason,
       ...(docsImpactWarning ? { docsImpactWarning } : {}),
+      ...(dispatchError ? { dispatchError } : {}),
     },
   });
 
-  return { dispatched, decision, importance, ...(docsImpactWarning ? { docsImpactWarning } : {}) };
+  return {
+    dispatched,
+    decision,
+    importance,
+    ...(docsImpactWarning ? { docsImpactWarning } : {}),
+    ...(dispatchError ? { dispatchError } : {}),
+  };
 }

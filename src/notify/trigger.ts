@@ -70,19 +70,33 @@ export function isAnyProviderEnabled(): boolean {
   return isTwilioEnabled() || isNtfyEnabled();
 }
 
-export async function dispatch(body: string, title?: string): Promise<void> {
+// FG-494 AC2: callers that need to distinguish an attempted dispatch from a
+// delivered one (e.g. milestone's audit trail) need the actual per-provider
+// outcome, not just "we called a provider". `ok` is true only if every
+// enabled provider reported success; `errors` names which provider(s) failed.
+export type DispatchResult = { ok: boolean; errors: string[] };
+
+export async function dispatch(body: string, title?: string): Promise<DispatchResult> {
   // Belt-and-suspenders: every caller gates on isAnyProviderEnabled() (already
   // false under NO_NOTIFY), but guard the sender too so a direct dispatch can
   // never reach a provider while suppressed.
-  if (isNotifySuppressed()) return;
+  if (isNotifySuppressed()) return { ok: true, errors: [] };
+  const errors: string[] = [];
   if (isTwilioEnabled()) {
     const result = await notifyTwilio(body);
-    if (!result.ok) console.error(`forge notify: SMS failed — ${result.error}`);
+    if (!result.ok) {
+      console.error(`forge notify: SMS failed — ${result.error}`);
+      errors.push(`SMS: ${result.error}`);
+    }
   }
   if (isNtfyEnabled()) {
     const result = await notifyNtfy(body, title);
-    if (!result.ok) console.error(`forge notify: ntfy failed — ${result.error}`);
+    if (!result.ok) {
+      console.error(`forge notify: ntfy failed — ${result.error}`);
+      errors.push(`ntfy: ${result.error}`);
+    }
   }
+  return { ok: errors.length === 0, errors };
 }
 
 export async function notifyOnRunTransition(

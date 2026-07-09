@@ -17,6 +17,23 @@ export function isNtfyEnabled(): boolean {
   return true;
 }
 
+// FG-494: fetch header values are ByteStrings (Latin-1), so a value
+// containing a character outside 0x00-0x7F either throws at request
+// construction (>0xFF, e.g. an em-dash) or silently mojibakes (0x80-0xFF,
+// e.g. 'é' as raw byte 0xE9 isn't valid UTF-8 on its own). ntfy documents
+// RFC 2047 encoded-words (`=?UTF-8?B?<base64>?=`) as its supported mechanism
+// for non-Latin-1 header text, so encode whenever any non-ASCII character is
+// present — that one >0x7F check covers both failure modes. Pure-ASCII values
+// pass through byte-identical (no wrapper applied). Named generically (not
+// `encodeNtfyTitle`) because it applies to ANY ntfy header carrying free-form
+// or user-supplied text (e.g. Title today; Tags/Actions if a future caller
+// drives them from user text) — route such headers through this, not just Title.
+function encodeNtfyHeaderValue(value: string): string {
+  if (/^[\x00-\x7F]*$/.test(value)) return value;
+  const base64 = Buffer.from(value, "utf8").toString("base64");
+  return `=?UTF-8?B?${base64}?=`;
+}
+
 export async function notifyNtfy(body: string, title?: string): Promise<NtfyResult> {
   if (!isNtfyEnabled()) {
     return { ok: false, error: "FORGE_NOTIFY does not include 'ntfy' or NTFY_URL is missing" };
@@ -25,7 +42,7 @@ export async function notifyNtfy(body: string, title?: string): Promise<NtfyResu
   const token = process.env["NTFY_TOKEN"];
 
   const headers: Record<string, string> = {};
-  if (title) headers["Title"] = title;
+  if (title) headers["Title"] = encodeNtfyHeaderValue(title);
   headers["Priority"] = process.env["NTFY_PRIORITY"] ?? "default";
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
