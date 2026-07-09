@@ -2129,3 +2129,58 @@ test("FG-502 CLI: an unresolvable remote ref withholds closeable with a distinct
   assert.equal(process.exitCode, 1);
   process.exitCode = prevExitCode;
 });
+
+test("FG-502 CLI end-to-end: computeInRangeDocsPaths threads through registerReviewLoop into the scope guard — a fixer edit to a docs/ path already touched by the ORIGINAL reviewed range survives commit, not reverted", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "reviewed.md"), "# reviewed\n\noriginal.\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket + docs/reviewed.md"], projectDir);
+  const tipShaBeforeFix = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // Round 1: reviewer asks for a fix touching the already-in-range docs path;
+  // round 2: reviewer passes once the fixer has committed.
+  let redCalls = 0;
+  const invokeFn = async (a: InvokeArgs): Promise<InvokeResult> => {
+    if (a.agentRole === "red-wide") {
+      redCalls++;
+      return redCalls === 1
+        ? RESULT({ result: { verdict: "fail", findings: [{ summary: "docs/reviewed.md needs a follow-up note", unanchored: true }] } })
+        : RESULT({ result: { verdict: "pass", findings: [] } });
+    }
+    // "engineer" fixer: edits the SAME docs/ path already committed within
+    // sinceSha..tip — this must be classified in-range, not reverted.
+    writeFileSync(join(projectDir, "docs", "reviewed.md"), "# reviewed\n\noriginal.\n\nfixer follow-up.\n");
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+
+  const program = new Command();
+  registerReviewLoop(program, invokeFn);
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  const printed = lines.join("\n");
+
+  assert.doesNotMatch(
+    printed, /fixer scope guard — reverted disallowed paths/,
+    `docs/reviewed.md was part of the loop-start reviewed range (computed via the real CLI wiring, not a hand-built Set) and must not trigger a scope-guard revert:\n${printed}`,
+  );
+
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.notEqual(headSha, tipShaBeforeFix, "the fixer round must have committed");
+  assert.match(readFileSync(join(projectDir, "docs", "reviewed.md"), "utf8"), /fixer follow-up/, "the fixer's docs/ edit must be on disk, not reverted");
+  const committedFiles = gitExec(["show", "--name-only", "--format=", headSha], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("docs/reviewed.md"), `expected docs/reviewed.md in the fixer's commit, got: ${JSON.stringify(committedFiles)}`);
+  process.exitCode = prevExitCode;
+});
