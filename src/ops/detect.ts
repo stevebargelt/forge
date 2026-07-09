@@ -424,7 +424,14 @@ type ReapFailedRow = { taskId: string; runId: string; phase: string; payload: st
  *  Reads only the LATEST container.reap_failed event per task (mirrors
  *  detectOrphanedWorkMayPersist's correlated-subquery approach) — a task can
  *  only be reaped once it's terminal, so there's no risk of shadowing a more
- *  recent successful reap (the happy path logs nothing, by design). */
+ *  recent successful reap (the happy path logs nothing, by design).
+ *
+ *  FG-504: a task's forge-<taskId> container name is 1:1 with its taskId, so
+ *  "superseded by a later resolution event for the same containerName" (the
+ *  ticket's design direction) is just "a later container.reaped event for the
+ *  same task_id" — no JSON payload parsing needed in SQL. Once `forge ops
+ *  reap-containers` confirms the container gone (rm succeeded, or not_found)
+ *  it logs container.reaped, and that incident stops firing here. */
 export function detectContainerReapFailed(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
   const rows = db
     .prepare(
@@ -437,7 +444,12 @@ export function detectContainerReapFailed(db: DatabaseInstance, opts: OpsCheckOp
          ORDER BY e2.created_at DESC, e2.id DESC
          LIMIT 1
        )
-       WHERE (? IS NULL OR r.project_dir = ?)`
+       WHERE (? IS NULL OR r.project_dir = ?)
+         AND NOT EXISTS (
+           SELECT 1 FROM events e3
+           WHERE e3.task_id = t.id AND e3.event_type = 'container.reaped'
+             AND (e3.created_at > e.created_at OR (e3.created_at = e.created_at AND e3.id > e.id))
+         )`
     )
     .all(opts.projectDir ?? null, opts.projectDir ?? null) as ReapFailedRow[];
 

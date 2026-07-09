@@ -423,6 +423,65 @@ test("detectContainerReapFailed: project scoping", () => {
   assert.equal(detectContainerReapFailed(db).length, 2, "no projectDir → host-wide");
 });
 
+// ── FG-504: a later container.reaped event supersedes container.reap_failed ─
+
+test("detectContainerReapFailed (FG-504): a LATER container.reaped event for the same task clears the incident (sweep 'killed')", () => {
+  insertRun(mkRun("run-reap-cleared", "active"));
+  insertTask(mkTask("task-reap-cleared", "run-reap-cleared", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-cleared", taskId: "task-reap-cleared",
+    payload: { containerName: "forge-task-reap-cleared", why: "docker rm -f -v failed after task completion" },
+  });
+  logEvent("container.reaped", {
+    runId: "run-reap-cleared", taskId: "task-reap-cleared",
+    payload: { containerName: "forge-task-reap-cleared", outcome: "killed" },
+  });
+
+  assert.equal(detectContainerReapFailed(db).length, 0, "the recommended repair succeeded — the incident must clear");
+});
+
+test("detectContainerReapFailed (FG-504): a LATER container.reaped event clears the incident on 'not_found' too (already gone still confirms it)", () => {
+  insertRun(mkRun("run-reap-notfound", "active"));
+  insertTask(mkTask("task-reap-notfound", "run-reap-notfound", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-notfound", taskId: "task-reap-notfound",
+    payload: { containerName: "forge-task-reap-notfound", why: "docker rm -f -v failed after task completion" },
+  });
+  logEvent("container.reaped", {
+    runId: "run-reap-notfound", taskId: "task-reap-notfound",
+    payload: { containerName: "forge-task-reap-notfound", outcome: "not_found" },
+  });
+
+  assert.equal(detectContainerReapFailed(db).length, 0, "not_found is confirmed-gone too — clears the incident");
+});
+
+test("detectContainerReapFailed (FG-504): a container.reaped event recorded BEFORE the reap_failed event does not suppress it (still stale/unresolved)", () => {
+  insertRun(mkRun("run-reap-stale", "active"));
+  insertTask(mkTask("task-reap-stale", "run-reap-stale", "complete"));
+  logEvent("container.reaped", {
+    runId: "run-reap-stale", taskId: "task-reap-stale",
+    payload: { containerName: "forge-task-reap-stale", outcome: "killed" },
+  });
+  logEvent("container.reap_failed", {
+    runId: "run-reap-stale", taskId: "task-reap-stale",
+    payload: { containerName: "forge-task-reap-stale", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const incidents = detectContainerReapFailed(db);
+  assert.equal(incidents.length, 1, "the reap_failed happened AFTER the (unrelated, earlier) reaped event — still unresolved");
+});
+
+test("detectContainerReapFailed (FG-504): with no container.reaped event at all, the incident persists (a reap 'error' leaves nothing to supersede it)", () => {
+  insertRun(mkRun("run-reap-persists", "active"));
+  insertTask(mkTask("task-reap-persists", "run-reap-persists", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-persists", taskId: "task-reap-persists",
+    payload: { containerName: "forge-task-reap-persists", why: "docker rm -f -v failed after task completion" },
+  });
+
+  assert.equal(detectContainerReapFailed(db).length, 1, "no resolution was ever recorded — the incident must keep firing");
+});
+
 // ── project scoping ─────────────────────────────────────────────────────────
 
 test("project scoping: filters to projectDir; host-wide when omitted", () => {

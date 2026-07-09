@@ -613,6 +613,130 @@ test("integ forge ops reap-containers --dry-run (plain): a completed-task leak i
   );
 });
 
+// ── FG-504: real CLI surface of the container.reaped resolution + wording split ──
+
+test("integ forge ops reap-containers --json: a completed-task leak whose docker rm fails is reported as completedTaskLeaksUnconfirmed, not completedTaskLeaks", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-unconfirmed";
+  const leakedTaskId = "t-fg504-reap-unconfirmed";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 unconfirmed leak", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }], { rmExitCode: 1 });
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { completedTaskLeaks: string[]; completedTaskLeaksUnconfirmed: string[] };
+  assert.deepEqual(outcome.completedTaskLeaks, [], "an unconfirmed reap must never claim to be swept");
+  assert.deepEqual(outcome.completedTaskLeaksUnconfirmed, [`forge-${leakedTaskId}`]);
+});
+
+test("integ forge ops reap-containers (plain): a completed-task leak whose docker rm fails says NOT confirmed gone, never 'now swept'", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-unconfirmed-plain";
+  const leakedTaskId = "t-fg504-reap-unconfirmed-plain";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 unconfirmed leak plain", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }], { rmExitCode: 1 });
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(
+    result.stdout,
+    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, NOT confirmed gone — left for a later sweep\\): forge-${leakedTaskId}`),
+  );
+  assert.ok(!result.stdout.includes("now swept"), "the error case must never share the 'now swept' wording");
+});
+
+test("integ forge ops reap-containers --json: a completed-task leak whose LIVE docker rm SUCCEEDS lands in completedTaskLeaks, not the unconfirmed field", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-confirmed";
+  const leakedTaskId = "t-fg504-reap-confirmed";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 confirmed leak", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }]);
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { reaped: string[]; completedTaskLeaks: string[]; completedTaskLeaksUnconfirmed: string[] };
+  assert.deepEqual(outcome.reaped, [`forge-${leakedTaskId}`]);
+  assert.deepEqual(outcome.completedTaskLeaks, [`forge-${leakedTaskId}`], "a confirmed-gone live reap is the 'now swept' set");
+  assert.deepEqual(outcome.completedTaskLeaksUnconfirmed, []);
+});
+
+test("integ forge ops reap-containers (plain): a completed-task leak whose LIVE docker rm SUCCEEDS says 'now swept', real non-dry-run subprocess", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-confirmed-plain";
+  const leakedTaskId = "t-fg504-reap-confirmed-plain";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 confirmed leak plain", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }]);
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(
+    result.stdout,
+    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, now swept\\): forge-${leakedTaskId}`),
+    "the confirmed-gone side of the FG-504 wording split, through the real CLI in live (non-dry-run) mode",
+  );
+  assert.ok(!/NOT confirmed gone/.test(result.stdout), "a confirmed-gone reap must not carry the unconfirmed wording");
+});
+
+test("integ forge ops reap-containers → forge ops check: a successful sweep ('killed') clears a prior container_reap_failed incident, real CLI end to end", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-clears";
+  const taskId = "t-fg504-reap-clears";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 clears incident", projectDir });
+  insertTaskRow({ id: taskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({
+    runId, taskId, eventType: "container.reap_failed",
+    payload: { containerName: `forge-${taskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const before = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(before.status, 0);
+  const beforeIncidents = JSON.parse(before.stdout) as Array<{ kind: string; taskId: string | null }>;
+  assert.ok(
+    beforeIncidents.some((i) => i.kind === "container_reap_failed" && i.taskId === taskId),
+    "sanity check: the prior reap_failed event raises the incident before any sweep",
+  );
+
+  const docker = withFakeDocker([{ name: `forge-${taskId}` }]);
+  const sweep = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(sweep.status, 0, `expected exit 0\nstdout: ${sweep.stdout}\nstderr: ${sweep.stderr}`);
+
+  const after = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(after.status, 0);
+  const afterIncidents = JSON.parse(after.stdout) as Array<{ kind: string; taskId: string | null }>;
+  assert.ok(
+    !afterIncidents.some((i) => i.kind === "container_reap_failed"),
+    "the recommended repair (forge ops reap-containers) succeeded — the incident must no longer be reported",
+  );
+});
+
+test("integ forge ops reap-containers → forge ops check: a sweep that errors keeps the container_reap_failed incident, real CLI end to end", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-persists";
+  const taskId = "t-fg504-reap-persists";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 persists incident", projectDir });
+  insertTaskRow({ id: taskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({
+    runId, taskId, eventType: "container.reap_failed",
+    payload: { containerName: `forge-${taskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const docker = withFakeDocker([{ name: `forge-${taskId}` }], { rmExitCode: 1 });
+  const sweep = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(sweep.status, 0, `expected exit 0 even when the reap itself can't confirm removal\nstdout: ${sweep.stdout}\nstderr: ${sweep.stderr}`);
+
+  const after = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(after.status, 0);
+  const afterIncidents = JSON.parse(after.stdout) as Array<{ kind: string; taskId: string | null }>;
+  assert.ok(
+    afterIncidents.some((i) => i.kind === "container_reap_failed" && i.taskId === taskId),
+    "the repair attempt errored (not confirmed gone) — the incident must still be raised",
+  );
+});
+
 test("integ forge ops reap-containers: a completed task that reaped cleanly (no container left on disk) is never scanned again, real CLI subprocess", () => {
   const projectDir = makeProjectDir();
   const runId = "run-fg503-reap-clean";
