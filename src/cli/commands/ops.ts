@@ -8,6 +8,7 @@ import type { LivenessProbe } from "../../ops/reconcile-candidate.js";
 import { getTask } from "../../store/tasks.js";
 import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-lock.js";
 import { getDb } from "../../store/db.js";
+import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 
 // `forge ops check` — read-only incident detection over the blackboard (#250).
@@ -83,11 +84,16 @@ export type ReapContainersOutcome = {
   reaped: string[];
   retained: string[]; // still within --older-than-minutes, left alone
   errors: string[]; // docker reap attempt failed — NOT confirmed gone
-  // FG-503: subset of reaped/errors whose task was COMPLETE (a leak on an
+  // FG-503: subset of reaped whose task was COMPLETE (a leak on an
   // otherwise-successful task) rather than the ordinary retained-on-failure
   // case — surfaced separately so it's operator-visible, not folded silently
-  // into the normal reap count.
+  // into the normal reap count. Confirmed-gone only (killed, or dry-run's
+  // speculative would-reap) — this is the "now swept" set.
   completedTaskLeaks: string[];
+  // FG-504: the completed-task-leak counterpart whose rm attempt returned
+  // "error" — NOT confirmed gone, distinct from completedTaskLeaks so the CLI
+  // never claims "now swept" for a container that might still be there.
+  completedTaskLeaksUnconfirmed: string[];
   // FG-503: `docker ps -a` itself couldn't be reached (daemon down, docker
   // missing) — the scan found nothing because it couldn't look, not because
   // there was nothing to find. Distinct from a docker error on an individual
@@ -96,7 +102,7 @@ export type ReapContainersOutcome = {
 };
 
 type ReapCandidateSource = "failed_retained" | "completed_leak";
-type TaskLookupRow = { status: string; completedAt: string | null; projectDir: string | null };
+type TaskLookupRow = { status: string; completedAt: string | null; projectDir: string | null; runId: string };
 
 export function performOpsReapContainers(
   opts: { dryRun?: boolean; olderThanMinutes?: number; projectDir?: string } = {},
@@ -105,12 +111,12 @@ export function performOpsReapContainers(
 ): ReapContainersOutcome {
   const containers = listContainers();
   if (containers === undefined) {
-    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], dockerUnavailable: true };
+    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], dockerUnavailable: true };
   }
 
   const db = getDb({ readOnly: true });
   const lookupTask = db.prepare(
-    `SELECT t.status AS status, t.completed_at AS completedAt, r.project_dir AS projectDir
+    `SELECT t.status AS status, t.completed_at AS completedAt, r.project_dir AS projectDir, t.run_id AS runId
      FROM tasks t JOIN runs r ON r.id = t.run_id WHERE t.id = ?`
   );
 
@@ -119,6 +125,7 @@ export function performOpsReapContainers(
   const retained: string[] = [];
   const errors: string[] = [];
   const completedTaskLeaks: string[] = [];
+  const completedTaskLeaksUnconfirmed: string[] = [];
   let scanned = 0;
 
   for (const container of containers) {
@@ -161,13 +168,20 @@ export function performOpsReapContainers(
     const outcome = reap(containerName);
     if (outcome === "error") {
       errors.push(containerName);
-      if (source === "completed_leak") completedTaskLeaks.push(containerName);
+      // FG-504: NOT confirmed gone — must never join completedTaskLeaks
+      // (that list is the "now swept" set the CLI reports as resolved).
+      if (source === "completed_leak") completedTaskLeaksUnconfirmed.push(containerName);
     } else {
       reaped.push(containerName);
       if (outcome === "killed" && source === "completed_leak") completedTaskLeaks.push(containerName);
+      // FG-504: confirmed gone (rm succeeded, or already not_found) — record
+      // the durable resolution so detectContainerReapFailed stops flagging a
+      // prior container.reap_failed for this task. Only the sweeper records
+      // this; happy-path task-completion reaps stay silent (FG-503 AC4).
+      logEvent("container.reaped", { runId: row.runId, taskId, payload: { containerName, outcome } });
     }
   }
-  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, dockerUnavailable: false };
+  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, completedTaskLeaksUnconfirmed, dockerUnavailable: false };
 }
 
 export function registerOps(program: Command): void {
@@ -270,6 +284,9 @@ export function registerOps(program: Command): void {
       // FG-503: call out leaks on otherwise-SUCCESSFUL tasks distinctly — the
       // condition FG-503 exists to make visible instead of silent.
       if (outcome.completedTaskLeaks.length > 0) console.log(`  leaked from a SUCCESSFUL task (explicit cleanup failed, now swept): ${outcome.completedTaskLeaks.join(", ")}`);
+      // FG-504: the reap attempt errored — NOT confirmed gone, so this must
+      // never share the "now swept" line above.
+      if (outcome.completedTaskLeaksUnconfirmed.length > 0) console.log(`  leaked from a SUCCESSFUL task (explicit cleanup failed, NOT confirmed gone — left for a later sweep): ${outcome.completedTaskLeaksUnconfirmed.join(", ")}`);
       if (outcome.dryRun) console.log("No writes.");
     });
 }

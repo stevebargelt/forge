@@ -36,6 +36,13 @@ export type EventType =
   // completed-task scan off of. Never emitted on the reaped/retained
   // outcomes — those stay silent, exactly as before FG-503.
   | "container.reap_failed"
+  // FG-504: the resolution counterpart to container.reap_failed — recorded
+  // ONLY by `forge ops reap-containers` (the sweeper) when a candidate is
+  // confirmed gone (rm succeeded, or it was already not_found). detect.ts
+  // treats any container.reap_failed as superseded once a LATER container.reaped
+  // exists for the same task, clearing the container_reap_failed incident.
+  // Happy-path task-completion reaps never emit this (FG-503 AC4 still holds).
+  | "container.reaped"
   // FG-437: durable phase-boundary markers around the (separate, short-lived)
   // dependency provisioner container, so a mid-provision crash is visible to
   // reconcile even though the task's own container.started hasn't fired yet.

@@ -6,7 +6,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
 import { insertTask, getTask } from "../../store/tasks.js";
-import { logEvent } from "../../store/events.js";
+import { logEvent, eventsForTask } from "../../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../../types/index.js";
 import type { LivenessState } from "../../ops/reconcile-candidate.js";
 import { RunBusyError } from "../../util/run-lock.js";
@@ -311,6 +311,104 @@ test("performOpsReapContainers: a 'not_found' reap result on a completed-task le
   const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-leak-gone" }]));
   assert.deepEqual(outcome.reaped, ["forge-t-reap-leak-gone"], "not_found is still 'nothing left behind' — counts as reaped");
   assert.deepEqual(outcome.completedTaskLeaks, [], "but must NOT be counted as a leak — it was already gone");
+});
+
+// ── FG-504: durable container.reaped resolution + completed-leak wording split ──
+
+test("performOpsReapContainers (FG-504): a 'killed' outcome records a container.reaped event and clears a prior container.reap_failed incident", () => {
+  insertRun(mkRun("run-reap-resolve-killed", "active"));
+  insertTask({ ...mkTask("t-reap-resolve-killed", "run-reap-resolve-killed", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-reap-resolve-killed", taskId: "t-reap-resolve-killed",
+    payload: { containerName: "forge-t-reap-resolve-killed", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const reap: ContainerReap = () => "killed";
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-resolve-killed" }]));
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-resolve-killed"]);
+
+  const events = eventsForTask("t-reap-resolve-killed");
+  const reapedEvents = events.filter((e) => e.eventType === "container.reaped");
+  assert.equal(reapedEvents.length, 1, "the sweep must record a durable resolution event");
+  assert.deepEqual(reapedEvents[0]!.payload, { containerName: "forge-t-reap-resolve-killed", outcome: "killed" });
+});
+
+test("performOpsReapContainers (FG-504): a 'not_found' outcome also records a container.reaped event (confirmed gone either way)", () => {
+  insertRun(mkRun("run-reap-resolve-notfound", "active"));
+  insertTask({ ...mkTask("t-reap-resolve-notfound", "run-reap-resolve-notfound", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "not_found";
+  performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-resolve-notfound" }]));
+
+  const events = eventsForTask("t-reap-resolve-notfound").filter((e) => e.eventType === "container.reaped");
+  assert.equal(events.length, 1, "not_found is confirmed-gone too — the resolution must still be recorded");
+  assert.deepEqual(events[0]!.payload, { containerName: "forge-t-reap-resolve-notfound", outcome: "not_found" });
+});
+
+test("performOpsReapContainers (FG-504): an 'error' outcome records NO container.reaped event — not confirmed gone", () => {
+  insertRun(mkRun("run-reap-resolve-error", "active"));
+  insertTask({ ...mkTask("t-reap-resolve-error", "run-reap-resolve-error", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "error";
+  performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-resolve-error" }]));
+
+  const events = eventsForTask("t-reap-resolve-error").filter((e) => e.eventType === "container.reaped");
+  assert.deepEqual(events, [], "an unconfirmed reap must never emit a resolution event");
+});
+
+test("performOpsReapContainers (FG-504): --dry-run records NO container.reaped event (writes nothing)", () => {
+  insertRun(mkRun("run-reap-resolve-dry", "active"));
+  insertTask({ ...mkTask("t-reap-resolve-dry", "run-reap-resolve-dry", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "killed";
+  performOpsReapContainers({ dryRun: true, olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-resolve-dry" }]));
+
+  const events = eventsForTask("t-reap-resolve-dry").filter((e) => e.eventType === "container.reaped");
+  assert.deepEqual(events, [], "dry-run must never write a resolution event");
+});
+
+test("performOpsReapContainers (FG-504): a completed-task leak whose reap errors is surfaced as completedTaskLeaksUnconfirmed, NOT completedTaskLeaks", () => {
+  insertRun(mkRun("run-reap-unconfirmed", "active"));
+  insertTask({ ...mkTask("t-reap-unconfirmed", "run-reap-unconfirmed", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "error";
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-unconfirmed" }]));
+  assert.deepEqual(outcome.completedTaskLeaks, [], "an unconfirmed reap must never claim to be swept");
+  assert.deepEqual(outcome.completedTaskLeaksUnconfirmed, ["forge-t-reap-unconfirmed"]);
+});
+
+test("performOpsReapContainers (FG-504): an ordinary failed-task retention candidate never lands in completedTaskLeaksUnconfirmed, even on error", () => {
+  insertRun(mkRun("run-reap-unconfirmed-failed", "active"));
+  insertTask({ ...mkTask("t-reap-unconfirmed-failed", "run-reap-unconfirmed-failed", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "error";
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-unconfirmed-failed" }]));
+  assert.deepEqual(outcome.errors, ["forge-t-reap-unconfirmed-failed"]);
+  assert.deepEqual(outcome.completedTaskLeaksUnconfirmed, [], "only a completed-task leak candidate belongs in this field");
+});
+
+test("performOpsReapContainers (FG-504): an ordinary failed-task retention candidate ('failed_retained' source, not a completed-task leak) ALSO records container.reaped and clears a prior container.reap_failed incident on success", () => {
+  // container.reaped is logged unconditionally on any non-error outcome (ops.ts's
+  // else-branch isn't gated on source === "completed_leak") — every other FG-504
+  // test above exercises this only via a "complete" task (completed_leak source).
+  // This confirms the same resolution wiring holds for the ordinary retained-on-
+  // failure candidate too, since detectContainerReapFailed doesn't filter by
+  // task status either.
+  insertRun(mkRun("run-reap-resolve-failed", "active"));
+  insertTask({ ...mkTask("t-reap-resolve-failed", "run-reap-resolve-failed", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-reap-resolve-failed", taskId: "t-reap-resolve-failed",
+    payload: { containerName: "forge-t-reap-resolve-failed", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const reap: ContainerReap = () => "killed";
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, containerList([{ name: "forge-t-reap-resolve-failed" }]));
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-resolve-failed"]);
+  assert.deepEqual(outcome.completedTaskLeaks, [], "a failed_retained candidate is never a completed-task leak");
+
+  const events = eventsForTask("t-reap-resolve-failed").filter((e) => e.eventType === "container.reaped");
+  assert.equal(events.length, 1, "the resolution event must be recorded regardless of candidate source");
+  assert.deepEqual(events[0]!.payload, { containerName: "forge-t-reap-resolve-failed", outcome: "killed" });
 });
 
 test("performOpsReapContainers: docker unavailable is reported, not thrown", () => {
