@@ -760,26 +760,31 @@ test("out-of-band: an awaiting_gate item that DOES carry a blockerKind is report
   assert.deepEqual(getCampaignItem(items[0]!.id)!, beforeItem);
 });
 
-// ── FG-502: campaign_system-recoverable (failed/blockerKind='campaign_system') ──
+// ── FG-502: campaign_system-recoverable (blockerKind='campaign_system') ────────
 //
-// executor.ts has three producers that park an item at lifecycleStatus:'failed',
-// blockerKind:'campaign_system' — a non-'complete' run status (salvage), a
-// done-audit gap after a passing verdict, and the unresolved-outcome fallback
-// (no authoritative reviewer verdict found at all). All three always set runId
-// before parking. reconcileCampaign routes this shape through the IDENTICAL
-// out-of-band evidence bar as an awaiting_gate item, but logs a distinct event
-// kind (campaign_item.campaign_system_reconciled) so the audit trail can tell
-// "delivered out-of-band via a re-routed lane" apart from "recovered from a
-// campaign-system-side failure that turned out to be already-shipped."
+// executor.ts has four producers that park an item at blockerKind:'campaign_system'.
+// Three, all in reconcileTerminalOutcome, leave lifecycleStatus:'failed' — a
+// non-'complete' run status (salvage), a done-audit gap after a passing verdict,
+// and the unresolved-outcome fallback (no authoritative reviewer verdict found at
+// all). The fourth, driveWorkflowItem's gate:verdict park on an inconclusive
+// aggregate verdict, leaves lifecycleStatus:'blocked_by_red' instead. All four
+// always set runId before parking. reconcileCampaign routes both statuses through
+// the IDENTICAL out-of-band evidence bar as an awaiting_gate item, but logs a
+// distinct event kind (campaign_item.campaign_system_reconciled) so the audit
+// trail can tell "delivered out-of-band via a re-routed lane" apart from
+// "recovered from a campaign-system-side failure that turned out to be
+// already-shipped."
 
 // Builds a single-item paused campaign parked in the shape executor.ts's own
-// campaign_system producers leave behind: lifecycleStatus='failed',
-// blockerKind='campaign_system', WITH a runId. `requestedHumanAction` mirrors
-// each producer's real message purely for test readability — reconcile's
-// routing predicate never reads it, only lifecycleStatus + blockerKind.
+// campaign_system producers leave behind: blockerKind='campaign_system', WITH a
+// runId, at the given lifecycleStatus ('failed' by default — the three
+// reconcileTerminalOutcome producers; pass 'blocked_by_red' for the
+// gate:verdict-inconclusive producer). `requestedHumanAction` mirrors each
+// producer's real message purely for test readability — reconcile's routing
+// predicate never reads it, only lifecycleStatus + blockerKind.
 function setupCampaignSystemCampaign(
   ticketId: string,
-  opts: { requestedHumanAction?: string } = {}
+  opts: { requestedHumanAction?: string; lifecycleStatus?: "failed" | "blocked_by_red" } = {}
 ): { campaignId: string; itemId: string; runId: string } {
   writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
   const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir, mode: "sequential" });
@@ -788,8 +793,8 @@ function setupCampaignSystemCampaign(
   const itemId = items[0]!.id;
   const runId = `run-${itemId}`;
   db.prepare(
-    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = ? WHERE id = ?"
-  ).run(runId, opts.requestedHumanAction ?? "workflow run ended with status abandoned", itemId);
+    "UPDATE campaign_items SET lifecycle_status = ?, outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = ? WHERE id = ?"
+  ).run(opts.lifecycleStatus ?? "failed", runId, opts.requestedHumanAction ?? "workflow run ended with status abandoned", itemId);
   db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
   return { campaignId: campaign.id, itemId, runId };
 }
@@ -826,6 +831,28 @@ test("campaign_system: all-evidence-present (docs lane) ships and logs the disti
   assert.equal(payload.ticketId, ticketId);
   assert.equal(payload.decidedBy, "steve");
   assert.ok(payload.evidence, "evidence must be embedded in the audit payload");
+});
+
+test("campaign_system: recovers the blocked_by_red/campaign_system shape (gate:verdict-inconclusive producer) that executor.ts itself produces", () => {
+  const ticketId = "FG-565";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId, {
+    lifecycleStatus: "blocked_by_red",
+    requestedHumanAction: "workflow verdict inconclusive at step ship",
+  });
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const result = reconcileCampaign(campaignId, { decidedBy: "steve" });
+
+  assert.equal(result.items[0]!.status, "shipped");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, undefined);
+
+  const evRow = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(runId) as { event_type: string };
+  assert.equal(evRow.event_type, "campaign_item.campaign_system_reconciled");
 });
 
 // ── negative paths, each parameterized against a DIFFERENT executor.ts producer
