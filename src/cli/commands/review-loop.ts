@@ -11,6 +11,7 @@ import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
 import { invoke, createInvokeRun, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
 import { finalizeRunIfSettled } from "../../v2/run-finalize.js";
+import { tasksForRun } from "../../store/tasks.js";
 import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
@@ -488,6 +489,19 @@ export function assertCleanWorkingTree(projectDir: string): boolean {
   return false;
 }
 
+// FG-487: mirrors invoke.ts's closeRunIfIdle — a run is "active" iff it has a
+// non-terminal top-level task, so finalize only when none remains. Without
+// this guard, an exception racing a still-running dispatched task (thrown
+// between markTaskRunning and that task's terminal write) would finalize the
+// run as complete while the task is genuinely in flight.
+function finalizeRunIfIdle(runId: string, logSource: string, extraPayload?: Record<string, unknown>): void {
+  const inFlight = tasksForRun(runId).some(
+    (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed",
+  );
+  if (inFlight) return;
+  finalizeRunIfSettled(runId, logSource, extraPayload);
+}
+
 function readScripts(projectDir: string): Record<string, unknown> {
   try {
     const pkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
@@ -590,7 +604,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         // permanent zero-task 'active' row — every sweep (findPhantomRuns,
         // reconcile completion, ops detectors) INNER JOINs tasks and is
         // structurally blind to it. Finalize with the error recorded, then rethrow.
-        finalizeRunIfSettled(eagerRunId, "review-loop", {
+        finalizeRunIfIdle(eagerRunId, "review-loop", {
           stopReason: "exception",
           error: err instanceof Error ? err.message : String(err),
         });
@@ -608,7 +622,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         // requires at least one task row before it will complete a run, so that path
         // would never close it. Finalize here too — idempotent (a no-op once the run
         // is already complete via the normal per-task path).
-        finalizeRunIfSettled(runId, "review-loop", { stopReason: outcome.stopReason });
+        finalizeRunIfIdle(runId, "review-loop", { stopReason: outcome.stopReason });
         const notePath = join(runDir(runId), "review-loop.md");
         if (existsSync(runDir(runId))) writeFileSync(notePath, note);
         console.log(`\n${note}\nnote: ${notePath}`);
