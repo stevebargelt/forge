@@ -260,6 +260,10 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/usage` | `groupBy` (`role\|workflow\|project\|model\|alias`), `since` (default `30d`), `projectDir`, `limit` (1–200, default 50) | Token usage rollup by dimension |
 | `GET /api/usage/timeseries` | `since` (default `30d`), `projectDir` | Daily token usage time-series |
 | `GET /api/usage/model-mix` | `groupBy` (same as `/api/usage`), `since` (default `30d`), `projectDir` | Model distribution by dimension |
+| `GET /api/verifications/in-progress` | `projectDir` | Host-side verification currently running (review-loop rounds, campaign reconcile real-exec gates), from unmatched `attemptId` starts, with `stale` flag (FG-487). `projectDir` filters strictly: review-loop rows via `runs.project_dir`, gate rows via `campaigns.project_dir` |
+| `GET /api/review-loop/phases` | `projectDir` | Active review-loop runs with phase `verifying \| waiting-on-ci \| reviewing \| fixing` (FG-487) |
+| `GET /api/host-verifications` | `ticketId` + optional `projectDir`, or `itemId` | host_verifications evidence rows scoped to a ticket or campaign item (FG-487) |
+| `GET /api/host-verifications/recent` | `limit` (1–500, default 50) | Most recent host_verifications rows across all tickets — after-the-fact discoverability of bare host gates (FG-487) |
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
 

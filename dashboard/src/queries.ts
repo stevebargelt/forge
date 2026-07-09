@@ -947,6 +947,22 @@ function readEventsByType(types: readonly string[]): VerificationEventRow[] {
     .all(...types) as VerificationEventRow[];
 }
 
+function runProjectDir(runId: string | null): string | null {
+  if (!runId) return null;
+  const row = db().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as
+    | { project_dir: string | null }
+    | undefined;
+  return row?.project_dir ?? null;
+}
+
+function campaignProjectDir(campaignId: string | null): string | null {
+  if (!campaignId) return null;
+  const row = db().prepare(`SELECT project_dir FROM campaigns WHERE id = ?`).get(campaignId) as
+    | { project_dir: string | null }
+    | undefined;
+  return row?.project_dir ?? null;
+}
+
 function parseEventPayload(raw: string | null): Record<string, unknown> {
   if (!raw) return {};
   try {
@@ -995,7 +1011,7 @@ export type InProgressVerification =
  *  at the same round/ticketId/sha with different attemptIds, only one
  *  finished) reports exactly the one attempt that's actually still open, not
  *  zero or two. */
-export function inProgressVerifications(nowMs: number = Date.now()): InProgressVerification[] {
+export function inProgressVerifications(nowMs: number = Date.now(), projectDir?: string): InProgressVerification[] {
   const finishedAttemptIds = new Set<string>();
   for (const row of readEventsByType(VERIFICATION_FINISH_TYPES)) {
     const attemptId = readAttemptId(parseEventPayload(row.payload));
@@ -1011,6 +1027,10 @@ export function inProgressVerifications(nowMs: number = Date.now()): InProgressV
     const ageMs = nowMs - new Date(row.created_at).getTime();
     if (ageMs > STALE_LOOKBACK_MS) continue;
     if (row.event_type === "review_loop.verification_started") {
+      // Project filter matches inFlight()'s strict-equality semantics: the
+      // loop's eager run row carries project_dir; campaign gates resolve via
+      // their campaign row (item.runId is frequently null).
+      if (projectDir && runProjectDir(row.run_id) !== projectDir) continue;
       out.push({
         kind: "review_loop_verification",
         attemptId,
@@ -1023,11 +1043,13 @@ export function inProgressVerifications(nowMs: number = Date.now()): InProgressV
         stale: ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS,
       });
     } else {
+      const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
+      if (projectDir && campaignProjectDir(campaignId) !== projectDir) continue;
       out.push({
         kind: "campaign_reconcile_gate",
         attemptId,
         runId: row.run_id,
-        campaignId: typeof payload.campaignId === "string" ? payload.campaignId : null,
+        campaignId,
         itemId: typeof payload.itemId === "string" ? payload.itemId : null,
         ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
         command:

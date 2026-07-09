@@ -172,7 +172,8 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
   // the host_verifications evidence they record. See queries.ts's FG-487
   // section for the events-spine contract these read.
   if (path === "/api/verifications/in-progress") {
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inProgressVerifications()));
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inProgressVerifications(Date.now(), projectDir)));
     return;
   }
 

@@ -70,6 +70,8 @@ insertEvent("run-double", "review_loop.verification_finished", { attemptId: "att
 insertEvent("run-double", "review_loop.verification_started", { attemptId: "attempt-double-2", round: 1, ticketId: "FG-903", sha: "bbb1111", mode: "local" }, iso(4 * 60_000));
 
 // ── Scenario 5: a campaign reconcile host-gate exec, unmatched + fresh ─────
+// camp-1 lives in /proj/a — the projectDir filter resolves gate rows via campaigns.project_dir.
+db.prepare(`INSERT INTO campaigns VALUES ('camp-1','running','tickets','[]','sequential', ?, ?, NULL, '/proj/a')`).run(iso(1000), iso(1000));
 insertEvent(null, "campaign_item.host_gate_started", {
   attemptId: "attempt-gate-1", campaignId: "camp-1", itemId: "item-1", ticketId: "FG-910", command: "npm run test:all", testedSha: "ccc2222",
 }, iso(2 * 60_000));
@@ -168,6 +170,29 @@ test("inProgressVerifications: a past-cutoff campaign reconcile host-gate start 
   const row = rows.find((r) => r.attemptId === "attempt-gate-stale");
   assert.ok(row, "a past-cutoff gate start must still be reported, flagged stale — not silently vanish");
   assert.equal(row!.stale, true);
+});
+
+test("inProgressVerifications: projectDir filter scopes review-loop rows via runs.project_dir", () => {
+  const projA = inProgressVerifications(NOW, "/proj/a");
+  assert.ok(projA.find((r) => r.attemptId === "attempt-fresh"), "/proj/a row must survive its own filter");
+  assert.equal(projA.find((r) => r.attemptId === "attempt-ci-1"), undefined, "/proj/b's open verification must not leak into /proj/a");
+  const projB = inProgressVerifications(NOW, "/proj/b");
+  assert.ok(projB.find((r) => r.attemptId === "attempt-ci-1"), "/proj/b row must survive its own filter");
+  assert.equal(projB.find((r) => r.attemptId === "attempt-fresh"), undefined, "/proj/a's open verification must not leak into /proj/b");
+});
+
+test("inProgressVerifications: projectDir filter scopes campaign gate rows via campaigns.project_dir", () => {
+  const projA = inProgressVerifications(NOW, "/proj/a");
+  assert.ok(projA.find((r) => r.attemptId === "attempt-gate-1"), "camp-1 (/proj/a) gate must survive the /proj/a filter");
+  const projB = inProgressVerifications(NOW, "/proj/b");
+  assert.equal(projB.find((r) => r.attemptId === "attempt-gate-1"), undefined, "camp-1 (/proj/a) gate must not leak into /proj/b");
+});
+
+test("inProgressVerifications: no projectDir filter returns rows across projects (cross-project survey default)", () => {
+  const rows = inProgressVerifications(NOW);
+  assert.ok(rows.find((r) => r.attemptId === "attempt-fresh"));
+  assert.ok(rows.find((r) => r.attemptId === "attempt-ci-1"));
+  assert.ok(rows.find((r) => r.attemptId === "attempt-gate-1"));
 });
 
 test("reviewLoopRunPhases: a run whose verification finished and now has a running red-wide task shows phase 'reviewing'", () => {
