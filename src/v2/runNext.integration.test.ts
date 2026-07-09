@@ -19,6 +19,7 @@ import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { failureKindForTask, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { runOpsCheck } from "../ops/detect.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { taskDir } from "../util/paths.js";
@@ -1357,6 +1358,49 @@ test("runNext: FG-492 result-missing after a clean container exit carries confir
   assert.ok(containerEvidence, "container.exited must carry the causal evidence");
   assert.equal(containerEvidence.containerExitedEventObserved, true, "Forge directly observed this exit");
   assert.equal(containerEvidence.dockerExitCode, 0);
+});
+
+// FG-492 review findings 2+3: same gap as invoke.ts's failTask call — the
+// pipeline/fanout-child dispatch path's `no_result_json` failure used to omit
+// `evidence`, so detect.ts's state-4 distinction could only be exercised with
+// a hand-crafted event. Drive it end to end through runNext's real failTask
+// call and confirm runOpsCheck raises the incident off that production shape.
+test("runNext: FG-492 finding 2+3 — result_missing from the REAL failTask call carries recovery evidence and is detected by runOpsCheck", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-fg492-detect",
+    description: "one step that exits cleanly but writes no result",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "fg492 detect test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath, onContainerEvidence }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "agent produced no result.json");
+    writeFileSync(stderrPath, "");
+    onContainerEvidence?.({ containerName: "forge-stub", containerExitedEventObserved: true, dockerExitCode: 0, oomKilled: false });
+    return 0;
+  };
+
+  await runNext({ runId, workflow: WF, dockerExec: cleanExitNoResult });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "result_missing");
+
+  const events = eventsForTask(primary.id);
+  const orphanEvidence = getOrphanEvidenceFromEvents(events);
+  assert.ok(orphanEvidence, "result_missing must now carry recovery evidence off the real failTask call");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true);
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === primary.id);
+  assert.ok(incident, "detectOrphanedWorkMayPersist must raise an incident for a real result_missing task.failed event");
+  assert.match(incident!.evidence.join(" "), /container exited cleanly but no result\.json was ever produced/);
 });
 
 test("runNext: container.idle_timeout emitted (not container.exited) on idle timeout", async () => {

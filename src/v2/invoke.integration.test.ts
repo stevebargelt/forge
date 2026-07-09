@@ -12,6 +12,7 @@ import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { failureKindForTask, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { runOpsCheck } from "../ops/detect.js";
 import { orphanRecoveryMessage, describeContainerEvidence } from "../cli/commands/show.js";
 import { execFileSync } from "node:child_process";
 import { writeProfile } from "../util/auth-profiles.js";
@@ -1558,4 +1559,32 @@ test("FG-492: result missing after a CLEAN container exit is rendered as a confi
   const exitedEvent = events.find((e) => e.eventType === "container.exited")!;
   assert.ok(exitedEvent, "container.exited must have fired before the result_missing classification");
   assert.equal((exitedEvent.payload as Record<string, unknown>).exitCode, 0);
+});
+
+// FG-492 review findings 1+3: the failTask call for `no_result_json` used to
+// omit `evidence` entirely, so ops/detect.ts's state-4 distinction (a clean
+// exit that produced no result) could only ever be exercised with a
+// hand-crafted event in detect.test.ts — never by the real producer. This
+// drives the whole path end to end: invoke()'s real failTask call must attach
+// OrphanEvidence, and runOpsCheck (the same detector `forge ops check` runs)
+// must raise the distinguishing incident off that real event shape.
+test("FG-492 finding 1+3: result_missing from the REAL failTask call carries recovery evidence and is detected by runOpsCheck", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg492-detect-"));
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeCleanExitNoResultExec() });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "result_missing");
+
+  const events = eventsForTask(r.taskId);
+  const orphanEvidence = getOrphanEvidenceFromEvents(events);
+  assert.ok(orphanEvidence, "result_missing must now carry recovery evidence off the real failTask call, not just a bare error string");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true, "attached-exit — Forge watched this container exit itself");
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === r.taskId);
+  assert.ok(incident, "detectOrphanedWorkMayPersist must raise an incident for a real result_missing task.failed event, not just a synthetic fixture");
+  assert.match(incident!.evidence.join(" "), /container exited cleanly but no result\.json was ever produced/);
+  assert.match(incident!.recommendedAction.reason, /without needing --force/);
 });

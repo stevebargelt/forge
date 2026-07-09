@@ -330,6 +330,63 @@ test("integ forge status <runId> --json: a failed task with no recorded evidence
   assert.equal(task?.containerEvidence, null);
 });
 
+// FG-492 review finding 4: `forge show` already distinguishes a fanout parent's
+// derived failure (fanout_wave_orphaned — no orphanEvidence key, no container
+// of its own) via getFanoutWaveEvidenceFromEvents; `status` had zero coverage
+// of this state at any tier before this pair of tests.
+test("integ forge status <runId>: plain output distinguishes a fanout-parent derived failure, never a bare unexplained ☠", () => {
+  const runId = "run-fg492-status-fanout";
+  const taskId = "t-fg492-status-fanout-parent";
+  insertRunRow({ id: runId, workflow: "build", title: "fg492 status fanout parent" });
+  insertTaskRow({ id: taskId, runId, status: "failed" });
+  insertEvent({
+    runId,
+    taskId,
+    eventType: "task.failed",
+    payload: {
+      failure_kind: "fanout_wave_orphaned",
+      error: "fanout wave orphaned: 1/3 children complete, the rest failed or never finished",
+      childSummary: { total: 3, complete: 1 },
+    },
+  });
+
+  const result = runForge(["status", runId, "--read-only"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stdout, /fanout wave orphaned — 1\/3 children completed/);
+  assert.match(result.stdout, /forge recover t-fg492-status-fanout-parent --re-drive/);
+  assert.doesNotMatch(result.stdout, FORBIDDEN_CAUSAL_CLAIMS, "a fanout parent never had its own agent container — must not read as a killed agent");
+});
+
+test("integ forge status <runId> --json: fanoutWaveRecovery carries childSummary + message for a fanout-parent derived failure, mirrors forge show", () => {
+  const runId = "run-fg492-status-fanout-json";
+  const taskId = "t-fg492-status-fanout-json";
+  insertRunRow({ id: runId, workflow: "build", title: "fg492 status fanout parent json" });
+  insertTaskRow({ id: taskId, runId, status: "failed" });
+  insertEvent({
+    runId,
+    taskId,
+    eventType: "task.failed",
+    payload: {
+      failure_kind: "fanout_wave_orphaned",
+      error: "fanout wave orphaned: 2/4 children complete, the rest failed or never finished",
+      childSummary: { total: 4, complete: 2 },
+    },
+  });
+
+  const result = runForge(["status", runId, "--json", "--read-only"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const parsed = JSON.parse(result.stdout) as {
+    tasks: Array<{ id: string; containerEvidence: unknown; orphanRecovery: unknown; fanoutWaveRecovery: { childSummary: { total: number; complete: number }; message: string } | null }>;
+  };
+  const task = parsed.tasks.find((t) => t.id === taskId);
+  assert.ok(task, "task must be present in status --json output");
+  assert.equal(task!.containerEvidence, null, "a fanout parent never had its own container — no containerEvidence to fabricate");
+  assert.equal(task!.orphanRecovery, null, "fanout evidence lives under childSummary, not the orphanEvidence `evidence` key");
+  assert.ok(task!.fanoutWaveRecovery, "fanoutWaveRecovery must be populated for a fanout-parent derived failure");
+  assert.deepEqual(task!.fanoutWaveRecovery!.childSummary, { total: 4, complete: 2 });
+  assert.match(task!.fanoutWaveRecovery!.message, /fanout wave orphaned — 2\/4 children completed/);
+});
+
 // ── forge ops reap-containers: real CLI option wiring (previously only ─────
 // exercised at the performOpsReapContainers() function level in ops.test.ts)
 

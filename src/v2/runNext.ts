@@ -2368,7 +2368,11 @@ async function runContainer(args: {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
       return { kind: "ok", result: inferred };
     }
-    failTask(args.taskId, { runId: args.runId, kind, error: msg });
+    // FG-492 finding 2: result_missing now joins ORPHAN_EVIDENCE_KINDS, so
+    // recoveryEvidenceFor gathers the same worktree-diff evidence as
+    // container_crash/idle_timeout for it; model_error is not in that set, so
+    // recoveryEvidenceFor returns undefined for it, matching line 2339 above.
+    failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
     return { kind: "failed", error: msg };
   }
 

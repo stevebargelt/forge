@@ -652,7 +652,13 @@ test("FG-492 finding 4 (state 4): a result missing after a confirmed clean exit 
   assert.match(i.recommendedAction.reason, /without needing --force/, "a plain clean-exit result_missing never needs --force");
 });
 
-test("FG-492 finding 4 (state 4 negative): result_missing with NO recorded evidence raises no incident — today's invoke.ts producer, avoids retroactive noise", () => {
+// FG-492 review findings 1+2: invoke.ts/runNext.ts's real failTask calls now
+// attach evidence for result_missing (see invoke.integration.test.ts /
+// runNext.integration.test.ts's "real failTask call" tests for the production-
+// shape proof) — this fixture models an evidence-less edge case that can still
+// occur: a pre-FG-492 event, or a read-only dispatch (a red/audit agent),
+// where recoveryEvidenceFor() is skipped and no evidence is ever recorded.
+test("FG-492 finding 4 (state 4 negative): result_missing with NO recorded evidence raises no incident — pre-FG-492 event or read-only dispatch, avoids retroactive noise", () => {
   insertRun(mkRun("run-state4-noev", "active"));
   insertTask(mkTask("task-state4-noev", "run-state4-noev", "failed"));
   logEvent("task.failed", {

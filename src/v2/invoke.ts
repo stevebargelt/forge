@@ -615,7 +615,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       closeRunIfIdle(true);
       return { runId, taskId, status: "complete", result: inferred };
     }
-    failTask(taskId, { runId, kind, error });
+    // FG-492 finding 1: result_missing now joins ORPHAN_EVIDENCE_KINDS, so
+    // recoveryEvidenceFor gathers the same worktree-diff evidence as
+    // container_crash/idle_timeout for it; model_error is not in that set, so
+    // recoveryEvidenceFor returns undefined for it, matching the branch above.
+    failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }

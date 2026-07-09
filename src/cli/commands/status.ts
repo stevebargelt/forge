@@ -5,10 +5,10 @@ import { tasksForRun } from "../../store/tasks.js";
 import { verdictsForTask } from "../../store/verdicts.js";
 import { getDb } from "../../store/db.js";
 import { ensureForgeDirs } from "../../util/paths.js";
-import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage, describeContainerEvidence } from "./show.js";
+import { liveIdleCountdownForTask, formatIdleCountdown, orphanRecoveryMessage, describeContainerEvidence, fanoutWaveRecoveryMessage } from "./show.js";
 import { reconcileRun, reconcileRuns } from "../../v2/reconcile.js";
 import { eventsForTask } from "../../store/events.js";
-import { failureKindFromEvents, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "../../v2/failure-kind.js";
+import { failureKindFromEvents, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents, getFanoutWaveEvidenceFromEvents } from "../../v2/failure-kind.js";
 import { taskHasPipelineFinalize } from "../../v2/run-kind.js";
 
 export function registerStatus(program: Command): void {
@@ -90,6 +90,12 @@ export function registerStatus(program: Command): void {
           // distinguishes a confirmed exit from a container that disappeared
           // with no terminal event, without asserting an unproven "killed" cause.
           const containerEvidence = t.status === "failed" ? getContainerCausalEvidenceFromEvents(events) : undefined;
+          // FG-492 finding 4: a fanout parent's derived failure carries its
+          // evidence under a distinct childSummary key (not `evidence`) — same
+          // distinction `forge show` renders via getFanoutWaveEvidenceFromEvents,
+          // now given the same rendering here so `status --json` doesn't leave
+          // it as an unexplained failure with no orphanRecovery/containerEvidence.
+          const fanoutWaveEvidence = t.status === "failed" ? getFanoutWaveEvidenceFromEvents(events) : undefined;
           return {
             id: t.id,
             phase: t.phase,
@@ -106,6 +112,9 @@ export function registerStatus(program: Command): void {
               : null,
             containerEvidence: containerEvidence
               ? { evidence: containerEvidence, message: describeContainerEvidence(containerEvidence) }
+              : null,
+            fanoutWaveRecovery: fanoutWaveEvidence
+              ? { childSummary: fanoutWaveEvidence, message: fanoutWaveRecoveryMessage(t.id, fanoutWaveEvidence) }
               : null,
             idleCountdown: liveIdleCountdownForTask(t) ?? null,
             verdicts: verdictsForTask(t.id).map((v) => ({
@@ -167,6 +176,14 @@ export function registerStatus(program: Command): void {
             if (orphanEvidence) {
               const kind = failureKindFromEvents(events) ?? "orphaned_work_may_persist";
               console.log(`      ${orphanRecoveryMessage(t.runId, t.id, orphanEvidence, kind, runIsInvokeRun)}`);
+            }
+            // FG-492 finding 4: a fanout parent's derived failure — no orphan
+            // evidence (its evidence lives under childSummary, not `evidence`) and
+            // no container evidence (it never had its own container) — must not
+            // read as a bare, unexplained ☠. Same message `forge show` prints.
+            const fanoutWaveEvidence = getFanoutWaveEvidenceFromEvents(events);
+            if (fanoutWaveEvidence) {
+              console.log(`      ${fanoutWaveRecoveryMessage(t.id, fanoutWaveEvidence)}`);
             }
             // FG-492: same causal-evidence line `forge show` prints — a confirmed
             // container exit vs. one that disappeared with no terminal event.

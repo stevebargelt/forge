@@ -302,6 +302,12 @@ export const ORPHAN_EVIDENCE_KINDS = new Set([
   // FG-479: recorded on reconcile's container-gone path with the same
   // OrphanEvidence shape (resultState "valid" or a recovered stdout result).
   "orphaned_needs_finalize",
+  // FG-492 finding 1/2: the attached-exit result_missing path (invoke.ts /
+  // runNext.ts) now gathers the same OrphanEvidence tuple via
+  // recoveryEvidenceFor — a clean container exit that produced no result.json
+  // still leaves a worktree diff worth surfacing, same as container_crash /
+  // idle_timeout above.
+  "result_missing",
 ]);
 
 /** Recover the orphaned_work_may_persist / oom_killed evidence from a task's
