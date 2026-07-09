@@ -3333,6 +3333,99 @@ test("FG-444 integ: THREE concurrently-parked items of mixed eligibility — sho
   );
 });
 
+// FG-502 finding 3: `forge campaign report` (human) already prints a per-item
+// `campaign-system-recoverable:` line from item.campaignSystemEligible (see
+// report.ts's renderCampaignReportHuman), but `forge campaign show` (human)
+// had no analogous line — only out-of-band-eligible — so the operator-facing
+// text surfaces stayed silent for a failed/campaign_system item even though
+// show's own JSON already carries campaignSystemEligible. Mirrors the
+// out-of-band-eligible CLI tests above (setupOutOfBandCliCampaign /
+// FG-444), but for the failed/blockerKind='campaign_system' shape.
+function setupCampaignSystemCliCampaign(ticketId: string): { campaignId: string; itemId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: "Campaign system recoverable", body: "" });
+
+  const planResult = runForge([
+    "campaign", "plan",
+    "--tickets", ticketId,
+    "--project", projectDir,
+    "--json",
+  ]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const planOutput = JSON.parse(planResult.stdout) as { campaignId: string };
+
+  const approveResult = runForge(["campaign", "approve", planOutput.campaignId, "--rationale", "approved"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstdout: ${approveResult.stdout}\nstderr: ${approveResult.stderr}`);
+
+  const dbPath = join(forgeHome, "forge.db");
+  const db = new Database(dbPath);
+  const item = db
+    .prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .get(planOutput.campaignId) as { id: string };
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(item.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(planOutput.campaignId);
+  db.close();
+
+  return { campaignId: planOutput.campaignId, itemId: item.id };
+}
+
+test("FG-502 integ campaign show (human): a failed/campaign_system item with full out-of-band evidence prints a campaign-system-recoverable line, matching report's human output", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupCampaignSystemCliCampaign("FG-630");
+  makeCommitIn(projectDir, "base-FG-630");
+  const commit = commitFileIn(projectDir, "docs/FG-630.md", "docs delivering FG-630", "docs: FG-630");
+  closeTicket(projectDir, "FG-630", commit);
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0, `show --json failed\nstdout: ${jsonResult.stdout}\nstderr: ${jsonResult.stderr}`);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as {
+    items: { ticketId: string; campaignSystemEligible: boolean }[];
+  };
+  const row630 = jsonOutput.items.find((i) => i.ticketId === "FG-630")!;
+  assert.equal(row630.campaignSystemEligible, true, "FG-630 must be marked campaign-system-recoverable");
+
+  const humanResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(humanResult.status, 0, `show (human) failed\nstdout: ${humanResult.stdout}\nstderr: ${humanResult.stderr}`);
+  const recoverableLines = humanResult.stdout.split("\n").filter((l) => l.includes("campaign-system-recoverable:"));
+  assert.equal(recoverableLines.length, 1, `expected exactly one campaign-system-recoverable line\nstdout: ${humanResult.stdout}`);
+  assert.ok(recoverableLines[0]!.includes("FG-630"));
+
+  // report's human output already carries the same line (pre-FG-502) — show must agree.
+  const reportHuman = runForge(["campaign", "report", campaignId]);
+  assert.equal(reportHuman.status, 0, `report (human) failed\nstdout: ${reportHuman.stdout}\nstderr: ${reportHuman.stderr}`);
+  assert.ok(reportHuman.stdout.includes("campaign-system-recoverable:"), `expected report to also print the line\nstdout: ${reportHuman.stdout}`);
+});
+
+test("FG-502 integ campaign show (human): a failed/campaign_system item that is NOT eligible (ticket never closed) prints no campaign-system-recoverable line", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+
+  const { campaignId } = setupCampaignSystemCliCampaign("FG-631");
+  makeCommitIn(projectDir, "base-FG-631");
+  // FG-631 stays 'active' — never closed, so out-of-band evidence can never be satisfied.
+
+  const jsonResult = runForge(["campaign", "show", campaignId, "--json"]);
+  assert.equal(jsonResult.status, 0, `show --json failed\nstdout: ${jsonResult.stdout}\nstderr: ${jsonResult.stderr}`);
+  const jsonOutput = JSON.parse(jsonResult.stdout) as {
+    items: { ticketId: string; campaignSystemEligible: boolean }[];
+  };
+  const row631 = jsonOutput.items.find((i) => i.ticketId === "FG-631")!;
+  assert.equal(row631.campaignSystemEligible, false, "FG-631 (never closed) must NOT be marked campaign-system-recoverable");
+
+  const humanResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(humanResult.status, 0, `show (human) failed\nstdout: ${humanResult.stdout}\nstderr: ${humanResult.stderr}`);
+  assert.ok(
+    !humanResult.stdout.includes("campaign-system-recoverable:"),
+    `ineligible item must print no campaign-system-recoverable line\nstdout: ${humanResult.stdout}`
+  );
+});
+
 // ── FG-473: invoke-lane out-of-band items (runId, zero authoritative verdicts) ──
 //
 // Real CLI-subprocess coverage for the FG-473 fix: `no_authoritative_verdict_

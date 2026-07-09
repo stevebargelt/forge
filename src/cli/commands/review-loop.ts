@@ -17,6 +17,7 @@ import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight
 import {
   resolveCommitRange, runVerification, runReviewLoop, renderReviewLoopNote, parseReviewerVerdict,
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
+  type ReviewedTipTrust, type RevertedPathGuidance, type GitRunner,
 } from "../../v2/review-loop.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
 import {
@@ -168,7 +169,157 @@ export type ReviewLoopContext = {
    *  affect the dirty-tree fallback (unchanged) or scriptsForVerification's
    *  FG-500 derived-gate semantics for other callers. */
   localExtended?: boolean;
+  /** FG-502: docs/learnings/README paths already touched by the reviewed
+   *  commit range — computed ONCE at loop start (see computeInRangeDocsPaths)
+   *  and fixed for the whole loop, never recomputed per round or against a
+   *  moving HEAD. Paths in this set are treated as in-scope for the fixer;
+   *  paths matching the docs/learnings/README class but absent from this set
+   *  are reverted. Defaults to an empty set (nothing in range) when omitted —
+   *  matches the pre-FG-502 always-disallowed behavior. Backlog/ticket-closeout
+   *  paths are NEVER in this set's concern — they stay unconditionally
+   *  disallowed regardless of range membership. */
+  inRangeDocsPaths?: Set<string>;
+  /** FG-502: injectable for tests — the git command runner used for the fixer's
+   *  scope-guard revert/verify (git status/checkout/rm/clean). Defaults to a
+   *  real execFileSync("git", ...) call in ctx.projectDir. Lets a test inject a
+   *  spy that fails ONE specific revert call (a git lock/permissions/disk
+   *  failure) without shelling out to a real broken git. */
+  gitRunner?: GitRunner;
 };
+
+// FG-502: scope-guard classification. Two independent disallowed classes:
+// (a) backlog/ and ticket-closeout paths — ALWAYS hard-disallowed, unchanged
+//     FG-462 semantics, range-membership irrelevant.
+// (b) docs/, learnings/, README paths — disallowed ONLY when NOT already
+//     touched by the loop-start reviewed commit range (ctx.inRangeDocsPaths).
+const BACKLOG_CLOSEOUT_RE = /^backlog\//;
+const DOCS_LEARNINGS_README_RE = /^(docs\/|learnings\/)|^README/;
+
+/** Non-null iff `path` is out of scope for the fixer; the string is the
+ *  operator-facing reason surfaced as reverted-path guidance. */
+function disallowedReason(path: string, inRangeDocsPaths: Set<string>): string | null {
+  if (BACKLOG_CLOSEOUT_RE.test(path)) {
+    return "backlog/ and ticket-closeout paths are always out of scope for the fixer (orchestrator post-merge job)";
+  }
+  if (DOCS_LEARNINGS_README_RE.test(path) && !inRangeDocsPaths.has(path)) {
+    return "docs/learnings/README path not touched by the reviewed commit range";
+  }
+  return null;
+}
+
+// A single git-status change, grouped so a rename/copy is always classified
+// and reverted as ONE unit (either side matching disallowed reverts BOTH
+// sides — recreating the old path and removing the new one — never just the
+// disallowed half, which would otherwise leave a duplicate/orphaned path).
+type PorcelainChange =
+  | { kind: "simple"; path: string; existsAtHead: boolean }
+  | { kind: "rename"; newPath: string; oldPath: string };
+
+/** Parse `git status --porcelain -z` (NUL-delimited, no C-quoting) into
+ *  repo-relative changes. With default core.quotePath, --porcelain wraps
+ *  non-ASCII paths in double-quotes + octal escapes, breaking prefix checks;
+ *  -z emits literal UTF-8 paths. Format: "XY path\0" for normal entries;
+ *  "XY newpath\0oldpath\0" for renames/copies (R/C in either status column). */
+function parsePorcelainChanges(porcelain: string): PorcelainChange[] {
+  const fields = porcelain.split("\0");
+  const changes: PorcelainChange[] = [];
+  let fi = 0;
+  while (fi < fields.length) {
+    const field = fields[fi]!;
+    if (!field) { fi++; continue; }
+    const xy = field.slice(0, 2);
+    const filePath = field.slice(3);
+    if (!filePath) { fi++; continue; }
+    const isRenameOrCopy = xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C";
+    if (isRenameOrCopy) {
+      fi++;
+      const oldPath = fields[fi];
+      if (oldPath) changes.push({ kind: "rename", newPath: filePath, oldPath });
+      fi++;
+      continue;
+    }
+    // Only a newly-added (staged 'A') or untracked ('??') path is absent from
+    // HEAD; M/D (and any other combination) mean the path existed at HEAD.
+    const existsAtHead = !xy.includes("A") && !xy.includes("?");
+    changes.push({ kind: "simple", path: filePath, existsAtHead });
+    fi++;
+  }
+  return changes;
+}
+
+/** FG-502: paths under docs/, learnings/, README* already touched by the
+ *  reviewed commit range — computed ONCE at loop start (before
+ *  buildReviewLoopDeps is constructed) and threaded in as
+ *  ctx.inRangeDocsPaths; never recomputed per round or against a moving HEAD. */
+export function computeInRangeDocsPaths(range: CommitRange, projectDir: string): Set<string> {
+  if (range.mode === "none") return new Set();
+  const nameOnly = (args: string[]): string[] =>
+    git(args, projectDir).split("\n").map((s) => s.trim()).filter(Boolean);
+  const paths = range.spansUnmatched
+    ? range.shas.flatMap((sha) => nameOnly(["show", "--name-only", "--format=", sha]))
+    : nameOnly(["diff", "--name-only", range.diffRange]);
+  return new Set(paths.filter((p) => DOCS_LEARNINGS_README_RE.test(p)));
+}
+
+// ── FG-502: reviewed-tip-vs-remote trust check ───────────────────────────────
+//
+// Mirrors src/cli/commands/claude.ts's statusBanner ahead-of-origin helper:
+// resolve a LOCALLY CACHED remote-tracking ref, no implicit `git fetch`. The
+// trust invariant is exact reachability (`git merge-base --is-ancestor
+// <reviewedTipSha> <remoteRef>`), never an ahead-count substitute — an
+// ahead-count can't distinguish "these commits are pushed to a different
+// remote branch" from "these commits exist only locally".
+
+/** Resolve the locally cached remote-tracking ref for the current branch, the
+ *  same two candidates (and order) claude.ts's statusBanner already checks —
+ *  origin/HEAD, falling back to the branch's configured upstream (`@{u}`).
+ *  Never invokes `git fetch`; a ref that isn't already cached locally resolves
+ *  to undefined rather than being fetched. */
+function resolveRemoteRef(projectDir: string): string | undefined {
+  for (const ref of ["origin/HEAD", "@{u}"]) {
+    try {
+      execFileSync("git", ["rev-parse", "--verify", "--quiet", ref], {
+        cwd: projectDir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+      });
+      return ref;
+    } catch { /* try the next candidate */ }
+  }
+  return undefined;
+}
+
+/** Exact ancestry check — `git merge-base --is-ancestor` exit code, never an
+ *  ahead-count arithmetic substitute. Any non-zero exit (including a
+ *  genuinely malformed ref) is treated as "not an ancestor" — fail closed,
+ *  since this feeds a closeable verdict and must never silently trust a
+ *  local-only tip. */
+function isAncestor(sha: string, ref: string, projectDir: string): boolean {
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", sha, ref], {
+      cwd: projectDir, stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve the FG-502 reviewed-tip trust fact for the final report/closeable
+ *  verdict. Three outcomes: trusted (remote ref resolves, tip is an
+ *  ancestor); local_only (remote ref resolves, tip is NOT an ancestor — names
+ *  the local-only commits); remote_unavailable (no resolvable remote-tracking
+ *  ref at all — never silently treated as trusted). */
+export function resolveReviewedTipTrust(projectDir: string, reviewedTipSha: string): ReviewedTipTrust {
+  const remoteRef = resolveRemoteRef(projectDir);
+  if (!remoteRef) return { kind: "remote_unavailable" };
+  if (isAncestor(reviewedTipSha, remoteRef, projectDir)) return { kind: "trusted", remoteRef };
+  const localCommits = git(["log", "--format=%h %s", `${remoteRef}..${reviewedTipSha}`], projectDir)
+    .split("\n").map((l) => l.trim()).filter(Boolean)
+    .map((line) => {
+      const idx = line.indexOf(" ");
+      return idx === -1 ? { sha: line, subject: "" } : { sha: line.slice(0, idx), subject: line.slice(idx + 1) };
+    });
+  return { kind: "local_only", remoteRef, localCommits };
+}
 
 /** Build the engine's deps from real invoke + host verification. `invokeFn` is
  *  injectable for tests. Threads a single runId across reviewer+fixer dispatches.
@@ -181,10 +332,12 @@ export function buildReviewLoopDeps(
   let round = 0;
 
   // gitInDir runs git commands in ctx.projectDir (the project being reviewed).
-  const gitInDir = (args: string[]): string => {
+  // ctx.gitRunner is injectable for tests (see ReviewLoopContext.gitRunner) —
+  // defaults to a real execFileSync("git", ...) call.
+  const gitInDir: GitRunner = ctx.gitRunner ?? ((args: string[]): string => {
     const opts: ExecFileSyncOptions = { cwd: ctx.projectDir, encoding: "utf8" };
     return execFileSync("git", args, opts).toString();
-  };
+  });
 
   const preflight = (): void => {
     applyRoutePreflight({
@@ -193,7 +346,7 @@ export function buildReviewLoopDeps(
     });
   };
 
-  const DISALLOWED_RE = /^(backlog\/|docs\/|learnings\/)|^README/;
+  const inRangeDocsPaths = ctx.inRangeDocsPaths ?? new Set<string>();
 
   // FG-500 regression fix: runVerification adds test:extended whenever the
   // script is present in `scripts`, with no notion of "is this project's
@@ -403,59 +556,141 @@ export function buildReviewLoopDeps(
         return { ok: false, error: res.error ?? "fixer dispatch failed" };
       }
 
-      // Parse git status --porcelain -z (NUL-delimited, no C-quoting) to get changed
-      // repo-relative paths. With default core.quotePath, --porcelain wraps non-ASCII
-      // paths in double-quotes + octal escapes, breaking the DISALLOWED_RE prefix check.
-      // -z emits literal UTF-8 paths. Format: "XY path\0" for normal entries;
-      // "XY newpath\0oldpath\0" for renames/copies (R/C in either status column).
-      const porcelain = gitInDir(["status", "--porcelain", "-z"]);
-      const fields = porcelain.split("\0");
-      const changed: string[] = [];
-      let fi = 0;
-      while (fi < fields.length) {
-        const field = fields[fi]!;
-        if (!field) { fi++; continue; }
-        const xy = field.slice(0, 2);
-        const filePath = field.slice(3);
-        if (!filePath) { fi++; continue; }
-        changed.push(filePath);
-        // Rename/copy: next NUL-field is the old path (no XY prefix). Collect both
-        // so a rename FROM a disallowed dir is also caught by the guard.
-        if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
-          fi++;
-          const oldPath = fields[fi];
-          if (oldPath) changed.push(oldPath);
+      // FG-502 round 2: every git call from here through the final commit is
+      // CONTAINED in one try — a throw from ANY of them (the scope-guard status
+      // scans, the scoped revert re-verify, the final 'remaining' check, or the
+      // add/commit/rev-parse sequence) must never escape fix() uncaught (that
+      // crashed the loop with a generic 'exception' stopReason and no recorded
+      // round state). `stage` names the call in flight so a catch records WHICH
+      // one failed; `toRevert` is declared outside the try so a catch can still
+      // report the affected/unverified paths even if the throw happened before
+      // the scoped re-verify ran. Any throw here becomes a recorded, fail-safe
+      // round failure via the same scope_guard_revert_failed shape the verified
+      // -failed-revert case already uses — never a false commit claim.
+      const toRevert: { path: string; existsAtHead: boolean; reason: string }[] = [];
+      let stage = "scope-guard status scan";
+      try {
+        // --untracked-files=all: without it, a wholly-new untracked directory
+        // collapses to a single "?? dir/" entry instead of listing its files
+        // individually — the scope guard needs per-file granularity so a
+        // disallowed file's specific path (not just its parent dir) is what
+        // gets classified, reverted, and named in operator-facing guidance.
+        const changes = parsePorcelainChanges(gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]));
+        if (changes.length === 0) {
+          return { ok: true };
         }
-        fi++;
-      }
 
-      if (changed.length === 0) {
-        return { ok: true };
-      }
+        // FG-502: classify each change; a rename/copy is reverted as ONE unit if
+        // EITHER side is disallowed (recreate the old path, remove the new one) —
+        // never just the disallowed half, which would otherwise leave a
+        // duplicate/orphaned path behind.
+        for (const c of changes) {
+          if (c.kind === "simple") {
+            const reason = disallowedReason(c.path, inRangeDocsPaths);
+            if (reason) toRevert.push({ path: c.path, existsAtHead: c.existsAtHead, reason });
+          } else {
+            const reason = disallowedReason(c.newPath, inRangeDocsPaths) ?? disallowedReason(c.oldPath, inRangeDocsPaths);
+            if (reason) {
+              toRevert.push({ path: c.oldPath, existsAtHead: true, reason });
+              toRevert.push({ path: c.newPath, existsAtHead: false, reason });
+            }
+          }
+        }
 
-      const disallowed = changed.filter((p) => DISALLOWED_RE.test(p));
-      if (disallowed.length > 0) {
-        // The clean-tree precondition + per-round commits mean HEAD is the pre-round
-        // state; resetting to it reverts only this round's changes safely.
-        // Safe: loop entry requires resolveCommitRange to succeed (needs existing commits), so HEAD is born.
-        gitInDir(["reset", "--hard", "HEAD"]);
-        gitInDir(["clean", "-fd"]);
-        return { ok: false, outOfScope: true, offendingPaths: disallowed };
-      }
+        // The clean-tree precondition + per-round commits mean HEAD is the
+        // pre-round state, so a per-path revert against HEAD is safe: `checkout
+        // HEAD -- <path>` restores a path that existed at HEAD (index + worktree);
+        // a path absent from HEAD (newly added/untracked, or a rename's new half)
+        // is removed instead — `git rm` unstages it if indexed, `git clean -f`
+        // removes any untracked leftover either way.
+        //
+        // Each path's revert is CONTAINED: a thrown exception here never escapes
+        // the per-path loop (finding 2 — a mid-loop throw must not stop other
+        // paths from being attempted). It is NOT silently swallowed either
+        // (finding 1) — `git rm --ignore-unmatch`/`git clean -fd` already exit 0
+        // on their benign no-op cases, so nothing legitimate is ever caught here;
+        // the scoped verify step below is the sole source of truth for whether a
+        // path actually reverted, regardless of whether the attempt threw.
+        stage = "per-path revert attempts";
+        for (const r of toRevert) {
+          try {
+            if (r.existsAtHead) {
+              gitInDir(["checkout", "HEAD", "--", r.path]);
+            } else {
+              gitInDir(["rm", "-f", "--ignore-unmatch", "--", r.path]);
+              gitInDir(["clean", "-fd", "--", r.path]);
+            }
+          } catch {
+            // Verified below.
+          }
+        }
 
-      // All changed paths are in scope — verify before committing. Fast tier by
-      // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
-      // test:extended as a required check; --local-extended restores the full tier.
-      const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
-      if (!verification.ok) {
-        // Leave the diff for inspection; do NOT commit or revert.
-        return { ok: false, verificationFailed: true, dirtyPaths: changed };
-      }
+        // Never trust the attempted revert on its own — VERIFY each to-revert
+        // path is actually clean/absent before it's allowed into revertedPaths
+        // or a commit. Scoped to just these paths so an unrelated in-scope
+        // change elsewhere in the tree doesn't mask a failed revert.
+        stage = "scoped revert re-verification";
+        const failedRevertPaths = toRevert.length === 0 ? [] : [
+          ...new Set(
+            parsePorcelainChanges(
+              gitInDir(["status", "--porcelain", "--untracked-files=all", "-z", "--", ...toRevert.map((r) => r.path)]),
+            ).flatMap((c) => (c.kind === "simple" ? [c.path] : [c.oldPath, c.newPath])),
+          ),
+        ];
 
-      gitInDir(["add", "-A"]);
-      gitInDir(["commit", "-m", `fix(review-loop): address ${ctx.ticketId} review findings (round ${round})`]);
-      const sha = gitInDir(["rev-parse", "HEAD"]).trim();
-      return { ok: true, committedSha: sha };
+        if (failedRevertPaths.length > 0) {
+          // FAIL SAFE: at least one disallowed path could not be verified
+          // reverted — never stage/commit over an unverified tree (that would
+          // silently ship a disallowed path via the blanket `git add -A` below).
+          // Stop the round; the tree is left as-is for inspection.
+          return { ok: false, scopeGuardRevertFailed: true, failedRevertPaths };
+        }
+
+        const revertedPaths: RevertedPathGuidance[] = toRevert.map((r) => ({ path: r.path, reason: r.reason }));
+        stage = "remaining-changes check";
+        const remaining = gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]).trim();
+
+        if (!remaining) {
+          // Nothing survived the revert — same full-abort shape as before FG-502
+          // (distinct from revertedPaths' partial-survival shape below).
+          if (revertedPaths.length > 0) {
+            return { ok: false, outOfScope: true, offendingPaths: revertedPaths.map((r) => r.path) };
+          }
+          return { ok: true };
+        }
+
+        // In-scope changes from this round survive the revert — verify + commit
+        // them normally rather than aborting the whole round. Fast tier by
+        // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
+        // test:extended as a required check; --local-extended restores the full tier.
+        stage = "post-revert verification";
+        const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+        if (!verification.ok) {
+          const dirtyPaths = parsePorcelainChanges(gitInDir(["status", "--porcelain", "--untracked-files=all", "-z"]))
+            .flatMap((c) => (c.kind === "simple" ? [c.path] : [c.oldPath, c.newPath]));
+          // Leave the diff for inspection; do NOT commit or revert further.
+          return { ok: false, verificationFailed: true, dirtyPaths };
+        }
+
+        stage = "add/commit/rev-parse";
+        gitInDir(["add", "-A"]);
+        gitInDir(["commit", "-m", `fix(review-loop): address ${ctx.ticketId} review findings (round ${round})`]);
+        const sha = gitInDir(["rev-parse", "HEAD"]).trim();
+        return revertedPaths.length > 0
+          ? { ok: true, committedSha: sha, revertedPaths }
+          : { ok: true, committedSha: sha };
+      } catch (err) {
+        // No commit is ever claimed here — the throw happened somewhere between
+        // the first status scan and (at worst) the final rev-parse, so any
+        // partial state is reported, never staged/committed over.
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: `fix() aborted: uncaught git failure during ${stage}: ${message}`,
+          scopeGuardRevertFailed: true,
+          failedRevertPaths: toRevert.map((r) => r.path),
+        };
+      }
     },
   };
   return { deps, getRunId: () => runId };
@@ -544,6 +779,9 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         throw new Error(`no commits reference ${ticketId} (and no --since). Pass --since <sha> to set the range.`);
       }
       const originalDiff = buildDiff(range, projectDir);
+      // FG-502: computed ONCE from the loop-start reviewed range, fixed for the
+      // whole loop — never recomputed per round or against a moving HEAD.
+      const inRangeDocsPaths = computeInRangeDocsPaths(range, projectDir);
 
       // Present (guardrail): ticket, route, range, rounds, stop conditions.
       const spanNote = range.spansUnmatched ? `, spans unrelated commits → diffing the ${range.shas.length} ticket shas` : "";
@@ -591,7 +829,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         diffProvider, projectDir, scripts: readScripts(projectDir),
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
-        localExtended: opts.localExtended,
+        localExtended: opts.localExtended, inRangeDocsPaths,
         runId: eagerRunId,
       }, invokeFn ?? invoke);
 
@@ -610,7 +848,14 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         });
         throw err;
       }
-      const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
+      // FG-502: the actual tip under review at loop end (accounts for any
+      // fixer-committed rounds — HEAD may have moved past startHead).
+      const reviewedTipSha = git(["rev-parse", "HEAD"], projectDir).trim();
+      const remoteTrust = resolveReviewedTipTrust(projectDir, reviewedTipSha);
+      const note = renderReviewLoopNote(
+        { ticketId, route: opts.route, maxRounds: opts.maxRounds, range, reviewedTipSha, remoteTrust },
+        outcome,
+      );
 
       const runId = getRunId();
       if (runId) {
@@ -630,8 +875,27 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         console.log(`\n${note}`);
       }
 
-      if (outcome.closeable) {
-        console.log(`\n✓ closeable — reviewer passed AND verification is green. Close with:  forge backlog close ${ticketId}`);
+      // FG-502: a closeable verdict must never print/emit for a local-only
+      // tip — compose outcome.closeable (unchanged: reviewer pass AND
+      // verification green) with the remote-ancestry trust fact ONLY here.
+      if (outcome.closeable && remoteTrust.kind === "trusted") {
+        console.log(
+          `\n✓ closeable — reviewer passed AND verification is green. Reviewed tip ${reviewedTipSha} ` +
+          `is reachable from ${remoteTrust.remoteRef}. Close with:  forge backlog close ${ticketId}`,
+        );
+      } else if (outcome.closeable && remoteTrust.kind === "local_only") {
+        console.log(
+          `\n✗ not closeable — reviewed tip ${reviewedTipSha} has local-only commit(s) not present on ` +
+          `${remoteTrust.remoteRef}: ${remoteTrust.localCommits.map((c) => c.sha).join(", ")}. ` +
+          `Push the branch and re-run \`forge review-loop\`, or re-evaluate before closing.`,
+        );
+        process.exitCode = 1;
+      } else if (outcome.closeable && remoteTrust.kind === "remote_unavailable") {
+        console.log(
+          `\n✗ not closeable — remote-unavailable: no resolvable remote-tracking ref, so reviewed tip ` +
+          `${reviewedTipSha} cannot be confirmed reachable (not local-only). Push and re-run, or re-evaluate before closing.`,
+        );
+        process.exitCode = 1;
       } else if (outcome.stopReason === "closeout_guidance_only") {
         // FG-462: the reviewer's only remaining asks were backlog closeout (the
         // orchestrator's post-merge job); the code review is otherwise clean. Not

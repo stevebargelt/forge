@@ -790,6 +790,7 @@ export function registerCampaign(program: Command): void {
         if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
         if (item.hostVerificationReconcileHint) console.log(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
         if (item.outOfBandEligible) console.log(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
+        if (item.campaignSystemEligible) console.log(`    campaign-system-recoverable: ${formatOutOfBandEligibleHint(item.ticketId)}`);
         if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
           console.log(`    readiness: ${item.readiness.outcome}`);
           if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);

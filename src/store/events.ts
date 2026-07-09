@@ -75,6 +75,16 @@ export type EventType =
   // campaign_item.evidence_reconciled — that event covers the scope-blocked
   // stale-red-fail shape; this one covers the non-pipeline/awaiting_gate shape.
   | "campaign_item.out_of_band_reconciled"
+  // FG-502: operator-triggered `campaign reconcile` shipped an item that one of
+  // executor.ts's campaign-system producers (run non-complete salvage, done-audit
+  // gap after a passing verdict, or the unresolved-outcome fallback) had parked at
+  // failed/blockerKind='campaign_system', after proving out-of-band delivery via
+  // the SAME evidence bar as campaign_item.out_of_band_reconciled (ticket done +
+  // closed commit reachable + lane evidence + no unresolved authoritative
+  // objection). Distinct event kind so the audit trail can tell "delivered
+  // out-of-band via a re-routed lane" apart from "recovered from a campaign-system
+  // salvage/gap/fallback failure that turned out to be already-shipped."
+  | "campaign_item.campaign_system_reconciled"
   // FG-441 red-review fix: `campaign resume`'s manually-driven awaiting_gate
   // reconcile branch found evidence incomplete and refused to ship, re-parking
   // the item. Durable counterpart to the console.error refusal message — under
