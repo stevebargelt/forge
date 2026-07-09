@@ -1,9 +1,11 @@
 ---
 id: FG-365
 type: story
-status: active
+status: done
 title: "FG-350 follow-up: loadModelPolicyWithSource re-reads model-policy per container dispatch (O(N+M) file reads)"
 created: 2026-06-22
+closed: 2026-07-09
+closed_commit: 6c0bf926de5757cb89b71e910d7d43203402425a
 ---
 
 **Found:** 2026-06-22, red-wide review of the FG-350 control-plane-receipts implementation.
