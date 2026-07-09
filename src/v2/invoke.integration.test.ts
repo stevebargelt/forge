@@ -492,10 +492,10 @@ test("invoke: malformed result.json marks failed", async () => {
 // real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
 // PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
 // whether `rm -f -v forge-<taskId>` was actually invoked.
-function makeDockerRmStub(): { binDir: string; logPath: string } {
+function makeDockerRmStub(exitCode = 0): { binDir: string; logPath: string } {
   const binDir = mkdtempSync(join(tmpdir(), "forge-invoke-docker-stub-"));
   const logPath = join(binDir, "docker-calls.log");
-  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit ${exitCode}\n`);
   chmodSync(join(binDir, "docker"), 0o755);
   writeFileSync(logPath, "");
   return { binDir, logPath };
@@ -503,6 +503,21 @@ function makeDockerRmStub(): { binDir: string; logPath: string } {
 
 async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
   const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+// FG-503: `docker rm -f -v` itself failing (daemon hiccup) — the same stub
+// technique, but exits non-zero so finalizeContainerRetention returns
+// "reap_failed" instead of "reaped".
+async function withFailingDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub(1);
   const origPath = process.env.PATH;
   process.env.PATH = `${binDir}:${origPath ?? ""}`;
   try {
@@ -614,6 +629,61 @@ test("invoke: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a faile
     } finally {
       delete process.env.FORGE_CONTAINER_RETENTION;
     }
+  });
+});
+
+// ── FG-503: reap_failed on a SUCCESSFUL task is durably recorded ────────────
+
+test("invoke: FG-503 — exit 0 + valid result.json but `docker rm` errors → task still completes AND a container.reap_failed event is recorded", async () => {
+  await withFailingDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: makeStubExec({ status: "complete" }),
+    });
+
+    assert.equal(r.status, "complete", "a reap failure must never turn a successful task into a failed one");
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${r.taskId}`), "the reap was attempted");
+
+    const events = eventsForTask(r.taskId);
+    const reapFailedEvents = events.filter((e) => e.eventType === "container.reap_failed");
+    assert.equal(reapFailedEvents.length, 1, "the failed reap must be durably recorded exactly once");
+    const payload = reapFailedEvents[0]!.payload as { containerName: string; why: string };
+    assert.equal(payload.containerName, `forge-${r.taskId}`);
+    // FG-503 cross-path consistency: invoke.ts, runNext.ts and gate.ts each
+    // wrap a distinct call site with their own reap-failure logging, but must
+    // emit the SAME payload shape — {containerName, why} — so any consumer
+    // (forge ops reap-containers, forge show --diagnostic) can read the event
+    // without caring which of the three paths produced it. See the matching
+    // assertion in runNext.integration.test.ts and fg492-gate-container-reap.test.ts.
+    assert.deepEqual(Object.keys(payload).sort(), ["containerName", "why"], "payload shape must match the other two reap paths (runNext.ts, gate.ts)");
+    assert.match(payload.why, /^docker rm -f -v failed/, "why must follow the shared wording convention across all three reap paths");
+  });
+});
+
+test("invoke: FG-503 — happy-path completion (reap succeeds) emits no container.reap_failed event", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: makeStubExec({ status: "complete" }),
+    });
+
+    assert.equal(r.status, "complete");
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${r.taskId}`));
+
+    const events = eventsForTask(r.taskId);
+    assert.equal(events.filter((e) => e.eventType === "container.reap_failed").length, 0, "the happy path must stay silent — no new event on a successful reap");
   });
 });
 

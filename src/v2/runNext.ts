@@ -326,6 +326,27 @@ async function dispatchStep(args: {
   });
 }
 
+// FG-503: wraps finalizeContainerRetention for every call site where the
+// primary genuinely completed — a "reap_failed" outcome there is a silent,
+// unsweepable leak (docker rm errored; container + DEC-019 shadow volume left
+// behind), so it's recorded as a durable event `forge ops reap-containers` can
+// later pick up by age. The reaped/retained outcomes stay exactly as silent
+// as before FG-503.
+function reapContainerAndReportFailure(containerName: string, taskSucceeded: boolean, runId: string, taskId: string): void {
+  const outcome = finalizeContainerRetention(containerName, taskSucceeded);
+  if (outcome === "reap_failed") {
+    try {
+      logEvent("container.reap_failed", {
+        runId,
+        taskId,
+        payload: { containerName, why: "docker rm -f -v failed after task completion; container may still be running/present with its anonymous shadow volume" },
+      });
+    } catch {
+      // best-effort — a logging failure must never fail the run
+    }
+  }
+}
+
 // Standard single-agent dispatch. Spawns primary, then any reds (in parallel),
 // aggregates verdicts, sets final status per gate + verdict policy.
 async function dispatchSingleStep(args: {
@@ -677,7 +698,7 @@ async function dispatchSingleStep(args: {
     // verdict returns "awaiting_gate" (paused, not failed, but not done
     // either), and a lost CAS race reports the task's actual terminal status.
     // Either way, anything other than "complete" retains.
-    finalizeContainerRetention(containerName, statusAfterReds === "complete");
+    reapContainerAndReportFailure(containerName, statusAfterReds === "complete", args.runId, taskId);
     // FG-352: cleanup after proven-merged worktree (provenMerged=true because
     // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
     if (statusAfterReds === "complete" && primaryWorktreePath) {
@@ -688,7 +709,8 @@ async function dispatchSingleStep(args: {
 
   const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
   // FG-492 review: same reap-only-on-complete rule as the reds branch above.
-  finalizeContainerRetention(containerName, finalStatus === "complete");
+  // FG-503: same reap_failed durability rule too — see reapContainerAndReportFailure.
+  reapContainerAndReportFailure(containerName, finalStatus === "complete", args.runId, taskId);
   // FG-352: cleanup after proven-merged worktree (provenMerged=true because
   // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
   if (finalStatus === "complete" && primaryWorktreePath) {

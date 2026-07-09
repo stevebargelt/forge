@@ -310,10 +310,10 @@ test("runNext: failed step (container exit nonzero + empty result.json) marks ta
 // real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
 // PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
 // whether `rm -f -v forge-<taskId>` was actually invoked.
-function makeDockerRmStub(): { binDir: string; logPath: string } {
+function makeDockerRmStub(exitCode = 0): { binDir: string; logPath: string } {
   const binDir = mkdtempSync(join(tmpdir(), "forge-runnext-docker-stub-"));
   const logPath = join(binDir, "docker-calls.log");
-  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit ${exitCode}\n`);
   chmodSync(join(binDir, "docker"), 0o755);
   writeFileSync(logPath, "");
   return { binDir, logPath };
@@ -321,6 +321,20 @@ function makeDockerRmStub(): { binDir: string; logPath: string } {
 
 async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
   const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+// FG-503: `docker rm -f -v` itself failing (daemon hiccup) — same stub
+// technique, non-zero exit so finalizeContainerRetention returns "reap_failed".
+async function withFailingDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub(1);
   const origPath = process.env.PATH;
   process.env.PATH = `${binDir}:${origPath ?? ""}`;
   try {
@@ -437,6 +451,91 @@ test("runNext: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a fail
     } finally {
       delete process.env.FORGE_CONTAINER_RETENTION;
     }
+  });
+});
+
+// ── FG-503: reap_failed on a SUCCESSFUL task is durably recorded ────────────
+
+test("runNext: FG-503 — no-reds completion, `docker rm` errors → primary still completes AND a container.reap_failed event is recorded", async () => {
+  await withFailingDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "reap-failed-on-complete test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: makeStubExec({ status: "complete" }) });
+    assert.deepEqual(wave.completedSteps, ["first"], "a reap failure must never turn a successful task into a failed one");
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`), "the reap was attempted");
+
+    const types = eventsForTask(first.id).map((e) => e.eventType);
+    assert.equal(types.filter((t) => t === "container.reap_failed").length, 1, "the failed reap must be durably recorded exactly once");
+    const reapFailedEvent = eventsForTask(first.id).find((e) => e.eventType === "container.reap_failed")!;
+    const payload = reapFailedEvent.payload as { containerName: string; why: string };
+    assert.equal(payload.containerName, `forge-${first.id}`);
+    // FG-503 cross-path consistency: same {containerName, why} payload shape
+    // as invoke.ts and gate.ts's own reap-failure logging — see the matching
+    // assertion in invoke.integration.test.ts and fg492-gate-container-reap.test.ts.
+    assert.deepEqual(Object.keys(payload).sort(), ["containerName", "why"], "payload shape must match the other two reap paths (invoke.ts, gate.ts)");
+    assert.match(payload.why, /^docker rm -f -v failed/, "why must follow the shared wording convention across all three reap paths");
+  });
+});
+
+test("runNext: FG-503 — post-reds completion (gate: auto, advisory red), `docker rm` errors → a container.reap_failed event is recorded", async () => {
+  await withFailingDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: REDS_SPECIALIST_FAIL_WORKFLOW,
+      title: "post-reds reap-failed test",
+      inputs: {},
+      projectDir: "/tmp/test-project",
+    });
+
+    const exec = makeRoutingExec([
+      { matches: (id) => id.startsWith("task-review-"), result: { status: "complete", artifact: "x" } },
+      {
+        matches: (id) => id.startsWith("task-red-review-"),
+        result: { status: "complete", verdict: "fail", confidence: 0.8, findings: [{ severity: "high", summary: "real issue", evidence: "observed in logs", hypothesis: "bug" }] },
+      },
+    ]);
+
+    const wave = await runNext({ runId, workflow: REDS_SPECIALIST_FAIL_WORKFLOW, dockerExec: exec });
+    assert.deepEqual(wave.completedSteps, ["review"], "gate: auto + only a specialist verdict-fail still completes (advisory only)");
+
+    const primary = tasksForRun(runId).find((t) => t.parentId === undefined)!;
+    assert.equal(primary.status, "complete");
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${primary.id}`), "the post-reds reap was attempted");
+
+    const types = eventsForTask(primary.id).map((e) => e.eventType);
+    assert.equal(types.filter((t) => t === "container.reap_failed").length, 1, "the post-reds reap failure must be durably recorded");
+  });
+});
+
+test("runNext: FG-503 — happy-path completion (reap succeeds) emits no container.reap_failed event", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "reap-happy-path test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: makeStubExec({ status: "complete" }) });
+    assert.deepEqual(wave.completedSteps, ["first"]);
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`));
+
+    const types = eventsForTask(first.id).map((e) => e.eventType);
+    assert.equal(types.filter((t) => t === "container.reap_failed").length, 0, "the happy path must stay silent — no new event on a successful reap");
   });
 });
 

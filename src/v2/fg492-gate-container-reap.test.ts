@@ -25,7 +25,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForTask } from "../store/events.js";
 import { gate } from "./gate.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -166,4 +166,56 @@ test("FG-492 final round: a manual step's task has no container of its own — a
 
   const calls = readFileSync(logPath, "utf8").trim();
   assert.equal(calls, "", "a task with no container.started event has nothing to reap — must not invoke docker at all");
+});
+
+// ── FG-503: reap_failed on a SUCCESSFUL task is durably recorded ────────────
+
+test("FG-503: docker rm fails on gate advance-to-complete → task still completes AND a container.reap_failed event is recorded", async () => {
+  const t = containerizedTask("task-gate-reap-failed", "step-human", "awaiting_gate");
+
+  // Shadow the beforeEach's passing stub with a failing one for this test only.
+  const failingBinDir = mkdtempSync(join(tmpdir(), "forge-gate-docker-fail-stub-"));
+  const failingLogPath = join(failingBinDir, "docker-calls.log");
+  writeFileSync(join(failingBinDir, "docker"), `#!/bin/sh\necho "$@" >> "${failingLogPath}"\nexit 1\n`);
+  chmodSync(join(failingBinDir, "docker"), 0o755);
+  writeFileSync(failingLogPath, "");
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${failingBinDir}:${origPath ?? ""}`;
+  try {
+    const result = await gate(t.id, "advance", undefined, {});
+    assert.equal(result.task.status, "complete", "a reap failure must never block the gate advance");
+
+    const calls = readFileSync(failingLogPath, "utf8").trim();
+    assert.equal(calls, `rm -f -v forge-${t.id}`, "the reap was attempted");
+
+    const events = eventsForTask(t.id);
+    const reapFailedEvents = events.filter((e) => e.eventType === "container.reap_failed");
+    assert.equal(reapFailedEvents.length, 1, "the failed reap must be durably recorded exactly once");
+    const payload = reapFailedEvents[0]!.payload as { containerName: string; why: string };
+    assert.equal(payload.containerName, `forge-${t.id}`);
+    // FG-503 cross-path consistency: same {containerName, why} payload shape
+    // as invoke.ts and runNext.ts's own reap-failure logging (their "why"
+    // wording differs in its tail — "after gate advance-to-complete" here vs.
+    // "after task completion" there — but the key set and leading phrase must
+    // match). See the matching assertion in invoke.integration.test.ts and
+    // runNext.integration.test.ts.
+    assert.deepEqual(Object.keys(payload).sort(), ["containerName", "why"], "payload shape must match the other two reap paths (invoke.ts, runNext.ts)");
+    assert.match(payload.why, /^docker rm -f -v failed/, "why must follow the shared wording convention across all three reap paths");
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(failingBinDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-503: happy-path gate advance-to-complete (reap succeeds) emits no container.reap_failed event", async () => {
+  const t = containerizedTask("task-gate-reap-happy", "step-human", "awaiting_gate");
+
+  const result = await gate(t.id, "advance", undefined, {});
+  assert.equal(result.task.status, "complete");
+
+  const calls = readFileSync(logPath, "utf8").trim();
+  assert.equal(calls, `rm -f -v forge-${t.id}`);
+
+  const events = eventsForTask(t.id);
+  assert.equal(events.filter((e) => e.eventType === "container.reap_failed").length, 0, "the happy path must stay silent — no new event on a successful reap");
 });

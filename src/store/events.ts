@@ -29,6 +29,13 @@ export type EventType =
   | "container.killed"
   | "container.idle_timeout"
   | "container.dependency_provisioning_failed"
+  // FG-503: finalizeContainerRetention(..., true) attempted a reap on a
+  // successful task and `docker rm -f -v` errored — the container (and its
+  // anonymous DEC-019 shadow volume) is left behind, unrecorded and
+  // unsweepable until this event exists to key `forge ops reap-containers`'
+  // completed-task scan off of. Never emitted on the reaped/retained
+  // outcomes — those stay silent, exactly as before FG-503.
+  | "container.reap_failed"
   // FG-437: durable phase-boundary markers around the (separate, short-lived)
   // dependency provisioner container, so a mid-provision crash is visible to
   // reconcile even though the task's own container.started hasn't fired yet.

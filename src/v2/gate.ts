@@ -175,7 +175,23 @@ export async function gate(
     // steps and fanout parents never emit container.started for themselves,
     // same signal reconcile.ts gates its own container logic on.
     if (eventsForTask(taskId).some((e) => e.eventType === "container.started")) {
-      finalizeContainerRetention(`forge-${taskId}`, true);
+      const containerName = `forge-${taskId}`;
+      const reapOutcome = finalizeContainerRetention(containerName, true);
+      // FG-503: reap_failed on this success path is a silent, unsweepable leak
+      // (docker rm errored; container + DEC-019 shadow volume left behind) —
+      // record it so `forge ops reap-containers`/`forge ops check` can pick it
+      // up later. Best-effort: a logging failure must never block the gate advance.
+      if (reapOutcome === "reap_failed") {
+        try {
+          logEvent("container.reap_failed", {
+            runId: run.id,
+            taskId,
+            payload: { containerName, why: "docker rm -f -v failed after gate advance-to-complete; container may still be running/present with its anonymous shadow volume" },
+          });
+        } catch {
+          // best-effort — see comment above
+        }
+      }
     }
 
     // If this was the last step (no step depends on it) and every primary

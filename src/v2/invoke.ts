@@ -93,6 +93,27 @@ export type InvokeResult = {
   error?: string;
 };
 
+// FG-503: wraps finalizeContainerRetention for every call site where the task
+// genuinely succeeded (or a lost CAS race still leaves it complete) — a
+// "reap_failed" outcome there is a silent, unsweepable leak (docker rm errored;
+// container + DEC-019 shadow volume left behind), so it's recorded as a durable
+// event `forge ops reap-containers` can later pick up by age. The reaped/
+// retained outcomes stay exactly as silent as before FG-503.
+function reapContainerAndReportFailure(containerName: string, taskSucceeded: boolean, runId: string, taskId: string): void {
+  const outcome = finalizeContainerRetention(containerName, taskSucceeded);
+  if (outcome === "reap_failed") {
+    try {
+      logEvent("container.reap_failed", {
+        runId,
+        taskId,
+        payload: { containerName, why: "docker rm -f -v failed after task completion; container may still be running/present with its anonymous shadow volume" },
+      });
+    } catch {
+      // best-effort — a logging failure must never fail the run
+    }
+  }
+}
+
 export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Resolve / create the run.
   const runId = args.runId ?? createInvokeRun(args.agentRole, args.projectDir, args.designDir, args.runTitle, args.workspace);
@@ -624,12 +645,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
         const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
         // FG-492 review: reap only if the task actually ended up complete —
         // a lost CAS race to a concurrent cancel is a failure, not a success.
-        finalizeContainerRetention(containerName, finalStatus === "complete");
+        reapContainerAndReportFailure(containerName, finalStatus === "complete", runId, taskId);
         closeRunIfIdle(finalStatus === "complete");
         return { runId, taskId, status: finalStatus, result: inferred, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
       }
       logEvent("task.completed", { runId, taskId });
-      finalizeContainerRetention(containerName, true);
+      reapContainerAndReportFailure(containerName, true, runId, taskId);
       closeRunIfIdle(true);
       return { runId, taskId, status: "complete", result: inferred };
     }
@@ -667,7 +688,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   if (!markTaskComplete(taskId, result)) {
     const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
     // FG-492 review: reap only if the task actually ended up complete.
-    finalizeContainerRetention(containerName, finalStatus === "complete");
+    reapContainerAndReportFailure(containerName, finalStatus === "complete", runId, taskId);
     closeRunIfIdle(finalStatus === "complete");
     return { runId, taskId, status: finalStatus, result, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
   }
@@ -675,7 +696,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // FG-492 review: task marked complete with a valid result — nothing left to
   // investigate on this container, reap it now instead of leaving it to
   // `forge ops reap-containers` or a stray reconcile pass.
-  finalizeContainerRetention(containerName, true);
+  reapContainerAndReportFailure(containerName, true, runId, taskId);
   closeRunIfIdle(true);
   return { runId, taskId, status: "complete", result };
 }

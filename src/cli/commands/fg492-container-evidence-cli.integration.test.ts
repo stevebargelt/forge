@@ -496,3 +496,98 @@ test("integ forge ops reap-containers --all --json: cross-project scan does not 
   const all = JSON.parse(allResult.stdout) as { scanned: number };
   assert.ok(all.scanned >= 2, "--all must see candidates across every project, not just the scoped one");
 });
+
+// ── FG-503: real CLI surface of the completed-task-leak scan ───────────────
+// (previously the completed_leak branch of performOpsReapContainers was only
+// exercised at the function level in ops.test.ts — never through registerOps's
+// actual `.action()` callback, real Commander option parsing, or the real
+// JSON/plain rendering the operator actually sees.)
+
+test("integ forge ops reap-containers --dry-run --json: a completed task's container.reap_failed leak surfaces via completedTaskLeaks, real CLI subprocess", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg503-reap-leak";
+  const leakedTaskId = "t-fg503-reap-leak";
+  insertRunRow({ id: runId, workflow: "build", title: "fg503 completed-task leak", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: leakedTaskId, eventType: "container.started", payload: {} });
+  insertEvent({
+    runId,
+    taskId: leakedTaskId,
+    eventType: "container.reap_failed",
+    payload: { containerName: `forge-${leakedTaskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { scanned: number; reaped: string[]; completedTaskLeaks: string[] };
+  assert.equal(outcome.scanned, 1, "a completed task carrying container.reap_failed is a candidate, not just failed tasks");
+  assert.deepEqual(outcome.reaped, [`forge-${leakedTaskId}`]);
+  assert.deepEqual(outcome.completedTaskLeaks, [`forge-${leakedTaskId}`], "surfaced distinctly through the real --json field, not folded into the ordinary reap count");
+});
+
+test("integ forge ops reap-containers --dry-run (plain): a completed-task leak is reported as leaked from a SUCCESSFUL task, real CLI subprocess", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg503-reap-leak-plain";
+  const leakedTaskId = "t-fg503-reap-leak-plain";
+  insertRunRow({ id: runId, workflow: "build", title: "fg503 completed-task leak plain", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: leakedTaskId, eventType: "container.started", payload: {} });
+  insertEvent({
+    runId,
+    taskId: leakedTaskId,
+    eventType: "container.reap_failed",
+    payload: { containerName: `forge-${leakedTaskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(result.stdout, /\(dry-run\) would reap 1\/1 retained container\(s\)/);
+  assert.match(
+    result.stdout,
+    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, now swept\\): forge-${leakedTaskId}`),
+    "the operator-visible text FG-503 exists to add — a leak on an otherwise-successful task must never read as an ordinary failed-task reap",
+  );
+});
+
+test("integ forge ops reap-containers: a completed task that reaped cleanly (no container.reap_failed event) is never scanned again, real CLI subprocess", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg503-reap-clean";
+  const cleanTaskId = "t-fg503-reap-clean";
+  insertRunRow({ id: runId, workflow: "build", title: "fg503 completed clean", projectDir });
+  insertTaskRow({ id: cleanTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: cleanTaskId, eventType: "container.started", payload: {} });
+  // No container.reap_failed — the ordinary silent happy path (the ONLY signal
+  // that gates a completed task into this scan at all; see ops.ts's comment).
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { scanned: number; reaped: string[]; completedTaskLeaks: string[] };
+  assert.equal(outcome.scanned, 0, "a cleanly-reaped completed task must never become a scan candidate, real CLI end to end");
+  assert.deepEqual(outcome.reaped, []);
+  assert.deepEqual(outcome.completedTaskLeaks, []);
+});
+
+test("integ forge ops reap-containers --json: a failed-task retention candidate and a completed-task leak candidate compose in the same real scan without cross-contamination", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg503-reap-mixed";
+  const failedTaskId = "t-fg503-reap-mixed-failed";
+  const leakedTaskId = "t-fg503-reap-mixed-leak";
+  insertRunRow({ id: runId, workflow: "build", title: "fg503 mixed scan", projectDir });
+  insertTaskRow({ id: failedTaskId, runId, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: failedTaskId, eventType: "container.started", payload: {} });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: leakedTaskId, eventType: "container.started", payload: {} });
+  insertEvent({
+    runId,
+    taskId: leakedTaskId,
+    eventType: "container.reap_failed",
+    payload: { containerName: `forge-${leakedTaskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { scanned: number; reaped: string[]; completedTaskLeaks: string[] };
+  assert.equal(outcome.scanned, 2, "both the failed-retained and completed-leak candidates land in the same scan");
+  assert.deepEqual(outcome.reaped.sort(), [`forge-${failedTaskId}`, `forge-${leakedTaskId}`].sort());
+  assert.deepEqual(outcome.completedTaskLeaks, [`forge-${leakedTaskId}`], "only the completed-task leak is tagged — the ordinary failed-task candidate must not bleed into this field");
+});

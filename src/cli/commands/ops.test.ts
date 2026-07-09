@@ -177,3 +177,83 @@ test("performOpsReapContainers: --older-than-minutes leaves a recently-failed ta
   assert.deepEqual(outcome.reaped, ["forge-t-reap-old"]);
   assert.equal(called, 1, "only the old one's container is actually reaped");
 });
+
+// ── FG-503: also sweeps a leaked container on an otherwise-SUCCESSFUL task ──
+
+test("performOpsReapContainers: sweeps a completed task's leaked container (container.reap_failed) past the age threshold", () => {
+  insertRun(mkRun("run-reap-5", "active"));
+  const leaked: Task = { ...mkTask("t-reap-leak", "run-reap-5", "complete"), completedAt: "2020-01-01T00:00:00Z" };
+  insertTask(leaked);
+  logEvent("container.started", { runId: "run-reap-5", taskId: "t-reap-leak" });
+  logEvent("container.reap_failed", { runId: "run-reap-5", taskId: "t-reap-leak", payload: { containerName: "forge-t-reap-leak" } });
+
+  const calls: string[] = [];
+  const reap: ContainerReap = (name) => { calls.push(name); return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap);
+  assert.equal(outcome.scanned, 1);
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-leak"]);
+  assert.deepEqual(outcome.completedTaskLeaks, ["forge-t-reap-leak"], "surfaced distinctly as a leak from a SUCCESSFUL task");
+  assert.deepEqual(calls, ["forge-t-reap-leak"]);
+});
+
+test("performOpsReapContainers: --older-than-minutes leaves a recently-completed leaked container alone too", () => {
+  insertRun(mkRun("run-reap-6", "active"));
+  const recentLeak: Task = { ...mkTask("t-reap-leak-recent", "run-reap-6", "complete"), completedAt: new Date().toISOString() };
+  insertTask(recentLeak);
+  logEvent("container.started", { runId: "run-reap-6", taskId: "t-reap-leak-recent" });
+  logEvent("container.reap_failed", { runId: "run-reap-6", taskId: "t-reap-leak-recent", payload: { containerName: "forge-t-reap-leak-recent" } });
+
+  let called = 0;
+  const reap: ContainerReap = () => { called++; return "killed"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap);
+  assert.deepEqual(outcome.retained, ["forge-t-reap-leak-recent"]);
+  assert.equal(called, 0, "still within the retention window — never reaped");
+  assert.deepEqual(outcome.completedTaskLeaks, []);
+});
+
+test("performOpsReapContainers: never touches a live/running task's container, even one that later gets a container.reap_failed-shaped event", () => {
+  insertRun(mkRun("run-reap-7", "active"));
+  insertTask(mkTask("t-reap-running-leak", "run-reap-7", "running"));
+  logEvent("container.started", { runId: "run-reap-7", taskId: "t-reap-running-leak" });
+  // A running task can never itself carry container.reap_failed (only 'complete'/
+  // 'failed' tasks reach a finalizeContainerRetention(..., true) call) — inserted
+  // here anyway to prove the scan's status filter, not the event, is what excludes it.
+  logEvent("container.reap_failed", { runId: "run-reap-7", taskId: "t-reap-running-leak", payload: { containerName: "forge-t-reap-running-leak" } });
+
+  const calls: string[] = [];
+  const reap: ContainerReap = (name) => { calls.push(name); return "killed"; };
+
+  const outcome = performOpsReapContainers({}, reap);
+  assert.equal(outcome.scanned, 0, "a running task's container is never a candidate, regardless of events recorded against it");
+  assert.deepEqual(calls, []);
+});
+
+test("performOpsReapContainers: never scans a completed task with no container.reap_failed event (ordinary successful reap)", () => {
+  insertRun(mkRun("run-reap-8", "active"));
+  insertTask({ ...mkTask("t-reap-ok", "run-reap-8", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.started", { runId: "run-reap-8", taskId: "t-reap-ok" });
+  // No container.reap_failed — the ordinary silent happy path.
+
+  const calls: string[] = [];
+  const reap: ContainerReap = (name) => { calls.push(name); return "not_found"; };
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap);
+  assert.equal(outcome.scanned, 0, "a completed task that reaped cleanly must never be scanned/attempted again");
+  assert.deepEqual(calls, []);
+});
+
+test("performOpsReapContainers: a 'not_found' reap result on a completed-task leak candidate is NOT counted as a leak (already cleaned up by an earlier sweep)", () => {
+  insertRun(mkRun("run-reap-9", "active"));
+  const leaked: Task = { ...mkTask("t-reap-leak-gone", "run-reap-9", "complete"), completedAt: "2020-01-01T00:00:00Z" };
+  insertTask(leaked);
+  logEvent("container.started", { runId: "run-reap-9", taskId: "t-reap-leak-gone" });
+  logEvent("container.reap_failed", { runId: "run-reap-9", taskId: "t-reap-leak-gone", payload: { containerName: "forge-t-reap-leak-gone" } });
+
+  const reap: ContainerReap = () => "not_found";
+
+  const outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap);
+  assert.deepEqual(outcome.reaped, ["forge-t-reap-leak-gone"], "not_found is still 'nothing left behind' — counts as reaped");
+  assert.deepEqual(outcome.completedTaskLeaks, [], "but must NOT be counted as a leak — it was already gone");
+});
