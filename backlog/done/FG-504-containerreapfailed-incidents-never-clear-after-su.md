@@ -1,9 +1,11 @@
 ---
 id: FG-504
 type: story
-status: active
+status: done
 title: container_reap_failed incidents never clear after successful repair; completed-leak sweep text claims swept on reap error
 created: 2026-07-09
+closed: 2026-07-09
+closed_commit: e0c42c957115eeda73b555e4b18957b8b5439241
 ---
 
 ## Problem
