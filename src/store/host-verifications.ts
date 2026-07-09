@@ -400,9 +400,29 @@ function defaultCheckStatusProvider(opts: { projectDir: string; sha: string; che
 
 export type GateEvidence =
   | { source: "host_row"; row: HostVerificationRow; rows: HostVerificationRow[] }
-  | { source: "ci"; sha: string; checkUrl?: string };
+  | { source: "ci"; sha: string; checkUrl?: string; checks: { context: string; url?: string }[] };
 
 const SHA_LOOKUP_RE = /^[0-9a-f]{7,40}$/i;
+
+// FG-501: shared by findCoveringGateEvidence AND probeCiGateStatus so the
+// fail-closed preconditions (REQUIRED_CI_CHECK_CONTEXT shape, this project's
+// own ci.yml demonstrably running `command`, whole-workflow job enumeration)
+// live in exactly one place. Two independent copies of this logic could drift
+// — probeCiGateStatus exists to report status WHILE covering evidence isn't
+// there yet, so it must apply the identical trust chain findCoveringGateEvidence
+// does, not a laxer or differently-shaped approximation of it.
+type CiPairing = { workflowName: string; pairedJobId: string; jobIds: string[] } | { unavailableReason: string };
+
+function resolveCiPairing(projectDir: string, command: string): CiPairing {
+  const [workflowName, pairedJobId] = REQUIRED_CI_CHECK_CONTEXT.split("/").map((s) => s.trim());
+  if (!workflowName || !pairedJobId) return { unavailableReason: `REQUIRED_CI_CHECK_CONTEXT "${REQUIRED_CI_CHECK_CONTEXT}" is malformed` };
+  if (!projectCiRunsCommand(projectDir, REQUIRED_CI_CHECK_CONTEXT, command)) {
+    return { unavailableReason: `${projectDir}'s CI workflow does not demonstrably run "${command}" as the "${REQUIRED_CI_CHECK_CONTEXT}" check` };
+  }
+  const jobIds = projectCiWorkflowJobIds(projectDir, workflowName);
+  if (!jobIds) return { unavailableReason: `could not enumerate jobs for the "${workflowName}" workflow in ${projectDir} (missing/unparseable workflow file)` };
+  return { workflowName, pairedJobId, jobIds };
+}
 
 /** Does covering deterministic-gate evidence already exist for (ticketId,
  *  projectDir, sha, command)? opts.command is the project's requiredHostGate —
@@ -446,44 +466,120 @@ export function findCoveringGateEvidence(opts: {
   // opts.command is THAT PROJECT'S OWN workflow content, read fresh at lookup
   // time. A REQUIRED_CI_GATE_COMMAND-style constant-equality check would only
   // prove pairing with forge's own ci.yml (task-red-wide-16933b) — never with
-  // the project actually being gated. Fall through to null (never consult the
-  // provider) when this project's ci.yml doesn't demonstrably run opts.command.
-  const [workflowName, pairedJobId] = REQUIRED_CI_CHECK_CONTEXT.split("/").map((s) => s.trim());
-  if (!workflowName || !pairedJobId) return null;
-  if (!projectCiRunsCommand(opts.projectDir, REQUIRED_CI_CHECK_CONTEXT, opts.command)) return null;
-
-  // FG-495 review finding: pairing alone only proves ONE job of this workflow
-  // runs opts.command. Post-FG-495 the suite is split across sibling required
-  // jobs (e.g. `test` + `test-extended`), so a green paired job no longer
-  // proves the whole gate passed — every job in the workflow must be green at
-  // this exact sha, or this is not covering evidence. Enumeration failure
-  // (unparseable workflow, etc.) fails closed: no coverage, and since this
-  // check runs BEFORE the provider is consulted, an enumeration failure means
-  // the provider is never even reached.
-  const jobIds = projectCiWorkflowJobIds(opts.projectDir, workflowName);
-  if (!jobIds) return null;
+  // the project actually being gated. FG-495 review finding: pairing alone
+  // only proves ONE job of this workflow runs opts.command — post-FG-495 the
+  // suite is split across sibling required jobs (e.g. `test` + `test-
+  // extended`), so a green paired job no longer proves the whole gate passed;
+  // every job in the workflow must be green at this exact sha, or this is not
+  // covering evidence. resolveCiPairing fails closed (never consults the
+  // provider) when pairing or job enumeration can't be established.
+  const pairing = resolveCiPairing(opts.projectDir, opts.command);
+  if ("unavailableReason" in pairing) return null;
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   let pairedStatus: CiCheckStatus | null = null;
-  for (const jobId of jobIds) {
-    const checkContext = `${workflowName} / ${jobId}`;
+  const checks: { context: string; url?: string }[] = [];
+  for (const jobId of pairing.jobIds) {
+    const checkContext = `${pairing.workflowName} / ${jobId}`;
     const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
     if (!status || status.state !== "success" || status.sha !== opts.sha) return null;
-    if (jobId === pairedJobId) pairedStatus = status;
+    checks.push({ context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) });
+    if (jobId === pairing.pairedJobId) pairedStatus = status;
   }
   if (!pairedStatus) return null;
-  return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl };
+  return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl, checks };
+}
+
+// ── FG-501: CI gate STATUS (not just coverage) ──────────────────────────────
+//
+// findCoveringGateEvidence answers a binary "does covering evidence exist yet"
+// and fails closed to null for ANYTHING short of full success (pending,
+// failing, unavailable all collapse to the same null). review-loop needs to
+// tell those apart: pending CI should be waited on, a failing check should stop
+// the loop with a named failure instead of running local verification, and only
+// a genuinely unavailable/unqueryable CI setup should fall back to a local run.
+// probeCiGateStatus applies the IDENTICAL preconditions (via resolveCiPairing)
+// and reports which of those states the required CI gate is actually in.
+
+export type CiGateStatus =
+  | { kind: "success" }
+  | { kind: "pending"; checks: { context: string; url?: string }[] }
+  | { kind: "failed"; failing: { context: string; url?: string } }
+  | { kind: "unavailable"; reason: string };
+
+/** Probe the STATUS of the required CI gate for (projectDir, sha, command) —
+ *  same trust chain as findCoveringGateEvidence's CI branch (sha shape,
+ *  content-verified pairing, whole-workflow job enumeration), but reports
+ *  WHY reuse isn't possible instead of collapsing every non-success case to
+ *  null. Every required job is checked before classifying (no short-circuit on
+ *  the first non-success job), since an earlier job the provider can't report
+ *  on must never mask a later sibling's genuine failure. Priority when jobs
+ *  disagree: any completed-non-success job (failure, or a completed-but-not-
+ *  successful conclusion like cancelled/skipped) wins outright as "failed" —
+ *  waiting longer cannot fix a terminal state. Otherwise a job the provider
+ *  couldn't report on (missing/mismatched-sha status) wins as "unavailable",
+ *  since coverage can't be proven for it either. Otherwise any still-incomplete
+ *  job makes the whole gate "pending". All-success is "success". A missing/
+ *  unparseable precondition is "unavailable" with a concrete reason — never
+ *  silently treated as pending or success. */
+export function probeCiGateStatus(opts: {
+  projectDir: string;
+  sha: string;
+  command: string;
+  checkStatusProvider?: CheckStatusProvider;
+}): CiGateStatus {
+  if (!SHA_LOOKUP_RE.test(opts.sha)) return { kind: "unavailable", reason: `sha "${opts.sha}" is not a valid lookup sha` };
+
+  const pairing = resolveCiPairing(opts.projectDir, opts.command);
+  if ("unavailableReason" in pairing) return { kind: "unavailable", reason: pairing.unavailableReason };
+
+  const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
+  let failing: { context: string; url?: string } | null = null;
+  let unavailableReason: string | null = null;
+  const pending: { context: string; url?: string }[] = [];
+  for (const jobId of pairing.jobIds) {
+    const checkContext = `${pairing.workflowName} / ${jobId}`;
+    const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
+    if (!status) {
+      unavailableReason ??= `no CI status available for check "${checkContext}" at sha ${opts.sha}`;
+      continue;
+    }
+    if (status.sha !== opts.sha) {
+      unavailableReason ??= `CI status for "${checkContext}" reported a different sha than the one requested`;
+      continue;
+    }
+    if (status.state === "failure" || status.state === "other") {
+      failing ??= { context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) };
+      continue;
+    }
+    if (status.state === "pending") pending.push({ context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) });
+  }
+  // A genuine red always wins over a mere reporting hiccup (a later sibling job
+  // must not be masked by an earlier one the provider couldn't report on), and
+  // unavailable still wins over pending/success since coverage cannot be proven
+  // for a job the provider never confirmed.
+  if (failing) return { kind: "failed", failing };
+  if (unavailableReason) return { kind: "unavailable", reason: unavailableReason };
+  if (pending.length > 0) return { kind: "pending", checks: pending };
+  return { kind: "success" };
 }
 
 /** Human-readable description of WHAT covered a reuse — used in place of raw run
  *  output wherever verification is reported (the review-loop note, CLI logs).
  *  FG-500: host_row evidence.rows carries a covering row per derived gate list
  *  member, not just the fast tier — every row is cited so the note attests to
- *  the FULL verified set, not a single (possibly fast-tier-only) row. */
+ *  the FULL verified set, not a single (possibly fast-tier-only) row. FG-501:
+ *  ci evidence.checks likewise carries every job of the matched workflow that
+ *  was verified green (e.g. `test` AND `test-extended`), not just the one job
+ *  paired to REQUIRED_CI_CHECK_CONTEXT — the description must name every
+ *  verified check context with its URL when available (AC2), since a green
+ *  paired job alone no longer proves the whole gate passed post-FG-495. */
 export function describeGateEvidence(evidence: GateEvidence): string {
   return evidence.source === "host_row"
     ? evidence.rows
         .map((row) => `host_verifications row #${row.id} (sha ${row.commitSha}, command: ${row.command})`)
         .join("; ")
-    : `CI check "${REQUIRED_CI_CHECK_CONTEXT}" (sha ${evidence.sha})${evidence.checkUrl ? ` — ${evidence.checkUrl}` : ""}`;
+    : evidence.checks
+        .map((check) => `CI check "${check.context}" (sha ${evidence.sha})${check.url ? ` — ${check.url}` : ""}`)
+        .join("; ");
 }

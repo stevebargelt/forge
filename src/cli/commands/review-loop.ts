@@ -17,9 +17,38 @@ import {
   type CommitRange, type ReviewLoopDeps, type VerificationResult, type Finding,
 } from "../../v2/review-loop.js";
 import { getRequiredHostGate } from "../../campaign/reconcile-collect.js";
-import { findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, type CheckStatusProvider } from "../../store/host-verifications.js";
+import {
+  findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, probeCiGateStatus,
+  type CheckStatusProvider, type CiGateStatus,
+} from "../../store/host-verifications.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
+type RunVerificationFn = typeof runVerification;
+type SleepFn = (ms: number) => Promise<void>;
+
+// FG-501: review-loop must consume in-flight CI as the verification authority
+// rather than starting duplicate local work. Defaults chosen for an unattended
+// review pass: check every 30s, give up after 20 minutes (a project's CI is
+// expected to complete well inside that window; a genuinely stuck/misconfigured
+// CI run should fall back to local rather than hang the loop indefinitely).
+// Both are operator-overridable per invocation via env vars.
+const CI_POLL_SECONDS_ENV = "FORGE_CI_POLL_SECONDS";
+const CI_WAIT_TIMEOUT_SECONDS_ENV = "FORGE_CI_WAIT_TIMEOUT_SECONDS";
+const DEFAULT_CI_POLL_SECONDS = 30;
+const DEFAULT_CI_WAIT_TIMEOUT_SECONDS = 20 * 60;
+
+function positiveIntEnvSeconds(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const defaultSleep: SleepFn = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+function describeCiChecks(checks: { context: string; url?: string }[]): string {
+  return checks.map((c) => (c.url ? `${c.context} (${c.url})` : c.context)).join(", ");
+}
 
 // ── task templates ───────────────────────────────────────────────────────────
 
@@ -91,6 +120,29 @@ export type ReviewLoopContext = {
   /** FG-474: injectable for tests — see buildReviewLoopDeps.verify. Defaults to
    *  the real gh-backed provider when omitted. */
   checkStatusProvider?: CheckStatusProvider;
+  /** FG-501: injectable for tests — the local verification runner
+   *  verifyWithReuse falls back to. Defaults to the real runVerification, so
+   *  tests can assert it was (or wasn't) invoked without spawning real
+   *  subprocesses. */
+  runVerification?: RunVerificationFn;
+  /** FG-501: injectable for tests — the delay between CI polls while waiting on
+   *  pending checks. Defaults to a real setTimeout-based sleep. */
+  sleep?: SleepFn;
+  /** FG-501: injectable for tests — wall-clock source for the CI wait's elapsed/
+   *  timeout accounting. Defaults to Date.now. */
+  now?: () => number;
+  /** FG-501: injectable for tests — overrides FORGE_CI_POLL_SECONDS. */
+  ciPollMs?: number;
+  /** FG-501: injectable for tests — overrides FORGE_CI_WAIT_TIMEOUT_SECONDS. */
+  ciWaitTimeoutMs?: number;
+  /** FG-501 (AC5): --local-extended opt-in. The review-loop's local CI-
+   *  unavailable/failed-precondition/timeout fallback runs the FAST gate only
+   *  (typecheck + test, no test:extended) by default — extended coverage is
+   *  delegated to CI. This restores the full local tier (equivalent to today's
+   *  scriptsForVerification()) for operators who explicitly want it. Does NOT
+   *  affect the dirty-tree fallback (unchanged) or scriptsForVerification's
+   *  FG-500 derived-gate semantics for other callers. */
+  localExtended?: boolean;
 };
 
 /** Build the engine's deps from real invoke + host verification. `invokeFn` is
@@ -133,29 +185,107 @@ export function buildReviewLoopDeps(
     return rest;
   };
 
+  const runVerify = ctx.runVerification ?? runVerification;
+  const sleep = ctx.sleep ?? defaultSleep;
+  const now = ctx.now ?? Date.now;
+  const pollMs = ctx.ciPollMs ?? positiveIntEnvSeconds(CI_POLL_SECONDS_ENV, DEFAULT_CI_POLL_SECONDS) * 1000;
+  const waitTimeoutMs = ctx.ciWaitTimeoutMs ?? positiveIntEnvSeconds(CI_WAIT_TIMEOUT_SECONDS_ENV, DEFAULT_CI_WAIT_TIMEOUT_SECONDS) * 1000;
+
+  // FG-501: the local fallback the review-loop CI-consuming path runs when CI is
+  // unavailable/failed-precondition/timed out. Fast-tier only (typecheck+test) by
+  // default — test:extended belongs to CI (AC5) — UNLESS --local-extended asks for
+  // the full tier scriptsForVerification() would otherwise produce.
+  const localFallbackScripts = (): Record<string, unknown> => {
+    const scripts = scriptsForVerification();
+    if (ctx.localExtended) return scripts;
+    const { "test:extended": _dropped, ...rest } = scripts;
+    return rest;
+  };
+
   // FG-474: one canonical deterministic gate per commit — before actually running
   // typecheck+test, check whether covering evidence for HEAD already exists (a
   // passing host_verifications row, or a green required CI check) and reuse it.
   // Reuse REQUIRES a clean working tree (a dirty tree never reuses — the diff under
-  // review wouldn't match what any recorded/CI evidence actually covers). Falls
-  // back to a real run whenever evidence is absent, stale, or ambiguous.
-  const verifyWithReuse = (): VerificationResult => {
+  // review wouldn't match what any recorded/CI evidence actually covers).
+  //
+  // FG-501: when no covering evidence exists yet, don't immediately duplicate CI
+  // by running locally — probe the required CI gate's STATUS first. Pending →
+  // wait/poll (bounded) and reuse once green. Failed → report the deterministic
+  // failure directly from CI evidence, no local run. Only a genuinely unavailable
+  // CI setup (or a wait that times out) falls back to a real local run.
+  const verifyWithReuse = async (): Promise<VerificationResult> => {
     const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
-    if (!dirty) {
-      const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
-      const evidence = findCoveringGateEvidence({
-        ticketId: ctx.ticketId,
-        projectDir: ctx.projectDir,
-        sha: headSha,
-        command: getRequiredHostGate(ctx.projectDir),
-        checkStatusProvider: ctx.checkStatusProvider,
-      });
-      if (evidence) {
-        const description = describeGateEvidence(evidence);
-        return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
-      }
+    if (dirty) {
+      console.log("review-loop: dirty tree — local verification");
+      return runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
     }
-    return runVerification(scriptsForVerification(), { cwd: ctx.projectDir });
+
+    const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
+    const requiredGate = getRequiredHostGate(ctx.projectDir);
+
+    const tryReuse = (): VerificationResult | null => {
+      const evidence = findCoveringGateEvidence({
+        ticketId: ctx.ticketId, projectDir: ctx.projectDir, sha: headSha,
+        command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
+      });
+      if (!evidence) return null;
+      const description = describeGateEvidence(evidence);
+      return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
+    };
+
+    const immediate = tryReuse();
+    if (immediate) return immediate;
+
+    const probe = (): CiGateStatus => probeCiGateStatus({
+      projectDir: ctx.projectDir, sha: headSha, command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
+    });
+
+    const shortSha = headSha.slice(0, 9);
+    const startedAt = now();
+    let status = probe();
+    let waited = false;
+
+    while (status.kind === "pending") {
+      const elapsedSeconds = Math.round((now() - startedAt) / 1000);
+      console.log(
+        `review-loop: CI pending for ${shortSha} — waiting on: ${describeCiChecks(status.checks)} ` +
+        `(elapsed ${elapsedSeconds}s, polling every ${Math.round(pollMs / 1000)}s, timeout ${Math.round(waitTimeoutMs / 1000)}s)`,
+      );
+      if (now() - startedAt >= waitTimeoutMs) {
+        status = { kind: "unavailable", reason: `CI wait timed out after ${Math.round(waitTimeoutMs / 1000)}s — still pending: ${describeCiChecks(status.checks)}` };
+        break;
+      }
+      waited = true;
+      await sleep(pollMs);
+      status = probe();
+    }
+
+    if (status.kind === "success") {
+      const reused = tryReuse();
+      if (reused) {
+        return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" } } : reused;
+      }
+      // CI reports every job green but the covering-evidence lookup still fails
+      // closed (e.g. a race between the check going green and the row landing) —
+      // never invent evidence; fall back to a local run like any other unavailable case.
+      status = { kind: "unavailable", reason: "CI reported all required checks green but covering evidence could not be confirmed" };
+    }
+
+    if (status.kind === "failed") {
+      const urlSuffix = status.failing.url ? ` — ${status.failing.url}` : "";
+      const message = `required CI check "${status.failing.context}" failed for ${shortSha}${urlSuffix}`;
+      console.log(`review-loop: ${message} (no local run)`);
+      return {
+        ok: false,
+        steps: [{ name: status.failing.context, ok: false, output: message }],
+        ciOutcome: { kind: "ci_failed", context: status.failing.context, url: status.failing.url },
+      };
+    }
+
+    console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
+    const extendedDelegatedToCi = !ctx.localExtended;
+    const result = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
+    return { ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi } };
   };
 
   const deps: ReviewLoopDeps = {
@@ -292,10 +422,12 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
     .option("--review-profile <name>", "model profile for the reviewer (red-wide)")
     .option("--implement-profile <name>", "model profile for the fixer (engineer)")
     .option("--dry-run", "present the plan (ticket, route, range, rounds, stop conditions) and exit — no dispatch")
+    .option("--local-extended", "FG-501: restore the full local verification tier (incl. test:extended) for the CI-unavailable fallback; by default that fallback runs typecheck+test only and delegates extended coverage to CI")
     .description("Bounded reviewer→fixer loop for a ticket's committed work (#301). Never auto-closes the ticket.")
     .action(async (ticketIdArg: string, opts: {
       maxRounds: number; since?: string; project?: string; route?: string;
       unrouted?: boolean; reviewProfile?: string; implementProfile?: string; dryRun?: boolean;
+      localExtended?: boolean;
     }) => {
       ensureForgeDirs();
       const projectDir = resolve(opts.project ?? process.cwd());
@@ -318,6 +450,12 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
       console.log(`  max rounds:   ${opts.maxRounds}`);
       console.log(`  reviewer:     red-wide (read-only)   fixer: engineer`);
       console.log(`  stops on:     passed | blocked_by_reviewer | needs_fix_max_rounds | verification_failed | fixer_failed | fixer_out_of_scope | closeout_guidance_only | reviewer_failed`);
+      console.log(
+        `  verification: reuse a passing host row or green CI first; if the required CI checks are in flight, ` +
+        `wait/poll for them (default up to 20m, 30s interval — FORGE_CI_WAIT_TIMEOUT_SECONDS/FORGE_CI_POLL_SECONDS) ` +
+        `instead of running local verification twice; a failing CI check stops the loop directly; only an ` +
+        `unavailable/unqueryable CI setup falls back to a local run (fast gate only unless --local-extended)`,
+      );
       console.log(`  never auto-closes the ticket; reports whether it's closeable.`);
       if (opts.dryRun) { console.log("\n(dry run — no dispatch)"); return; }
 
@@ -344,6 +482,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         diffProvider, projectDir, scripts: readScripts(projectDir),
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
+        localExtended: opts.localExtended,
       }, invokeFn ?? invoke);
 
       const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);

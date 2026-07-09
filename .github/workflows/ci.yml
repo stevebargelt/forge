@@ -11,10 +11,14 @@ name: CI
 # trust-sensitive and IS a required merge check, same as `test`. Branch
 # protection carries both contexts ("test" and "test-extended"; the
 # orchestrator applies that host-side, see CLAUDE.md's branch-protection
-# note). It runs on the same triggers, in parallel with `test` and with
-# review-loop verification, so the ~94s extended tier is paid once per
-# merge rather than per round — the fast `test:all` gate stays the
-# per-round cost the orchestrator/review-loop actually re-pay.
+# note). It runs on the same triggers as `test`. Since FG-501, review-loop
+# verification no longer re-pays either tier per round in the common case:
+# on a clean tree it waits for and reuses this in-flight CI run (polling
+# both required checks, then reusing the covering evidence) instead of
+# duplicating the suite locally — a real local run is only the fallback
+# when CI is unavailable, unpaired, or the wait times out (fast tier only;
+# `--local-extended` restores the full local tier). See CLAUDE.md's
+# "CI vs review-loop verification" section.
 on:
   push:
   pull_request:

@@ -2,18 +2,19 @@
 // injected invokeFn (no containers) — assert verdict mapping, dispatch-failure
 // handling, runId threading, and the reviewer/fixer dispatch shape.
 
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
+import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { invoke, type InvokeArgs, type InvokeResult, type DockerExecFn } from "../../v2/invoke.js";
-import { buildReviewLoopDeps, assertCleanWorkingTree, type ReviewLoopContext } from "./review-loop.js";
-import { runReviewLoop, type VerificationResult } from "../../v2/review-loop.js";
+import { buildReviewLoopDeps, assertCleanWorkingTree, registerReviewLoop, type ReviewLoopContext } from "./review-loop.js";
+import { runReviewLoop, renderReviewLoopNote, type VerificationResult } from "../../v2/review-loop.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
-import { insertHostVerification } from "../../store/host-verifications.js";
+import { insertHostVerification, REQUIRED_CI_CHECK_CONTEXT } from "../../store/host-verifications.js";
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -856,4 +857,424 @@ test("FG-493 fence (real dispatch): an UNPARSEABLE result.json from the REAL inv
   );
   assert.equal(outcome.stopReason, "reviewer_failed");
   assert.equal(outcome.closeable, false);
+});
+
+// ── FG-501 AC7: verifyWithReuse — the CI-consuming path end-to-end ──────────
+//
+// buildReviewLoopDeps.verify (verifyWithReuse) probes the required CI gate's
+// STATUS via probeCiGateStatus/findCoveringGateEvidence before ever running
+// local verification. These tests drive it through its injectable knobs
+// (checkStatusProvider, sleep, ciPollMs/ciWaitTimeoutMs, runVerification) —
+// no real CI, subprocess, or wall-clock delay — asserting: pending CI is
+// waited on and reused once green; a failing check stops the loop directly;
+// an unavailable/unqueryable CI setup (or a timed-out wait) falls back to a
+// local run whose command set excludes test:extended unless --local-extended
+// asks for it; already-green CI reuses immediately with no wait.
+
+function verifyCtx(over: Partial<ReviewLoopContext> = {}): ReviewLoopContext {
+  return {
+    ticketId: "FG-501", acceptance: "FG-501 — review-loop waits for in-flight CI",
+    diffProvider: () => "diff --git a/x b/x", projectDir, scripts: {}, unrouted: true, ...over,
+  };
+}
+
+function makeRunnerSpy(): { calls: string[][]; fn: NonNullable<ReviewLoopContext["runVerification"]> } {
+  const calls: string[][] = [];
+  const fn: NonNullable<ReviewLoopContext["runVerification"]> = (scripts) => {
+    calls.push(Object.keys(scripts));
+    return { ok: true, steps: Object.keys(scripts).map((name) => ({ name, ok: true, output: "" })) };
+  };
+  return { calls, fn };
+}
+
+function noopSleep(): { calls: number[]; fn: NonNullable<ReviewLoopContext["sleep"]> } {
+  const calls: number[] = [];
+  const fn: NonNullable<ReviewLoopContext["sleep"]> = async (ms) => { calls.push(ms); };
+  return { calls, fn };
+}
+
+test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reuses, no local run, reusedEvidence names check+url, renders in the report", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  let calls = 0;
+  const checkStatusProvider = () => {
+    calls++;
+    if (calls <= 3) return { sha: headSha, state: "pending" as const };
+    return { sha: headSha, state: "success" as const, detailsUrl: "https://example.com/ci/run-9" };
+  };
+  const runner = makeRunnerSpy();
+  const sleep = noopSleep();
+
+  const { deps } = buildReviewLoopDeps(verifyCtx({
+    checkStatusProvider, runVerification: runner.fn, sleep: sleep.fn,
+    ciPollMs: 1000, ciWaitTimeoutMs: 60_000,
+  }));
+
+  const result = await deps.verify();
+  assert.equal(result.ok, true);
+  assert.equal(runner.calls.length, 0, "local verification must never run when CI eventually reuses");
+  assert.ok(sleep.calls.length >= 1, "must have polled at least once while pending");
+  assert.match(result.reusedEvidence ?? "", new RegExp(REQUIRED_CI_CHECK_CONTEXT.replace(/\//g, "\\/")));
+  assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-9/);
+  assert.equal(result.ciOutcome?.kind, "reused_after_wait");
+
+  // Renders in the report: drive a canned round through the real loop + note renderer.
+  const outcome = await runReviewLoop(
+    { maxRounds: 1, ticketId: "FG-501" },
+    { verify: () => result, review: async () => ({ ok: true, verdict: "pass", findings: [] }), fix: () => { throw new Error("must not fix"); } },
+  );
+  const note = renderReviewLoopNote(
+    { ticketId: "FG-501", maxRounds: 1, range: { mode: "since", diffRange: "a..b", shas: ["a"], spansUnmatched: false } },
+    outcome,
+  );
+  assert.match(note, /waited for in-flight CI, then reused it \(no local run\)/);
+  assert.match(note, /https:\/\/example\.com\/ci\/run-9/);
+});
+
+test("FG-501 verifyWithReuse: CI pending then failed -> verification fails citing the failing check context+url, no local run", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  let calls = 0;
+  const checkStatusProvider = () => {
+    calls++;
+    if (calls <= 2) return { sha: headSha, state: "pending" as const };
+    return { sha: headSha, state: "failure" as const, detailsUrl: "https://example.com/ci/run-fail" };
+  };
+  const runner = makeRunnerSpy();
+  const sleep = noopSleep();
+
+  const { deps } = buildReviewLoopDeps(verifyCtx({
+    checkStatusProvider, runVerification: runner.fn, sleep: sleep.fn,
+    ciPollMs: 1000, ciWaitTimeoutMs: 60_000,
+  }));
+
+  const result = await deps.verify();
+  assert.equal(result.ok, false);
+  assert.equal(runner.calls.length, 0, "a failing required CI check must never trigger a local run");
+  assert.equal(result.ciOutcome?.kind, "ci_failed");
+  assert.equal((result.ciOutcome as { context: string }).context, REQUIRED_CI_CHECK_CONTEXT);
+  assert.equal((result.ciOutcome as { url?: string }).url, "https://example.com/ci/run-fail");
+  assert.equal(result.steps.length, 1);
+  assert.equal(result.steps[0]!.ok, false);
+  assert.match(result.steps[0]!.output, /https:\/\/example\.com\/ci\/run-fail/);
+});
+
+test("FG-501 verifyWithReuse: CI unavailable -> local fallback runs, citing the reason, and EXCLUDES test:extended by default", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml + test:extended script"], projectDir);
+
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(verifyCtx({
+    scripts, checkStatusProvider: () => null, runVerification: runner.fn,
+  }));
+
+  const result = await deps.verify();
+  assert.equal(runner.calls.length, 1, "must fall back to exactly one local run");
+  assert.ok(!runner.calls[0]!.includes("test:extended"), `default local fallback must exclude test:extended, got: ${JSON.stringify(runner.calls[0])}`);
+  assert.ok(runner.calls[0]!.includes("typecheck") && runner.calls[0]!.includes("test"));
+  assert.equal(result.ciOutcome?.kind, "local_fallback");
+  const outcome = result.ciOutcome as { reason: string; extendedDelegatedToCi: boolean };
+  assert.match(outcome.reason, /no CI status available/);
+  assert.equal(outcome.extendedDelegatedToCi, true);
+});
+
+test("FG-501 verifyWithReuse: --local-extended restores test:extended in the CI-unavailable local fallback", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml + test:extended script"], projectDir);
+
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(verifyCtx({
+    scripts, checkStatusProvider: () => null, runVerification: runner.fn, localExtended: true,
+  }));
+
+  const result = await deps.verify();
+  assert.equal(runner.calls.length, 1);
+  assert.ok(runner.calls[0]!.includes("test:extended"), `--local-extended must restore test:extended, got: ${JSON.stringify(runner.calls[0])}`);
+  const outcome = result.ciOutcome as { extendedDelegatedToCi: boolean };
+  assert.equal(outcome.extendedDelegatedToCi, false);
+});
+
+test("FG-501 verifyWithReuse: CI wait times out -> local fallback, citing the timeout reason", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const checkStatusProvider = () => ({ sha: headSha, state: "pending" as const });
+  const runner = makeRunnerSpy();
+  const sleep = noopSleep();
+
+  const { deps } = buildReviewLoopDeps(verifyCtx({
+    scripts, checkStatusProvider, runVerification: runner.fn, sleep: sleep.fn,
+    ciPollMs: 1000, ciWaitTimeoutMs: 0,
+  }));
+
+  const result = await deps.verify();
+  assert.equal(runner.calls.length, 1, "a timed-out wait must fall back to exactly one local run");
+  assert.equal(sleep.calls.length, 0, "must time out on the first pending check, before ever sleeping");
+  assert.equal(result.ciOutcome?.kind, "local_fallback");
+  assert.match((result.ciOutcome as { reason: string }).reason, /CI wait timed out/);
+});
+
+test("FG-501 verifyWithReuse: CI already green -> immediate reuse, no waiting, no local run", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const checkStatusProvider = () => ({ sha: headSha, state: "success" as const, detailsUrl: "https://example.com/ci/run-immediate" });
+  const runner = makeRunnerSpy();
+  const sleep = noopSleep();
+
+  const { deps } = buildReviewLoopDeps(verifyCtx({ checkStatusProvider, runVerification: runner.fn, sleep: sleep.fn }));
+
+  const result = await deps.verify();
+  assert.equal(result.ok, true);
+  assert.equal(runner.calls.length, 0, "already-green CI must never trigger a local run");
+  assert.equal(sleep.calls.length, 0, "already-green CI must never wait");
+  assert.equal(result.ciOutcome, undefined, "immediate reuse carries no ciOutcome — that's reserved for the wait/fallback paths");
+  assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-immediate/);
+});
+
+test("FG-501 verifyWithReuse: CI reports all-green but the covering-evidence re-check still misses (race) -> local fallback citing the race-condition reason, never invents evidence", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // tryReuse() (findCoveringGateEvidence) and probe() (probeCiGateStatus) share
+  // the identical preconditions and consult the SAME provider — the only honest
+  // way to force "probe says green, tryReuse still misses" is a provider whose
+  // answer itself changes between calls (e.g. the check-runs API lagging behind
+  // the status rollup it's read from). Call 1 is the initial tryReuse() (must
+  // miss so we reach probe()), call 2 is probe() (must be green), call 3 is the
+  // post-success tryReuse() re-check (must miss again to trigger the race path).
+  let calls = 0;
+  const checkStatusProvider = () => {
+    calls++;
+    if (calls === 2) return { sha: headSha, state: "success" as const };
+    return { sha: headSha, state: "pending" as const };
+  };
+
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(verifyCtx({ scripts, checkStatusProvider, runVerification: runner.fn }));
+
+  const result = await deps.verify();
+  assert.equal(calls, 3, "expects the initial tryReuse, one probe, and the post-success tryReuse re-check");
+  assert.equal(result.ciOutcome?.kind, "local_fallback");
+  const outcome = result.ciOutcome as { reason: string };
+  assert.equal(outcome.reason, "CI reported all required checks green but covering evidence could not be confirmed");
+  assert.equal(runner.calls.length, 1, "the race must still fall back to exactly one local run, never invent evidence");
+});
+
+// ── FG-501 AC6: operator-facing surface ─────────────────────────────────────
+//
+// The AC7 block above pins verifyWithReuse's RETURNED data (ok/steps/
+// ciOutcome/reusedEvidence). None of it pins what an operator actually SEES
+// while the loop runs: the console.log progress line printed on every pending
+// poll, the explicit reason line printed when CI is unavailable (distinguishing
+// "the provider has no status" from "we waited and timed out"), the failing-
+// check line, and the --dry-run header's description of the wait behavior.
+// These tests capture console.log and assert on the printed operator text.
+
+function writeTwoJobCiWorkflow(command = "npm run test:all"): void {
+  mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".github", "workflows", "ci.yml"),
+    `name: CI\njobs:\n  test:\n    steps:\n      - run: ${command}\n  test-extended:\n    steps:\n      - run: echo extended\n`,
+  );
+}
+
+function captureConsoleLog(): string[] {
+  const lines: string[] = [];
+  mock.method(console, "log", (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  return lines;
+}
+
+test("FG-501 AC6: pending progress line names the short sha, each pending check's context (+url when present), and elapsed/poll/timeout", async () => {
+  writeTwoJobCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add two-job ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // "pending" until the one poll (sleep) happens, then flips to "success" —
+  // NOT a call-count-based round: tryReuse() (findCoveringGateEvidence) shares
+  // this same provider and short-circuits after the FIRST job it sees is
+  // non-success, so it consumes a call before the wait loop's own probe() ever
+  // runs. A call-count/2 "round" scheme drifts out of sync with that extra
+  // call; flipping on the sleep callback instead survives it. "CI / test"
+  // carries a details URL, "CI / test-extended" does not, so the line must
+  // render both shapes.
+  let phase: "pending" | "success" = "pending";
+  const checkStatusProvider = ({ checkContext }: { checkContext: string }) => {
+    if (phase === "pending") {
+      return checkContext === "CI / test"
+        ? { sha: headSha, state: "pending" as const, detailsUrl: "https://example.com/ci/run-test" }
+        : { sha: headSha, state: "pending" as const };
+    }
+    return { sha: headSha, state: "success" as const, detailsUrl: "https://example.com/ci/final" };
+  };
+
+  // A deterministic `now`: startedAt=0, then +5000ms per subsequent call, so
+  // the single pending iteration reports a fixed elapsed=5s with no real delay.
+  let tick = 0;
+  const now = () => { const v = tick; tick += 5000; return v; };
+  const sleepCalls: number[] = [];
+  const sleep = { fn: async (ms: number) => { sleepCalls.push(ms); phase = "success"; } };
+  const lines = captureConsoleLog();
+
+  try {
+    const { deps } = buildReviewLoopDeps(verifyCtx({
+      checkStatusProvider, sleep: sleep.fn, now,
+      ciPollMs: 30_000, ciWaitTimeoutMs: 600_000,
+    }));
+
+    const result = await deps.verify();
+    assert.equal(result.ok, true);
+    assert.equal(result.ciOutcome?.kind, "reused_after_wait");
+    assert.equal(sleepCalls.length, 1, "expected exactly one poll before the check went green");
+
+    const pendingLine = lines.find((l) => l.includes("CI pending for"));
+    assert.ok(pendingLine, `expected a CI-pending progress line, got: ${JSON.stringify(lines)}`);
+    assert.equal(
+      pendingLine,
+      `review-loop: CI pending for ${headSha.slice(0, 9)} — waiting on: CI / test (https://example.com/ci/run-test), ` +
+      `CI / test-extended (elapsed 5s, polling every 30s, timeout 600s)`,
+    );
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-501 AC6: CI-unavailable fallback prints an explicit reason line — provider has no status for the check", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add ci.yml + scripts"], projectDir);
+
+  const runner = makeRunnerSpy();
+  const lines = captureConsoleLog();
+
+  try {
+    const { deps } = buildReviewLoopDeps(verifyCtx({
+      scripts, checkStatusProvider: () => null, runVerification: runner.fn,
+    }));
+
+    const result = await deps.verify();
+    assert.equal(result.ciOutcome?.kind, "local_fallback");
+
+    const line = lines.find((l) => l.startsWith("review-loop: CI unavailable:"));
+    assert.ok(line, `expected a CI-unavailable fallback line, got: ${JSON.stringify(lines)}`);
+    assert.match(line!, /no CI status available for check "CI \/ test" at sha/);
+    assert.match(line!, /falling back to local verification\.$/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-501 AC6: CI-unavailable fallback prints an explicit reason line — wait timed out (distinct wording from provider-unavailable)", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add ci.yml + scripts"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const checkStatusProvider = () => ({ sha: headSha, state: "pending" as const });
+  const runner = makeRunnerSpy();
+  const sleep = noopSleep();
+  const lines = captureConsoleLog();
+
+  try {
+    const { deps } = buildReviewLoopDeps(verifyCtx({
+      scripts, checkStatusProvider, runVerification: runner.fn, sleep: sleep.fn,
+      ciPollMs: 1000, ciWaitTimeoutMs: 0,
+    }));
+
+    const result = await deps.verify();
+    assert.equal(result.ciOutcome?.kind, "local_fallback");
+
+    const line = lines.find((l) => l.startsWith("review-loop: CI unavailable:"));
+    assert.ok(line, `expected a CI-unavailable fallback line, got: ${JSON.stringify(lines)}`);
+    assert.match(line!, /CI wait timed out after 0s — still pending: CI \/ test/);
+    assert.match(line!, /falling back to local verification\.$/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-501 AC6: a failing required CI check prints the context+sha+url with '(no local run)'", async () => {
+  writeMatchingCiWorkflow();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const checkStatusProvider = () => ({ sha: headSha, state: "failure" as const, detailsUrl: "https://example.com/ci/run-fail" });
+  const lines = captureConsoleLog();
+
+  try {
+    const { deps } = buildReviewLoopDeps(verifyCtx({ checkStatusProvider }));
+
+    const result = await deps.verify();
+    assert.equal(result.ok, false);
+    assert.equal(result.ciOutcome?.kind, "ci_failed");
+
+    const line = lines.find((l) => l.includes("failed for"));
+    assert.ok(line, `expected the failing-check line, got: ${JSON.stringify(lines)}`);
+    assert.equal(
+      line,
+      `review-loop: required CI check "${REQUIRED_CI_CHECK_CONTEXT}" failed for ${headSha.slice(0, 9)} — https://example.com/ci/run-fail (no local run)`,
+    );
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("FG-501 AC6: --dry-run header describes the CI-wait behavior (reuse-first, wait/poll/timeout, failing-check stop, local-fallback tier)", async () => {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-501-review-loop-waits-for-ci.md"),
+    "---\nid: FG-501\ntype: story\nstatus: active\ntitle: review-loop waits for in-flight CI\n---\n\nBody.\n",
+  );
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerReviewLoop(program, async () => { throw new Error("must not dispatch on --dry-run"); });
+    await program.parseAsync(
+      ["review-loop", "FG-501", "--since", headSha, "--project", projectDir, "--unrouted", "--dry-run"],
+      { from: "user" },
+    );
+
+    const printed = lines.join("\n");
+    assert.match(printed, /reuse a passing host row or green CI first/);
+    assert.match(printed, /wait\/poll for them/);
+    assert.match(printed, /FORGE_CI_WAIT_TIMEOUT_SECONDS\/FORGE_CI_POLL_SECONDS/);
+    assert.match(printed, /a failing CI check stops the loop directly/);
+    assert.match(printed, /unavailable\/unqueryable CI setup falls back to a local run/);
+    assert.match(printed, /--local-extended/);
+    assert.match(printed, /\(dry run — no dispatch\)/);
+  } finally {
+    mock.restoreAll();
+  }
 });

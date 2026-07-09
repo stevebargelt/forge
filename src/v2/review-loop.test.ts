@@ -572,6 +572,93 @@ test("FG-474 note: a round with NO reusedEvidence renders unchanged — no reuse
   assert.doesNotMatch(note, /verification reused evidence/);
 });
 
+// FG-501 AC6: renderReviewLoopNote's operator-facing rendering of HOW the
+// CI-consuming path (buildReviewLoopDeps.verify in cli/commands/review-loop.ts)
+// resolved verification. The reused_after_wait case is already exercised
+// end-to-end in review-loop.integration.test.ts's AC7 block; these pin the
+// two cases that block doesn't render through the note: a failing required CI
+// check (ci_failed) and the local fallback's reason + fast-only/full tier
+// wording (local_fallback), including the --local-extended toggle.
+
+test("FG-501 note: local fallback (CI unavailable) records the reason and the fast-only tier wording by default", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{
+        round: 1,
+        verification: {
+          ok: true, steps: [{ name: "typecheck", ok: true, output: "" }, { name: "test", ok: true, output: "" }],
+          ciOutcome: { kind: "local_fallback", reason: 'no CI status available for check "CI / test" at sha abc1234', extendedDelegatedToCi: true },
+        },
+        verdict: "pass", findings: [], fixAttempted: false,
+      }],
+    },
+  );
+  assert.match(note, /CI: local fallback — no CI status available for check "CI \/ test"/);
+  assert.match(note, /local fallback tier: fast only \(test:extended delegated to CI\)/);
+});
+
+test("FG-501 note: local fallback with --local-extended records the full tier wording", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{
+        round: 1,
+        verification: {
+          ok: true, steps: [{ name: "typecheck", ok: true, output: "" }],
+          ciOutcome: { kind: "local_fallback", reason: "CI wait timed out after 1200s — still pending: CI / test", extendedDelegatedToCi: false },
+        },
+        verdict: "pass", findings: [], fixAttempted: false,
+      }],
+    },
+  );
+  assert.match(note, /CI: local fallback — CI wait timed out after 1200s/);
+  assert.match(note, /local fallback tier: full \(incl\. test:extended\)/);
+});
+
+test("FG-501 note: a failing required CI check records the context+url with no local run", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "verification_failed", closeable: false,
+      rounds: [{
+        round: 1,
+        verification: {
+          ok: false,
+          steps: [{ name: "CI / test", ok: false, output: 'required CI check "CI / test" failed for abc1234 — https://example.com/ci/run-fail' }],
+          ciOutcome: { kind: "ci_failed", context: "CI / test", url: "https://example.com/ci/run-fail" },
+        },
+        findings: [{ summary: "deterministic verification step 'CI / test' failed", unanchored: true }],
+        fixAttempted: false,
+      }],
+    },
+  );
+  assert.match(note, /CI: required check "CI \/ test" failed — https:\/\/example\.com\/ci\/run-fail \(no local run\)/);
+});
+
+test("FG-501 note: a failing required CI check with NO url still records the context, with no local run", () => {
+  const note = renderReviewLoopNote(
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    {
+      stopReason: "verification_failed", closeable: false,
+      rounds: [{
+        round: 1,
+        verification: {
+          ok: false,
+          steps: [{ name: "CI / test", ok: false, output: 'required CI check "CI / test" failed for abc1234' }],
+          ciOutcome: { kind: "ci_failed", context: "CI / test" },
+        },
+        findings: [{ summary: "deterministic verification step 'CI / test' failed", unanchored: true }],
+        fixAttempted: false,
+      }],
+    },
+  );
+  assert.match(note, /CI: required check "CI \/ test" failed \(no local run\)/);
+  assert.doesNotMatch(note, /CI: required check "CI \/ test" failed —/);
+});
+
 test("#301 loop: verification ok:false with NO failed steps (no checks) → verification_failed, fixer NOT called", async () => {
   let fixed = false;
   const r = await runReviewLoop({ maxRounds: 2 }, deps({

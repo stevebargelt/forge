@@ -235,7 +235,29 @@ export type VerificationStep = { name: string; ok: boolean; output: string };
 // running typecheck/test — see buildReviewLoopDeps.verify in
 // cli/commands/review-loop.ts. Human-readable description of WHAT covered it,
 // surfaced in the loop report in place of run output.
-export type VerificationResult = { ok: boolean; steps: VerificationStep[]; reusedEvidence?: string };
+//
+// FG-501: ciOutcome is set ONLY on the CI-consuming path in
+// cli/commands/review-loop.ts's verifyWithReuse, to make a run diagnosable
+// without re-deriving why local verification did or didn't run:
+//  - "reused_after_wait": pending CI was polled until it went green, then
+//    reused (reusedEvidence is also set on this result, same as an immediate
+//    reuse — this just records that a wait happened first).
+//  - "ci_failed": a required CI check failed at the reviewed sha; verification
+//    is reported failed directly from that CI evidence, with no local run.
+//  - "local_fallback": CI was unavailable, unqueryable, or the wait timed out
+//    (or the tree was dirty), so verification fell back to a real local run;
+//    `reason` is the operator-facing explanation and `extendedDelegatedToCi`
+//    records whether test:extended was skipped locally (the review-loop
+//    default — see --local-extended) or actually run.
+export type VerificationResult = {
+  ok: boolean;
+  steps: VerificationStep[];
+  reusedEvidence?: string;
+  ciOutcome?:
+    | { kind: "reused_after_wait" }
+    | { kind: "ci_failed"; context: string; url?: string }
+    | { kind: "local_fallback"; reason: string; extendedDelegatedToCi: boolean };
+};
 
 export type CommandRunner = (cmd: string, args: string[]) => { ok: boolean; output: string };
 function makeDefaultRunner(cwd?: string): CommandRunner {
@@ -470,6 +492,19 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
     // covered it (row id or CI run URL + sha) in place of run output.
     if (r.verification.reusedEvidence) {
       L.push(`- verification reused evidence: ${r.verification.reusedEvidence}`);
+    }
+    // FG-501: how the CI-consuming path resolved — waited for pending CI, was
+    // stopped by a failing CI check, or fell back to local verification.
+    if (r.verification.ciOutcome) {
+      const outcome = r.verification.ciOutcome;
+      if (outcome.kind === "reused_after_wait") {
+        L.push(`- CI: waited for in-flight CI, then reused it (no local run)`);
+      } else if (outcome.kind === "ci_failed") {
+        L.push(`- CI: required check "${outcome.context}" failed${outcome.url ? ` — ${outcome.url}` : ""} (no local run)`);
+      } else {
+        L.push(`- CI: local fallback — ${outcome.reason}`);
+        L.push(`- local fallback tier: ${outcome.extendedDelegatedToCi ? "fast only (test:extended delegated to CI)" : "full (incl. test:extended)"}`);
+      }
     }
     L.push(r.verdict
       ? `- reviewer verdict: ${r.verdict}`
