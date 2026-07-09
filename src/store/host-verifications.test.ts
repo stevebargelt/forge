@@ -917,6 +917,30 @@ describe("probeCiGateStatus", () => {
       });
       assert.equal(status.kind, "unavailable");
     });
+
+    test("first job unreportable (null), second job failed -> failed, not masked as unavailable", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? null : { sha: GATE_SHA, state: "failure" }),
+      });
+      assert.equal(status.kind, "failed", "a later sibling's genuine failure must win over an earlier job the provider couldn't report on");
+    });
+
+    test("first job failed, second job unreportable (null) -> failed (already the case; kept as a regression guard)", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "failure" } : null),
+      });
+      assert.equal(status.kind, "failed");
+    });
+
+    test("first job unreportable (null), second job pending -> unavailable (coverage can't be proven, even though nothing is red)", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? null : { sha: GATE_SHA, state: "pending" }),
+      });
+      assert.equal(status.kind, "unavailable");
+    });
   });
 });
 

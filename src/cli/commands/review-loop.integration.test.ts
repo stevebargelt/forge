@@ -1050,6 +1050,39 @@ test("FG-501 verifyWithReuse: CI already green -> immediate reuse, no waiting, n
   assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-immediate/);
 });
 
+test("FG-501 verifyWithReuse: CI reports all-green but the covering-evidence re-check still misses (race) -> local fallback citing the race-condition reason, never invents evidence", async () => {
+  writeMatchingCiWorkflow();
+  const scripts = { typecheck: "true", test: "true" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add matching ci.yml"], projectDir);
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // tryReuse() (findCoveringGateEvidence) and probe() (probeCiGateStatus) share
+  // the identical preconditions and consult the SAME provider — the only honest
+  // way to force "probe says green, tryReuse still misses" is a provider whose
+  // answer itself changes between calls (e.g. the check-runs API lagging behind
+  // the status rollup it's read from). Call 1 is the initial tryReuse() (must
+  // miss so we reach probe()), call 2 is probe() (must be green), call 3 is the
+  // post-success tryReuse() re-check (must miss again to trigger the race path).
+  let calls = 0;
+  const checkStatusProvider = () => {
+    calls++;
+    if (calls === 2) return { sha: headSha, state: "success" as const };
+    return { sha: headSha, state: "pending" as const };
+  };
+
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(verifyCtx({ scripts, checkStatusProvider, runVerification: runner.fn }));
+
+  const result = await deps.verify();
+  assert.equal(calls, 3, "expects the initial tryReuse, one probe, and the post-success tryReuse re-check");
+  assert.equal(result.ciOutcome?.kind, "local_fallback");
+  const outcome = result.ciOutcome as { reason: string };
+  assert.equal(outcome.reason, "CI reported all required checks green but covering evidence could not be confirmed");
+  assert.equal(runner.calls.length, 1, "the race must still fall back to exactly one local run, never invent evidence");
+});
+
 // ── FG-501 AC6: operator-facing surface ─────────────────────────────────────
 //
 // The AC7 block above pins verifyWithReuse's RETURNED data (ok/steps/

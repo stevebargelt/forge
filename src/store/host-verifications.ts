@@ -511,15 +511,17 @@ export type CiGateStatus =
  *  same trust chain as findCoveringGateEvidence's CI branch (sha shape,
  *  content-verified pairing, whole-workflow job enumeration), but reports
  *  WHY reuse isn't possible instead of collapsing every non-success case to
- *  null. Priority when jobs disagree: any completed-non-success job (failure,
- *  or a completed-but-not-successful conclusion like cancelled/skipped) wins
- *  outright as "failed" — waiting longer cannot fix a terminal state, so it's
- *  reported (and the loop stopped) as soon as the first one is seen, mirroring
- *  findCoveringGateEvidence's short-circuit. Otherwise any still-incomplete job
- *  makes the whole gate "pending". All-success is "success". A missing/
- *  unparseable precondition, or a provider returning null / a mismatched sha,
- *  is "unavailable" with a concrete reason — never silently treated as pending
- *  or success. */
+ *  null. Every required job is checked before classifying (no short-circuit on
+ *  the first non-success job), since an earlier job the provider can't report
+ *  on must never mask a later sibling's genuine failure. Priority when jobs
+ *  disagree: any completed-non-success job (failure, or a completed-but-not-
+ *  successful conclusion like cancelled/skipped) wins outright as "failed" —
+ *  waiting longer cannot fix a terminal state. Otherwise a job the provider
+ *  couldn't report on (missing/mismatched-sha status) wins as "unavailable",
+ *  since coverage can't be proven for it either. Otherwise any still-incomplete
+ *  job makes the whole gate "pending". All-success is "success". A missing/
+ *  unparseable precondition is "unavailable" with a concrete reason — never
+ *  silently treated as pending or success. */
 export function probeCiGateStatus(opts: {
   projectDir: string;
   sha: string;
@@ -532,17 +534,32 @@ export function probeCiGateStatus(opts: {
   if ("unavailableReason" in pairing) return { kind: "unavailable", reason: pairing.unavailableReason };
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
+  let failing: { context: string; url?: string } | null = null;
+  let unavailableReason: string | null = null;
   const pending: { context: string; url?: string }[] = [];
   for (const jobId of pairing.jobIds) {
     const checkContext = `${pairing.workflowName} / ${jobId}`;
     const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
-    if (!status) return { kind: "unavailable", reason: `no CI status available for check "${checkContext}" at sha ${opts.sha}` };
-    if (status.sha !== opts.sha) return { kind: "unavailable", reason: `CI status for "${checkContext}" reported a different sha than the one requested` };
+    if (!status) {
+      unavailableReason ??= `no CI status available for check "${checkContext}" at sha ${opts.sha}`;
+      continue;
+    }
+    if (status.sha !== opts.sha) {
+      unavailableReason ??= `CI status for "${checkContext}" reported a different sha than the one requested`;
+      continue;
+    }
     if (status.state === "failure" || status.state === "other") {
-      return { kind: "failed", failing: { context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) } };
+      failing ??= { context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) };
+      continue;
     }
     if (status.state === "pending") pending.push({ context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) });
   }
+  // A genuine red always wins over a mere reporting hiccup (a later sibling job
+  // must not be masked by an earlier one the provider couldn't report on), and
+  // unavailable still wins over pending/success since coverage cannot be proven
+  // for a job the provider never confirmed.
+  if (failing) return { kind: "failed", failing };
+  if (unavailableReason) return { kind: "unavailable", reason: unavailableReason };
   if (pending.length > 0) return { kind: "pending", checks: pending };
   return { kind: "success" };
 }
