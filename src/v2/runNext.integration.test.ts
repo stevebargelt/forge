@@ -308,7 +308,7 @@ test("runNext: failed step (container exit nonzero + empty result.json) marks ta
 // The fake dockerExec above never calls docker itself, so `finalizeContainerRetention`'s
 // real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
 // PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
-// whether `rm -f forge-<taskId>` was actually invoked.
+// whether `rm -f -v forge-<taskId>` was actually invoked.
 function makeDockerRmStub(): { binDir: string; logPath: string } {
   const binDir = mkdtempSync(join(tmpdir(), "forge-runnext-docker-stub-"));
   const logPath = join(binDir, "docker-calls.log");
@@ -345,7 +345,7 @@ test("runNext: FG-492 review — exit 0 + valid result.json → primary complete
 
     const first = tasksForRun(runId).find((t) => t.phase === "first")!;
     const calls = readFileSync(logPath, "utf8");
-    assert.match(calls, new RegExp(`rm -f forge-${first.id}`), "a completed primary's container is reaped");
+    assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`), "a completed primary's container is reaped");
   });
 });
 
@@ -432,7 +432,7 @@ test("runNext: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a fail
 
       const first = tasksForRun(runId).find((t) => t.phase === "first")!;
       const calls = readFileSync(logPath, "utf8");
-      assert.match(calls, new RegExp(`rm -f forge-${first.id}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
+      assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
     } finally {
       delete process.env.FORGE_CONTAINER_RETENTION;
     }
