@@ -99,6 +99,17 @@ export type ReapContainersOutcome = {
   // there was nothing to find. Distinct from a docker error on an individual
   // `rm -f` (still captured in `errors`).
   dockerUnavailable: boolean;
+  // FG-505: containers healed by ABSENCE this sweep — an unresolved
+  // container.reap_failed event whose container no longer appears anywhere in
+  // the docker ps -a listing (the crash-window "resolution write was lost, or
+  // an operator ran `docker rm` by hand" case). Recorded with a
+  // confirmed-absent-at-scan outcome, distinct from an actively-removed one.
+  absenceHealed: string[];
+  // FG-505: a container.reaped write (either the post-rm resolution or an
+  // absence-heal one) threw. The underlying docker fact (reaped / absent) is
+  // still true — only the DB write failed — so this never blocks the sweep;
+  // the next sweep's absence-heal pass closes it.
+  resolutionWriteErrors: string[];
 };
 
 type ReapCandidateSource = "failed_retained" | "completed_leak";
@@ -111,7 +122,7 @@ export function performOpsReapContainers(
 ): ReapContainersOutcome {
   const containers = listContainers();
   if (containers === undefined) {
-    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], dockerUnavailable: true };
+    return { dryRun: !!opts.dryRun, scanned: 0, reaped: [], retained: [], errors: [], completedTaskLeaks: [], completedTaskLeaksUnconfirmed: [], absenceHealed: [], resolutionWriteErrors: [], dockerUnavailable: true };
   }
 
   const db = getDb({ readOnly: true });
@@ -126,7 +137,24 @@ export function performOpsReapContainers(
   const errors: string[] = [];
   const completedTaskLeaks: string[] = [];
   const completedTaskLeaksUnconfirmed: string[] = [];
+  const absenceHealed: string[] = [];
+  const resolutionWriteErrors: string[] = [];
   let scanned = 0;
+
+  // FG-505: the post-rm resolution write (and the absence-heal write below)
+  // must never abort the sweep — if `docker rm` already confirmed the
+  // container gone (or absence-scan did), that fact stands regardless of
+  // whether logEvent's insert succeeds. A failed write is reported and left
+  // for the next sweep's absence-heal pass to close.
+  function recordResolution(runId: string, taskId: string, containerName: string, outcome: string): boolean {
+    try {
+      logEvent("container.reaped", { runId, taskId, payload: { containerName, outcome } });
+      return true;
+    } catch {
+      resolutionWriteErrors.push(containerName);
+      return false;
+    }
+  }
 
   for (const container of containers) {
     if (container.running) continue; // never touch a live container
@@ -178,10 +206,55 @@ export function performOpsReapContainers(
       // the durable resolution so detectContainerReapFailed stops flagging a
       // prior container.reap_failed for this task. Only the sweeper records
       // this; happy-path task-completion reaps stay silent (FG-503 AC4).
-      logEvent("container.reaped", { runId: row.runId, taskId, payload: { containerName, outcome } });
+      // FG-505: this write is non-fatal (see recordResolution) — a thrown
+      // insert here no longer aborts the rest of the sweep.
+      recordResolution(row.runId, taskId, containerName, outcome);
     }
   }
-  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, completedTaskLeaksUnconfirmed, dockerUnavailable: false };
+
+  // FG-505: absence-heal pass — a `container.reap_failed` event can go
+  // unresolved forever if the resolution write itself was lost (crash between
+  // `docker rm` and logEvent above) or an operator cleaned the container up by
+  // hand, since FG-503 candidacy only looks at containers docker still knows
+  // about. Reconcile every unresolved reap_failed against the SAME `docker ps
+  // -a` listing already fetched at the top of this scan (zero extra docker
+  // calls): a container absent from that listing entirely (not merely
+  // stopped) is confirmed gone one way or another. Live mode only — dry-run
+  // writes nothing, and a container still present here is left for the
+  // ordinary candidate loop above (or a later sweep) rather than healed.
+  if (!opts.dryRun) {
+    const presentNames = new Set(containers.map((c) => c.name));
+    const unresolvedReapFailed = db
+      .prepare(
+        `SELECT t.id AS taskId, t.run_id AS runId, e.payload AS payload
+         FROM tasks t
+         JOIN runs r ON r.id = t.run_id
+         JOIN events e ON e.id = (
+           SELECT e2.id FROM events e2
+           WHERE e2.task_id = t.id AND e2.event_type = 'container.reap_failed'
+           ORDER BY e2.created_at DESC, e2.id DESC
+           LIMIT 1
+         )
+         WHERE (? IS NULL OR r.project_dir = ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM events e3
+             WHERE e3.task_id = t.id AND e3.event_type = 'container.reaped'
+               AND (e3.created_at > e.created_at OR (e3.created_at = e.created_at AND e3.id > e.id))
+           )`
+      )
+      .all(opts.projectDir ?? null, opts.projectDir ?? null) as { taskId: string; runId: string; payload: string | null }[];
+
+    for (const row of unresolvedReapFailed) {
+      const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
+      const containerName = typeof payload?.["containerName"] === "string" ? (payload["containerName"] as string) : `forge-${row.taskId}`;
+      if (presentNames.has(containerName)) continue; // still on disk — never absence-heal
+      if (recordResolution(row.runId, row.taskId, containerName, "confirmed-absent-at-scan")) {
+        absenceHealed.push(containerName);
+      }
+    }
+  }
+
+  return { dryRun: !!opts.dryRun, scanned, reaped, retained, errors, completedTaskLeaks, completedTaskLeaksUnconfirmed, absenceHealed, resolutionWriteErrors, dockerUnavailable: false };
 }
 
 export function registerOps(program: Command): void {
@@ -283,10 +356,21 @@ export function registerOps(program: Command): void {
       if (outcome.errors.length > 0) console.log(`  reap failed (not confirmed gone — left for a later sweep): ${outcome.errors.join(", ")}`);
       // FG-503: call out leaks on otherwise-SUCCESSFUL tasks distinctly — the
       // condition FG-503 exists to make visible instead of silent.
-      if (outcome.completedTaskLeaks.length > 0) console.log(`  leaked from a SUCCESSFUL task (explicit cleanup failed, now swept): ${outcome.completedTaskLeaks.join(", ")}`);
+      // FG-505: dry-run never claims a completed action — "would be swept" is
+      // conditional, matching the "(dry-run) would reap" verb above; only a
+      // real (live) sweep gets to say "now swept".
+      if (outcome.completedTaskLeaks.length > 0) {
+        const phrase = outcome.dryRun ? "would be swept" : "now swept";
+        console.log(`  leaked from a SUCCESSFUL task (explicit cleanup failed, ${phrase}): ${outcome.completedTaskLeaks.join(", ")}`);
+      }
       // FG-504: the reap attempt errored — NOT confirmed gone, so this must
       // never share the "now swept" line above.
       if (outcome.completedTaskLeaksUnconfirmed.length > 0) console.log(`  leaked from a SUCCESSFUL task (explicit cleanup failed, NOT confirmed gone — left for a later sweep): ${outcome.completedTaskLeaksUnconfirmed.join(", ")}`);
+      // FG-505: a prior container.reap_failed healed by absence (container
+      // gone from docker entirely — a lost resolution write, or a manual
+      // `docker rm`), not by this sweep's own reap attempt.
+      if (outcome.absenceHealed.length > 0) console.log(`  healed by absence (container gone, prior reap resolution now recorded): ${outcome.absenceHealed.join(", ")}`);
+      if (outcome.resolutionWriteErrors.length > 0) console.log(`  resolution write failed (container confirmed gone, but the event insert threw — a later sweep will heal it): ${outcome.resolutionWriteErrors.join(", ")}`);
       if (outcome.dryRun) console.log("No writes.");
     });
 }

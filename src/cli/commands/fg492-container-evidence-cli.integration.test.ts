@@ -608,9 +608,10 @@ test("integ forge ops reap-containers --dry-run (plain): a completed-task leak i
   assert.match(result.stdout, /\(dry-run\) would reap 1\/1 retained container\(s\)/);
   assert.match(
     result.stdout,
-    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, now swept\\): forge-${leakedTaskId}`),
-    "the operator-visible text FG-503 exists to add — a leak on an otherwise-successful task must never read as an ordinary failed-task reap",
+    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, would be swept\\): forge-${leakedTaskId}`),
+    "FG-505: dry-run must never claim a completed action ('now swept') — conditional wording matches the leading '(dry-run) would reap' line",
   );
+  assert.ok(!result.stdout.includes("now swept"), "dry-run must never say 'now swept'");
 });
 
 // ── FG-504: real CLI surface of the container.reaped resolution + wording split ──
@@ -788,4 +789,72 @@ test("integ forge ops reap-containers --json: a failed-task retention candidate 
   assert.equal(outcome.scanned, 2, "both the failed-retained and completed-leak candidates land in the same scan");
   assert.deepEqual(outcome.reaped.sort(), [`forge-${failedTaskId}`, `forge-${leakedTaskId}`].sort());
   assert.deepEqual(outcome.completedTaskLeaks, [`forge-${leakedTaskId}`], "only the completed-task leak is tagged — the ordinary failed-task candidate must not bleed into this field");
+});
+
+// ── FG-505: absence-heal — a lost resolution write eventually heals itself ──
+
+test("integ forge ops reap-containers → forge ops check (FG-505): a container.reap_failed whose container is later gone entirely from docker ps -a is healed by absence, real CLI end to end", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg505-absence-heal";
+  const taskId = "t-fg505-absence-heal";
+  insertRunRow({ id: runId, workflow: "build", title: "fg505 absence heal", projectDir });
+  insertTaskRow({ id: taskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  // The reap attempt failed once (docker error, or the process crashed before
+  // ever attempting it) and the container has since disappeared entirely —
+  // an operator ran `docker rm` by hand, or the resolution write itself was
+  // lost. Either way it no longer shows up in `docker ps -a` at all.
+  insertEvent({
+    runId, taskId, eventType: "container.reap_failed",
+    payload: { containerName: `forge-${taskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+
+  const before = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(before.status, 0);
+  const beforeIncidents = JSON.parse(before.stdout) as Array<{ kind: string; taskId: string | null }>;
+  assert.ok(
+    beforeIncidents.some((i) => i.kind === "container_reap_failed" && i.taskId === taskId),
+    "sanity check: the incident fires before any sweep",
+  );
+
+  // The fake docker ps -a listing is now EMPTY — the container isn't there at
+  // all, not merely stopped.
+  const docker = withFakeDocker([]);
+  const sweep = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(sweep.status, 0, `expected exit 0\nstdout: ${sweep.stdout}\nstderr: ${sweep.stderr}`);
+  const outcome = JSON.parse(sweep.stdout) as { scanned: number; absenceHealed: string[] };
+  assert.equal(outcome.scanned, 0, "the container was never a scan candidate — it isn't in the listing");
+  assert.deepEqual(outcome.absenceHealed, [`forge-${taskId}`]);
+
+  const after = runForge(["ops", "check", "--project", projectDir, "--json"]);
+  assert.equal(after.status, 0);
+  const afterIncidents = JSON.parse(after.stdout) as Array<{ kind: string; taskId: string | null }>;
+  assert.ok(
+    !afterIncidents.some((i) => i.kind === "container_reap_failed"),
+    "absence-heal recorded the resolution — the incident must no longer be reported",
+  );
+});
+
+test("integ forge ops reap-containers (FG-505, plain): absence-heal is reported distinctly and never fires in --dry-run", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg505-absence-heal-dry";
+  const taskId = "t-fg505-absence-heal-dry";
+  insertRunRow({ id: runId, workflow: "build", title: "fg505 absence heal dry", projectDir });
+  insertTaskRow({ id: taskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({
+    runId, taskId, eventType: "container.reap_failed",
+    payload: { containerName: `forge-${taskId}`, why: "docker rm -f -v failed after task completion" },
+  });
+  const docker = withFakeDocker([]);
+
+  const dry = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"], { env: docker.env });
+  assert.equal(dry.status, 0, `expected exit 0\nstdout: ${dry.stdout}\nstderr: ${dry.stderr}`);
+  const dryOutcome = JSON.parse(dry.stdout) as { absenceHealed: string[] };
+  assert.deepEqual(dryOutcome.absenceHealed, [], "dry-run must never absence-heal (it would have to write an event)");
+
+  const live = runForge(["ops", "reap-containers", "--project", projectDir], { env: docker.env });
+  assert.equal(live.status, 0, `expected exit 0\nstdout: ${live.stdout}\nstderr: ${live.stderr}`);
+  assert.match(
+    live.stdout,
+    new RegExp(`healed by absence \\(container gone, prior reap resolution now recorded\\): forge-${taskId}`),
+  );
 });
