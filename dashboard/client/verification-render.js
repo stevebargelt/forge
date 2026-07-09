@@ -55,7 +55,8 @@ export function reviewLoopVerificationDetail(p) {
 // command, testedSha (src/campaign/reconcile-collect.ts).
 export function hostGateDetail(p) {
   const parts = [];
-  if (p.gate) parts.push(String(p.gate));
+  // The producer sets `gate` and `command` to the same string — render once.
+  if (p.gate && p.gate !== p.command) parts.push(String(p.gate));
   if (p.command) parts.push(String(p.command));
   if (typeof p.exitCode === "number") parts.push(`exit ${p.exitCode}`);
   return parts.join(" · ");

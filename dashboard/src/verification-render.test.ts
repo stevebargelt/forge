@@ -82,6 +82,17 @@ test("hostGateDetail: shows gate/command and exit code", () => {
   assert.match(detail, /exit 1/);
 });
 
+test("hostGateDetail: identical gate+command renders the command ONCE, not duplicated", () => {
+  const detail = hostGateDetail({ gate: "npm run test:all", command: "npm run test:all", exitCode: 0 });
+  assert.equal(detail.match(/npm run test:all/g)?.length, 1, `command must not render twice: "${detail}"`);
+});
+
+test("hostGateDetail: a distinct gate label still renders alongside the command", () => {
+  const detail = hostGateDetail({ gate: "unit-gate", command: "npm run test", exitCode: 0 });
+  assert.match(detail, /unit-gate/);
+  assert.match(detail, /npm run test/);
+});
+
 test("groupVerificationRows: splits review-loop verifications and campaign reconcile gates into separate buckets", () => {
   const rows = [
     { kind: "review_loop_verification", attemptId: "a1" },
