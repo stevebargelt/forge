@@ -9,7 +9,9 @@ import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
-import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
+import { invoke, createInvokeRun, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
+import { finalizeRunIfSettled } from "../../v2/run-finalize.js";
+import { tasksForRun } from "../../store/tasks.js";
 import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
@@ -21,6 +23,8 @@ import {
   findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, probeCiGateStatus,
   type CheckStatusProvider, type CiGateStatus,
 } from "../../store/host-verifications.js";
+import { logEvent } from "../../store/events.js";
+import { newAttemptId } from "../../util/ids.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
 type RunVerificationFn = typeof runVerification;
@@ -48,6 +52,26 @@ const defaultSleep: SleepFn = (ms) => new Promise((resolvePromise) => setTimeout
 
 function describeCiChecks(checks: { context: string; url?: string }[]): string {
   return checks.map((c) => (c.url ? `${c.context} (${c.url})` : c.context)).join(", ");
+}
+
+// FG-487 AC2: the verification_finished event must carry the required CI check
+// contexts (ci_wait) or the command/tier actually run (local) — not just
+// ok/ciOutcome — so the dashboard can render what was actually verified.
+// Kept as a local extension of VerificationResult (not a change to the shared
+// v2/review-loop.ts contract) since these fields are event/telemetry detail,
+// not part of the engine's own pass/fail decision.
+type VerificationResultWithDetail = VerificationResult & {
+  checkContexts?: string[];
+  command?: string;
+  tier?: "fast" | "extended";
+};
+
+function tierFromSteps(steps: { name: string }[]): "fast" | "extended" | undefined {
+  if (steps.length === 0) return undefined;
+  return steps.some((s) => s.name === "test:extended") ? "extended" : "fast";
+}
+function commandFromSteps(steps: { name: string }[]): string | undefined {
+  return steps.length === 0 ? undefined : steps.map((s) => `npm run ${s.name}`).join(" && ");
 }
 
 // ── task templates ───────────────────────────────────────────────────────────
@@ -214,28 +238,36 @@ export function buildReviewLoopDeps(
   // wait/poll (bounded) and reuse once green. Failed → report the deterministic
   // failure directly from CI evidence, no local run. Only a genuinely unavailable
   // CI setup (or a wait that times out) falls back to a real local run.
-  const verifyWithReuse = async (): Promise<VerificationResult> => {
+  const verifyWithReuse = async (): Promise<VerificationResultWithDetail> => {
     const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
     if (dirty) {
       console.log("review-loop: dirty tree — local verification");
-      return runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
+      const result = runVerify(scriptsForVerification(), { cwd: ctx.projectDir });
+      return { ...result, command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps) };
     }
 
     const headSha = gitInDir(["rev-parse", "HEAD"]).trim();
     const requiredGate = getRequiredHostGate(ctx.projectDir);
 
-    const tryReuse = (): VerificationResult | null => {
+    // Populated whenever a CI check context becomes known (pending poll, a
+    // failing check, or CI-sourced covering evidence) so the finish event can
+    // report what was actually required — never invented for the host_row /
+    // local-only paths, where no CI check context exists.
+    let checkContexts: string[] | undefined;
+
+    const tryReuse = (): VerificationResultWithDetail | null => {
       const evidence = findCoveringGateEvidence({
         ticketId: ctx.ticketId, projectDir: ctx.projectDir, sha: headSha,
         command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
       });
       if (!evidence) return null;
+      if (evidence.source === "ci") checkContexts = evidence.checks.map((c) => c.context);
       const description = describeGateEvidence(evidence);
       return { ok: true, steps: [{ name: "reused", ok: true, output: description }], reusedEvidence: description };
     };
 
     const immediate = tryReuse();
-    if (immediate) return immediate;
+    if (immediate) return checkContexts ? { ...immediate, checkContexts } : immediate;
 
     const probe = (): CiGateStatus => probeCiGateStatus({
       projectDir: ctx.projectDir, sha: headSha, command: requiredGate, checkStatusProvider: ctx.checkStatusProvider,
@@ -247,6 +279,7 @@ export function buildReviewLoopDeps(
     let waited = false;
 
     while (status.kind === "pending") {
+      checkContexts = status.checks.map((c) => c.context);
       const elapsedSeconds = Math.round((now() - startedAt) / 1000);
       console.log(
         `review-loop: CI pending for ${shortSha} — waiting on: ${describeCiChecks(status.checks)} ` +
@@ -264,7 +297,7 @@ export function buildReviewLoopDeps(
     if (status.kind === "success") {
       const reused = tryReuse();
       if (reused) {
-        return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" } } : reused;
+        return waited ? { ...reused, ciOutcome: { kind: "reused_after_wait" }, checkContexts } : { ...reused, checkContexts };
       }
       // CI reports every job green but the covering-evidence lookup still fails
       // closed (e.g. a race between the check going green and the row landing) —
@@ -273,6 +306,7 @@ export function buildReviewLoopDeps(
     }
 
     if (status.kind === "failed") {
+      checkContexts = [status.failing.context];
       const urlSuffix = status.failing.url ? ` — ${status.failing.url}` : "";
       const message = `required CI check "${status.failing.context}" failed for ${shortSha}${urlSuffix}`;
       console.log(`review-loop: ${message} (no local run)`);
@@ -280,17 +314,70 @@ export function buildReviewLoopDeps(
         ok: false,
         steps: [{ name: status.failing.context, ok: false, output: message }],
         ciOutcome: { kind: "ci_failed", context: status.failing.context, url: status.failing.url },
+        checkContexts,
       };
     }
 
     console.log(`review-loop: CI unavailable: ${status.reason} — falling back to local verification.`);
     const extendedDelegatedToCi = !ctx.localExtended;
     const result = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
-    return { ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi } };
+    return {
+      ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi },
+      command: commandFromSteps(result.steps), tier: tierFromSteps(result.steps),
+    };
+  };
+
+  // FG-487: every round's verification (the FG-501 CI-wait poll, or the local
+  // typecheck+test fallback) previously left no durable trace between rounds —
+  // only the reviewer/fixer task rows around it were ever visible. Wrap
+  // verifyWithReuse in a start/finish event pair per round, keyed by a fresh
+  // attemptId so a crashed-and-restarted round at the same round/ticket/sha
+  // identity is never mispaired with the wrong finish (see newAttemptId).
+  // `mode` is coarse (known before verifyWithReuse resolves any of its
+  // sub-branches): "local" for a dirty tree (verifyWithReuse never consults CI
+  // for a dirty tree — see its own dirty check), "ci_wait" for a clean tree
+  // (which always consults covering evidence / CI status first, whether it
+  // resolves instantly via reuse, waits on pending CI, or falls back to a real
+  // local run) — the finish event's ciOutcome/reusedEvidence carry the actual
+  // sub-branch taken.
+  let verificationRound = 0;
+  const verifyWithEvents = async (): Promise<VerificationResult> => {
+    verificationRound++;
+    const attemptId = newAttemptId();
+    const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
+    let sha: string | undefined;
+    try {
+      sha = gitInDir(["rev-parse", "HEAD"]).trim();
+    } catch {
+      sha = undefined;
+    }
+    const mode: "local" | "ci_wait" = dirty ? "local" : "ci_wait";
+    logEvent("review_loop.verification_started", {
+      runId,
+      payload: { attemptId, round: verificationRound, ticketId: ctx.ticketId, sha, mode },
+    });
+    const result = await verifyWithReuse();
+    logEvent("review_loop.verification_finished", {
+      runId,
+      payload: {
+        attemptId, round: verificationRound, ticketId: ctx.ticketId, sha, mode,
+        ok: result.ok,
+        reusedEvidence: result.reusedEvidence ?? null,
+        ciOutcome: result.ciOutcome ?? null,
+        // AC2: ci_wait's required check contexts, local's command/tier — the
+        // dashboard detail line these fields exist for (see main.js's
+        // reviewLoopVerificationDetail).
+        checkContexts: result.checkContexts ?? null,
+        command: result.command ?? null,
+        tier: result.tier ?? null,
+        steps: result.steps.map((s) => ({ name: s.name, ok: s.ok })),
+      },
+    });
+    return result;
   };
 
   const deps: ReviewLoopDeps = {
-    verify: () => verifyWithReuse(),
+    verify: () => verifyWithEvents(),
     review: async (verification) => {
       preflight();
       const res = await invokeFn({
@@ -402,6 +489,19 @@ export function assertCleanWorkingTree(projectDir: string): boolean {
   return false;
 }
 
+// FG-487: mirrors invoke.ts's closeRunIfIdle — a run is "active" iff it has a
+// non-terminal top-level task, so finalize only when none remains. Without
+// this guard, an exception racing a still-running dispatched task (thrown
+// between markTaskRunning and that task's terminal write) would finalize the
+// run as complete while the task is genuinely in flight.
+function finalizeRunIfIdle(runId: string, logSource: string, extraPayload?: Record<string, unknown>): void {
+  const inFlight = tasksForRun(runId).some(
+    (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed",
+  );
+  if (inFlight) return;
+  finalizeRunIfSettled(runId, logSource, extraPayload);
+}
+
 function readScripts(projectDir: string): Record<string, unknown> {
   try {
     const pkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
@@ -479,6 +579,12 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         return `${originalDiff}\n\n## Fixer commits since review start (${startHead.slice(0, 9)}..${head.slice(0, 9)})\n${fixerCommits}`;
       };
 
+      // FG-487: create the run row (and emit run.created) at loop entry — BEFORE
+      // round 1's verification, not lazily on the first reviewer/fixer dispatch as
+      // before. Without this the dashboard showed nothing for the whole
+      // verification/CI-wait window, which is often the loop's longest phase.
+      const eagerRunId = createInvokeRun("review-loop", projectDir, undefined, `review-loop #${ticketId}`, undefined);
+
       const { deps, getRunId } = buildReviewLoopDeps({
         ticketId,
         acceptance: `${ticket.id} — ${ticket.title}\n\n${ticket.body}`,
@@ -486,13 +592,37 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
         localExtended: opts.localExtended,
+        runId: eagerRunId,
       }, invokeFn ?? invoke);
 
-      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
+      let outcome: Awaited<ReturnType<typeof runReviewLoop>>;
+      try {
+        outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
+      } catch (err) {
+        // FG-487: an exception escaping the loop (e.g. deps.verify() throwing
+        // before any task exists) must not leak the eagerly-created run as a
+        // permanent zero-task 'active' row — every sweep (findPhantomRuns,
+        // reconcile completion, ops detectors) INNER JOINs tasks and is
+        // structurally blind to it. Finalize with the error recorded, then rethrow.
+        finalizeRunIfIdle(eagerRunId, "review-loop", {
+          stopReason: "exception",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
 
       const runId = getRunId();
       if (runId) {
+        // FG-487: normally the last reviewer/fixer task's own completion closes the
+        // run (invoke.ts's closeRunIfIdle). But a loop that stops before ANY task is
+        // ever dispatched (e.g. verification_failed with zero actionable findings on
+        // round 1 — no discoverable checks at all) now leaves an eagerly-created run
+        // with no task ever attached to it; reconcile.ts's crash-recovery sweep
+        // requires at least one task row before it will complete a run, so that path
+        // would never close it. Finalize here too — idempotent (a no-op once the run
+        // is already complete via the normal per-task path).
+        finalizeRunIfIdle(runId, "review-loop", { stopReason: outcome.stopReason });
         const notePath = join(runDir(runId), "review-loop.md");
         if (existsSync(runDir(runId))) writeFileSync(notePath, note);
         console.log(`\n${note}\nnote: ${notePath}`);

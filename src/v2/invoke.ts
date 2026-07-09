@@ -642,7 +642,12 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
 // --- Helpers ---
 
-function createInvokeRun(
+// FG-487: exported so callers that must create the run row EAGERLY — before any
+// task dispatch — can reuse the exact same run-creation primitive `invoke()`
+// itself uses lazily (see review-loop.ts's CLI wiring, which creates the run at
+// loop entry, before round 1's verification, rather than waiting for the first
+// reviewer/fixer dispatch).
+export function createInvokeRun(
   agentRole: string,
   projectDir: string,
   designDir: string | undefined,

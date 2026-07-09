@@ -72,7 +72,19 @@ export type EventType =
   // BEFORE the campaign is parked to 'paused' and the error is rethrown to the
   // caller — the only audit trail of the raw error under a cron/service
   // invocation where stderr may not be captured.
-  | "campaign_item.drive_error";
+  | "campaign_item.drive_error"
+  // FG-487: durable phase-boundary markers around host-side verification work
+  // that previously had no dashboard trace — `forge review-loop`'s per-round
+  // verification (the FG-501 CI-wait poll, or the local typecheck+test
+  // fallback) and `forge campaign reconcile`'s real host-gate execs (a covering-
+  // evidence REUSE never emits these — only an actual exec does). Every
+  // start/finish pair carries a shared `attemptId` (see util/ids.ts's
+  // newAttemptId) so a crashed-and-restarted round/gate at the same
+  // round/ticket/sha identity can never be mispaired with the wrong finish.
+  | "review_loop.verification_started"
+  | "review_loop.verification_finished"
+  | "campaign_item.host_gate_started"
+  | "campaign_item.host_gate_finished";
 
 export type Event = {
   id: number;

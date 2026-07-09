@@ -158,6 +158,90 @@ test("logEvent accepts new #194 event types without throwing", () => {
   assert.ok(types.includes("auth.profile_failed"));
 });
 
+// FG-487: host-side verification events (review-loop rounds, campaign reconcile
+// host-gate execs) — previously invisible activity now gets durable start/finish
+// markers in the events spine.
+test("logEvent accepts FG-487 host-side verification event types and round-trips their payload", () => {
+  logEvent("review_loop.verification_started", {
+    runId: RUN.id,
+    payload: { attemptId: "attempt-1", round: 1, ticketId: "FG-487", sha: "deadbeef", mode: "ci_wait" },
+  });
+  logEvent("review_loop.verification_finished", {
+    runId: RUN.id,
+    payload: { attemptId: "attempt-1", round: 1, ok: true, ciOutcome: { kind: "reused_after_wait" }, reusedEvidence: "CI check \"CI / test\"" },
+  });
+  logEvent("campaign_item.host_gate_started", {
+    runId: RUN.id,
+    payload: { attemptId: "gate-1", ticketId: "FG-487", itemId: "citem-1", campaignId: "campaign-1", gate: "npm run test:all", command: "npm run test:all", testedSha: "deadbeef" },
+  });
+  logEvent("campaign_item.host_gate_finished", {
+    runId: RUN.id,
+    payload: { attemptId: "gate-1", ticketId: "FG-487", itemId: "citem-1", campaignId: "campaign-1", exitCode: 0 },
+  });
+
+  const events = eventsForRun(RUN.id);
+  const types = events.map((e) => e.eventType);
+  assert.ok(types.includes("review_loop.verification_started"));
+  assert.ok(types.includes("review_loop.verification_finished"));
+  assert.ok(types.includes("campaign_item.host_gate_started"));
+  assert.ok(types.includes("campaign_item.host_gate_finished"));
+
+  const started = events.find((e) => e.eventType === "review_loop.verification_started")!;
+  const startedPayload = started.payload as { attemptId: string; mode: string; sha: string };
+  assert.equal(startedPayload.attemptId, "attempt-1");
+  assert.equal(startedPayload.mode, "ci_wait");
+  assert.equal(startedPayload.sha, "deadbeef");
+
+  const gateFinished = events.find((e) => e.eventType === "campaign_item.host_gate_finished")!;
+  const gatePayload = gateFinished.payload as { attemptId: string; itemId: string; exitCode: number };
+  assert.equal(gatePayload.attemptId, "gate-1");
+  assert.equal(gatePayload.itemId, "citem-1");
+  assert.equal(gatePayload.exitCode, 0);
+});
+
+// FG-487: round/ticketId/sha alone is NOT a safe pairing key — a crashed
+// process restarting the same round (or a retried gate exec) can produce two
+// starts at the identical identity. Every start/finish payload carries a
+// unique attemptId specifically so pairing can never be done by key alone.
+// This test proves the property directly against logged events: a naive
+// pairing keyed only on (round, ticketId, sha) mispairs a same-identity
+// double-start (it can't tell WHICH start a finish belongs to, so it
+// incorrectly resolves BOTH once ANY finish shares the key); pairing by
+// attemptId correctly leaves the un-finished attempt open.
+test("FG-487 attemptId pairing survives a same-identity double-start — naive key-only pairing mispairs, attemptId pairing doesn't", () => {
+  const round = 1;
+  const ticketId = "FG-487";
+  const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+  logEvent("review_loop.verification_started", { runId: RUN.id, payload: { attemptId: "attempt-A", round, ticketId, sha, mode: "ci_wait" } });
+  logEvent("review_loop.verification_started", { runId: RUN.id, payload: { attemptId: "attempt-B", round, ticketId, sha, mode: "ci_wait" } });
+  // Only attempt-B ever finishes — attempt-A's process crashed mid-wait and never resumed.
+  logEvent("review_loop.verification_finished", { runId: RUN.id, payload: { attemptId: "attempt-B", round, ticketId, sha, ok: true } });
+
+  const events = eventsForRun(RUN.id);
+  const starts = events.filter((e) => e.eventType === "review_loop.verification_started");
+  const finishes = events.filter((e) => e.eventType === "review_loop.verification_finished");
+  assert.equal(starts.length, 2);
+  assert.equal(finishes.length, 1);
+
+  type Payload = { attemptId: string; round: number; ticketId: string; sha: string };
+  const key = (p: Payload): string => `${p.round}:${p.ticketId}:${p.sha}`;
+
+  // Naive pairing: "is there ANY finish at this start's (round,ticketId,sha)
+  // key" — since both starts share the identical key, the one real finish
+  // (attempt-B's) makes the key look resolved for BOTH starts.
+  const naiveResolvedKeys = new Set(finishes.map((f) => key(f.payload as Payload)));
+  const naiveStillOpen = starts.filter((s) => !naiveResolvedKeys.has(key(s.payload as Payload)));
+  assert.equal(naiveStillOpen.length, 0, "naive key-only pairing wrongly resolves BOTH starts once any finish shares their key — this is the failure mode attemptId pairing must avoid");
+
+  // Correct: pair by attemptId — attempt-A has no matching finish and must
+  // still read as open/in-progress; attempt-B is correctly resolved.
+  const finishedAttemptIds = new Set(finishes.map((f) => (f.payload as Payload).attemptId));
+  const stillOpenByAttemptId = starts.filter((s) => !finishedAttemptIds.has((s.payload as Payload).attemptId));
+  assert.equal(stillOpenByAttemptId.length, 1);
+  assert.equal((stillOpenByAttemptId[0]!.payload as Payload).attemptId, "attempt-A");
+});
+
 // FG-428: campaign_item.evidence_reconciled is distinct from run.reconciled/task.reconciled
 test("logEvent accepts campaign_item.evidence_reconciled and round-trips its payload", () => {
   logEvent("campaign_item.evidence_reconciled", {

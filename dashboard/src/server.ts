@@ -5,6 +5,10 @@
 // - GET /api/in-flight   currently-running / awaiting-gate tasks (?projectDir filter)
 // - GET /api/projects    project registry: name, color, last activity, live sessions (#154)
 // - GET /api/task/:id    full task detail (result + stdout/stderr logs + verdicts + gates)
+// - GET /api/verifications/in-progress   host verification (review-loop / campaign reconcile) currently running (FG-487)
+// - GET /api/review-loop/phases          active review-loop runs with a distinguishable phase (?projectDir filter, FG-487)
+// - GET /api/host-verifications           host_verifications evidence rows, ?ticketId=|&projectDir= or ?itemId= (FG-487)
+// - GET /api/host-verifications/recent    most recent host_verifications rows, unscoped (?limit) (FG-487)
 //
 // All reads. No writes. Mutating actions (gate/next/retry) shell to the
 // `forge` CLI binary — wired in a later iteration; the MVP is read-only.
@@ -13,7 +17,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance } from "./queries.js";
+import {
+  recentActivity, inFlight, taskDetail, projectsForDashboard, usageRollup, usageTimeSeries, usageModelMix, opsMetrics, routingGovernance,
+  inProgressVerifications, reviewLoopRunPhases, hostVerificationsForTicket, hostVerificationsForCampaignItem, recentHostVerifications,
+} from "./queries.js";
 import type { GroupBy } from "./queries.js";
 import { renderShell } from "./shell.js";
 import { listTickets } from "@forge/backlog";
@@ -159,6 +166,44 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
+
+  // FG-487: host-side verification visibility — review-loop verification
+  // phases (incl. FG-501 CI-wait), campaign reconcile's real-exec gates, and
+  // the host_verifications evidence they record. See queries.ts's FG-487
+  // section for the events-spine contract these read.
+  if (path === "/api/verifications/in-progress") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(inProgressVerifications(Date.now(), projectDir)));
+    return;
+  }
+
+  if (path === "/api/review-loop/phases") {
+    const projectDir = url.searchParams.get("projectDir") ?? undefined;
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(projectDir)));
+    return;
+  }
+
+  if (path === "/api/host-verifications/recent") {
+    const limit = clamp(Number(url.searchParams.get("limit") ?? 50), 1, 500);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(recentHostVerifications(limit)));
+    return;
+  }
+
+  if (path === "/api/host-verifications") {
+    const itemId = url.searchParams.get("itemId");
+    const ticketId = url.searchParams.get("ticketId");
+    if (itemId) {
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForCampaignItem(itemId)));
+      return;
+    }
+    if (ticketId) {
+      const projectDir = url.searchParams.get("projectDir") ?? undefined;
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(hostVerificationsForTicket(ticketId, projectDir)));
+      return;
+    }
+    res.writeHead(400, { "Content-Type": "application/json" }).end(JSON.stringify({ error: "ticketId or itemId required" }));
+    return;
+  }
 
   const taskMatch = path.match(/^\/api\/task\/(.+)$/);
   if (taskMatch) {

@@ -398,10 +398,20 @@ export function taskDetail(taskId: string): TaskDetail | null {
   }>;
 
   // WALK-5: lifecycle timeline from the events table (write-only until Crawl).
+  // FG-487: verification phase-boundary events are RUN-scoped (task_id is never
+  // set — the loop's verification happens between tasks; reconcile gates have no
+  // task at all), so a strict task_id match would never show them. Fold the
+  // task's run's verification events into its timeline; they render with the
+  // verification badge/detail helpers in the client.
   const eventRows = db().prepare(`
     SELECT event_type, payload, created_at
-    FROM events WHERE task_id = ? ORDER BY created_at ASC, id ASC
-  `).all(taskId) as Array<{ event_type: string; payload: string | null; created_at: string }>;
+    FROM events
+    WHERE task_id = ?
+       OR (run_id = ? AND task_id IS NULL AND event_type IN (
+            'review_loop.verification_started', 'review_loop.verification_finished',
+            'campaign_item.host_gate_started', 'campaign_item.host_gate_finished'))
+    ORDER BY created_at ASC, id ASC
+  `).all(taskId, taskRow.run_id) as Array<{ event_type: string; payload: string | null; created_at: string }>;
   const events: TaskEventEntry[] = eventRows.map((e) => ({
     eventType: e.event_type,
     payload: e.payload ? safeJsonParse(e.payload) : null,
@@ -888,4 +898,405 @@ export function routingGovernance(projectDir?: string): WorkbenchPanel {
     effective,
     recorded: { entries: recentRaciAudit(8) },
   };
+}
+
+// ── FG-487: host-side verification visibility ──────────────────────────────
+//
+// Host verification (review-loop's CI-wait/local verification phases, campaign
+// reconcile's real-exec gates) runs OUTSIDE the task/container lifecycle the
+// rest of this file reads — minutes of host-side activity with no task row
+// while it's in flight. The producing side (src/store/events.ts and its two
+// emitters) writes durable start/finish event pairs keyed by a per-invocation
+// `attemptId` (a crash-restarted round or CI-wait retry can legitimately
+// produce two starts at the same round/ticket/sha identity — pairing MUST be
+// by attemptId, never "latest unmatched start by key"). Everything below is
+// derived at query time from `events` + `host_verifications` — no new
+// lifecycle/state table (FG-477 constraint discipline).
+//
+// Event contract (documented fully in docs/SCHEMA-CONTRACT.md):
+//   review_loop.verification_started  { attemptId, round, ticketId, sha, mode? }
+//   review_loop.verification_finished { attemptId, ...outcome }
+//   campaign_item.host_gate_started   { attemptId, campaignId?, itemId, ticketId, command|gate, testedSha, runId }
+//   campaign_item.host_gate_finished  { attemptId, exitCode, ...outcome }
+// Payload field READS below are deliberately tolerant (e.g. command ?? gate)
+// since the producing side is a separate build step against the same contract
+// doc — a single canonical key is documented, but a reasonable alias is not
+// treated as a hard failure.
+
+// Query-time staleness heuristic (NOT a watchdog/sweep) so a crashed forge
+// process doesn't show as perpetually "in progress". Kept in sync BY HAND with
+// the producing side's own timeouts — these are upper bounds, not the
+// authoritative timeout values (which are env-overridable there).
+// Mirrors src/cli/commands/review-loop.ts's DEFAULT_CI_WAIT_TIMEOUT_SECONDS.
+const REVIEW_LOOP_VERIFICATION_STALE_MS = 20 * 60 * 1000;
+// Mirrors src/campaign/reconcile-collect.ts's HOST_GATE_TIMEOUT_MS_DEFAULT.
+const CAMPAIGN_HOST_GATE_STALE_MS = 10 * 60 * 1000;
+// FG-487 incident fix: a past-cutoff unmatched start used to be dropped
+// entirely, so a crashed/hung verification vanished instead of being flagged
+// — the exact gap this ticket was filed over. Past-cutoff starts are now
+// INCLUDED with stale: true, bounded by this lookback so ancient rows (a
+// process that crashed days ago) don't accumulate forever.
+const STALE_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+type VerificationEventRow = {
+  run_id: string | null;
+  task_id: string | null;
+  event_type: string;
+  payload: string | null;
+  created_at: string;
+};
+
+// sinceMs bounds the scan to events created at/after that instant, pushed
+// down into SQL so it can use idx_events_type_created (event_type, created_at)
+// instead of a full-table scan — this is called 4x per dashboard poll tick
+// (2x here, 2x from reviewLoopRunPhases below) by every open tab.
+function readEventsByType(types: readonly string[], sinceMs?: number): VerificationEventRow[] {
+  const placeholders = types.map(() => "?").join(",");
+  const sinceClause = sinceMs !== undefined ? `AND created_at >= ?` : ``;
+  const params: unknown[] = [...types];
+  if (sinceMs !== undefined) params.push(new Date(sinceMs).toISOString());
+  return db()
+    .prepare(
+      `SELECT run_id, task_id, event_type, payload, created_at
+       FROM events WHERE event_type IN (${placeholders}) ${sinceClause}
+       ORDER BY created_at ASC, id ASC`
+    )
+    .all(...params) as VerificationEventRow[];
+}
+
+function runProjectDir(runId: string | null): string | null {
+  if (!runId) return null;
+  const row = db().prepare(`SELECT project_dir FROM runs WHERE id = ?`).get(runId) as
+    | { project_dir: string | null }
+    | undefined;
+  return row?.project_dir ?? null;
+}
+
+function campaignProjectDir(campaignId: string | null): string | null {
+  if (!campaignId) return null;
+  const row = db().prepare(`SELECT project_dir FROM campaigns WHERE id = ?`).get(campaignId) as
+    | { project_dir: string | null }
+    | undefined;
+  return row?.project_dir ?? null;
+}
+
+function parseEventPayload(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const p: unknown = JSON.parse(raw);
+    return p !== null && typeof p === "object" ? (p as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readAttemptId(payload: Record<string, unknown>): string | null {
+  return typeof payload.attemptId === "string" ? payload.attemptId : null;
+}
+
+const VERIFICATION_START_TYPES = ["review_loop.verification_started", "campaign_item.host_gate_started"] as const;
+const VERIFICATION_FINISH_TYPES = ["review_loop.verification_finished", "campaign_item.host_gate_finished"] as const;
+
+export type InProgressVerification =
+  | {
+      kind: "review_loop_verification";
+      attemptId: string;
+      runId: string | null;
+      ticketId: string | null;
+      sha: string | null;
+      mode: string | null;
+      round: number | null;
+      startedAt: string;
+      stale: boolean;
+    }
+  | {
+      kind: "campaign_reconcile_gate";
+      attemptId: string;
+      runId: string | null;
+      campaignId: string | null;
+      itemId: string | null;
+      ticketId: string | null;
+      command: string | null;
+      testedSha: string | null;
+      startedAt: string;
+      stale: boolean;
+    };
+
+/** Every start event whose attemptId has no matching finish yet, minus any
+ *  past its type's staleness cutoff. Pairing is by attemptId — never "latest
+ *  unmatched start by key" — so a same-identity double-start (e.g. two starts
+ *  at the same round/ticketId/sha with different attemptIds, only one
+ *  finished) reports exactly the one attempt that's actually still open, not
+ *  zero or two. */
+export function inProgressVerifications(nowMs: number = Date.now(), projectDir?: string): InProgressVerification[] {
+  // A finish event for an attempt whose start survives the lookback cutoff is
+  // itself always created at/after that start (finish can't precede its own
+  // start), so bounding both reads by the same cutoff is safe — it can't drop
+  // a finish that would otherwise unmatch a still-relevant start.
+  const sinceMs = nowMs - STALE_LOOKBACK_MS;
+  const finishedAttemptIds = new Set<string>();
+  for (const row of readEventsByType(VERIFICATION_FINISH_TYPES, sinceMs)) {
+    const attemptId = readAttemptId(parseEventPayload(row.payload));
+    if (attemptId) finishedAttemptIds.add(attemptId);
+  }
+
+  const out: InProgressVerification[] = [];
+  for (const row of readEventsByType(VERIFICATION_START_TYPES, sinceMs)) {
+    const payload = parseEventPayload(row.payload);
+    const attemptId = readAttemptId(payload);
+    if (!attemptId || finishedAttemptIds.has(attemptId)) continue;
+
+    const ageMs = nowMs - new Date(row.created_at).getTime();
+    if (ageMs > STALE_LOOKBACK_MS) continue;
+    if (row.event_type === "review_loop.verification_started") {
+      // Project filter matches inFlight()'s strict-equality semantics: the
+      // loop's eager run row carries project_dir; campaign gates resolve via
+      // their campaign row (item.runId is frequently null).
+      if (projectDir && runProjectDir(row.run_id) !== projectDir) continue;
+      out.push({
+        kind: "review_loop_verification",
+        attemptId,
+        runId: row.run_id,
+        ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
+        sha: typeof payload.sha === "string" ? payload.sha : null,
+        mode: typeof payload.mode === "string" ? payload.mode : null,
+        round: typeof payload.round === "number" ? payload.round : null,
+        startedAt: row.created_at,
+        stale: ageMs > REVIEW_LOOP_VERIFICATION_STALE_MS,
+      });
+    } else {
+      const campaignId = typeof payload.campaignId === "string" ? payload.campaignId : null;
+      if (projectDir && campaignProjectDir(campaignId) !== projectDir) continue;
+      out.push({
+        kind: "campaign_reconcile_gate",
+        attemptId,
+        runId: row.run_id,
+        campaignId,
+        itemId: typeof payload.itemId === "string" ? payload.itemId : null,
+        ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
+        command:
+          typeof payload.command === "string" ? payload.command : typeof payload.gate === "string" ? payload.gate : null,
+        testedSha: typeof payload.testedSha === "string" ? payload.testedSha : null,
+        startedAt: row.created_at,
+        stale: ageMs > CAMPAIGN_HOST_GATE_STALE_MS,
+      });
+    }
+  }
+  return out;
+}
+
+export type ReviewLoopPhase = "verifying" | "waiting-on-ci" | "reviewing" | "fixing";
+
+export type ReviewLoopRunPhaseEntry = {
+  runId: string;
+  runTitle: string;
+  workflow: string;
+  projectDir: string | null;
+  projectLabel: string | null;
+  projectColor: string | null;
+  phase: ReviewLoopPhase;
+  phaseStartedAt: string;
+  ticketId: string | null;
+  round: number | null;
+};
+
+/** Review-loop runs currently mid-phase, including the launch-to-first-round
+ *  window BEFORE any reviewer/fixer task row exists — the exact gap FG-487
+ *  reports (a watcher can't tell "verifying" from "hung" because inFlight()'s
+ *  task JOIN returns nothing for a run that has no task yet). A run counts as
+ *  a "review-loop run" purely by having ever emitted a
+ *  review_loop.verification_started event — no workflow-name assumption, so
+ *  this stays correct even if the run's `workflow` column is a generic
+ *  "invoke" sentinel. Phase per run is whichever is more recent: the latest
+ *  running reviewer/fixer task, or the latest still-open verification start
+ *  (same attemptId pairing as inProgressVerifications). */
+export function reviewLoopRunPhases(projectDir?: string): ReviewLoopRunPhaseEntry[] {
+  // Track the LATEST verification_started per run for its ticketId/round/mode
+  // context (kept even once finished — a "reviewing"/"fixing" phase driven by
+  // a task row still wants to display which ticket/round it belongs to), plus
+  // separately whether that latest start is still open (unmatched by a finish
+  // event) — that's what actually makes it a candidate phase on its own.
+  // Same lookback bound as inProgressVerifications, for the same reason: a
+  // review-loop run whose latest verification_started event is this old has
+  // either long since finished or hung well past any phase worth displaying.
+  const sinceMs = Date.now() - STALE_LOOKBACK_MS;
+  const finishedAttemptIds = new Set<string>();
+  for (const row of readEventsByType(["review_loop.verification_finished"], sinceMs)) {
+    const attemptId = readAttemptId(parseEventPayload(row.payload));
+    if (attemptId) finishedAttemptIds.add(attemptId);
+  }
+
+  type LatestStart = { attemptId: string; ticketId: string | null; round: number | null; mode: string | null; startedAt: string; open: boolean };
+  const latestStartByRun = new Map<string, LatestStart>();
+  for (const row of readEventsByType(["review_loop.verification_started"], sinceMs)) {
+    if (!row.run_id) continue;
+    const payload = parseEventPayload(row.payload);
+    const attemptId = readAttemptId(payload);
+    if (!attemptId) continue;
+    // rows are ASC by created_at — later rows overwrite earlier ones, so the
+    // map ends up holding the latest start per run.
+    latestStartByRun.set(row.run_id, {
+      attemptId,
+      ticketId: typeof payload.ticketId === "string" ? payload.ticketId : null,
+      round: typeof payload.round === "number" ? payload.round : null,
+      mode: typeof payload.mode === "string" ? payload.mode : null,
+      startedAt: row.created_at,
+      open: !finishedAttemptIds.has(attemptId),
+    });
+  }
+  if (latestStartByRun.size === 0) return [];
+
+  const where = projectDir ? `AND r.project_dir = ?` : ``;
+  const params = projectDir ? [projectDir] : [];
+  const runRows = db()
+    .prepare(`SELECT id, title, workflow, project_dir FROM runs r WHERE r.status = 'active' ${where}`)
+    .all(...params) as Array<{ id: string; title: string; workflow: string; project_dir: string | null }>;
+  const candidateRuns = runRows.filter((r) => latestStartByRun.has(r.id));
+  if (candidateRuns.length === 0) return [];
+
+  const runIdsPlaceholder = candidateRuns.map(() => "?").join(",");
+  const taskRows = db()
+    .prepare(
+      `SELECT run_id, agent_role, started_at, created_at
+       FROM tasks WHERE run_id IN (${runIdsPlaceholder}) AND status = 'running'
+       ORDER BY COALESCE(started_at, created_at) DESC`
+    )
+    .all(...candidateRuns.map((r) => r.id)) as Array<{
+    run_id: string;
+    agent_role: string;
+    started_at: string | null;
+    created_at: string;
+  }>;
+  const latestTaskByRun = new Map<string, (typeof taskRows)[number]>();
+  for (const t of taskRows) {
+    if (!latestTaskByRun.has(t.run_id)) latestTaskByRun.set(t.run_id, t); // rows are DESC — first hit per run is the latest
+  }
+
+  const out: ReviewLoopRunPhaseEntry[] = [];
+  for (const run of candidateRuns) {
+    const task = latestTaskByRun.get(run.id);
+    const start = latestStartByRun.get(run.id)!;
+    const taskStartedAt = task ? task.started_at ?? task.created_at : null;
+
+    let phase: ReviewLoopPhase | null = null;
+    let phaseStartedAt: string | null = null;
+    if (task && taskStartedAt && (!start.open || taskStartedAt > start.startedAt)) {
+      phase = task.agent_role === "engineer" ? "fixing" : "reviewing";
+      phaseStartedAt = taskStartedAt;
+    } else if (start.open) {
+      phase = start.mode === "ci-wait" || start.mode === "ci_wait" ? "waiting-on-ci" : "verifying";
+      phaseStartedAt = start.startedAt;
+    }
+    if (!phase || !phaseStartedAt) continue;
+
+    const meta = resolveProjectMeta(run.project_dir);
+    out.push({
+      runId: run.id,
+      runTitle: run.title,
+      workflow: run.workflow,
+      projectDir: run.project_dir,
+      projectLabel: meta?.label ?? null,
+      projectColor: meta?.color ?? null,
+      phase,
+      phaseStartedAt,
+      ticketId: start.ticketId,
+      round: start.round,
+    });
+  }
+  return out;
+}
+
+// ── host_verifications evidence (dashboard read path) ───────────────────────
+//
+// The trust evidence FG-440/FG-483/FG-474 ship decisions rest on, rendered
+// here rather than requiring sqlite access. Read via direct SQL against the
+// dashboard's own read-only handle (this file's established convention —
+// see the module header) rather than importing src/store/host-verifications.ts:
+// that module's exported lookups (queryHostVerificationRows /
+// queryHostVerificationRowsForGate) are single-gate/single-sha lookups built
+// for the reuse-check call sites, not "everything recorded for this ticket",
+// which is what an evidence VIEW needs.
+
+export type HostVerificationEvidenceRow = {
+  id: number;
+  ticketId: string;
+  projectDir: string;
+  commitSha: string;
+  gateName: string;
+  command: string;
+  exitCode: number;
+  runId: string | null;
+  recordedAt: string;
+  source: "host" | "ci";
+  ciUrl: string | null;
+};
+
+type HostVerificationDbRow = {
+  id: number;
+  ticket_id: string;
+  project_dir: string;
+  commit_sha: string;
+  gate_name: string;
+  command: string;
+  exit_code: number;
+  run_id: string | null;
+  recorded_at: string;
+  source: string;
+  ci_url: string | null;
+};
+
+function rowToHostVerification(row: HostVerificationDbRow): HostVerificationEvidenceRow {
+  return {
+    id: row.id,
+    ticketId: row.ticket_id,
+    projectDir: row.project_dir,
+    commitSha: row.commit_sha,
+    gateName: row.gate_name,
+    command: row.command,
+    exitCode: row.exit_code,
+    runId: row.run_id,
+    recordedAt: row.recorded_at,
+    source: row.source === "ci" ? "ci" : "host",
+    ciUrl: row.ci_url,
+  };
+}
+
+/** All host_verifications rows recorded for a ticket (optionally narrowed to
+ *  one project_dir), most-recent-first. Unscoped by gate/sha — an evidence
+ *  view shows everything recorded, not one gate lookup at a time. */
+export function hostVerificationsForTicket(ticketId: string, projectDir?: string, limit = 100): HostVerificationEvidenceRow[] {
+  const where = projectDir ? `AND project_dir = ?` : ``;
+  const params: unknown[] = [ticketId];
+  if (projectDir) params.push(projectDir);
+  params.push(limit);
+  const rows = db()
+    .prepare(`SELECT * FROM host_verifications WHERE ticket_id = ? ${where} ORDER BY recorded_at DESC LIMIT ?`)
+    .all(...params) as HostVerificationDbRow[];
+  return rows.map(rowToHostVerification);
+}
+
+/** Same evidence, scoped by campaign item. host_verifications has no item_id
+ *  column (FG-477: no new lifecycle/evidence table) — this resolves the
+ *  item's ticketId and its campaign's project_dir via campaign_items →
+ *  campaigns, then delegates to the ticket-scoped lookup. Returns [] for an
+ *  unknown item id rather than throwing. */
+export function hostVerificationsForCampaignItem(itemId: string): HostVerificationEvidenceRow[] {
+  const item = db()
+    .prepare(
+      `SELECT ci.ticket_id AS ticket_id, c.project_dir AS project_dir
+       FROM campaign_items ci JOIN campaigns c ON c.id = ci.campaign_id
+       WHERE ci.id = ?`
+    )
+    .get(itemId) as { ticket_id: string; project_dir: string | null } | undefined;
+  if (!item) return [];
+  return hostVerificationsForTicket(item.ticket_id, item.project_dir ?? undefined);
+}
+
+/** Unscoped, most-recent-first — the AC5 breadcrumb: a completed
+ *  orchestrator-run bare gate (e.g. `npm run test:all` invoked directly, no
+ *  review-loop/reconcile wrapper) has no in-flight window to catch, but its
+ *  recorded row is still discoverable here after the fact. */
+export function recentHostVerifications(limit = 50): HostVerificationEvidenceRow[] {
+  const rows = db().prepare(`SELECT * FROM host_verifications ORDER BY recorded_at DESC LIMIT ?`).all(limit) as HostVerificationDbRow[];
+  return rows.map(rowToHostVerification);
 }

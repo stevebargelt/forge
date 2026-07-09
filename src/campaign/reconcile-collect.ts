@@ -14,8 +14,8 @@ import {
   type CheckStatusProvider,
   type HostVerificationRow,
 } from "../store/host-verifications.js";
-import { eventsForRun } from "../store/events.js";
-import { nowIso } from "../util/ids.js";
+import { eventsForRun, logEvent } from "../store/events.js";
+import { nowIso, newAttemptId } from "../util/ids.js";
 import type { CampaignItem, GateDecision } from "../types/index.js";
 import type { ReconcileEvidenceInput, ReconcileRunEvent } from "./reconcile-evidence.js";
 
@@ -373,11 +373,27 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *  is still recorded with its real exit code; remaining members are never run,
  *  so a failing extended run blocks exactly like a failing fast run). Each
  *  member gets its own row under its OWN command string (never requiredGate's
- *  label) — the FG-419 gate_name spoofing guard applies per member. */
+ *  label) — the FG-419 gate_name spoofing guard applies per member.
+ *
+ *  FG-487: each gate-list member's real exec (below) emits a
+ *  campaign_item.host_gate_started/_finished event pair around its execFileSync
+ *  call, keyed by a fresh attemptId — the evidence-reuse/CI-shortcut branches
+ *  above return before reaching this loop and never emit these (no real exec
+ *  happened, nothing host-side to show as "in progress"). opts.itemId/
+ *  campaignId are optional and threaded straight into the event payload when
+ *  the caller has them; reconcile.ts's call sites pass item.id/item.campaignId
+ *  at both capture points. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,
-  opts: { runId?: string | null; checkStatusProvider?: CheckStatusProvider } = {}
+  opts: {
+    runId?: string | null;
+    checkStatusProvider?: CheckStatusProvider;
+    /** FG-487: campaign item / campaign identity, for the host-gate start/finish
+     *  event payload — optional so existing callers keep compiling unchanged. */
+    itemId?: string | null;
+    campaignId?: string | null;
+  } = {}
 ): HostVerificationCaptureResult {
   let statusOutput: string;
   try {
@@ -464,6 +480,17 @@ export function runAndRecordHostVerification(
 
     const argv = gate.trim().split(/\s+/).filter(Boolean);
     const [cmd, ...args] = argv;
+
+    // FG-487: start/finish bracket the REAL exec only — the evidence-reuse/CI
+    // shortcuts above return long before this loop, so those never emit these.
+    // attemptId is fresh per gate-list member (each is its own real exec, up to
+    // hostGateTimeoutMs() independently).
+    const attemptId = newAttemptId();
+    logEvent("campaign_item.host_gate_started", {
+      runId: opts.runId ?? undefined,
+      payload: { attemptId, ticketId, itemId: opts.itemId ?? null, campaignId: opts.campaignId ?? null, gate, command: gate, testedSha: headSha, projectDir },
+    });
+
     let exitCode: number;
     try {
       execFileSync(cmd!, args, {
@@ -477,6 +504,11 @@ export function runAndRecordHostVerification(
       const err = e as { status?: number | null };
       exitCode = typeof err.status === "number" && err.status !== 0 ? err.status : TIMEOUT_OR_SIGNAL_EXIT_SENTINEL;
     }
+
+    logEvent("campaign_item.host_gate_finished", {
+      runId: opts.runId ?? undefined,
+      payload: { attemptId, ticketId, itemId: opts.itemId ?? null, campaignId: opts.campaignId ?? null, gate, command: gate, testedSha: headSha, exitCode },
+    });
 
     // FIX 3 (FG-440 follow-up): the gate just spent up to hostGateTimeoutMs()
     // running — re-confirm projectDir is still exactly the sha/state we

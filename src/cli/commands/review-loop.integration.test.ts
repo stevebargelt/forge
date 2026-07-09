@@ -15,6 +15,8 @@ import { buildReviewLoopDeps, assertCleanWorkingTree, registerReviewLoop, type R
 import { runReviewLoop, renderReviewLoopNote, type VerificationResult } from "../../v2/review-loop.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification, REQUIRED_CI_CHECK_CONTEXT } from "../../store/host-verifications.js";
+import { eventsForRun } from "../../store/events.js";
+import { listRuns } from "../../store/runs.js";
 
 function gitExec(args: string[], cwd: string): string {
   return execFileSync("git", args, {
@@ -636,6 +638,196 @@ test("FG-500 regression: deps.verify's no-reuse fallback never runs test:extende
   assert.equal(result.ok, true, "a failing test:extended must not affect the result since it must never have run");
 });
 
+// ── FG-487: deps.verify emits review_loop.verification_started/_finished per
+// round — previously the loop's verification phase (a local run, or the
+// FG-501 CI-wait poll) left no durable trace between reviewer/fixer task rows.
+// ctx({ runId: ... }) mirrors what the real CLI now sets eagerly (see
+// registerReviewLoop's action) so deps.verify() has somewhere to log events.
+
+test("FG-487 deps.verify: emits a start/finish pair sharing one attemptId, carrying round + ticketId", async () => {
+  const { deps } = buildReviewLoopDeps(ctx({ runId: "run-487-a" }));
+  await deps.verify();
+
+  const events = eventsForRun("run-487-a");
+  const started = events.filter((e) => e.eventType === "review_loop.verification_started");
+  const finished = events.filter((e) => e.eventType === "review_loop.verification_finished");
+  assert.equal(started.length, 1);
+  assert.equal(finished.length, 1);
+
+  const startPayload = started[0]!.payload as { attemptId: string; round: number; ticketId: string; mode: string };
+  const finishPayload = finished[0]!.payload as { attemptId: string; round: number; ok: boolean };
+  assert.equal(startPayload.attemptId, finishPayload.attemptId, "start and finish must share the same attemptId");
+  assert.ok(startPayload.attemptId.length > 0);
+  assert.equal(startPayload.round, 1);
+  assert.equal(startPayload.ticketId, "301");
+});
+
+test("FG-487 deps.verify: EVERY round gets its own fresh attemptId — no reuse across rounds", async () => {
+  const { deps } = buildReviewLoopDeps(ctx({ runId: "run-487-b" }));
+  await deps.verify();
+  await deps.verify();
+
+  const events = eventsForRun("run-487-b");
+  const started = events.filter((e) => e.eventType === "review_loop.verification_started");
+  assert.equal(started.length, 2);
+  const attemptIds = started.map((e) => (e.payload as { attemptId: string }).attemptId);
+  assert.notEqual(attemptIds[0], attemptIds[1]);
+  const rounds = started.map((e) => (e.payload as { round: number }).round);
+  assert.deepEqual(rounds, [1, 2]);
+});
+
+test("FG-487 deps.verify: the start event fires without ever dispatching a reviewer/fixer — verification never invokes the agent dispatch fn", async () => {
+  let invokeCalled = false;
+  const { deps } = buildReviewLoopDeps(ctx({ runId: "run-487-c" }), async (a) => { invokeCalled = true; return RESULT({}); });
+  await deps.verify();
+  assert.equal(invokeCalled, false, "verify() must not dispatch a reviewer/fixer task — the run row + verification event exist independent of any task");
+  const events = eventsForRun("run-487-c");
+  assert.ok(events.some((e) => e.eventType === "review_loop.verification_started"));
+});
+
+test("FG-487 deps.verify: a dirty tree — mode 'local' (verifyWithReuse never consults CI on a dirty tree)", async () => {
+  writeFileSync(join(projectDir, "dirty.txt"), "wip");
+  const { deps } = buildReviewLoopDeps(ctx({
+    runId: "run-487-d",
+    checkStatusProvider: () => { throw new Error("must not be consulted on a dirty tree"); },
+  }));
+  await deps.verify();
+  const events = eventsForRun("run-487-d");
+  const started = events.find((e) => e.eventType === "review_loop.verification_started")!;
+  assert.equal((started.payload as { mode: string }).mode, "local");
+});
+
+test("FG-487 deps.verify: a dirty tree's finish event carries AC2's command + tier (what actually ran locally)", async () => {
+  writeFileSync(join(projectDir, "dirty.txt"), "wip");
+  const { deps } = buildReviewLoopDeps(ctx({
+    runId: "run-487-d2",
+    scripts: { typecheck: "true", test: "true" },
+    runVerification: (scripts) => ({ ok: true, steps: Object.keys(scripts).map((name) => ({ name, ok: true, output: "" })) }),
+  }));
+  await deps.verify();
+  const events = eventsForRun("run-487-d2");
+  const finished = events.find((e) => e.eventType === "review_loop.verification_finished")!;
+  const payload = finished.payload as { command: string | null; tier: string | null };
+  assert.equal(payload.command, "npm run typecheck && npm run test");
+  assert.equal(payload.tier, "fast");
+});
+
+test("FG-487 deps.verify: a clean tree — mode 'ci_wait' (the CI-consuming path), even when it resolves via instant reuse", async () => {
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  insertHostVerification({
+    ticketId: "301", projectDir, commitSha: headSha,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+  const { deps } = buildReviewLoopDeps(ctx({ runId: "run-487-e" }));
+  await deps.verify();
+
+  const events = eventsForRun("run-487-e");
+  const started = events.find((e) => e.eventType === "review_loop.verification_started")!;
+  assert.equal((started.payload as { mode: string }).mode, "ci_wait");
+  const finished = events.find((e) => e.eventType === "review_loop.verification_finished")!;
+  assert.ok((finished.payload as { reusedEvidence?: string }).reusedEvidence, "finish event carries the reuse outcome");
+  assert.equal(
+    (finished.payload as { checkContexts: string[] | null }).checkContexts, null,
+    "a host_verifications-row reuse has no CI check contexts to report — never invented",
+  );
+});
+
+test("FG-487 deps.verify: CI unavailable → local fallback — finish event's ciOutcome.kind is 'local_fallback'", async () => {
+  const { deps } = buildReviewLoopDeps(ctx({ runId: "run-487-f", checkStatusProvider: () => null }));
+  const result = await deps.verify();
+  assert.equal(result.ciOutcome?.kind, "local_fallback");
+
+  const events = eventsForRun("run-487-f");
+  const finished = events.find((e) => e.eventType === "review_loop.verification_finished")!;
+  const payload = finished.payload as { ciOutcome: { kind: string } | null };
+  assert.equal(payload.ciOutcome?.kind, "local_fallback");
+});
+
+// ── FG-487: the CLI's eager run creation, end-to-end through registerReviewLoop
+// itself — a run row (and run.created) must exist BEFORE round 1's
+// verification, not lazily on first reviewer/fixer dispatch. projectDir has no
+// package.json, so verification fails with zero discoverable checks (zero
+// findings) and the loop stops on round 1 WITHOUT EVER dispatching a task —
+// the exact edge case where the eagerly-created run would otherwise be left
+// dangling "active" forever (reconcile.ts's crash-recovery sweep requires at
+// least one task row before it will complete a run).
+
+test("FG-487: forge review-loop creates its run row eagerly at loop entry — before any task exists — and closes it out even when the loop stops with zero task dispatches", async () => {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-487-review-loop-eager-run.md"),
+    "---\nid: FG-487\ntype: story\nstatus: active\ntitle: eager run creation\n---\n\nBody.\n",
+  );
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add FG-487 ticket"], projectDir);
+
+  const program = new Command();
+  let dispatched = false;
+  registerReviewLoop(program, async () => { dispatched = true; return RESULT({}); });
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  await program.parseAsync(
+    ["review-loop", "FG-487", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+    { from: "user" },
+  );
+
+  assert.equal(dispatched, false, "no package.json in projectDir means zero discoverable checks — the loop stops on round 1 before any dispatch");
+  assert.equal(process.exitCode, 1, "a loop stopping on verification_failed must set exitCode 1");
+  process.exitCode = prevExitCode;
+
+  const runs = listRuns();
+  assert.equal(runs.length, 1, "the run row must exist even though no task was ever dispatched");
+  const run = runs[0]!;
+  assert.equal(run.status, "complete", "an eagerly-created run with zero task dispatches must still be closed out, not left dangling active");
+
+  const events = eventsForRun(run.id);
+  const types = events.map((e) => e.eventType);
+  assert.deepEqual(
+    types.slice(0, 3),
+    ["run.created", "review_loop.verification_started", "review_loop.verification_finished"],
+    "run.created and the verification start/finish events must exist, in order, with no task-shaped event ever appearing in this run",
+  );
+});
+
+test("FG-487: an exception escaping the loop finalizes the eager run — no permanent zero-task active run", async () => {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-487-review-loop-throw.md"),
+    "---\nid: FG-487\ntype: story\nstatus: active\ntitle: eager run finalize on throw\n---\n\nBody.\n",
+  );
+  // A passing test script so verification succeeds and the loop reaches the
+  // reviewer dispatch — whose injected invokeFn THROWS (not a clean !complete
+  // return), the exception path the clean zero-dispatch test above cannot reach.
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add FG-487 ticket + scripts"], projectDir);
+
+  const program = new Command();
+  registerReviewLoop(program, async () => { throw new Error("boom: reviewer dispatch exploded"); });
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  await assert.rejects(
+    () => program.parseAsync(
+      ["review-loop", "FG-487", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    ),
+    /boom: reviewer dispatch exploded/,
+  );
+  process.exitCode = prevExitCode;
+
+  const runs = listRuns();
+  assert.equal(runs.length, 1, "the eagerly-created run must exist");
+  assert.equal(
+    runs[0]!.status,
+    "complete",
+    "an escaped exception must finalize the eager run, not leak a zero-task 'active' row invisible to every sweep",
+  );
+  const completed = eventsForRun(runs[0]!.id).find((e) => e.eventType === "run.completed");
+  assert.ok(completed, "run.completed must be logged on the exception path");
+});
+
 // ── FG-497: the REAL invoke() dispatch, through the review-loop reviewer path ──
 //
 // Every test above injects a FAKE invokeFn that returns a canned InvokeResult —
@@ -893,6 +1085,14 @@ function noopSleep(): { calls: number[]; fn: NonNullable<ReviewLoopContext["slee
   return { calls, fn };
 }
 
+// AC2 fields (checkContexts / command / tier) are event/telemetry detail, not
+// part of VerificationResult's declared contract (see review-loop.ts's local
+// VerificationResultWithDetail) — cast to read them off deps.verify()'s result.
+type ResultDetail = { checkContexts?: string[] | null; command?: string | null; tier?: string | null };
+function detail(result: unknown): ResultDetail {
+  return result as ResultDetail;
+}
+
 test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reuses, no local run, reusedEvidence names check+url, renders in the report", async () => {
   writeMatchingCiWorkflow();
   gitExec(["add", "."], projectDir);
@@ -920,6 +1120,7 @@ test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reu
   assert.match(result.reusedEvidence ?? "", new RegExp(REQUIRED_CI_CHECK_CONTEXT.replace(/\//g, "\\/")));
   assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-9/);
   assert.equal(result.ciOutcome?.kind, "reused_after_wait");
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: the finish event must carry the required CI check contexts consulted for reuse");
 
   // Renders in the report: drive a canned round through the real loop + note renderer.
   const outcome = await runReviewLoop(
@@ -960,6 +1161,7 @@ test("FG-501 verifyWithReuse: CI pending then failed -> verification fails citin
   assert.equal(result.ciOutcome?.kind, "ci_failed");
   assert.equal((result.ciOutcome as { context: string }).context, REQUIRED_CI_CHECK_CONTEXT);
   assert.equal((result.ciOutcome as { url?: string }).url, "https://example.com/ci/run-fail");
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: the finish event must carry the failing check's context");
   assert.equal(result.steps.length, 1);
   assert.equal(result.steps[0]!.ok, false);
   assert.match(result.steps[0]!.output, /https:\/\/example\.com\/ci\/run-fail/);
@@ -985,6 +1187,8 @@ test("FG-501 verifyWithReuse: CI unavailable -> local fallback runs, citing the 
   const outcome = result.ciOutcome as { reason: string; extendedDelegatedToCi: boolean };
   assert.match(outcome.reason, /no CI status available/);
   assert.equal(outcome.extendedDelegatedToCi, true);
+  assert.equal(detail(result).command, "npm run typecheck && npm run test", "AC2: the finish event must carry the local fallback's command");
+  assert.equal(detail(result).tier, "fast", "AC2: the finish event must carry the local fallback's tier");
 });
 
 test("FG-501 verifyWithReuse: --local-extended restores test:extended in the CI-unavailable local fallback", async () => {
@@ -1004,6 +1208,7 @@ test("FG-501 verifyWithReuse: --local-extended restores test:extended in the CI-
   assert.ok(runner.calls[0]!.includes("test:extended"), `--local-extended must restore test:extended, got: ${JSON.stringify(runner.calls[0])}`);
   const outcome = result.ciOutcome as { extendedDelegatedToCi: boolean };
   assert.equal(outcome.extendedDelegatedToCi, false);
+  assert.equal(detail(result).tier, "extended", "AC2: --local-extended's finish event must report tier 'extended'");
 });
 
 test("FG-501 verifyWithReuse: CI wait times out -> local fallback, citing the timeout reason", async () => {
@@ -1048,6 +1253,7 @@ test("FG-501 verifyWithReuse: CI already green -> immediate reuse, no waiting, n
   assert.equal(sleep.calls.length, 0, "already-green CI must never wait");
   assert.equal(result.ciOutcome, undefined, "immediate reuse carries no ciOutcome — that's reserved for the wait/fallback paths");
   assert.match(result.reusedEvidence ?? "", /https:\/\/example\.com\/ci\/run-immediate/);
+  assert.deepEqual(detail(result).checkContexts, [REQUIRED_CI_CHECK_CONTEXT], "AC2: an immediate CI-sourced reuse must still report the required check contexts");
 });
 
 test("FG-501 verifyWithReuse: CI reports all-green but the covering-evidence re-check still misses (race) -> local fallback citing the race-condition reason, never invents evidence", async () => {

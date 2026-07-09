@@ -7,6 +7,10 @@ import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
+import {
+  eventBadgeClass, reviewLoopVerificationDetail, hostGateDetail,
+  groupVerificationRows, verificationRowBadge, evidenceState,
+} from "./verification-render.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -35,17 +39,33 @@ function App() {
   const [opsSince, setOpsSince] = useState("30d");
   const [governance, setGovernance] = useState(null);
   const [backlog, setBacklog] = useState(null);
+  // FG-487: review-loop verification / CI-wait windows and campaign reconcile
+  // host-gate execs, in progress right now — polled alongside feed/in-flight
+  // so a launched loop is visible before any task row exists for it.
+  const [inProgressVerifications, setInProgressVerifications] = useState([]);
+  const [reviewLoopPhases, setReviewLoopPhases] = useState([]);
+  const [verifyTicketId, setVerifyTicketId] = useState("");
+  const [verifyItemId, setVerifyItemId] = useState("");
+  const [verifyEvidence, setVerifyEvidence] = useState(null);
+  const [verifyRecent, setVerifyRecent] = useState([]);
 
   const poll = useCallback(async () => {
     try {
       const q = projectFilter ? `?projectDir=${encodeURIComponent(projectFilter.projectDir)}` : "";
-      const reqs = [fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`), fetch(`/api/in-flight${q}`)];
+      const reqs = [
+        fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`),
+        fetch(`/api/in-flight${q}`),
+        fetch(`/api/verifications/in-progress${q}`),
+        fetch(`/api/review-loop/phases${q}`),
+      ];
       // Only poll /api/projects on the projects view (or first load) — saves a
       // filesystem scan every 2s on the activity view.
       if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
-      const [feedRes, ifRes, projRes] = await Promise.all(reqs);
+      const [feedRes, ifRes, ivRes, phasesRes, projRes] = await Promise.all(reqs);
       if (feedRes.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
+      if (ivRes && ivRes.ok) setInProgressVerifications(await ivRes.json());
+      if (phasesRes && phasesRes.ok) setReviewLoopPhases(await phasesRes.json());
       if (projRes && projRes.ok) setProjects(await projRes.json());
       setError(null);
       setNow(Date.now());
@@ -133,6 +153,34 @@ function App() {
     return () => clearInterval(id);
   }, [pollBacklog, view]);
 
+  const pollVerifyRecent = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/host-verifications/recent?limit=50`);
+      if (res.ok) setVerifyRecent(await res.json());
+      setNow(Date.now());
+    } catch (e) { setError(String(e)); }
+  }, []);
+
+  useEffect(() => {
+    if (view !== "verify") return;
+    pollVerifyRecent();
+    const id = setInterval(pollVerifyRecent, USAGE_POLL_MS);
+    return () => clearInterval(id);
+  }, [pollVerifyRecent, view]);
+
+  // Evidence lookup is user-driven (ticket/campaign-item id), not polled —
+  // triggered by the "look up" button in VerificationsView.
+  const lookupEvidence = useCallback(async () => {
+    const params = new URLSearchParams();
+    if (verifyTicketId.trim()) params.set("ticketId", verifyTicketId.trim());
+    if (verifyItemId.trim()) params.set("itemId", verifyItemId.trim());
+    if (!params.toString()) { setVerifyEvidence(null); return; }
+    try {
+      const res = await fetch(`/api/host-verifications?${params.toString()}`);
+      setVerifyEvidence(res.ok ? await res.json() : []);
+    } catch (e) { setError(String(e)); }
+  }, [verifyTicketId, verifyItemId]);
+
   useEffect(() => {
     const onHash = () => setView(initialView());
     window.addEventListener("hashchange", onHash);
@@ -157,6 +205,7 @@ function App() {
           <nav class="view-tabs">
             <button class=${"tab " + (view === "activity" ? "tab-active" : "")} onClick=${() => switchView("activity")}>activity</button>
             <button class=${"tab " + (view === "projects" ? "tab-active" : "")} onClick=${() => switchView("projects")}>projects</button>
+            <button class=${"tab " + (view === "verify" ? "tab-active" : "")} onClick=${() => switchView("verify")}>verification</button>
             <button class=${"tab " + (view === "usage" ? "tab-active" : "")} onClick=${() => switchView("usage")}>usage</button>
             <button class=${"tab " + (view === "ops" ? "tab-active" : "")} onClick=${() => switchView("ops")}>ops</button>
             <button class=${"tab " + (view === "governance" ? "tab-active" : "")} onClick=${() => switchView("governance")}>workbench</button>
@@ -174,6 +223,18 @@ function App() {
         ? html`<${GovernanceView} data=${governance} />`
         : view === "backlog"
         ? html`<${BacklogView} data=${backlog} projectFilter=${projectFilter} />`
+        : view === "verify"
+        ? html`<${VerificationsView}
+            inProgress=${inProgressVerifications}
+            recent=${verifyRecent}
+            ticketId=${verifyTicketId}
+            itemId=${verifyItemId}
+            onTicketIdChange=${setVerifyTicketId}
+            onItemIdChange=${setVerifyItemId}
+            onLookup=${lookupEvidence}
+            evidence=${verifyEvidence}
+            now=${now}
+          />`
         : view === "ops"
         ? html`<${OpsView} data=${ops} since=${opsSince} onSinceChange=${setOpsSince} />`
         : view === "usage"
@@ -195,6 +256,9 @@ function App() {
           ` : null}
           <${InFlightSection}
             inFlight=${inFlight}
+            verifications=${inProgressVerifications}
+            phases=${reviewLoopPhases}
+            now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
             onTaskClick=${(id) => setSelectedTaskId(id)}
@@ -222,6 +286,7 @@ function initialView() {
   if (h === "ops") return "ops";
   if (h === "governance") return "governance";
   if (h === "backlog") return "backlog";
+  if (h === "verify") return "verify";
   return "activity";
 }
 
@@ -371,9 +436,25 @@ function ProjectChip({ entry }) {
   `;
 }
 
-function InFlightSection({ inFlight, orchCollapsed, onToggleOrch, onTaskClick }) {
+function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
+
+  // FG-487: /api/review-loop/phases' "reviewing"/"fixing" phase vocabulary,
+  // keyed by runId, so a review-loop task row can show it explicitly instead
+  // of only agentRole + status.
+  const phaseByRunId = new Map((phases || []).map((p) => [p.runId, p.phase]));
+
+  // FG-487: a review-loop's verification / CI-wait window (and a campaign
+  // reconcile host-gate exec) can be running with NO task row yet — the loop
+  // creates its run row eagerly but the first reviewer/fixer task doesn't
+  // land until verification finishes. Render those as their own liveness
+  // rows so the run isn't invisible during that window. Skip an entry once a
+  // task row for its run has shown up, so it doesn't duplicate.
+  const knownRunIds = new Set(inFlight.map((t) => t.runId));
+  const standalone = (verifications || []).filter((v) => !v.runId || !knownRunIds.has(v.runId));
+
+  const nothingLive = work.length === 0 && orchestrators.length === 0 && standalone.length === 0;
 
   return html`
     <section class="in-flight">
@@ -389,17 +470,45 @@ function InFlightSection({ inFlight, orchCollapsed, onToggleOrch, onTaskClick })
           `) : null}
         </div>
       ` : null}
-      ${work.length === 0 && orchestrators.length === 0
+      ${standalone.map((v) => html`<${VerificationRow} key=${v.attemptId} v=${v} now=${now} />`)}
+      ${nothingLive
         ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
         : work.length === 0
-        ? html`<div class="empty">No agent work in flight.</div>`
-        : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => onTaskClick(t.taskId)} />`)
+        ? (standalone.length > 0 ? null : html`<div class="empty">No agent work in flight.</div>`)
+        : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} reviewLoopPhase=${phaseByRunId.get(t.runId)} onClick=${() => onTaskClick(t.taskId)} />`)
       }
     </section>
   `;
 }
 
-function InFlightItem({ task, onClick, muted }) {
+// FG-487: liveness row for a review-loop verification/CI-wait window or a
+// campaign reconcile host-gate exec — sourced from GET /api/verifications/in-progress
+// (events-derived, attemptId-paired; `stale` means the start's timeout cutoff
+// passed with no matching finish, so it's flagged rather than shown as a
+// perpetual "in progress"). Shaped to look like an InFlightItem row so it
+// reads as part of the same list, not a separate visual language.
+function VerificationRow({ v, now }) {
+  const startedMs = v.startedAt ? new Date(v.startedAt).getTime() : null;
+  const elapsed = startedMs != null ? now - startedMs : null;
+  const isGate = v.kind === "campaign_reconcile_gate";
+  const badge = verificationRowBadge(v);
+  return html`
+    <div class="item">
+      <span class="badge ${badge.class}" title=${v.stale ? "no finish event observed past the expected timeout — may be stuck or crashed" : "host verification in progress"}>${badge.text}</span>
+      <div>
+        <div>
+          <strong>${v.ticketId ?? "—"}</strong>
+          ${v.itemId ? html`<span class="faint"> · ${v.itemId}</span>` : null}
+          <span class="faint"> ·</span> <span class="muted">${isGate ? (v.gate ?? v.command ?? "reconcile gate") : "review-loop"}</span>
+        </div>
+        <div class="faint mono" style="font-size: 11px;">${v.sha ? v.sha.slice(0, 12) : ""}${v.runId ? ` · run ${v.runId}` : ""}${v.command ? ` · ${v.command}` : ""}</div>
+      </div>
+      <div class="muted mono" style="font-size: 11px;" title="time since verification started">${elapsed != null ? html`⏱ ${formatDuration(elapsed)}` : formatRelativeTime(v.startedAt)}</div>
+    </div>
+  `;
+}
+
+function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
   // #290: a running task whose container is gone is a reconcile candidate, not
   // ordinary live work — badge it distinctly so the dashboard stops showing
   // stale `running`. The title carries the reason + the read-only nature.
@@ -408,10 +517,16 @@ function InFlightItem({ task, onClick, muted }) {
         ? "container gone, valid result exists — finished but unreconciled. Run forge show/status/next to finalize."
         : "container gone, no result — orphaned. Run forge show/status/next to finalize.")
     : null;
+  // FG-487: once a review-loop round's reviewer/fixer task starts, label its
+  // badge with the same "reviewing"/"fixing" phase vocabulary AC1 requires,
+  // sourced from GET /api/review-loop/phases — rather than leaving it to the
+  // generic status text ("running").
   return html`
     <div class=${"item" + (muted ? " item-muted" : "")} onClick=${onClick}>
       ${task.reconcile
         ? html`<span class="badge status-reconcile_candidate" title=${reconcileTitle}>reconcile candidate</span>`
+        : reviewLoopPhase
+        ? html`<span class="badge status-${task.status}" title=${"review-loop phase: " + reviewLoopPhase}>${reviewLoopPhase}</span>`
         : html`<span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>`}
       <div>
         <div>
@@ -608,7 +723,7 @@ function TaskDetail({ taskId, onClose }) {
             ${detail.events.map((e, i) => html`
               <div class="row" key=${i} style="gap: 8px; padding: 2px 0; align-items: baseline;">
                 <span class="muted mono" style="font-size: 11px; min-width: 76px;">${formatClock(e.createdAt)}</span>
-                <span class="badge ${eventBadgeClass(e.eventType)}">${e.eventType}</span>
+                <span class="badge ${eventBadgeClass(e)}">${e.eventType}</span>
                 ${eventDetail(e) ? html`<span class="muted" style="font-size: 12px;">${eventDetail(e)}</span>` : null}
               </div>
             `)}
@@ -625,6 +740,113 @@ function TaskDetail({ taskId, onClose }) {
           <pre class="log">${tailChars(detail.stderrLog, 8000)}</pre>
         ` : null}
       </div>
+    </div>
+  `;
+}
+
+// FG-487: dedicated tab for host-side verification liveness + host_verifications
+// evidence. Kept as its own view rather than folded into a ticket/campaign
+// detail page because the dashboard client has no such page today and this
+// step's file scope is main.js only — the evidence lookup below is
+// self-service (enter a ticket/item id) rather than embedded in a ticket card.
+function VerificationsView({ inProgress, recent, ticketId, itemId, onTicketIdChange, onItemIdChange, onLookup, evidence, now }) {
+  const { loop: loopVerifications, gate: gateVerifications } = groupVerificationRows(inProgress);
+  const onSubmit = (e) => { e.preventDefault(); onLookup(); };
+  const evidenceLookupState = evidenceState(evidence);
+  const recentState = evidenceState(recent || []);
+
+  return html`
+    <section class="verify-view">
+      <h2>Host verification — in progress</h2>
+      ${(inProgress || []).length === 0
+        ? html`<div class="muted">No review-loop verification, CI-wait, or campaign reconcile gate activity in progress.</div>`
+        : html`
+          ${loopVerifications.length > 0 ? html`
+            <h3 style="font-size: 13px; margin: 8px 0 4px;">Review-loop verification / CI-wait</h3>
+            ${loopVerifications.map((v) => html`<${VerificationRow} key=${v.attemptId} v=${v} now=${now} />`)}
+          ` : null}
+          ${gateVerifications.length > 0 ? html`
+            <h3 style="font-size: 13px; margin: 12px 0 4px;">Campaign reconcile gates</h3>
+            ${gateVerifications.map((v) => html`<${VerificationRow} key=${v.attemptId} v=${v} now=${now} />`)}
+          ` : null}
+        `
+      }
+
+      <h2 style="margin-top: 24px;">Evidence lookup</h2>
+      <form class="row" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;" onSubmit=${onSubmit}>
+        <label for="verify-ticket-id" class="muted" style="font-size: 12px;">ticket id</label>
+        <input
+          id="verify-ticket-id"
+          type="text"
+          value=${ticketId}
+          onInput=${(e) => onTicketIdChange(e.target.value)}
+          placeholder="e.g. FG-487"
+          style="max-width: 160px;"
+        />
+        <label for="verify-item-id" class="muted" style="font-size: 12px;">campaign item id</label>
+        <input
+          id="verify-item-id"
+          type="text"
+          value=${itemId}
+          onInput=${(e) => onItemIdChange(e.target.value)}
+          placeholder="e.g. citem-..."
+          style="max-width: 220px;"
+        />
+        <button type="submit" class="tab" aria-label="Look up host verification evidence">look up</button>
+      </form>
+      ${ticketId.trim() && itemId.trim()
+        ? html`<div class="muted" style="font-size: 11px; margin: -6px 0 8px;">Both fields are filled in — campaign item id takes precedence and ticket id is ignored.</div>`
+        : null}
+      ${evidenceLookupState === "prompt"
+        ? html`<div class="muted">Enter a ticket id or campaign item id above to view its recorded verification evidence.</div>`
+        : evidenceLookupState === "empty"
+        ? html`<div class="muted">No host_verifications rows found for that ticket/item.</div>`
+        : html`<${EvidenceTable} rows=${evidence} />`
+      }
+
+      <h2 style="margin-top: 24px;">Recent host verifications</h2>
+      <div class="muted" style="font-size: 12px; margin-bottom: 8px;">
+        Discoverable evidence for orchestrator-run bare gates even when their in-flight window was missed.
+      </div>
+      ${recentState === "empty"
+        ? html`<div class="muted">No recorded host_verifications rows yet.</div>`
+        : html`<${EvidenceTable} rows=${recent} showTicket=${true} />`
+      }
+    </section>
+  `;
+}
+
+// Rows follow src/store/host-verifications.ts's HostVerificationRow shape:
+// ticketId, gateName, command, exitCode, commitSha, source (host|ci), recordedAt.
+function EvidenceTable({ rows, showTicket }) {
+  return html`
+    <div class="card" style="overflow-x: auto;">
+      <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+        <thead>
+          <tr class="muted" style="text-align: left;">
+            ${showTicket ? html`<th style="padding: 4px 8px;">ticket</th>` : null}
+            <th style="padding: 4px 8px;">gate</th>
+            <th style="padding: 4px 8px;">command</th>
+            <th style="padding: 4px 8px;">exit</th>
+            <th style="padding: 4px 8px;">tested sha</th>
+            <th style="padding: 4px 8px;">source</th>
+            <th style="padding: 4px 8px;">recorded</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r, i) => html`
+            <tr key=${r.id ?? i} style="border-top: 1px solid var(--border);">
+              ${showTicket ? html`<td style="padding: 4px 8px;" class="mono">${r.ticketId ?? "—"}</td>` : null}
+              <td style="padding: 4px 8px;">${r.gateName ?? "—"}</td>
+              <td style="padding: 4px 8px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" class="mono faint" title=${r.command ?? ""}>${r.command ?? "—"}</td>
+              <td style="padding: 4px 8px;"><span class="badge ${r.exitCode === 0 ? "status-complete" : "status-failed"}">${r.exitCode}</span></td>
+              <td style="padding: 4px 8px;" class="mono faint" title=${r.commitSha ?? ""}>${r.commitSha ? r.commitSha.slice(0, 10) : "—"}</td>
+              <td style="padding: 4px 8px;"><span class="badge ${r.source === "ci" ? "status-awaiting_red" : "status-pending"}">${r.source ?? "host"}</span></td>
+              <td class="muted mono" style="padding: 4px 8px; font-size: 11px;">${formatRelativeTime(r.recordedAt)}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table>
     </div>
   `;
 }
@@ -685,15 +907,15 @@ function formatDurMs(ms) {
 function formatClock(iso) {
   try { return new Date(iso).toLocaleTimeString(); } catch { return iso; }
 }
-function eventBadgeClass(type) {
-  if (/failed|blocked|killed|idle_timeout|abandoned|cancelled/.test(type)) return "status-failed";
-  if (/completed|complete/.test(type)) return "status-complete";
-  if (/awaiting/.test(type)) return "status-awaiting_gate";
-  return "status-pending";
-}
+// FG-487: review_loop.verification_* / campaign_item.host_gate_* are the new
+// host-side verification phase-boundary events (events.ts) — eventBadgeClass/
+// reviewLoopVerificationDetail/hostGateDetail live in verification-render.js
+// so their decision logic is unit-testable.
 function eventDetail(e) {
   const p = e.payload;
   if (!p || typeof p !== "object") return "";
+  if (/verification_started|verification_finished/.test(e.eventType)) return reviewLoopVerificationDetail(p);
+  if (/host_gate_started|host_gate_finished/.test(e.eventType)) return hostGateDetail(p);
   if (typeof p.failure_kind === "string") return p.failure_kind;
   if (typeof p.message === "string") return p.message;
   if (typeof p.exitCode === "number") return `exit ${p.exitCode}`;

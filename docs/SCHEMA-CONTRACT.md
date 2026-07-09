@@ -61,8 +61,35 @@ Columns the dashboard reads:
 - `event_type` — string; dashboard reads all event types for the lifecycle timeline
 - `payload` — nullable JSON string; event-specific structured data
 - `task_id` — string, foreign key to tasks
-- `run_id` — string, foreign key to runs
+- `run_id` — string, foreign key to runs (**nullable** — a campaign reconcile host-gate event, below, is frequently run-less)
 - `created_at` — ISO 8601 timestamp string
+
+#### FG-487: host-side verification events
+
+Host verification (review-loop's CI-wait/local verification phases, campaign reconcile's real-exec gates) runs outside the task/container lifecycle — minutes of host-side activity with no task row while it's in flight. These `event_type`s make that activity durable so the dashboard can render it; see `dashboard/src/queries.ts`'s FG-487 section for the read side.
+
+Every start/finish payload carries a per-invocation `attemptId` (uuid). **Pairing a start with its finish is always by `attemptId`** — never "the latest unmatched start for this round/ticket/sha" — because a crashed forge process restarting a round, or a CI-wait retry, can legitimately produce two starts at the same round/ticketId/sha identity.
+
+- `review_loop.verification_started` — emitted by `forge review-loop` immediately before each round's `deps.verify()` call (including round 1, before any reviewer/fixer task row exists — this is the launch-to-first-round window the dashboard previously showed nothing for). Payload: `{ attemptId, round, ticketId, sha, mode? }`. `mode` (when present) is `"ci_wait"` or `"local"` (the producer, `src/cli/commands/review-loop.ts`'s `verifyWithEvents`, emits the underscore form; the dashboard tolerates both `"ci_wait"` and the hyphenated `"ci-wait"`) and is read by the dashboard to distinguish a `"verifying"` phase from a `"waiting-on-ci"` phase — a start emitted before that determination is made may omit `mode`, in which case the dashboard degrades to `"verifying"`.
+- `review_loop.verification_finished` — emitted once `deps.verify()` resolves. Payload: `{ attemptId, round, ticketId, sha, mode, ok, reusedEvidence, ciOutcome, checkContexts, command, tier, steps }`. `ok` (boolean) is the actual pass/fail signal the dashboard's badge reads (`verificationOutcomeClass()` in `dashboard/client/verification-render.js`) — there is no `ciOutcome.kind === "passed"` value; `ciOutcome.kind` is one of `"reused_after_wait" | "ci_failed" | "local_fallback"` (or `null` on an immediate reuse) and is rendered as supplementary detail, not the pass/fail signal itself. `checkContexts` (string array, `ci_wait` only) is the required CI check contexts consulted for reuse/wait/failure; `null` when nothing CI-specific was resolved (e.g. an unavailable-CI local fallback). `command` / `tier` (`"fast" | "extended"`, `local` only) describe what actually ran, derived from the local run's step names; `null` on any path that didn't run locally. `steps` is `{ name, ok }[]` per discoverable check (`typecheck`/`test`/`test:extended`) and is read by the dashboard to list which steps failed. `reusedEvidence` (string, nullable) is a human-readable description of the reused evidence. The dashboard reads `attemptId` for pairing and every other field above for its detail line (`reviewLoopVerificationDetail()`).
+- `campaign_item.host_gate_started` — emitted by `forge campaign reconcile`'s host-gate path immediately before a REAL `execFileSync` gate run (not emitted when evidence is reused instead of executed). `run_id` is the events-table column, set to the campaign item's `runId` (nullable — many campaign items have none). Payload: `{ attemptId, campaignId?, itemId, ticketId, command, testedSha }` (the dashboard also accepts a `gate` key as an alias for `command`).
+- `campaign_item.host_gate_finished` — emitted immediately after that `execFileSync` call resolves. Payload: `{ attemptId, exitCode, ...outcome }`. The dashboard's badge reads `exitCode` (`0` → success) — this event never carries an `ok` field, unlike `review_loop.verification_finished`.
+
+The dashboard derives "in progress" (`inProgressVerifications()` / `GET /api/verifications/in-progress`) as: a start event whose `attemptId` has no matching finish event, AND whose `created_at` is within a 24-hour lookback window (beyond that, the row is dropped so a long-dead process doesn't accumulate forever). Within the lookback, a start past its type's staleness cutoff — 20 minutes for `review_loop.verification_started` (mirrors `DEFAULT_CI_WAIT_TIMEOUT_SECONDS` in `src/cli/commands/review-loop.ts`) or 10 minutes for `campaign_item.host_gate_started` (mirrors `HOST_GATE_TIMEOUT_MS_DEFAULT` in `src/campaign/reconcile-collect.ts`) — is still returned, but flagged `stale: true` on the `InProgressVerification` row, rather than silently dropped; the dashboard renders this as a `"stale · <label>"` badge (`verificationRowBadge()`) instead of vanishing it, since a stale-and-unmatched start is exactly the crashed/hung-verification case an operator needs surfaced, not hidden. These cutoff constants are kept in sync **by hand** — they're upper-bound display heuristics, not the authoritative (env-overridable) timeouts.
+
+Because these four event types are RUN-scoped (`task_id` is never set — the loop's verification happens between tasks; reconcile gates may have no task at all), the per-task Timeline (`taskDetail()`) folds the task's run's verification events into its event list alongside the strictly task-scoped rows; a strict `task_id` match alone would never surface them.
+
+A review-loop run's current phase (`reviewLoopRunPhases()` / `GET /api/review-loop/phases`, one of `verifying | waiting-on-ci | reviewing | fixing`) is derived per run_id as whichever is more recent: a running task (`agent_role = 'engineer'` → `fixing`, else → `reviewing`), or the latest still-open `review_loop.verification_started` (→ `verifying`/`waiting-on-ci` per `mode`). A run is considered a "review-loop run" purely by having ever emitted a `review_loop.verification_started` event — there is no assumption about the `runs.workflow` column's value.
+
+### `campaigns` / `campaign_items` tables
+
+The dashboard reads these (in addition to `@forge/backlog`) only to resolve a campaign item's `ticket_id` and its campaign's `project_dir`, for scoping a `host_verifications` evidence lookup by campaign item (`hostVerificationsForCampaignItem()` — `host_verifications` itself has no `campaign_id`/`item_id` column, see below). Columns read: `campaign_items.id`, `campaign_items.ticket_id`, `campaign_items.campaign_id`; `campaigns.id`, `campaigns.project_dir`.
+
+### `host_verifications` table (FG-487 dashboard read path)
+
+The trust evidence FG-440/FG-483/FG-474 ship decisions rest on — a real host command execution (`source = 'host'`) or a green required CI check consulted in place of one (`source = 'ci'`). Previously only readable via `forge campaign report` / sqlite; the dashboard now renders it directly (`hostVerificationsForTicket()`, `hostVerificationsForCampaignItem()`, `recentHostVerifications()` — `GET /api/host-verifications` and `GET /api/host-verifications/recent`).
+
+Columns the dashboard reads: `id`, `ticket_id`, `project_dir`, `commit_sha`, `gate_name`, `command`, `exit_code`, `run_id` (nullable), `recorded_at`, `source` (`host | ci`), `ci_url` (nullable, `ci`-sourced rows only). Read via direct SQL against the dashboard's own handle (this file's established drift-surface caveat applies here too), not by importing `src/store/host-verifications.ts` — that module's exported lookups are single-gate/single-sha reuse-check helpers, not "everything recorded for this ticket," which is what an evidence view needs.
 
 ## Filesystem contract
 
@@ -235,6 +262,10 @@ The dashboard server exposes read-only JSON endpoints. All `GET` — no writes. 
 | `GET /api/usage` | `groupBy` (`role\|workflow\|project\|model\|alias`), `since` (default `30d`), `projectDir`, `limit` (1–200, default 50) | Token usage rollup by dimension |
 | `GET /api/usage/timeseries` | `since` (default `30d`), `projectDir` | Daily token usage time-series |
 | `GET /api/usage/model-mix` | `groupBy` (same as `/api/usage`), `since` (default `30d`), `projectDir` | Model distribution by dimension |
+| `GET /api/verifications/in-progress` | `projectDir` | Host-side verification currently running (review-loop rounds, campaign reconcile real-exec gates), from unmatched `attemptId` starts, with `stale` flag (FG-487). `projectDir` filters strictly: review-loop rows via `runs.project_dir`, gate rows via `campaigns.project_dir` |
+| `GET /api/review-loop/phases` | `projectDir` | Active review-loop runs with phase `verifying \| waiting-on-ci \| reviewing \| fixing` (FG-487) |
+| `GET /api/host-verifications` | `ticketId` + optional `projectDir`, or `itemId` | host_verifications evidence rows scoped to a ticket or campaign item (FG-487) |
+| `GET /api/host-verifications/recent` | `limit` (1–500, default 50) | Most recent host_verifications rows across all tickets — after-the-fact discoverability of bare host gates (FG-487) |
 
 ### `GET /api/governance` response shape (`WorkbenchPanel`)
 
