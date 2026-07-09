@@ -1,10 +1,12 @@
 ---
 id: FG-362
 type: story
-status: active
+status: done
 title: "Forge Invariants: document the small set of rules that make the system understandable"
 epic: FG-291
 created: 2026-06-22
+closed: 2026-07-09
+closed_commit: dfbae8cc56e8342be488c97759b316f7d3107f39
 ---
 
 ## Problem
