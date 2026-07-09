@@ -70,11 +70,13 @@ test("emitMilestone: always records an orchestrator.milestone event (provider of
 });
 
 // FG-494: milestone recording must stay independent of provider delivery
-// outcome. The pre-fix bug had ntfy's Title header throw
+// outcome, but the recorded/returned `dispatched` flag must still reflect
+// that outcome (AC2). The pre-fix bug had ntfy's Title header throw
 // "Cannot convert argument to a ByteString..." for any title with a
 // non-Latin-1 character (em-dash, arrows, etc); notifyNtfy's try/catch already
 // converts that into a returned error rather than a throw, so dispatch()
-// swallows it — this pins that the milestone event is recorded regardless.
+// swallows it — this pins that the milestone event is recorded regardless,
+// while `dispatched` correctly reads false since delivery failed.
 test("emitMilestone: milestone event is recorded even when ntfy delivery throws (ByteString-shaped failure)", async () => {
   const savedNoNotify = process.env["NO_NOTIFY"];
   const savedForgeNotify = process.env["FORGE_NOTIFY"];
@@ -93,10 +95,11 @@ test("emitMilestone: milestone event is recorded even when ntfy delivery throws 
     const run = mkRun("run-ms-bytestring-1");
     const res = await emitMilestone({ runId: run.id, kind: "blocked", title: "Milestone — blocked" });
     assert.equal(res.decision.send, true);
-    assert.equal(res.dispatched, true, "dispatch was attempted regardless of provider outcome");
+    assert.equal(res.dispatched, false, "provider failed (network throw), so not really delivered");
+    assert.match(res.dispatchError ?? "", /ntfy/);
     const evts = eventsForRun(run.id).filter((e) => e.eventType === "orchestrator.milestone");
     assert.equal(evts.length, 1, "milestone event recorded despite provider throwing");
-    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], true);
+    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], false);
   } finally {
     globalThis.fetch = originalFetch;
     if (savedNoNotify !== undefined) process.env["NO_NOTIFY"] = savedNoNotify; else delete process.env["NO_NOTIFY"];
@@ -170,8 +173,9 @@ test("emitMilestone -> dispatch -> notifyNtfy: Unicode title/body round-trip thr
 // FG-494 (this task): same real wiring, but ntfy answers HTTP 500 — the
 // audit-trail event must still be recorded, the failure must surface (via
 // dispatch's console.error path, per trigger.ts's documented contract), and
-// nothing may throw up through emitMilestone.
-test("emitMilestone -> dispatch -> notifyNtfy: HTTP 500 still records the milestone event and surfaces the error without throwing", async () => {
+// nothing may throw up through emitMilestone. AC2: `dispatched` must read
+// false here (delivery failed), distinct from the HTTP-200 success case above.
+test("emitMilestone -> dispatch -> notifyNtfy: HTTP 500 still records the milestone event, reports non-delivery, and surfaces the error without throwing", async () => {
   const savedNoNotify = process.env["NO_NOTIFY"];
   const savedForgeNotify = process.env["FORGE_NOTIFY"];
   const savedNtfyUrl = process.env["NTFY_URL"];
@@ -194,11 +198,13 @@ test("emitMilestone -> dispatch -> notifyNtfy: HTTP 500 still records the milest
       res = await emitMilestone({ runId: run.id, kind: "blocked", title });
     });
 
-    assert.equal(res!.dispatched, true, "dispatch was attempted regardless of provider outcome");
+    assert.equal(res!.dispatched, false, "provider returned HTTP 500, so delivery did not succeed");
+    assert.match(res!.dispatchError ?? "", /ntfy.*HTTP 500/);
 
     const evts = eventsForRun(run.id).filter((e) => e.eventType === "orchestrator.milestone");
     assert.equal(evts.length, 1, "milestone event recorded despite provider HTTP 500");
-    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], true);
+    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], false, "event's dispatched field must distinguish this failure from a real success");
+    assert.match(String((evts[0]!.payload as Record<string, unknown>)["dispatchError"]), /HTTP 500/);
 
     assert.equal(consoleErrors.length, 1, "the ntfy failure is surfaced via console.error");
     assert.match(String(consoleErrors[0]?.[0]), /ntfy failed/);
