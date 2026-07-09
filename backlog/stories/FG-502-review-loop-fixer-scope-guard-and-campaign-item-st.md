@@ -6,8 +6,6 @@ title: "review-loop fixer scope-guard and campaign item-state: in-diff docs reve
 created: 2026-07-09
 ---
 
-## Problem
-
 Three related review-loop/campaign-runner frictions, each hit repeatedly in the 2026-07-09 autonomous campaign session (campaign-7a56519b2f3d; journal: notes/autonomous-session-2026-07-09.md):
 
 1. **Fixer scope-guard reverts entire fix rounds over in-diff docs (6 occurrences).** The review-loop fixer's DISALLOWED_RE (docs/, learnings/, README*, backlog/) reverts the WHOLE round — including valid code fixes — when the reviewed diff's own contract docs (docs/SCHEMA-CONTRACT.md, docs/concepts.md, learnings ADR) legitimately need editing to stay true against the code fix. FG-487 hit this twice, FG-492 four times; each cost a full reviewer+fixer round and forced a manual engineer invoke as the workaround. The guard's purpose (fixers must not close tickets / rewrite policy) is right; its blast radius (whole-round revert, docs of the diff's own surface) is wrong.
@@ -40,5 +38,5 @@ Three related review-loop/campaign-runner frictions, each hit repeatedly in the 
 
 ## Non-Goals
 
-- No relaxation of the backlog-closeout guard (FG-462 semantics stay).
+- No relaxation of the backlog-closeout guard (FG-462 semantics stay). OPERATOR CLARIFICATION (plan gate, 2026-07-09): 'the guard' = the CLASSIFICATION (backlog/ticket-closeout always disallowed, range-membership irrelevant) + the always-reverted outcome + the FG-462 closeout-finding withholding channel. It does NOT mean whole-round blast radius: per AC2, enforcement is PATH-LEVEL — a round touching backlog/ plus valid in-scope changes removes only the backlog/closeout paths and preserves+commits the in-scope changes, surfacing the reverted paths as guidance. Reinstating the whole-round reset --hard for any class is a regression, not compliance.
 - No campaign schema change beyond what the reconcile recovery needs.
