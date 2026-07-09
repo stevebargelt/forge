@@ -647,6 +647,40 @@ test("integ forge ops reap-containers (plain): a completed-task leak whose docke
   assert.ok(!result.stdout.includes("now swept"), "the error case must never share the 'now swept' wording");
 });
 
+test("integ forge ops reap-containers --json: a completed-task leak whose LIVE docker rm SUCCEEDS lands in completedTaskLeaks, not the unconfirmed field", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-confirmed";
+  const leakedTaskId = "t-fg504-reap-confirmed";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 confirmed leak", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }]);
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--json"], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { reaped: string[]; completedTaskLeaks: string[]; completedTaskLeaksUnconfirmed: string[] };
+  assert.deepEqual(outcome.reaped, [`forge-${leakedTaskId}`]);
+  assert.deepEqual(outcome.completedTaskLeaks, [`forge-${leakedTaskId}`], "a confirmed-gone live reap is the 'now swept' set");
+  assert.deepEqual(outcome.completedTaskLeaksUnconfirmed, []);
+});
+
+test("integ forge ops reap-containers (plain): a completed-task leak whose LIVE docker rm SUCCEEDS says 'now swept', real non-dry-run subprocess", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg504-reap-confirmed-plain";
+  const leakedTaskId = "t-fg504-reap-confirmed-plain";
+  insertRunRow({ id: runId, workflow: "build", title: "fg504 confirmed leak plain", projectDir });
+  insertTaskRow({ id: leakedTaskId, runId, status: "complete", completedAt: "2026-07-01T00:10:00Z" });
+  const docker = withFakeDocker([{ name: `forge-${leakedTaskId}` }]);
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir], { env: docker.env });
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  assert.match(
+    result.stdout,
+    new RegExp(`leaked from a SUCCESSFUL task \\(explicit cleanup failed, now swept\\): forge-${leakedTaskId}`),
+    "the confirmed-gone side of the FG-504 wording split, through the real CLI in live (non-dry-run) mode",
+  );
+  assert.ok(!/NOT confirmed gone/.test(result.stdout), "a confirmed-gone reap must not carry the unconfirmed wording");
+});
+
 test("integ forge ops reap-containers → forge ops check: a successful sweep ('killed') clears a prior container_reap_failed incident, real CLI end to end", () => {
   const projectDir = makeProjectDir();
   const runId = "run-fg504-reap-clears";
