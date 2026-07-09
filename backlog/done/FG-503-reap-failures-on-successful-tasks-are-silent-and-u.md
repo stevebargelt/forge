@@ -1,9 +1,11 @@
 ---
 id: FG-503
 type: story
-status: active
+status: done
 title: "reap failures on successful tasks are silent and unsweepable: callers ignore reap_failed; ops reap-containers scans failed tasks only"
 created: 2026-07-09
+closed: 2026-07-09
+closed_commit: 1b96936f5ba28a8fd73d1ed2525b088b00e5fbf7
 ---
 
 ## Problem
