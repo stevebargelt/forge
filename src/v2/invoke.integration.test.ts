@@ -1588,3 +1588,36 @@ test("FG-492 finding 1+3: result_missing from the REAL failTask call carries rec
   assert.match(incident!.evidence.join(" "), /container exited cleanly but no result\.json was ever produced/);
   assert.match(incident!.recommendedAction.reason, /without needing --force/);
 });
+
+// FG-492 review round 2 (state 1): detect.test.ts's "confirmed exit renders
+// full code/signal/OOM detail" coverage only ever exercised
+// containerEvidenceLine against a hand-authored OrphanEvidence fixture — never
+// the real attached-exit producer (invoke.ts's recoveryEvidenceFor, wired
+// through attachedExitEvidence). Drive an actual container_crash exit through
+// the real invoke() path and confirm runOpsCheck renders the SAME
+// confirmed-exit line off the production event shape.
+test("FG-492 review round 2 (state 1): a REAL confirmed attached exit (container_crash) carries the confirmed-exit containerEvidenceLine through runOpsCheck", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeNoResultExec(1) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "container_crash");
+
+  const orphanEvidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
+  assert.ok(orphanEvidence, "container_crash attached-exit must record recovery evidence off the real failTask call");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true, "attached-exit — Forge watched this container exit itself, not a later disappearance");
+  assert.equal(orphanEvidence!.exitCode, 1);
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === r.taskId);
+  assert.ok(incident, "container_crash with a dirty worktree must raise an incident off a real task.failed event, not just a synthetic fixture");
+  const evidenceText = incident!.evidence.join(" ");
+  assert.match(evidenceText, /task .* crashed \(exit 1\) with no recoverable result/);
+  assert.match(
+    evidenceText,
+    /container exit was directly observed by forge \(attached-exit\) — exit code 1/,
+    "the confirmed-exit containerEvidenceLine — code known because Forge itself watched this exit, not a disappearance",
+  );
+});

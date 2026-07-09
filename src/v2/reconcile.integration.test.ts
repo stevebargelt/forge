@@ -16,6 +16,7 @@ import type { OrphanEvidence } from "./failure-kind.js";
 import { getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
 import { orphanRecoveryMessage, describeContainerEvidence, missingContainerEvidence } from "../cli/commands/show.js";
 import { performReDrive } from "../cli/commands/recover.js";
+import { runOpsCheck } from "../ops/detect.js";
 import type { Run, Task } from "../types/index.js";
 
 let db: DatabaseInstance;
@@ -1520,4 +1521,40 @@ test("FG-492: a fanout parent's derived failure carries NO container evidence an
   const failed = events.find((e) => e.eventType === "task.failed")!;
   const errorText = (failed.payload as Record<string, unknown>).error as string;
   assert.doesNotMatch(errorText, /killed/i, "a fanout parent's derived failure must never read as a killed agent");
+});
+
+// FG-492 review round 2 (state 3): detect.test.ts's "fanout parent raises an
+// incident that never calls it a killed agent" coverage only ever exercised
+// runOpsCheck against a hand-authored task.failed event — never the real
+// producer. Drive an actual stuck fanout parent (children already terminal —
+// one complete, one failed, so the wave never fully completed and the parent
+// never got its own container) through the real reconcileRun() path and
+// confirm runOpsCheck renders the fanout-parent line off that production
+// event shape, never a killed-agent framing.
+test("FG-492 review round 2 (state 3): a REAL fanout-parent derived failure from reconcileRun is detected by runOpsCheck without a killed-agent framing", () => {
+  insertTask(mkTask("fanout-parent-ops", { status: "running" }));
+  insertTask(mkTask("fanout-child-ops-1", { parentId: "fanout-parent-ops", status: "complete" }));
+  insertTask(mkTask("fanout-child-ops-2", { parentId: "fanout-parent-ops", status: "failed" }));
+
+  const r = reconcileRun(RUN.id, ALIVE);
+
+  const parentChange = r.taskChanges.find((c) => c.taskId === "fanout-parent-ops");
+  assert.deepEqual(parentChange, { taskId: "fanout-parent-ops", from: "running", to: "failed", reason: "fanout_wave_orphaned" });
+  assert.equal(getTask("fanout-parent-ops")!.status, "failed");
+
+  const events = eventsForTask("fanout-parent-ops");
+  assert.ok(!events.some((e) => e.eventType === "container.started"), "a fanout parent never gets its own agent container");
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === "fanout-parent-ops");
+  assert.ok(incident, "the fanout-parent derived failure must raise an incident off a real reconcileRun task.failed event, not just a synthetic fixture");
+  const evidenceText = incident!.evidence.join(" ");
+  assert.match(evidenceText, /fanout wave's parent, orphaned mid-wave/, "must render the fanout-parent derived-failure line");
+  assert.match(evidenceText, /1\/2 children completed before it was reconciled to failed/);
+  assert.match(
+    evidenceText,
+    /not a killed agent/,
+    "must explicitly disclaim a killed-agent cause — the parent's failure is derived from its children's outcomes",
+  );
+  assert.doesNotMatch(evidenceText, /\bwas killed\b/i, "must never read as if the fanout parent itself was killed");
 });
