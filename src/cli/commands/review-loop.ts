@@ -581,7 +581,21 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         runId: eagerRunId,
       }, invokeFn ?? invoke);
 
-      const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
+      let outcome: Awaited<ReturnType<typeof runReviewLoop>>;
+      try {
+        outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
+      } catch (err) {
+        // FG-487: an exception escaping the loop (e.g. deps.verify() throwing
+        // before any task exists) must not leak the eagerly-created run as a
+        // permanent zero-task 'active' row — every sweep (findPhantomRuns,
+        // reconcile completion, ops detectors) INNER JOINs tasks and is
+        // structurally blind to it. Finalize with the error recorded, then rethrow.
+        finalizeRunIfSettled(eagerRunId, "review-loop", {
+          stopReason: "exception",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
       const note = renderReviewLoopNote({ ticketId, route: opts.route, maxRounds: opts.maxRounds, range }, outcome);
 
       const runId = getRunId();

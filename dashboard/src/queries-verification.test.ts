@@ -18,12 +18,15 @@ const {
   hostVerificationsForTicket,
   hostVerificationsForCampaignItem,
   recentHostVerifications,
+  taskDetail,
 } = await import("./queries.js");
 
 const db = new Database(join(tmpHome, "forge.db"));
 db.exec(`
   CREATE TABLE runs (id TEXT PRIMARY KEY, title TEXT, workflow TEXT, project_dir TEXT, status TEXT, created_at TEXT);
-  CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT);
+  CREATE TABLE tasks (id TEXT PRIMARY KEY, run_id TEXT, phase TEXT, agent_role TEXT, agent_model TEXT, status TEXT, started_at TEXT, created_at TEXT, parent_id TEXT, result TEXT, completed_at TEXT, error TEXT);
+  CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, red_task_id TEXT, red_role TEXT, verdict TEXT, authority TEXT, confidence REAL, findings TEXT, created_at TEXT);
+  CREATE TABLE gates (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, decision TEXT, rationale TEXT, decided_at TEXT, decided_by TEXT);
   CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, task_id TEXT, event_type TEXT, payload TEXT, created_at TEXT);
   CREATE TABLE campaigns (id TEXT PRIMARY KEY, status TEXT, source_kind TEXT, source_input TEXT, mode TEXT, created_at TEXT, updated_at TEXT, metadata TEXT, project_dir TEXT);
   CREATE TABLE campaign_items (id TEXT PRIMARY KEY, campaign_id TEXT, item_order INTEGER, ticket_id TEXT, run_id TEXT, lifecycle_status TEXT, created_at TEXT, updated_at TEXT);
@@ -86,7 +89,7 @@ insertEvent(null, "campaign_item.host_gate_started", {
 db.prepare(`INSERT INTO runs VALUES ('run-reviewing','review-loop #FG-920','invoke','/proj/b','active', ?)`).run(iso(10 * 60_000));
 insertEvent("run-reviewing", "review_loop.verification_started", { attemptId: "attempt-rev-1", round: 1, ticketId: "FG-920", sha: "eee4444", mode: "local" }, iso(10 * 60_000));
 insertEvent("run-reviewing", "review_loop.verification_finished", { attemptId: "attempt-rev-1", ok: true }, iso(9 * 60_000));
-db.prepare(`INSERT INTO tasks VALUES ('task-red-1','run-reviewing','red-wide','red-wide','sonnet','running', ?, ?, NULL)`).run(iso(9 * 60_000), iso(9 * 60_000));
+db.prepare(`INSERT INTO tasks (id, run_id, phase, agent_role, agent_model, status, started_at, created_at, parent_id) VALUES ('task-red-1','run-reviewing','red-wide','red-wide','sonnet','running', ?, ?, NULL)`).run(iso(9 * 60_000), iso(9 * 60_000));
 
 // ── reviewLoopRunPhases: waiting-on-ci mode, no task yet ────────────────────
 db.prepare(`INSERT INTO runs VALUES ('run-ciwait','review-loop #FG-921','invoke','/proj/b','active', ?)`).run(iso(3 * 60_000));
@@ -186,6 +189,16 @@ test("inProgressVerifications: projectDir filter scopes campaign gate rows via c
   assert.ok(projA.find((r) => r.attemptId === "attempt-gate-1"), "camp-1 (/proj/a) gate must survive the /proj/a filter");
   const projB = inProgressVerifications(NOW, "/proj/b");
   assert.equal(projB.find((r) => r.attemptId === "attempt-gate-1"), undefined, "camp-1 (/proj/a) gate must not leak into /proj/b");
+});
+
+test("taskDetail: folds the run's RUN-scoped verification events into the task timeline (they carry no task_id)", () => {
+  const detail = taskDetail("task-red-1");
+  assert.ok(detail, "task-red-1 fixture must resolve");
+  const types = detail!.events.map((e) => e.eventType);
+  assert.ok(
+    types.includes("review_loop.verification_started") && types.includes("review_loop.verification_finished"),
+    `run-scoped verification events must appear in the task's timeline, got: ${JSON.stringify(types)}`,
+  );
 });
 
 test("inProgressVerifications: no projectDir filter returns rows across projects (cross-project survey default)", () => {

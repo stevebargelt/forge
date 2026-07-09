@@ -790,6 +790,44 @@ test("FG-487: forge review-loop creates its run row eagerly at loop entry — be
   );
 });
 
+test("FG-487: an exception escaping the loop finalizes the eager run — no permanent zero-task active run", async () => {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-487-review-loop-throw.md"),
+    "---\nid: FG-487\ntype: story\nstatus: active\ntitle: eager run finalize on throw\n---\n\nBody.\n",
+  );
+  // A passing test script so verification succeeds and the loop reaches the
+  // reviewer dispatch — whose injected invokeFn THROWS (not a clean !complete
+  // return), the exception path the clean zero-dispatch test above cannot reach.
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add FG-487 ticket + scripts"], projectDir);
+
+  const program = new Command();
+  registerReviewLoop(program, async () => { throw new Error("boom: reviewer dispatch exploded"); });
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  await assert.rejects(
+    () => program.parseAsync(
+      ["review-loop", "FG-487", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    ),
+    /boom: reviewer dispatch exploded/,
+  );
+  process.exitCode = prevExitCode;
+
+  const runs = listRuns();
+  assert.equal(runs.length, 1, "the eagerly-created run must exist");
+  assert.equal(
+    runs[0]!.status,
+    "complete",
+    "an escaped exception must finalize the eager run, not leak a zero-task 'active' row invisible to every sweep",
+  );
+  const completed = eventsForRun(runs[0]!.id).find((e) => e.eventType === "run.completed");
+  assert.ok(completed, "run.completed must be logged on the exception path");
+});
+
 // ── FG-497: the REAL invoke() dispatch, through the review-loop reviewer path ──
 //
 // Every test above injects a FAKE invokeFn that returns a canned InvokeResult —

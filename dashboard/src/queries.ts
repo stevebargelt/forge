@@ -398,10 +398,20 @@ export function taskDetail(taskId: string): TaskDetail | null {
   }>;
 
   // WALK-5: lifecycle timeline from the events table (write-only until Crawl).
+  // FG-487: verification phase-boundary events are RUN-scoped (task_id is never
+  // set — the loop's verification happens between tasks; reconcile gates have no
+  // task at all), so a strict task_id match would never show them. Fold the
+  // task's run's verification events into its timeline; they render with the
+  // verification badge/detail helpers in the client.
   const eventRows = db().prepare(`
     SELECT event_type, payload, created_at
-    FROM events WHERE task_id = ? ORDER BY created_at ASC, id ASC
-  `).all(taskId) as Array<{ event_type: string; payload: string | null; created_at: string }>;
+    FROM events
+    WHERE task_id = ?
+       OR (run_id = ? AND task_id IS NULL AND event_type IN (
+            'review_loop.verification_started', 'review_loop.verification_finished',
+            'campaign_item.host_gate_started', 'campaign_item.host_gate_finished'))
+    ORDER BY created_at ASC, id ASC
+  `).all(taskId, taskRow.run_id) as Array<{ event_type: string; payload: string | null; created_at: string }>;
   const events: TaskEventEntry[] = eventRows.map((e) => ({
     eventType: e.event_type,
     payload: e.payload ? safeJsonParse(e.payload) : null,
