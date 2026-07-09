@@ -6,7 +6,7 @@ import { insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
 import { logEvent } from "../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../types/index.js";
-import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, runOpsCheck } from "./detect.js";
+import { detectRetryOrphan, detectInconsistentRunState, detectOrphanedWorkMayPersist, detectStuckRun, detectContainerReapFailed, runOpsCheck } from "./detect.js";
 import { makeIncident } from "./incident.js";
 import { renderHuman } from "../cli/commands/ops.js";
 
@@ -356,6 +356,71 @@ test("detectStuckRun: project scoping", () => {
   assert.equal(detectStuckRun(db, { projectDir: "/projects/alpha" }).length, 1);
   assert.equal(detectStuckRun(db, { projectDir: "/projects/alpha" })[0]!.runId, "run-stuck-a");
   assert.equal(detectStuckRun(db).length, 2, "no projectDir → host-wide");
+});
+
+// ── detectContainerReapFailed (FG-503 finding 4: review) ────────────────────
+
+test("detectContainerReapFailed: flags a task with a container.reap_failed event", () => {
+  insertRun(mkRun("run-reap", "active"));
+  insertTask(mkTask("task-reap", "run-reap", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap", taskId: "task-reap",
+    payload: { containerName: "forge-task-reap", why: "docker rm -f -v failed after task completion; container may still be running/present with its anonymous shadow volume" },
+  });
+
+  const incidents = detectContainerReapFailed(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "container_reap_failed");
+  assert.equal(i.confidence, "db-confirmed");
+  assert.equal(i.severity, "low");
+  assert.equal(i.taskId, "task-reap");
+  assert.equal(i.recommendedAction.type, "repair");
+  assert.equal(i.recommendedAction.autonomy, "ask");
+  assert.equal(i.recommendedAction.command, "forge ops reap-containers");
+  assert.match(i.evidence.join(" "), /forge-task-reap/);
+});
+
+test("detectContainerReapFailed: a task with no reap_failed event raises no incident", () => {
+  insertRun(mkRun("run-noreap", "active"));
+  insertTask(mkTask("task-noreap", "run-noreap", "complete"));
+  assert.equal(detectContainerReapFailed(db).length, 0);
+});
+
+test("detectContainerReapFailed: only reads the LATEST reap_failed event per task", () => {
+  insertRun(mkRun("run-reap2", "active"));
+  insertTask(mkTask("task-reap2", "run-reap2", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap2", taskId: "task-reap2",
+    payload: { containerName: "forge-task-reap2", why: "first failure" },
+  });
+  logEvent("container.reap_failed", {
+    runId: "run-reap2", taskId: "task-reap2",
+    payload: { containerName: "forge-task-reap2", why: "second failure" },
+  });
+
+  const incidents = detectContainerReapFailed(db);
+  assert.equal(incidents.length, 1);
+  assert.match(incidents[0]!.evidence.join(" "), /second failure/);
+});
+
+test("detectContainerReapFailed: project scoping", () => {
+  insertRun(mkRun("run-reap-a", "active", "/projects/alpha"));
+  insertTask(mkTask("task-reap-a", "run-reap-a", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-a", taskId: "task-reap-a",
+    payload: { containerName: "forge-task-reap-a", why: "docker error" },
+  });
+  insertRun(mkRun("run-reap-b", "active", "/projects/beta"));
+  insertTask(mkTask("task-reap-b", "run-reap-b", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-b", taskId: "task-reap-b",
+    payload: { containerName: "forge-task-reap-b", why: "docker error" },
+  });
+
+  assert.equal(detectContainerReapFailed(db, { projectDir: "/projects/alpha" }).length, 1);
+  assert.equal(detectContainerReapFailed(db, { projectDir: "/projects/alpha" })[0]!.runId, "run-reap-a");
+  assert.equal(detectContainerReapFailed(db).length, 2, "no projectDir → host-wide");
 });
 
 // ── project scoping ─────────────────────────────────────────────────────────

@@ -405,12 +405,74 @@ export function detectStuckRun(db: DatabaseInstance, opts: OpsCheckOptions = {})
   });
 }
 
+type ReapFailedRow = { taskId: string; runId: string; phase: string; payload: string | null };
+
+/** FG-503 finding 4 (review): a `container.reap_failed` event (invoke.ts/
+ *  runNext.ts/gate.ts/reconcile.ts's four success-path reap sites) was only
+ *  ever observable via `forge ops reap-containers`' own disk-truth scan, which
+ *  rediscovers leaked containers independently of these events — the events
+ *  themselves were logged for evidence but nothing ever read them back, so a
+ *  reap failure recorded well before a container aged past --older-than-minutes
+ *  (or one that got orphaned entirely off the default sweep's project scope)
+ *  had no representation in `forge ops check` / the dashboard's incident list
+ *  at all. db-confirmed (the event is a plain DB fact); the action is always
+ *  `forge ops reap-containers`, the same idempotent best-effort sweep the
+ *  reap sites themselves defer to — safe to re-run, so 'ask' rather than
+ *  'manual-only', but not 'auto-safe' since a still-failing docker daemon
+ *  makes re-running it a no-op worth a human noticing.
+ *
+ *  Reads only the LATEST container.reap_failed event per task (mirrors
+ *  detectOrphanedWorkMayPersist's correlated-subquery approach) — a task can
+ *  only be reaped once it's terminal, so there's no risk of shadowing a more
+ *  recent successful reap (the happy path logs nothing, by design). */
+export function detectContainerReapFailed(db: DatabaseInstance, opts: OpsCheckOptions = {}): Incident[] {
+  const rows = db
+    .prepare(
+      `SELECT t.id AS taskId, t.run_id AS runId, t.phase AS phase, e.payload AS payload
+       FROM tasks t
+       JOIN runs r ON r.id = t.run_id
+       JOIN events e ON e.id = (
+         SELECT e2.id FROM events e2
+         WHERE e2.task_id = t.id AND e2.event_type = 'container.reap_failed'
+         ORDER BY e2.created_at DESC, e2.id DESC
+         LIMIT 1
+       )
+       WHERE (? IS NULL OR r.project_dir = ?)`
+    )
+    .all(opts.projectDir ?? null, opts.projectDir ?? null) as ReapFailedRow[];
+
+  return rows.map((row) => {
+    const payload = row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : null;
+    const containerName = typeof payload?.["containerName"] === "string" ? payload["containerName"] : `forge-${row.taskId}`;
+    const why = typeof payload?.["why"] === "string" ? payload["why"] : "docker rm -f -v failed after task completion";
+    return makeIncident({
+      kind: "container_reap_failed",
+      severity: "low",
+      confidence: "db-confirmed",
+      runId: row.runId,
+      taskId: row.taskId,
+      evidence: [
+        `task ${row.taskId} (${row.phase}) recorded a container.reap_failed event for ${containerName}`,
+        why,
+      ],
+      recommendedAction: {
+        type: "repair",
+        autonomy: "ask",
+        command: "forge ops reap-containers",
+        reason:
+          "the automatic reap attempt at task completion failed (docker error); `forge ops reap-containers` is the same best-effort sweep and safe to retry. Autonomy is 'ask' — confirm before running.",
+      },
+    });
+  });
+}
+
 const DETECTORS: Array<(db: DatabaseInstance, opts: OpsCheckOptions) => Incident[]> = [
   detectRetryOrphan,
   detectInconsistentRunState,
   detectReconcileCandidate,
   detectOrphanedWorkMayPersist,
   detectStuckRun,
+  detectContainerReapFailed,
 ];
 
 /** Run every detector over a read-only handle and return the flat incident list.

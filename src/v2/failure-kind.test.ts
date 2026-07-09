@@ -526,6 +526,13 @@ test("parseDockerInspectState: empty array / no State → {}", () => {
   assert.deepEqual(parseDockerInspectState(JSON.stringify([{}])), {});
 });
 
+test("parseDockerInspectState: FinishedAt at Docker's zero-value sentinel (never started/exited) is omitted, not treated as a real ancient timestamp", () => {
+  const raw = JSON.stringify([{ State: { StartedAt: "0001-01-01T00:00:00Z", FinishedAt: "0001-01-01T00:00:00Z", ExitCode: 0 } }]);
+  const parsed = parseDockerInspectState(raw);
+  assert.equal(parsed.finishedAt, undefined);
+  assert.equal(parsed.startedAt, "0001-01-01T00:00:00Z", "only FinishedAt's sentinel is reap-containers' age-fallback concern");
+});
+
 test("signalNameForExitCode: maps 128+signal to the POSIX name; <=128 is not a signal", () => {
   assert.equal(signalNameForExitCode(137), "SIGKILL");
   assert.equal(signalNameForExitCode(143), "SIGTERM");

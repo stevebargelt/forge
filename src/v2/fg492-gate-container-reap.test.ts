@@ -7,8 +7,8 @@
 // used to reap it: the exec-time caller in runNext.ts already returned (the
 // task wasn't complete yet), reconcile.ts's reap sweep only ever revisits
 // tasks whose status is still `running` (this task left `running` the moment
-// it became awaiting_gate), and `forge ops reap-containers` only scans FAILED
-// tasks. The container leaked forever.
+// it became awaiting_gate), and (pre-FG-503) `forge ops reap-containers` only
+// scanned FAILED tasks. The container leaked forever.
 //
 // Fix: gate.ts's "advance" branch now reaps the container itself, right after
 // markTaskComplete, mirroring runNext.ts's own finalizeContainerRetention
