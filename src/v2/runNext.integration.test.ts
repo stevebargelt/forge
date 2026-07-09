@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { runNext, resolveChildAgent, type DockerExecFn } from "./runNext.js";
+import { loadModelPolicyWithSource } from "./loader.js";
 import { startRun } from "./startRun.js";
 import { tasksForRun, getTask, markTaskComplete } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
@@ -1172,6 +1173,160 @@ test("runNext: fanout — plan returns N claims, research spawns N children, par
   const wave3 = await runNext({ runId, workflow: FANOUT_WORKFLOW, dockerExec: exec });
   assert.deepEqual(wave3.dispatchedSteps, []);
   assert.equal(wave3.runStatus, "complete");
+});
+
+// ---------------------------------------------------------------------------
+// FG-365: model-policy provenance is memoized per projectDir per dispatch
+// wave — runContainer previously called loadModelPolicyWithSource once per
+// container, so a fan-out of N children + M reds re-read/re-parsed the same
+// model-policy.yml N+M times.
+// ---------------------------------------------------------------------------
+
+const FANOUT_WITH_REDS_WORKFLOW: Workflow = {
+  name: "fg365-fanout-reds",
+  description: "fanout step with reds, for model-policy memoization test",
+  inputs: [],
+  steps: [
+    {
+      id: "plan",
+      agent: "planner-agent",
+      gate: "auto",
+      manual: false,
+      depends_on: [],
+      runtime: "claude",
+      reds: [],
+    },
+    {
+      id: "build",
+      agent: "engineer",
+      gate: "auto",
+      manual: false,
+      depends_on: ["plan"],
+      runtime: "claude",
+      reds: [
+        { agent: "red-narrow", authority: "specialist", gate_on_verdict: false },
+        { agent: "red-wide", authority: "specialist", gate_on_verdict: false },
+      ],
+      fanout: {
+        from_upstream: { step: "plan", array_key: "items", input_key: "item" },
+        max_concurrency: 4,
+        failure_mode: "continue",
+      },
+    },
+  ],
+};
+
+test("runNext: FG-365 — model-policy loaded once per projectDir per wave, not once per container, across a fanout+reds dispatch", async () => {
+  ensureRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub"; // makes auth:api available (probeAuth)
+
+  // Policy mode resolves the RUNTIME from (provider, auth) — auth:api binds to
+  // "claude-apikey", not the workflow-declared "claude" — so a stub runtime for
+  // it must exist too (mirrors the run-level --profile test above).
+  const apikeyRuntimePath = join(process.env.FORGE_HOME!, "runtimes", "claude-apikey.yml");
+  if (!existsSync(apikeyRuntimePath)) {
+    mkdirSync(dirname(apikeyRuntimePath), { recursive: true });
+    writeFileSync(apikeyRuntimePath, `name: claude-apikey
+description: test stub apikey runtime
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+  }
+
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg365-"));
+  mkdirSync(join(projectDir, ".forge"), { recursive: true });
+  writeFileSync(join(projectDir, ".forge", "model-policy.yml"), `
+on_unavailable: fail
+model_profiles:
+  claude-api:
+    provider: anthropic
+    auth: api
+    map:
+      default: { model: claude-sonnet-4-6, cost_tier: standard }
+defaults:
+  profile: claude-api
+  activity: {}
+`);
+
+  try {
+    const { runId } = startRun({
+      workflow: FANOUT_WITH_REDS_WORKFLOW,
+      title: "fg365 memoization test",
+      inputs: {},
+      projectDir,
+    });
+
+    // Single result shape satisfies every container: plan needs `items` (the
+    // fanout array); children and reds just need to report complete.
+    const exec = makeStubExec({ status: "complete", items: ["a", "b", "c"] });
+
+    // Spy that delegates to the REAL loader — proves both call count and that
+    // the memoized receipt still reflects real provenance (source: "project").
+    let loadCount = 0;
+    const countingLoader: typeof loadModelPolicyWithSource = (ctx) => {
+      loadCount++;
+      return loadModelPolicyWithSource(ctx);
+    };
+
+    // Wave 1: single primary ("plan") — one container, one load.
+    const wave1 = await runNext({
+      runId,
+      workflow: FANOUT_WITH_REDS_WORKFLOW,
+      dockerExec: exec,
+      modelPolicyLoader: countingLoader,
+    });
+    assert.deepEqual(wave1.dispatchedSteps, ["plan"]);
+    assert.equal(loadCount, 1, "wave 1 (single primary) loads model-policy exactly once");
+
+    // Wave 2: fanout ("build") — 3 children + 2 reds = 5 containers dispatched
+    // against the SAME projectDir. Without the fix this would load 5 times.
+    const wave2 = await runNext({
+      runId,
+      workflow: FANOUT_WITH_REDS_WORKFLOW,
+      dockerExec: exec,
+      modelPolicyLoader: countingLoader,
+    });
+    assert.deepEqual(wave2.dispatchedSteps, ["build"]);
+
+    const tasks = tasksForRun(runId);
+    const buildParent = tasks.find((t) => t.phase === "build" && t.parentId === undefined)!;
+    const children = tasks.filter(
+      (t) => t.parentId === buildParent.id && !t.agentRole.startsWith("red-"),
+    );
+    const reds = tasks.filter(
+      (t) => t.parentId === buildParent.id && t.agentRole.startsWith("red-"),
+    );
+    assert.equal(children.length, 3, "3 fanout children dispatched");
+    assert.equal(reds.length, 2, "2 reds dispatched on the fanout aggregate");
+
+    assert.equal(
+      loadCount,
+      2,
+      "wave 2 dispatches 5 containers (3 children + 2 reds) against one projectDir but must add exactly " +
+        "one more model-policy load (total 2), not 5 more (FG-365)",
+    );
+
+    // The memoized receipt still records real, correct provenance.
+    const childManifest = JSON.parse(
+      readFileSync(join(taskDir(runId, children[0]!.id), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+    assert.equal(childManifest.controlPlane?.modelPolicy.source, "project");
+    assert.ok(childManifest.controlPlane?.modelPolicy.path?.includes(projectDir));
+  } finally {
+    rmSync(projectDir, { recursive: true, force: true });
+  }
 });
 
 // AWN-7 leak guard: a run-level --profile (metadata.modelProfile) pours through
