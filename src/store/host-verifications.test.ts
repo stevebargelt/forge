@@ -17,6 +17,7 @@ import {
   aggregateCiCheckRuns,
   projectCiRunsCommand,
   projectCiWorkflowJobIds,
+  probeCiGateStatus,
   REQUIRED_CI_CHECK_CONTEXT,
   type CiCheckStatus,
 } from "./host-verifications.js";
@@ -743,6 +744,165 @@ describe("findCoveringGateEvidence / describeGateEvidence (real per-project ci.y
     const ciDesc = describeGateEvidence(ciEvidence);
     assert.match(ciDesc, /CI check/);
     assert.match(ciDesc, /https:\/\/example\.com\/run\/1/);
+  });
+});
+
+// ── FG-501: probeCiGateStatus — reports the required CI gate's STATUS (not
+// just coverage), applying the identical fail-closed preconditions
+// findCoveringGateEvidence's CI branch uses (sha shape, content-verified
+// pairing via projectCiRunsCommand, whole-workflow job enumeration via
+// projectCiWorkflowJobIds) — see resolveCiPairing.
+
+describe("probeCiGateStatus", () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    projectDir = mkdtempSync(join(tmpdir(), "hv-probe-project-"));
+    writeWorkflowFile(projectDir, "ci.yml", `name: CI\njobs:\n  test:\n    steps:\n      - run: ${GATE_CMD}\n`);
+  });
+
+  afterEach(() => {
+    rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  test("a bad sha (fails SHA_LOOKUP_RE) -> unavailable, provider never consulted", () => {
+    let called = false;
+    const status = probeCiGateStatus({
+      projectDir, sha: "not-a-sha", command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+    });
+    assert.equal(status.kind, "unavailable");
+    assert.equal(called, false, "an invalid sha must fail closed before ever consulting the provider");
+  });
+
+  test("a project whose ci.yml doesn't run the required command (pairing fails) -> unavailable, provider never consulted", () => {
+    rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+    writeWorkflowFile(projectDir, "ci.yml", "name: CI\njobs:\n  test:\n    steps:\n      - run: npm run something-else\n");
+    let called = false;
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+    });
+    assert.deepEqual(status.kind, "unavailable");
+    assert.match((status as { kind: "unavailable"; reason: string }).reason, /does not demonstrably run/);
+    assert.equal(called, false, "a failed pairing precondition must never reach the provider");
+  });
+
+  test("no .github/workflows directory at all (pairing fails) -> unavailable", () => {
+    rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+    const status = probeCiGateStatus({ projectDir, sha: GATE_SHA, command: GATE_CMD, checkStatusProvider: () => { throw new Error("must not be called"); } });
+    assert.equal(status.kind, "unavailable");
+  });
+
+  test("unparseable workflow (job enumeration fails) -> unavailable, provider never consulted", () => {
+    rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+    writeWorkflowFile(projectDir, "ci.yml", "name: CI\njobs:\n  test:\n    steps: [\n");
+    let called = false;
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => { called = true; return { sha: GATE_SHA, state: "success" }; },
+    });
+    assert.equal(status.kind, "unavailable");
+    assert.equal(called, false, "an unparseable workflow means neither pairing nor job coverage can be established");
+  });
+
+  test("provider returns null for the (only) required job -> unavailable with a concrete reason naming the check", () => {
+    const status = probeCiGateStatus({ projectDir, sha: GATE_SHA, command: GATE_CMD, checkStatusProvider: () => null });
+    assert.equal(status.kind, "unavailable");
+    assert.match((status as { kind: "unavailable"; reason: string }).reason, /CI \/ test/);
+  });
+
+  test("provider reports a DIFFERENT sha than requested -> unavailable (staleness guard)", () => {
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", state: "success" }),
+    });
+    assert.equal(status.kind, "unavailable");
+  });
+
+  test("the single required job is green -> success", () => {
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "success", detailsUrl: "https://example.com/run/ok" }),
+    });
+    assert.deepEqual(status, { kind: "success" });
+  });
+
+  test("the single required job is pending -> pending, naming the check context and url", () => {
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "pending" }),
+    });
+    assert.equal(status.kind, "pending");
+    assert.deepEqual((status as { kind: "pending"; checks: { context: string }[] }).checks, [{ context: REQUIRED_CI_CHECK_CONTEXT }]);
+  });
+
+  test("the single required job failed -> failed, naming the check context and url", () => {
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "failure", detailsUrl: "https://example.com/run/fail" }),
+    });
+    assert.deepEqual(status, { kind: "failed", failing: { context: REQUIRED_CI_CHECK_CONTEXT, url: "https://example.com/run/fail" } });
+  });
+
+  test("the single required job completed with a non-success/failure conclusion (e.g. cancelled, aggregated as 'other') -> failed — a terminal non-success state is not worth waiting on", () => {
+    const status = probeCiGateStatus({
+      projectDir, sha: GATE_SHA, command: GATE_CMD,
+      checkStatusProvider: () => ({ sha: GATE_SHA, state: "other" }),
+    });
+    assert.equal(status.kind, "failed");
+  });
+
+  describe("whole-workflow status (a second required job in the same workflow)", () => {
+    beforeEach(() => {
+      rmSync(join(projectDir, ".github"), { recursive: true, force: true });
+      writeWorkflowFile(
+        projectDir,
+        "ci.yml",
+        `name: CI\njobs:\n  test:\n    steps:\n      - run: ${GATE_CMD}\n  test-extended:\n    steps:\n      - run: npm run test:extended\n`
+      );
+    });
+
+    test("both jobs green -> success", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: () => ({ sha: GATE_SHA, state: "success" }),
+      });
+      assert.deepEqual(status, { kind: "success" });
+    });
+
+    test("one job green, the other pending -> pending, naming only the pending one", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "success" } : { sha: GATE_SHA, state: "pending" }),
+      });
+      assert.equal(status.kind, "pending");
+      assert.deepEqual((status as { kind: "pending"; checks: { context: string }[] }).checks, [{ context: "CI / test-extended" }]);
+    });
+
+    test("one job green, the other failed -> failed, naming the failing one", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "success" } : { sha: GATE_SHA, state: "failure", detailsUrl: "https://example.com/run/ext-fail" }),
+      });
+      assert.deepEqual(status, { kind: "failed", failing: { context: "CI / test-extended", url: "https://example.com/run/ext-fail" } });
+    });
+
+    test("one job pending, the other failed -> failed wins over pending regardless of enumeration order", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "pending" } : { sha: GATE_SHA, state: "failure" }),
+      });
+      assert.equal(status.kind, "failed", "a failing sibling job must win over a merely-pending one");
+    });
+
+    test("one job has no check run at all at this sha -> unavailable (never assumed green or pending)", () => {
+      const status = probeCiGateStatus({
+        projectDir, sha: GATE_SHA, command: GATE_CMD,
+        checkStatusProvider: (opts) => (opts.checkContext === "CI / test" ? { sha: GATE_SHA, state: "success" } : null),
+      });
+      assert.equal(status.kind, "unavailable");
+    });
   });
 });
 

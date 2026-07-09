@@ -404,6 +404,26 @@ export type GateEvidence =
 
 const SHA_LOOKUP_RE = /^[0-9a-f]{7,40}$/i;
 
+// FG-501: shared by findCoveringGateEvidence AND probeCiGateStatus so the
+// fail-closed preconditions (REQUIRED_CI_CHECK_CONTEXT shape, this project's
+// own ci.yml demonstrably running `command`, whole-workflow job enumeration)
+// live in exactly one place. Two independent copies of this logic could drift
+// — probeCiGateStatus exists to report status WHILE covering evidence isn't
+// there yet, so it must apply the identical trust chain findCoveringGateEvidence
+// does, not a laxer or differently-shaped approximation of it.
+type CiPairing = { workflowName: string; pairedJobId: string; jobIds: string[] } | { unavailableReason: string };
+
+function resolveCiPairing(projectDir: string, command: string): CiPairing {
+  const [workflowName, pairedJobId] = REQUIRED_CI_CHECK_CONTEXT.split("/").map((s) => s.trim());
+  if (!workflowName || !pairedJobId) return { unavailableReason: `REQUIRED_CI_CHECK_CONTEXT "${REQUIRED_CI_CHECK_CONTEXT}" is malformed` };
+  if (!projectCiRunsCommand(projectDir, REQUIRED_CI_CHECK_CONTEXT, command)) {
+    return { unavailableReason: `${projectDir}'s CI workflow does not demonstrably run "${command}" as the "${REQUIRED_CI_CHECK_CONTEXT}" check` };
+  }
+  const jobIds = projectCiWorkflowJobIds(projectDir, workflowName);
+  if (!jobIds) return { unavailableReason: `could not enumerate jobs for the "${workflowName}" workflow in ${projectDir} (missing/unparseable workflow file)` };
+  return { workflowName, pairedJobId, jobIds };
+}
+
 /** Does covering deterministic-gate evidence already exist for (ticketId,
  *  projectDir, sha, command)? opts.command is the project's requiredHostGate —
  *  FG-500: the actual covering set is deriveRequiredGateList(opts.projectDir,
@@ -446,33 +466,83 @@ export function findCoveringGateEvidence(opts: {
   // opts.command is THAT PROJECT'S OWN workflow content, read fresh at lookup
   // time. A REQUIRED_CI_GATE_COMMAND-style constant-equality check would only
   // prove pairing with forge's own ci.yml (task-red-wide-16933b) — never with
-  // the project actually being gated. Fall through to null (never consult the
-  // provider) when this project's ci.yml doesn't demonstrably run opts.command.
-  const [workflowName, pairedJobId] = REQUIRED_CI_CHECK_CONTEXT.split("/").map((s) => s.trim());
-  if (!workflowName || !pairedJobId) return null;
-  if (!projectCiRunsCommand(opts.projectDir, REQUIRED_CI_CHECK_CONTEXT, opts.command)) return null;
-
-  // FG-495 review finding: pairing alone only proves ONE job of this workflow
-  // runs opts.command. Post-FG-495 the suite is split across sibling required
-  // jobs (e.g. `test` + `test-extended`), so a green paired job no longer
-  // proves the whole gate passed — every job in the workflow must be green at
-  // this exact sha, or this is not covering evidence. Enumeration failure
-  // (unparseable workflow, etc.) fails closed: no coverage, and since this
-  // check runs BEFORE the provider is consulted, an enumeration failure means
-  // the provider is never even reached.
-  const jobIds = projectCiWorkflowJobIds(opts.projectDir, workflowName);
-  if (!jobIds) return null;
+  // the project actually being gated. FG-495 review finding: pairing alone
+  // only proves ONE job of this workflow runs opts.command — post-FG-495 the
+  // suite is split across sibling required jobs (e.g. `test` + `test-
+  // extended`), so a green paired job no longer proves the whole gate passed;
+  // every job in the workflow must be green at this exact sha, or this is not
+  // covering evidence. resolveCiPairing fails closed (never consults the
+  // provider) when pairing or job enumeration can't be established.
+  const pairing = resolveCiPairing(opts.projectDir, opts.command);
+  if ("unavailableReason" in pairing) return null;
 
   const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
   let pairedStatus: CiCheckStatus | null = null;
-  for (const jobId of jobIds) {
-    const checkContext = `${workflowName} / ${jobId}`;
+  for (const jobId of pairing.jobIds) {
+    const checkContext = `${pairing.workflowName} / ${jobId}`;
     const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
     if (!status || status.state !== "success" || status.sha !== opts.sha) return null;
-    if (jobId === pairedJobId) pairedStatus = status;
+    if (jobId === pairing.pairedJobId) pairedStatus = status;
   }
   if (!pairedStatus) return null;
   return { source: "ci", sha: pairedStatus.sha, checkUrl: pairedStatus.detailsUrl };
+}
+
+// ── FG-501: CI gate STATUS (not just coverage) ──────────────────────────────
+//
+// findCoveringGateEvidence answers a binary "does covering evidence exist yet"
+// and fails closed to null for ANYTHING short of full success (pending,
+// failing, unavailable all collapse to the same null). review-loop needs to
+// tell those apart: pending CI should be waited on, a failing check should stop
+// the loop with a named failure instead of running local verification, and only
+// a genuinely unavailable/unqueryable CI setup should fall back to a local run.
+// probeCiGateStatus applies the IDENTICAL preconditions (via resolveCiPairing)
+// and reports which of those states the required CI gate is actually in.
+
+export type CiGateStatus =
+  | { kind: "success" }
+  | { kind: "pending"; checks: { context: string; url?: string }[] }
+  | { kind: "failed"; failing: { context: string; url?: string } }
+  | { kind: "unavailable"; reason: string };
+
+/** Probe the STATUS of the required CI gate for (projectDir, sha, command) —
+ *  same trust chain as findCoveringGateEvidence's CI branch (sha shape,
+ *  content-verified pairing, whole-workflow job enumeration), but reports
+ *  WHY reuse isn't possible instead of collapsing every non-success case to
+ *  null. Priority when jobs disagree: any completed-non-success job (failure,
+ *  or a completed-but-not-successful conclusion like cancelled/skipped) wins
+ *  outright as "failed" — waiting longer cannot fix a terminal state, so it's
+ *  reported (and the loop stopped) as soon as the first one is seen, mirroring
+ *  findCoveringGateEvidence's short-circuit. Otherwise any still-incomplete job
+ *  makes the whole gate "pending". All-success is "success". A missing/
+ *  unparseable precondition, or a provider returning null / a mismatched sha,
+ *  is "unavailable" with a concrete reason — never silently treated as pending
+ *  or success. */
+export function probeCiGateStatus(opts: {
+  projectDir: string;
+  sha: string;
+  command: string;
+  checkStatusProvider?: CheckStatusProvider;
+}): CiGateStatus {
+  if (!SHA_LOOKUP_RE.test(opts.sha)) return { kind: "unavailable", reason: `sha "${opts.sha}" is not a valid lookup sha` };
+
+  const pairing = resolveCiPairing(opts.projectDir, opts.command);
+  if ("unavailableReason" in pairing) return { kind: "unavailable", reason: pairing.unavailableReason };
+
+  const provider = opts.checkStatusProvider ?? defaultCheckStatusProvider;
+  const pending: { context: string; url?: string }[] = [];
+  for (const jobId of pairing.jobIds) {
+    const checkContext = `${pairing.workflowName} / ${jobId}`;
+    const status = provider({ projectDir: opts.projectDir, sha: opts.sha, checkContext });
+    if (!status) return { kind: "unavailable", reason: `no CI status available for check "${checkContext}" at sha ${opts.sha}` };
+    if (status.sha !== opts.sha) return { kind: "unavailable", reason: `CI status for "${checkContext}" reported a different sha than the one requested` };
+    if (status.state === "failure" || status.state === "other") {
+      return { kind: "failed", failing: { context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) } };
+    }
+    if (status.state === "pending") pending.push({ context: checkContext, ...(status.detailsUrl ? { url: status.detailsUrl } : {}) });
+  }
+  if (pending.length > 0) return { kind: "pending", checks: pending };
+  return { kind: "success" };
 }
 
 /** Human-readable description of WHAT covered a reuse — used in place of raw run
