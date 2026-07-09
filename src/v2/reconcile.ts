@@ -477,10 +477,11 @@ export function reconcileRun(
         // FG-463: the complete write + its paired events commit atomically. The
         // markTaskComplete no-op (already complete concurrently) rolls back to
         // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
+        const containerEvidence = toContainerCausalEvidence(evidence);
         const completed = getDb().transaction(() => {
           if (!markTaskComplete(t.id, result)) return false;
           logEvent("task.completed", { runId, taskId: t.id });
-          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence } });
+          logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence, containerEvidence } });
           return true;
         })();
         if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_present" });
@@ -541,10 +542,11 @@ export function reconcileRun(
         } else {
           // FG-463: complete write + its events atomic (the result.json write above
           // is best-effort and deliberately stays OUTSIDE the transaction).
+          const containerEvidence = toContainerCausalEvidence(evidence);
           const completed = getDb().transaction(() => {
             if (!markTaskComplete(t.id, inferred)) return false;
             logEvent("task.completed", { runId, taskId: t.id });
-            logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence } });
+            logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence, containerEvidence } });
             return true;
           })();
           if (completed) taskChanges.push({ taskId: t.id, from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout" });

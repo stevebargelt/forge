@@ -397,7 +397,9 @@ test("integ forge ops reap-containers --dry-run --json: scans a failed task's co
   const runningTaskId = "t-fg492-reap-running";
   insertRunRow({ id: runId, workflow: "build", title: "fg492 reap", projectDir });
   insertTaskRow({ id: failedTaskId, runId, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId: failedTaskId, eventType: "container.started", payload: {} });
   insertTaskRow({ id: runningTaskId, runId, status: "running", completedAt: null });
+  insertEvent({ runId, taskId: runningTaskId, eventType: "container.started", payload: {} });
 
   const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
@@ -408,12 +410,28 @@ test("integ forge ops reap-containers --dry-run --json: scans a failed task's co
   assert.ok(!outcome.reaped.includes(`forge-${runningTaskId}`));
 });
 
+test("integ forge ops reap-containers: never scans a failed task with no container.started event (fanout parent / host-side dispatch)", () => {
+  const projectDir = makeProjectDir();
+  const runId = "run-fg492-reap-nocontainer";
+  const taskId = "t-fg492-reap-fanout-parent";
+  insertRunRow({ id: runId, workflow: "build", title: "fg492 reap no container", projectDir });
+  insertTaskRow({ id: taskId, runId, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  // No container.started event — this task structurally never had a container.
+
+  const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json"]);
+  assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+  const outcome = JSON.parse(result.stdout) as { scanned: number; reaped: string[] };
+  assert.equal(outcome.scanned, 0, "a task with no container.started event is never a candidate");
+  assert.deepEqual(outcome.reaped, []);
+});
+
 test("integ forge ops reap-containers --dry-run (plain): reports would-reap phrasing and writes nothing", () => {
   const projectDir = makeProjectDir();
   const runId = "run-fg492-reap-plain";
   const taskId = "t-fg492-reap-plain";
   insertRunRow({ id: runId, workflow: "build", title: "fg492 reap plain", projectDir });
   insertTaskRow({ id: taskId, runId, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId, eventType: "container.started", payload: {} });
 
   const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run"]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
@@ -428,7 +446,9 @@ test("integ forge ops reap-containers --older-than-minutes: real CLI numeric opt
   const recentTaskId = "t-fg492-reap-recent";
   insertRunRow({ id: runId, workflow: "build", title: "fg492 reap age", projectDir });
   insertTaskRow({ id: oldTaskId, runId, status: "failed", completedAt: "2020-01-01T00:00:00Z" });
+  insertEvent({ runId, taskId: oldTaskId, eventType: "container.started", payload: {} });
   insertTaskRow({ id: recentTaskId, runId, status: "failed", completedAt: new Date().toISOString() });
+  insertEvent({ runId, taskId: recentTaskId, eventType: "container.started", payload: {} });
 
   const result = runForge(["ops", "reap-containers", "--project", projectDir, "--dry-run", "--json", "--older-than-minutes", "60"]);
   assert.equal(result.status, 0, `expected exit 0\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
@@ -443,6 +463,7 @@ test("integ forge ops reap-containers: a live reap attempt with docker unavailab
   const taskId = "t-fg492-reap-live";
   insertRunRow({ id: runId, workflow: "build", title: "fg492 reap live", projectDir });
   insertTaskRow({ id: taskId, runId, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId, taskId, eventType: "container.started", payload: {} });
 
   // No `docker` binary is guaranteed present in this sandbox — defaultContainerReap
   // must degrade to "error" (left for a later sweep), never throw out of the CLI.
@@ -462,7 +483,9 @@ test("integ forge ops reap-containers --all --json: cross-project scan does not 
   insertRunRow({ id: runA, workflow: "build", title: "fg492 reap all a", projectDir: projectDirA });
   insertRunRow({ id: runB, workflow: "build", title: "fg492 reap all b", projectDir: projectDirB });
   insertTaskRow({ id: "t-fg492-reap-all-a", runId: runA, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId: runA, taskId: "t-fg492-reap-all-a", eventType: "container.started", payload: {} });
   insertTaskRow({ id: "t-fg492-reap-all-b", runId: runB, status: "failed", completedAt: "2026-07-01T00:10:00Z" });
+  insertEvent({ runId: runB, taskId: "t-fg492-reap-all-b", eventType: "container.started", payload: {} });
 
   const scopedResult = runForge(["ops", "reap-containers", "--project", projectDirA, "--dry-run", "--json"]);
   const scoped = JSON.parse(scopedResult.stdout) as { scanned: number };

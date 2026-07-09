@@ -108,6 +108,13 @@ test("reconcile: container gone WITH a valid result → finalized as complete (l
     assert.equal(evidence.worktreePathChecked, gitDir, "the task's real worktree_path is checked, not hardcoded null");
     assert.deepEqual(evidence.changedFiles, ["?? changed-file.txt"], "changed files are actually computed, not hardcoded []");
     assert.equal(evidence.source, "worktree");
+
+    // FG-492 review: a completed container-gone-with-result task must carry
+    // the same containerEvidence record every other container-gone branch
+    // attaches — completing a task is not exempt from causal evidence.
+    const containerEvidence = getContainerCausalEvidenceFromEvents(eventsForTask("t-result"));
+    assert.ok(containerEvidence, "container_gone_result_present must record containerEvidence, not just OrphanEvidence");
+    assert.equal(containerEvidence!.containerName, "forge-t-result");
   } finally {
     rmSync(gitDir, { recursive: true, force: true });
   }
@@ -273,6 +280,12 @@ test("FG-455: container gone, empty result, but a recoverable stdout result (FG-
   assert.equal(evidence.containerLiveness, "gone");
   assert.equal(evidence.recoverableStdoutResult, true);
   assert.equal(evidence.resultWriteFailed, undefined, "disk write succeeded — no failure noted");
+
+  // FG-492 review: same containerEvidence requirement for the stdout-recovered
+  // completion path.
+  const containerEvidence = getContainerCausalEvidenceFromEvents(eventsForTask(taskId));
+  assert.ok(containerEvidence, "container_gone_result_recovered_from_stdout must record containerEvidence too");
+  assert.equal(containerEvidence!.containerName, `forge-${taskId}`);
 });
 
 test("FG-455 review finding1: recovered stdout result, but the result.json write throws (dir in the way) → task still COMPLETES from the in-memory result, reconcileRun does not throw, and evidence records resultWriteFailed", () => {

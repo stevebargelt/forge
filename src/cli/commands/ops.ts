@@ -54,10 +54,14 @@ export function performOpsRepairCommand(
 // task's container is kept for `forge show`/diagnostic inspection instead of
 // being auto-removed), once they're past the point that evidence is still
 // useful. Read-only by construction over the DB (only ever queries FAILED
-// tasks — a `running` task's container is never a candidate), and the removal
-// itself is best-effort via the same defaultContainerReap reconcile.ts already
-// uses (never throws; "error" means NOT confirmed gone, left alone for a later
-// sweep). --dry-run reports without touching anything.
+// tasks that actually launched one — a `container.started` event is required,
+// the same guard reconcile.ts/reconcile-candidate.ts use — so fanout parents
+// and host-side/manual dispatch, which structurally never had a container,
+// are never scanned or counted as "reaped"; a `running` task's container is
+// never a candidate either), and the removal itself is best-effort via the
+// same defaultContainerReap reconcile.ts already uses (never throws; "error"
+// means NOT confirmed gone, left alone for a later sweep). --dry-run reports
+// without touching anything.
 export type ReapContainersOutcome = {
   dryRun: boolean;
   scanned: number;
@@ -77,7 +81,9 @@ export function performOpsReapContainers(
     .prepare(
       `SELECT t.id AS taskId, t.completed_at AS completedAt
        FROM tasks t JOIN runs r ON r.id = t.run_id
-       WHERE t.status = 'failed' AND (? IS NULL OR r.project_dir = ?)`
+       WHERE t.status = 'failed'
+         AND EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.event_type = 'container.started')
+         AND (? IS NULL OR r.project_dir = ?)`
     )
     .all(opts.projectDir ?? null, opts.projectDir ?? null) as FailedTaskRow[];
 
