@@ -158,6 +158,33 @@ test("FG-492 finding 3: container gone WITH a valid result AND a confirmed clean
   }
 });
 
+// FG-492 review (final round): the comment above hasContainerExited's
+// computation used to claim it was "always false by the time we're here" —
+// that's not true. A real interleaving: forge logs container.exited, then
+// crashes BEFORE the markTaskComplete/failTask DB write that would move the
+// task off `running`. The next reconcile pass finds a `running` task whose
+// event history already has a container.exited event, with the container
+// itself now gone (the crash didn't stop it from actually exiting). This
+// drives exactly that interleaving and confirms the evidence records
+// containerExitedEventObserved=true (the computation was already correct —
+// only the comment was wrong).
+test("FG-492 review (final round): container.exited logged then forge crashes before the DB write → reconcile still finds the task `running`, but evidence records containerExitedEventObserved=true", () => {
+  const taskId = "t-exited-then-crashed";
+  insertContainerized(mkTask(taskId, { status: "running" }));
+  // Simulate forge having logged the exit event before crashing pre-write.
+  logEvent("container.exited", { runId: RUN.id, taskId, payload: { containerName: `forge-${taskId}`, exitCode: 1 } });
+
+  assert.equal(getTask(taskId)!.status, "running", "the crash happened before the DB write — task is still running");
+
+  const r = reconcileRun(RUN.id, GONE);
+
+  assert.deepEqual(r.taskChanges, [{ taskId, from: "running", to: "failed", reason: "container_gone_no_result" }], "no result.json was ever produced, so this is the ordinary orphan path");
+  const events = eventsForTask(taskId);
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+  assert.ok(containerEvidence, "reconcile must still record container causal evidence");
+  assert.equal(containerEvidence.containerExitedEventObserved, true, "forge DID observe the exit before crashing — the evidence must reflect that, not silently default to false");
+});
+
 test("FG-492 finding 3: container gone, no result, confirmed FAILURE exit → NOT reaped (retained for diagnosis)", () => {
   const taskId = "t-failed-exit-retained";
   insertContainerized(mkTask(taskId, { status: "running" })); // clean worktree — no changed files → ordinary orphaned

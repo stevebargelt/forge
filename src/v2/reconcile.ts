@@ -303,15 +303,16 @@ export function reconcileRun(
     try {
     const taskEvents = eventsForTask(t.id);
     const hasContainerStarted = taskEvents.some((e) => e.eventType === "container.started");
-    // FG-492: explicit — record whether Forge itself ever observed this task's
-    // container exit (any attached-exit terminal container event), rather than
-    // just implying "no" from reaching this branch at all. In practice this is
-    // always false by the time we're here (a task only stays `running` with its
-    // container confirmed gone below if the process that would have logged one
-    // of these never got the chance to), but recording it explicitly — instead
-    // of relying on that inference — is exactly what distinguishes "container
-    // disappeared without terminal evidence" from a confirmed exit for
-    // `forge show`/`status`/`ops check`.
+    // FG-492 review (final round): hasContainerExited CAN be true here — it is
+    // not just a defensive placeholder. Forge can log container.exited (or
+    // .idle_timeout / .dependency_provisioning_failed) and then crash BEFORE
+    // the markTaskComplete/failTask write that would move the task off
+    // `running`; the next reconcile pass then finds a `running` task whose
+    // event history already contains a real exit event. Recording this
+    // explicitly — instead of inferring "no" from reaching this branch at all
+    // — is what lets `forge show`/`status`/`ops check` distinguish "container
+    // disappeared without terminal evidence" from a confirmed exit forge
+    // itself already witnessed before crashing on the write.
     const hasContainerExited = taskEvents.some(
       (e) =>
         e.eventType === "container.exited" ||
