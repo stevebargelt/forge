@@ -61,7 +61,7 @@ import { loadProjectAuthProfile, resolveProjectAuthForContainer, ProjectAuthErro
 import { writeTaskManifest, manifestControlPlaneBlock } from "./task-manifest.js";
 import { resolveDocsSurfacesReceipt } from "./contract.js";
 import { emitAgentProgressEvents } from "./agent-progress.js";
-import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource } from "./loader.js";
+import { loadRuntimeWithSource, loadModelPolicyWithSource, loadWorkflowWithSource, type ModelPolicyWithSource } from "./loader.js";
 import {
   resolveModel,
   taskModelFields,
@@ -111,12 +111,35 @@ export type RunNextResult = {
   runStatus: string;              // post-call run status
 };
 
+// FG-365: runContainer previously called loadModelPolicyWithSource once per
+// container dispatch — a fan-out of N children + M reds re-read/re-parsed the
+// same model-policy.yml N+M times. Built once per runNext() call and threaded
+// down through dispatch/runContainer (same pattern as dockerExec) so every
+// dispatch in the wave shares one resolution per projectDir. Fan-out reds run
+// against the integration worktree (a different projectDir than the children),
+// so this keys by projectDir rather than collapsing to a single value.
+function createModelPolicyResolver(
+  loader: typeof loadModelPolicyWithSource = loadModelPolicyWithSource,
+): (projectDir: string) => ModelPolicyWithSource {
+  const cache = new Map<string, ModelPolicyWithSource>();
+  return (projectDir: string) => {
+    const cached = cache.get(projectDir);
+    if (cached) return cached;
+    const resolved = loader({ projectDir });
+    cache.set(projectDir, resolved);
+    return resolved;
+  };
+}
+
 export async function runNext(args: {
   runId: string;
   workflow: Workflow;
   // For testing: override the docker spawn. Real callers leave this undefined
   // and the real `docker run ...` is invoked via buildDockerArgs + child_process.
   dockerExec?: DockerExecFn;
+  // For testing: override/spy on the model-policy loader. Real callers leave
+  // this undefined and the real loadModelPolicyWithSource is used.
+  modelPolicyLoader?: typeof loadModelPolicyWithSource;
 }): Promise<RunNextResult> {
   const run = getRun(args.runId);
   if (!run) throw new Error(`runNext: run not found: ${args.runId}`);
@@ -186,6 +209,7 @@ export async function runNext(args: {
   // Dispatch all ready steps in parallel (Promise.all → "parallel within wave").
   // Each dispatchStep returns the post-dispatch task status for its step.
   const dispatched: string[] = ready.map((s) => s.id);
+  const getModelPolicy = createModelPolicyResolver(args.modelPolicyLoader);
   const outcomes = await Promise.all(
     ready.map((step) => dispatchStep({
       runId: args.runId,
@@ -195,6 +219,7 @@ export async function runNext(args: {
       designDir,
       runMetadata: run.metadata ?? {},
       dockerExec: args.dockerExec,
+      getModelPolicy,
     }))
   );
 
@@ -263,6 +288,7 @@ async function dispatchStep(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
 }): Promise<string> {
   const step = args.step;
 
@@ -284,6 +310,7 @@ async function dispatchStep(args: {
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
     });
   }
 
@@ -295,6 +322,7 @@ async function dispatchStep(args: {
     designDir: args.designDir,
     runMetadata: args.runMetadata,
     dockerExec: args.dockerExec,
+    getModelPolicy: args.getModelPolicy,
   });
 }
 
@@ -308,6 +336,7 @@ async function dispatchSingleStep(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   parentId?: string;            // set when this dispatch is a fanout child
   fanoutInput?: { key: string; value: unknown };  // forwarded into task inputs
   syntheticPhase?: string;      // override phase id for fanout children (e.g. "build-0")
@@ -502,6 +531,7 @@ async function dispatchSingleStep(args: {
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
+    getModelPolicy: args.getModelPolicy,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: cpWorkflowProv.source,
@@ -611,6 +641,7 @@ async function dispatchSingleStep(args: {
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
     });
 
     // Aggregation policy mirrors v1 gate.ts:
@@ -718,6 +749,7 @@ async function dispatchReds(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
 }): Promise<{ verdicts: Verdict[]; authoritativeFail: boolean }> {
   const artifact = JSON.stringify(args.primaryResult, null, 2);
   const allTasks = tasksForRun(args.runId);
@@ -775,6 +807,7 @@ async function dispatchReds(args: {
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
       reviewerContextPacket: red.agent === "shipping-reviewer" ? reviewerContextPacket : undefined,
     }),
   );
@@ -900,6 +933,7 @@ async function runOneRed(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   reviewerContextPacket?: ReviewerContextPacket;
 }): Promise<{ red: RedDef; verdict: Verdict; redTaskId: string }> {
   const redTaskId = newTaskId(`red-${args.step.id}`);
@@ -990,6 +1024,7 @@ async function runOneRed(args: {
     workflowAlias: args.red.activity,
     role: args.red.agent,
     dockerExec: args.dockerExec,
+    getModelPolicy: args.getModelPolicy,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: redWorkflowProv.source,
@@ -1199,6 +1234,7 @@ async function dispatchFanoutStep(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
 }): Promise<string> {
   const step = args.step;
   const fanout = args.fanout;
@@ -1410,6 +1446,7 @@ async function dispatchFanoutStep(args: {
         designDir: args.designDir,
         runMetadata: args.runMetadata,
         dockerExec: args.dockerExec,
+        getModelPolicy: args.getModelPolicy,
         requestedChanges,
       })),
     );
@@ -1436,6 +1473,7 @@ async function dispatchFanoutStep(args: {
           designDir: args.designDir,
           runMetadata: args.runMetadata,
           dockerExec: args.dockerExec,
+          getModelPolicy: args.getModelPolicy,
           requestedChanges,
         })),
       );
@@ -1558,6 +1596,7 @@ async function dispatchFanoutStep(args: {
       designDir: args.designDir,
       runMetadata: args.runMetadata,
       dockerExec: args.dockerExec,
+      getModelPolicy: args.getModelPolicy,
     });
 
     if (aggregate.authoritativeFail) {
@@ -1696,6 +1735,7 @@ async function runFanoutChild(args: {
   designDir?: string;
   runMetadata: Record<string, unknown>;
   dockerExec?: DockerExecFn;
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   requestedChanges?: string;
 }): Promise<ChildOutcome> {
   const step = args.step;
@@ -1832,6 +1872,7 @@ async function runFanoutChild(args: {
     authProfile: authProfileForRole(args.runMetadata, agentRole),
     role: agentRole,
     dockerExec: args.dockerExec,
+    getModelPolicy: args.getModelPolicy,
     controlPlaneInputs: {
       workflowName: args.workflow.name,
       workflowSource: fcWorkflowProv.source,
@@ -1915,6 +1956,11 @@ async function runContainer(args: {
   authProfile?: string;
   role?: string; // AWN-6: agent role, for project-command auth role-gating
   dockerExec?: DockerExecFn;
+  // FG-365: resolves (and memoizes, per projectDir, for the dispatch wave)
+  // model-policy provenance for the controlPlane receipt below — replaces a
+  // direct loadModelPolicyWithSource call so a fan-out of N children + M reds
+  // reads model-policy.yml once per projectDir instead of once per container.
+  getModelPolicy: (projectDir: string) => ModelPolicyWithSource;
   // FG-350: dispatch-time control-plane inputs for the manifest receipt. When
   // provided, runContainer assembles a ControlPlaneReceipt and writes it into
   // the manifest.json so explain views read RECORDED dispatch-time truth.
@@ -2078,9 +2124,9 @@ async function runContainer(args: {
       ...(receiptWarnings ?? []),
       ...(cp.workflowWarnings ?? []),
     ];
-    let modelPolicyLoaded: ReturnType<typeof loadModelPolicyWithSource>;
+    let modelPolicyLoaded: ModelPolicyWithSource;
     try {
-      modelPolicyLoaded = loadModelPolicyWithSource({ projectDir: args.projectDir });
+      modelPolicyLoaded = args.getModelPolicy(args.projectDir);
     } catch (e) {
       const msg = `loadModelPolicy failed: ${(e as Error).message}`;
       cleanupStagedAuth(dir); // AWN-8
