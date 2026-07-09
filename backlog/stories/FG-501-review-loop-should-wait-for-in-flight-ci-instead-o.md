@@ -1,11 +1,9 @@
 ---
 id: FG-501
 type: story
-status: done
+status: active
 title: review-loop should wait for in-flight CI instead of starting duplicate local verification
 created: 2026-07-09
-closed: 2026-07-09
-closed_commit: ad7afee
 ---
 
 ## Problem
