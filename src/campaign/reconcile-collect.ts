@@ -381,9 +381,8 @@ function projectSnapshotStillValid(projectDir: string, expectedHeadSha: string):
  *  above return before reaching this loop and never emit these (no real exec
  *  happened, nothing host-side to show as "in progress"). opts.itemId/
  *  campaignId are optional and threaded straight into the event payload when
- *  the caller has them; reconcile.ts's current call sites don't pass them yet
- *  (see this step's build notes), so those events carry ticketId only until
- *  that wiring lands — this function is ready to receive them either way. */
+ *  the caller has them; reconcile.ts's call sites pass item.id/item.campaignId
+ *  at both capture points. */
 export function runAndRecordHostVerification(
   projectDir: string,
   ticketId: string,

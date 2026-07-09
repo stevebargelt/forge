@@ -136,7 +136,7 @@ export function reconcileCampaign(
         // every other item down with it. A gate that runs to completion still
         // has its real exit recorded as-is; this only guards the invocation.
         try {
-          runGate(projectDir, item.ticketId, { runId: item.runId ?? null });
+          runGate(projectDir, item.ticketId, { runId: item.runId ?? null, itemId: item.id, campaignId: item.campaignId });
         } catch (err) {
           console.error(
             `reconcile: host-verification capture failed for ${item.ticketId} — item degrades to not_recorded: ${(err as Error).message ?? String(err)}`
@@ -180,7 +180,7 @@ export function reconcileCampaign(
         // here degrades only THIS item to its normal lane_evidence_missing
         // refusal path — never crashes the reconcile loop for other items.
         try {
-          runGate(projectDir, item.ticketId, { runId: item.runId ?? null });
+          runGate(projectDir, item.ticketId, { runId: item.runId ?? null, itemId: item.id, campaignId: item.campaignId });
         } catch (err) {
           console.error(
             `reconcile: host-verification capture failed for ${item.ticketId} — item degrades to its normal refusal path: ${(err as Error).message ?? String(err)}`

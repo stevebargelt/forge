@@ -7,6 +7,7 @@ import { renderResultByAgent, md } from "./renderers.js";
 import { UsageView } from "./usage.js";
 import { GovernanceView } from "./governance.js";
 import { BacklogView } from "./backlog.js";
+import { verificationRowLabel } from "./verification-label.js";
 
 const html = htm.bind(h);
 const POLL_MS = 2000;
@@ -39,6 +40,7 @@ function App() {
   // host-gate execs, in progress right now — polled alongside feed/in-flight
   // so a launched loop is visible before any task row exists for it.
   const [inProgressVerifications, setInProgressVerifications] = useState([]);
+  const [reviewLoopPhases, setReviewLoopPhases] = useState([]);
   const [verifyTicketId, setVerifyTicketId] = useState("");
   const [verifyItemId, setVerifyItemId] = useState("");
   const [verifyEvidence, setVerifyEvidence] = useState(null);
@@ -51,14 +53,16 @@ function App() {
         fetch(`/api/feed${q ? q + "&limit=100" : "?limit=100"}`),
         fetch(`/api/in-flight${q}`),
         fetch(`/api/verifications/in-progress${q}`),
+        fetch(`/api/review-loop/phases${q}`),
       ];
       // Only poll /api/projects on the projects view (or first load) — saves a
       // filesystem scan every 2s on the activity view.
       if (view === "projects" || projects.length === 0) reqs.push(fetch("/api/projects"));
-      const [feedRes, ifRes, ivRes, projRes] = await Promise.all(reqs);
+      const [feedRes, ifRes, ivRes, phasesRes, projRes] = await Promise.all(reqs);
       if (feedRes.ok) setFeed(await feedRes.json());
       if (ifRes.ok) setInFlight(await ifRes.json());
       if (ivRes && ivRes.ok) setInProgressVerifications(await ivRes.json());
+      if (phasesRes && phasesRes.ok) setReviewLoopPhases(await phasesRes.json());
       if (projRes && projRes.ok) setProjects(await projRes.json());
       setError(null);
       setNow(Date.now());
@@ -250,6 +254,7 @@ function App() {
           <${InFlightSection}
             inFlight=${inFlight}
             verifications=${inProgressVerifications}
+            phases=${reviewLoopPhases}
             now=${now}
             orchCollapsed=${orchCollapsed}
             onToggleOrch=${() => setOrchCollapsed((c) => !c)}
@@ -428,9 +433,14 @@ function ProjectChip({ entry }) {
   `;
 }
 
-function InFlightSection({ inFlight, verifications, now, orchCollapsed, onToggleOrch, onTaskClick }) {
+function InFlightSection({ inFlight, verifications, phases, now, orchCollapsed, onToggleOrch, onTaskClick }) {
   const orchestrators = inFlight.filter((t) => t.agentRole === "orchestrator");
   const work = inFlight.filter((t) => t.agentRole !== "orchestrator");
+
+  // FG-487: /api/review-loop/phases' "reviewing"/"fixing" phase vocabulary,
+  // keyed by runId, so a review-loop task row can show it explicitly instead
+  // of only agentRole + status.
+  const phaseByRunId = new Map((phases || []).map((p) => [p.runId, p.phase]));
 
   // FG-487: a review-loop's verification / CI-wait window (and a campaign
   // reconcile host-gate exec) can be running with NO task row yet — the loop
@@ -462,7 +472,7 @@ function InFlightSection({ inFlight, verifications, now, orchCollapsed, onToggle
         ? html`<div class="empty">No live tasks. Polling every ${POLL_MS / 1000}s.</div>`
         : work.length === 0
         ? (standalone.length > 0 ? null : html`<div class="empty">No agent work in flight.</div>`)
-        : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} onClick=${() => onTaskClick(t.taskId)} />`)
+        : work.map((t) => html`<${InFlightItem} key=${t.taskId} task=${t} reviewLoopPhase=${phaseByRunId.get(t.runId)} onClick=${() => onTaskClick(t.taskId)} />`)
       }
     </section>
   `;
@@ -478,7 +488,7 @@ function VerificationRow({ v, now }) {
   const startedMs = v.startedAt ? new Date(v.startedAt).getTime() : null;
   const elapsed = startedMs != null ? now - startedMs : null;
   const isGate = v.kind === "campaign_reconcile_gate";
-  const label = isGate ? "host gate" : (v.mode === "ci-wait" ? "waiting-on-ci" : "verifying");
+  const label = verificationRowLabel(v);
   const badgeClass = v.stale ? "status-failed" : "status-running";
   return html`
     <div class="item">
@@ -496,7 +506,7 @@ function VerificationRow({ v, now }) {
   `;
 }
 
-function InFlightItem({ task, onClick, muted }) {
+function InFlightItem({ task, reviewLoopPhase, onClick, muted }) {
   // #290: a running task whose container is gone is a reconcile candidate, not
   // ordinary live work — badge it distinctly so the dashboard stops showing
   // stale `running`. The title carries the reason + the read-only nature.
@@ -505,10 +515,16 @@ function InFlightItem({ task, onClick, muted }) {
         ? "container gone, valid result exists — finished but unreconciled. Run forge show/status/next to finalize."
         : "container gone, no result — orphaned. Run forge show/status/next to finalize.")
     : null;
+  // FG-487: once a review-loop round's reviewer/fixer task starts, label its
+  // badge with the same "reviewing"/"fixing" phase vocabulary AC1 requires,
+  // sourced from GET /api/review-loop/phases — rather than leaving it to the
+  // generic status text ("running").
   return html`
     <div class=${"item" + (muted ? " item-muted" : "")} onClick=${onClick}>
       ${task.reconcile
         ? html`<span class="badge status-reconcile_candidate" title=${reconcileTitle}>reconcile candidate</span>`
+        : reviewLoopPhase
+        ? html`<span class="badge status-${task.status}" title=${"review-loop phase: " + reviewLoopPhase}>${reviewLoopPhase}</span>`
         : html`<span class="badge status-${task.status}">${task.status.replace(/_/g, " ")}</span>`}
       <div>
         <div>
