@@ -1620,7 +1620,7 @@ test("FG-502 fix dep: backlog/ path is unconditionally disallowed even if (erron
   assert.equal(status, "", "tree must be clean after the full-abort revert");
 });
 
-test("FG-502 fix dep: backlog/ violation MIXED with a surviving in-scope change still full-aborts the round — the hard guard is never relaxed by a legitimate co-change", async () => {
+test("FG-502 fix dep: backlog/ violation MIXED with a surviving in-scope change is reverted PATH-LEVEL — the backlog path is removed, the in-scope change survives and commits, and the round record surfaces the reverted path as guidance (operator-decided, ticket Non-Goals)", async () => {
   writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
   gitExec(["add", "."], projectDir);
   gitExec(["commit", "-m", "add package.json"], projectDir);
@@ -1629,23 +1629,30 @@ test("FG-502 fix dep: backlog/ violation MIXED with a surviving in-scope change 
     mkdirSync(join(projectDir, "backlog"), { recursive: true });
     writeFileSync(join(projectDir, "backlog", "story.md"), "story\n");
     // A NEW untracked in-scope file, distinct from the beforeEach-committed
-    // src.ts — proves the guard reverts a genuinely novel legitimate change,
-    // not just a modification of an already-tracked path.
+    // src.ts — proves the guard reverts only the disallowed path, not the
+    // whole round, when a genuinely novel legitimate change co-occurs.
     writeFileSync(join(projectDir, "in-scope.ts"), "// fixed\n");
     return COMPLETE();
   };
   const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn);
   const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
 
-  assert.equal(r.ok, false, `a backlog violation must full-abort the round even with a surviving in-scope change, got: ${JSON.stringify(r)}`);
-  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
-  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
-  assert.ok(offending.includes("backlog/story.md"));
-  assert.equal((r as { committedSha?: string }).committedSha, undefined, "nothing must be committed on a full-abort round");
+  assert.equal(r.ok, true, `the in-scope change must survive and commit despite the mixed backlog violation, got: ${JSON.stringify(r)}`);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, undefined, "must NOT be a full-abort outOfScope — an in-scope change survives the revert");
+  const committedSha = (r as { committedSha?: string }).committedSha;
+  assert.ok(committedSha, "the in-scope change must be committed");
+
+  const reverted = (r as { revertedPaths?: { path: string; reason: string }[] }).revertedPaths ?? [];
+  assert.ok(reverted.some((p) => p.path === "backlog/story.md"), `expected backlog/story.md in revertedPaths: ${JSON.stringify(reverted)}`);
 
   const status = gitExec(["status", "--porcelain"], projectDir).trim();
-  assert.equal(status, "", "tree must be clean after the full-abort revert — the in-scope change must also be reverted, not just the backlog path");
-  assert.equal(existsSync(join(projectDir, "in-scope.ts")), false, "the in-scope change is reverted too — a full-round abort, not a partial one");
+  assert.equal(status, "", "tree must be clean after commit");
+  assert.equal(existsSync(join(projectDir, "backlog", "story.md")), false, "the backlog path must have been reverted, not committed");
+  assert.equal(existsSync(join(projectDir, "in-scope.ts")), true, "the in-scope change survives — path-level enforcement, not a whole-round abort");
+
+  const committedFiles = gitExec(["show", "--name-only", "--format=", committedSha!], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("in-scope.ts"), `expected in-scope.ts in the commit, got: ${JSON.stringify(committedFiles)}`);
+  assert.ok(!committedFiles.includes("backlog/story.md"), "the reverted backlog path must not appear in the commit");
 });
 
 test("FG-502 fix dep: fixer renames a docs/ path OUT to an in-scope path — the whole rename is reverted as one unit (old path restored, new path removed), never left half-applied", async () => {
@@ -1927,32 +1934,74 @@ test("FG-502 computeInRangeDocsPaths: a spansUnmatched range diffs the PRECISE s
 
 // ── FG-502: reviewed-tip-vs-remote trust check ───────────────────────────────
 //
-// resolveRemoteRef mirrors claude.ts's statusBanner ahead-of-origin helper —
-// a LOCALLY CACHED remote-tracking ref, no implicit `git fetch`. These tests
-// seed refs/remotes/origin/{main,HEAD} directly via `git update-ref` /
-// `git symbolic-ref` (local ref plumbing, not a network fetch) to simulate a
-// clone's already-cached remote-tracking state deterministically.
+// resolveRemoteRef resolves a LOCALLY CACHED remote-tracking ref, no implicit
+// `git fetch`. Candidate order is `@{u}` (the branch's configured upstream)
+// FIRST, `origin/HEAD` only as a fallback when no upstream is configured —
+// `origin/HEAD` virtually always resolves (it tracks the default branch), so
+// checking it first would compare a pre-merge feature-branch tip against
+// main, where it can never be an ancestor. These tests seed
+// refs/remotes/origin/{<branch>,HEAD} and branch.<branch>.{remote,merge}
+// directly via `git update-ref` / `git symbolic-ref` / `git config` (local
+// ref/config plumbing, not a network fetch) to simulate a clone's
+// already-cached remote-tracking state deterministically.
 
 function setLocalOriginHead(dir: string, sha: string): void {
   gitExec(["update-ref", "refs/remotes/origin/main", sha], dir);
   gitExec(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], dir);
 }
 
-test("FG-502 resolveReviewedTipTrust: reviewed tip IS an ancestor of a locally cached origin/HEAD → trusted", async () => {
+/** Configure the current branch's upstream (`@{u}`) to a locally cached
+ *  remote-tracking ref at `sha` — simulates "this branch has been pushed and
+ *  tracks its own remote ref", independent of origin/HEAD (the default
+ *  branch's tracking ref). `branch.<name>.merge` alone isn't recognized as a
+ *  remote-tracking upstream without a `remote.origin.fetch` refspec (git
+ *  requires an actual `git remote add` to establish that mapping — a bare
+ *  `git config` of the branch keys errors "not stored as a remote-tracking
+ *  branch"), so this registers a (fake, never-contacted) origin remote too. */
+function setLocalUpstream(dir: string, sha: string): void {
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], dir).trim();
+  gitExec(["update-ref", `refs/remotes/origin/${branch}`, sha], dir);
+  try {
+    gitExec(["remote", "add", "origin", "https://example.invalid/repo.git"], dir);
+  } catch { /* already added by an earlier call in this test */ }
+  gitExec(["config", `branch.${branch}.remote`, "origin"], dir);
+  gitExec(["config", `branch.${branch}.merge`, `refs/heads/${branch}`], dir);
+}
+
+test("FG-502 resolveReviewedTipTrust: with an upstream configured, trust uses @{u} — a tip pushed to the feature branch is trusted even though it is not on origin/HEAD (main)", async () => {
+  // origin/HEAD (main) is pinned at the pre-feature baseline — a pre-merge
+  // feature-branch tip can never be an ancestor of it.
+  const baseSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setLocalOriginHead(projectDir, baseSha);
+
+  writeFileSync(join(projectDir, "feature.txt"), "feature\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feature commit"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // The feature branch has been pushed — its upstream tracks the pushed tip.
+  setLocalUpstream(projectDir, tipSha);
+
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+  assert.equal(trust.kind, "trusted", `expected @{u} to be preferred over origin/HEAD: ${JSON.stringify(trust)}`);
+  assert.equal((trust as { remoteRef: string }).remoteRef, "@{u}");
+});
+
+test("FG-502 resolveReviewedTipTrust: no upstream configured → falls back to origin/HEAD — reviewed tip IS an ancestor of a locally cached origin/HEAD → trusted", async () => {
   writeFileSync(join(projectDir, "a.txt"), "a\n");
   gitExec(["add", "."], projectDir);
   gitExec(["commit", "-m", "commit A"], projectDir);
   const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
-  setLocalOriginHead(projectDir, tipSha);
+  setLocalOriginHead(projectDir, tipSha); // no upstream configured — the fallback candidate
 
   const trust = resolveReviewedTipTrust(projectDir, tipSha);
   assert.equal(trust.kind, "trusted");
   assert.equal((trust as { remoteRef: string }).remoteRef, "origin/HEAD");
 });
 
-test("FG-502 resolveReviewedTipTrust: reviewed tip is NOT an ancestor of origin/HEAD → local_only, names the local-only commit(s) + next action data", async () => {
+test("FG-502 resolveReviewedTipTrust: no upstream configured, falls back to origin/HEAD — reviewed tip is NOT an ancestor → local_only, names the local-only commit(s) + next action data", async () => {
   const baseSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
-  setLocalOriginHead(projectDir, baseSha); // origin is behind — never fetched, just locally cached at the pre-fixer sha
+  setLocalOriginHead(projectDir, baseSha); // origin is behind — never fetched, just locally cached at the pre-fixer sha; no upstream configured
 
   writeFileSync(join(projectDir, "local-only.txt"), "local\n");
   gitExec(["add", "."], projectDir);
