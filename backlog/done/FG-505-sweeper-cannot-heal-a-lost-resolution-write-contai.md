@@ -1,9 +1,11 @@
 ---
 id: FG-505
 type: story
-status: active
+status: done
 title: sweeper cannot heal a lost resolution write (container gone, reap_failed sticky forever); dry-run leak wording says now swept
 created: 2026-07-09
+closed: 2026-07-09
+closed_commit: df1f06a0c2cf64456abc7c9789aaa44aab508c0c
 ---
 
 ## Problem
