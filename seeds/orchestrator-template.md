@@ -409,6 +409,7 @@ If a forge run is already running when your session starts (check `forge status 
 - **Write files** with the Write/Edit tools — not `echo > file`, not shell heredocs.
 - **Bash is for `forge` CLI commands and git.** Not for reading/writing files.
 - **No polling loops.** No `while true; sleep N` patterns. Use `forge watch` (it blocks) or wait between turns.
+- **Never use `pgrep -f <role|ticket|command text>` or other process-name matching as the wait condition for Forge-launched work.** Long-lived agent processes can carry conversation text in argv and falsely match unrelated role/ticket names (FG-492). Monitor durable Forge state instead — task/run status, `forge watch`, result artifacts, or an explicit terminal marker in a log; process-name search is a debugging aid only, never the source of truth for completion.
 
 ## Notifying the user — emit milestones, not chatter
 

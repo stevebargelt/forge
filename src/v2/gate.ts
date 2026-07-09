@@ -28,7 +28,8 @@ import { getDb } from "../store/db.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun } from "../store/runs.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForTask } from "../store/events.js";
+import { finalizeContainerRetention } from "./docker-exec.js";
 import { newGateId, newTaskId, nowIso } from "../util/ids.js";
 import { loadWorkflow } from "./loader.js";
 import type { Workflow, Step } from "./schema.js";
@@ -162,6 +163,20 @@ export async function gate(
     // Non-fanout or non-blocked advance: unchanged.
     markTaskComplete(taskId, task.result);
     logEvent("task.completed", { runId: run.id, taskId });
+
+    // FG-492 final round: this task paused at a human/verdict gate with its
+    // container retained per the outcome-keyed policy (awaiting_gate is not
+    // "complete", so runNext.ts's own finalizeContainerRetention call kept
+    // it). Reconcile's reap sweep only ever revisits tasks that are still
+    // `running` — this task left `running` the moment it became awaiting_gate
+    // — so nothing else ever reaps this container once it advances here. Now
+    // that it's genuinely complete, reap best-effort. Only tasks with their
+    // own agent container (containerName forge-<taskId>) reach this — manual
+    // steps and fanout parents never emit container.started for themselves,
+    // same signal reconcile.ts gates its own container logic on.
+    if (eventsForTask(taskId).some((e) => e.eventType === "container.started")) {
+      finalizeContainerRetention(`forge-${taskId}`, true);
+    }
 
     // If this was the last step (no step depends on it) and every primary
     // task is now terminal, mark the run complete. The runner does this on

@@ -27,7 +27,7 @@ import {
   provisionerContainerName,
   type DependencyVolumePlan,
 } from "./dependency-provisioning.js";
-import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { join } from "node:path";
 import type { Task, TaskPackage, Verdict, Finding, RedAuthority, ReviewerContextPacket, DoneAuditResult } from "../types/index.js";
 import type { Workflow, Step, Runtime, RedDef, FanoutDef } from "./schema.js";
@@ -39,7 +39,7 @@ import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
 import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
-import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
+import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
 import { getDb } from "../store/db.js";
@@ -529,6 +529,12 @@ async function dispatchSingleStep(args: {
   }
 
   const result = dispatchResult.result;
+  // FG-492 review: runContainer deliberately left the reap/retain decision to
+  // us — a valid result doesn't mean the STEP succeeds; persistence, merge,
+  // the integration gate, reds, and a human gate can still fail/pause it
+  // below. Reap only once we reach the actual "complete" outcome; every
+  // return before that retains (see finalizeContainerRetention calls below).
+  const containerName = dispatchResult.containerName;
 
   // #254: persistence assertion. If the agent reports a complete result with
   // files_modified but none of those files landed on the host project mount, the
@@ -538,6 +544,7 @@ async function dispatchSingleStep(args: {
   if (!persistence.ok) {
     const error = persistenceErrorMessage(persistence);
     failTask(taskId, { runId: args.runId, kind: "work_not_persisted", error, result });
+    finalizeContainerRetention(containerName, false);
     return "failed";
   }
 
@@ -549,6 +556,7 @@ async function dispatchSingleStep(args: {
     if (!merge.ok) {
       failTask(taskId, { runId: args.runId, kind: "merge_conflict", error: merge.error, result });
       // Retain worktree and branch for inspection — do NOT call removeWorktreeIfSafe.
+      finalizeContainerRetention(containerName, false);
       return "failed";
     }
     // FG-357: post-merge integration gate. The merge above only proves the
@@ -564,6 +572,7 @@ async function dispatchSingleStep(args: {
         error: `post-merge integration gate failed: ${gate.error}\n${gate.output}`,
         result,
       });
+      finalizeContainerRetention(containerName, false);
       return "failed";
     }
 
@@ -620,6 +629,9 @@ async function dispatchSingleStep(args: {
           logEvent("task.blocked_by_red", { runId: args.runId, taskId });
         }
       })();
+      // FG-492 review: blocked_by_red (whether applied here or lost to a
+      // concurrent transition) is never "complete" — retain either way.
+      finalizeContainerRetention(containerName, false);
       if (!blockedByRedApplied) {
         return getTask(taskId)?.status ?? "failed";
       }
@@ -630,6 +642,11 @@ async function dispatchSingleStep(args: {
     }
     // No authoritative fail — proceed to normal gate semantics.
     const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
+    // FG-492 review: reap only on the real "complete" outcome — gate=human/
+    // verdict returns "awaiting_gate" (paused, not failed, but not done
+    // either), and a lost CAS race reports the task's actual terminal status.
+    // Either way, anything other than "complete" retains.
+    finalizeContainerRetention(containerName, statusAfterReds === "complete");
     // FG-352: cleanup after proven-merged worktree (provenMerged=true because
     // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
     if (statusAfterReds === "complete" && primaryWorktreePath) {
@@ -639,6 +656,8 @@ async function dispatchSingleStep(args: {
   }
 
   const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
+  // FG-492 review: same reap-only-on-complete rule as the reds branch above.
+  finalizeContainerRetention(containerName, finalStatus === "complete");
   // FG-352: cleanup after proven-merged worktree (provenMerged=true because
   // the merge-back succeeded above). Also removes in EPHEMERAL test mode.
   if (finalStatus === "complete" && primaryWorktreePath) {
@@ -1006,9 +1025,14 @@ async function runOneRed(args: {
 
   // AWN-2 task-level race: only emit task.completed if the CAS actually completed
   // it (not if a concurrent cancel already terminated it).
-  if (markTaskComplete(redTaskId, result.result)) {
+  const redCompleted = markTaskComplete(redTaskId, result.result);
+  if (redCompleted) {
     logEvent("task.completed", { runId: args.runId, taskId: redTaskId });
   }
+  // FG-492 review: a red is read-only (no merge/gate downstream) — its
+  // container's fate is decided right here. Reap only if the CAS above
+  // actually completed it; a lost race to a concurrent cancel retains.
+  finalizeContainerRetention(result.containerName, redCompleted);
   if (args.red.agent === "shipping-reviewer") {
     return {
       red: args.red,
@@ -1834,11 +1858,15 @@ async function runFanoutChild(args: {
   }
 
   // AWN-2 task-level race: don't overwrite / re-announce a concurrently-cancelled child.
-  if (markTaskComplete(childTaskId, dispatchResult.result)) {
+  const childCompleted = markTaskComplete(childTaskId, dispatchResult.result);
+  if (childCompleted) {
     logEvent("task.completed", { runId: args.runId, taskId: childTaskId });
     // FG-353: cleanup responsibility moves to dispatchFanoutStep after proven HEAD merge.
     // The old per-child removeWorktreeIfSafe call is removed here.
   }
+  // FG-492 review: reap only if the CAS above actually completed the child —
+  // a lost race to a concurrent cancel retains its container.
+  finalizeContainerRetention(dispatchResult.containerName, childCompleted);
   return {
     index: args.index,
     value: args.value,
@@ -1854,8 +1882,15 @@ async function runFanoutChild(args: {
 // the caller writes the final status (complete vs awaiting_gate vs blocked).
 //
 // This is the shared core used by primary, red, and fanout-child dispatches.
+// FG-492 review: `containerName` rides on the "ok" outcome so the caller
+// (dispatchSingleStep / runOneRed / runFanoutChild) can decide reap-vs-retain
+// once IT knows the task's real final outcome — a valid result here doesn't
+// mean the task ultimately succeeds (merge conflict, integration gate, reds,
+// or a human gate can still fail/pause it downstream). Every failure branch
+// inside runContainer already knows its own outcome is terminal-failed, so it
+// retains (or reaps under FORGE_CONTAINER_RETENTION=off) right there.
 type ContainerOutcome =
-  | { kind: "ok"; result: unknown }
+  | { kind: "ok"; result: unknown; containerName: string }
   | { kind: "failed"; error: string };
 
 async function runContainer(args: {
@@ -2152,6 +2187,11 @@ async function runContainer(args: {
           stdoutPath: provisionStdoutPath,
           stderrPath: provisionStderrPath,
           idleTimeoutMs: DEPENDENCY_PROVISIONER_IDLE_TIMEOUT_MS,
+          // FG-492 finding 2: the provisioner keeps its own --rm lifecycle
+          // (FG-437) — skip docker-exec.ts's capture-at-close/reap policy so a
+          // clean provisioner run doesn't `docker inspect`/`docker rm -f` a
+          // container the daemon has likely already auto-removed.
+          isProvisionerExec: true,
         });
         const stderrTail = existsSync(provisionStderrPath) ? readFileSync(provisionStderrPath, "utf8").trim() : "";
         return { exitCode: provisionerExitCode, stderrTail };
@@ -2231,6 +2271,11 @@ async function runContainer(args: {
   const containerName = `forge-${args.taskId}`;
   logEvent("container.started", { runId: args.runId, taskId: args.taskId, payload: { containerName } });
   let exitCode: number;
+  // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
+  // every terminal container event below (mirrors invoke.ts). FG-492 review:
+  // reap-vs-retain is decided separately, below, once result.json's outcome
+  // is known — see finalizeContainerRetention.
+  let containerEvidence: ContainerCausalEvidence | undefined;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
@@ -2238,6 +2283,7 @@ async function runContainer(args: {
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
+      onContainerEvidence: (e) => { containerEvidence = e; },
     });
   } catch (e) {
     // #155: capture usage on docker failure too — tokens may have flown before crash.
@@ -2283,10 +2329,12 @@ async function runContainer(args: {
   // #173: the watchdog killed a hung agent (no stdout within the idle timeout).
   // Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
-    logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+    logEvent("container.idle_timeout", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const msg = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     const kind = classify({ exitCode });
     failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }
 
@@ -2298,13 +2346,15 @@ async function runContainer(args: {
   // branch below.
   if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.dependency_provisioning_failed", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+    logEvent("container.dependency_provisioning_failed", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const msg = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(args.taskId, { runId: args.runId, kind: classify({ source: "verification_environment_unavailable" }), error: msg });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }
 
-  logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode } });
+  logEvent("container.exited", { runId: args.runId, taskId: args.taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
 
   const resultPath = join(dir, "result.json");
   const resultRaw = existsSync(resultPath) ? readFileSync(resultPath, "utf8").trim() : "";
@@ -2327,6 +2377,8 @@ async function runContainer(args: {
     // FG-461: oom_killed / container_crash carry recovery evidence; model_error
     // is not in ORPHAN_EVIDENCE_KINDS, so recoveryEvidenceFor returns undefined.
     failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }
   let result: unknown;
@@ -2335,6 +2387,8 @@ async function runContainer(args: {
   } catch {
     const msg = "result.json malformed";
     failTask(args.taskId, { runId: args.runId, kind: classify({ resultState: "malformed" }), error: msg });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention in docker-exec.ts).
+    finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }
   if (!result) {
@@ -2356,13 +2410,25 @@ async function runContainer(args: {
     const inferred = inferredResultFrom(a, args.role);
     if (inferred) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
-      return { kind: "ok", result: inferred };
+      return { kind: "ok", result: inferred, containerName };
     }
-    failTask(args.taskId, { runId: args.runId, kind, error: msg });
+    // FG-492 finding 2: result_missing now joins ORPHAN_EVIDENCE_KINDS, so
+    // recoveryEvidenceFor gathers the same worktree-diff evidence as
+    // container_crash/idle_timeout for it; model_error is not in that set, so
+    // recoveryEvidenceFor returns undefined for it, matching line 2339 above.
+    failTask(args.taskId, { runId: args.runId, kind, error: msg, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: this is exactly the state-4 case the retention fix
+    // targets — a clean exit that produced no result.json is retained, not
+    // reaped.
+    finalizeContainerRetention(containerName, false);
     return { kind: "failed", error: msg };
   }
 
-  return { kind: "ok", result };
+  // FG-492 review: a valid result here does NOT mean reap now — the caller
+  // still has to run the persistence check, worktree merge, integration gate,
+  // reds, and gate before the task's real outcome is known. containerName
+  // rides on the outcome so the caller can decide once it does.
+  return { kind: "ok", result, containerName };
 }
 
 function dispatchManualStep(runId: string, step: Step): string {

@@ -5,7 +5,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
 import { insertTask, getTask } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
-import { retry, RetryNotAllowedError, FanoutChildRetryError } from "./retry.js";
+import { retry, RetryNotAllowedError, FanoutChildRetryError, reapRetainedContainer } from "./retry.js";
 import { retryPolicy } from "./retry-policy.js";
 import type { Run, Task } from "../types/index.js";
 
@@ -270,4 +270,37 @@ test("retry: a RED reviewer child (parentId + same phase, agentRole prefixed red
   const out = await retry("red-child");
   assert.equal(out.newTask.status, "pending");
   assert.equal(out.newTask.parentId, undefined);
+});
+
+// ── FG-492: reap-before-retry hygiene ────────────────────────────────────────
+// retry() always mints a fresh task id (see the newId comment above), so the
+// new task's container name (forge-<newId>) never collides with the old
+// failed task's retained container — but that old container's diagnostic
+// value is spent once an operator retries, so it's reaped as cleanup.
+
+test("reapRetainedContainer: attempts `docker rm -f forge-<taskId>` for the OLD (failed) task", () => {
+  const calls: Array<{ cmd: string; args: string[] }> = [];
+  const fake = ((cmd: string, args: string[]) => {
+    calls.push({ cmd, args });
+    return Buffer.from("");
+  }) as unknown as typeof import("node:child_process").execFileSync;
+
+  reapRetainedContainer("t-old-failed", fake);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], { cmd: "docker", args: ["rm", "-f", "-v", "forge-t-old-failed"] });
+});
+
+test("reapRetainedContainer: never throws when docker is unreachable or the container is already gone", () => {
+  const throwingFake = (() => {
+    throw new Error("docker: command not found");
+  }) as unknown as typeof import("node:child_process").execFileSync;
+  assert.doesNotThrow(() => reapRetainedContainer("t-gone", throwingFake));
+});
+
+test("retry: reaps the OLD failed task's container as part of a successful retry, without blocking it", async () => {
+  failedTask("t-reap-on-retry", "container_crash", "boom");
+  const out = await retry("t-reap-on-retry");
+  // No real docker in this environment — retry() must still succeed; the reap
+  // is best-effort and never blocks the retry itself.
+  assert.equal(out.newTask.status, "pending");
 });

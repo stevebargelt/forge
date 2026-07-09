@@ -26,7 +26,7 @@ import { resolveRuntimeMetadata } from "./schema.js";
 import { analyzeProviderFailure } from "./provider-failure.js";
 import { insertTask, markTaskRunning, markTaskComplete, tasksForRun, getTask } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
-import type { FailureKind, OrphanEvidence } from "./failure-kind.js";
+import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -38,7 +38,7 @@ import { resolvePolicyPath } from "../raci/project.js";
 import { explainRouteFile } from "../cli/commands/route.js";
 import { resolveIdleTimeoutMs, IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
-import { defaultDockerExec, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
+import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, type DockerExecFn } from "./docker-exec.js";
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
@@ -459,6 +459,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const containerName = `forge-${taskId}`;
   logEvent("container.started", { runId, taskId, payload: { containerName } });
   let exitCode: number;
+  // FG-492: populated by docker-exec.ts's capture-at-close. Attached onto
+  // every terminal container event below so `forge show`/`status`/`ops check`
+  // can render "confirmed container exit — exit N, signal S, OOMKilled=B"
+  // instead of an unproven "killed" label. FG-492 review: reap-vs-retain is
+  // decided separately, below, once result.json's outcome is known — see
+  // finalizeContainerRetention.
+  let containerEvidence: ContainerCausalEvidence | undefined;
   try {
     exitCode = await exec({
       args: dockerArgs.args,
@@ -466,6 +473,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       stdoutPath,
       stderrPath,
       idleTimeoutMs,
+      onContainerEvidence: (e) => { containerEvidence = e; },
     });
   } catch (e) {
     // #155: capture usage even on docker failure — the task may have streamed
@@ -518,10 +526,15 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // #173: the watchdog SIGKILLed a hung agent (no stdout within the idle
   // timeout). Fail with a clear reason rather than a generic container_crash.
   if (exitCode === IDLE_TIMEOUT_EXIT_CODE) {
-    logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode } });
+    logEvent("container.idle_timeout", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `idle_timeout (no agent output for ${Math.round(idleTimeoutMs / 60000)}m)`;
     const kind = classify({ exitCode });
     failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: the reap/retain decision moves here, keyed on the TASK
+    // outcome (false = failed) rather than the raw exit code — retained for
+    // `forge show --diagnostic` / `docker inspect` unless
+    // FORGE_CONTAINER_RETENTION=off forces an immediate reap regardless.
+    finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -534,14 +547,16 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // generic crash.
   if (exitCode === DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE) {
     const stderrTail = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8").trim() : "";
-    logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode } });
+    logEvent("container.dependency_provisioning_failed", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
     const error = `verification_environment_unavailable: dependency install failed${stderrTail ? ` — ${stderrTail}` : ""}`;
     failTask(taskId, { runId, kind: classify({ source: "verification_environment_unavailable" }), error });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention above).
+    finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
 
-  logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode } });
+  logEvent("container.exited", { runId, taskId, payload: { containerName, exitCode, ...(containerEvidence ? { containerEvidence } : {}) } });
 
   // Read result.json.
   const resultPath = join(dir, "result.json");
@@ -567,6 +582,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     // (a clean provider rejection) is not in ORPHAN_EVIDENCE_KINDS, so
     // recoveryEvidenceFor returns undefined for it.
     failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention above).
+    finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -577,6 +594,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   } catch {
     const error = "result.json malformed";
     failTask(taskId, { runId, kind: classify({ resultState: "malformed" }), error });
+    // FG-492 review: task failed — retain (see finalizeContainerRetention above).
+    finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -601,14 +620,25 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
       if (!markTaskComplete(taskId, inferred)) {
         const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
+        // FG-492 review: reap only if the task actually ended up complete —
+        // a lost CAS race to a concurrent cancel is a failure, not a success.
+        finalizeContainerRetention(containerName, finalStatus === "complete");
         closeRunIfIdle(finalStatus === "complete");
         return { runId, taskId, status: finalStatus, result: inferred, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
       }
       logEvent("task.completed", { runId, taskId });
+      finalizeContainerRetention(containerName, true);
       closeRunIfIdle(true);
       return { runId, taskId, status: "complete", result: inferred };
     }
-    failTask(taskId, { runId, kind, error });
+    // FG-492 finding 1: result_missing now joins ORPHAN_EVIDENCE_KINDS, so
+    // recoveryEvidenceFor gathers the same worktree-diff evidence as
+    // container_crash/idle_timeout for it; model_error is not in that set, so
+    // recoveryEvidenceFor returns undefined for it, matching the branch above.
+    failTask(taskId, { runId, kind, error, evidence: recoveryEvidenceFor(kind) });
+    // FG-492 review: this is exactly the state-4 case the retention fix targets
+    // — a clean exit that produced no result.json is retained, not reaped.
+    finalizeContainerRetention(containerName, false);
     closeRunIfIdle(false);
     return { runId, taskId, status: "failed", error };
   }
@@ -621,6 +651,8 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     if (!persistence.ok) {
       const error = persistenceErrorMessage(persistence);
       failTask(taskId, { runId, kind: "work_not_persisted", error, result });
+      // FG-492 review: task failed — retain (see finalizeContainerRetention above).
+      finalizeContainerRetention(containerName, false);
       closeRunIfIdle(false);
       return { runId, taskId, status: "failed", error };
     }
@@ -632,10 +664,16 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // task.completed and report success if we actually completed it.
   if (!markTaskComplete(taskId, result)) {
     const finalStatus = getTask(taskId)?.status === "failed" ? "failed" : "complete";
+    // FG-492 review: reap only if the task actually ended up complete.
+    finalizeContainerRetention(containerName, finalStatus === "complete");
     closeRunIfIdle(finalStatus === "complete");
     return { runId, taskId, status: finalStatus, result, ...(finalStatus === "failed" ? { error: getTask(taskId)?.error ?? "cancelled" } : {}) };
   }
   logEvent("task.completed", { runId, taskId });
+  // FG-492 review: task marked complete with a valid result — nothing left to
+  // investigate on this container, reap it now instead of leaving it to
+  // `forge ops reap-containers` or a stray reconcile pass.
+  finalizeContainerRetention(containerName, true);
   closeRunIfIdle(true);
   return { runId, taskId, status: "complete", result };
 }

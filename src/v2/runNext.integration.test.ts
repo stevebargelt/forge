@@ -8,7 +8,7 @@
 
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, rmSync, mkdtempSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -18,7 +18,8 @@ import { tasksForRun, getTask, markTaskComplete } from "../store/tasks.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
 import { verdictsForTask } from "../store/verdicts.js";
-import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
+import { failureKindForTask, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { runOpsCheck } from "../ops/detect.js";
 import { IDLE_TIMEOUT_EXIT_CODE } from "./idle-watchdog.js";
 import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provisioning.js";
 import { taskDir } from "../util/paths.js";
@@ -299,6 +300,143 @@ test("runNext: failed step (container exit nonzero + empty result.json) marks ta
   const first = tasks.find((t) => t.phase === "first");
   assert.ok(first);
   assert.equal(first!.status, "failed");
+});
+
+// ── FG-492 review: reap/retain now decided in runNext.ts (task outcome), not
+// docker-exec.ts (raw exit code) ─────────────────────────────────────────────
+//
+// The fake dockerExec above never calls docker itself, so `finalizeContainerRetention`'s
+// real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
+// PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
+// whether `rm -f -v forge-<taskId>` was actually invoked.
+function makeDockerRmStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-runnext-docker-stub-"));
+  const logPath = join(binDir, "docker-calls.log");
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  chmodSync(join(binDir, "docker"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test("runNext: FG-492 review — exit 0 + valid result.json → primary completes AND the container is reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "reap-on-complete test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: makeStubExec({ status: "complete" }) });
+    assert.deepEqual(wave.completedSteps, ["first"]);
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`), "a completed primary's container is reaped");
+  });
+});
+
+test("runNext: FG-492 review — exit 0 + NO result.json (state 4) → primary fails result_missing AND the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "retain-on-result-missing test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    // Confirmed clean exit, but no result.json at all — exactly the state-4
+    // case a raw-exit-code-based reap policy would have destroyed.
+    const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: cleanExitNoResult });
+    assert.deepEqual(wave.failedSteps, ["first"]);
+
+    const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+    assert.match(first.error ?? "", /no_result_json/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a clean exit with no result.json must be retained, never reaped just because the exit code was 0");
+  });
+});
+
+test("runNext: FG-492 review — non-zero exit (container_crash) → the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    const { runId } = startRun({
+      workflow: LINEAR_WORKFLOW,
+      title: "retain-on-crash test",
+      inputs: { brief: "x" },
+      projectDir: "/tmp/test-project",
+    });
+
+    const crashingExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "result.json"), "");
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "container crashed");
+      return 1;
+    };
+
+    const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: crashingExec });
+    assert.deepEqual(wave.failedSteps, ["first"]);
+
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a genuine container_crash must stay retained for diagnosis");
+  });
+});
+
+test("runNext: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a failed primary", async () => {
+  await withDockerRmStub(async (logPath) => {
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    process.env.FORGE_CONTAINER_RETENTION = "off";
+    try {
+      const { runId } = startRun({
+        workflow: LINEAR_WORKFLOW,
+        title: "retention-off test",
+        inputs: { brief: "x" },
+        projectDir: "/tmp/test-project",
+      });
+
+      const crashingExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+        const dir = dirname(stdoutPath);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "result.json"), "");
+        writeFileSync(stdoutPath, "");
+        writeFileSync(stderrPath, "container crashed");
+        return 1;
+      };
+
+      const wave = await runNext({ runId, workflow: LINEAR_WORKFLOW, dockerExec: crashingExec });
+      assert.deepEqual(wave.failedSteps, ["first"]);
+
+      const first = tasksForRun(runId).find((t) => t.phase === "first")!;
+      const calls = readFileSync(logPath, "utf8");
+      assert.match(calls, new RegExp(`rm -f -v forge-${first.id}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
+    } finally {
+      delete process.env.FORGE_CONTAINER_RETENTION;
+    }
+  });
 });
 
 test("runNext: idle-timeout exit code marks the pipeline task failed with idle_timeout", async () => {
@@ -1319,6 +1457,87 @@ test("runNext: container.started and container.exited emitted on successful step
 
   const exited = events.find((e) => e.eventType === "container.exited")!;
   assert.equal((exited.payload as Record<string, unknown>).exitCode, 0);
+});
+
+// FG-492: docker-exec.ts's capture-at-close reports causal evidence via
+// onContainerEvidence — mirrors invoke.ts's wiring test. A clean exit (0) with
+// no usable result must render as a CONFIRMED exit, never conflated with
+// reconcile's "container disappeared with no terminal evidence" state.
+test("runNext: FG-492 result-missing after a clean container exit carries confirmed container evidence, not a disappearance", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-fg492-container-evidence",
+    description: "one step that exits cleanly but writes no result",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "fg492 container evidence test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath, onContainerEvidence }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "agent produced no result.json");
+    writeFileSync(stderrPath, "");
+    onContainerEvidence?.({ containerName: "forge-stub", containerExitedEventObserved: true, dockerExitCode: 0, oomKilled: false });
+    return 0;
+  };
+
+  await runNext({ runId, workflow: WF, dockerExec: cleanExitNoResult });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "result_missing");
+
+  const events = eventsForTask(primary.id);
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+  assert.ok(containerEvidence, "container.exited must carry the causal evidence");
+  assert.equal(containerEvidence.containerExitedEventObserved, true, "Forge directly observed this exit");
+  assert.equal(containerEvidence.dockerExitCode, 0);
+});
+
+// FG-492 review findings 2+3: same gap as invoke.ts's failTask call — the
+// pipeline/fanout-child dispatch path's `no_result_json` failure used to omit
+// `evidence`, so detect.ts's state-4 distinction could only be exercised with
+// a hand-crafted event. Drive it end to end through runNext's real failTask
+// call and confirm runOpsCheck raises the incident off that production shape.
+test("runNext: FG-492 finding 2+3 — result_missing from the REAL failTask call carries recovery evidence and is detected by runOpsCheck", async () => {
+  ensureClaudeRuntime();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const WF: Workflow = {
+    name: "test-fg492-detect",
+    description: "one step that exits cleanly but writes no result",
+    inputs: [],
+    steps: [{ id: "work", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] }],
+  };
+  const { runId } = startRun({ workflow: WF, title: "fg492 detect test", inputs: {}, projectDir: "/tmp/test-project" });
+
+  const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath, onContainerEvidence }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "agent produced no result.json");
+    writeFileSync(stderrPath, "");
+    onContainerEvidence?.({ containerName: "forge-stub", containerExitedEventObserved: true, dockerExitCode: 0, oomKilled: false });
+    return 0;
+  };
+
+  await runNext({ runId, workflow: WF, dockerExec: cleanExitNoResult });
+
+  const tasks = tasksForRun(runId);
+  const primary = tasks.find((t) => t.phase === "work" && t.parentId === undefined)!;
+  assert.equal(primary.status, "failed");
+  assert.equal(failureKindForTask(primary.id), "result_missing");
+
+  const events = eventsForTask(primary.id);
+  const orphanEvidence = getOrphanEvidenceFromEvents(events);
+  assert.ok(orphanEvidence, "result_missing must now carry recovery evidence off the real failTask call");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true);
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === primary.id);
+  assert.ok(incident, "detectOrphanedWorkMayPersist must raise an incident for a real result_missing task.failed event");
+  assert.match(incident!.evidence.join(" "), /container exited cleanly but no result\.json was ever produced/);
 });
 
 test("runNext: container.idle_timeout emitted (not container.exited) on idle timeout", async () => {

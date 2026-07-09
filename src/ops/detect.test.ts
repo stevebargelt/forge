@@ -554,3 +554,117 @@ test("detectOrphanedWorkMayPersist: FG-461 a container_crash with evidence but a
   const incidents = detectOrphanedWorkMayPersist(db);
   assert.equal(incidents.length, 0, "no changed files → no persisted work at risk → no incident");
 });
+
+// ── FG-492 finding 4: `forge ops check` distinguishes all four causal states ──
+//
+// The AC requires `forge show`, `forge status`, AND `forge ops check` to tell
+// apart: (1) a confirmed exit with code/signal/OOM evidence; (2) a container
+// missing with no terminal event; (3) a fanout parent's derived failure (never
+// had a container); (4) a result missing after a clean exit. show/status
+// already rendered all four; ops check had only a bare observed/not-observed
+// boolean, and states 3/4 raised no incident at all. These pin the richer
+// evidence lines and the two newly-admitted states.
+
+test("FG-492 finding 4 (state 1): a confirmed exit renders full code/signal/OOM detail, not just a boolean", () => {
+  insertRun(mkRun("run-state1", "active"));
+  insertTask(mkTask("task-state1", "run-state1", "failed"));
+  const evidence = {
+    containerName: "forge-task-state1", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? f.txt"],
+    source: "worktree", exitCode: 1, oomKilled: false, containerExitedEventObserved: true,
+  };
+  logEvent("task.failed", {
+    runId: "run-state1", taskId: "task-state1",
+    payload: { failure_kind: "container_crash", error: "container_crash (exit 1)", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const line = incidents[0]!.evidence.find((l) => l.includes("directly observed"));
+  assert.ok(line, "expected a directly-observed evidence line");
+  assert.match(line!, /exit code 1/);
+  assert.match(line!, /OOMKilled=false/);
+});
+
+test("FG-492 finding 4 (state 2): a container missing with no terminal event is distinguished from a confirmed exit", () => {
+  insertRun(mkRun("run-state2", "active"));
+  insertTask(mkTask("task-state2", "run-state2", "failed"));
+  const evidence = {
+    containerName: "forge-task-state2", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: ["?? f.txt"],
+    source: "worktree", containerExitedEventObserved: false,
+  };
+  logEvent("task.failed", {
+    runId: "run-state2", taskId: "task-state2",
+    payload: { failure_kind: "orphaned_work_may_persist", error: "orphaned_work_may_persist: ...", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  assert.match(
+    incidents[0]!.evidence.join(" "),
+    /container disappeared without a recorded terminal event — no container\.exited event was ever observed for this task/,
+  );
+});
+
+test("FG-492 finding 4 (state 3): a fanout parent's derived failure raises an incident that never calls it a killed agent", () => {
+  insertRun(mkRun("run-state3", "active"));
+  insertTask(mkTask("task-state3", "run-state3", "failed"));
+  logEvent("task.failed", {
+    runId: "run-state3", taskId: "task-state3",
+    payload: {
+      failure_kind: "fanout_wave_orphaned",
+      error: "fanout wave orphaned: 1/3 children complete, the rest failed or never finished",
+      childSummary: { total: 3, complete: 1 },
+    },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.equal(i.kind, "orphaned_work_may_persist", "no new IncidentKind — bucketed like container_crash/idle_timeout");
+  assert.match(i.evidence.join(" "), /fanout wave's parent, orphaned mid-wave/);
+  assert.match(i.evidence.join(" "), /1\/3 children completed/);
+  assert.match(i.evidence.join(" "), /never had its own agent container.*not a killed agent/);
+  assert.match(i.evidence.join(" "), /n\/a — a fanout parent has no dedicated container or worktree/);
+  assert.match(i.recommendedAction.reason, /forge recover task-state3 --re-drive/);
+});
+
+test("FG-492 finding 4 (state 4): a result missing after a confirmed clean exit is distinguished from a crash, when evidence is recorded", () => {
+  insertRun(mkRun("run-state4", "active"));
+  insertTask(mkTask("task-state4", "run-state4", "failed"));
+  const evidence = {
+    containerName: "forge-task-state4", containerLiveness: "gone", resultState: "absent",
+    recoverableStdoutResult: false, worktreePathChecked: "/tmp/wt", changedFiles: [],
+    source: "worktree", exitCode: 0, containerExitedEventObserved: true,
+  };
+  logEvent("task.failed", {
+    runId: "run-state4", taskId: "task-state4",
+    payload: { failure_kind: "result_missing", error: "no_result_json", evidence },
+  });
+
+  const incidents = detectOrphanedWorkMayPersist(db);
+  assert.equal(incidents.length, 1);
+  const i = incidents[0]!;
+  assert.match(i.evidence[0]!, /container exited cleanly but no result\.json was ever produced/);
+  assert.match(i.evidence[0]!, /not a killed agent/);
+  assert.match(i.recommendedAction.reason, /forge retry task-state4/);
+  assert.match(i.recommendedAction.reason, /without needing --force/, "a plain clean-exit result_missing never needs --force");
+});
+
+// FG-492 review findings 1+2: invoke.ts/runNext.ts's real failTask calls now
+// attach evidence for result_missing (see invoke.integration.test.ts /
+// runNext.integration.test.ts's "real failTask call" tests for the production-
+// shape proof) — this fixture models an evidence-less edge case that can still
+// occur: a pre-FG-492 event, or a read-only dispatch (a red/audit agent),
+// where recoveryEvidenceFor() is skipped and no evidence is ever recorded.
+test("FG-492 finding 4 (state 4 negative): result_missing with NO recorded evidence raises no incident — pre-FG-492 event or read-only dispatch, avoids retroactive noise", () => {
+  insertRun(mkRun("run-state4-noev", "active"));
+  insertTask(mkTask("task-state4-noev", "run-state4-noev", "failed"));
+  logEvent("task.failed", {
+    runId: "run-state4-noev", taskId: "task-state4-noev",
+    payload: { failure_kind: "result_missing", error: "no_result_json" },
+  });
+
+  assert.deepEqual(detectOrphanedWorkMayPersist(db), []);
+});

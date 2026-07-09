@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, readFileSync, statSync, mkdtempSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { invoke, type DockerExecFn } from "./invoke.js";
@@ -11,8 +11,9 @@ import { DEPENDENCY_PROVISIONING_FAILED_EXIT_CODE } from "./dependency-provision
 import { getRun } from "../store/runs.js";
 import { getTask, tasksForRun } from "../store/tasks.js";
 import { eventsForTask, eventsForRun } from "../store/events.js";
-import { failureKindForTask, getOrphanEvidenceFromEvents } from "./failure-kind.js";
-import { orphanRecoveryMessage } from "../cli/commands/show.js";
+import { failureKindForTask, getOrphanEvidenceFromEvents, getContainerCausalEvidenceFromEvents } from "./failure-kind.js";
+import { runOpsCheck } from "../ops/detect.js";
+import { orphanRecoveryMessage, describeContainerEvidence } from "../cli/commands/show.js";
 import { execFileSync } from "node:child_process";
 import { writeProfile } from "../util/auth-profiles.js";
 import { taskDir } from "../util/paths.js";
@@ -482,6 +483,138 @@ test("invoke: malformed result.json marks failed", async () => {
 
   assert.equal(r.status, "failed");
   assert.match(r.error ?? "", /malformed/);
+});
+
+// ── FG-492 review: reap/retain now decided in invoke.ts (task outcome), not
+// docker-exec.ts (raw exit code) ─────────────────────────────────────────────
+//
+// The fake dockerExec above never calls docker itself, so `finalizeContainerRetention`'s
+// real `docker rm -f` would hit whatever `docker` is on PATH. These tests shadow
+// PATH with a no-op stub (same technique docker-exec.test.ts uses) and assert on
+// whether `rm -f -v forge-<taskId>` was actually invoked.
+function makeDockerRmStub(): { binDir: string; logPath: string } {
+  const binDir = mkdtempSync(join(tmpdir(), "forge-invoke-docker-stub-"));
+  const logPath = join(binDir, "docker-calls.log");
+  writeFileSync(join(binDir, "docker"), `#!/bin/sh\necho "$@" >> "${logPath}"\nexit 0\n`);
+  chmodSync(join(binDir, "docker"), 0o755);
+  writeFileSync(logPath, "");
+  return { binDir, logPath };
+}
+
+async function withDockerRmStub<T>(fn: (logPath: string) => Promise<T>): Promise<T> {
+  const { binDir, logPath } = makeDockerRmStub();
+  const origPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${origPath ?? ""}`;
+  try {
+    return await fn(logPath);
+  } finally {
+    process.env.PATH = origPath;
+    rmSync(binDir, { recursive: true, force: true });
+  }
+}
+
+test("invoke: FG-492 review — exit 0 + valid result.json → task completes AND the container is reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: makeStubExec({ status: "complete" }),
+    });
+
+    assert.equal(r.status, "complete");
+    const calls = readFileSync(logPath, "utf8");
+    assert.match(calls, new RegExp(`rm -f -v forge-${r.taskId}`), "a completed task's container is reaped");
+  });
+});
+
+test("invoke: FG-492 review — exit 0 + NO result.json (state 4) → task fails result_missing AND the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    // Confirmed clean exit, but no result.json at all — exactly the state-4
+    // case a raw-exit-code-based reap policy would have destroyed.
+    const cleanExitNoResult: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 0;
+    };
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: cleanExitNoResult,
+    });
+
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /no_result_json/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a clean exit with no result.json must be retained, never reaped just because the exit code was 0");
+  });
+});
+
+test("invoke: FG-492 review — non-zero exit (container_crash) → the container is RETAINED, not reaped", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+
+    const crash: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+      const dir = dirname(stdoutPath);
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      writeFileSync(stdoutPath, "");
+      writeFileSync(stderrPath, "");
+      return 1;
+    };
+
+    const r = await invoke({
+      agentRole: "engineer",
+      task: "do thing",
+      projectDir: "/tmp/x",
+      dockerExec: crash,
+    });
+
+    assert.equal(r.status, "failed");
+    assert.match(r.error ?? "", /container_crash/);
+    const calls = readFileSync(logPath, "utf8");
+    assert.doesNotMatch(calls, / rm /, "a genuine container_crash must stay retained for diagnosis");
+  });
+});
+
+test("invoke: FG-492 review — FORGE_CONTAINER_RETENTION=off reaps even a failed task", async () => {
+  await withDockerRmStub(async (logPath) => {
+    setupRuntimeStub();
+    process.env.ANTHROPIC_API_KEY = "sk-stub";
+    process.env.FORGE_CONTAINER_RETENTION = "off";
+    try {
+      const crash: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
+        const dir = dirname(stdoutPath);
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        writeFileSync(stdoutPath, "");
+        writeFileSync(stderrPath, "");
+        return 1;
+      };
+
+      const r = await invoke({
+        agentRole: "engineer",
+        task: "do thing",
+        projectDir: "/tmp/x",
+        dockerExec: crash,
+      });
+
+      assert.equal(r.status, "failed");
+      const calls = readFileSync(logPath, "utf8");
+      assert.match(calls, new RegExp(`rm -f -v forge-${r.taskId}`), "FORGE_CONTAINER_RETENTION=off forces a reap even on failure");
+    } finally {
+      delete process.env.FORGE_CONTAINER_RETENTION;
+    }
+  });
 });
 
 // FG-497: the task description must reach the agent via the task package
@@ -1511,4 +1644,112 @@ test("FG-497: an oversized task (>131072 bytes) dispatches cleanly through the r
   const dir = taskDir(r.runId, r.taskId);
   const packageMd = readFileSync(join(dir, "package.md"), "utf8");
   assert.ok(packageMd.includes(oversizedTask), "package.md must carry the full task content");
+});
+
+// ── FG-492: container causal-evidence wiring ────────────────────────────────
+
+// A dockerExec fake standing in for docker-exec.ts's real capture-at-close:
+// it reports the container causal evidence via onContainerEvidence exactly
+// like the real executor does, but writes no result.json (exit 0, clean
+// container exit, agent just never produced usable output).
+function makeCleanExitNoResultExec(): DockerExecFn {
+  return async ({ stdoutPath, stderrPath, onContainerEvidence }) => {
+    const dir = dirname(stdoutPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(stdoutPath, "agent produced no result.json");
+    writeFileSync(stderrPath, "");
+    onContainerEvidence?.({
+      containerName: "forge-stub",
+      containerExitedEventObserved: true,
+      dockerExitCode: 0,
+      oomKilled: false,
+    });
+    return 0;
+  };
+}
+
+test("FG-492: result missing after a CLEAN container exit is rendered as a confirmed exit, never conflated with a disappeared container", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg492-clean-"));
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeCleanExitNoResultExec() });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "result_missing", "distinct failure_kind from container_crash/orphaned — the container exited cleanly");
+
+  const events = eventsForTask(r.taskId);
+  const containerEvidence = getContainerCausalEvidenceFromEvents(events)!;
+  assert.ok(containerEvidence, "container.exited must carry the causal evidence even when the task then fails on a missing result");
+  assert.equal(containerEvidence.containerExitedEventObserved, true, "Forge directly observed this exit — not a disappearance");
+  assert.equal(containerEvidence.dockerExitCode, 0);
+
+  const summary = describeContainerEvidence(containerEvidence);
+  assert.match(summary, /confirmed container exit/, "a clean exit is a CONFIRMED exit, not a disappearance");
+  assert.doesNotMatch(summary, /disappeared without terminal evidence/, "must not read as the same state as a container that vanished with no terminal event");
+
+  // Sanity: the exited event itself (not a later event) is what carries it.
+  const exitedEvent = events.find((e) => e.eventType === "container.exited")!;
+  assert.ok(exitedEvent, "container.exited must have fired before the result_missing classification");
+  assert.equal((exitedEvent.payload as Record<string, unknown>).exitCode, 0);
+});
+
+// FG-492 review findings 1+3: the failTask call for `no_result_json` used to
+// omit `evidence` entirely, so ops/detect.ts's state-4 distinction (a clean
+// exit that produced no result) could only ever be exercised with a
+// hand-crafted event in detect.test.ts — never by the real producer. This
+// drives the whole path end to end: invoke()'s real failTask call must attach
+// OrphanEvidence, and runOpsCheck (the same detector `forge ops check` runs)
+// must raise the distinguishing incident off that real event shape.
+test("FG-492 finding 1+3: result_missing from the REAL failTask call carries recovery evidence and is detected by runOpsCheck", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg492-detect-"));
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeCleanExitNoResultExec() });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "result_missing");
+
+  const events = eventsForTask(r.taskId);
+  const orphanEvidence = getOrphanEvidenceFromEvents(events);
+  assert.ok(orphanEvidence, "result_missing must now carry recovery evidence off the real failTask call, not just a bare error string");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true, "attached-exit — Forge watched this container exit itself");
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === r.taskId);
+  assert.ok(incident, "detectOrphanedWorkMayPersist must raise an incident for a real result_missing task.failed event, not just a synthetic fixture");
+  assert.match(incident!.evidence.join(" "), /container exited cleanly but no result\.json was ever produced/);
+  assert.match(incident!.recommendedAction.reason, /without needing --force/);
+});
+
+// FG-492 review round 2 (state 1): detect.test.ts's "confirmed exit renders
+// full code/signal/OOM detail" coverage only ever exercised
+// containerEvidenceLine against a hand-authored OrphanEvidence fixture — never
+// the real attached-exit producer (invoke.ts's recoveryEvidenceFor, wired
+// through attachedExitEvidence). Drive an actual container_crash exit through
+// the real invoke() path and confirm runOpsCheck renders the SAME
+// confirmed-exit line off the production event shape.
+test("FG-492 review round 2 (state 1): a REAL confirmed attached exit (container_crash) carries the confirmed-exit containerEvidenceLine through runOpsCheck", async () => {
+  setupRuntimeStub();
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = makeDirtyGitProject();
+
+  const r = await invoke({ agentRole: "engineer", task: "do thing", projectDir, dockerExec: makeNoResultExec(1) });
+  assert.equal(r.status, "failed");
+  assert.equal(failureKindForTask(r.taskId), "container_crash");
+
+  const orphanEvidence = getOrphanEvidenceFromEvents(eventsForTask(r.taskId));
+  assert.ok(orphanEvidence, "container_crash attached-exit must record recovery evidence off the real failTask call");
+  assert.equal(orphanEvidence!.containerExitedEventObserved, true, "attached-exit — Forge watched this container exit itself, not a later disappearance");
+  assert.equal(orphanEvidence!.exitCode, 1);
+
+  const incidents = runOpsCheck();
+  const incident = incidents.find((i) => i.taskId === r.taskId);
+  assert.ok(incident, "container_crash with a dirty worktree must raise an incident off a real task.failed event, not just a synthetic fixture");
+  const evidenceText = incident!.evidence.join(" ");
+  assert.match(evidenceText, /task .* crashed \(exit 1\) with no recoverable result/);
+  assert.match(
+    evidenceText,
+    /container exit was directly observed by forge \(attached-exit\) — exit code 1/,
+    "the confirmed-exit containerEvidenceLine — code known because Forge itself watched this exit, not a disappearance",
+  );
 });
