@@ -69,6 +69,150 @@ test("emitMilestone: always records an orchestrator.milestone event (provider of
   assert.equal(p["dispatched"], false);
 });
 
+// FG-494: milestone recording must stay independent of provider delivery
+// outcome. The pre-fix bug had ntfy's Title header throw
+// "Cannot convert argument to a ByteString..." for any title with a
+// non-Latin-1 character (em-dash, arrows, etc); notifyNtfy's try/catch already
+// converts that into a returned error rather than a throw, so dispatch()
+// swallows it — this pins that the milestone event is recorded regardless.
+test("emitMilestone: milestone event is recorded even when ntfy delivery throws (ByteString-shaped failure)", async () => {
+  const savedNoNotify = process.env["NO_NOTIFY"];
+  const savedForgeNotify = process.env["FORGE_NOTIFY"];
+  const savedNtfyUrl = process.env["NTFY_URL"];
+  const originalFetch = globalThis.fetch;
+  try {
+    process.env["NO_NOTIFY"] = "";
+    process.env["FORGE_NOTIFY"] = "ntfy";
+    process.env["NTFY_URL"] = "https://ntfy.example.com/forge";
+    globalThis.fetch = (async () => {
+      throw new TypeError(
+        "Cannot convert argument to a ByteString because the character at index 10 has a value of 8212 which is greater than 255.",
+      );
+    }) as typeof fetch;
+
+    const run = mkRun("run-ms-bytestring-1");
+    const res = await emitMilestone({ runId: run.id, kind: "blocked", title: "Milestone — blocked" });
+    assert.equal(res.decision.send, true);
+    assert.equal(res.dispatched, true, "dispatch was attempted regardless of provider outcome");
+    const evts = eventsForRun(run.id).filter((e) => e.eventType === "orchestrator.milestone");
+    assert.equal(evts.length, 1, "milestone event recorded despite provider throwing");
+    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedNoNotify !== undefined) process.env["NO_NOTIFY"] = savedNoNotify; else delete process.env["NO_NOTIFY"];
+    if (savedForgeNotify !== undefined) process.env["FORGE_NOTIFY"] = savedForgeNotify; else delete process.env["FORGE_NOTIFY"];
+    if (savedNtfyUrl !== undefined) process.env["NTFY_URL"] = savedNtfyUrl; else delete process.env["NTFY_URL"];
+  }
+});
+
+// FG-494 (this task): end-to-end at the milestone emission surface — the
+// composed ntfy Title (`forge: <kind> — <title>`) always contains a non-ASCII
+// em-dash even for ASCII-only inputs, so this exercises the full
+// emitMilestone -> dispatch -> notifyNtfy -> encodeNtfyTitle chain with a
+// title/body that also carry emoji, pinning that RFC 2047 encoding and the
+// audit-trail event both survive the real wiring (not just notifyNtfy tested
+// in isolation, as ntfy.test.ts already does).
+test("emitMilestone -> dispatch -> notifyNtfy: Unicode title/body round-trip through the real wiring, event recorded", async () => {
+  const savedNoNotify = process.env["NO_NOTIFY"];
+  const savedForgeNotify = process.env["FORGE_NOTIFY"];
+  const savedNtfyUrl = process.env["NTFY_URL"];
+  const originalFetch = globalThis.fetch;
+  let capturedHeaders: Record<string, string> | undefined;
+  let capturedBody: unknown;
+  try {
+    process.env["NO_NOTIFY"] = "";
+    process.env["FORGE_NOTIFY"] = "ntfy";
+    process.env["NTFY_URL"] = "https://ntfy.example.com/forge";
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedHeaders = init?.headers as Record<string, string>;
+      capturedBody = init?.body;
+      return { ok: true, status: 200, text: async () => "" } as Response;
+    }) as typeof fetch;
+
+    const run = mkRun("run-ms-unicode-1");
+    const title = "Launch 🚀 — done ✓";
+    const body = "Release ✓ shipped — 🎉 all systems go";
+    const res = await emitMilestone({ runId: run.id, kind: "blocked", title, body });
+
+    assert.equal(res.dispatched, true);
+
+    // The Title header ntfy actually receives is `forge: <kind> — <title>`
+    // (composed in emitMilestone), not the bare title.
+    const expectedTitle = `forge: blocked — ${title}`;
+    const header = capturedHeaders?.["Title"];
+    assert.ok(header, "Title header was set");
+    const match = header!.match(/^=\?UTF-8\?B\?(.+)\?=$/);
+    assert.ok(match, `expected RFC 2047 encoded-word, got: ${header}`);
+    assert.equal(Buffer.from(match![1]!, "base64").toString("utf8"), expectedTitle);
+
+    // The dispatched body is the composed action-marker body — assert it
+    // matches exactly and still carries the original Unicode bytes unmangled.
+    const expectedBody = milestoneDispatchBody("blocked", body);
+    assert.equal(capturedBody, expectedBody);
+    assert.equal(Buffer.from(capturedBody as string, "utf8").toString("utf8"), expectedBody);
+    assert.match(capturedBody as string, /🎉/);
+    assert.match(capturedBody as string, /✓/);
+
+    const evts = eventsForRun(run.id).filter((e) => e.eventType === "orchestrator.milestone");
+    assert.equal(evts.length, 1);
+    const p = evts[0]!.payload as Record<string, unknown>;
+    assert.equal(p["title"], title);
+    assert.equal(p["body"], body);
+    assert.equal(p["dispatched"], true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (savedNoNotify !== undefined) process.env["NO_NOTIFY"] = savedNoNotify; else delete process.env["NO_NOTIFY"];
+    if (savedForgeNotify !== undefined) process.env["FORGE_NOTIFY"] = savedForgeNotify; else delete process.env["FORGE_NOTIFY"];
+    if (savedNtfyUrl !== undefined) process.env["NTFY_URL"] = savedNtfyUrl; else delete process.env["NTFY_URL"];
+  }
+});
+
+// FG-494 (this task): same real wiring, but ntfy answers HTTP 500 — the
+// audit-trail event must still be recorded, the failure must surface (via
+// dispatch's console.error path, per trigger.ts's documented contract), and
+// nothing may throw up through emitMilestone.
+test("emitMilestone -> dispatch -> notifyNtfy: HTTP 500 still records the milestone event and surfaces the error without throwing", async () => {
+  const savedNoNotify = process.env["NO_NOTIFY"];
+  const savedForgeNotify = process.env["FORGE_NOTIFY"];
+  const savedNtfyUrl = process.env["NTFY_URL"];
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  const consoleErrors: unknown[][] = [];
+  try {
+    process.env["NO_NOTIFY"] = "";
+    process.env["FORGE_NOTIFY"] = "ntfy";
+    process.env["NTFY_URL"] = "https://ntfy.example.com/forge";
+    console.error = (...args: unknown[]) => { consoleErrors.push(args); };
+    globalThis.fetch = (async () => {
+      return { ok: false, status: 500, text: async () => "internal error" } as Response;
+    }) as typeof fetch;
+
+    const run = mkRun("run-ms-unicode-500-1");
+    const title = "Launch 🚀 — done ✓";
+    let res: Awaited<ReturnType<typeof emitMilestone>> | undefined;
+    await assert.doesNotReject(async () => {
+      res = await emitMilestone({ runId: run.id, kind: "blocked", title });
+    });
+
+    assert.equal(res!.dispatched, true, "dispatch was attempted regardless of provider outcome");
+
+    const evts = eventsForRun(run.id).filter((e) => e.eventType === "orchestrator.milestone");
+    assert.equal(evts.length, 1, "milestone event recorded despite provider HTTP 500");
+    assert.equal((evts[0]!.payload as Record<string, unknown>)["dispatched"], true);
+
+    assert.equal(consoleErrors.length, 1, "the ntfy failure is surfaced via console.error");
+    assert.match(String(consoleErrors[0]?.[0]), /ntfy failed/);
+    assert.match(String(consoleErrors[0]?.[0]), /HTTP 500/);
+    assert.match(String(consoleErrors[0]?.[0]), /internal error/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalConsoleError;
+    if (savedNoNotify !== undefined) process.env["NO_NOTIFY"] = savedNoNotify; else delete process.env["NO_NOTIFY"];
+    if (savedForgeNotify !== undefined) process.env["FORGE_NOTIFY"] = savedForgeNotify; else delete process.env["FORGE_NOTIFY"];
+    if (savedNtfyUrl !== undefined) process.env["NTFY_URL"] = savedNtfyUrl; else delete process.env["NTFY_URL"];
+  }
+});
+
 test("emitMilestone: suppressed kind is still recorded (audit), not dispatched", async () => {
   const run = mkRun("run-ms-2");
   const res = await emitMilestone({ runId: run.id, kind: "plan_started", title: "starting" });
