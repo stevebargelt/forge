@@ -397,7 +397,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     files: { prompt: "CLAUDE.md", package: "package.md", result: "result.json", stdout: "container.stdout.log", stderr: "container.stderr.log" },
     container: { name: `forge-${taskId}`, idleTimeoutMs },
     auth: { profileRequested: !!args.authProfile, stateMounted: !!authStateHostPath },
-    runtime: { name: resolution.runtime, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
+    // FG-366: name is the resolved concrete runtime (matches controlPlane.runtime.name),
+    // not the requested sentinel — see task-manifest.ts's ManifestRuntime doc comment.
+    runtime: { name: runtimeName, kind: runtimeMeta.runtimeKind, logFormat: runtimeMeta.logFormat, promptStrategy: runtimeMeta.promptStrategy, authStrategy: runtimeMeta.authStrategy },
     ...(manifestModelBlock(resolution) ? { model: manifestModelBlock(resolution) } : {}),
     controlPlane,
   });

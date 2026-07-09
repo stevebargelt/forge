@@ -547,6 +547,91 @@ result:
       "claude",
       "the sentinel name 'claude' must NOT be recorded in the receipt",
     );
+    // FG-366: the outer execution-metadata runtime.name must agree with
+    // controlPlane.runtime.name — no intra-manifest sentinel-vs-resolved split.
+    assert.equal(
+      manifest.runtime?.name,
+      "claude-apikey",
+      "outer manifest.runtime.name must record the resolved concrete runtime, matching controlPlane.runtime.name",
+    );
+  } finally {
+    process.env.FORGE_HOME = origForgeHome;
+    rmSync(isolatedHome, { recursive: true, force: true });
+    rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FG-366: sentinel runtime records the concrete name on the runNext/pipeline
+// path too (fix2 above only exercised invoke — this closes that gap), and the
+// outer manifest.runtime.name (pre-FG-350 execution-metadata block) must match
+// controlPlane.runtime.name rather than the requested sentinel.
+// ---------------------------------------------------------------------------
+
+test("FG-366: sentinel 'claude' runtime records the concrete declared name on the runNext/pipeline path", async () => {
+  // Mirrors FG-350 fix2, but dispatches via startRun+runNext (pipeline path)
+  // instead of invoke — the invoke-only coverage gap this ticket closes.
+  const origForgeHome = process.env.FORGE_HOME;
+  const isolatedHome = mkdtempSync(join(tmpdir(), "forge-fg366-pipe-"));
+  process.env.FORGE_HOME = isolatedHome;
+  process.env.ANTHROPIC_API_KEY = "sk-stub";
+  const projectDir = mkdtempSync(join(tmpdir(), "forge-fg366-pipe-proj-"));
+  try {
+    // Write ONLY claude-apikey.yml — no claude.yml so sentinel resolution fires.
+    const runtimeDir = join(isolatedHome, "runtimes");
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(join(runtimeDir, "claude-apikey.yml"), `name: claude-apikey
+description: fg366 pipeline test stub
+image: test-image:latest
+models:
+  default: test-model
+auth:
+  mode: apikey
+mounts:
+  - { host: "\${TASK_DIR}", container: /task }
+invocation:
+  command: echo
+  args: ["stub"]
+container:
+  name: "forge-\${TASK_ID}"
+result:
+  file: /task/result.json
+`);
+
+    const { runId } = startRun({
+      workflow: SINGLE_STEP_WORKFLOW,
+      title: "fg366 pipeline sentinel test",
+      inputs: {},
+      projectDir,
+    });
+    await runNext({ runId, workflow: SINGLE_STEP_WORKFLOW, dockerExec: makeSimpleExec() });
+
+    const tasks = tasksForRun(runId).filter((t) => t.parentId === undefined);
+    assert.equal(tasks.length, 1, "one primary task expected");
+    const manifest = JSON.parse(
+      readFileSync(join(taskDir(runId, tasks[0]!.id), "manifest.json"), "utf8"),
+    ) as TaskManifest;
+
+    assert.ok(manifest.controlPlane !== undefined, "controlPlane must be present");
+    assert.equal(
+      manifest.controlPlane!.runtime.name,
+      "claude-apikey",
+      "sentinel-resolved runtime must record the concrete YAML-declared name in controlPlane on the pipeline path too",
+    );
+
+    // FG-366: the outer execution-metadata runtime.name must agree with
+    // controlPlane.runtime.name — no intra-manifest sentinel-vs-resolved split.
+    assert.ok(manifest.runtime !== undefined, "outer runtime block must be present");
+    assert.equal(
+      manifest.runtime!.name,
+      "claude-apikey",
+      "outer manifest.runtime.name must record the resolved concrete runtime, matching controlPlane.runtime.name",
+    );
+    assert.equal(
+      manifest.runtime!.name,
+      manifest.controlPlane!.runtime.name,
+      "outer runtime.name and controlPlane.runtime.name must never disagree",
+    );
   } finally {
     process.env.FORGE_HOME = origForgeHome;
     rmSync(isolatedHome, { recursive: true, force: true });

@@ -112,7 +112,7 @@ Top-level fields written at dispatch time:
 - `files` — map of well-known filenames (`prompt`, `package`, `result`, `stdout`, `stderr`)
 - `container` — `{ name, idleTimeoutMs? }` — effective idle timeout resolved at dispatch
 - `auth` — `{ profileRequested: boolean, stateMounted: boolean }` — booleans only; no credential material (see [redaction.md](redaction.md))
-- `runtime` — `{ name, kind, logFormat, promptStrategy, authStrategy }` — execution behavior resolved from the runtime YAML
+- `runtime` — `{ name, kind, logFormat, promptStrategy, authStrategy }` — execution behavior resolved from the runtime YAML. `name` is the resolved concrete runtime (e.g. `claude-apikey`), never the requested sentinel (`claude`) — matches `controlPlane.runtime.name` below (FG-366; the two could diverge for sentinel-resolved runtimes between FG-350 and FG-366)
 - `model` — *(optional)* model resolution record (policy mode only); omitted in legacy mode
 - `controlPlane` — *(optional)* RECORDED dispatch-time control-plane provenance; omitted on pre-FG-350 manifests (legacy-compatible)
 
