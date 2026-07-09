@@ -1278,3 +1278,51 @@ test("FG-501 AC6: --dry-run header describes the CI-wait behavior (reuse-first, 
     mock.restoreAll();
   }
 });
+
+// ── FG-501 AC5 (reopen): the fixer's post-change pre-commit verification ─────
+//
+// A needs_fix round is part of the normal review-loop path, so it must follow
+// the same tier policy as the CI-unavailable fallback: fast tier (typecheck +
+// test) by default with test:extended delegated to CI (the fixer's commit gets
+// pushed and CI runs it as a required check), --local-extended restoring the
+// full tier — and it must honor the runVerification injection seam.
+
+test("FG-501 fix dep: in-scope fixer change verifies via the injected runner, fast tier by default — test:extended excluded", async () => {
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add tiered package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts, runVerification: runner.fn }), invokeFn);
+
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, true);
+  assert.ok((r as { committedSha?: string }).committedSha, "verified fix must be committed");
+  assert.equal(runner.calls.length, 1, "fixer verification must go through the injected runner");
+  assert.ok(!runner.calls[0]!.includes("test:extended"), `fixer verification must exclude test:extended by default, got: ${JSON.stringify(runner.calls[0])}`);
+  assert.ok(runner.calls[0]!.includes("typecheck") && runner.calls[0]!.includes("test"));
+});
+
+test("FG-501 fix dep: --local-extended restores test:extended in the fixer's pre-commit verification", async () => {
+  const scripts = { typecheck: "true", test: "true", "test:extended": "false" };
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add tiered package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const runner = makeRunnerSpy();
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts, runVerification: runner.fn, localExtended: true }), invokeFn);
+
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, true);
+  assert.equal(runner.calls.length, 1);
+  assert.ok(runner.calls[0]!.includes("test:extended"), `--local-extended must restore test:extended in fixer verification, got: ${JSON.stringify(runner.calls[0])}`);
+});

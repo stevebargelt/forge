@@ -136,9 +136,10 @@ export type ReviewLoopContext = {
   /** FG-501: injectable for tests — overrides FORGE_CI_WAIT_TIMEOUT_SECONDS. */
   ciWaitTimeoutMs?: number;
   /** FG-501 (AC5): --local-extended opt-in. The review-loop's local CI-
-   *  unavailable/failed-precondition/timeout fallback runs the FAST gate only
-   *  (typecheck + test, no test:extended) by default — extended coverage is
-   *  delegated to CI. This restores the full local tier (equivalent to today's
+   *  unavailable/failed-precondition/timeout fallback AND the fixer's
+   *  post-change pre-commit verification run the FAST gate only (typecheck +
+   *  test, no test:extended) by default — extended coverage is delegated to
+   *  CI. This restores the full local tier (equivalent to today's
    *  scriptsForVerification()) for operators who explicitly want it. Does NOT
    *  affect the dirty-tree fallback (unchanged) or scriptsForVerification's
    *  FG-500 derived-gate semantics for other callers. */
@@ -355,8 +356,10 @@ export function buildReviewLoopDeps(
         return { ok: false, outOfScope: true, offendingPaths: disallowed };
       }
 
-      // All changed paths are in scope — run verification before committing.
-      const verification = runVerification(scriptsForVerification(), { cwd: ctx.projectDir });
+      // All changed paths are in scope — verify before committing. Fast tier by
+      // default (FG-501 AC5): the fixer's commit gets pushed and CI runs
+      // test:extended as a required check; --local-extended restores the full tier.
+      const verification = runVerify(localFallbackScripts(), { cwd: ctx.projectDir });
       if (!verification.ok) {
         // Leave the diff for inspection; do NOT commit or revert.
         return { ok: false, verificationFailed: true, dirtyPaths: changed };
