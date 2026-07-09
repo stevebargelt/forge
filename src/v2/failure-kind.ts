@@ -41,7 +41,15 @@ export function parseDockerInspectState(raw: string): {
     if (!state) return {};
     const out: ReturnType<typeof parseDockerInspectState> = {};
     if (typeof state["StartedAt"] === "string") out.startedAt = state["StartedAt"];
-    if (typeof state["FinishedAt"] === "string") out.finishedAt = state["FinishedAt"];
+    // Docker reports "0001-01-01T00:00:00Z" (Go's zero-value time) for
+    // FinishedAt on a container that was created but never actually started
+    // or exited — a bare truthiness/typeof check would treat that as a real,
+    // extremely old timestamp, which is exactly wrong for reap-containers'
+    // age fallback (ops.ts): it would look ancient and reap immediately
+    // instead of being left for the task's own completedAt fallback.
+    if (typeof state["FinishedAt"] === "string" && state["FinishedAt"] !== "0001-01-01T00:00:00Z") {
+      out.finishedAt = state["FinishedAt"];
+    }
     if (typeof state["ExitCode"] === "number") {
       out.exitCode = state["ExitCode"];
       const signal = signalNameForExitCode(state["ExitCode"]);

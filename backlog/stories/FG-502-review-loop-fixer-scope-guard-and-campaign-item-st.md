@@ -36,6 +36,7 @@ Three related review-loop/campaign-runner frictions, each hit repeatedly in the 
 - FG-492: loops 1-3+5 fixer_out_of_scope on docs/SCHEMA-CONTRACT.md / docs/concepts.md / learnings ADR (runs …c930cd, …4e9ed5, …65d65c, …44b6d4).
 - FG-487/FG-492 items: failed/campaign_system after shipped+closed (campaign-7a56519b2f3d); reconcile not_applicable both passes.
 - FG-366: stranded fixer commit 609ec7d recovered via PR #82.
+- FG-503: SECOND stranded fixer commit (f54d57a, loop-3 round-1) — worse than FG-366's: the reviewer's round-2 PASS evaluated the stranded tip, so the merge landed code the pass did not fully describe; recovered via PR #84. This elevates the unpushed-tip warning from nice-to-have to correctness: a `closeable` verdict must name the tip sha it reviewed, and the orchestrator must merge THAT sha or re-review.
 
 ## Non-Goals
 

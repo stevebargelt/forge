@@ -662,10 +662,14 @@ export function reconcileRun(
     // FG-492 finding 3 (review): a container reconcile finds already gone (or
     // stopped-but-retained) leaks permanently if the forge process dies before
     // invoke.ts/runNext.ts's own reap-vs-retain decision can run — reconcile is
-    // the only other place that ever observes it, and `forge ops reap-containers`
-    // only ever scans FAILED tasks, so a task reconcile finalizes to COMPLETE
-    // here (container_gone_result_present / container_gone_result_recovered_from_stdout
-    // above) would otherwise never be swept. The decision now mirrors
+    // the only other place that ever observes it, and (pre-FG-503) `forge ops
+    // reap-containers` only ever scanned FAILED tasks, so a task reconcile
+    // finalizes to COMPLETE here (container_gone_result_present /
+    // container_gone_result_recovered_from_stdout above) would otherwise never
+    // be swept. FG-503 made reap-containers disk-truth-driven, covering
+    // COMPLETE tasks too, but this reap-at-reconcile-time path still stands —
+    // it reaps immediately instead of waiting on the next sweep. The decision
+    // now mirrors
     // docker-exec.ts's shouldRetainContainer exactly, but keyed on the TASK
     // outcome reconcile itself just decided (taskCompletedSuccessfully), not on
     // the container's raw exit code — a clean exit (0) that reconcile still
