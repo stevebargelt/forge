@@ -411,6 +411,134 @@ test("performOpsReapContainers (FG-504): an ordinary failed-task retention candi
   assert.deepEqual(events[0]!.payload, { containerName: "forge-t-reap-resolve-failed", outcome: "killed" });
 });
 
+// ── FG-505: absence-heal — a lost resolution write eventually heals itself ──
+// A `container.reap_failed` event is otherwise sticky forever once its
+// container is no longer in the `docker ps -a` listing at all (FG-503
+// candidacy only reconciles containers docker still knows about), whether
+// because the resolution write itself was lost (crash between `docker rm`
+// and logEvent) or an operator ran `docker rm` by hand. The absence-heal pass
+// reconciles unresolved reap_failed events against the SAME listing this
+// scan already fetched — no extra docker calls.
+
+test("performOpsReapContainers (FG-505): an unresolved reap_failed whose container is absent from docker ps -a gets healed with a distinct outcome", () => {
+  insertRun(mkRun("run-absence-heal", "active"));
+  insertTask({ ...mkTask("t-absence-heal", "run-absence-heal", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-absence-heal", taskId: "t-absence-heal",
+    payload: { containerName: "forge-t-absence-heal", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const calls: string[] = [];
+  const reap: ContainerReap = (name) => { calls.push(name); return "killed"; };
+  // The container never appears in this scan's docker ps -a listing at all —
+  // not merely stopped, genuinely gone (or never existed at scan time).
+  const outcome = performOpsReapContainers({}, reap, containerList([]));
+
+  assert.deepEqual(outcome.absenceHealed, ["forge-t-absence-heal"]);
+  assert.deepEqual(calls, [], "absence-heal never calls the reaper — the container isn't there to reap");
+  assert.equal(outcome.scanned, 0, "absence-heal is a separate pass, not a scan candidate");
+
+  const events = eventsForTask("t-absence-heal").filter((e) => e.eventType === "container.reaped");
+  assert.equal(events.length, 1);
+  assert.deepEqual(
+    events[0]!.payload,
+    { containerName: "forge-t-absence-heal", outcome: "confirmed-absent-at-scan" },
+    "distinct payload flag from an actively-removed resolution (outcome: 'killed'/'not_found')",
+  );
+});
+
+test("performOpsReapContainers (FG-505): absence-heal never fires in --dry-run", () => {
+  insertRun(mkRun("run-absence-heal-dry", "active"));
+  insertTask({ ...mkTask("t-absence-heal-dry", "run-absence-heal-dry", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-absence-heal-dry", taskId: "t-absence-heal-dry",
+    payload: { containerName: "forge-t-absence-heal-dry", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const reap: ContainerReap = () => "killed";
+  const outcome = performOpsReapContainers({ dryRun: true }, reap, containerList([]));
+
+  assert.deepEqual(outcome.absenceHealed, [], "dry-run must never write a resolution event");
+  const events = eventsForTask("t-absence-heal-dry").filter((e) => e.eventType === "container.reaped");
+  assert.deepEqual(events, []);
+});
+
+test("performOpsReapContainers (FG-505): absence-heal never fires when the container is still present (even stopped)", () => {
+  insertRun(mkRun("run-absence-heal-present", "active"));
+  insertTask({ ...mkTask("t-absence-heal-present", "run-absence-heal-present", "failed"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-absence-heal-present", taskId: "t-absence-heal-present",
+    payload: { containerName: "forge-t-absence-heal-present", why: "docker rm -f -v failed after task completion" },
+  });
+
+  // Still on disk (stopped, but present) — the ordinary candidate loop, past
+  // its retention window, reaps it directly; absence-heal must not also fire
+  // for it.
+  const reap: ContainerReap = () => "killed";
+  const outcome = performOpsReapContainers({}, reap, containerList([{ name: "forge-t-absence-heal-present" }]));
+
+  assert.deepEqual(outcome.absenceHealed, [], "the container is present — never absence-healed");
+  assert.deepEqual(outcome.reaped, ["forge-t-absence-heal-present"], "handled by the ordinary candidate loop instead");
+});
+
+test("performOpsReapContainers (FG-505): absence-heal respects project scoping, same as the ordinary candidate loop", () => {
+  insertRun({ ...mkRun("run-absence-heal-scope-a", "active"), projectDir: "/projects/alpha" });
+  insertRun({ ...mkRun("run-absence-heal-scope-b", "active"), projectDir: "/projects/beta" });
+  insertTask({ ...mkTask("t-absence-heal-scope-a", "run-absence-heal-scope-a", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  insertTask({ ...mkTask("t-absence-heal-scope-b", "run-absence-heal-scope-b", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  logEvent("container.reap_failed", {
+    runId: "run-absence-heal-scope-a", taskId: "t-absence-heal-scope-a",
+    payload: { containerName: "forge-t-absence-heal-scope-a", why: "docker rm -f -v failed after task completion" },
+  });
+  logEvent("container.reap_failed", {
+    runId: "run-absence-heal-scope-b", taskId: "t-absence-heal-scope-b",
+    payload: { containerName: "forge-t-absence-heal-scope-b", why: "docker rm -f -v failed after task completion" },
+  });
+
+  const reap: ContainerReap = () => "killed";
+  const outcome = performOpsReapContainers({ projectDir: "/projects/alpha" }, reap, containerList([]));
+
+  assert.deepEqual(outcome.absenceHealed, ["forge-t-absence-heal-scope-a"], "only the in-scope project's unresolved reap_failed is healed");
+});
+
+test("performOpsReapContainers (FG-505): a thrown post-rm resolution write is reported, not fatal — remaining candidates still process, and the docker-confirmed reap still counts", () => {
+  insertRun(mkRun("run-write-fail", "active"));
+  insertTask({ ...mkTask("t-write-fail-1", "run-write-fail", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+  insertTask({ ...mkTask("t-write-fail-2", "run-write-fail", "complete"), completedAt: "2020-01-01T00:00:00Z" });
+
+  const reap: ContainerReap = () => "killed";
+  const list = containerList([{ name: "forge-t-write-fail-1" }, { name: "forge-t-write-fail-2" }]);
+
+  const originalPrepare = db.prepare.bind(db);
+  let failNext = true;
+  (db as unknown as { prepare: typeof db.prepare }).prepare = ((sql: string) => {
+    if (failNext && sql.trim().startsWith("INSERT INTO events")) {
+      failNext = false;
+      return { run: () => { throw new Error("simulated write failure"); } } as unknown as ReturnType<typeof db.prepare>;
+    }
+    return originalPrepare(sql);
+  }) as typeof db.prepare;
+
+  let outcome;
+  try {
+    outcome = performOpsReapContainers({ olderThanMinutes: 60 }, reap, list);
+  } finally {
+    (db as unknown as { prepare: typeof db.prepare }).prepare = originalPrepare;
+  }
+
+  assert.deepEqual(
+    outcome.reaped.sort(),
+    ["forge-t-write-fail-1", "forge-t-write-fail-2"].sort(),
+    "docker already confirmed both gone — a failed event write doesn't undo that",
+  );
+  assert.equal(outcome.resolutionWriteErrors.length, 1, "exactly one of the two resolution writes was made to throw");
+  assert.equal(
+    outcome.completedTaskLeaks.length,
+    2,
+    "the completedTaskLeaks bookkeeping reflects the confirmed docker outcome, not the event-write outcome",
+  );
+});
+
 test("performOpsReapContainers: docker unavailable is reported, not thrown", () => {
   const calls: string[] = [];
   const reap: ContainerReap = (name) => { calls.push(name); return "killed"; };

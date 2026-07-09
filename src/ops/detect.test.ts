@@ -455,6 +455,25 @@ test("detectContainerReapFailed (FG-504): a LATER container.reaped event clears 
   assert.equal(detectContainerReapFailed(db).length, 0, "not_found is confirmed-gone too — clears the incident");
 });
 
+test("detectContainerReapFailed (FG-505): a LATER container.reaped event with a 'confirmed-absent-at-scan' outcome (absence-heal) also clears the incident", () => {
+  insertRun(mkRun("run-reap-absence-healed", "active"));
+  insertTask(mkTask("task-reap-absence-healed", "run-reap-absence-healed", "complete"));
+  logEvent("container.reap_failed", {
+    runId: "run-reap-absence-healed", taskId: "task-reap-absence-healed",
+    payload: { containerName: "forge-task-reap-absence-healed", why: "docker rm -f -v failed after task completion" },
+  });
+  logEvent("container.reaped", {
+    runId: "run-reap-absence-healed", taskId: "task-reap-absence-healed",
+    payload: { containerName: "forge-task-reap-absence-healed", outcome: "confirmed-absent-at-scan" },
+  });
+
+  assert.equal(
+    detectContainerReapFailed(db).length,
+    0,
+    "the detector treats ANY later container.reaped as a resolution, regardless of the outcome payload value — absence-heal clears the incident the same as an active reap",
+  );
+});
+
 test("detectContainerReapFailed (FG-504): a container.reaped event recorded BEFORE the reap_failed event does not suppress it (still stale/unresolved)", () => {
   insertRun(mkRun("run-reap-stale", "active"));
   insertTask(mkTask("task-reap-stale", "run-reap-stale", "complete"));
