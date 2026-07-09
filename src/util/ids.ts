@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 function shortId(): string {
   return randomBytes(3).toString("hex");
@@ -27,6 +27,15 @@ export function newCampaignId(): string {
 
 export function newCampaignItemId(): string {
   return `citem-${shortId()}${shortId()}`;
+}
+
+// FG-487: pairing discriminator for host-side verification start/finish event
+// pairs (review-loop rounds, campaign reconcile host-gate execs) — a crashed
+// process restarting the same round/ticket/sha, or a retried gate exec, can
+// produce two starts at the same identity; only attemptId disambiguates which
+// finish belongs to which start.
+export function newAttemptId(): string {
+  return randomUUID();
 }
 
 export function nowIso(): string {

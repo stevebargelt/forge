@@ -9,7 +9,8 @@ import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
-import { invoke, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
+import { invoke, createInvokeRun, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
+import { finalizeRunIfSettled } from "../../v2/run-finalize.js";
 import { readTicket } from "../../backlog/structured.js";
 import { applyRoutePreflight, preflightEnforceFromEnv } from "../route-preflight.js";
 import {
@@ -21,6 +22,8 @@ import {
   findCoveringGateEvidence, describeGateEvidence, deriveRequiredGateList, probeCiGateStatus,
   type CheckStatusProvider, type CiGateStatus,
 } from "../../store/host-verifications.js";
+import { logEvent } from "../../store/events.js";
+import { newAttemptId } from "../../util/ids.js";
 
 type InvokeFn = (args: InvokeArgs) => Promise<InvokeResult>;
 type RunVerificationFn = typeof runVerification;
@@ -289,8 +292,51 @@ export function buildReviewLoopDeps(
     return { ...result, ciOutcome: { kind: "local_fallback", reason: status.reason, extendedDelegatedToCi } };
   };
 
+  // FG-487: every round's verification (the FG-501 CI-wait poll, or the local
+  // typecheck+test fallback) previously left no durable trace between rounds —
+  // only the reviewer/fixer task rows around it were ever visible. Wrap
+  // verifyWithReuse in a start/finish event pair per round, keyed by a fresh
+  // attemptId so a crashed-and-restarted round at the same round/ticket/sha
+  // identity is never mispaired with the wrong finish (see newAttemptId).
+  // `mode` is coarse (known before verifyWithReuse resolves any of its
+  // sub-branches): "local" for a dirty tree (verifyWithReuse never consults CI
+  // for a dirty tree — see its own dirty check), "ci_wait" for a clean tree
+  // (which always consults covering evidence / CI status first, whether it
+  // resolves instantly via reuse, waits on pending CI, or falls back to a real
+  // local run) — the finish event's ciOutcome/reusedEvidence carry the actual
+  // sub-branch taken.
+  let verificationRound = 0;
+  const verifyWithEvents = async (): Promise<VerificationResult> => {
+    verificationRound++;
+    const attemptId = newAttemptId();
+    const dirty = gitInDir(["status", "--porcelain"]).trim().length > 0;
+    let sha: string | undefined;
+    try {
+      sha = gitInDir(["rev-parse", "HEAD"]).trim();
+    } catch {
+      sha = undefined;
+    }
+    const mode: "local" | "ci_wait" = dirty ? "local" : "ci_wait";
+    logEvent("review_loop.verification_started", {
+      runId,
+      payload: { attemptId, round: verificationRound, ticketId: ctx.ticketId, sha, mode },
+    });
+    const result = await verifyWithReuse();
+    logEvent("review_loop.verification_finished", {
+      runId,
+      payload: {
+        attemptId, round: verificationRound, ticketId: ctx.ticketId, sha, mode,
+        ok: result.ok,
+        reusedEvidence: result.reusedEvidence ?? null,
+        ciOutcome: result.ciOutcome ?? null,
+        steps: result.steps.map((s) => ({ name: s.name, ok: s.ok })),
+      },
+    });
+    return result;
+  };
+
   const deps: ReviewLoopDeps = {
-    verify: () => verifyWithReuse(),
+    verify: () => verifyWithEvents(),
     review: async (verification) => {
       preflight();
       const res = await invokeFn({
@@ -479,6 +525,12 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         return `${originalDiff}\n\n## Fixer commits since review start (${startHead.slice(0, 9)}..${head.slice(0, 9)})\n${fixerCommits}`;
       };
 
+      // FG-487: create the run row (and emit run.created) at loop entry — BEFORE
+      // round 1's verification, not lazily on the first reviewer/fixer dispatch as
+      // before. Without this the dashboard showed nothing for the whole
+      // verification/CI-wait window, which is often the loop's longest phase.
+      const eagerRunId = createInvokeRun("review-loop", projectDir, undefined, `review-loop #${ticketId}`, undefined);
+
       const { deps, getRunId } = buildReviewLoopDeps({
         ticketId,
         acceptance: `${ticket.id} — ${ticket.title}\n\n${ticket.body}`,
@@ -486,6 +538,7 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         route: opts.route, unrouted: opts.unrouted,
         reviewProfile: opts.reviewProfile, implementProfile: opts.implementProfile,
         localExtended: opts.localExtended,
+        runId: eagerRunId,
       }, invokeFn ?? invoke);
 
       const outcome = await runReviewLoop({ maxRounds: opts.maxRounds, ticketId }, deps);
@@ -493,6 +546,15 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
 
       const runId = getRunId();
       if (runId) {
+        // FG-487: normally the last reviewer/fixer task's own completion closes the
+        // run (invoke.ts's closeRunIfIdle). But a loop that stops before ANY task is
+        // ever dispatched (e.g. verification_failed with zero actionable findings on
+        // round 1 — no discoverable checks at all) now leaves an eagerly-created run
+        // with no task ever attached to it; reconcile.ts's crash-recovery sweep
+        // requires at least one task row before it will complete a run, so that path
+        // would never close it. Finalize here too — idempotent (a no-op once the run
+        // is already complete via the normal per-task path).
+        finalizeRunIfSettled(runId, "review-loop", { stopReason: outcome.stopReason });
         const notePath = join(runDir(runId), "review-loop.md");
         if (existsSync(runDir(runId))) writeFileSync(notePath, note);
         console.log(`\n${note}\nnote: ${notePath}`);

@@ -12,7 +12,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
 import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForRun } from "../store/events.js";
 import { collectReconcileEvidence, collectAuthoritativeEvents, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
 import type { CiCheckStatus } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
@@ -1065,4 +1065,114 @@ test("FG-500 round 2 regression: a single-gate project (no test:extended) still 
 
   const result = collectReconcileEvidence(projectDir, item());
   assert.deepEqual(result.hostVerification, { recorded: true, passed: true });
+});
+
+// ── FG-487: campaign_item.host_gate_started/_finished — the real-exec path was
+// entirely invisible on the dashboard; these events bracket ONLY the actual
+// execFileSync call (not the evidence-reuse/CI-shortcut short-circuits above,
+// which never spend host time and must not emit them).
+
+type HostGatePayload = {
+  attemptId: string;
+  ticketId: string;
+  itemId: string | null;
+  campaignId: string | null;
+  gate: string;
+  command: string;
+  testedSha: string;
+  exitCode?: number;
+};
+
+test("FG-487 runAndRecordHostVerification: real exec emits host_gate_started/_finished sharing one attemptId, with testedSha and the real exit code", () => {
+  writePackageJsonWithGateScript("exit 0");
+  const commit = commitAll("add passing gate script");
+
+  const result = runAndRecordHostVerification(projectDir, "FG-487-A", { runId: "run-487-a", itemId: "citem-487", campaignId: "campaign-487" });
+  assert.equal(result.status, "recorded");
+
+  const events = eventsForRun("run-487-a");
+  const started = events.filter((e) => e.eventType === "campaign_item.host_gate_started");
+  const finished = events.filter((e) => e.eventType === "campaign_item.host_gate_finished");
+  assert.equal(started.length, 1);
+  assert.equal(finished.length, 1);
+
+  const startPayload = started[0]!.payload as HostGatePayload;
+  const finishPayload = finished[0]!.payload as HostGatePayload;
+  assert.equal(startPayload.attemptId, finishPayload.attemptId, "start and finish must share the same attemptId");
+  assert.equal(startPayload.ticketId, "FG-487-A");
+  assert.equal(startPayload.itemId, "citem-487");
+  assert.equal(startPayload.campaignId, "campaign-487");
+  assert.equal(startPayload.gate, "npm run test:all");
+  assert.equal(startPayload.testedSha, commit);
+  assert.equal(finishPayload.exitCode, 0);
+});
+
+test("FG-487 runAndRecordHostVerification: itemId/campaignId are optional — omitting them still emits events, ticketId-scoped", () => {
+  writePackageJsonWithGateScript("exit 0");
+  commitAll("add passing gate script");
+
+  runAndRecordHostVerification(projectDir, "FG-487-B", { runId: "run-487-b" });
+
+  const events = eventsForRun("run-487-b");
+  const started = events.find((e) => e.eventType === "campaign_item.host_gate_started")!;
+  const payload = started.payload as HostGatePayload;
+  assert.equal(payload.ticketId, "FG-487-B");
+  assert.equal(payload.itemId, null);
+  assert.equal(payload.campaignId, null);
+});
+
+test("FG-487 runAndRecordHostVerification: a FAILING real exec still emits finish with the real (non-zero) exit code", () => {
+  writePackageJsonWithGateScript("exit 7");
+  commitAll("add failing gate script");
+
+  runAndRecordHostVerification(projectDir, "FG-487-C", { runId: "run-487-c" });
+
+  const events = eventsForRun("run-487-c");
+  const finished = events.find((e) => e.eventType === "campaign_item.host_gate_finished")!;
+  assert.equal((finished.payload as HostGatePayload).exitCode, 7);
+});
+
+test("FG-487 runAndRecordHostVerification FG-500: a tiered project — each gate-list member gets its OWN start/finish pair with its own attemptId", () => {
+  writePackageJsonWithGateScripts("exit 0", "exit 0");
+  commitAll("tiered project, both gates pass");
+
+  runAndRecordHostVerification(projectDir, "FG-487-D", { runId: "run-487-d" });
+
+  const events = eventsForRun("run-487-d");
+  const started = events.filter((e) => e.eventType === "campaign_item.host_gate_started");
+  assert.equal(started.length, 2, "fast + extended gates each get their own start event");
+  const gates = started.map((e) => (e.payload as HostGatePayload).gate);
+  assert.deepEqual(gates, ["npm run test:all", "npm run test:extended"]);
+  const attemptIds = started.map((e) => (e.payload as HostGatePayload).attemptId);
+  assert.notEqual(attemptIds[0], attemptIds[1], "each gate-list member must get a fresh attemptId");
+});
+
+test("FG-487 runAndRecordHostVerification: evidence REUSE (existing passing host row) does NOT emit host_gate events — no real exec happened", () => {
+  const commit = makeCommit("reuse setup");
+  insertHostVerification({
+    ticketId: "FG-487-E", projectDir, commitSha: commit,
+    gateName: "npm run test:all", command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  const result = runAndRecordHostVerification(projectDir, "FG-487-E", { runId: "run-487-e" });
+  assert.equal(result.status, "reused");
+
+  const events = eventsForRun("run-487-e");
+  assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_started").length, 0);
+  assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_finished").length, 0);
+});
+
+test("FG-487 runAndRecordHostVerification: CI-shortcut evidence (green required CI check) does NOT emit host_gate events — no real exec happened", () => {
+  writeMatchingCiWorkflow("npm run test:all");
+  const commit = commitAll("add matching ci.yml");
+  const stub = (opts: { sha: string }): CiCheckStatus | null =>
+    opts.sha === commit ? { sha: commit, state: "success", detailsUrl: "https://example.test/run/9" } : null;
+
+  const result = runAndRecordHostVerification(projectDir, "FG-487-F", { runId: "run-487-f", checkStatusProvider: stub });
+  assert.equal(result.status, "recorded");
+  assert.equal((result as { source: string }).source, "ci");
+
+  const events = eventsForRun("run-487-f");
+  assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_started").length, 0);
+  assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_finished").length, 0);
 });
