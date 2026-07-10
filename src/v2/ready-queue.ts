@@ -82,7 +82,7 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
     const hasLiveRecovery = existing.some(
       (t) => t.status === "pending" && isOnRejectRecoveryTask(t),
     );
-    if (hasCompletePrimary(existing) && !hasLiveRecovery) continue;
+    if (resolvePhasePrimary(existing, step.id) !== undefined && !hasLiveRecovery) continue;
 
     // No complete primary. If a task row exists but none is pending, the step is
     // in progress or terminally failed-without-retry — not ready. A pending row
@@ -90,15 +90,18 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
     // step still needs dispatch, so fall through to the deps check.
     if (existing.length > 0 && !existing.some((t) => t.status === "pending")) continue;
 
-    // Deps: a dependency phase is satisfied if ANY of its primaries is complete —
-    // not just the most-recent one. Using "most recent" let an orphaned pending
-    // duplicate primary (created after, but never run) shadow the real complete
-    // primary, permanently blocking the downstream step. "Any complete" is
-    // identical to "most recent" in the normal one-primary-per-phase case and in
-    // legit retries (old failed + new pending ⇒ no complete ⇒ still blocks until
-    // the retry completes); it only diverges to fix the duplicate-primary bug.
+    // Deps: a dependency phase is satisfied when it has a COMPLETE primary —
+    // resolvePhasePrimary (FG-519) returns the latest-complete parent-less row,
+    // and `!== undefined` is the presence check. Selecting by "latest complete"
+    // rather than "latest primary regardless of status" is what stops an orphaned
+    // pending duplicate primary (created after, but never run) from shadowing the
+    // real complete primary and permanently blocking the downstream step. In the
+    // normal one-primary-per-phase case, and in legit retries (old failed + new
+    // pending ⇒ no complete ⇒ still blocks until the retry completes), this is
+    // identical to the old any-complete check; it only diverges to fix the
+    // duplicate-primary bug.
     const depsMet = step.depends_on.every((depId) =>
-      hasCompletePrimary(tasksByPhase.get(depId) ?? []),
+      resolvePhasePrimary(tasksByPhase.get(depId) ?? [], depId) !== undefined,
     );
 
     if (depsMet) ready.push(step);
@@ -110,6 +113,24 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
 // True when at least one primary (non-child) task in the set is complete.
 function hasCompletePrimary(tasks: Task[]): boolean {
   return tasks.some((t) => t.parentId === undefined && COMPLETE_LIKE.has(t.status));
+}
+
+// FG-519: the one canonical phase-primary resolution rule, shared by the three
+// sites that used to disagree — the ready queue (this file), inputs.deriveUpstream,
+// and runNext's fanout upstream read. Returns the latest (by createdAt) COMPLETE,
+// parent-less (parentId === undefined) task row for `phase`, or undefined.
+//
+// "parent-less" excludes red/fanout children; "COMPLETE" is what makes the row
+// safe for a downstream reader — a healed duplicate-primary pair ([complete
+// older, failed newer]) resolves to the complete row, not the failed one whose
+// result.json is missing. Callers own the INPUT filtering (e.g. computeReadyQueue
+// drops ad-hoc invoke rows before calling); this canonicalizes only the SELECTION
+// rule over whatever row universe it is handed.
+export function resolvePhasePrimary(tasks: Task[], phase: string): Task | undefined {
+  return tasks
+    .filter((t) => t.phase === phase && t.parentId === undefined && COMPLETE_LIKE.has(t.status))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .pop();
 }
 
 // Shared "is this run settled" reachability check, consumed identically by
