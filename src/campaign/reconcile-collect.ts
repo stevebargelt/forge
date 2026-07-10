@@ -115,6 +115,17 @@ export function checkClosedCommitCoveredByTestedSha(
 // when every covering row failed, true when at least one covering row passed
 // (a later real pass ships over an earlier covering failure — FG-453's
 // passing-row model).
+//
+// FG-510: a row covers `gate` only when its recorded COMMAND is `gate` too —
+// the rows are queried by gate_name, and `forge record-host-verification
+// --gate <required gate>` lets an operator write gate_name = the required gate
+// while command is anything (`echo ok`). Matching findCoveringGateEvidence's
+// long-standing r.command === gate check gives ONE definition of a covering
+// row. A command-mismatched row is not covering AT ALL — it neither passes nor
+// counts as a covering failure, so verified stays null (fail-closed) when only
+// spoofed rows exist, exactly as if the row had never been written. Canonical
+// writers set command and gate_name to the same string, so no legitimate row
+// is lost.
 export type GateCoverage = { verified: boolean | null; detailRow: HostVerificationRow | null; failureCount: number };
 
 export function resolveGateCoverage(
@@ -125,7 +136,9 @@ export function resolveGateCoverage(
   baseBranch: string
 ): GateCoverage {
   const rows = queryHostVerificationRowsForGate(ticketId, projectDir, gate);
-  const covering = rows.filter((r) => checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch));
+  const covering = rows.filter(
+    (r) => r.command === gate && checkClosedCommitCoveredByTestedSha(projectDir, closedCommit, r.commitSha, baseBranch)
+  );
   if (covering.length === 0) return { verified: null, detailRow: null, failureCount: 0 };
   const passingRows = covering.filter((r) => r.exitCode === 0);
   const verified = passingRows.length > 0;
