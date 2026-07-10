@@ -17,6 +17,7 @@ import {
   resolveReviewedTipTrust, type ReviewLoopContext,
 } from "./review-loop.js";
 import { runReviewLoop, renderReviewLoopNote, resolveCommitRange, type VerificationResult, type GitRunner } from "../../v2/review-loop.js";
+import { runDir } from "../../util/paths.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification, REQUIRED_CI_CHECK_CONTEXT } from "../../store/host-verifications.js";
 import { eventsForRun } from "../../store/events.js";
@@ -2256,6 +2257,245 @@ test("FG-502 CLI: an unresolvable remote ref withholds closeable with a distinct
   assert.match(printed, /not closeable — remote-unavailable/);
   assert.equal(process.exitCode, 1);
   process.exitCode = prevExitCode;
+});
+
+// ── FG-514: the trust fact on the operator-facing surfaces ───────────────────
+//
+// The tests above pin the trust PRIMITIVE (resolveReviewedTipTrust's four
+// outcomes) and stdout for the remote_ahead case. What sits between the
+// primitive and the operator is untested: the note the loop leaves ON DISK
+// (the artifact read after the terminal scrolls away), the closeable print
+// gate as a composition (`outcome.closeable && kind === "trusted"` — the
+// spoof FG-514 closes is the "Close with:" line appearing without equality),
+// and the remote_unavailable branch that only fires when a ref DID resolve
+// but its fetch failed. These drive the real `registerReviewLoop` path.
+
+/** Ticket + package.json + one reviewed commit tracked by a pushed upstream,
+ *  then a commit pushed to origin behind the local repo's back. The cached
+ *  tracking ref stays stale — only the loop's own bounded fetch sees the real
+ *  remote head. Returns what the assertions need to name shas. */
+function setupRemoteAheadLoopRepo(): { sinceSha: string; tipSha: string; branch: string } {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const bare = addBareOrigin(projectDir);
+  setUpstream(projectDir, tipSha);
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], projectDir).trim();
+  pushNewCommitToOrigin(bare, branch, "unreviewed commit the reviewer never saw");
+  return { sinceSha, tipSha, branch };
+}
+
+/** A passing reviewer that also does what a REAL dispatch does: spawn.ts
+ *  creates the run dir. The note writer is guarded on `existsSync(runDir())`,
+ *  so a stub that skips it silently downgrades every note assertion to a
+ *  stdout assertion — the persisted artifact would never be written and the
+ *  test would still pass. Records the runId so the caller can read the note. */
+function passingReviewerCreatingRunDir(seen: { runId?: string }) {
+  return async (a: InvokeArgs): Promise<InvokeResult> => {
+    if (a.runId) {
+      seen.runId = a.runId;
+      mkdirSync(runDir(a.runId), { recursive: true });
+      extraTempDirs.push(runDir(a.runId)); // under the suite's temp FORGE_HOME
+    }
+    return RESULT({ result: { verdict: "pass", findings: [] } });
+  };
+}
+
+function readPersistedNote(seen: { runId?: string }, printed: string): string {
+  assert.ok(seen.runId, "the reviewer must have been dispatched with the eagerly-created runId");
+  const notePath = join(runDir(seen.runId), "review-loop.md");
+  assert.ok(existsSync(notePath), `the run note must be PERSISTED, not merely printed. stdout:\n${printed}`);
+  return readFileSync(notePath, "utf8");
+}
+
+async function runLoopCli(sinceSha: string, invokeFn: (a: InvokeArgs) => Promise<InvokeResult>): Promise<string> {
+  const program = new Command();
+  registerReviewLoop(program, invokeFn);
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  return lines.join("\n");
+}
+
+test("FG-514 CLI: a remote-ahead loop writes the trust fact into the DURABLE run note — REMOTE-AHEAD, the unreviewed commit's sha + subject, and the pull/rebase next action", async () => {
+  const { sinceSha, branch } = setupRemoteAheadLoopRepo();
+  const seen: { runId?: string } = {};
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+
+  const printed = await runLoopCli(sinceSha, passingReviewerCreatingRunDir(seen));
+  const note = readPersistedNote(seen, printed);
+
+  // Positive control: `passed` is the ONLY stopReason carrying closeable=true,
+  // so the reviewer passed AND verification was green. What withholds closeable
+  // below is the trust gate, not a failed loop — without this the doesNotMatch
+  // assertions could pass vacuously.
+  assert.match(note, /- \*\*stop reason:\*\* passed/);
+  assert.match(note, /- \*\*closeable:\*\* no/);
+
+  assert.match(note, /remote reachability:.*REMOTE-AHEAD/, `the persisted note must carry the trust fact:\n${note}`);
+  assert.match(note, /- \*\*unreviewed commits:\*\*/);
+  // The note's shas come from `git log --format=%h`; read the fetched remote
+  // head back through the same producer so abbreviation length can't drift.
+  const remoteHeadShortSha = gitExec(["log", "--format=%h", "-1", `refs/remotes/origin/${branch}`], projectDir).trim();
+  assert.match(note, new RegExp(`- ${remoteHeadShortSha} unreviewed commit the reviewer never saw`),
+    `the note must name the unreviewed commit sha the operator has to rebase onto:\n${note}`);
+  assert.match(note, /next action:.*pull\/rebase onto/);
+  assert.doesNotMatch(note, /a closeable verdict \(if any\) is trustworthy/, "the trusted line must never render for a remote-ahead tip");
+
+  assert.equal(process.exitCode, 1);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-514 CLI: remote-ahead + an otherwise-closeable outcome exits 1 and never emits the `Close with: forge backlog close` line — not on the console, not in the note", async () => {
+  const { sinceSha } = setupRemoteAheadLoopRepo();
+  const seen: { runId?: string } = {};
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+
+  const printed = await runLoopCli(sinceSha, passingReviewerCreatingRunDir(seen));
+  const note = readPersistedNote(seen, printed);
+  const everything = `${printed}\n${note}`;
+
+  // Positive control — outcome.closeable was true. The gate is the ONLY reason
+  // the close instruction is absent.
+  assert.match(printed, /- \*\*stop reason:\*\* passed/);
+
+  // The exact spoof FG-514 closes: a close instruction reachable without
+  // equality against the remote head. Assert the ABSENCE on every surface.
+  assert.doesNotMatch(everything, /✓ closeable/);
+  assert.doesNotMatch(everything, /Close with:/, `the close instruction must never render for a remote-ahead tip:\n${everything}`);
+  assert.doesNotMatch(everything, /forge backlog close/);
+  assert.match(printed, /✗ not closeable — remote-ahead/);
+  assert.equal(process.exitCode, 1, "a withheld closeable must fail the command, not just print");
+  process.exitCode = prevExitCode;
+});
+
+test("FG-514 CLI: a failed bounded fetch over an EXISTING cached tracking ref withholds closeable, surfaces the fetch error, and is distinct from the no-remote-ref message", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // The cached tracking ref AGREES with the reviewed tip — the pre-FG-514
+  // stale-cache comparison would print "✓ closeable" here. origin points at a
+  // path that does not exist, so the bounded fetch fails without any network.
+  gitExec(["remote", "add", "origin", join(tmpdir(), "forge-rl-nonexistent-remote-3f10c4")], projectDir);
+  gitExec(["update-ref", "refs/remotes/origin/main", tipSha], projectDir);
+  gitExec(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], projectDir);
+
+  const seen: { runId?: string } = {};
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+
+  const printed = await runLoopCli(sinceSha, passingReviewerCreatingRunDir(seen));
+  const note = readPersistedNote(seen, printed);
+
+  assert.match(printed, /- \*\*stop reason:\*\* passed/, "positive control: the loop itself passed");
+  assert.doesNotMatch(printed, /✓ closeable/, "a cached ref equal to the tip must never be trusted when its fetch failed");
+  assert.doesNotMatch(printed, /forge backlog close/);
+  assert.match(printed, /✗ not closeable — remote-unavailable: the remote head could not be verified \(bounded fetch of origin\/HEAD failed: .+\)/,
+    `the operator must see WHY the head is unknown:\n${printed}`);
+  assert.match(printed, /and a stale cached ref is never trusted/);
+  assert.match(printed, new RegExp(tipSha), "the unconfirmable tip is named");
+  // The two remote_unavailable branches are distinct: this ref DID resolve.
+  assert.doesNotMatch(printed, /no resolvable remote-tracking ref/);
+  assert.equal(process.exitCode, 1);
+
+  assert.match(note, /remote reachability:.*UNAVAILABLE — the remote head could not be verified: the bounded fetch of `origin\/HEAD` failed \(.+\)/,
+    `the persisted note must carry the fetch failure, not the no-ref wording:\n${note}`);
+  assert.match(note, /next action:.*restore remote access/);
+  assert.match(note, /- \*\*closeable:\*\* no/);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-514 CLI: a cached upstream lagging BEHIND the pushed tip is refreshed by the bounded fetch — equality holds, closeable is granted (the fetch decides, not the cache)", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], projectDir).trim();
+
+  // The tip IS the remote head — but the local tracking ref was never updated
+  // after the push, so it still names the pre-commit baseline. Comparing
+  // against that cache yields local_only and withholds closeable (a false
+  // NEGATIVE); only the bounded fetch can see the tip is the remote head. This
+  // is the equality happy path where the cache and the truth disagree, so it
+  // also proves the fetch runs on the real CLI path, not just in the primitive.
+  const bare = addBareOrigin(projectDir);
+  gitExec(["push", "--quiet", "--force", bare, `${tipSha}:refs/heads/${branch}`], projectDir);
+  gitExec(["update-ref", `refs/remotes/origin/${branch}`, sinceSha], projectDir);
+  gitExec(["config", `branch.${branch}.remote`, "origin"], projectDir);
+  gitExec(["config", `branch.${branch}.merge`, `refs/heads/${branch}`], projectDir);
+  assert.equal(gitExec(["rev-parse", "@{u}"], projectDir).trim(), sinceSha,
+    "precondition: the cached upstream must lag the pushed tip before the loop runs");
+
+  const seen: { runId?: string } = {};
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+
+  const printed = await runLoopCli(sinceSha, passingReviewerCreatingRunDir(seen));
+  const note = readPersistedNote(seen, printed);
+
+  assert.match(printed, /✓ closeable/, `equality with the FETCHED head must grant closeable:\n${printed}`);
+  assert.match(printed, /is the head of @\{u\}/, "@{u} wins over the origin/HEAD fallback when an upstream is configured");
+  assert.match(printed, /Close with:\s+forge backlog close #?FG-502/);
+  assert.notEqual(process.exitCode, 1);
+
+  assert.equal(gitExec(["rev-parse", "@{u}"], projectDir).trim(), tipSha,
+    "the bounded fetch must have refreshed the stale tracking ref — otherwise trust was decided off the cache");
+  assert.match(note, /- \*\*closeable:\*\* yes/);
+  assert.match(note, /the reviewed tip IS the head of `@\{u\}`/);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-514 resolveReviewedTipTrust: a DIVERGED branch — local commits the remote lacks AND remote commits the reviewer never saw — is never trusted", async () => {
+  const bare = addBareOrigin(projectDir);
+  const baseSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setUpstream(projectDir, baseSha);
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], projectDir).trim();
+  pushNewCommitToOrigin(bare, branch, "remote-only commit the reviewer never saw");
+
+  writeFileSync(join(projectDir, "diverged.txt"), "diverged\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "local-only commit the remote never saw"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+
+  // The invariant that actually gates merge authorization: divergence is not trust.
+  assert.notEqual(trust.kind, "trusted", `a diverged branch must never authorize a close: ${JSON.stringify(trust)}`);
+
+  // Both directions are non-empty. `remoteRef..tip` is tested first, so
+  // divergence collapses to local_only — the closeable gate is identical either
+  // way, but the operator is told to "push the branch", which a diverged branch
+  // rejects as non-fast-forward, and the remote-only commit is never named.
+  assert.equal(trust.kind, "local_only");
+  const t = trust as { remoteRef: string; localCommits: { sha: string; subject: string }[] };
+  assert.equal(t.remoteRef, "@{u}");
+  assert.equal(t.localCommits.length, 1);
+  assert.match(t.localCommits[0]!.subject, /local-only commit the remote never saw/);
+
+  // Pin that this really is divergence and not merely a local-ahead branch:
+  // the fetch pulled in a remote commit the reviewed tip does not contain.
+  const remoteHead = gitExec(["rev-parse", `refs/remotes/origin/${branch}`], projectDir).trim();
+  assert.notEqual(remoteHead, baseSha, "the bounded fetch must have pulled in the remote-only commit");
+  const unreviewed = gitExec(["log", "--format=%h", `${tipSha}..${remoteHead}`], projectDir).trim().split("\n").filter(Boolean);
+  assert.equal(unreviewed.length, 1, "the remote genuinely carries a commit the reviewed tip lacks — divergence, not local-ahead");
 });
 
 test("FG-502 CLI end-to-end: computeInRangeDocsPaths threads through registerReviewLoop into the scope guard — a fixer edit to a docs/ path already touched by the ORIGINAL reviewed range survives commit, not reverted", async () => {
