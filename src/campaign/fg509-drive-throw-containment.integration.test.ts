@@ -9,8 +9,12 @@
 // These tests drive the REAL executor (startCampaign/resumeCampaign/driveWorkflowItem) and
 // assert the containment invariant at each of the three sites: item parked recoverably at
 // awaiting_gate with the drive-error reason, a campaign_item.drive_error event on the run,
-// and the campaign row transitioned running→paused. Test 4 closes the loop the ticket is
-// actually about — that a campaign parked this way can be resumed at all.
+// and the campaign row transitioned running→paused. Tests 4 and 5 close the loop the ticket
+// is actually about — that a campaign parked this way can be resumed at all — once per park
+// shape, because resume reaches the two shapes by different routes: the active-run parks
+// (test 4) re-enter the drive loop via the FG-485 liveness probe, while the terminal
+// reconciliation park (test 5) has no active run, falls through the out-of-band evidence
+// path, and re-runs reconcileTerminalOutcome itself.
 //
 // The gate:auto and gate:verdict setups use the same seam fg484-auto-gate-cancel-race
 // uses: drive the step to a genuine awaiting_gate park under gate:human, then rewrite the
@@ -285,21 +289,25 @@ test("FG-509: a throwing doGate on the gate:verdict pass branch parks the item a
   assertParkedAndPaused(campaignId, runId);
 });
 
-test("FG-509: a throwing reconcileTerminalOutcome parks the item and pauses the campaign", { timeout: 20000 }, async () => {
-  const campaignId = setupCampaign();
-
-  // executor.ts's done-audit override hook, made to throw from inside
-  // reconcileTerminalOutcome's real body (the verdict-passed / done-audit branch).
-  class ThrowingDoneAuditMap extends Map<string, DoneAuditResult> {
-    override get(_key: string): DoneAuditResult | undefined {
-      throw new Error(BOOM);
-    }
+// executor.ts's done-audit override hook, made to throw from inside
+// reconcileTerminalOutcome's real body (the verdict-passed / done-audit branch).
+class ThrowingDoneAuditMap extends Map<string, DoneAuditResult> {
+  override get(_key: string): DoneAuditResult | undefined {
+    throw new Error(BOOM);
   }
+}
+
+// Clearing the fault: a real map whose entry is what a clean done-audit of this settled
+// run yields. Paired with the authoritative pass verdict below, a reconciliation that
+// actually re-runs can only land the item at complete/shipped.
+const PASSING_AUDIT: DoneAuditResult = { outcome: "pass", checks: [], gaps: [], requestedAction: null };
+
+// Settles the run to 'complete' with an authoritative pass verdict recorded, so the next
+// pass of the drive loop takes the terminal branch and reconcileTerminalOutcome reaches
+// the done-audit lookup — where the injected fault throws. Returns the run id.
+async function driveToReconcileThrowPark(campaignId: string): Promise<string> {
   setExecutorDoneAuditMapForTest(new ThrowingDoneAuditMap());
 
-  // Settle the run to 'complete' with an authoritative pass verdict recorded, so the next
-  // pass of the drive loop takes the terminal branch and reconcileTerminalOutcome reaches
-  // the done-audit lookup.
   let settled = false;
   const settlingRunNext = async ({ runId }: { runId: string; workflow: Workflow }): Promise<RunNextResult> => {
     if (!settled) {
@@ -319,7 +327,12 @@ test("FG-509: a throwing reconcileTerminalOutcome parks the item and pauses the 
     startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: settlingRunNext }),
   );
 
-  const runId = listCampaignItems(campaignId)[0]!.runId!;
+  return listCampaignItems(campaignId)[0]!.runId!;
+}
+
+test("FG-509: a throwing reconcileTerminalOutcome parks the item and pauses the campaign", { timeout: 20000 }, async () => {
+  const campaignId = setupCampaign();
+  const runId = await driveToReconcileThrowPark(campaignId);
   assertParkedAndPaused(campaignId, runId);
 });
 
@@ -355,4 +368,40 @@ test("FG-509: resume after a drive-throw park re-attaches and re-drives — no n
   assert.notEqual(resumed.stopReason, "not_paused", "resume must not refuse a drive-throw-parked campaign");
   assert.ok(gateCalls > 0, "resume must actually re-enter the drive loop and reach the auto-advance gate");
   assert.equal(tasksForRun(runId)[0]!.status, "complete", "the benign gate advance must have landed for real");
+});
+
+// The reconcileTerminalOutcome park is a DISTINCT resume shape from the three active-run
+// sites above: there is no active run and nothing to re-dispatch, so the liveness probe
+// finds no dispatchable work and resume falls through to the out-of-band evidence path
+// (which refuses — the ticket is still active) before re-entering driveWorkflowItem's
+// terminal branch. That re-entry is the recovery: it retries the SAME reconciliation.
+test("FG-509: resume after a reconcile-throw park re-runs reconcileTerminalOutcome once the fault is cleared", { timeout: 20000 }, async () => {
+  const campaignId = setupCampaign();
+  const runId = await driveToReconcileThrowPark(campaignId);
+  assertParkedAndPaused(campaignId, runId);
+
+  // Resuming with the fault still present re-parks on the identical error — the reason
+  // `campaign resume` docs say to clear the fault first.
+  await assertRejectsWithEnrichedError(() =>
+    resumeCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) }),
+  );
+  assertParkedAndPaused(campaignId, runId);
+
+  setExecutorDoneAuditMapForTest(new Map([[TICKET_ID, PASSING_AUDIT]]));
+
+  const resumed = await resumeCampaign(campaignId, {
+    dispatch: dispatchMustNotBeCalled,
+    runNextFn: makeCappedRunNext(10),
+  });
+
+  assert.notEqual(resumed.stopReason, "not_paused", "resume must not refuse a reconcile-throw-parked campaign");
+
+  // The item must leave the parked drive-error shape at the terminal outcome its evidence
+  // dictates — an authoritative pass plus a passing done-audit is exactly 'shipped'. Only a
+  // real re-run of reconcileTerminalOutcome can produce it; the park never writes an outcome.
+  const item = listCampaignItems(campaignId)[0]!;
+  assert.equal(item.lifecycleStatus, "complete", "reconcileTerminalOutcome must have re-run and terminalized the item");
+  assert.equal(item.outcome, "shipped", "an authoritative pass + passing done-audit reconciles to shipped");
+  assert.equal(item.blockerKind, undefined, "the cleanly reconciled item carries no blocker");
+  assert.notEqual(getCampaign(campaignId)?.status, "paused", "the campaign must not be left parked after a clean reconcile");
 });
