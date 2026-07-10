@@ -26,8 +26,9 @@ export function setCampaignNotifyEmitterForTest(fn: typeof emitMilestone | null)
 // campaign it describes. Returns the first item's run so the same held item scopes
 // to the same run across resumes (keeping the persistent dedupe stable). Undefined
 // only when NO item in the whole campaign ever produced a run (e.g. every item
-// held from the start) — that residual campaign-scoped case still needs a schema
-// change, deferred to FG-517.
+// held from the start) — that residual case needs a campaign-scoped emission path
+// (new notify machinery: emitMilestone hard-requires a real run), NOT a schema
+// change: events.run_id is already nullable. Deferred to FG-517.
 export function pickCampaignFallbackRunId(campaignId: string): string | undefined {
   for (const it of listCampaignItems(campaignId)) {
     if (it.runId && getRun(it.runId)) return it.runId;

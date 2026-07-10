@@ -167,9 +167,14 @@ export function eventsForRun(runId: string): Event[] {
 // is campaign+item-stable, but `forge campaign retry` clears the item's runId so a
 // re-park lands on a NEW run — a run-scoped scan (eventsForRun) would miss the
 // prior push and re-notify. This scan is run-agnostic so the suppression holds
-// across runs. json_extract filters on the indexed dedupeKey; the dispatched check
-// parses the payload exactly like rowToEvent, keeping the semantics identical to
-// the run-scoped dedupe in emitMilestone.
+// across runs. There is NO index on json_extract(payload, '$.dedupeKey') — only
+// idx_events_type_created (event_type, created_at) exists — so this narrows to
+// orchestrator.milestone rows via that index and then scans their payloads for the
+// dedupeKey match. Cost is bounded by the count of milestone events (a small,
+// slow-growing slice: one per dispatched pause), not the whole events table, so the
+// scan is acceptable at expected volumes. The dispatched check parses the payload
+// exactly like rowToEvent, keeping the semantics identical to the run-scoped dedupe
+// in emitMilestone.
 export function anyDispatchedMilestoneWithDedupeKey(dedupeKey: string): boolean {
   const rows = getDb({ readOnly: true })
     .prepare(
