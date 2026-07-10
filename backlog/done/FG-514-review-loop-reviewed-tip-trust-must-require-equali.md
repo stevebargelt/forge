@@ -1,9 +1,11 @@
 ---
 id: FG-514
 type: story
-status: active
+status: done
 title: "review-loop: reviewed-tip trust must require equality with the remote head, not ancestry — a remote-ahead tip currently reads trusted"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: f135f95
 ---
 
 Review finding N-C (queued 2026-07-10, item 1 of 4 in the sequential reliability queue).

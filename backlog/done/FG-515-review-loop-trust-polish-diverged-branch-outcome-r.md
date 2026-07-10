@@ -1,9 +1,11 @@
 ---
 id: FG-515
 type: story
-status: active
+status: done
 title: "review-loop trust polish: diverged-branch outcome + run-note persistence on no-dispatch exits (FG-514 follow-ups F1/F2)"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: f135f95
 ---
 
 Originally filed as a fail-safe follow-up from FG-514's test-engineer pass (findings F1/F2). SUPERSEDED BY EVENTS the same day: the FG-514 review-loop (run run-review-loop-fg-514-3a23bf) round-1 reviewer graded both items as in-scope for FG-514 — they guard the durable trust facts that ticket ships — and the round-1 fixer implemented both, with tests, in commit 391bb80 on PR #93:
