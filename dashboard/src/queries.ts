@@ -1110,7 +1110,7 @@ export type ReviewLoopRunPhaseEntry = {
  *  "invoke" sentinel. Phase per run is whichever is more recent: the latest
  *  running reviewer/fixer task, or the latest still-open verification start
  *  (same attemptId pairing as inProgressVerifications). */
-export function reviewLoopRunPhases(projectDir?: string): ReviewLoopRunPhaseEntry[] {
+export function reviewLoopRunPhases(nowMs: number = Date.now(), projectDir?: string): ReviewLoopRunPhaseEntry[] {
   // Track the LATEST verification_started per run for its ticketId/round/mode
   // context (kept even once finished — a "reviewing"/"fixing" phase driven by
   // a task row still wants to display which ticket/round it belongs to), plus
@@ -1119,7 +1119,7 @@ export function reviewLoopRunPhases(projectDir?: string): ReviewLoopRunPhaseEntr
   // Same lookback bound as inProgressVerifications, for the same reason: a
   // review-loop run whose latest verification_started event is this old has
   // either long since finished or hung well past any phase worth displaying.
-  const sinceMs = Date.now() - STALE_LOOKBACK_MS;
+  const sinceMs = nowMs - STALE_LOOKBACK_MS;
   const finishedAttemptIds = new Set<string>();
   for (const row of readEventsByType(["review_loop.verification_finished"], sinceMs)) {
     const attemptId = readAttemptId(parseEventPayload(row.payload));
