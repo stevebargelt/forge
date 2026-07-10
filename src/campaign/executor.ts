@@ -74,7 +74,7 @@ export function setCampaignNotifyEmitterForTest(fn: typeof emitMilestone | null)
 // to the same run across resumes (keeping the persistent dedupe stable). Undefined
 // only when NO item in the whole campaign ever produced a run (e.g. every item
 // held from the start) — that residual campaign-scoped case still needs a schema
-// change this ticket's scope guard defers.
+// change, deferred to FG-517.
 function pickCampaignFallbackRunId(campaignId: string): string | undefined {
   for (const it of listCampaignItems(campaignId)) {
     if (it.runId && getRun(it.runId)) return it.runId;
@@ -1768,7 +1768,7 @@ async function driveRemainingItems(
   // each milestone is scoped to a campaign fallback run; the per campaign+item
   // dedupe key keeps a re-park across resumes from spamming. Only a campaign with
   // ZERO runs at all (every item held from the start) still can't push — that
-  // residual needs a campaign-scoped channel this ticket's scope guard defers.
+  // residual needs a campaign-scoped channel, deferred to FG-517.
   if (anyHeld) {
     if (tryTransitionCampaign(campaignId, "running", "paused")) {
       const fallbackRunId = pickCampaignFallbackRunId(campaignId);

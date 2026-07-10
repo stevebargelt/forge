@@ -12,9 +12,11 @@ import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
 import { emitMilestone } from "../../notify/milestone.js";
 
-// `forge ops check` — read-only incident detection over the blackboard (#250).
-// The orchestrator runs `--json` and decides what to act on or surface; humans
-// get the plain rendering. This command NEVER mutates state.
+// `forge ops check` — incident detection over the blackboard (#250). The
+// orchestrator runs `--json`, which is read-only/side-effect-free, and decides
+// what to act on or surface. The live (human) path renders the report AND, since
+// FG-516, records + pushes one deduped milestone per new live incident
+// (orchestrator.milestone events); only `--json` stays read-only.
 
 // FG-516: in LIVE (human/interactive) mode, `forge ops check` pushes ONE
 // milestone per detected incident so a standing incident (orphaned work, stuck
@@ -285,7 +287,7 @@ export function performOpsReapContainers(
 }
 
 export function registerOps(program: Command): void {
-  const ops = program.command("ops").description("Operational intelligence over the forge blackboard (read-only).");
+  const ops = program.command("ops").description("Operational intelligence over the forge blackboard.");
 
   ops
     .command("check")
