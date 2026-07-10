@@ -1,9 +1,11 @@
 ---
 id: FG-516
 type: story
-status: active
+status: done
 title: "notify: campaign pause and ops stuck-run detection must push — unattended wedges currently fire nothing"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: b1490bd
 ---
 
 Review finding F9 residual (queued 2026-07-10, item 2 of 4 in the sequential reliability queue) — the last silent unattended-failure class.
