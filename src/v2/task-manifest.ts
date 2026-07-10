@@ -170,10 +170,17 @@ export type ManifestRuntime = {
   authStrategy: string;
 };
 export function getManifestRuntime(taskDirPath: string): ManifestRuntime | undefined {
+  return readTaskManifest(taskDirPath)?.runtime;
+}
+
+// FG-507: the whole manifest, not just its runtime block. `forge retry` on an
+// ad-hoc invoke task re-dispatches it directly, and the dispatch facts it must
+// reproduce (projectDir, mountMode — a red's read-only mount is an OS-level
+// invariant, not a preference) live only in the FG-350 control-plane receipt.
+// Partial because pre-FG-350 / pre-#292 manifests omit whole blocks.
+export function readTaskManifest(taskDirPath: string): Partial<TaskManifest> | undefined {
   try {
-    const raw = readFileSync(join(taskDirPath, "manifest.json"), "utf8");
-    const manifest = JSON.parse(raw) as { runtime?: ManifestRuntime };
-    return manifest.runtime;
+    return JSON.parse(readFileSync(join(taskDirPath, "manifest.json"), "utf8")) as Partial<TaskManifest>;
   } catch {
     return undefined;
   }

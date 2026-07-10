@@ -110,30 +110,79 @@ function gatherLiveEvidence(task: Task, run: Run): LiveEvidence {
 // That is `invoke` AND `invoke_chain` (campaign quick lanes chain plain
 // invokes); run-kind.ts owns the one definition shared with reconcile.ts.
 
+// A recommended next step: the command(s) to run, and why. Rendered as
+// `cmd [&& cmd]  (note)` — the `&&` chain is literal, copy-pasteable shell.
+type Recommendation = { commands: string[]; note: string };
+
+function renderRecommendation(r: Recommendation): string {
+  return r.commands.join(" && ") + (r.note ? `  (${r.note})` : "");
+}
+
 // FG-455 p4 review finding 2: only recommend --continue for a failure_kind
 // performContinue will actually accept (CONTINUABLE_KINDS) — otherwise this
 // recommended a command performContinue then refused (e.g. a container_crash
 // task that happened to have a dirty worktree). A non-continuable kind falls
 // back to the plain retry recommendation instead.
-function recommendationFor(task: Task, evidence: LiveEvidence, failureKind: string | undefined, run: Run): string {
+function recommendationForKind(task: Task, evidence: LiveEvidence, failureKind: string | undefined, run: Run): Recommendation {
   const continuable = CONTINUABLE_KINDS.has(failureKind ?? "") && !taskHasPipelineFinalize(run);
   const hasRecoverableWork =
     evidence.validResult !== undefined || evidence.stdoutInferredResult !== undefined || evidence.changedFiles.length > 0;
   if (continuable && hasRecoverableWork) {
     return evidence.source === "project_dir_shared"
-      ? `forge recover ${task.id} --continue --force  (shared project dir — confirm the diff is this task's before forcing)`
-      : `forge recover ${task.id} --continue`;
+      ? { commands: [`forge recover ${task.id} --continue --force`], note: "shared project dir — confirm the diff is this task's before forcing" }
+      : { commands: [`forge recover ${task.id} --continue`], note: "" };
   }
   if (hasRecoverableWork) {
     if (retryPolicy(failureKind).retryable) {
-      return `forge retry ${task.id}  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue, but is retryable without --force; evidence found — inspect the diff first if unsure)`;
+      return {
+        commands: [`forge retry ${task.id}`],
+        note: `failure_kind=${failureKind ?? "none"} isn't continuable via --continue, but is retryable without --force; evidence found — inspect the diff first if unsure`,
+      };
     }
-    return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} isn't continuable via --continue; evidence found but not adopted — inspect the diff first)`;
+    return {
+      commands: [`forge retry ${task.id} --force`],
+      note: `failure_kind=${failureKind ?? "none"} isn't continuable via --continue; evidence found but not adopted — inspect the diff first`,
+    };
   }
   if (!retryPolicy(failureKind).retryable) {
-    return `forge retry ${task.id} --force  (failure_kind=${failureKind ?? "none"} requires --force to re-dispatch)`;
+    return { commands: [`forge retry ${task.id} --force`], note: `failure_kind=${failureKind ?? "none"} requires --force to re-dispatch` };
   }
-  return `forge retry ${task.id}  (no persisted work found — safe to re-dispatch from scratch)`;
+  return { commands: [`forge retry ${task.id}`], note: "no persisted work found — safe to re-dispatch from scratch" };
+}
+
+// The failure_kind `forge cancel` stamps on a task it kills — see cancel.ts's
+// `classify({ source: "cancelled" })`. The post-cancel retry recommendation is
+// computed against THIS kind, not the running task's (absent) one, so its
+// --force suffix reflects the state the task will actually be in.
+const POST_CANCEL_FAILURE_KIND = "cancelled";
+
+// FG-507 gap 1: `forge recover` on a RUNNING task whose container is confirmed
+// gone used to recommend a bare `forge retry <id>` — which retry then refuses
+// ("Task is in status running, not failed"), because retrying over a
+// possibly-live task is unsafe. That guard is correct; the recommendation was
+// not. Recover already holds the evidence that the container is gone, so it can
+// name the sequence that actually works: cancel (settling the row to
+// failed/cancelled) and then the retry line it would otherwise have printed.
+// Recover does NOT perform the cancel itself — killing a task stays an explicit
+// operator act.
+function recommendationFor(
+  task: Task,
+  evidence: LiveEvidence,
+  failureKind: string | undefined,
+  run: Run,
+  containerAlive: ContainerAlive,
+): Recommendation {
+  if (task.status === "running" && !containerAlive(`forge-${task.id}`)) {
+    const afterCancel = recommendationForKind(task, evidence, POST_CANCEL_FAILURE_KIND, run);
+    const why =
+      `container forge-${task.id} is confirmed gone, but the row is still status=running — ` +
+      `forge retry only accepts a failed task, so cancel it first`;
+    return {
+      commands: [`forge cancel ${task.id}`, ...afterCancel.commands],
+      note: afterCancel.note ? `${why}; then: ${afterCancel.note}` : why,
+    };
+  }
+  return recommendationForKind(task, evidence, failureKind, run);
 }
 
 export type TaskEvidenceView = {
@@ -149,13 +198,17 @@ export type TaskEvidenceView = {
   hasValidResult: boolean;
   hasStdoutRecoverableResult: boolean;
   recommendation: string;
+  /** FG-507: the recommendation as discrete commands, in order. Usually one;
+   *  two for the cancel→retry sequence a running task with a dead container needs. */
+  recommendationCommands: string[];
   verification: string;
 };
 
-function buildTaskView(task: Task, run: Run): TaskEvidenceView {
+function buildTaskView(task: Task, run: Run, containerAlive: ContainerAlive): TaskEvidenceView {
   const failureKind = failureKindForTask(task.id);
   const storedEvidence = getOrphanEvidenceFromEvents(eventsForTask(task.id));
   const evidence = gatherLiveEvidence(task, run);
+  const recommendation = recommendationFor(task, evidence, failureKind, run, containerAlive);
   return {
     taskId: task.id,
     runId: task.runId,
@@ -168,7 +221,8 @@ function buildTaskView(task: Task, run: Run): TaskEvidenceView {
     changedFiles: evidence.changedFiles,
     hasValidResult: evidence.validResult !== undefined,
     hasStdoutRecoverableResult: evidence.stdoutInferredResult !== undefined,
-    recommendation: recommendationFor(task, evidence, failureKind, run),
+    recommendation: renderRecommendation(recommendation),
+    recommendationCommands: recommendation.commands,
     verification: VERIFICATION_HINT,
   };
 }
@@ -228,7 +282,7 @@ export type RecoverOutcome =
 
 // ── default: read-only inspection ───────────────────────────────────────────
 
-export function performInspect(id: string): RecoverOutcome {
+export function performInspect(id: string, containerAlive: ContainerAlive = defaultContainerAlive): RecoverOutcome {
   const task = getTask(id);
   if (task) {
     const run = getRun(task.runId);
@@ -237,15 +291,17 @@ export function performInspect(id: string): RecoverOutcome {
     if (isFanoutParent(task, allTasks)) {
       return { kind: "inspect-fanout-parent", parent: buildFanoutView(task, allTasks) };
     }
-    return { kind: "inspect-task", task: buildTaskView(task, run) };
+    return { kind: "inspect-task", task: buildTaskView(task, run, containerAlive) };
   }
 
   const run = getRun(id);
   if (run) {
     const allTasks = tasksForRun(run.id);
+    // Only FAILED tasks are listed here, so buildTaskView never reaches the
+    // running-task container probe below — a run-level inspect stays docker-free.
     const tasks = allTasks
       .filter((t) => t.status === "failed" && RUN_INSPECT_KINDS.has(failureKindForTask(t.id) ?? ""))
-      .map((t) => buildTaskView(t, run));
+      .map((t) => buildTaskView(t, run, containerAlive));
     const fanoutParents = allTasks.filter((t) => fanoutParentRecoverable(t, allTasks)).map((t) => buildFanoutView(t, allTasks));
     return { kind: "inspect-run", runId: run.id, tasks, fanoutParents };
   }
@@ -481,7 +537,7 @@ export function performRecover(
   }
   if (opts.continueTask) return performContinue(id, { force: opts.force });
   if (opts.reDrive) return performReDrive(id, { containerAlive });
-  return performInspect(id);
+  return performInspect(id, containerAlive);
 }
 
 function renderTaskEvidence(v: TaskEvidenceView): string[] {
