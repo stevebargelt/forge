@@ -432,7 +432,7 @@ test("FG-507 1c: a genuine workflow-step task on that same workflow keeps the pe
   const out = await retry(failed.id);
   assert.equal(out.adHoc, undefined, "a real workflow step is never ad-hoc");
   assert.equal(getTask(out.newTask.id)!.status, "pending");
-  assert.equal(getTask(out.newTask.id)!.taskPackage.dispatchSource, undefined, "and it is never stamped as invoke-dispatched");
+  assert.equal(getTask(out.newTask.id)!.taskPackage.dispatchSource, "workflow", "FG-512: stamped `workflow`, not left marker-less, and never `invoke`");
   assert.match(retrySummaryLines(failed.id, out).join("\n"), new RegExp(`forge next ${run.id}`));
 
   const ready = computeReadyQueue(loadWorkflow(TASK_STEP_WORKFLOW, { projectDir }), tasksForRun(run.id));
