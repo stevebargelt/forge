@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Step } from "./schema.js";
 import type { Task } from "../types/index.js";
+import { resolvePhasePrimary } from "./ready-queue.js";
 
 export type UpstreamEntry = {
   phase: string;          // the upstream step's id (== phase under v2)
@@ -34,10 +35,15 @@ export function deriveUpstream(args: {
     // upstream — those are accessed via the verdicts table.
     // Fanout child tasks have parent=primary; the runner pre-aggregates them
     // (today's spine pattern); for now collect the primary task's result.
-    const primary = args.allTasks
-      .filter((t) => t.phase === depId && t.parentId === undefined)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-      .pop(); // latest primary task in this phase (handles retries)
+    // FG-519: the latest COMPLETE parent-less primary — the canonical rule.
+    // A status-blind pop() (the prior behavior) picked whatever row was newest
+    // regardless of status: after a duplicate-primary heal ([complete older,
+    // failed newer]) it selected the FAILED row and folded its missing result
+    // (result: undefined, result.json never written) into the downstream agent's
+    // inputs. Selecting the latest complete row fixes that. A phase whose only
+    // primaries are non-complete now resolves to undefined and yields no upstream
+    // entry — the existing `if (!primary) continue` path, unchanged.
+    const primary = resolvePhasePrimary(args.allTasks, depId);
 
     if (!primary) continue;
 

@@ -149,3 +149,73 @@ test("deriveUpstream: dep without a task is skipped, not a hard error", () => {
     assert.deepEqual(out, []);
   } finally { cleanup(); }
 });
+
+// ----- FG-519: status-blind pop() was the bug -----
+// deriveUpstream used to select the latest primary REGARDLESS of status. After a
+// duplicate-primary heal ([complete older, failed newer]) that picked the failed
+// row, whose result.json is never written, and folded result: undefined into the
+// downstream agent's inputs. resolvePhasePrimary selects the latest COMPLETE row.
+
+test("deriveUpstream: [complete older + failed newer] folds the COMPLETE row's result, not the failed newer one (FG-519 headline)", () => {
+  const { runDir, cleanup } = setupRunDir();
+  try {
+    // Only the complete row has a result.json — the failed newer row never wrote one.
+    writeResult(runDir, "t-a-complete", { status: "complete", plan: ["step-1", "step-2"] });
+    const tasks = [
+      mkTask({ id: "t-a-complete", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00Z" }),
+      mkTask({ id: "t-a-failed", phase: "a", status: "failed", createdAt: "2026-05-13T02:00:00Z" }),
+    ];
+    const out = deriveUpstream({ step: mkStep("b", ["a"]), allTasks: tasks, runDir });
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.taskId, "t-a-complete", "must select the complete row, not the failed newer one");
+    assert.deepEqual(
+      out[0]!.result,
+      { status: "complete", plan: ["step-1", "step-2"] },
+      "downstream must receive the complete row's actual result content, not undefined",
+    );
+  } finally { cleanup(); }
+});
+
+test("deriveUpstream: [complete + newer pending] folds the complete row (FG-519)", () => {
+  const { runDir, cleanup } = setupRunDir();
+  try {
+    writeResult(runDir, "t-a-complete", { status: "complete", v: "real" });
+    const tasks = [
+      mkTask({ id: "t-a-complete", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00Z" }),
+      mkTask({ id: "t-a-pending", phase: "a", status: "pending", createdAt: "2026-05-13T03:00:00Z" }),
+    ];
+    const out = deriveUpstream({ step: mkStep("b", ["a"]), allTasks: tasks, runDir });
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.taskId, "t-a-complete");
+    assert.deepEqual(out[0]!.result, { status: "complete", v: "real" });
+  } finally { cleanup(); }
+});
+
+test("deriveUpstream: single complete primary is selected (FG-519 parity)", () => {
+  const { runDir, cleanup } = setupRunDir();
+  try {
+    writeResult(runDir, "t-a", { status: "complete", v: "solo" });
+    const tasks = [mkTask({ id: "t-a", phase: "a", status: "complete" })];
+    const out = deriveUpstream({ step: mkStep("b", ["a"]), allTasks: tasks, runDir });
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.taskId, "t-a");
+    assert.deepEqual(out[0]!.result, { status: "complete", v: "solo" });
+  } finally { cleanup(); }
+});
+
+test("deriveUpstream: a phase whose only primary is FAILED yields no upstream entry (continue path) (FG-519)", () => {
+  const { runDir, cleanup } = setupRunDir();
+  try {
+    const tasks = [mkTask({ id: "t-a", phase: "a", status: "failed" })];
+    const out = deriveUpstream({ step: mkStep("b", ["a"]), allTasks: tasks, runDir });
+    assert.deepEqual(out, [], "no complete primary => no entry, matching ready-queue/fanout semantics");
+  } finally { cleanup(); }
+});
+
+test("deriveUpstream: an empty phase yields no upstream entry (FG-519)", () => {
+  const { runDir, cleanup } = setupRunDir();
+  try {
+    const out = deriveUpstream({ step: mkStep("b", ["a"]), allTasks: [], runDir });
+    assert.deepEqual(out, []);
+  } finally { cleanup(); }
+});

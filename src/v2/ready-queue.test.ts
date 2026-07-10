@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, resolvePhasePrimary } from "./ready-queue.js";
 import type { Workflow } from "./schema.js";
 import type { Task, TaskPackage } from "../types/index.js";
 
@@ -232,6 +232,78 @@ test("computeReadyQueue: legit retry (old failed + new pending, NO complete) sti
   ];
   const ready = computeReadyQueue(wf, tasks);
   assert.deepEqual(ready.map((s) => s.id), ["build"], "retry replacement is dispatched; verify stays blocked until build completes");
+});
+
+// ----- resolvePhasePrimary: the FG-519 canonical rule, unit-tested directly -----
+// Latest (by createdAt) COMPLETE parent-less row for a phase, or undefined.
+
+test("resolvePhasePrimary: [complete older + failed newer] resolves to the complete row (FG-519)", () => {
+  const tasks = [
+    mkTask({ id: "c", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00Z" }),
+    mkTask({ id: "f", phase: "a", status: "failed", createdAt: "2026-05-13T02:00:00Z" }),
+  ];
+  assert.equal(resolvePhasePrimary(tasks, "a")?.id, "c");
+});
+
+test("resolvePhasePrimary: [complete + newer pending] resolves to the complete row", () => {
+  const tasks = [
+    mkTask({ id: "c", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00Z" }),
+    mkTask({ id: "p", phase: "a", status: "pending", createdAt: "2026-05-13T03:00:00Z" }),
+  ];
+  assert.equal(resolvePhasePrimary(tasks, "a")?.id, "c");
+});
+
+test("resolvePhasePrimary: two complete primaries => the newest by createdAt", () => {
+  const tasks = [
+    mkTask({ id: "old", phase: "a", status: "complete", createdAt: "2026-05-13T00:00:00Z" }),
+    mkTask({ id: "new", phase: "a", status: "complete", createdAt: "2026-05-13T04:00:00Z" }),
+  ];
+  assert.equal(resolvePhasePrimary(tasks, "a")?.id, "new");
+});
+
+test("resolvePhasePrimary: single complete primary => it", () => {
+  assert.equal(resolvePhasePrimary([mkTask({ id: "c", phase: "a", status: "complete" })], "a")?.id, "c");
+});
+
+test("resolvePhasePrimary: single failed primary => undefined", () => {
+  assert.equal(resolvePhasePrimary([mkTask({ id: "f", phase: "a", status: "failed" })], "a"), undefined);
+});
+
+test("resolvePhasePrimary: empty phase => undefined", () => {
+  assert.equal(resolvePhasePrimary([], "a"), undefined);
+});
+
+test("resolvePhasePrimary: ignores a complete child (parentId-tagged) row", () => {
+  const tasks = [
+    mkTask({ id: "c", phase: "a", status: "complete" }),
+    mkTask({ id: "child", phase: "a", parentId: "c", status: "complete", agentRole: "red-wide" }),
+  ];
+  const primary = resolvePhasePrimary(tasks, "a");
+  assert.equal(primary?.id, "c", "only parent-less rows are candidates");
+});
+
+test("resolvePhasePrimary: filters by the requested phase", () => {
+  const tasks = [
+    mkTask({ id: "a-c", phase: "a", status: "complete" }),
+    mkTask({ id: "b-c", phase: "b", status: "complete" }),
+  ];
+  assert.equal(resolvePhasePrimary(tasks, "b")?.id, "b-c");
+});
+
+// FG-519 parity: a phase with [complete + failed-newer] still closes (the phase
+// is not re-admitted to the ready set), and a downstream dep is satisfied off the
+// complete row. The live-recovery (FG-475/FG-476) re-admit shape is covered below.
+test("computeReadyQueue: [complete + failed-newer] phase closes and satisfies downstream (FG-519 parity)", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+    { id: "verify", agent: "test-engineer", gate: "auto", manual: false, depends_on: ["build"], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-real", phase: "build", status: "complete", createdAt: "2026-06-03T16:57:00.000Z" }),
+    mkTask({ id: "build-heal", phase: "build", status: "failed", createdAt: "2026-06-03T17:49:00.000Z" }),
+  ];
+  const ready = computeReadyQueue(wf, tasks);
+  assert.deepEqual(ready.map((s) => s.id), ["verify"], "build must not be re-admitted; verify becomes ready off the complete row");
 });
 
 // ----- isRunSettled (FG-475) -----

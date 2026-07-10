@@ -48,7 +48,7 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeTask } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeTask, resolvePhasePrimary } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
@@ -1406,10 +1406,9 @@ async function dispatchFanoutStep(args: {
 
   // Read the upstream array. The fanout source is fanout.from_upstream.step,
   // and the value lives at result[array_key].
-  const upstreamTask = allTasks
-    .filter((t) => t.phase === fanout.from_upstream.step && t.parentId === undefined && t.status === "complete")
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-    .pop();
+  // FG-519: canonical latest-complete parent-less primary — pure parity with the
+  // prior inline filter/sort/pop (which already selected latest-complete here).
+  const upstreamTask = resolvePhasePrimary(allTasks, fanout.from_upstream.step);
   if (!upstreamTask) {
     // Upstream hasn't completed; ready-queue logic should have prevented this.
     const upstreamMsg = "fanout: upstream not complete";
