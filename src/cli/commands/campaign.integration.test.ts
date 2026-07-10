@@ -4606,6 +4606,56 @@ test("integ FG-511: real `campaign retry` refuses a campaign_system item on non-
   assert.equal(auditCount, 0, "a refused retry must record no audit event");
 });
 
+// FG-511 round 2: the same transient run evidence, but the ticket was delivered
+// out-of-band anyway. Through the real CLI: `show` must point at reconcile and
+// never print the retry hint, and `retry` must refuse rather than re-dispatch
+// work already on main.
+test("integ FG-511: real `campaign retry` refuses a campaign_system item whose ticket is provably delivered, naming reconcile — show points there too", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+
+  makeCommitIn(projectDir, "base");
+  const shipCommit = makeCommitIn(projectDir, "ship-FG-101");
+  closeTicket(projectDir, "FG-101", shipCommit);
+  const { itemId, runId } = seedCampaignSystemItem(dbPath, campaignId, ["idle_timeout"]);
+
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(showResult.status, 0, `show failed\nstderr: ${showResult.stderr}`);
+  assert.ok(showResult.stdout.includes("forge campaign reconcile"), `show must point at reconcile\nstdout: ${showResult.stdout}`);
+  assert.ok(
+    !showResult.stdout.includes("campaign-system-retryable"),
+    `show must not print a retry hint for delivered work\nstdout: ${showResult.stdout}`
+  );
+  assert.ok(!showResult.stdout.includes("forge campaign retry"), `show must not name retry at all\nstdout: ${showResult.stdout}`);
+
+  const showJson = JSON.parse(runForge(["campaign", "show", campaignId, "--json"]).stdout) as {
+    items: { campaignSystemEligible: boolean; campaignSystemRetryEligible: boolean }[];
+  };
+  assert.equal(showJson.items[0]!.campaignSystemEligible, true, "the JSON surface must expose reconcile eligibility");
+  assert.equal(showJson.items[0]!.campaignSystemRetryEligible, false, "the JSON surface must not claim retry eligibility");
+
+  const retryResult = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.notEqual(retryResult.status, 0, "delivered work must never be reset for re-dispatch");
+  assert.match(retryResult.stderr, /provably delivered/i, `refusal must say the work already landed\nstderr: ${retryResult.stderr}`);
+  assert.match(retryResult.stderr, new RegExp(`forge campaign reconcile ${campaignId}`), `refusal must name reconcile\nstderr: ${retryResult.stderr}`);
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const item = dbAfter.prepare("SELECT lifecycle_status, blocker_kind, run_id FROM campaign_items WHERE id = ?").get(itemId) as {
+    lifecycle_status: string;
+    blocker_kind: string | null;
+    run_id: string | null;
+  };
+  const auditCount = (
+    dbAfter.prepare("SELECT COUNT(*) as n FROM events WHERE event_type = 'campaign_item.campaign_system_retried'").get() as { n: number }
+  ).n;
+  dbAfter.close();
+  assert.equal(item.lifecycle_status, "failed", "a refused retry must not mutate the item");
+  assert.equal(item.blocker_kind, "campaign_system");
+  assert.equal(item.run_id, runId, "a refused retry must not clear the run linkage");
+  assert.equal(auditCount, 0, "a refused retry must record no audit event");
+});
+
 // ── FG-442 review (PR #11 follow-up), Finding 2: paused-approve plan-hash scoping ──
 
 test("integ FG-442 Finding 2: campaign approve refuses a paused campaign parked at awaiting_gate with an unchanged plan_hash (campaign-922 shape)", () => {

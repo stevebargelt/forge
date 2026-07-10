@@ -26,11 +26,12 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest, getDb } from "../store/db.js";
-import { writeTicket } from "../backlog/structured.js";
+import { writeTicket, closeTicket } from "../backlog/structured.js";
 import {
   approveCampaign,
   getCampaign,
@@ -202,6 +203,37 @@ function parkOnCampaignSystem(item: CampaignItem, runId: string | undefined): vo
     ...(runId ? { runId } : {}),
     requestedHumanAction: "seeded campaign_system park",
   });
+}
+
+// FG-511 round 2: the ship-evidence fixtures below need a real repo — the
+// out-of-band composition proves base-branch reachability with `git merge-base`
+// and reads the closing commit's diff. Only those tests git-init projectDir; the
+// probe-only fixtures above never touch git.
+function gitExec(args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: projectDir,
+    encoding: "utf8",
+    timeout: 10000,
+    env: { ...process.env, GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@t.com", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@t.com" },
+  });
+}
+
+function initGitRepo(): void {
+  gitExec(["init", "-b", "main"]);
+  gitExec(["config", "user.email", "t@t.com"]);
+  gitExec(["config", "user.name", "T"]);
+}
+
+// A docs-only commit: its diff touches one .md path, so the out-of-band evaluator's
+// lane evidence resolves to {kind:'non_code_diff'} with no host-verification row —
+// the same lane the reconcile out-of-band tests use for a full-evidence fixture.
+function commitDocsFile(relPath: string, message: string): string {
+  const full = join(projectDir, relPath);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(full, `${message}\n`);
+  gitExec(["add", "."]);
+  gitExec(["commit", "-m", message]);
+  return gitExec(["rev-parse", "HEAD"]).trim();
 }
 
 function assertItemUnchanged(campaignId: string, expectedRunId: string | undefined): void {
@@ -465,6 +497,62 @@ test("FG-511: the auth fast path still accepts with NO run linkage — its block
   const result = retryCampaignItem(campaignId, TICKET_ID);
   assert.equal(result.ok, true, "the auth fast path must not be gated on the campaign_system evidence probe");
   assert.equal(listCampaignItems(campaignId)[0]!.lifecycleStatus, "pending");
+});
+
+// ── Round 2: ship evidence outranks transient evidence ────────────────────────
+//
+// The two can coexist on ONE item: a run abandoned by an overnight idle timeout
+// (transient, and by itself retryable) whose ticket was nonetheless delivered
+// out-of-band. Accepting there would CAS-reset the item and re-dispatch work
+// already on the base branch. The recovery contract is that delivered work is
+// reconciled, never re-dispatched — so the probe evaluates the SAME out-of-band
+// eligibility composition reconcile does, FIRST, and refuses naming reconcile.
+
+test("FG-511: transient run evidence PLUS full out-of-band ship evidence is refused naming reconcile — delivered work is never re-dispatched", () => {
+  initGitRepo();
+  const { campaignId, item } = setupPausedCampaign();
+  commitDocsFile("README.md", "root");
+  const shipCommit = commitDocsFile(`docs/${TICKET_ID}.md`, `docs: ${TICKET_ID}`);
+  closeTicket(projectDir, TICKET_ID, shipCommit);
+
+  const runId = "run-fg511-shipped-anyway";
+  seedRunWithFailedPrimaries(runId, "abandoned", ["idle_timeout"]);
+  parkOnCampaignSystem(item, runId);
+
+  const result = retryCampaignItem(campaignId, TICKET_ID);
+  assert.equal(result.ok, false, "an item whose ticket is provably delivered must never be reset for re-dispatch");
+  if (!result.ok) {
+    assert.match(result.reason, /provably delivered/i, `reason must say the work already landed, got: ${result.reason}`);
+    assert.match(
+      result.reason,
+      new RegExp(`forge campaign reconcile ${campaignId}`),
+      `reason must name reconcile as the verb for delivered work, got: ${result.reason}`,
+    );
+    assert.ok(!/re-plan or abandon/.test(result.reason), `a delivered item must not be sent to re-plan/abandon, got: ${result.reason}`);
+  }
+  assertItemUnchanged(campaignId, runId);
+});
+
+test("FG-511: PARTIAL ship evidence (ticket done, closing commit not reachable on base) does NOT block a transient retry", () => {
+  initGitRepo();
+  const { campaignId, item } = setupPausedCampaign();
+  commitDocsFile("README.md", "root");
+
+  // Delivered onto a side branch that was never merged: an unpushed/unproven
+  // delivery is not ship evidence, and reconcile could not ship it either.
+  gitExec(["checkout", "-b", "side"]);
+  const sideCommit = commitDocsFile(`docs/${TICKET_ID}.md`, `docs: ${TICKET_ID}`);
+  gitExec(["checkout", "main"]);
+  closeTicket(projectDir, TICKET_ID, sideCommit);
+
+  const runId = "run-fg511-unmerged";
+  seedRunWithFailedPrimaries(runId, "abandoned", ["idle_timeout"]);
+  parkOnCampaignSystem(item, runId);
+
+  const result = retryCampaignItem(campaignId, TICKET_ID);
+  assert.equal(result.ok, true, `partial ship evidence must not gate the transient-evidence acceptance: ${!result.ok ? result.reason : ""}`);
+  assert.equal(listCampaignItems(campaignId)[0]!.lifecycleStatus, "pending");
+  assert.equal(eventsForRun(runId).filter((e) => e.eventType === RETRIED_EVENT).length, 1, "the acceptance must still record its audit event");
 });
 
 test("FG-511: scope is still refused outright — no evidence probe, no widening beyond campaign_system", () => {

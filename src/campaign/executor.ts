@@ -543,12 +543,17 @@ function parkCampaignOnDriveThrow(
 // 'abandoned' run row inserted above for traceability. Parking this shape at
 // 'awaiting_gate' (parkCampaignOnDriveThrow's shape) let the reattach path on
 // resume see that terminal run and reconcileTerminalOutcome re-terminalize the
-// item to blockerKind 'campaign_system' — which `forge campaign retry` refuses
-// (RETRYABLE_BLOCKER_KINDS is auth/infrastructure only), making a startRun
-// failure unrecoverable through any supported verb. Park it DIRECTLY at its
-// true terminal shape instead — failed/blocked/infrastructure, matching the
-// terminal synthetic run row so the projection never disagrees with itself —
-// which composes with FG-489's `forge campaign retry` instead of fighting it.
+// item to blockerKind 'campaign_system'. Park it DIRECTLY at its true terminal
+// shape instead — failed/blocked/infrastructure, matching the terminal synthetic
+// run row so the projection never disagrees with itself.
+//
+// FG-511: `forge campaign retry` now accepts campaign_system conditionally, but
+// only behind probeCampaignSystemRetryEvidence — and this shape has no evidence
+// trail for that probe to read. No run was ever dispatched, so no primary task
+// ever failed, so the probe's no-failed-primary branch would refuse it. Parking
+// at 'infrastructure' (directly retryable, its blockerKind already IS the
+// classification) keeps composing with retry instead of routing the operator
+// through an evidence probe that must refuse.
 function parkCampaignOnStartRunThrow(
   campaignId: string,
   itemId: string,
@@ -1891,6 +1896,23 @@ const RETRYABLE_BLOCKER_KINDS = new Set<BlockerKind>(["auth", "infrastructure"])
 // operator) can see exactly which durable evidence licensed the retry.
 export type CampaignSystemRetryEvidence = { taskId: string; failureKind: string; classified: BlockerKind };
 
+// FG-511 (round 2): the ONE shared "was this ticket actually delivered" test for a
+// campaign_system item — reconcile.ts's own composition (composeOutOfBandEligibility
+// over the same two collectors), minus reconcile's host-verification capture, which
+// is a write neither a retry nor a read-only preview may perform. Delivered work is
+// reconciled, never re-dispatched, so the retry verb AND show/report's retry hint
+// both gate on this single function: the surface cannot promise a retry the verb
+// would refuse, and the verb cannot reset an item the surface calls shipped.
+export function evaluateCampaignSystemShipEligibility(
+  projectDir: string,
+  item: CampaignItem,
+): { eligible: boolean; missing: string[] } {
+  const authoritative = authoritativeOutcomeContribution(item.runId ? collectReconcileEvidence(projectDir, item) : null);
+  const outOfBand = evaluateOutOfBandEvidence(collectOutOfBandEvidence(projectDir, item));
+  const { eligible, missing } = composeOutOfBandEligibility({ outOfBand, authoritative, hasRunId: !!item.runId });
+  return { eligible, missing };
+}
+
 // FG-511: reconcileTerminalOutcome lands ANY non-complete run on campaign_system,
 // so an overnight transient blip (idle timeout, container crash, killed driver)
 // that abandoned a run is indistinguishable — at the ITEM level — from a genuine
@@ -1905,11 +1927,30 @@ export type CampaignSystemRetryEvidence = { taskId: string; failureKind: string;
 // gate its `forge campaign retry` guidance on the SAME evidence the write path
 // judges from, instead of mirroring the probe and drifting from it.
 export function probeCampaignSystemRetryEvidence(
-  campaignId: string,
-  ticketId: string,
-  runId: string | undefined,
+  campaign: Campaign,
+  item: CampaignItem,
 ): { ok: true; evidence: CampaignSystemRetryEvidence[] } | { ok: false; reason: string } {
+  const campaignId = campaign.id;
+  const ticketId = item.ticketId;
+  const runId = item.runId;
   const refuse = (reason: string) => ({ ok: false as const, reason: `ticket ${ticketId} failed with blockerKind 'campaign_system' — ${reason}` });
+
+  // FG-511 (round 2): ship evidence outranks transient evidence, and is checked
+  // FIRST. A campaign_system item can carry both — an abandoned run whose primary
+  // idled out, and a ticket that was nonetheless delivered out-of-band. Accepting
+  // the retry there would CAS-reset the item and re-dispatch work already on the
+  // base branch. Fail-closed: when the delivery cannot be re-derived at all (no
+  // stored projectDir), refuse rather than guess.
+  if (!campaign.projectDir) {
+    return refuse(
+      `its campaign has no stored project directory, so whether the ticket was already delivered cannot be re-derived from durable evidence; inspect the item, then re-plan or abandon`,
+    );
+  }
+  if (evaluateCampaignSystemShipEligibility(campaign.projectDir, item).eligible) {
+    return refuse(
+      `its ticket is provably delivered (closed, its closing commit reachable on the base branch, lane evidence satisfied) — delivered work is reconciled, never re-dispatched; run \`forge campaign reconcile ${campaignId}\` to complete it from that evidence`,
+    );
+  }
 
   if (!runId) {
     return refuse("no linked run, so there is no durable evidence the failure was transient; inspect the item, then re-plan or abandon");
@@ -1985,7 +2026,7 @@ export function retryCampaignItem(campaignId: string, ticketId: string): RetryIt
   const retainedRunId = targetItem.runId;
   let evidence: CampaignSystemRetryEvidence[] | undefined;
   if (isCampaignSystem) {
-    const probe = probeCampaignSystemRetryEvidence(campaignId, ticketId, retainedRunId);
+    const probe = probeCampaignSystemRetryEvidence(campaign, targetItem);
     if (!probe.ok) return probe;
     evidence = probe.evidence;
   }

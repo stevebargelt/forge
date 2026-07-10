@@ -23,7 +23,7 @@ export function setDoneAuditMapForTest(map: Map<string, DoneAuditResult> | null)
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
-import { campaignBlocker, probeCampaignSystemRetryEvidence } from "./executor.js";
+import { campaignBlocker, probeCampaignSystemRetryEvidence, evaluateCampaignSystemShipEligibility } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
@@ -188,22 +188,21 @@ function isCampaignSystemRecoverable(item: CampaignItem): boolean {
   );
 }
 
-// FG-502: the campaign_system counterpart to outOfBandCompletableAction —
-// same evaluators (evaluateOutOfBandEvidence/collectOutOfBandEvidence), same
-// paused-only gate (reconcile refuses categorically unless paused), same
-// runId+hasUnresolvedAuthoritativeOutcome guard (FG-458) — routed off
+// FG-502: the campaign_system counterpart to outOfBandCompletableAction — same
+// paused-only gate (reconcile refuses categorically unless paused), routed off
 // isCampaignSystemRecoverable instead of the awaiting_gate/no-blockerKind shape.
+// FG-511 (round 2): the out-of-band + authoritative-outcome composition it used to
+// spell out inline is now executor.ts's evaluateCampaignSystemShipEligibility —
+// the SAME function `forge campaign retry`'s probe refuses on, so this hint and
+// that refusal can never disagree about whether the item shipped.
 function campaignSystemCompletableHint(campaign: Campaign, item: CampaignItem): string | null {
   if (campaign.status !== "paused") return null;
   if (!isCampaignSystemRecoverable(item)) return null;
   if (!campaign.projectDir) return null;
   try {
-    const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
-    if (!evaluated.eligible) return null;
-    if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
-      return null;
-    }
-    return formatOutOfBandEligibleHint(item.ticketId);
+    return evaluateCampaignSystemShipEligibility(campaign.projectDir, item).eligible
+      ? formatOutOfBandEligibleHint(item.ticketId)
+      : null;
   } catch {
     // best-effort — fall through to no hint
   }
@@ -311,14 +310,15 @@ function campaignSystemLaneEvidenceHint(campaign: Campaign, item: CampaignItem):
 // read-only evaluator) behind the same guards retryCampaignItem applies before
 // reaching it: paused campaign, failed/blocked lifecycle, campaign_system
 // blockerKind. Anything the probe refuses yields no hint, so the operator never
-// sees a `forge campaign retry` pointer for a retry that would refuse.
-// Un-memoized, matching campaignSystemLaneEvidenceHint — the probe reads the
-// store, it doesn't shell out to git.
+// sees a `forge campaign retry` pointer for a retry that would refuse — including
+// the round-2 shape where transient run evidence and real ship evidence coexist:
+// the probe checks evaluateCampaignSystemShipEligibility first and refuses,
+// naming reconcile. Un-memoized, matching campaignSystemLaneEvidenceHint.
 function campaignSystemRetryHint(campaign: Campaign, item: CampaignItem): string | null {
   if (campaign.status !== "paused") return null;
   if (item.blockerKind !== "campaign_system") return null;
   if (!(item.lifecycleStatus === "failed" && item.outcome === "blocked")) return null;
-  return probeCampaignSystemRetryEvidence(campaign.id, item.ticketId, item.runId).ok
+  return probeCampaignSystemRetryEvidence(campaign, item).ok
     ? formatCampaignSystemRetryHint(campaign.id, item.ticketId)
     : null;
 }
@@ -342,9 +342,13 @@ function memoizeOutOfBandCompletableAction(): (campaign: Campaign, item: Campaig
 // (`outOfBand ?? reconcileHint ?? requestedHumanAction`) the awaiting_gate
 // gateParkedItem branch below already uses. Returns null when neither hint
 // applies, so callers fall through to the plain blockedItemGuidance text.
-// FG-511: the retry hint comes LAST — a campaign_system item that actually
-// shipped out-of-band must be completed from that evidence (reconcile), never
-// re-dispatched; only an item with no ship evidence at all reaches retry.
+// FG-511: precedence, most authoritative evidence first — ship-eligible => point at
+// reconcile; else transient run evidence => point at retry; else fall through to the
+// generic inspect/re-plan/abandon text. Delivered work is completed from its own
+// evidence, never re-dispatched, so the retry hint comes LAST. The ordering here is
+// belt-and-braces: campaignSystemRetryHint's probe independently refuses a
+// ship-eligible item, so the per-item campaignSystemRetryEligible flag agrees with
+// this top-level next-action even though it is computed separately.
 function campaignSystemRecoverableAction(
   campaign: Campaign,
   item: CampaignItem,
