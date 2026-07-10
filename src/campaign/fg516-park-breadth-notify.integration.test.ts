@@ -39,7 +39,7 @@ import { getRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import { planCampaign } from "./planner.js";
 import type { ItemModeOverride } from "./planner.js";
-import { startCampaign, resumeCampaign, setCampaignNotifyEmitterForTest } from "./executor.js";
+import { startCampaign, resumeCampaign, driveRemainingItems, setCampaignNotifyEmitterForTest } from "./executor.js";
 import type { EmitMilestoneArgs, EmitMilestoneResult } from "../notify/milestone.js";
 import { runNext } from "../v2/runNext.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
@@ -359,4 +359,64 @@ test("FG-516 (F1): a recovery park whose persisted runId no longer resolves stil
   assert.equal(m["dispatched"], true, "the push actually went out, scoped to the campaign fallback run");
   assert.equal(fetchCalls, 1, "exactly one provider push for the dangling-runId recovery park");
   assert.match(String(m["body"]), /blocker: campaign_system/, "body carries the blockerKind detail");
+});
+
+// ── Shape 4 (F1 round 2): the in-flight/indeterminate park RECORDS its own context ──
+// The executor.ts:1269 park fires for an item whose lifecycle status slipped past
+// campaignBlocker (a future TaskStatus value, or a 'running'/'awaiting_red' item that
+// reached the drive loop). Unlike Shape 3 — which pre-populates blockerKind +
+// requestedHumanAction on the fixture and so never proves the PARK sets them — this
+// pins that the park itself persists both fields BEFORE notifying, so an item that
+// arrives WITHOUT them still gets a real "blocker: … — …" milestone body, not
+// notifyCampaignPause's generic "parked <ticket>" fallback. campaignBlocker shadows
+// this branch (in-flight statuses bail to recovery_needed pre-flight), so the test
+// drives driveRemainingItems directly with the campaign already 'running'.
+test("FG-516 (F1): the in-flight/indeterminate park persists blockerKind + requestedHumanAction itself, so a bare item still gets a context-carrying milestone", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign();
+
+  // Park the item at the human gate so it owns ONE real, resolvable run.
+  const started = await startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(started.stopReason, "paused");
+  const item = listCampaignItems(campaignId)[0]!;
+  const runId = item.runId!;
+  assert.ok(getRun(runId), "the item owns a real run to scope its milestone to");
+
+  // Force the item into an in-flight status that campaignBlocker would otherwise
+  // catch pre-flight, and strip any context fields — the park must supply them.
+  db.prepare("UPDATE campaign_items SET lifecycle_status = 'running', blocker_kind = NULL, requested_human_action = NULL WHERE id = ?").run(item.id);
+  db.prepare("UPDATE campaigns SET status = 'running' WHERE id = ?").run(campaignId);
+  const bare = listCampaignItems(campaignId)[0]!;
+  assert.equal(bare.lifecycleStatus, "running", "the item is in the in-flight status the park handles");
+  assert.equal(bare.blockerKind, undefined, "the item arrives WITHOUT a blockerKind");
+  assert.equal(bare.requestedHumanAction, undefined, "the item arrives WITHOUT a requestedHumanAction");
+
+  fetchCalls = 0;
+  const camp = getCampaign(campaignId)!;
+  const result = await driveRemainingItems(campaignId, {
+    dispatch: dispatchMustNotBeCalled,
+    projectDir: camp.projectDir!,
+    mode: camp.mode,
+    runNextFn: makeCappedRunNext(10),
+  });
+  assert.equal(result.stopReason, "recovery_needed", "the in-flight/indeterminate item parks the campaign as recovery_needed");
+  assert.equal(getCampaign(campaignId)?.status, "paused", "the campaign is durably paused");
+
+  // The park persisted the two context fields ON the item.
+  const parked = listCampaignItems(campaignId)[0]!;
+  assert.equal(parked.blockerKind, "campaign_system", "the park recorded a campaign_system blockerKind");
+  assert.match(String(parked.requestedHumanAction), /unexpected lifecycle status 'running'/, "the park recorded actionable guidance");
+
+  // And the milestone body carries them — NOT the generic "parked" fallback.
+  // Filter to the `blocked` kind: startCampaign's earlier gate park emitted a
+  // `decision_needed` milestone under the SAME dedupeKey (same ticket), so the
+  // in-flight park's push is the one `blocked` milestone for this item.
+  const milestones = pauseMilestones(runId).filter(
+    (p) => p["dedupeKey"] === `campaign-pause:${campaignId}:${TICKET_ID}` && p["kind"] === "blocked",
+  );
+  assert.equal(milestones.length, 1, "the in-flight park pushed exactly one `blocked` milestone (not silent)");
+  const m = milestones[0]!;
+  assert.match(String(m["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail the park recorded");
+  assert.match(String(m["body"]), /unexpected lifecycle status 'running'/, "body carries the requestedHumanAction guidance");
+  assert.doesNotMatch(String(m["body"]), /^campaign .* parked/, "body is NOT notifyCampaignPause's generic fallback");
 });

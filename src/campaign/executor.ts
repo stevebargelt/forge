@@ -987,7 +987,11 @@ function finalizeInvokeLaneOutcome(
 // Reattaches to workflow items in awaiting_gate or blocked_by_red on resume.
 // Cooperative pause: re-reads campaign status before each dispatch and after
 // each item completes, stopping without transition if status != 'running'.
-async function driveRemainingItems(
+// Exported (test-only) so a test can drive an item whose lifecycle status
+// slipped past campaignBlocker straight into the in-flight/indeterminate park —
+// that backstop is otherwise shadowed by campaignBlocker and unreachable through
+// startCampaign/resumeCampaign.
+export async function driveRemainingItems(
   campaignId: string,
   opts: {
     dispatch: (args: InvokeArgs) => Promise<InvokeResult>;
@@ -1260,14 +1264,23 @@ async function driveRemainingItems(
     // This path is reached when the item is in a status not handled above (e.g.
     // a future TaskStatus value or a status that slipped past campaignBlocker).
     if (item.lifecycleStatus !== "pending") {
+      // FG-516: like every other unattended park, persist the two context fields
+      // BEFORE notifying so notifyCampaignPause emits a real "blocker: … — …" body
+      // instead of its generic "parked <ticket>" fallback. An item stuck in an
+      // unhandled lifecycle status is a campaign-machinery wedge (campaign_system).
+      updateCampaignItem(item.id, {
+        blockerKind: "campaign_system",
+        requestedHumanAction: `campaign left ${item.ticketId} in the unexpected lifecycle status '${item.lifecycleStatus}' — inspect the item${item.runId ? ` (forge show ${item.runId})` : ""}, resolve it, then \`forge campaign resume ${campaignId}\`.`,
+      });
       itemRecords.push({
         itemId: item.id,
         ticketId: item.ticketId,
         runId: item.runId,
         lifecycleStatus: item.lifecycleStatus,
+        blockerKind: "campaign_system",
       });
       tryTransitionCampaign(campaignId, "running", "paused");
-      await notifyCampaignPause(campaignId, item.id, "blocked");
+      await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
       return { stopReason: "recovery_needed", itemRecords };
     }
 
