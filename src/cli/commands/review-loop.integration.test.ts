@@ -2357,6 +2357,47 @@ test("FG-514 CLI: a remote-ahead loop writes the trust fact into the DURABLE run
   process.exitCode = prevExitCode;
 });
 
+test("FG-514 CLI: a loop that exits BEFORE any dispatch (verification_failed, no discoverable checks) still PERSISTS the run note carrying the remote-ahead trust fact", async () => {
+  writeFg502Ticket();
+  // No typecheck/test scripts → runVerification finds no steps → ok:false with
+  // zero findings → the engine stops without ever dispatching a reviewer/fixer,
+  // so nothing else creates the run dir.
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: {} }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const bare = addBareOrigin(projectDir);
+  setUpstream(projectDir, tipSha);
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], projectDir).trim();
+  pushNewCommitToOrigin(bare, branch, "unreviewed commit the reviewer never saw");
+
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+
+  const printed = await runLoopCli(sinceSha, async () => {
+    throw new Error("no reviewer/fixer may be dispatched on a no-discoverable-checks exit");
+  });
+
+  assert.match(printed, /stop reason: verification_failed/);
+  const notePath = /^note: (.+)$/m.exec(printed)?.[1];
+  assert.ok(notePath, `the loop must print the note path even with no dispatch:\n${printed}`);
+  extraTempDirs.push(dirname(notePath));
+  assert.ok(existsSync(notePath),
+    `the note must be PERSISTED on a no-dispatch exit, not merely printed — the run dir is otherwise only created by a dispatch:\n${printed}`);
+
+  const note = readFileSync(notePath, "utf8");
+  assert.match(note, /remote reachability:.*REMOTE-AHEAD/, `the persisted note must carry the trust fact:\n${note}`);
+  const remoteHeadShortSha = gitExec(["log", "--format=%h", "-1", `refs/remotes/origin/${branch}`], projectDir).trim();
+  assert.match(note, new RegExp(`- ${remoteHeadShortSha} unreviewed commit the reviewer never saw`));
+  assert.match(note, /- \*\*stop reason:\*\* verification_failed/);
+  assert.match(note, /- \*\*closeable:\*\* no/);
+
+  assert.equal(process.exitCode, 1);
+  process.exitCode = prevExitCode;
+});
+
 test("FG-514 CLI: remote-ahead + an otherwise-closeable outcome exits 1 and never emits the `Close with: forge backlog close` line — not on the console, not in the note", async () => {
   const { sinceSha } = setupRemoteAheadLoopRepo();
   const seen: { runId?: string } = {};
@@ -2480,15 +2521,20 @@ test("FG-514 resolveReviewedTipTrust: a DIVERGED branch — local commits the re
   // The invariant that actually gates merge authorization: divergence is not trust.
   assert.notEqual(trust.kind, "trusted", `a diverged branch must never authorize a close: ${JSON.stringify(trust)}`);
 
-  // Both directions are non-empty. `remoteRef..tip` is tested first, so
-  // divergence collapses to local_only — the closeable gate is identical either
-  // way, but the operator is told to "push the branch", which a diverged branch
-  // rejects as non-fast-forward, and the remote-only commit is never named.
-  assert.equal(trust.kind, "local_only");
-  const t = trust as { remoteRef: string; localCommits: { sha: string; subject: string }[] };
+  // Both directions are non-empty, so neither local_only nor remote_ahead tells
+  // the truth: the operator must be told to rebase (a plain push is
+  // non-fast-forward) and BOTH sides must be named.
+  assert.equal(trust.kind, "diverged");
+  const t = trust as {
+    remoteRef: string;
+    localCommits: { sha: string; subject: string }[];
+    unreviewedCommits: { sha: string; subject: string }[];
+  };
   assert.equal(t.remoteRef, "@{u}");
   assert.equal(t.localCommits.length, 1);
   assert.match(t.localCommits[0]!.subject, /local-only commit the remote never saw/);
+  assert.equal(t.unreviewedCommits.length, 1);
+  assert.match(t.unreviewedCommits[0]!.subject, /remote-only commit the reviewer never saw/);
 
   // Pin that this really is divergence and not merely a local-ahead branch:
   // the fetch pulled in a remote commit the reviewed tip does not contain.

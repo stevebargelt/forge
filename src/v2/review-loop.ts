@@ -510,6 +510,7 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
 // one-directional ancestry check and never an ahead-count heuristic:
 //   - local_only    the tip carries commits the remote head does not have
 //   - remote_ahead  the remote head carries commits the reviewer never saw
+//   - diverged      both directions non-empty — neither is a fast-forward of the other
 //   - trusted       both directions empty — the tip IS the remote head
 // A closeable verdict must never print/emit when this is anything other than
 // "trusted".
@@ -517,6 +518,11 @@ export type ReviewedTipTrust =
   | { kind: "trusted"; remoteRef: string }
   | { kind: "local_only"; remoteRef: string; localCommits: { sha: string; subject: string }[] }
   | { kind: "remote_ahead"; remoteRef: string; unreviewedCommits: { sha: string; subject: string }[] }
+  | {
+      kind: "diverged"; remoteRef: string;
+      localCommits: { sha: string; subject: string }[];
+      unreviewedCommits: { sha: string; subject: string }[];
+    }
   /** `remoteRef`/`fetchError` are set when a ref DID resolve but the bounded
    *  fetch failed — the cached ref may be stale, so the remote head could not
    *  be verified. Absent when no remote-tracking ref resolved at all. */
@@ -561,6 +567,13 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
     L.push(`- **unreviewed commits:**`);
     for (const c of meta.remoteTrust.unreviewedCommits) L.push(`  - ${c.sha} ${c.subject}`);
     L.push(`- **next action:** pull/rebase onto \`${meta.remoteTrust.remoteRef}\` and re-run \`forge review-loop\`, or re-evaluate before closing`);
+  } else if (meta.remoteTrust.kind === "diverged") {
+    L.push(`- **remote reachability:** DIVERGED — the reviewed tip carries local-only commit(s) AND \`${meta.remoteTrust.remoteRef}\` carries commit(s) the reviewer never saw; closeable is withheld even if the reviewer/verification would otherwise pass`);
+    L.push(`- **local-only commits:**`);
+    for (const c of meta.remoteTrust.localCommits) L.push(`  - ${c.sha} ${c.subject}`);
+    L.push(`- **unreviewed commits:**`);
+    for (const c of meta.remoteTrust.unreviewedCommits) L.push(`  - ${c.sha} ${c.subject}`);
+    L.push(`- **next action:** a plain push is non-fast-forward — rebase onto \`${meta.remoteTrust.remoteRef}\`, push, and re-run \`forge review-loop\`, or re-evaluate before closing`);
   } else if (meta.remoteTrust.remoteRef) {
     L.push(`- **remote reachability:** UNAVAILABLE — the remote head could not be verified: the bounded fetch of \`${meta.remoteTrust.remoteRef}\` failed (${meta.remoteTrust.fetchError ?? "unknown error"}), and a stale cached ref is never trusted; closeable is withheld even if the reviewer/verification would otherwise pass`);
     L.push(`- **next action:** restore remote access and re-run \`forge review-loop\`, or re-evaluate before closing`);

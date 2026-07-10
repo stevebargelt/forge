@@ -935,6 +935,28 @@ test("FG-514 note: remote_ahead trust names the unreviewed commits, says the rem
   assert.match(note, /pull\/rebase onto/i);
 });
 
+test("FG-514 note: diverged trust names BOTH the local-only and the unreviewed commits, tells the operator to rebase (not push), and withholds closeable", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "514", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d",
+      remoteTrust: {
+        kind: "diverged", remoteRef: "@{u}",
+        localCommits: [{ sha: "abc1234", subject: "fix: local only" }],
+        unreviewedCommits: [{ sha: "deadbee", subject: "feat: never reviewed" }],
+      },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* no/);
+  assert.doesNotMatch(note, /\*\*closeable:\*\* yes/);
+  assert.match(note, /DIVERGED/);
+  assert.match(note, /abc1234 fix: local only/);
+  assert.match(note, /deadbee feat: never reviewed/);
+  assert.match(note, /non-fast-forward/);
+  assert.match(note, /rebase onto `@\{u\}`/);
+});
+
 test("FG-514 note: a remote_unavailable caused by a FAILED FETCH over a cached ref says the remote head could not be verified", () => {
   const note = renderReviewLoopNote(
     {

@@ -6,7 +6,7 @@
 
 import type { Command } from "commander";
 import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { ensureForgeDirs, runDir } from "../../util/paths.js";
 import { invoke, createInvokeRun, type InvokeArgs, type InvokeResult } from "../../v2/invoke.js";
@@ -381,13 +381,13 @@ function commitsIn(range: string, projectDir: string): { sha: string; subject: s
 }
 
 /** Resolve the reviewed-tip trust fact for the final report/closeable verdict.
- *  Four outcomes: trusted (the tip IS the freshly-fetched remote head — both
+ *  Five outcomes: trusted (the tip IS the freshly-fetched remote head — both
  *  directions empty); local_only (the tip carries commits the remote lacks);
  *  remote_ahead (the remote head carries commits the reviewer never saw);
- *  remote_unavailable (no resolvable remote-tracking ref, or the bounded fetch
- *  failed so the real remote head is unknown). Only "trusted" permits
- *  closeable — every other outcome, including a failed fetch over a cached
- *  ref, withholds it. */
+ *  diverged (both directions non-empty); remote_unavailable (no resolvable
+ *  remote-tracking ref, or the bounded fetch failed so the real remote head is
+ *  unknown). Only "trusted" permits closeable — every other outcome, including
+ *  a failed fetch over a cached ref, withholds it. */
 export function resolveReviewedTipTrust(projectDir: string, reviewedTipSha: string): ReviewedTipTrust {
   const remoteRef = resolveRemoteRef(projectDir);
   if (!remoteRef) return { kind: "remote_unavailable" };
@@ -395,8 +395,11 @@ export function resolveReviewedTipTrust(projectDir: string, reviewedTipSha: stri
   if (fetchError) return { kind: "remote_unavailable", remoteRef, fetchError };
 
   const localCommits = commitsIn(`${remoteRef}..${reviewedTipSha}`, projectDir);
-  if (localCommits.length > 0) return { kind: "local_only", remoteRef, localCommits };
   const unreviewedCommits = commitsIn(`${reviewedTipSha}..${remoteRef}`, projectDir);
+  if (localCommits.length > 0 && unreviewedCommits.length > 0) {
+    return { kind: "diverged", remoteRef, localCommits, unreviewedCommits };
+  }
+  if (localCommits.length > 0) return { kind: "local_only", remoteRef, localCommits };
   if (unreviewedCommits.length > 0) return { kind: "remote_ahead", remoteRef, unreviewedCommits };
   return { kind: "trusted", remoteRef };
 }
@@ -950,7 +953,11 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
         // is already complete via the normal per-task path).
         finalizeRunIfIdle(runId, "review-loop", { stopReason: outcome.stopReason });
         const notePath = join(runDir(runId), "review-loop.md");
-        if (existsSync(runDir(runId))) writeFileSync(notePath, note);
+        // FG-514: the run dir is otherwise created by the first task dispatch, so a
+        // loop that exits before ANY dispatch (verification_failed with no
+        // discoverable checks) used to print the trust fact and persist nothing.
+        mkdirSync(runDir(runId), { recursive: true });
+        writeFileSync(notePath, note);
         console.log(`\n${note}\nnote: ${notePath}`);
       } else {
         console.log(`\n${note}`);
@@ -978,6 +985,15 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
           `\n✗ not closeable — remote-ahead: ${remoteTrust.remoteRef} carries commit(s) beyond reviewed tip ` +
           `${reviewedTipSha}: ${remoteTrust.unreviewedCommits.map((c) => c.sha).join(", ")}. ` +
           `The remote head was never reviewed. Pull/rebase onto ${remoteTrust.remoteRef} and re-run ` +
+          `\`forge review-loop\`, or re-evaluate before closing.`,
+        );
+        process.exitCode = 1;
+      } else if (outcome.closeable && remoteTrust.kind === "diverged") {
+        console.log(
+          `\n✗ not closeable — diverged: reviewed tip ${reviewedTipSha} has local-only commit(s) ` +
+          `${remoteTrust.localCommits.map((c) => c.sha).join(", ")} AND ${remoteTrust.remoteRef} carries ` +
+          `commit(s) the reviewer never saw: ${remoteTrust.unreviewedCommits.map((c) => c.sha).join(", ")}. ` +
+          `A plain push is non-fast-forward. Rebase onto ${remoteTrust.remoteRef}, push, and re-run ` +
           `\`forge review-loop\`, or re-evaluate before closing.`,
         );
         process.exitCode = 1;
