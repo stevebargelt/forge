@@ -312,7 +312,7 @@ The dashboard does NOT write to the DB or filesystem. All mutating actions shell
 Mutating commands the dashboard might invoke:
 - `forge gate <taskId> advance | reject | request-changes [--rationale <text>] [--force]`
 - `forge next <runId>`
-- `forge retry <taskId>`
+- `forge retry <taskId>` — note that on an ad-hoc (`forge invoke`-attached) task this re-dispatches the agent in-process and does not return until it finishes, the same as `forge invoke` (FG-507; see [Task retry](concepts.md#task-retry)). On a workflow-step task it still returns immediately, leaving the new row for `forge next`.
 - `forge new <workflow> "<title>" [...flags]`
 
 This boundary is FORGE-DEC-015 carried forward from v1: dashboards don't bypass the CLI; the CLI's auth/validation/event-emission logic stays the single entrypoint for state changes.
