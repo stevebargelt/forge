@@ -44,16 +44,28 @@ function recoveryGuidanceMessage(rec: { ticketId: string; lifecycleStatus: strin
 // (name the supported `forge campaign retry` verb) from everything else
 // (scope/verdict failures and other blockers, which retry refuses — re-plan,
 // escalate the lane, or abandon instead).
+// FG-511: campaign_system is a THIRD bucket — retry neither accepts it outright
+// (like auth/infrastructure) nor refuses it outright (like scope): it judges the
+// item from the underlying run's durable failure evidence. Only `forge campaign
+// retry` can make that call, so name it as the verb to try rather than sending
+// the operator straight to re-plan/abandon.
 const RETRYABLE_BLOCKER_KINDS = new Set(["auth", "infrastructure"]);
 
 function blockedItemsGuidance(campaignId: string, blocked: { ticketId: string; blockerKind?: string }[]): string {
   const retryable = blocked.filter((r) => r.blockerKind && RETRYABLE_BLOCKER_KINDS.has(r.blockerKind));
-  const other = blocked.filter((r) => !r.blockerKind || !RETRYABLE_BLOCKER_KINDS.has(r.blockerKind));
+  const campaignSystem = blocked.filter((r) => r.blockerKind === "campaign_system");
+  const other = blocked.filter((r) => !r.blockerKind || (!RETRYABLE_BLOCKER_KINDS.has(r.blockerKind) && r.blockerKind !== "campaign_system"));
   const parts: string[] = [];
   if (retryable.length) {
     const ids = retryable.map((r) => r.ticketId).join(", ");
     parts.push(
       `${retryable.length} item(s) blocked on a transient failure (${ids}) — run \`forge campaign retry ${campaignId} <ticket-id>\` for each, then resume`
+    );
+  }
+  if (campaignSystem.length) {
+    const ids = campaignSystem.map((r) => r.ticketId).join(", ");
+    parts.push(
+      `${campaignSystem.length} item(s) blocked on campaign_system (${ids}) — \`forge campaign retry ${campaignId} <ticket-id>\` applies if the underlying run's failure evidence is transient (auth/infrastructure); it judges from that evidence and refuses otherwise, naming what is missing`
     );
   }
   if (other.length) {
@@ -664,7 +676,7 @@ export function registerCampaign(program: Command): void {
   campaign
     .command("retry <campaign-id> <ticket-id>")
     .description(
-      "Reset a transiently-failed campaign item (auth/infrastructure) back to pending for a clean re-dispatch — campaign must be paused; a scope/verdict-failed item is refused. Run `forge campaign resume` afterward to re-dispatch."
+      "Reset a transiently-failed campaign item (auth/infrastructure) back to pending for a clean re-dispatch — campaign must be paused; a scope/verdict-failed item is refused. A campaign_system item is judged from its run's durable failure evidence: accepted only when every failed task classifies transient (auth/infrastructure), refused otherwise naming the missing or non-transient evidence. Run `forge campaign resume` afterward to re-dispatch."
     )
     .option("--json", "machine-readable JSON output")
     .action((campaignId: string, ticketId: string, opts: { json?: boolean }) => {

@@ -1886,6 +1886,63 @@ export type RetryItemResult = { ok: true } | { ok: false; reason: string };
 // no operator signal.
 const RETRYABLE_BLOCKER_KINDS = new Set<BlockerKind>(["auth", "infrastructure"]);
 
+// FG-511: one classified failed primary task of the item's run. Recorded on the
+// campaign_item.campaign_system_retried audit event so a later done-audit (or an
+// operator) can see exactly which durable evidence licensed the retry.
+export type CampaignSystemRetryEvidence = { taskId: string; failureKind: string; classified: BlockerKind };
+
+// FG-511: reconcileTerminalOutcome lands ANY non-complete run on campaign_system,
+// so an overnight transient blip (idle timeout, container crash, killed driver)
+// that abandoned a run is indistinguishable — at the ITEM level — from a genuine
+// campaign-system fault. The item's blockerKind is therefore not a classification
+// here (unlike auth/infrastructure, which already ARE one); it is a placeholder.
+// Probe the underlying run/task evidence instead, and accept only when every
+// failed primary task provably classifies transient. Fail-closed in every branch:
+// missing run, complete run, no failed primary, or ANY non-transient/mixed
+// classification refuses and names what was missing or non-transient.
+function probeCampaignSystemRetryEvidence(
+  campaignId: string,
+  ticketId: string,
+  runId: string | undefined,
+): { ok: true; evidence: CampaignSystemRetryEvidence[] } | { ok: false; reason: string } {
+  const refuse = (reason: string) => ({ ok: false as const, reason: `ticket ${ticketId} failed with blockerKind 'campaign_system' — ${reason}` });
+
+  if (!runId) {
+    return refuse("no linked run, so there is no durable evidence the failure was transient; inspect the item, then re-plan or abandon");
+  }
+  const run = getRun(runId);
+  if (!run) {
+    return refuse(`its linked run ${runId} is not in the store, so there is no durable evidence the failure was transient; inspect the item, then re-plan or abandon`);
+  }
+  // A run that reached 'complete' and STILL landed campaign_system is a
+  // done-audit/verdict gap, not a transient dispatch failure — re-driving it
+  // would re-burn the item against evidence that is already on record.
+  if (run.status === "complete") {
+    return refuse(
+      `its run ${runId} completed — that is a done-audit/verdict gap, not a transient dispatch failure; run \`forge campaign reconcile ${campaignId}\` to re-derive the outcome from durable evidence`,
+    );
+  }
+
+  const failedPrimaries = tasksForRun(runId).filter((t) => t.parentId === undefined && t.status === "failed");
+  if (failedPrimaries.length === 0) {
+    return refuse(
+      `its run ${runId} (status ${run.status}) recorded no failed primary task, so the failure kind cannot be classified — the driver may have died before any task failure landed; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
+    );
+  }
+
+  const evidence: CampaignSystemRetryEvidence[] = failedPrimaries.map((t) => {
+    const failureKind = failureKindForTask(t.id);
+    return { taskId: t.id, failureKind: failureKind ?? "unknown", classified: classifyFailureKind(failureKind) };
+  });
+  const nonTransient = evidence.find((e) => !RETRYABLE_BLOCKER_KINDS.has(e.classified));
+  if (nonTransient) {
+    return refuse(
+      `task ${nonTransient.taskId} of run ${runId} failed with kind '${nonTransient.failureKind}', which classifies as '${nonTransient.classified}' — not a transient host/environment failure; inspect it (\`forge show ${runId}\`), then re-plan or abandon`,
+    );
+  }
+  return { ok: true, evidence };
+}
+
 export function retryCampaignItem(campaignId: string, ticketId: string): RetryItemResult {
   const campaign = getCampaign(campaignId);
   if (!campaign) return { ok: false, reason: `campaign ${campaignId} not found` };
@@ -1904,10 +1961,12 @@ export function retryCampaignItem(campaignId: string, ticketId: string): RetryIt
       reason: `ticket ${ticketId} is not currently failed (lifecycleStatus: ${targetItem.lifecycleStatus}, outcome: ${targetItem.outcome ?? "none"})`,
     };
   }
-  if (!targetItem.blockerKind || !RETRYABLE_BLOCKER_KINDS.has(targetItem.blockerKind)) {
-    const kind = targetItem.blockerKind ?? "none";
+  const blockerKind = targetItem.blockerKind;
+  const isCampaignSystem = blockerKind === "campaign_system";
+  if (!blockerKind || !(RETRYABLE_BLOCKER_KINDS.has(blockerKind) || isCampaignSystem)) {
+    const kind = blockerKind ?? "none";
     const hint =
-      targetItem.blockerKind === "lane_escalation"
+      blockerKind === "lane_escalation"
         ? `run forge campaign escalate-lane ${campaignId} ${ticketId} --new-lane <lane> --rationale <text> instead`
         : `it is not a transient host/environment failure — inspect the item (blockerKind: ${kind}), then re-plan or abandon`;
     return {
@@ -1916,22 +1975,49 @@ export function retryCampaignItem(campaignId: string, ticketId: string): RetryIt
     };
   }
 
+  // FG-511: auth/infrastructure need no probe — their blockerKind already IS the
+  // classification. campaign_system is a placeholder, so it must earn the retry
+  // from the underlying run's durable task evidence.
+  const retainedRunId = targetItem.runId;
+  let evidence: CampaignSystemRetryEvidence[] | undefined;
+  if (isCampaignSystem) {
+    const probe = probeCampaignSystemRetryEvidence(campaignId, ticketId, retainedRunId);
+    if (!probe.ok) return probe;
+    evidence = probe.evidence;
+  }
+
   // Clear per-attempt state (run/branch/worktree/PR from the failed attempt)
   // so the next dispatch starts clean — mirrors escalateCampaignItemLane's
   // reset above, plus the run-linkage fields that a lane escalation leaves
   // untouched but a retry of the SAME lane must not carry forward.
-  const applied = updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
-    lifecycleStatus: "pending",
-    outcome: undefined,
-    blockerKind: undefined,
-    continuePolicy: undefined,
-    reason: undefined,
-    requestedHumanAction: undefined,
-    runId: undefined,
-    branch: undefined,
-    worktreePath: undefined,
-    prUrl: undefined,
-  });
+  //
+  // FG-511: the reset and the campaign_system audit event land in ONE
+  // transaction, mirroring reconcile.ts's campaign_item.campaign_system_reconciled
+  // precedent — updateCampaignItemIfCampaignPaused reads campaigns.status inside
+  // its own UPDATE, so a concurrent unpause makes the write a no-op and no audit
+  // event is logged for a reset that never happened.
+  const applied = getDb().transaction(() => {
+    const wrote = updateCampaignItemIfCampaignPaused(targetItem.id, campaignId, {
+      lifecycleStatus: "pending",
+      outcome: undefined,
+      blockerKind: undefined,
+      continuePolicy: undefined,
+      reason: undefined,
+      requestedHumanAction: undefined,
+      runId: undefined,
+      branch: undefined,
+      worktreePath: undefined,
+      prUrl: undefined,
+    });
+    if (!wrote) return false;
+    if (evidence) {
+      logEvent("campaign_item.campaign_system_retried", {
+        runId: retainedRunId,
+        payload: { campaignId, itemId: targetItem.id, ticketId, runId: retainedRunId, evidence, decidedAt: nowIso() },
+      });
+    }
+    return true;
+  })();
   if (!applied) return { ok: false, reason: "campaign is no longer paused (concurrent state change)" };
 
   return { ok: true };
