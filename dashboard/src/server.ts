@@ -179,7 +179,7 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
 
   if (path === "/api/review-loop/phases") {
     const projectDir = url.searchParams.get("projectDir") ?? undefined;
-    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(projectDir)));
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reviewLoopRunPhases(Date.now(), projectDir)));
     return;
   }
 

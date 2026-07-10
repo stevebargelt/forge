@@ -1,5 +1,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertRun } from "../store/runs.js";
@@ -24,7 +26,33 @@ function failedTask(id: string, failureKind: string | undefined, error = "boom")
   return t;
 }
 
-beforeEach(() => { db = makeInMemoryDb(); prev = setDbForTest(db); insertRun(RUN); });
+// RUN declares workflow 'feature', so the YAML it names must exist: retry refuses
+// outright when a real run's workflow won't load (FG-507 — an unloadable workflow
+// can't prove a task is a workflow step rather than an ad-hoc invoke row). Both
+// phases these fixtures use are declared as steps, so every task below is a
+// genuine workflow step.
+function installFeatureWorkflow(): void {
+  const path = join(process.env["FORGE_HOME"]!, "workflows", "feature.yml");
+  if (existsSync(path)) return;
+  mkdirSync(join(process.env["FORGE_HOME"]!, "workflows"), { recursive: true });
+  writeFileSync(
+    path,
+    `
+name: feature
+description: retry-test fixture
+inputs: []
+steps:
+  - id: engineer
+    agent: engineer
+    gate: auto
+  - id: build
+    agent: engineer
+    gate: auto
+`,
+  );
+}
+
+beforeEach(() => { db = makeInMemoryDb(); prev = setDbForTest(db); installFeatureWorkflow(); insertRun(RUN); });
 afterEach(() => { setDbForTest(prev as DatabaseInstance); db.close(); });
 
 // ── retryPolicy ──

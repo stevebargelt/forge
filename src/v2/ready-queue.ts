@@ -30,9 +30,29 @@ export function isOnRejectRecoveryTask(task: Task): boolean {
   return task.parentId !== undefined && task.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
 }
 
+// FG-507: a row `forge invoke` minted — including the fresh row `forge retry`
+// mints to re-dispatch one through the invoke path — is dispatched directly and
+// never by the workflow runner. Its phase is always `task`, an id a workflow may
+// legally declare as a step, so PROVENANCE and not phase is what keeps it out of
+// the workflow's bookkeeping: the ready queue, the settle states, dispatch's
+// pending-primary reuse, and reconcile's orphaned-primary sweep.
+//
+// Without this, an attached invoke row in a `task`-declaring workflow is
+// indistinguishable from that step's primary. A concurrent `forge next` in the
+// window between retry's row insert and its direct dispatch would reuse the
+// pending row and run it as a pipeline step (worktree merge, gates, reds) —
+// exactly the semantics retry promised it would not get.
+//
+// Marker-less legacy rows can't be resolved here; retry refuses them up front
+// rather than guess (run-kind.ts's `legacy_ambiguous_phase`).
+export function isAdHocInvokeTask(task: Task): boolean {
+  return task.taskPackage.dispatchSource === "invoke";
+}
+
 export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
   const tasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
+    if (isAdHocInvokeTask(t)) continue;
     const arr = tasksByPhase.get(t.phase) ?? [];
     arr.push(t);
     tasksByPhase.set(t.phase, arr);
@@ -113,7 +133,30 @@ function hasCompletePrimary(tasks: Task[]): boolean {
 // rather than pending.
 type StepSettleState = "complete" | "active" | "blocked";
 
+// FG-507: a top-level ad-hoc row that has not reached a terminal status is a
+// live `forge invoke` container, dispatched outside the workflow entirely. No
+// step's settle state describes it — computeStepSettleStates below skips it, as
+// computeReadyQueue must — so settledness has to see it here or a concurrent
+// `forge next` / `forge gate` finalizes the run out from under a container that
+// is still writing its result. Terminal ad-hoc rows say nothing either way; the
+// steps' own states decide.
+//
+// Only settledness widens. Step classification and the ready queue stay blind
+// to these rows: they are run-level work, not workflow-step work, and admitting
+// them to either would run an ad-hoc row as a pipeline step (worktree merge,
+// gates, reds) — exactly what retry promised it would not get.
+function hasLiveAdHocInvokeTask(tasks: Task[]): boolean {
+  return tasks.some(
+    (t) =>
+      t.parentId === undefined &&
+      isAdHocInvokeTask(t) &&
+      t.status !== "complete" &&
+      t.status !== "failed",
+  );
+}
+
 export function isRunSettled(workflow: Workflow, tasks: Task[]): boolean {
+  if (hasLiveAdHocInvokeTask(tasks)) return false;
   const states = computeStepSettleStates(workflow, tasks);
   for (const state of states.values()) {
     if (state === "active") return false;
@@ -135,6 +178,13 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
   // task without that marker is a genuine fanout/red child and is ignored.
   const recoveryTasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
+    // An ad-hoc invoke row is not this workflow's work; it can neither complete
+    // a step nor keep one active. Skipped here for the same reason
+    // computeReadyQueue skips it — otherwise the two disagree on a `task`-step
+    // workflow: the queue says the step is ready, settledness says it's done.
+    // A LIVE one still blocks the run from settling, one level up, in
+    // isRunSettled — run-level work, not step-level work.
+    if (isAdHocInvokeTask(t)) continue;
     if (t.parentId !== undefined) {
       if (!isOnRejectRecoveryTask(t)) continue; // red/fanout child — ignore
       const arr = recoveryTasksByPhase.get(t.phase) ?? [];

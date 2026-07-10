@@ -209,7 +209,7 @@ test("inProgressVerifications: no projectDir filter returns rows across projects
 });
 
 test("reviewLoopRunPhases: a run whose verification finished and now has a running red-wide task shows phase 'reviewing'", () => {
-  const phases = reviewLoopRunPhases();
+  const phases = reviewLoopRunPhases(NOW);
   const entry = phases.find((p) => p.runId === "run-reviewing");
   assert.ok(entry, "expected a phase entry for run-reviewing");
   assert.equal(entry!.phase, "reviewing");
@@ -217,7 +217,7 @@ test("reviewLoopRunPhases: a run whose verification finished and now has a runni
 });
 
 test("reviewLoopRunPhases: a run with an open ci-wait verification and no task yet shows phase 'waiting-on-ci'", () => {
-  const phases = reviewLoopRunPhases();
+  const phases = reviewLoopRunPhases(NOW);
   const entry = phases.find((p) => p.runId === "run-ciwait");
   assert.ok(entry, "expected a phase entry for run-ciwait — this is the launch-to-first-round window with no task row yet");
   assert.equal(entry!.phase, "waiting-on-ci");
@@ -225,10 +225,10 @@ test("reviewLoopRunPhases: a run with an open ci-wait verification and no task y
 });
 
 test("reviewLoopRunPhases: projectDir filter scopes to the matching run only", () => {
-  const phases = reviewLoopRunPhases("/proj/b");
+  const phases = reviewLoopRunPhases(NOW, "/proj/b");
   assert.ok(phases.every((p) => p.projectDir === "/proj/b"));
   assert.ok(phases.some((p) => p.runId === "run-reviewing"));
-  const other = reviewLoopRunPhases("/proj/does-not-exist");
+  const other = reviewLoopRunPhases(NOW, "/proj/does-not-exist");
   assert.equal(other.length, 0);
 });
 

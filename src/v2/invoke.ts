@@ -42,7 +42,7 @@ import { defaultDockerExec, finalizeContainerRetention, type DockerExecArgs, typ
 import { composeSystemPrompt } from "./compose.js";
 import { buildDockerArgs, preflightProjectMount, type SpawnContext } from "./spawn.js";
 import { loadRuntimeWithSource, loadModelPolicyWithSource } from "./loader.js";
-import { resolveModel, taskModelFields, manifestModelBlock } from "./model-resolution.js";
+import { resolveModel, taskModelFields, manifestModelBlock, type ModelResolution } from "./model-resolution.js";
 import { checkResolvedAvailability, checkToolCapability } from "./provider-doctor.js";
 import { newRunId, newTaskId } from "../util/ids.js";
 import { resolveAuthStateForContainer, AuthProfileError, cleanupStagedAuth } from "./auth-state.js";
@@ -122,73 +122,9 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
 
   const ownsRun = args.runId === undefined;
 
-  // #201: attaching a task to a run whose status already went terminal (a
-  // prior invoke closed it, or it was abandoned) must bring the run back to
-  // active — a run with a live task is not complete. Only the attach path can
-  // hit this; the owns-run path created a fresh active run above. Before the
-  // fix the live task was invisible (dashboard / forge status list by run
-  // status), so a churning container looked like "nothing running".
-  if (!ownsRun && (run.status === "complete" || run.status === "abandoned")) {
-    updateRunStatus(runId, "active");
-    logEvent("run.reactivated", { runId, payload: { source: "invoke", from: run.status } });
-  }
+  if (!ownsRun) reactivateTerminalRun(runId, run.status, "invoke");
 
-  // Run status is a derived property: a run is "active" iff it has a
-  // non-terminal top-level task. Close to "complete" only when no top-level
-  // task is still in flight — so a parallel sibling invoke under the same run
-  // (e.g. reds launched together) keeps the run active until the last one
-  // finishes. This supersedes #157's "attached invoke never closes the run":
-  // that left attached runs leaked-active with nothing to close them. Applies
-  // to owned AND attached runs; the owns-run case still closes its lone task.
-  //
-  // RunStatus is "active" | "complete" | "abandoned" — no "failed". Mirrors
-  // runNext.ts — task-level status carries success/failure; the run flips to
-  // "complete" simply to mark "no longer in flight". The logged event payload
-  // carries the success-vs-failure signal for downstream consumers.
-  const closeRunIfIdle = (succeeded: boolean): void => {
-    const inFlight = tasksForRun(runId).some(
-      (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
-    );
-    if (inFlight) return;
-    // finalizeRunIfSettled re-reads the run and only writes when it's still
-    // "active" — a no-op (false, no write, no event) when it's already
-    // complete (idempotent close) or abandoned (a concurrent `forge cancel`
-    // won the race; its cancellation is authoritative and must not be
-    // flipped back to complete, AWN-2/FG-484).
-    finalizeRunIfSettled(runId, "invoke", { source: "invoke", succeeded, owned: ownsRun });
-  };
-
-  // Build a synthetic single-step workflow + step. The runner machinery
-  // (compose, spawn) takes Workflow + Step types; for invoke we create
-  // minimal ones in-memory rather than loading from YAML. The runner's heavy
-  // step lifecycle (depends_on, gates, reds) isn't exercised here.
-  const step: Step = {
-    id: "task",                           // synthetic phase id; matches v1 single-task runs
-    agent: args.agentRole,
-    activity: args.modelAlias,            // capability alias (CLI --model); legacy field name was `model`
-    runtime: args.runtimeName ?? "claude",
-    depends_on: [],
-    gate: "auto",
-    manual: false,
-    reds: [],
-    // FG-497: do NOT embed args.task here — workflow_additions folds into the
-    // composed system prompt, which every claude/pi runtime passes as a single
-    // argv string (--append-system-prompt), capped by Linux's 128KB
-    // MAX_ARG_STRLEN. A large task (e.g. a >120KB review-loop packet) blew past
-    // that limit and crashed the container exec with E2BIG before the agent even
-    // started. The task reaches the agent instead via TASK_PACKAGE_MARKDOWN,
-    // piped over stdin (unbounded) — see renderInvokeTaskPackage below.
-    workflow_additions:
-      `You are receiving a single freeform task. The task description arrives as ` +
-      `your input message (the task package). Read it carefully and produce a result.\n`,
-  };
-
-  const workflow: Workflow = {
-    name: "invoke",
-    description: "Single-agent invocation (forge invoke)",
-    inputs: [],
-    steps: [step],
-  };
+  const { step, workflow } = invokeWorkflowShape(args.agentRole, args.modelAlias, args.runtimeName);
 
   // Use the agent role for the id (e.g. task-test-engineer-ab12cd), not the
   // literal phase "task" — newTaskId already prefixes "task-", so passing "task"
@@ -200,6 +136,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     phase: "task",
     role: args.agentRole,
     inputs: { task: args.task } as Record<string, unknown>,
+    // FG-507: dispatch provenance, recorded once at creation so `forge retry`
+    // never has to infer it. Both invoke shapes pass through here — the synthetic
+    // `invoke` run and `--run <real-workflow-run>`. renderInvokeTaskPackage reads
+    // only taskId/runId/role/inputs, so this stays inert in what the agent sees.
+    dispatchSource: "invoke",
     composedSystemPrompt: composeSystemPrompt({
       role: args.agentRole,
       workflow,
@@ -234,11 +175,140 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // task.created, not task.started — matching the pipeline path (runNext).
   logEvent("task.created", { runId, taskId });
 
+  return dispatchInvokeTask({
+    task,
+    resolution,
+    projectDir: args.projectDir,
+    taskText: args.task,
+    ownsRun,
+    modelAlias: args.modelAlias,
+    designDir: args.designDir,
+    readOnlyProject: args.readOnlyProject,
+    authProfile: args.authProfile,
+    routeKey: args.routeKey,
+    invocationCwd: args.invocationCwd,
+    resolvedFromSubdir: args.resolvedFromSubdir,
+    explicitSubproject: args.explicitSubproject,
+    dockerExec: args.dockerExec,
+  });
+}
+
+// #201: attaching a task to a run whose status already went terminal (a prior
+// invoke closed it, or it was abandoned) must bring the run back to active — a
+// run with a live task is not complete. Only the attach path can hit this; the
+// owns-run path created a fresh active run. Before the fix the live task was
+// invisible (dashboard / forge status list by run status), so a churning
+// container looked like "nothing running".
+// FG-507: `forge retry` on an ad-hoc task attaches to the failed task's run the
+// same way, and hits the same trap.
+export function reactivateTerminalRun(runId: string, status: Run["status"], source: string): void {
+  if (status !== "complete" && status !== "abandoned") return;
+  updateRunStatus(runId, "active");
+  logEvent("run.reactivated", { runId, payload: { source, from: status } });
+}
+
+// The synthetic single-step workflow + step invoke dispatches against. The runner
+// machinery (compose, spawn) takes Workflow + Step types; for invoke we create
+// minimal ones in-memory rather than loading from YAML. The runner's heavy step
+// lifecycle (depends_on, gates, reds) isn't exercised here.
+export function invokeWorkflowShape(
+  agentRole: string,
+  modelAlias: string | undefined,
+  runtimeName: string | undefined,
+): { step: Step; workflow: Workflow } {
+  const step: Step = {
+    id: "task",                           // synthetic phase id; matches v1 single-task runs
+    agent: agentRole,
+    activity: modelAlias,                 // capability alias (CLI --model); legacy field name was `model`
+    runtime: runtimeName ?? "claude",
+    depends_on: [],
+    gate: "auto",
+    manual: false,
+    reds: [],
+    // FG-497: do NOT embed the task text here — workflow_additions folds into the
+    // composed system prompt, which every claude/pi runtime passes as a single
+    // argv string (--append-system-prompt), capped by Linux's 128KB
+    // MAX_ARG_STRLEN. A large task (e.g. a >120KB review-loop packet) blew past
+    // that limit and crashed the container exec with E2BIG before the agent even
+    // started. The task reaches the agent instead via TASK_PACKAGE_MARKDOWN,
+    // piped over stdin (unbounded) — see renderInvokeTaskPackage below.
+    workflow_additions:
+      `You are receiving a single freeform task. The task description arrives as ` +
+      `your input message (the task package). Read it carefully and produce a result.\n`,
+  };
+  return {
+    step,
+    workflow: {
+      name: "invoke",
+      description: "Single-agent invocation (forge invoke)",
+      inputs: [],
+      steps: [step],
+    },
+  };
+}
+
+export type DispatchInvokeTaskArgs = {
+  /** An already-inserted PENDING row whose taskPackage.composedSystemPrompt is set. */
+  task: Task;
+  resolution: ModelResolution;
+  projectDir: string;
+  /** The freeform task text (task.taskPackage.inputs.task). */
+  taskText: string;
+  ownsRun: boolean;
+  modelAlias?: string;
+  designDir?: string;
+  readOnlyProject?: boolean;
+  authProfile?: string;
+  routeKey?: string;
+  invocationCwd?: string;
+  resolvedFromSubdir?: boolean;
+  explicitSubproject?: boolean;
+  dockerExec?: DockerExecFn;
+};
+
+// FG-507: the spawn → result-ingestion → run-finalization half of `invoke`,
+// against a task row that already exists. `forge invoke` calls it right after
+// minting its row; `forge retry` calls it against the lineage-linked row it
+// mints for a retried ad-hoc task, which the workflow ready queue would never
+// dispatch. ONE dispatch path, so the two can't drift on the result.json
+// contract, the event sequence, or run finalization.
+export async function dispatchInvokeTask(args: DispatchInvokeTaskArgs): Promise<InvokeResult> {
+  const { task, resolution } = args;
+  const taskId = task.id;
+  const runId = task.runId;
+  const agentRole = task.agentRole;
+  const taskPackage = task.taskPackage;
+
+  // Run status is a derived property: a run is "active" iff it has a
+  // non-terminal top-level task. Close to "complete" only when no top-level
+  // task is still in flight — so a parallel sibling invoke under the same run
+  // (e.g. reds launched together) keeps the run active until the last one
+  // finishes. This supersedes #157's "attached invoke never closes the run":
+  // that left attached runs leaked-active with nothing to close them. Applies
+  // to owned AND attached runs; the owns-run case still closes its lone task.
+  //
+  // RunStatus is "active" | "complete" | "abandoned" — no "failed". Mirrors
+  // runNext.ts — task-level status carries success/failure; the run flips to
+  // "complete" simply to mark "no longer in flight". The logged event payload
+  // carries the success-vs-failure signal for downstream consumers.
+  const closeRunIfIdle = (succeeded: boolean): void => {
+    const inFlight = tasksForRun(runId).some(
+      (t) => t.parentId === undefined && t.status !== "complete" && t.status !== "failed"
+    );
+    if (inFlight) return;
+    // finalizeRunIfSettled re-reads the run and only writes when it's still
+    // "active" — a no-op (false, no write, no event) when it's already
+    // complete (idempotent close) or abandoned (a concurrent `forge cancel`
+    // won the race; its cancellation is authoritative and must not be
+    // flipped back to complete, AWN-2/FG-484).
+    finalizeRunIfSettled(runId, "invoke", { source: "invoke", succeeded, owned: args.ownsRun });
+  };
+
   // Materialize the task dir.
   const dir = taskDir(runId, taskId);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "CLAUDE.md"), taskPackage.composedSystemPrompt);
-  writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.task));
+  writeFileSync(join(dir, "package.md"), renderInvokeTaskPackage(taskPackage, args.taskText));
   writeFileSync(join(dir, "result.json"), "");
   chmodSync(dir, 0o777);
 
@@ -286,7 +356,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   // Pi runtimes default non-capable (guilty-until-proven); others default capable.
   if (resolution.resolvedBy !== "legacy") {
     const effectiveToolCapable = resolution.toolCapable ?? (runtimeMeta.runtimeKind !== "pi");
-    const toolCapability = checkToolCapability(args.agentRole, effectiveToolCapable, resolution.profile, resolution.model, resolution.alias);
+    const toolCapability = checkToolCapability(agentRole, effectiveToolCapable, resolution.profile, resolution.model, resolution.alias);
     if (!toolCapability.ok) {
       logEvent("model.profile_unavailable", {
         runId,
@@ -317,7 +387,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
       // captured #176 profile. Either way forge stages a mode-600 copy.
       const projectProfile = loadProjectAuthProfile(args.projectDir, args.authProfile);
       const staged = projectProfile
-        ? resolveProjectAuthForContainer(projectProfile, args.projectDir, dir, args.agentRole)
+        ? resolveProjectAuthForContainer(projectProfile, args.projectDir, dir, agentRole)
         : resolveAuthStateForContainer(args.authProfile, dir);
       authStateHostPath = staged.hostPath;
       logEvent("auth.profile_applied", { runId, taskId, payload: { profile: args.authProfile, kind: projectProfile ? "project-command" : "captured" } });
@@ -360,13 +430,13 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
   const constraintsDir = join(process.env.FORGE_HOME ?? join(process.env.HOME ?? "/", ".forge"), "constraints");
   const allConstraints = loadAllConstraints(constraintsDir);
   const suggestCount = filterConstraints(allConstraints, {
-    role: args.agentRole,
+    role: agentRole,
     workflow: "invoke",
     phase: "task",
     level: "suggest",
   }).length;
   const forceCount = filterConstraints(allConstraints, {
-    role: args.agentRole,
+    role: agentRole,
     workflow: "invoke",
     phase: "task",
     level: "force",
@@ -448,7 +518,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     MODEL: resolution.model,
     UPSTREAM_PROVIDER: resolution.provider ?? "",
     SYSTEM_PROMPT: systemPrompt,
-    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.task),
+    TASK_PACKAGE_MARKDOWN: renderInvokeTaskPackage(taskPackage, args.taskText),
     DESIGN_DIR: args.designDir,
     AUTH_STATE_HOST_PATH: authStateHostPath,
   };
@@ -638,7 +708,7 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     if (a.modelError) kind = classify({ source: "model_error" });
     // FG-337: clean completion + captured assistant text + narrative role →
     // synthesize an inferred result instead of hard-failing.
-    const inferred = inferredResultFrom(a, args.agentRole);
+    const inferred = inferredResultFrom(a, agentRole);
     if (inferred) {
       writeFileSync(join(dir, "result.json"), JSON.stringify(inferred));
       if (!markTaskComplete(taskId, inferred)) {
@@ -735,6 +805,24 @@ export function createInvokeRun(
   return runId;
 }
 
+// FG-507: `forge retry` stamps inputs.previous_failure on the row it mints (AWN-3)
+// so the next attempt is informed. The pipeline renderer surfaces inputs; this one
+// renders only the freeform task text, so a re-dispatched ad-hoc retry would have
+// silently dropped that context. Plain invoke rows never carry the key.
+function previousFailureSection(tp: TaskPackage): string[] {
+  const pf = tp.inputs["previous_failure"] as { kind?: string; error?: string | null; failedTaskId?: string } | undefined;
+  if (!pf) return [];
+  return [
+    `## Previous attempt (this is a retry)`,
+    ``,
+    `Task ${pf.failedTaskId ?? "(unknown)"} attempted this same work and failed with failure_kind=${pf.kind ?? "unknown"}.`,
+    `Error: ${pf.error ?? "(none recorded)"}`,
+    ``,
+    `Read that as context, not as instruction — diagnose before repeating the same approach.`,
+    ``,
+  ];
+}
+
 function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
   return [
     `# Task ${tp.taskId}`,
@@ -746,6 +834,7 @@ function renderInvokeTaskPackage(tp: TaskPackage, task: string): string {
     ``,
     task,
     ``,
+    ...previousFailureSection(tp),
     `## Output contract`,
     ``,
     `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,
