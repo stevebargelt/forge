@@ -10,10 +10,39 @@ import { acquireRunLock, releaseRunLock, RunBusyError } from "../../util/run-loc
 import { getDb } from "../../store/db.js";
 import { logEvent } from "../../store/events.js";
 import { defaultContainerReap, defaultContainerList, type ContainerReap, type ContainerLister } from "../../v2/reconcile.js";
+import { emitMilestone } from "../../notify/milestone.js";
 
-// `forge ops check` — read-only incident detection over the blackboard (#250).
-// The orchestrator runs `--json` and decides what to act on or surface; humans
-// get the plain rendering. This command NEVER mutates state.
+// `forge ops check` — incident detection over the blackboard (#250). The
+// orchestrator runs `--json`, which is read-only/side-effect-free, and decides
+// what to act on or surface. The live (human) path renders the report AND, since
+// FG-516, records + pushes one deduped milestone per new live incident
+// (orchestrator.milestone events); only `--json` stays read-only.
+
+// FG-516: in LIVE (human/interactive) mode, `forge ops check` pushes ONE
+// milestone per detected incident so a standing incident (orphaned work, stuck
+// run) surfaces without waiting for an operator to eyeball the report. Deduped on
+// incident identity — kind + runId + taskId — and scoped to the incident's run so
+// emitMilestone's persistent, run-scoped dedupe holds across `ops check`
+// invocations: re-running over the same standing incidents never re-pushes. Only
+// the human path calls this; `--json` stays read-only (side-effect-free) by
+// design. A notify failure never breaks `ops check` — every error is swallowed.
+// NO_NOTIFY is honored automatically: emitMilestone gates dispatch on
+// isAnyProviderEnabled(), which NO_NOTIFY short-circuits.
+export async function notifyLiveIncidents(incidents: Incident[]): Promise<void> {
+  for (const inc of incidents) {
+    try {
+      await emitMilestone({
+        runId: inc.runId,
+        kind: "risk_found",
+        title: `ops: ${inc.kind} (${inc.severity}) needs attention`,
+        body: `${inc.evidence.join("; ")} — ${inc.recommendedAction.reason}`,
+        dedupeKey: `ops-incident:${inc.kind}:${inc.runId}:${inc.taskId ?? "none"}`,
+      });
+    } catch (err) {
+      console.error(`FG-516: ops incident notify failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
 
 export function renderHuman(incidents: Incident[]): string {
   if (incidents.length === 0) return "No ops incidents.";
@@ -258,24 +287,30 @@ export function performOpsReapContainers(
 }
 
 export function registerOps(program: Command): void {
-  const ops = program.command("ops").description("Operational intelligence over the forge blackboard (read-only).");
+  const ops = program.command("ops").description("Operational intelligence over the forge blackboard.");
 
   ops
     .command("check")
     .option("--json", "emit structured incidents as JSON")
     .option("--all", "check every project on this host (default: scope to the current directory's project)")
     .option("--project <dir>", "scope to a specific project dir (default: cwd). Ignored with --all.")
-    .description("Detect 'needs attention' incidents from existing state. Read-only — never mutates.")
-    .action((opts: { json?: boolean; all?: boolean; project?: string }) => {
+    .description(
+      "Detect 'needs attention' incidents from existing state. The default (human) output also pushes one " +
+        "notification per NEW live incident, recording orchestrator.milestone events (deduped on incident identity). " +
+        "Use --json for a read-only, side-effect-free scan."
+    )
+    .action(async (opts: { json?: boolean; all?: boolean; project?: string }) => {
       ensureForgeDirs();
       const projectDir = opts.all ? undefined : resolve(opts.project ?? process.cwd());
       const incidents = runOpsCheck({ projectDir });
 
       if (opts.json) {
+        // Read-only contract: the --json path must stay side-effect-free (no notify).
         console.log(JSON.stringify(incidents, null, 2));
         return;
       }
       console.log(renderHuman(incidents));
+      await notifyLiveIncidents(incidents);
     });
 
   ops

@@ -516,6 +516,9 @@ export function registerCampaign(program: Command): void {
         process.stderr.write(`Error: campaign ${campaignId} not found\n`);
         process.exit(1);
       }
+      // FG-516: no pause notification here — this is the operator's OWN pause
+      // action, not an unattended wedge. Only the executor's automatic
+      // running→paused parks (drive errors, blockers, gates) notify.
       if (!tryTransitionCampaign(campaignId, "running", "paused")) {
         const current = getCampaign(campaignId);
         process.stderr.write(

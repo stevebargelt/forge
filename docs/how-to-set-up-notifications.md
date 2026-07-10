@@ -14,6 +14,8 @@ Default trigger set (override via `FORGE_NOTIFY_ON`):
 - **`blocked_by_red`** — a task got blocked by an authoritative red verdict; the run is parked, needs you to decide.
 - **`awaiting_gate`** — a task paused for a human/verdict gate; a gate is exactly the kind of thing that needs your action, so it's on by default (not opt-in).
 
+These four are the run/task *lifecycle* triggers, governed by `FORGE_NOTIFY_ON` (below). Forge also emits some notifications **automatically as milestones** — campaign parks and live `forge ops check` incidents — which push via the milestone policy, not `FORGE_NOTIFY_ON`. See [Orchestrator milestones](#orchestrator-milestones-202203) for both.
+
 Every message ends with an explicit action segment, so a glance tells you whether it's FYI or needs something from you. A clean finish is unmistakably non-actionable:
 ```
 forge: run-add-login-7c2a91 [complete] feature "add login" — 14m23s · no action
@@ -177,6 +179,8 @@ Comma-separated. Unrecognized values are silently ignored. Empty / unset = use t
 
 Find gate pings noisy? Drop `awaiting_gate` from the set: `export FORGE_NOTIFY_ON="complete,failed,blocked_by_red"`.
 
+`FORGE_NOTIFY_ON` governs **only** these four lifecycle triggers. The automatic milestones forge emits itself — campaign parks and live `ops check` incidents (see [Orchestrator milestones](#orchestrator-milestones-202203)) — are not lifecycle transitions and are unaffected by this variable; they push under the milestone policy instead. The master switch (`FORGE_NOTIFY=`) and `NO_NOTIFY` still silence everything, milestones included.
+
 ## Opt out (master switch)
 
 To stop all notifications without unsubscribing the number:
@@ -273,6 +277,24 @@ When a milestone does push, the body leads with an action marker so it reads dis
 `--dedupe-key` suppresses a *repeat* push for the same key within a run (the event is still recorded). Delivery uses the same `FORGE_NOTIFY` providers — with none configured, the milestone records but doesn't push.
 
 The **orchestrator contract** — emit milestones only at semantic checkpoints, never on ordinary replies — is shipped: it lives in `seeds/orchestrator-template.md` and is installed into every project's `CLAUDE.md` via `forge init`/`forge upgrade`. The one remaining slice is **per-run policy** (`quiet`/`normal`/`verbose` via `--notify-policy`), still future.
+
+### Milestones forge emits automatically
+
+Beyond milestones the orchestrator declares, forge itself fires milestones for two classes of **unattended** situation that would otherwise wedge silently. Both use the same push policy and `FORGE_NOTIFY` providers as above — with no provider configured they record but don't push.
+
+**Campaign parks.** When an unattended campaign transitions running→paused in the executor — drive-loop error, an item blocker, an authoritative red verdict, a human/verdict gate, no drive-loop progress, a lost/absent run needing recovery, a missing workflow YAML, an invoke-lane item that finished without shipping, or a dependency-held item — forge fires **one** milestone right after the park commits (the pause is never gated on the notification). The kind is:
+- **`blocked`** — a genuine wedge that needs you to unblock it.
+- **`decision_needed`** — a park that awaits an operator call (e.g. a gate, or an item that outgrew its lane and needs re-approval).
+
+The provider **title** carries the campaign id and the ticket (`Campaign <id> paused — <ticket> needs attention`, surfaced as the ntfy title `forge: <kind> — …`); the **body** normally carries the item's `blockerKind` and the requested human action — e.g. `blocker: dependency — held on dependency FG-480 — resolve/complete FG-480, then forge campaign resume`. One known exception, tracked as **FG-518**: when a deferred-resume item's workflow YAML fails to reload, forge still fires the park milestone (no silent wedge, and the campaign+ticket still ride the title) but the body carries the item's *stale* gate context — it may have no `blockerKind` and shows the prior gate's action rather than the load-failure reason. That body-precision fix is deferred to FG-518. It is deduped per campaign+item (dedupe key `campaign-pause:<campaignId>:<ticketId>`), so re-parking the same item after a `forge campaign resume` does **not** re-push. An item with no run of its own scopes its milestone to another run in the same campaign.
+
+Two exemptions stay silent: an operator-initiated `forge campaign pause` (that's your own action, not a wedge), and — for now — a campaign in which *no* item ever produced a run (every item held before any run started); that residual corner is deferred to FG-517.
+
+**Live `ops check` incidents.** `forge ops check` in its default human (interactive) mode renders the incident report **and** pushes one `risk_found` milestone per **new** incident, so a standing incident (orphaned work, a stuck run) reaches you once instead of scrolling past unread. Pushes are deduped on incident identity — `kind` + `runId` + `taskId` — via the persistent event log, so re-running `ops check` over the same standing incidents never re-pushes. A notify failure never breaks the command.
+
+`forge ops check --json` is unchanged: it stays **strictly read-only / side-effect-free** and pushes nothing — the orchestrator consumes the JSON and decides what to surface itself.
+
+No new kinds, channels, or config come with either source; `NO_NOTIFY` and every existing provider/consent/throttle setting apply as-is.
 
 ## What's coming next (and what isn't)
 

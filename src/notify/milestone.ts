@@ -12,7 +12,7 @@
 // adds the orchestrator-contract (emit only at checkpoint boundaries). Crawl is
 // the command + event + default policy + dedupe + dispatch.
 
-import { logEvent, eventsForRun } from "../store/events.js";
+import { logEvent, eventsForRun, anyDispatchedMilestoneWithDedupeKey } from "../store/events.js";
 import { getRun } from "../store/runs.js";
 import { dispatch, isAnyProviderEnabled } from "./trigger.js";
 import { assessRunDocsImpact, formatDocsImpactWarning } from "../v2/docs-impact.js";
@@ -116,6 +116,13 @@ export type EmitMilestoneArgs = {
   title: string;
   body?: string;
   dedupeKey?: string;
+  // FG-516: how far the dedupe suppression scan reaches. "run" (default, every
+  // existing caller byte-compatible) suppresses a repeat of the same key within
+  // THIS run. "global" suppresses it across ALL recorded milestone events — the
+  // campaign-pause path needs this because `forge campaign retry` clears the
+  // item's runId, so a re-park lands on a new run and a run-scoped scan would let
+  // the same campaign+item push again.
+  dedupeScope?: "run" | "global";
 };
 
 export type EmitMilestoneResult = {
@@ -149,13 +156,17 @@ export async function emitMilestone(args: EmitMilestoneArgs): Promise<EmitMilest
   const importance = KIND_POLICY[kind].importance;
   const runElapsedMs = Math.max(0, Date.now() - new Date(run.createdAt).getTime());
 
-  // Dedupe vs prior DISPATCHED milestones with the same key in this run.
+  // Dedupe vs prior DISPATCHED milestones with the same key. "run" scope (default)
+  // scans this run only; "global" scope scans the whole events store so the
+  // suppression survives a run change (FG-516: campaign retry clears runId).
   const alreadyDispatchedKey = args.dedupeKey
-    ? eventsForRun(args.runId).some((e) => {
-        if (e.eventType !== "orchestrator.milestone") return false;
-        const p = e.payload as { dedupeKey?: string; dispatched?: boolean } | null;
-        return !!p && p.dedupeKey === args.dedupeKey && p.dispatched === true;
-      })
+    ? args.dedupeScope === "global"
+      ? anyDispatchedMilestoneWithDedupeKey(args.dedupeKey)
+      : eventsForRun(args.runId).some((e) => {
+          if (e.eventType !== "orchestrator.milestone") return false;
+          const p = e.payload as { dedupeKey?: string; dispatched?: boolean } | null;
+          return !!p && p.dedupeKey === args.dedupeKey && p.dispatched === true;
+        })
     : false;
 
   const decision = decideMilestone(kind, runElapsedMs, alreadyDispatchedKey, args.dedupeKey);

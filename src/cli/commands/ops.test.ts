@@ -6,12 +6,13 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
 import { insertTask, getTask } from "../../store/tasks.js";
-import { logEvent, eventsForTask } from "../../store/events.js";
+import { logEvent, eventsForTask, eventsForRun } from "../../store/events.js";
 import type { Run, Task, TaskStatus, RunStatus } from "../../types/index.js";
 import type { LivenessState } from "../../ops/reconcile-candidate.js";
 import { RunBusyError } from "../../util/run-lock.js";
 import { runDir } from "../../util/paths.js";
-import { performOpsRepairCommand, performOpsReapContainers } from "./ops.js";
+import { performOpsRepairCommand, performOpsReapContainers, notifyLiveIncidents } from "./ops.js";
+import { runOpsCheck } from "../../ops/detect.js";
 import type { ContainerReap, ContainerLister, ContainerListEntry } from "../../v2/reconcile.js";
 
 let db: DatabaseInstance;
@@ -549,4 +550,95 @@ test("performOpsReapContainers: docker unavailable is reported, not thrown", () 
   assert.equal(outcome.scanned, 0);
   assert.deepEqual(outcome.reaped, []);
   assert.deepEqual(calls, [], "the reaper must never be invoked when the listing itself failed");
+});
+
+// ── FG-516: LIVE-mode `forge ops check` notifications ────────────────────────
+// The LIVE (human) path pushes one milestone per NEW incident, deduped on
+// incident identity (kind + runId + taskId) scoped to the incident's run so a
+// re-run over the same standing incidents never re-pushes. The --json path is
+// read-only and never calls notifyLiveIncidents. Provider mocking mirrors
+// milestone.test.ts: FORGE_NOTIFY=ntfy + NTFY_URL + a stubbed global fetch,
+// NO_NOTIFY cleared so a push actually fires; fetch calls count the real pushes.
+
+const NOTIFY_ENV_KEYS = ["NO_NOTIFY", "FORGE_NOTIFY", "NTFY_URL"] as const;
+
+function withStubProvider(fn: (fetchCalls: () => number) => Promise<void> | void, opts: { noNotify?: boolean } = {}): Promise<void> {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of NOTIFY_ENV_KEYS) saved[k] = process.env[k];
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  process.env["NO_NOTIFY"] = opts.noNotify ? "true" : "";
+  process.env["FORGE_NOTIFY"] = "ntfy";
+  process.env["NTFY_URL"] = "https://ntfy.example.com/forge";
+  globalThis.fetch = (async () => {
+    calls++;
+    return { ok: true, status: 200, text: async () => "" } as Response;
+  }) as typeof fetch;
+  return (async () => {
+    try {
+      await fn(() => calls);
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const k of NOTIFY_ENV_KEYS) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k] as string;
+      }
+    }
+  })();
+}
+
+function dispatchedOpsMilestones(runId: string): number {
+  return eventsForRun(runId)
+    .filter((e) => e.eventType === "orchestrator.milestone")
+    .map((e) => e.payload as Record<string, unknown>)
+    .filter((p) => typeof p["dedupeKey"] === "string" && (p["dedupeKey"] as string).startsWith("ops-incident:") && p["dispatched"] === true).length;
+}
+
+test("notifyLiveIncidents: pushes one milestone per new incident", async () => {
+  insertRun(mkRun("run-orphan-ops", "complete"));
+  insertTask(mkTask("t-orphan-ops", "run-orphan-ops", "pending")); // retry_orphan
+  insertRun(mkRun("run-stuck-ops", "active"));
+  insertTask(mkTask("t-stuck-ops", "run-stuck-ops", "failed")); // stuck_run
+
+  const incidents = runOpsCheck();
+  assert.equal(incidents.length, 2, "two synthetic incidents detected");
+
+  await withStubProvider(async (fetchCalls) => {
+    await notifyLiveIncidents(incidents);
+    assert.equal(fetchCalls(), 2, "one push per new incident");
+    assert.equal(dispatchedOpsMilestones("run-orphan-ops"), 1);
+    assert.equal(dispatchedOpsMilestones("run-stuck-ops"), 1);
+  });
+});
+
+test("notifyLiveIncidents: a second run over the same standing incidents pushes nothing (dedupe on incident identity)", async () => {
+  insertRun(mkRun("run-orphan-dd", "complete"));
+  insertTask(mkTask("t-orphan-dd", "run-orphan-dd", "pending"));
+
+  const incidents = runOpsCheck();
+  assert.equal(incidents.length, 1);
+
+  await withStubProvider(async (fetchCalls) => {
+    await notifyLiveIncidents(incidents);
+    assert.equal(fetchCalls(), 1, "first run pushes the incident");
+
+    // Re-run over the identical standing incident — the incident-identity key +
+    // emitMilestone's persistent, run-scoped dedupe must suppress the re-push.
+    await notifyLiveIncidents(runOpsCheck());
+    assert.equal(fetchCalls(), 1, "no second push for the same standing incident");
+    assert.equal(dispatchedOpsMilestones("run-orphan-dd"), 1);
+  });
+});
+
+test("notifyLiveIncidents: NO_NOTIFY suppresses every push", async () => {
+  insertRun(mkRun("run-orphan-nn", "complete"));
+  insertTask(mkTask("t-orphan-nn", "run-orphan-nn", "pending"));
+
+  const incidents = runOpsCheck();
+  assert.equal(incidents.length, 1);
+
+  await withStubProvider(async (fetchCalls) => {
+    await notifyLiveIncidents(incidents);
+    assert.equal(fetchCalls(), 0, "NO_NOTIFY → no provider push attempted");
+  }, { noNotify: true });
 });
