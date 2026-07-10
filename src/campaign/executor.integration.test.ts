@@ -22,7 +22,7 @@ import { planCampaign as _planCampaign, computePlanHash, resolvePlan } from "./p
 import type { PlannerInput, PlanMode, ItemModeOverride } from "./planner.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane, retryCampaignItem } from "./executor.js";
 import type { InvokeArgs, InvokeResult } from "../v2/invoke.js";
-import { logEvent } from "../store/events.js";
+import { logEvent, eventsForRun } from "../store/events.js";
 import { listCampaignItems } from "../store/campaigns.js";
 import { updateRunStatus, getRun, insertRun } from "../store/runs.js";
 import { insertTask } from "../store/tasks.js";
@@ -377,6 +377,63 @@ test("first-item failure (FG-393): item2 held (unknown relation, sequential), ca
 
   const finalCampaign = getCampaign(campaign.id)!;
   assert.equal(finalCampaign.status, "paused", "FG-393: campaign paused (not failed) on LOCAL blocker");
+});
+
+test("FG-516 (F3): the anyHeld campaign-level park notifies each held item, scoped to a campaign fallback run", async () => {
+  // Same shape as the FG-393 test: FG-101 blocks (LOCAL) with a REAL run row, FG-102
+  // is held (no run of its own). The final anyHeld running→paused park must not be
+  // silent — it emits a campaign-pause milestone for the held item, scoped to the
+  // blocker's run as the campaign fallback (a held item has no run to scope to).
+  const savedEnv = {
+    NO_NOTIFY: process.env["NO_NOTIFY"],
+    FORGE_NOTIFY: process.env["FORGE_NOTIFY"],
+    NTFY_URL: process.env["NTFY_URL"],
+  };
+  const savedFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  process.env["NO_NOTIFY"] = "";
+  process.env["FORGE_NOTIFY"] = "ntfy";
+  process.env["NTFY_URL"] = "https://ntfy.example.com/forge";
+  globalThis.fetch = (async () => {
+    fetchCalls++;
+    return { ok: true, status: 200, text: async () => "" } as Response;
+  }) as typeof fetch;
+  try {
+    const { campaign } = planCampaign(
+      { kind: "list", ticketIds: ["FG-101", "FG-102"] },
+      { projectDir, mode: "sequential" }
+    );
+    approveCampaign(campaign.id, { rationale: "Approved" });
+
+    const fakeDispatchFail = async (args: InvokeArgs): Promise<InvokeResult> => {
+      seedLocalFailure("task-fake");
+      return { runId: args.runId ?? "run-fake", taskId: "task-fake", status: "failed", error: "agent exploded" };
+    };
+
+    const result = await startCampaign(campaign.id, { dispatch: fakeDispatchFail });
+    assert.equal(result.stopReason, "paused");
+
+    const items = listCampaignItems(campaign.id);
+    const item1 = items.find((i) => i.ticketId === "FG-101")!;
+    const item2 = items.find((i) => i.ticketId === "FG-102")!;
+    assert.ok(item1.runId && getRun(item1.runId), "the blocker item has a real run to serve as the campaign fallback");
+    assert.equal(item2.runId, undefined, "the held item has no run of its own");
+
+    const heldMilestones = eventsForRun(item1.runId!)
+      .filter((e) => e.eventType === "orchestrator.milestone")
+      .map((e) => e.payload as Record<string, unknown>)
+      .filter((p) => p["dedupeKey"] === `campaign-pause:${campaign.id}:FG-102`);
+    assert.equal(heldMilestones.length, 1, "the held item FG-102 got exactly one campaign-pause milestone via the fallback run");
+    assert.equal(heldMilestones[0]!["kind"], "blocked", "an unattended held-item park is a `blocked` milestone");
+    assert.equal(heldMilestones[0]!["dispatched"], true, "the push actually went out (fresh dedupe key, real fallback run)");
+    assert.equal(fetchCalls, 1, "exactly one provider push for the single held item");
+  } finally {
+    globalThis.fetch = savedFetch;
+    for (const k of ["NO_NOTIFY", "FORGE_NOTIFY", "NTFY_URL"] as const) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k] as string;
+    }
+  }
 });
 
 // ── start: shipped evidence ───────────────────────────────────────────────────

@@ -42,6 +42,7 @@ import { eventsForRun } from "../store/events.js";
 import { planCampaign } from "./planner.js";
 import type { ItemModeOverride } from "./planner.js";
 import { startCampaign, setCampaignNotifyEmitterForTest } from "./executor.js";
+import type { EmitMilestoneArgs, EmitMilestoneResult } from "../notify/milestone.js";
 import { runNext } from "../v2/runNext.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
 import type { Workflow } from "../v2/schema.js";
@@ -237,6 +238,44 @@ test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-
   assert.match(String(m["title"]), new RegExp(TICKET_ID), "title names the parked ticket");
   assert.match(String(m["body"]), /drive loop threw/, "body carries the drive-error requestedHumanAction guidance");
   assert.match(String(m["body"]), new RegExp(BOOM.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "body carries the underlying error message");
+});
+
+// ── Finding F1: the drive-error park now AWAITS the notify before rethrowing ──
+// The production CLI (renderDriveErrorAndExit) calls process.exit(1) the instant
+// this rethrow reaches it. With the old fire-and-forget `void notifyCampaignPause`,
+// an emitter that yields on a macrotask could be pre-empted by that exit. This
+// pins the fix: inject an emitter that yields a FULL macrotask (setImmediate)
+// before recording, and assert — WITHOUT any explicit drain — that it has already
+// recorded by the time startCampaign's rejection reaches the caller. Under the old
+// synchronous rethrow this array would still be empty at the assertion.
+test("FG-516 (F1): a drive-error park awaits the full (macrotask-yielding) notify chain before the rethrow reaches the caller", { timeout: 20000 }, async () => {
+  const campaignId = setupCampaign();
+
+  const recorded: string[] = [];
+  const yieldingEmitter = async (args: EmitMilestoneArgs): Promise<EmitMilestoneResult> => {
+    await new Promise<void>((r) => setImmediate(r));
+    recorded.push(String(args.dedupeKey));
+    return { dispatched: false, decision: { send: false, reason: "test-emitter" }, importance: "high" };
+  };
+  setCampaignNotifyEmitterForTest(yieldingEmitter);
+
+  const throwingRunNext = async (): Promise<RunNextResult> => {
+    throw new Error(BOOM);
+  };
+
+  await assert.rejects(
+    () => startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: throwingRunNext }),
+    /paused after a drive error/,
+    "the drive throw still parks and rethrows the enriched next-action error",
+  );
+
+  // Deliberately NO drainMicrotasks/macrotask hop here — the await inside the park
+  // is what must have flushed the emitter before control returned to us.
+  assert.deepEqual(
+    recorded,
+    [`campaign-pause:${campaignId}:${TICKET_ID}`],
+    "the notify (incl. its macrotask hop) settled before the park rethrew — proves the awaited fix, not fire-and-forget",
+  );
 });
 
 // ── Shape 2: the workflow-YAML-missing park (AWAITED, carries a blockerKind) ──

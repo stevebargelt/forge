@@ -65,24 +65,55 @@ export function setCampaignNotifyEmitterForTest(fn: typeof emitMilestone | null)
   _campaignNotifyEmitter = fn ?? emitMilestone;
 }
 
+// FG-516: the run a no-run park scopes its milestone to. A held or recovery park
+// has no run of its OWN (the item was never dispatched, or its run was lost), but
+// emitMilestone is run-scoped. Any real run belonging to the SAME campaign is a
+// coherent anchor: the milestone is about the campaign pausing, its dedupe key is
+// still per campaign+item, and the run-scoped audit trail lands under a run in the
+// campaign it describes. Returns the first item's run so the same held item scopes
+// to the same run across resumes (keeping the persistent dedupe stable). Undefined
+// only when NO item in the whole campaign ever produced a run (e.g. every item
+// held from the start) — that residual campaign-scoped case still needs a schema
+// change this ticket's scope guard defers.
+function pickCampaignFallbackRunId(campaignId: string): string | undefined {
+  for (const it of listCampaignItems(campaignId)) {
+    if (it.runId && getRun(it.runId)) return it.runId;
+  }
+  return undefined;
+}
+
 // FG-516: notify the operator that an UNATTENDED campaign park just happened —
 // the silent-wedge class this ticket closes. Called AFTER the running→paused
 // transition succeeds, so the durable pause is never gated on the notification.
 // One milestone per campaign+item via a stable dedupe key, scoped to the item's
-// run so emitMilestone's persistent run-scoped dedupe suppresses a re-park of the
-// same item after resume. A notify failure must NEVER propagate — the park is the
-// safety-critical half — so every error (including a missing run) is swallowed.
-async function notifyCampaignPause(campaignId: string, itemId: string, kind: MilestoneKind): Promise<void> {
+// own run when it has one, else to a campaign-scoped fallback run so held /
+// no-run parks still push (findings F2/F3). emitMilestone's persistent run-scoped
+// dedupe then suppresses a re-park of the same item after resume. A notify failure
+// must NEVER propagate — the park is the safety-critical half — so every error is
+// swallowed.
+async function notifyCampaignPause(
+  campaignId: string,
+  itemId: string,
+  kind: MilestoneKind,
+  fallbackRunId?: string,
+): Promise<void> {
   try {
     const item = getCampaignItem(itemId);
-    // No run to scope a (run-scoped) milestone to → nothing to emit. getRun guards
-    // the emitMilestone "run not found" throw for a synthetic/absent run row.
-    if (!item || !item.runId || !getRun(item.runId)) return;
+    if (!item) return;
+    const runId =
+      item.runId && getRun(item.runId)
+        ? item.runId
+        : fallbackRunId && getRun(fallbackRunId)
+          ? fallbackRunId
+          : undefined;
+    // No run anywhere in the campaign to scope a (run-scoped) milestone to →
+    // nothing to emit. getRun guards the emitMilestone "run not found" throw.
+    if (!runId) return;
     const detail: string[] = [];
     if (item.blockerKind) detail.push(`blocker: ${item.blockerKind}`);
     if (item.requestedHumanAction) detail.push(item.requestedHumanAction);
     await _campaignNotifyEmitter({
-      runId: item.runId,
+      runId,
       kind,
       title: `Campaign ${campaignId} paused — ${item.ticketId} needs attention`,
       body: detail.length > 0 ? detail.join(" — ") : `campaign ${campaignId} parked ${item.ticketId}`,
@@ -548,13 +579,19 @@ type LoadWorkflowFn = (name: string, ctx: LoadContext) => Workflow;
 // NOTE: a thrown startRun has no live run to reattach to — see the sibling
 // parkCampaignOnStartRunThrow below, which parks that shape directly at its
 // true terminal state instead of this recoverable one.
-function parkCampaignOnDriveThrow(
+// FG-516 (finding F1): async + AWAITED notify. The production campaign CLI
+// (renderDriveErrorAndExit) calls process.exit(1) as soon as this rethrow reaches
+// its top-level catch. A fire-and-forget `void notifyCampaignPause(...)` could be
+// pre-empted at an await hop before it records/dispatches, leaving the wedge
+// silent. Awaiting the notify (it never throws) before the rethrow guarantees the
+// milestone is settled before control returns to the CLI.
+async function parkCampaignOnDriveThrow(
   campaignId: string,
   itemId: string,
   ticketId: string,
   runId: string,
   err: unknown
-): never {
+): Promise<never> {
   const message = err instanceof Error ? err.message : String(err);
   try {
     updateCampaignItem(itemId, {
@@ -570,7 +607,7 @@ function parkCampaignOnDriveThrow(
       payload: { campaignId, itemId, ticketId, error: message, decidedAt: nowIso() },
     });
     tryTransitionCampaign(campaignId, "running", "paused");
-    void notifyCampaignPause(campaignId, itemId, "blocked");
+    await notifyCampaignPause(campaignId, itemId, "blocked");
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -598,13 +635,15 @@ function parkCampaignOnDriveThrow(
 // at 'infrastructure' (directly retryable, its blockerKind already IS the
 // classification) keeps composing with retry instead of routing the operator
 // through an evidence probe that must refuse.
-function parkCampaignOnStartRunThrow(
+// FG-516 (finding F1): async + AWAITED notify, same rationale as
+// parkCampaignOnDriveThrow — the CLI process.exit(1) must not race the push.
+async function parkCampaignOnStartRunThrow(
   campaignId: string,
   itemId: string,
   ticketId: string,
   runId: string,
   err: unknown
-): never {
+): Promise<never> {
   const message = err instanceof Error ? err.message : String(err);
   try {
     logEvent("campaign_item.drive_error", {
@@ -620,7 +659,7 @@ function parkCampaignOnStartRunThrow(
       requestedHumanAction: `startRun threw while dispatching ${ticketId} on run ${runId}: ${message}. Once the campaign is paused, run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume\`.`,
     });
     tryTransitionCampaign(campaignId, "running", "paused");
-    void notifyCampaignPause(campaignId, itemId, "blocked");
+    await notifyCampaignPause(campaignId, itemId, "blocked");
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -676,7 +715,7 @@ async function driveWorkflowItem(
       try {
         reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
       } catch (err) {
-        parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+        throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
       }
       const updatedItem = getCampaignItem(itemId);
       const bk = updatedItem?.blockerKind;
@@ -748,7 +787,7 @@ async function driveWorkflowItem(
         try {
           await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:auto)", {});
         } catch (err) {
-          parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+          throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
         }
       } else if (gateType === "verdict") {
         const taskVerdicts = verdictsForTask(awaitingTask.id);
@@ -757,7 +796,7 @@ async function driveWorkflowItem(
           try {
             await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, all reds passed)", {});
           } catch (err) {
-            parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+            throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
           }
         } else if (agg.verdict === "fail") {
           updateCampaignItem(itemId, {
@@ -823,7 +862,7 @@ async function driveWorkflowItem(
     try {
       nextResult = await fns.runNextFn({ runId, workflow });
     } catch (err) {
-      parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+      throw await parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
     }
     const dispatchedNothing =
       nextResult.dispatchedSteps.length === 0 &&
@@ -1143,7 +1182,9 @@ async function driveRemainingItems(
       if (!item.runId) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
         tryTransitionCampaign(campaignId, "running", "paused");
-        await notifyCampaignPause(campaignId, item.id, "blocked");
+        // FG-516 (finding F2): this item has no run of its own, so scope the pause
+        // milestone to a campaign fallback run instead of going silent.
+        await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
         return { stopReason: "recovery_needed", itemRecords };
       }
       const runForItem = preloadedRun ?? getRun(item.runId);
@@ -1407,7 +1448,7 @@ async function driveRemainingItems(
           // not stop parkCampaignOnStartRunThrow below from recording and rethrowing
           // the ORIGINAL startRun error.
         }
-        parkCampaignOnStartRunThrow(campaignId, item.id, item.ticketId, failRunId, err);
+        throw await parkCampaignOnStartRunThrow(campaignId, item.id, item.ticketId, failRunId, err);
       }
 
       updateCampaignItem(item.id, { runId, lifecycleStatus: "running" });
@@ -1722,13 +1763,19 @@ async function driveRemainingItems(
 
   // All items processed. If any held items remain, campaign → paused (awaiting resume).
   // If no held items, campaign → complete (may be complete_with_issues per report verdict).
-  // FG-516: no notifyCampaignPause here — this is a campaign-level pause with no
-  // single parked item/run to scope a (run-scoped) milestone to; each held item
-  // was already surfaced at its own dependency-hold site, and the run-scoped
-  // notify machinery has no campaign-scoped channel to add without a schema change
-  // (out of scope).
+  // FG-516 (finding F3): this campaign-level pause is an unattended running→paused
+  // park too, so it must not stay silent. Held items have no run of their own, so
+  // each milestone is scoped to a campaign fallback run; the per campaign+item
+  // dedupe key keeps a re-park across resumes from spamming. Only a campaign with
+  // ZERO runs at all (every item held from the start) still can't push — that
+  // residual needs a campaign-scoped channel this ticket's scope guard defers.
   if (anyHeld) {
     if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      const fallbackRunId = pickCampaignFallbackRunId(campaignId);
+      const heldItemIds = new Set(itemRecords.filter((r) => r.outcome === "held").map((r) => r.itemId));
+      for (const heldItemId of heldItemIds) {
+        await notifyCampaignPause(campaignId, heldItemId, "blocked", fallbackRunId);
+      }
       return { stopReason: "paused", itemRecords };
     }
     const finalCheck = getCampaign(campaignId);

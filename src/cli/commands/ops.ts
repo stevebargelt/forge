@@ -292,7 +292,11 @@ export function registerOps(program: Command): void {
     .option("--json", "emit structured incidents as JSON")
     .option("--all", "check every project on this host (default: scope to the current directory's project)")
     .option("--project <dir>", "scope to a specific project dir (default: cwd). Ignored with --all.")
-    .description("Detect 'needs attention' incidents from existing state. Read-only — never mutates.")
+    .description(
+      "Detect 'needs attention' incidents from existing state. The default (human) output also pushes one " +
+        "notification per NEW live incident, recording orchestrator.milestone events (deduped on incident identity). " +
+        "Use --json for a read-only, side-effect-free scan."
+    )
     .action(async (opts: { json?: boolean; all?: boolean; project?: string }) => {
       ensureForgeDirs();
       const projectDir = opts.all ? undefined : resolve(opts.project ?? process.cwd());
