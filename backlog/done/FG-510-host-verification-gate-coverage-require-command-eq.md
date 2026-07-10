@@ -1,9 +1,11 @@
 ---
 id: FG-510
 type: story
-status: active
+status: done
 title: "host-verification gate coverage: require command equality with the required gate — close the --gate override spoof (audit N-D/F13)"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: 363128b
 ---
 
 Source: notes/forge-engineering-review-2026-07-09.md finding N-D (MEDIUM, verified), sharpening F13. Trust-perimeter item.
