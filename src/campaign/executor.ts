@@ -1303,7 +1303,16 @@ async function driveRemainingItems(
         // Dependency-held: use existing evaluateForHold path.
         const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
         if (holdResult.hold) {
-          updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
+          // FG-516: persist blockerKind + requestedHumanAction so the anyHeld park's
+          // milestone carries real context (which dependency + how to clear it),
+          // not the generic "parked <ticket>" fallback.
+          updateCampaignItem(item.id, {
+            outcome: "held",
+            blockerKind: "dependency",
+            continuePolicy: "hold_dependents",
+            reason: holdResult.reason,
+            requestedHumanAction: `held on dependency ${holdResult.holderId} — resolve/complete ${holdResult.holderId}, then forge campaign resume`,
+          });
           anyHeld = true;
           itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", reason: holdResult.reason });
           continue;
@@ -1317,7 +1326,16 @@ async function driveRemainingItems(
     if (blockedItems.length > 0) {
       const holdResult = evaluateForHold(laterTicket, blockedItems, opts.mode);
       if (holdResult.hold) {
-        updateCampaignItem(item.id, { outcome: "held", continuePolicy: "hold_dependents", reason: holdResult.reason });
+        // FG-516: persist blockerKind + requestedHumanAction so the anyHeld park's
+        // milestone carries real context (which dependency + how to clear it),
+        // not the generic "parked <ticket>" fallback.
+        updateCampaignItem(item.id, {
+          outcome: "held",
+          blockerKind: "dependency",
+          continuePolicy: "hold_dependents",
+          reason: holdResult.reason,
+          requestedHumanAction: `held on dependency ${holdResult.holderId} — resolve/complete ${holdResult.holderId}, then forge campaign resume`,
+        });
         anyHeld = true;
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, lifecycleStatus: "pending", outcome: "held", reason: holdResult.reason });
         continue;

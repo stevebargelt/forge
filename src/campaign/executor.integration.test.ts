@@ -427,6 +427,16 @@ test("FG-516 (F3): the anyHeld campaign-level park notifies each held item, scop
     assert.equal(heldMilestones[0]!["kind"], "blocked", "an unattended held-item park is a `blocked` milestone");
     assert.equal(heldMilestones[0]!["dispatched"], true, "the push actually went out (fresh dedupe key, real fallback run)");
     assert.equal(fetchCalls, 1, "exactly one provider push for the single held item");
+
+    // FG-516 (round 2): a dependency-held item now persists blockerKind +
+    // requestedHumanAction, so the pushed body carries the real context payload
+    // (which dependency + how to clear it), NOT the generic "parked <ticket>" fallback.
+    assert.equal(item2.blockerKind, "dependency", "the dependency-held item persists the dependency blockerKind");
+    const body = String(heldMilestones[0]!["body"]);
+    assert.match(body, /blocker: dependency/, "body leads with the dependency blockerKind detail");
+    assert.match(body, /FG-101/, "body names the dependency ticket FG-102 is held on");
+    assert.match(body, /forge campaign resume/, "body carries the operator action to clear the hold");
+    assert.doesNotMatch(body, /^campaign .* parked FG-102$/, "NOT the generic context-free fallback body");
   } finally {
     globalThis.fetch = savedFetch;
     for (const k of ["NO_NOTIFY", "FORGE_NOTIFY", "NTFY_URL"] as const) {

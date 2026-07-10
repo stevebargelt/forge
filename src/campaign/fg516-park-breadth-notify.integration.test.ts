@@ -7,25 +7,22 @@
 // shapes with genuinely different semantics, driving the REAL executor:
 //
 //   1. The drive-error park (parkCampaignOnDriveThrow) — a runNext throw parks
-//      the item and fires `void notifyCampaignPause(...)`, FIRE-AND-FORGET, from
-//      a synchronous never-returning function that then RETHROWS. This asserts
+//      the item and AWAITS notifyCampaignPause before it RETHROWS. This asserts
 //      the milestone is a `blocked` kind carrying the "drive loop threw" guidance.
 //   2. The workflow-YAML-missing park — an AWAITED `blocked` park that DOES carry
 //      a blockerKind (`campaign_system`). This exercises the "blocker: <kind>"
 //      body branch that the gate:human test (no blockerKind) never reaches, so
 //      the most-divergent pushed body is pinned.
 //
-// FIRE-AND-FORGET NOTE (observation, NOT a confirmed defect): the drive-error and
-// startRun-throw parks call `void notifyCampaignPause(...)` (unawaited) and then
-// rethrow synchronously; the CLI (renderDriveErrorAndExit) catches that rethrow
-// and calls process.exit(1). In the CURRENT code the notify's dispatch/logEvent
-// microtasks drain during rejection propagation — before control returns to the
-// CLI catch — so the push is NOT lost today (verified: the milestone is already
-// recorded at the synchronous rejection point, no explicit drain required). It is
-// a latent fragility: the flush relies on incidental microtask ordering, not on
-// an await, so a future change that adds an await hop to the dispatch chain could
-// let process.exit(1) pre-empt it. This test drains explicitly only to be robust
-// to that ordering, and asserts the wiring records/dispatches the right milestone.
+// AWAITED-NOTIFY NOTE: since review round 1 (commit 35053cb) the drive-error and
+// startRun-throw parks AWAIT notifyCampaignPause before rethrowing — no longer the
+// old fire-and-forget `void notifyCampaignPause(...)`. The CLI
+// (renderDriveErrorAndExit) catches the rethrow and calls process.exit(1); because
+// the notify is awaited inside the park, the milestone is guaranteed recorded and
+// dispatched before control returns to that CLI catch, so process.exit(1) can never
+// pre-empt it (the F1 test below proves this WITHOUT any explicit drain). The
+// remaining drainMicrotasks() calls in shape 1 are belt-and-suspenders only — they
+// no longer gate correctness, since the await already flushed the chain.
 //
 // Setup mirrors fg509 (drive-throw seams) + fg516 (stub-provider push counting).
 
@@ -168,8 +165,8 @@ function pauseMilestones(runId: string) {
     .filter((p) => typeof p["dedupeKey"] === "string" && (p["dedupeKey"] as string).startsWith("campaign-pause:"));
 }
 
-// Let all pending microtasks (the fire-and-forget notify chain) settle. A macrotask
-// tick guarantees the microtask queue has fully drained.
+// Let all pending microtasks (the awaited notify chain's dispatch/logEvent) settle.
+// A macrotask tick guarantees the microtask queue has fully drained.
 const drainMicrotasks = () => new Promise<void>((r) => setImmediate(r));
 
 beforeEach(() => {
@@ -199,15 +196,15 @@ afterEach(() => {
   }
 });
 
-// ── Shape 1: the drive-error park (parkCampaignOnDriveThrow, fire-and-forget) ──
-test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-throw guidance (fire-and-forget, records after the queue drains)", { timeout: 20000 }, async () => {
+// ── Shape 1: the drive-error park (parkCampaignOnDriveThrow, awaited notify) ──
+test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-throw guidance (awaited notify before the rethrow)", { timeout: 20000 }, async () => {
   enableStubProvider();
   const campaignId = setupCampaign();
 
   // A runNext throw on the very first drive → driveWorkflowItem Step 5 catch →
-  // parkCampaignOnDriveThrow → `void notifyCampaignPause(..., "blocked")` then a
-  // synchronous rethrow. This is the item's FIRST park, so the dedupe key is
-  // fresh and a real push should fire.
+  // parkCampaignOnDriveThrow → AWAIT notifyCampaignPause(..., "blocked") then a
+  // rethrow. This is the item's FIRST park, so the dedupe key is fresh and a real
+  // push should fire.
   const throwingRunNext = async (): Promise<RunNextResult> => {
     throw new Error(BOOM);
   };
@@ -223,9 +220,10 @@ test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-
   assert.equal(getCampaign(campaignId)?.status, "paused", "the campaign is durably paused");
   const runId = item.runId!;
 
-  // The notify is fire-and-forget from a synchronous throw path. Drain the queue
-  // so the async dispatch/logEvent are guaranteed settled regardless of microtask
-  // interleaving (see the FIRE-AND-FORGET NOTE in the file header).
+  // The park AWAITS the notify before rethrowing, so the dispatch/logEvent are
+  // already settled by the time startCampaign rejected above (see the AWAITED-NOTIFY
+  // NOTE in the file header). These drains are belt-and-suspenders — the dedicated
+  // F1 test below proves the awaited flush WITHOUT any drain.
   await drainMicrotasks();
   await drainMicrotasks();
 
@@ -234,7 +232,7 @@ test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-
   const m = milestones[0]!;
   assert.equal(m["kind"], "blocked", "a drive-error wedge is a `blocked` milestone, NOT decision_needed");
   assert.equal(m["dedupeKey"], `campaign-pause:${campaignId}:${TICKET_ID}`, "stable per campaign+item dedupe key");
-  assert.equal(m["dispatched"], true, "the push actually went out once the fire-and-forget settled");
+  assert.equal(m["dispatched"], true, "the push actually went out (awaited notify settled before the rethrow)");
   assert.equal(fetchCalls, 1, "exactly one provider push for the drive-error park");
   assert.match(String(m["title"]), new RegExp(TICKET_ID), "title names the parked ticket");
   assert.match(String(m["body"]), /drive loop threw/, "body carries the drive-error requestedHumanAction guidance");
