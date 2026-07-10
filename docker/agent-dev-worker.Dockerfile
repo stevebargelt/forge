@@ -37,7 +37,7 @@ RUN npm config set cafile /etc/ssl/certs/ca-certificates.crt \
 # Codex CLI (AWN-7 Walk): second provider runtime. Pinned for reproducible
 # builds; bump CODEX_CLI_VERSION to upgrade. Provides the `codex` bin used by
 # seeds/runtimes/codex-subscription.yml (`codex exec --json`).
-ARG CODEX_CLI_VERSION=0.135.0
+ARG CODEX_CLI_VERSION=0.144.1
 RUN npm install -g @openai/codex@${CODEX_CLI_VERSION}
 
 # pi coding agent (#258 Crawl / #260): third provider runtime. Provides the `pi`
