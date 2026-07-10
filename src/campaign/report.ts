@@ -162,6 +162,61 @@ function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): str
   return null;
 }
 
+// FG-502: mirrors reconcile.ts's isCampaignSystemRecoverable routing predicate
+// (kept independent here — this module never imports reconcile.ts) — the
+// recoverable shape is blockerKind 'campaign_system' with lifecycleStatus
+// 'failed' OR 'blocked_by_red', not an enumerated producer list.
+// executor.ts producers include (non-exhaustive) reconcileTerminalOutcome's
+// run-status-incomplete salvage, done-audit-gap, and unresolved-outcome-
+// fallback paths, and infrastructure failures such as a workflow-YAML load
+// error (all leaving lifecycleStatus:'failed'); plus driveWorkflowItem's
+// inconclusive-verdict park, which leaves lifecycleStatus:'blocked_by_red'.
+// An item matching either combination may have actually shipped out-of-band
+// despite the campaign-level failure. This predicate and the hints below are
+// a read-only preview mirror: they never write, and `forge campaign reconcile`
+// re-derives the same evidence independently as the sole write path.
+function isCampaignSystemRecoverable(item: CampaignItem): boolean {
+  return (
+    item.blockerKind === "campaign_system" &&
+    (item.lifecycleStatus === "failed" || item.lifecycleStatus === "blocked_by_red")
+  );
+}
+
+// FG-502: the campaign_system counterpart to outOfBandCompletableAction —
+// same evaluators (evaluateOutOfBandEvidence/collectOutOfBandEvidence), same
+// paused-only gate (reconcile refuses categorically unless paused), same
+// runId+hasUnresolvedAuthoritativeOutcome guard (FG-458) — routed off
+// isCampaignSystemRecoverable instead of the awaiting_gate/no-blockerKind shape.
+function campaignSystemCompletableHint(campaign: Campaign, item: CampaignItem): string | null {
+  if (campaign.status !== "paused") return null;
+  if (!isCampaignSystemRecoverable(item)) return null;
+  if (!campaign.projectDir) return null;
+  try {
+    const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
+    if (!evaluated.eligible) return null;
+    if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
+      return null;
+    }
+    return formatOutOfBandEligibleHint(item.ticketId);
+  } catch {
+    // best-effort — fall through to no hint
+  }
+  return null;
+}
+
+// FG-502: memoize like outOfBandCompletableAction's memoizeOutOfBandCompletableAction
+// — the underlying evaluators shell out to git, and this hint is evaluated both
+// for the top-level next-action computation and for every per-item row.
+function memoizeCampaignSystemCompletableHint(): (campaign: Campaign, item: CampaignItem) => string | null {
+  const cache = new Map<string, string | null>();
+  return (campaign: Campaign, item: CampaignItem) => {
+    if (!cache.has(item.ticketId)) {
+      cache.set(item.ticketId, campaignSystemCompletableHint(campaign, item));
+    }
+    return cache.get(item.ticketId) ?? null;
+  };
+}
+
 // FG-440: distinguishes "the required host gate hasn't run yet — will be
 // captured automatically on the next reconcile/drive run" from "the gate ran
 // for real and failed" for a scope-blocked item, so the report never renders a
@@ -219,6 +274,31 @@ function outOfBandHostVerificationHint(campaign: Campaign, item: CampaignItem): 
   return null;
 }
 
+// FG-502: the campaign_system counterpart to outOfBandHostVerificationHint —
+// same missing===["lane_evidence_missing"] shape, same FG-458 runId guard,
+// routed off isCampaignSystemRecoverable instead of the awaiting_gate shape.
+// Not memoized, matching outOfBandHostVerificationHint's own un-memoized calls.
+function campaignSystemLaneEvidenceHint(campaign: Campaign, item: CampaignItem): string | null {
+  if (!isCampaignSystemRecoverable(item)) return null;
+  if (!campaign.projectDir) return null;
+  try {
+    const evaluated = evaluateOutOfBandEvidence(collectOutOfBandEvidence(campaign.projectDir, item));
+    if (evaluated.eligible) return null;
+    if (evaluated.missing.length === 1 && evaluated.missing[0] === "lane_evidence_missing") {
+      if (item.runId && hasUnresolvedAuthoritativeOutcome(campaign.projectDir, item)) {
+        return null;
+      }
+      return (
+        "lane_evidence_missing (no covering passing host-verification row recorded yet for this out-of-band " +
+        "delivery — run `forge campaign reconcile` to capture a real host-verification gate and re-check)"
+      );
+    }
+  } catch {
+    // best-effort — fall through to no hint
+  }
+  return null;
+}
+
 // FG-444 fix: outOfBandCompletableAction shells out to git (via
 // collectOutOfBandEvidence/hasUnresolvedAuthoritativeOutcome) — memoize per
 // ticketId so a single assemble call evaluates each item at most once, even
@@ -233,10 +313,28 @@ function memoizeOutOfBandCompletableAction(): (campaign: Campaign, item: Campaig
   };
 }
 
+// FG-502: combines the two campaign_system hints into the single action string
+// slotted in place of blockedItemGuidance's generic text — same two-step shape
+// (`outOfBand ?? reconcileHint ?? requestedHumanAction`) the awaiting_gate
+// gateParkedItem branch below already uses. Returns null when neither hint
+// applies, so callers fall through to the plain blockedItemGuidance text.
+function campaignSystemRecoverableAction(
+  campaign: Campaign,
+  item: CampaignItem,
+  getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
+): string | null {
+  const eligible = getCampaignSystemCompletableHint(campaign, item);
+  if (eligible) return eligible;
+  const laneHint = campaignSystemLaneEvidenceHint(campaign, item);
+  if (laneHint) return `run \`forge campaign reconcile\` to capture host verification for ${item.ticketId} and complete it`;
+  return null;
+}
+
 function computeNextShowAction(
   campaign: Campaign,
   items: CampaignItem[],
-  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null
+  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null,
+  getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -252,9 +350,24 @@ function computeNextShowAction(
   if (blocker === null) {
     if (intent === "start") return "start";
     const blockedItem = unresolvedBlockedItem(items);
-    if (blockedItem) return blockedItemGuidance(campaign.id, blockedItem);
+    if (blockedItem) {
+      if (blockedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, blockedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
+      return blockedItemGuidance(campaign.id, blockedItem);
+    }
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
+      // FG-502: a blocked_by_red item can ALSO be the campaign_system shape (e.g.
+      // driveWorkflowItem's inconclusive-verdict park) — route it through the
+      // same campaign_system hint the failed-shape branch above uses,
+      // same as unresolvedBlockedItem's campaign_system check, before falling
+      // through to the awaiting_gate-shaped out-of-band checks below.
+      if (gateParkedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, gateParkedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
       const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
@@ -330,7 +443,8 @@ function computeNextOperatorAction(
   verdict: CampaignVerdict,
   items: CampaignItem[],
   doneAuditMap: Map<string, DoneAuditResult>,
-  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null
+  getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null,
+  getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
   if (campaign.status === "running") {
     const inf = findInFlightItem(items);
@@ -365,11 +479,21 @@ function computeNextOperatorAction(
     // Paused with unresolved blocked item: surface it to guide the operator.
     const blockedItem = unresolvedBlockedItem(items);
     if (blockedItem) {
+      if (blockedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, blockedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
       return blockedItemGuidance(campaign.id, blockedItem);
     }
     // Parked at a human gate or red block: surface the specific gate/block action.
     const gateParkedItem = items.find((i) => i.lifecycleStatus === "awaiting_gate" || i.lifecycleStatus === "blocked_by_red");
     if (gateParkedItem) {
+      // FG-502: same campaign_system routing as computeNextShowAction above — a
+      // blocked_by_red item can be the campaign_system shape too.
+      if (gateParkedItem.blockerKind === "campaign_system") {
+        const campaignSystemAction = campaignSystemRecoverableAction(campaign, gateParkedItem, getCampaignSystemCompletableHint);
+        if (campaignSystemAction) return campaignSystemAction;
+      }
       const outOfBand = getOutOfBandCompletableAction(campaign, gateParkedItem);
       if (outOfBand) return outOfBand;
       const reconcileHint = outOfBandHostVerificationHint(campaign, gateParkedItem);
@@ -412,6 +536,10 @@ export type ShowItemRow = {
   // FG-444: per-item out-of-band completion eligibility (the same evaluator the
   // Next action line uses for the first parked item, applied to EVERY item).
   outOfBandEligible: boolean;
+  // FG-502: per-item campaign_system recovery eligibility — a failed item whose
+  // blockerKind is 'campaign_system' that turns out to be delivered out-of-band,
+  // using the same evidence bar as outOfBandEligible above.
+  campaignSystemEligible: boolean;
   // FG-442: policy-derived execution lane, per item.
   lane: string;
   laneRationale: string;
@@ -467,6 +595,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
   const planContentForShow = campaign.metadata?.["planContent"] as Record<string, unknown> | undefined;
 
   const getOutOfBandCompletableAction = memoizeOutOfBandCompletableAction();
+  const getCampaignSystemCompletableHint = memoizeCampaignSystemCompletableHint();
 
   const itemRows: ShowItemRow[] = items.map((i) => {
     const planEntry = getItemPlanEntry(planContentForShow, i.ticketId);
@@ -481,15 +610,19 @@ export function assembleCampaignShow(id: string): ShowResult | null {
       reason: i.reason ?? null,
       requestedHumanAction: i.requestedHumanAction ?? null,
       readiness: readinessMap.get(i.ticketId) ?? null,
-      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
+      hostVerificationReconcileHint:
+        scopeBlockedHostVerificationHint(campaign, i) ??
+        outOfBandHostVerificationHint(campaign, i) ??
+        campaignSystemLaneEvidenceHint(campaign, i),
       outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
+      campaignSystemEligible: getCampaignSystemCompletableHint(campaign, i) !== null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
       materialLaneAssumptions: planEntry.materialLaneAssumptions,
     };
   });
 
-  const nextAction = computeNextShowAction(campaign, items, getOutOfBandCompletableAction);
+  const nextAction = computeNextShowAction(campaign, items, getOutOfBandCompletableAction, getCampaignSystemCompletableHint);
 
   return {
     campaignId: campaign.id,
@@ -625,7 +758,15 @@ export function assembleCampaignReport(id: string): ReportResult | null {
   const safetyToContinue = computeSafety(campaign, items);
   const verdict = computeVerdict(campaign, items, doneAuditMap);
   const getOutOfBandCompletableAction = memoizeOutOfBandCompletableAction();
-  const nextOperatorAction = computeNextOperatorAction(campaign, verdict, items, doneAuditMap, getOutOfBandCompletableAction);
+  const getCampaignSystemCompletableHint = memoizeCampaignSystemCompletableHint();
+  const nextOperatorAction = computeNextOperatorAction(
+    campaign,
+    verdict,
+    items,
+    doneAuditMap,
+    getOutOfBandCompletableAction,
+    getCampaignSystemCompletableHint
+  );
 
   const goal =
     campaign.metadata?.["goal"] !== undefined
@@ -704,8 +845,12 @@ export function assembleCampaignReport(id: string): ReportResult | null {
       doneAuditState: doneAuditMap.get(i.ticketId) ?? null,
       hostVerificationDetail:
         doneAuditMap.get(i.ticketId)?.checks.find((c) => c.name === "host_verification")?.detail ?? null,
-      hostVerificationReconcileHint: scopeBlockedHostVerificationHint(campaign, i) ?? outOfBandHostVerificationHint(campaign, i),
+      hostVerificationReconcileHint:
+        scopeBlockedHostVerificationHint(campaign, i) ??
+        outOfBandHostVerificationHint(campaign, i) ??
+        campaignSystemLaneEvidenceHint(campaign, i),
       outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
+      campaignSystemEligible: getCampaignSystemCompletableHint(campaign, i) !== null,
       reviewerResult: null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
@@ -797,6 +942,7 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
     }
     if (item.hostVerificationReconcileHint) lines.push(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
     if (item.outOfBandEligible) lines.push(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
+    if (item.campaignSystemEligible) lines.push(`    campaign-system-recoverable: ${formatOutOfBandEligibleHint(item.ticketId)}`);
     // Execution mode and workflow traceability — the mechanism underlying the lane.
     if (item.executionMode === "invoke (escape hatch)") {
       lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);

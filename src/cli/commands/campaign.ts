@@ -717,7 +717,7 @@ export function registerCampaign(program: Command): void {
   campaign
     .command("reconcile <campaign-id>")
     .description(
-      "Operator recovery: re-derive outcomes for scope-blocked items from durable evidence (ticket/git/host-verification/event records) and ship them if all facts hold — no evidence override; only a paused campaign is eligible"
+      "Operator recovery: re-derive outcomes for scope-blocked, out-of-band-delivered, and campaign_system-recoverable items from durable evidence (ticket/git/host-verification/event records) and ship them if all facts hold — no evidence override; only a paused campaign is eligible"
     )
     .option("--by <operator>", "operator identifier (attribution only, not evidence)")
     .option("--json", "machine-readable JSON output")
@@ -790,6 +790,7 @@ export function registerCampaign(program: Command): void {
         if (item.requestedHumanAction) console.log(`    action: ${item.requestedHumanAction}`);
         if (item.hostVerificationReconcileHint) console.log(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
         if (item.outOfBandEligible) console.log(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
+        if (item.campaignSystemEligible) console.log(`    campaign-system-recoverable: ${formatOutOfBandEligibleHint(item.ticketId)}`);
         if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
           console.log(`    readiness: ${item.readiness.outcome}`);
           if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);

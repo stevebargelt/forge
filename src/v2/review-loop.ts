@@ -296,10 +296,27 @@ export function runVerification(
 export type ReviewDispatch =
   | { ok: true; verdict: ReviewerVerdict; findings: Finding[] }
   | { ok: false; error: string };
+
+// FG-502: a path the fixer touched but that fell outside the scope guard
+// (backlog/ticket-closeout — always; docs/learnings/README — only when not
+// already touched by the loop-start reviewed range) and was therefore
+// selectively reverted rather than committed. Distinct from the full-abort
+// outOfScope/offendingPaths shape below: a round with revertedPaths still
+// SUCCEEDS (ok:true) when in-scope changes from the same round remain and get
+// committed normally — only a round where NOTHING survives the revert falls
+// back to the full-abort outOfScope shape.
+export type RevertedPathGuidance = { path: string; reason: string };
+
 export type FixDispatch =
-  | { ok: true; committedSha?: string }
+  | { ok: true; committedSha?: string; revertedPaths?: RevertedPathGuidance[] }
   | { ok: false; error?: string; outOfScope?: boolean; offendingPaths?: string[];
-      verificationFailed?: boolean; dirtyPaths?: string[] };
+      verificationFailed?: boolean; dirtyPaths?: string[];
+      // FG-502 finding 1/2: at least one disallowed path failed to verifiably
+      // revert (still dirty/present after the attempt, or the revert command
+      // itself threw). Distinct from `outOfScope` (a clean full revert that
+      // left nothing in-scope to commit) — this is a REVERT FAILURE: the tree
+      // is left in an unverified state and must never be staged/committed.
+      scopeGuardRevertFailed?: boolean; failedRevertPaths?: string[] };
 
 /** Explicit terminal states — the only ways the loop stops. */
 export type StopReason =
@@ -309,6 +326,7 @@ export type StopReason =
   | "verification_failed"   // deterministic verification still failing at max rounds
   | "fixer_failed"          // the fixer dispatch failed
   | "fixer_out_of_scope"    // the fixer mutated orchestrator-owned paths (backlog/, docs/, etc.)
+  | "scope_guard_revert_failed" // FG-502: a disallowed path's revert could not be verified clean — round aborted, nothing staged/committed
   | "closeout_guidance_only" // FG-462: reviewer's ONLY remaining asks are backlog closeout (orchestrator post-merge work); nothing for the fixer
   | "reviewer_failed";      // the reviewer dispatch failed or returned an invalid verdict
 
@@ -326,6 +344,13 @@ export type RoundRecord = {
   committedSha?: string;
   outOfScopePaths?: string[];
   fixDirtyPaths?: string[];
+  /** FG-502: paths the fixer touched but that were selectively reverted by the
+   *  scope guard (see RevertedPathGuidance) while in-scope changes from the
+   *  same round survived and were committed. */
+  revertedPaths?: RevertedPathGuidance[];
+  /** FG-502: disallowed paths whose revert could not be verified clean/absent —
+   *  the round aborted fail-safe with nothing staged/committed. */
+  scopeGuardFailedPaths?: string[];
 };
 
 /** Turn failed verification steps into fixer findings (unanchored — typecheck/test
@@ -383,8 +408,15 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
       rec.fixAttempted = true;
       if (fix.ok) {
         if (fix.committedSha) rec.committedSha = fix.committedSha;
+        if (fix.revertedPaths && fix.revertedPaths.length > 0) rec.revertedPaths = fix.revertedPaths;
         rounds.push(rec); // fixed; next round re-verifies
         continue;
+      }
+      if (fix.scopeGuardRevertFailed) {
+        rec.scopeGuardFailedPaths = fix.failedRevertPaths;
+        if (fix.error) rec.fixError = fix.error;
+        rounds.push(rec);
+        return { stopReason: "scope_guard_revert_failed", closeable: false, rounds };
       }
       if (fix.outOfScope) {
         rec.outOfScopePaths = fix.offendingPaths;
@@ -442,7 +474,13 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
     rec.fixAttempted = true;
     if (fix.ok) {
       if (fix.committedSha) rec.committedSha = fix.committedSha;
+      if (fix.revertedPaths && fix.revertedPaths.length > 0) rec.revertedPaths = fix.revertedPaths;
       rounds.push(rec); // fixed; next round re-verifies + re-reviews
+    } else if (fix.scopeGuardRevertFailed) {
+      rec.scopeGuardFailedPaths = fix.failedRevertPaths;
+      if (fix.error) rec.fixError = fix.error;
+      rounds.push(rec);
+      return { stopReason: "scope_guard_revert_failed", closeable: false, rounds };
     } else if (fix.outOfScope) {
       rec.outOfScopePaths = fix.offendingPaths;
       rounds.push(rec);
@@ -464,20 +502,55 @@ export async function runReviewLoop(opts: { maxRounds?: number; ticketId?: strin
 
 // ── Slice 5: durable run-note ────────────────────────────────────────────────
 
+// FG-502: whether the reviewed tip (HEAD at loop end, including any
+// fixer-committed rounds) is trustworthy for a closeable verdict. Computed
+// CLI-side (git/network access lives in cli/commands/review-loop.ts — this
+// pure engine only renders the resulting fact, data in) via exact ancestry
+// (`git merge-base --is-ancestor <reviewedTipSha> <remoteRef>`), never an
+// ahead-count heuristic. A closeable verdict must never print/emit when this
+// is anything other than "trusted".
+export type ReviewedTipTrust =
+  | { kind: "trusted"; remoteRef: string }
+  | { kind: "local_only"; remoteRef: string; localCommits: { sha: string; subject: string }[] }
+  | { kind: "remote_unavailable" };
+
 export type ReviewLoopNoteMeta = {
   ticketId: string;
   route?: string;
   maxRounds: number;
   range: CommitRange;
+  /** FG-502: the actual tip under review at loop end (accounts for
+   *  fixer-committed rounds) — always named in the report. */
+  reviewedTipSha: string;
+  remoteTrust: ReviewedTipTrust;
 };
 
 /** Render the loop's outcome as a durable markdown artifact: commit range,
  *  per-round verdicts/verification/findings/fixes, and the stop reason. Pure. */
 export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLoopOutcome): string {
   const L: string[] = [];
+  // FG-502: the headline must agree with the remote-reachability line below —
+  // outcome.closeable alone (reviewer pass AND verification green) doesn't
+  // know about the remote-trust gate, so compose it here the same way the CLI
+  // does before printing its own closeable/not-closeable message.
+  const closeable = outcome.closeable && meta.remoteTrust.kind === "trusted";
   L.push(`# review-loop — ticket #${meta.ticketId.replace(/^#/, "")}`, "");
   L.push(`- **stop reason:** ${outcome.stopReason}`);
-  L.push(`- **closeable:** ${outcome.closeable ? "yes — reviewer pass AND verification green" : "no"}`);
+  L.push(`- **closeable:** ${closeable ? "yes — reviewer pass AND verification green" : "no"}`);
+  L.push(`- **reviewed tip:** \`${meta.reviewedTipSha}\``);
+  // FG-502: name the reviewed tip and flag loop-created/local commits not on
+  // the remote tracking/PR branch — a closeable verdict must never silently
+  // apply to a local-only tip.
+  if (meta.remoteTrust.kind === "trusted") {
+    L.push(`- **remote reachability:** reachable from \`${meta.remoteTrust.remoteRef}\` — a closeable verdict (if any) is trustworthy`);
+  } else if (meta.remoteTrust.kind === "local_only") {
+    L.push(`- **remote reachability:** NOT reachable from \`${meta.remoteTrust.remoteRef}\` — local-only commit(s) present; closeable is withheld even if the reviewer/verification would otherwise pass`);
+    L.push(`- **local-only commits:**`);
+    for (const c of meta.remoteTrust.localCommits) L.push(`  - ${c.sha} ${c.subject}`);
+    L.push(`- **next action:** push the branch and re-run \`forge review-loop\`, or re-evaluate before closing`);
+  } else {
+    L.push(`- **remote reachability:** UNAVAILABLE — no resolvable remote-tracking ref; not-closeable/remote-unavailable (closeable is withheld even if the reviewer/verification would otherwise pass)`);
+  }
   L.push(`- **route:** ${meta.route ?? "(none — unrouted)"}`);
   L.push(`- **max rounds:** ${meta.maxRounds}`);
   const span = meta.range.spansUnmatched ? " — span includes unrelated commits; reviewed the specific shas" : "";
@@ -533,8 +606,21 @@ export function renderReviewLoopNote(meta: ReviewLoopNoteMeta, outcome: ReviewLo
         L.push(`  - ${where} ${f.summary.split("\n")[0]}`);
       }
     }
+    if (r.revertedPaths && r.revertedPaths.length > 0) {
+      // FG-502: a parallel guidance section (same closeout-guidance-style
+      // channel as r.closeoutFindings above) for paths the scope guard
+      // selectively reverted this round while in-scope changes survived.
+      L.push(`- fixer scope guard — reverted disallowed paths (guidance; not applied):`);
+      for (const rp of r.revertedPaths) {
+        L.push(`  - ${rp.path} — ${rp.reason}`);
+      }
+    }
     if (r.fixAttempted) {
-      if (r.fixError) {
+      if (r.scopeGuardFailedPaths && r.scopeGuardFailedPaths.length > 0) {
+        L.push(`- fix: rejected (scope guard revert failed — could not verify a clean/absent tree, nothing staged or committed)`);
+        L.push(`- scope guard revert failed for: ${r.scopeGuardFailedPaths.join(", ")}`);
+        if (r.fixError) L.push(`- failure context: ${r.fixError}`);
+      } else if (r.fixError) {
         L.push(`- fix: FAILED — ${r.fixError}`);
       } else if (r.outOfScopePaths && r.outOfScopePaths.length > 0) {
         L.push(`- fix: rejected (fixer out of scope)`);

@@ -7,12 +7,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { invoke, type InvokeArgs, type InvokeResult, type DockerExecFn } from "../../v2/invoke.js";
-import { buildReviewLoopDeps, assertCleanWorkingTree, registerReviewLoop, type ReviewLoopContext } from "./review-loop.js";
-import { runReviewLoop, renderReviewLoopNote, type VerificationResult } from "../../v2/review-loop.js";
+import {
+  buildReviewLoopDeps, assertCleanWorkingTree, registerReviewLoop, computeInRangeDocsPaths,
+  resolveReviewedTipTrust, type ReviewLoopContext,
+} from "./review-loop.js";
+import { runReviewLoop, renderReviewLoopNote, resolveCommitRange, type VerificationResult, type GitRunner } from "../../v2/review-loop.js";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertHostVerification, REQUIRED_CI_CHECK_CONTEXT } from "../../store/host-verifications.js";
 import { eventsForRun } from "../../store/events.js";
@@ -1128,7 +1132,10 @@ test("FG-501 verifyWithReuse: CI pending then pending then success -> waits, reu
     { verify: () => result, review: async () => ({ ok: true, verdict: "pass", findings: [] }), fix: () => { throw new Error("must not fix"); } },
   );
   const note = renderReviewLoopNote(
-    { ticketId: "FG-501", maxRounds: 1, range: { mode: "since", diffRange: "a..b", shas: ["a"], spansUnmatched: false } },
+    {
+      ticketId: "FG-501", maxRounds: 1, range: { mode: "since", diffRange: "a..b", shas: ["a"], spansUnmatched: false },
+      reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" },
+    },
     outcome,
   );
   assert.match(note, /waited for in-flight CI, then reused it \(no local run\)/);
@@ -1531,4 +1538,649 @@ test("FG-501 fix dep: --local-extended restores test:extended in the fixer's pre
   assert.equal(r.ok, true);
   assert.equal(runner.calls.length, 1);
   assert.ok(runner.calls[0]!.includes("test:extended"), `--local-extended must restore test:extended in fixer verification, got: ${JSON.stringify(runner.calls[0])}`);
+});
+
+// ── FG-502: fixer scope guard — selective revert of disallowed-path changes ──
+//
+// Replaces the old whole-round `git reset --hard HEAD && git clean -fd`: a
+// disallowed path (backlog/ticket-closeout — always; docs/learnings/README —
+// only when NOT already touched by the loop-start reviewed range) is reverted
+// on its own, while in-scope changes from the SAME round survive and commit
+// normally. Only when NOTHING survives the revert does the round still fall
+// back to the pre-FG-502 full-abort outOfScope shape.
+
+test("FG-502 fix dep: fixer touches ONE disallowed docs/ path (not in range) + one in-scope file — disallowed reverted, in-scope committed, revertedPaths surfaced, NOT a full outOfScope abort", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "docs"), { recursive: true });
+    writeFileSync(join(projectDir, "docs", "out-of-range.md"), "# not in range\n");
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+
+  assert.equal(r.ok, true, `expected the round to succeed with the in-scope change committed, got: ${JSON.stringify(r)}`);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, undefined, "must NOT be a full-abort outOfScope — an in-scope change survives the revert");
+  const committedSha = (r as { committedSha?: string }).committedSha;
+  assert.ok(committedSha, "the in-scope change must be committed");
+
+  const reverted = (r as { revertedPaths?: { path: string; reason: string }[] }).revertedPaths ?? [];
+  assert.ok(reverted.some((p) => p.path === "docs/out-of-range.md"), `expected docs/out-of-range.md in revertedPaths: ${JSON.stringify(reverted)}`);
+
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", "tree must be clean after commit");
+  assert.equal(existsSync(join(projectDir, "docs", "out-of-range.md")), false, "the disallowed doc must have been reverted, not committed");
+
+  const committedFiles = gitExec(["show", "--name-only", "--format=", committedSha!], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("src.ts"), `expected src.ts in the commit, got: ${JSON.stringify(committedFiles)}`);
+  assert.ok(!committedFiles.includes("docs/out-of-range.md"), "the reverted doc must not appear in the commit");
+});
+
+test("FG-502 fix dep: a docs/ path already touched by the loop-start reviewed range is in-scope — NOT reverted, committed normally", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "docs"), { recursive: true });
+    writeFileSync(join(projectDir, "docs", "in-range.md"), "# in range\n");
+    return COMPLETE();
+  };
+  const inRangeDocsPaths = new Set(["docs/in-range.md"]);
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" }, inRangeDocsPaths }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+
+  assert.equal(r.ok, true);
+  assert.equal((r as { revertedPaths?: unknown[] }).revertedPaths, undefined, "an in-range docs path must not be reverted");
+  const committedSha = (r as { committedSha?: string }).committedSha;
+  assert.ok(committedSha);
+  assert.equal(existsSync(join(projectDir, "docs", "in-range.md")), true, "the in-range docs change must survive, committed");
+  const committedFiles = gitExec(["show", "--name-only", "--format=", committedSha!], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("docs/in-range.md"));
+});
+
+test("FG-502 fix dep: backlog/ path is unconditionally disallowed even if (erroneously) present in inRangeDocsPaths — the two classes are never merged", async () => {
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "backlog"), { recursive: true });
+    writeFileSync(join(projectDir, "backlog", "story.md"), "story\n");
+    return COMPLETE();
+  };
+  const inRangeDocsPaths = new Set(["backlog/story.md"]); // malformed input — must never matter
+  const { deps } = buildReviewLoopDeps(gitCtx({ inRangeDocsPaths }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const offending = (r as { offendingPaths?: string[] }).offendingPaths ?? [];
+  assert.ok(offending.includes("backlog/story.md"));
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", "tree must be clean after the full-abort revert");
+});
+
+test("FG-502 fix dep: backlog/ violation MIXED with a surviving in-scope change is reverted PATH-LEVEL — the backlog path is removed, the in-scope change survives and commits, and the round record surfaces the reverted path as guidance (operator-decided, ticket Non-Goals)", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    mkdirSync(join(projectDir, "backlog"), { recursive: true });
+    writeFileSync(join(projectDir, "backlog", "story.md"), "story\n");
+    // A NEW untracked in-scope file, distinct from the beforeEach-committed
+    // src.ts — proves the guard reverts only the disallowed path, not the
+    // whole round, when a genuinely novel legitimate change co-occurs.
+    writeFileSync(join(projectDir, "in-scope.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn);
+  const r = await deps.fix([{ summary: "fix x", unanchored: true }]);
+
+  assert.equal(r.ok, true, `the in-scope change must survive and commit despite the mixed backlog violation, got: ${JSON.stringify(r)}`);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, undefined, "must NOT be a full-abort outOfScope — an in-scope change survives the revert");
+  const committedSha = (r as { committedSha?: string }).committedSha;
+  assert.ok(committedSha, "the in-scope change must be committed");
+
+  const reverted = (r as { revertedPaths?: { path: string; reason: string }[] }).revertedPaths ?? [];
+  assert.ok(reverted.some((p) => p.path === "backlog/story.md"), `expected backlog/story.md in revertedPaths: ${JSON.stringify(reverted)}`);
+
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", "tree must be clean after commit");
+  assert.equal(existsSync(join(projectDir, "backlog", "story.md")), false, "the backlog path must have been reverted, not committed");
+  assert.equal(existsSync(join(projectDir, "in-scope.ts")), true, "the in-scope change survives — path-level enforcement, not a whole-round abort");
+
+  const committedFiles = gitExec(["show", "--name-only", "--format=", committedSha!], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("in-scope.ts"), `expected in-scope.ts in the commit, got: ${JSON.stringify(committedFiles)}`);
+  assert.ok(!committedFiles.includes("backlog/story.md"), "the reverted backlog path must not appear in the commit");
+});
+
+test("FG-502 fix dep: fixer renames a docs/ path OUT to an in-scope path — the whole rename is reverted as one unit (old path restored, new path removed), never left half-applied", async () => {
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "old.md"), "# old\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add docs/old.md"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    gitExec(["mv", "docs/old.md", "old.md"], projectDir);
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx(), invokeFn);
+  const r = await deps.fix([{ summary: "rename", unanchored: true }]);
+  assert.equal(r.ok, false);
+  assert.equal((r as { outOfScope?: boolean }).outOfScope, true);
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", `tree must be fully clean — neither the old nor the new path left behind: ${status}`);
+  assert.equal(existsSync(join(projectDir, "docs", "old.md")), true, "old path must be restored");
+  assert.equal(existsSync(join(projectDir, "old.md")), false, "new path must be removed, not left as an orphan");
+});
+
+test("FG-502 fix dep: fixer DELETES a tracked disallowed docs/ path (status D, out-of-range) — reverted via checkout HEAD, in-scope change survives and commits, round record surfaces the reverted path", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "deleteme.md"), "# will be deleted\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json + docs/deleteme.md"], projectDir);
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    rmSync(join(projectDir, "docs", "deleteme.md"));
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" } }), invokeFn);
+
+  // Drive through the full loop engine (not just deps.fix directly) so the
+  // assertion also pins that the RoundRecord surfaces the reverted D-status
+  // path — the plan's per-status-letter coverage requirement (M/A/D/R/C).
+  let round = 0;
+  const outcome = await runReviewLoop(
+    { maxRounds: 2, ticketId: "FG-502" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: async () => {
+        round++;
+        return round === 1
+          ? { ok: true, verdict: "needs_fix" as const, findings: [{ summary: "fix x", unanchored: true }] }
+          : { ok: true, verdict: "pass" as const, findings: [] };
+      },
+      fix: deps.fix,
+    },
+  );
+
+  assert.equal(outcome.stopReason, "passed");
+  assert.equal(outcome.closeable, true);
+  const round1 = outcome.rounds[0]!;
+  assert.ok(round1.committedSha, "round 1 must have committed the in-scope src.ts change");
+
+  const reverted = round1.revertedPaths ?? [];
+  assert.ok(
+    reverted.some((p) => p.path === "docs/deleteme.md"),
+    `round record must surface the reverted D-status path: ${JSON.stringify(reverted)}`,
+  );
+
+  assert.equal(existsSync(join(projectDir, "docs", "deleteme.md")), true, "the deleted disallowed doc must have been restored via checkout HEAD, not left deleted");
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.equal(status, "", "tree must be clean after commit");
+
+  const committedFiles = gitExec(["show", "--name-only", "--format=", round1.committedSha!], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("src.ts"), `expected src.ts in the commit, got: ${JSON.stringify(committedFiles)}`);
+  assert.ok(!committedFiles.includes("docs/deleteme.md"), "the restored doc must not appear as a change in the fixer's commit");
+});
+
+// ── FG-502 finding 2: FAILURE-INJECTION — the per-path revert loop must never
+// let a mid-loop throw (a git lock/permissions/disk failure) escape fix() or
+// leave the round in a mixed reverted/not-reverted state with no record. An
+// injected GitRunner spy (ctx.gitRunner) fails ONE specific revert call —
+// never shells out to a real broken git — and the round must fail SAFE: no
+// commit is created, the disallowed path never lands in any commit, and the
+// round record names the failed path.
+
+test("FG-502 fix dep FAILURE INJECTION: injected gitRunner fails the revert of ONE tracked disallowed path — round fails safe: no commit is created, the disallowed path never lands in any commit, and the round record names the failed path", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "protected.md"), "# protected\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json + docs/protected.md"], projectDir);
+  const headBefore = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    // Disallowed path modified (tracked at HEAD -> the `checkout HEAD --` revert branch).
+    writeFileSync(join(projectDir, "docs", "protected.md"), "# tampered\n");
+    // In-scope change from the same round.
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+
+  const gitRunner: GitRunner = (args) => {
+    if (args[0] === "checkout" && args.includes("docs/protected.md")) {
+      throw new Error("simulated git failure (disk full)");
+    }
+    return gitExec(args, projectDir);
+  };
+
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" }, gitRunner }), invokeFn);
+
+  const outcome = await runReviewLoop(
+    { maxRounds: 2, ticketId: "FG-502" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: async () => ({ ok: true, verdict: "needs_fix", findings: [{ summary: "fix x", unanchored: true }] }),
+      fix: deps.fix,
+    },
+  );
+
+  // (c) the round record names the failed path.
+  assert.equal(outcome.stopReason, "scope_guard_revert_failed");
+  assert.equal(outcome.closeable, false);
+  const round1 = outcome.rounds[0]!;
+  assert.ok(
+    round1.scopeGuardFailedPaths?.includes("docs/protected.md"),
+    `round record must name the failed path: ${JSON.stringify(round1.scopeGuardFailedPaths)}`,
+  );
+
+  // (a) no commit created for this round.
+  const headAfter = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.equal(headAfter, headBefore, "no commit must be created when a revert cannot be verified clean");
+
+  // (b) the disallowed path never lands in any commit — it's left visibly
+  // dirty in the working tree, never silently swept up by the blanket
+  // `git add -A` that follows a (falsely) trusted revert.
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.match(status, /docs\/protected\.md/, `the failed-revert path must remain visibly dirty: ${status}`);
+});
+
+// ── FG-502 round 2 red-backend re-check: exception containment must cover
+// EVERY git call in the fix() closure, not just the per-path revert loop —
+// a throw from the scoped verification re-check, the final 'remaining' check,
+// or add/commit/rev-parse must never escape fix() uncaught (that crashes the
+// loop with a generic 'exception' stopReason and no recorded round state).
+
+test("FG-502 round2 FAILURE INJECTION: injected gitRunner throws from the scoped verification re-check ('status') — round fails safe with recorded context, no uncaught exception", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "protected.md"), "# protected\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json + docs/protected.md"], projectDir);
+  const headBefore = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    // Disallowed path modified (drives toRevert non-empty so the scoped
+    // re-verify status call actually runs) + an in-scope change.
+    writeFileSync(join(projectDir, "docs", "protected.md"), "# tampered\n");
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+
+  // Only the SCOPED re-check (status ... -- <paths>) throws — the initial
+  // scan and the final 'remaining' check (neither carries "--") run for real.
+  const gitRunner: GitRunner = (args) => {
+    if (args[0] === "status" && args.includes("--")) {
+      throw new Error("simulated git failure (scoped status re-check)");
+    }
+    return gitExec(args, projectDir);
+  };
+
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" }, gitRunner }), invokeFn);
+
+  const outcome = await runReviewLoop(
+    { maxRounds: 2, ticketId: "FG-502" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: async () => ({ ok: true, verdict: "needs_fix", findings: [{ summary: "fix x", unanchored: true }] }),
+      fix: deps.fix,
+    },
+  );
+
+  // Loop stopped cleanly — no uncaught exception propagated out of runReviewLoop.
+  assert.equal(outcome.stopReason, "scope_guard_revert_failed");
+  assert.equal(outcome.closeable, false);
+  const round1 = outcome.rounds[0]!;
+  assert.match(round1.fixError ?? "", /scoped revert re-verification/, `round record must name which call failed: ${round1.fixError}`);
+  assert.match(round1.fixError ?? "", /simulated git failure/);
+  assert.equal(round1.committedSha, undefined, "no false commit claim");
+
+  const headAfter = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.equal(headAfter, headBefore, "HEAD must be unchanged — no commit was ever created");
+});
+
+test("FG-502 round2 FAILURE INJECTION: injected gitRunner throws from 'commit' — round fails safe with recorded context, no false commit claim", async () => {
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ scripts: { test: "true" } }));
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add package.json"], projectDir);
+  const headBefore = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const invokeFn = async (_a: InvokeArgs): Promise<InvokeResult> => {
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+
+  const gitRunner: GitRunner = (args) => {
+    if (args[0] === "commit") {
+      throw new Error("simulated git failure (commit)");
+    }
+    return gitExec(args, projectDir);
+  };
+
+  const { deps } = buildReviewLoopDeps(gitCtx({ scripts: { test: "true" }, gitRunner }), invokeFn);
+
+  const outcome = await runReviewLoop(
+    { maxRounds: 2, ticketId: "FG-502" },
+    {
+      verify: () => ({ ok: true, steps: [] }),
+      review: async () => ({ ok: true, verdict: "needs_fix", findings: [{ summary: "fix x", unanchored: true }] }),
+      fix: deps.fix,
+    },
+  );
+
+  assert.equal(outcome.stopReason, "scope_guard_revert_failed");
+  assert.equal(outcome.closeable, false);
+  const round1 = outcome.rounds[0]!;
+  assert.equal(round1.committedSha, undefined, "no commit must be claimed when 'commit' itself throws");
+  assert.match(round1.fixError ?? "", /add\/commit\/rev-parse/, `round record must name which call failed: ${round1.fixError}`);
+  assert.match(round1.fixError ?? "", /simulated git failure/);
+
+  // HEAD never moved — the throw happened during commit, before any new commit existed.
+  const headAfter = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.equal(headAfter, headBefore, "HEAD must be unchanged — commit never actually landed");
+
+  // `git add -A` ran for real before the injected throw, staging src.ts — but
+  // since commit never completed, the change is left dirty/staged, never
+  // silently discarded or falsely reported as committed.
+  const status = gitExec(["status", "--porcelain"], projectDir).trim();
+  assert.match(status, /src\.ts/, "the in-scope change is left staged/dirty, not silently discarded");
+});
+
+// ── FG-502: computeInRangeDocsPaths — the in-range docs/learnings/README set ─
+
+test("FG-502 computeInRangeDocsPaths: only docs/learnings/README paths actually touched by the reviewed range are in-range", async () => {
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "old.md"), "old\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "add docs/old.md (baseline)"], projectDir);
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  writeFileSync(join(projectDir, "docs", "new.md"), "new\n");
+  writeFileSync(join(projectDir, "src.ts"), "// change\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "FG-502 add docs/new.md + src.ts"], projectDir);
+
+  const range = resolveCommitRange("FG-502", { since: sinceSha, git: (a) => gitExec(a, projectDir) });
+  const inRange = computeInRangeDocsPaths(range, projectDir);
+  assert.equal(inRange.has("docs/new.md"), true);
+  assert.equal(inRange.has("docs/old.md"), false, "a docs path NOT touched by the reviewed range is not in-range");
+  assert.equal(inRange.has("src.ts"), false, "non-docs/learnings/README paths are never included");
+});
+
+test("FG-502 computeInRangeDocsPaths: a spansUnmatched range diffs the PRECISE shas, not the full span — an unrelated commit's docs change is excluded", async () => {
+  writeFileSync(join(projectDir, "marker.txt"), "m\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-777) baseline"], projectDir);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "unrelated.md"), "unrelated\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "unrelated change touching docs/unrelated.md"], projectDir);
+
+  writeFileSync(join(projectDir, "docs", "related.md"), "related\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-777) add docs/related.md"], projectDir);
+
+  const range = resolveCommitRange("FG-777", { git: (a) => gitExec(a, projectDir) });
+  assert.equal(range.spansUnmatched, true, "the span includes the unrelated middle commit");
+  const inRange = computeInRangeDocsPaths(range, projectDir);
+  assert.equal(inRange.has("docs/related.md"), true);
+  assert.equal(inRange.has("docs/unrelated.md"), false, "the unrelated commit's docs change must be excluded — precise shas, not the full span");
+});
+
+// ── FG-502: reviewed-tip-vs-remote trust check ───────────────────────────────
+//
+// resolveRemoteRef resolves a LOCALLY CACHED remote-tracking ref, no implicit
+// `git fetch`. Candidate order is `@{u}` (the branch's configured upstream)
+// FIRST, `origin/HEAD` only as a fallback when no upstream is configured —
+// `origin/HEAD` virtually always resolves (it tracks the default branch), so
+// checking it first would compare a pre-merge feature-branch tip against
+// main, where it can never be an ancestor. These tests seed
+// refs/remotes/origin/{<branch>,HEAD} and branch.<branch>.{remote,merge}
+// directly via `git update-ref` / `git symbolic-ref` / `git config` (local
+// ref/config plumbing, not a network fetch) to simulate a clone's
+// already-cached remote-tracking state deterministically.
+
+function setLocalOriginHead(dir: string, sha: string): void {
+  gitExec(["update-ref", "refs/remotes/origin/main", sha], dir);
+  gitExec(["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], dir);
+}
+
+/** Configure the current branch's upstream (`@{u}`) to a locally cached
+ *  remote-tracking ref at `sha` — simulates "this branch has been pushed and
+ *  tracks its own remote ref", independent of origin/HEAD (the default
+ *  branch's tracking ref). `branch.<name>.merge` alone isn't recognized as a
+ *  remote-tracking upstream without a `remote.origin.fetch` refspec (git
+ *  requires an actual `git remote add` to establish that mapping — a bare
+ *  `git config` of the branch keys errors "not stored as a remote-tracking
+ *  branch"), so this registers a (fake, never-contacted) origin remote too. */
+function setLocalUpstream(dir: string, sha: string): void {
+  const branch = gitExec(["symbolic-ref", "--short", "HEAD"], dir).trim();
+  gitExec(["update-ref", `refs/remotes/origin/${branch}`, sha], dir);
+  try {
+    gitExec(["remote", "add", "origin", "https://example.invalid/repo.git"], dir);
+  } catch { /* already added by an earlier call in this test */ }
+  gitExec(["config", `branch.${branch}.remote`, "origin"], dir);
+  gitExec(["config", `branch.${branch}.merge`, `refs/heads/${branch}`], dir);
+}
+
+test("FG-502 resolveReviewedTipTrust: with an upstream configured, trust uses @{u} — a tip pushed to the feature branch is trusted even though it is not on origin/HEAD (main)", async () => {
+  // origin/HEAD (main) is pinned at the pre-feature baseline — a pre-merge
+  // feature-branch tip can never be an ancestor of it.
+  const baseSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setLocalOriginHead(projectDir, baseSha);
+
+  writeFileSync(join(projectDir, "feature.txt"), "feature\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feature commit"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // The feature branch has been pushed — its upstream tracks the pushed tip.
+  setLocalUpstream(projectDir, tipSha);
+
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+  assert.equal(trust.kind, "trusted", `expected @{u} to be preferred over origin/HEAD: ${JSON.stringify(trust)}`);
+  assert.equal((trust as { remoteRef: string }).remoteRef, "@{u}");
+});
+
+test("FG-502 resolveReviewedTipTrust: no upstream configured → falls back to origin/HEAD — reviewed tip IS an ancestor of a locally cached origin/HEAD → trusted", async () => {
+  writeFileSync(join(projectDir, "a.txt"), "a\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "commit A"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setLocalOriginHead(projectDir, tipSha); // no upstream configured — the fallback candidate
+
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+  assert.equal(trust.kind, "trusted");
+  assert.equal((trust as { remoteRef: string }).remoteRef, "origin/HEAD");
+});
+
+test("FG-502 resolveReviewedTipTrust: no upstream configured, falls back to origin/HEAD — reviewed tip is NOT an ancestor → local_only, names the local-only commit(s) + next action data", async () => {
+  const baseSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setLocalOriginHead(projectDir, baseSha); // origin is behind — never fetched, just locally cached at the pre-fixer sha; no upstream configured
+
+  writeFileSync(join(projectDir, "local-only.txt"), "local\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "local-only commit not on origin"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+  assert.equal(trust.kind, "local_only");
+  const t = trust as { remoteRef: string; localCommits: { sha: string; subject: string }[] };
+  assert.equal(t.remoteRef, "origin/HEAD");
+  assert.equal(t.localCommits.length, 1);
+  assert.match(t.localCommits[0]!.subject, /local-only commit not on origin/);
+});
+
+test("FG-502 resolveReviewedTipTrust: no resolvable remote-tracking ref at all → remote_unavailable, never silently trusted", async () => {
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  // projectDir (freshly init'd in beforeEach) has no origin remote and no upstream configured.
+  const trust = resolveReviewedTipTrust(projectDir, tipSha);
+  assert.equal(trust.kind, "remote_unavailable");
+});
+
+test("FG-502: no implicit `git fetch` anywhere in review-loop.ts — only locally cached remote-tracking refs are ever consulted", () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "review-loop.ts"), "utf8");
+  // Scoped to an actual git-argv element (quoted "fetch"/'fetch'), not prose —
+  // this file's own doc comments legitimately describe "git fetch" (backticked,
+  // no quotes) as the thing that must never be invoked.
+  assert.doesNotMatch(src, /["']fetch["']/, "review-loop.ts must never invoke git fetch (AC5) — only origin/HEAD / @{u} / merge-base --is-ancestor against locally cached refs");
+});
+
+// ── FG-502: end-to-end through registerReviewLoop — the closeable print is
+// gated on remote reachability, not just outcome.closeable ───────────────────
+
+function writeFg502Ticket(): void {
+  mkdirSync(join(projectDir, "backlog", "stories"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "backlog", "stories", "FG-502-reviewed-tip-trust.md"),
+    "---\nid: FG-502\ntype: story\nstatus: active\ntitle: reviewed-tip trust\n---\n\nBody.\n",
+  );
+}
+
+test("FG-502 CLI: an ancestor reviewed tip on a resolvable remote ref prints closeable naming the reviewed tip sha", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  const tipSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  setLocalOriginHead(projectDir, tipSha);
+
+  const program = new Command();
+  registerReviewLoop(program, async () => RESULT({ result: { verdict: "pass", findings: [] } }));
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  const printed = lines.join("\n");
+  assert.match(printed, /✓ closeable/);
+  assert.match(printed, new RegExp(tipSha));
+  assert.match(printed, /reachable from origin\/HEAD/);
+  assert.notEqual(process.exitCode, 1);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-502 CLI: an ancestor-failing (local-only) reviewed tip withholds closeable even though the reviewer passed and verification is green", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  // origin is pinned at sinceSha — behind the reviewed tip — so the reviewed
+  // tip is NOT an ancestor of origin/HEAD.
+  setLocalOriginHead(projectDir, sinceSha);
+
+  const program = new Command();
+  registerReviewLoop(program, async () => RESULT({ result: { verdict: "pass", findings: [] } }));
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  const printed = lines.join("\n");
+  assert.doesNotMatch(printed, /✓ closeable/);
+  assert.match(printed, /not closeable — reviewed tip .* has local-only commit/);
+  assert.equal(process.exitCode, 1);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-502 CLI: an unresolvable remote ref withholds closeable with a distinct remote-unavailable message", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket"], projectDir);
+  // No origin remote / upstream configured at all.
+
+  const program = new Command();
+  registerReviewLoop(program, async () => RESULT({ result: { verdict: "pass", findings: [] } }));
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  const printed = lines.join("\n");
+  assert.doesNotMatch(printed, /✓ closeable/);
+  assert.match(printed, /not closeable — remote-unavailable/);
+  assert.equal(process.exitCode, 1);
+  process.exitCode = prevExitCode;
+});
+
+test("FG-502 CLI end-to-end: computeInRangeDocsPaths threads through registerReviewLoop into the scope guard — a fixer edit to a docs/ path already touched by the ORIGINAL reviewed range survives commit, not reverted", async () => {
+  writeFg502Ticket();
+  writeFileSync(join(projectDir, "package.json"), JSON.stringify({ name: "p", scripts: { test: "true" } }));
+  const sinceSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "reviewed.md"), "# reviewed\n\noriginal.\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "(#FG-502) add package.json + ticket + docs/reviewed.md"], projectDir);
+  const tipShaBeforeFix = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+
+  // Round 1: reviewer asks for a fix touching the already-in-range docs path;
+  // round 2: reviewer passes once the fixer has committed.
+  let redCalls = 0;
+  const invokeFn = async (a: InvokeArgs): Promise<InvokeResult> => {
+    if (a.agentRole === "red-wide") {
+      redCalls++;
+      return redCalls === 1
+        ? RESULT({ result: { verdict: "fail", findings: [{ summary: "docs/reviewed.md needs a follow-up note", unanchored: true }] } })
+        : RESULT({ result: { verdict: "pass", findings: [] } });
+    }
+    // "engineer" fixer: edits the SAME docs/ path already committed within
+    // sinceSha..tip — this must be classified in-range, not reverted.
+    writeFileSync(join(projectDir, "docs", "reviewed.md"), "# reviewed\n\noriginal.\n\nfixer follow-up.\n");
+    writeFileSync(join(projectDir, "src.ts"), "// fixed\n");
+    return COMPLETE();
+  };
+
+  const program = new Command();
+  registerReviewLoop(program, invokeFn);
+  const prevExitCode = process.exitCode;
+  process.exitCode = undefined as unknown as number;
+  const lines = captureConsoleLog();
+  try {
+    await program.parseAsync(
+      ["review-loop", "FG-502", "--since", sinceSha, "--project", projectDir, "--unrouted"],
+      { from: "user" },
+    );
+  } finally {
+    mock.restoreAll();
+  }
+  const printed = lines.join("\n");
+
+  assert.doesNotMatch(
+    printed, /fixer scope guard — reverted disallowed paths/,
+    `docs/reviewed.md was part of the loop-start reviewed range (computed via the real CLI wiring, not a hand-built Set) and must not trigger a scope-guard revert:\n${printed}`,
+  );
+
+  const headSha = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  assert.notEqual(headSha, tipShaBeforeFix, "the fixer round must have committed");
+  assert.match(readFileSync(join(projectDir, "docs", "reviewed.md"), "utf8"), /fixer follow-up/, "the fixer's docs/ edit must be on disk, not reverted");
+  const committedFiles = gitExec(["show", "--name-only", "--format=", headSha], projectDir).trim().split("\n");
+  assert.ok(committedFiles.includes("docs/reviewed.md"), `expected docs/reviewed.md in the fixer's commit, got: ${JSON.stringify(committedFiles)}`);
+  process.exitCode = prevExitCode;
 });

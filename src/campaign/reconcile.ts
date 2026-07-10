@@ -1,18 +1,21 @@
-// FG-428/FG-443: `forge campaign reconcile <campaign-id>` — on-demand operator
-// recovery for a campaign item wedged on a stale historical authoritative
-// red-fail (FG-428), or parked at a human gate because its ticket was delivered
-// through a re-routed, non-pipeline lane rather than the feature run itself
-// (FG-443).
+// FG-428/FG-443/FG-502: `forge campaign reconcile <campaign-id>` — on-demand
+// operator recovery for a campaign item wedged on a stale historical
+// authoritative red-fail (FG-428), parked at a human gate because its ticket
+// was delivered through a re-routed, non-pipeline lane rather than the feature
+// run itself (FG-443), or parked failed/blockerKind='campaign_system' by one of
+// executor.ts's own salvage/gap/fallback producers when the ticket was actually
+// delivered out-of-band (FG-502).
 //
 // This is a TRUST-GATE WRITE PATH: it can mark an item shipped/complete. It
 // accepts no operator-supplied evidence ARGUMENT of any kind — every fact is
 // re-derived from durable Forge/git/backlog/host-verification records via
 // reconcile-collect.ts + reconcile-evidence.ts for the scope-blocked shape, or
 // reconcile-outofband-collect.ts + reconcile-outofband-evidence.ts for the
-// awaiting_gate/non-pipeline shape (see each evidence module's header for what
-// it requires). An item is mutated ONLY when its branch's facts all hold AND
-// the campaign is still 'paused' at write time; every refusal leaves state
-// untouched.
+// awaiting_gate/non-pipeline shape AND the failed/campaign_system shape (same
+// evidence bar, distinct audit event kind — see each evidence module's header
+// for what it requires). An item is mutated ONLY when its branch's facts all
+// hold AND the campaign is still 'paused' at write time; every refusal leaves
+// state untouched.
 //
 // This is NOT the automatic reconciliation on the normal outcome path (FG-427) —
 // that runs during driveWorkflowItem; this is the operator-triggered recovery
@@ -102,8 +105,23 @@ export function reconcileCampaign(
     // is exactly what distinguishes an out-of-band-eligible item from a scope-blocked
     // one (which always carries blockerKind: 'scope').
     const isOutOfBand = item.lifecycleStatus === "awaiting_gate" && !item.blockerKind;
+    // FG-502: the recoverable shape is blockerKind:'campaign_system' with
+    // lifecycleStatus 'failed' OR 'blocked_by_red' — not an enumerated
+    // producer list. executor.ts producers include (non-exhaustive)
+    // reconcileTerminalOutcome's run.status!=='complete' salvage, done-audit
+    // gap after a passing verdict, unresolved-outcome fallback, and
+    // infrastructure failures such as a workflow-YAML load error (all leaving
+    // lifecycleStatus:'failed'); driveWorkflowItem's gate:verdict park on an
+    // inconclusive aggregate verdict leaves lifecycleStatus:'blocked_by_red'
+    // — so this check must cover both statuses, not just 'failed'. It stays
+    // its own check (rather than folding into RECONCILABLE_LIFECYCLE_STATUSES)
+    // because that set is scope-only by name, even though its status values
+    // happen to coincide.
+    const isCampaignSystemRecoverable =
+      item.blockerKind === "campaign_system" &&
+      (item.lifecycleStatus === "failed" || item.lifecycleStatus === "blocked_by_red");
 
-    if (!isScopeBlocked && !isOutOfBand) {
+    if (!isScopeBlocked && !isOutOfBand && !isCampaignSystemRecoverable) {
       results.push({ ticketId: item.ticketId, status: "not_applicable" });
       continue;
     }
@@ -150,14 +168,15 @@ export function reconcileCampaign(
       evidence = evaluated.evidence;
       eventType = "campaign_item.evidence_reconciled";
     } else {
-      // FG-458/FG-460: an out-of-band item WITH a runId must ALSO agree with the
-      // run's own authoritative-review outcome — the SAME fact, via the SAME
-      // shared helper, that `forge campaign resume` uses for this exact shape
-      // (awaiting_gate, no blockerKind, has a runId — see executor.ts's FG-441
-      // reattach path). Evaluated FIRST, before the lane-evidence needsCapture
-      // gate run below: an unresolved authoritative fail refuses regardless of
-      // lane evidence — no reason to spend a real host-verification gate run
-      // finding that out.
+      // FG-458/FG-460/FG-502: an out-of-band OR campaign_system-recoverable item
+      // WITH a runId must ALSO agree with the run's own authoritative-review
+      // outcome — the SAME fact, via the SAME shared helper, that `forge campaign
+      // resume` uses for the out-of-band shape (awaiting_gate, no blockerKind, has
+      // a runId — see executor.ts's FG-441 reattach path). Evaluated FIRST, before
+      // the lane-evidence needsCapture gate run below: an unresolved authoritative
+      // fail refuses regardless of lane evidence — no reason to spend a real
+      // host-verification gate run finding that out. No shortcut for the
+      // campaign_system cause: it runs the identical sequence as isOutOfBand.
       const authoritative = authoritativeOutcomeContribution(item.runId ? collect(projectDir, item) : null);
 
       let collected = collectOutOfBand(projectDir, item);
@@ -199,7 +218,13 @@ export function reconcileCampaign(
       eligible = composed.eligible;
       missing = composed.missing;
       evidence = composed.evidence;
-      eventType = "campaign_item.out_of_band_reconciled";
+      // FG-502: same evidence bar as the out-of-band shape, but a distinct audit
+      // event kind so the trail can tell "delivered out-of-band via a re-routed
+      // lane" apart from "recovered from a campaign-system salvage/gap/fallback
+      // failure that turned out to be already-shipped."
+      eventType = isCampaignSystemRecoverable
+        ? "campaign_item.campaign_system_reconciled"
+        : "campaign_item.out_of_band_reconciled";
     }
 
     if (!eligible) {

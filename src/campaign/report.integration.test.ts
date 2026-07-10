@@ -2690,6 +2690,215 @@ test("FG-444 mixed case: one parked item delivered out-of-band, the other genuin
   assert.ok(eligibleLines[0]!.includes("FG-101"));
 });
 
+// ── FG-502: campaign_system recovery preview — mirrors the out-of-band
+// eligibility hints above for a failed/blockerKind='campaign_system' item that
+// may have shipped out-of-band despite the campaign-level failure. ──────────
+
+test("FG-502: failed/campaign_system item with full out-of-band evidence → campaignSystemEligible + eligibility hint naming forge campaign reconcile, distinguishable from the plain blockedItemGuidance text", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, true);
+  assert.ok(show.nextAction.includes("delivered out-of-band"), `expected eligibility hint, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("forge campaign reconcile"), `expected pointer to forge campaign reconcile, got: ${show.nextAction}`);
+  assert.notEqual(show.nextAction, "resolve blocker FG-101 (campaign_system) then resume", "must not fall back to the generic blockedItemGuidance text");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, true);
+  assert.ok(report.nextOperatorAction.includes("forge campaign reconcile"));
+  assert.notEqual(report.nextOperatorAction, "resolve blocker FG-101 (campaign_system) then resume");
+
+  const rendered = renderCampaignReportHuman(report).join("\n");
+  assert.ok(rendered.includes("campaign-system-recoverable:"), `expected a campaign-system-recoverable line, got:\n${rendered}`);
+});
+
+// FG-502 round-2: the fourth campaign_system producer (driveWorkflowItem's
+// inconclusive-verdict park) leaves lifecycleStatus='blocked_by_red' rather than
+// 'failed' — the preview predicate must cover both statuses identically.
+test("FG-502: blocked_by_red/campaign_system item with full out-of-band evidence → campaignSystemEligible + eligibility hint naming forge campaign reconcile", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'blocked_by_red', outcome = 'blocked', blocker_kind = 'campaign_system', requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, true);
+  assert.ok(show.nextAction.includes("delivered out-of-band"), `expected eligibility hint, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("forge campaign reconcile"), `expected pointer to forge campaign reconcile, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, true);
+  assert.ok(report.nextOperatorAction.includes("forge campaign reconcile"));
+
+  const rendered = renderCampaignReportHuman(report).join("\n");
+  assert.ok(rendered.includes("campaign-system-recoverable:"), `expected a campaign-system-recoverable line, got:\n${rendered}`);
+});
+
+test("FG-502: failed/campaign_system item with only lane evidence missing → hostVerificationReconcileHint is the lane_evidence_missing-style hint pointing at forge campaign reconcile", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  // Code-touching delivery with NO covering host-verification row — out-of-band's
+  // own evidence is exactly {missing: ["lane_evidence_missing"]}.
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, false);
+  assert.ok(
+    show.items[0]!.hostVerificationReconcileHint?.includes("forge campaign reconcile"),
+    `expected lane_evidence_missing hint, got: ${show.items[0]!.hostVerificationReconcileHint}`
+  );
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const reportRow = report.items.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(reportRow.campaignSystemEligible, false);
+  assert.ok(
+    reportRow.hostVerificationReconcileHint?.includes("forge campaign reconcile"),
+    `expected lane_evidence_missing hint, got: ${reportRow.hostVerificationReconcileHint}`
+  );
+});
+
+test("FG-502: failed/campaign_system item WITH a runId and an unresolved authoritative fail on that run — must NOT claim campaign_system eligibility despite full out-of-band evidence (FG-458 parity)", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  const runId = "run-fg502-101";
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration' WHERE id = ?"
+  ).run(runId, items[0]!.id);
+
+  mkdirSync(join(projectDir, "src"), { recursive: true });
+  writeFileSync(join(projectDir, "src", "fg101.ts"), "export const fg101 = 1;\n");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "feat: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+  insertHostVerification({
+    ticketId: "FG-101",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, false, "unresolved authoritative fail must suppress eligibility");
+  assert.ok(!show.nextAction.includes("delivered out-of-band"), `must not claim eligibility, got: ${show.nextAction}`);
+  assert.ok(!show.nextAction.includes("forge campaign reconcile"), `must not point at forge campaign reconcile, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaign.id)!;
+  const reportRow = report.items.find((i) => i.ticketId === "FG-101")!;
+  assert.equal(reportRow.campaignSystemEligible, false);
+  assert.ok(!report.nextOperatorAction.includes("delivered out-of-band"));
+});
+
+test("FG-502 regression: failed/scope-blocked item with full out-of-band-shaped evidence lying around is never treated as campaign_system-recoverable", () => {
+  gitExec(["init", "-b", "main"], projectDir);
+  gitExec(["config", "user.email", "t@t.com"], projectDir);
+  gitExec(["config", "user.name", "Test"], projectDir);
+  writeFileSync(join(projectDir, "BASE.md"), "base");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "base"], projectDir);
+
+  const { campaign } = planCampaign({ kind: "list", ticketIds: ["FG-101"] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "LGTM" });
+  tryTransitionCampaignToRunning(campaign.id);
+  updateCampaignStatus(campaign.id, "paused");
+
+  const items = db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").all(campaign.id) as { id: string }[];
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', requested_human_action = 'workflow completed but authoritative reviewer verdict failed' WHERE id = ?"
+  ).run(items[0]!.id);
+
+  mkdirSync(join(projectDir, "docs"), { recursive: true });
+  writeFileSync(join(projectDir, "docs", "FG-101.md"), "docs delivering FG-101 out of band");
+  gitExec(["add", "."], projectDir);
+  gitExec(["commit", "-m", "docs: FG-101"], projectDir);
+  const commit = gitExec(["rev-parse", "HEAD"], projectDir).trim();
+  closeTicket(projectDir, "FG-101", commit);
+
+  const show = assembleCampaignShow(campaign.id)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, false);
+  assert.equal(show.nextAction, "resolve blocker FG-101 (scope) then resume");
+
+  const report = assembleCampaignReport(campaign.id)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, false);
+  assert.equal(report.nextOperatorAction, "resolve blocker FG-101 (scope) then resume");
+});
+
 // ── FG-442: execution lanes surfaced in show/report ──────────────────────────
 
 test("FG-442: assembleCampaignShow surfaces lane/laneRationale/materialLaneAssumptions per item", () => {

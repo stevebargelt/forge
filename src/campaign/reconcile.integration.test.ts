@@ -760,6 +760,251 @@ test("out-of-band: an awaiting_gate item that DOES carry a blockerKind is report
   assert.deepEqual(getCampaignItem(items[0]!.id)!, beforeItem);
 });
 
+// ── FG-502: campaign_system-recoverable (blockerKind='campaign_system') ────────
+//
+// executor.ts has four producers that park an item at blockerKind:'campaign_system'.
+// Three, all in reconcileTerminalOutcome, leave lifecycleStatus:'failed' — a
+// non-'complete' run status (salvage), a done-audit gap after a passing verdict,
+// and the unresolved-outcome fallback (no authoritative reviewer verdict found at
+// all). The fourth, driveWorkflowItem's gate:verdict park on an inconclusive
+// aggregate verdict, leaves lifecycleStatus:'blocked_by_red' instead. All four
+// always set runId before parking. reconcileCampaign routes both statuses through
+// the IDENTICAL out-of-band evidence bar as an awaiting_gate item, but logs a
+// distinct event kind (campaign_item.campaign_system_reconciled) so the audit
+// trail can tell "delivered out-of-band via a re-routed lane" apart from
+// "recovered from a campaign-system-side failure that turned out to be
+// already-shipped."
+
+// Builds a single-item paused campaign parked in the shape executor.ts's own
+// campaign_system producers leave behind: blockerKind='campaign_system', WITH a
+// runId, at the given lifecycleStatus ('failed' by default — the three
+// reconcileTerminalOutcome producers; pass 'blocked_by_red' for the
+// gate:verdict-inconclusive producer). `requestedHumanAction` mirrors each
+// producer's real message purely for test readability — reconcile's routing
+// predicate never reads it, only lifecycleStatus + blockerKind.
+function setupCampaignSystemCampaign(
+  ticketId: string,
+  opts: { requestedHumanAction?: string; lifecycleStatus?: "failed" | "blocked_by_red" } = {}
+): { campaignId: string; itemId: string; runId: string } {
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", title: ticketId, body: "" });
+  const { campaign } = planCampaign({ kind: "list", ticketIds: [ticketId] }, { projectDir, mode: "sequential" });
+  approveCampaign(campaign.id, { rationale: "approved" });
+  const items = listCampaignItems(campaign.id);
+  const itemId = items[0]!.id;
+  const runId = `run-${itemId}`;
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = ?, outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = ? WHERE id = ?"
+  ).run(opts.lifecycleStatus ?? "failed", runId, opts.requestedHumanAction ?? "workflow run ended with status abandoned", itemId);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+  return { campaignId: campaign.id, itemId, runId };
+}
+
+test("campaign_system: all-evidence-present (docs lane) ships and logs the distinct campaign_item.campaign_system_reconciled event", () => {
+  const ticketId = "FG-560";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId, {
+    requestedHumanAction: "workflow run run-fake ended with status abandoned",
+  });
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const beforeEvents = countEvents();
+  const result = reconcileCampaign(campaignId, { decidedBy: "steve" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0]!.status, "shipped");
+  assert.equal(result.items[0]!.missing, undefined);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, undefined);
+  assert.equal(item.requestedHumanAction, undefined);
+
+  assert.equal(countEvents(), beforeEvents + 1, "exactly one new event row");
+  const evRow = db
+    .prepare("SELECT event_type, payload FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(runId) as { event_type: string; payload: string };
+  assert.equal(evRow.event_type, "campaign_item.campaign_system_reconciled");
+  assert.notEqual(evRow.event_type, "campaign_item.evidence_reconciled");
+  assert.notEqual(evRow.event_type, "campaign_item.out_of_band_reconciled");
+  const payload = JSON.parse(evRow.payload) as { ticketId: string; decidedBy: string; evidence: unknown };
+  assert.equal(payload.ticketId, ticketId);
+  assert.equal(payload.decidedBy, "steve");
+  assert.ok(payload.evidence, "evidence must be embedded in the audit payload");
+});
+
+test("campaign_system: recovers the blocked_by_red/campaign_system shape (gate:verdict-inconclusive producer) that executor.ts itself produces", () => {
+  const ticketId = "FG-565";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId, {
+    lifecycleStatus: "blocked_by_red",
+    requestedHumanAction: "workflow verdict inconclusive at step ship",
+  });
+  seedOutOfBandDocsEvidence(ticketId);
+
+  const result = reconcileCampaign(campaignId, { decidedBy: "steve" });
+
+  assert.equal(result.items[0]!.status, "shipped");
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "complete");
+  assert.equal(item.outcome, "shipped");
+  assert.equal(item.blockerKind, undefined);
+
+  const evRow = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(runId) as { event_type: string };
+  assert.equal(evRow.event_type, "campaign_item.campaign_system_reconciled");
+});
+
+// ── negative paths, each parameterized against a DIFFERENT executor.ts producer
+// shape (salvage / done-audit-gap / unresolved-outcome-fallback), zero mutation ──
+
+test("campaign_system: refuses (salvage-producer shape: run ended non-complete) when ticket.status !== 'done' — no state mutated", () => {
+  const ticketId = "FG-561";
+  const { campaignId, itemId } = setupCampaignSystemCampaign(ticketId, {
+    requestedHumanAction: "workflow run run-fake ended with status abandoned",
+  });
+  makeBaseCommit(`base-${ticketId}`);
+  const commit = commitDocsFile(`docs/${ticketId}.md`, "docs", `docs: ${ticketId}`);
+  writeTicket(projectDir, { id: ticketId, type: "story", status: "active", closedCommit: commit, title: ticketId, body: "" });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.ok(result.items[0]!.missing!.includes("ticket_status_not_done"));
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+test("campaign_system: refuses (done-audit-gap-producer shape) when closedCommit is not reachable on the base branch — no state mutated", () => {
+  const ticketId = "FG-562";
+  const { campaignId, itemId } = setupCampaignSystemCampaign(ticketId, {
+    requestedHumanAction: "verdict passed but done-audit fail: missing closing commit reference",
+  });
+  makeBaseCommit(`base-${ticketId}`);
+  gitExec(["checkout", "-b", "feature/off-main-cs-562"], projectDir);
+  const offMainCommit = commitDocsFile(`docs/${ticketId}.md`, "docs off main", "docs change off main");
+  gitExec(["checkout", "main"], projectDir);
+  closeTicket(projectDir, ticketId, offMainCommit);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["closed_commit_not_reachable_on_base_branch"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+test("campaign_system: refuses (unresolved-outcome-fallback-producer shape) when lane evidence is missing (code-touching commit, no host verification) — no state mutated", () => {
+  const ticketId = "FG-563";
+  const { campaignId, itemId } = setupCampaignSystemCampaign(ticketId, {
+    requestedHumanAction: "workflow completed but no authoritative reviewer verdicts found — check workflow reds configuration",
+  });
+  seedOutOfBandCodeEvidence(ticketId, { recordVerification: false });
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.deepEqual(result.items[0]!.missing, ["lane_evidence_missing"]);
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+// ── the item's OWN run's unresolved authoritative outcome refuses regardless of
+// otherwise-complete lane evidence ──────────────────────────────────────────────
+
+test("campaign_system: refuses when the item's own run has an unresolved authoritative fail — even with lane evidence + ticket/commit facts all present", () => {
+  const ticketId = "FG-564";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId);
+  seedOutOfBandDocsEvidence(ticketId);
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "fail", authority: "authoritative" } });
+  // No later pass, no qualifying force-advance.
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+
+  const result = reconcileCampaign(campaignId);
+  assert.equal(result.items[0]!.status, "refused");
+  assert.ok(
+    result.items[0]!.missing!.some((m) => m.startsWith("run_evidence:")),
+    `expected a run_evidence:-prefixed missing code, got ${JSON.stringify(result.items[0]!.missing)}`
+  );
+
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem);
+  assert.equal(countEvents(), beforeEvents);
+});
+
+// ── coexistence: scope-blocked + out-of-band + campaign_system items in ONE call,
+// each routed and evaluated independently with zero cross-contamination ────────
+
+test("campaign_system: coexists with a scope-blocked item and an out-of-band awaiting_gate item in the same reconcileCampaign call, each routed independently", () => {
+  writeTicket(projectDir, { id: "FG-570", type: "story", status: "active", title: "t1", body: "" });
+  writeTicket(projectDir, { id: "FG-571", type: "story", status: "active", title: "t2", body: "" });
+  writeTicket(projectDir, { id: "FG-572", type: "story", status: "active", title: "t3", body: "" });
+  const { campaign } = planCampaign(
+    { kind: "list", ticketIds: ["FG-570", "FG-571", "FG-572"] },
+    { projectDir, mode: "sequential" }
+  );
+  approveCampaign(campaign.id, { rationale: "approved" });
+
+  const items = db
+    .prepare("SELECT id, ticket_id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC")
+    .all(campaign.id) as { id: string; ticket_id: string }[];
+  const scopeItem = items.find((i) => i.ticket_id === "FG-570")!;
+  const oobItem = items.find((i) => i.ticket_id === "FG-571")!;
+  const csItem = items.find((i) => i.ticket_id === "FG-572")!;
+  const scopeRunId = `run-${scopeItem.id}`;
+  const csRunId = `run-${csItem.id}`;
+
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'scope', run_id = ?, reason = 'stale red fail' WHERE id = ?"
+  ).run(scopeRunId, scopeItem.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'awaiting_gate', outcome = NULL, blocker_kind = NULL, requested_human_action = 'Human gate required' WHERE id = ?"
+  ).run(oobItem.id);
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'workflow run ended with status abandoned' WHERE id = ?"
+  ).run(csRunId, csItem.id);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaign.id);
+
+  seedAllEvidence("FG-570", scopeRunId);
+  seedOutOfBandDocsEvidence("FG-571");
+  seedOutOfBandDocsEvidence("FG-572");
+
+  const result = reconcileCampaign(campaign.id);
+  assert.equal(result.items.length, 3);
+
+  const scopeResult = result.items.find((i) => i.ticketId === "FG-570")!;
+  const oobResult = result.items.find((i) => i.ticketId === "FG-571")!;
+  const csResult = result.items.find((i) => i.ticketId === "FG-572")!;
+  assert.equal(scopeResult.status, "shipped");
+  assert.equal(oobResult.status, "shipped");
+  assert.equal(csResult.status, "shipped");
+
+  const scopeEvent = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(scopeRunId) as { event_type: string };
+  assert.equal(scopeEvent.event_type, "campaign_item.evidence_reconciled", "scope-blocked item routes through the unchanged evidence-reconciled path");
+
+  const oobEvent = db
+    .prepare("SELECT event_type FROM events WHERE run_id IS NULL ORDER BY id DESC LIMIT 1")
+    .get() as { event_type: string };
+  assert.equal(oobEvent.event_type, "campaign_item.out_of_band_reconciled", "out-of-band item routes through its own distinct event kind");
+
+  const csEvent = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(csRunId) as { event_type: string };
+  assert.equal(csEvent.event_type, "campaign_item.campaign_system_reconciled", "campaign_system item routes through its own distinct event kind, not the out-of-band one");
+});
+
 // ── FG-440: reconcile-time host-verification capture ───────────────────────────
 //
 // A forge-observed merge (campaign-driven, or force-advanced then merged through

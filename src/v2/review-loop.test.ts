@@ -484,7 +484,7 @@ test("#462 note: closeout guidance is rendered ONCE (not duplicated in the gener
   const shared = { summary: "move to done", file: "backlog/stories/FG-462-x.md", line: 1 };
   const codeFinding = { summary: "off-by-one", file: "src/x.ts", line: 9 };
   const note = renderReviewLoopNote(
-    { ticketId: "462", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "462", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "needs_fix_max_rounds", closeable: false,
       rounds: [{
@@ -508,7 +508,7 @@ test("#462 note: closeout guidance is rendered ONCE (not duplicated in the gener
 
 test("#301 note: records stop reason, closeable, range, and per-round detail", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "301", route: "implementation_quick", maxRounds: 2, range: { mode: "since", diffRange: "abc..HEAD", shas: ["h1"], spansUnmatched: false } },
+    { ticketId: "301", route: "implementation_quick", maxRounds: 2, range: { mode: "since", diffRange: "abc..HEAD", shas: ["h1"], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "needs_fix_max_rounds",
       closeable: false,
@@ -531,7 +531,7 @@ test("#301 note: records stop reason, closeable, range, and per-round detail", (
 
 test("#301 note: a skipped review (verification failed) is shown", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "301", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "301", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     { stopReason: "verification_failed", closeable: false, rounds: [
       { round: 1, verification: { ok: false, steps: [{ name: "typecheck", ok: false, output: "TS error" }] }, findings: [], fixAttempted: false },
     ] },
@@ -544,7 +544,7 @@ test("#301 note: a skipped review (verification failed) is shown", () => {
 // in place of run output.
 test("FG-474 note: reused verification evidence is shown in the round detail", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "passed", closeable: true,
       rounds: [
@@ -563,7 +563,7 @@ test("FG-474 note: reused verification evidence is shown in the round detail", (
 // before (no extra line).
 test("FG-474 note: a round with NO reusedEvidence renders unchanged — no reuse line", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "474", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "passed", closeable: true,
       rounds: [{ round: 1, verification: { ok: true, steps: [{ name: "test", ok: true, output: "" }] }, verdict: "pass", findings: [], fixAttempted: false }],
@@ -582,7 +582,7 @@ test("FG-474 note: a round with NO reusedEvidence renders unchanged — no reuse
 
 test("FG-501 note: local fallback (CI unavailable) records the reason and the fast-only tier wording by default", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "passed", closeable: true,
       rounds: [{
@@ -601,7 +601,7 @@ test("FG-501 note: local fallback (CI unavailable) records the reason and the fa
 
 test("FG-501 note: local fallback with --local-extended records the full tier wording", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "passed", closeable: true,
       rounds: [{
@@ -620,7 +620,7 @@ test("FG-501 note: local fallback with --local-extended records the full tier wo
 
 test("FG-501 note: a failing required CI check records the context+url with no local run", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "verification_failed", closeable: false,
       rounds: [{
@@ -640,7 +640,7 @@ test("FG-501 note: a failing required CI check records the context+url with no l
 
 test("FG-501 note: a failing required CI check with NO url still records the context, with no local run", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "501", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "verification_failed", closeable: false,
       rounds: [{
@@ -718,7 +718,7 @@ test("#415 loop: fix { ok:true, committedSha:'abc' } → committedSha recorded o
 
 test("#415 note: committed sha shown when fix succeeded with committedSha", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "passed", closeable: true,
       rounds: [{
@@ -732,7 +732,7 @@ test("#415 note: committed sha shown when fix succeeded with committedSha", () =
 
 test("#415 note: fixer out-of-scope paths shown", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "fixer_out_of_scope", closeable: false,
       rounds: [{
@@ -746,7 +746,7 @@ test("#415 note: fixer out-of-scope paths shown", () => {
 
 test("#415 note: fix left uncommitted (verification failed) shown with paths", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "verification_failed", closeable: false,
       rounds: [{
@@ -760,7 +760,7 @@ test("#415 note: fix left uncommitted (verification failed) shown with paths", (
 
 test("#415 note: fixer_out_of_scope stop reason in header", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "415", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     {
       stopReason: "fixer_out_of_scope", closeable: false,
       rounds: [{ round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED, fixAttempted: true, outOfScopePaths: ["docs/x.md"] }],
@@ -828,7 +828,7 @@ test("#493 loop e2e: reviewer returning a well-formed red-schema fail (unpinned 
 
 test("#457 note: verification ok + no verdict → reviewer failed (invalid/absent result), not the skip line", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     { stopReason: "reviewer_failed", closeable: false, rounds: [
       { round: 1, verification: VERIFY_OK, findings: [], fixAttempted: false },
     ] },
@@ -839,10 +839,121 @@ test("#457 note: verification ok + no verdict → reviewer failed (invalid/absen
 
 test("#457 note: verification failed + no verdict → still the genuine skip line", () => {
   const note = renderReviewLoopNote(
-    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false } },
+    { ticketId: "457", maxRounds: 1, range: { mode: "since", diffRange: "x..HEAD", shas: [], spansUnmatched: false }, reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" } },
     { stopReason: "verification_failed", closeable: false, rounds: [
       { round: 1, verification: VERIFY_BAD, findings: [], fixAttempted: false },
     ] },
   );
   assert.match(note, /reviewer: skipped \(verification failed\)/);
+});
+
+// ── FG-502: fixer scope guard's revertedPaths propagate through the loop,
+// and the reviewed-tip trust fact renders in the note header ──────────────────
+
+test("#502 loop: fix { ok:true, committedSha, revertedPaths } → revertedPaths recorded on the round, loop proceeds normally (not fixer_out_of_scope)", async () => {
+  let round = 0;
+  const r = await runReviewLoop({ maxRounds: 2 }, deps({
+    review: () => (++round === 1
+      ? { ok: true, verdict: "needs_fix", findings: ANCHORED }
+      : { ok: true, verdict: "pass", findings: [] }),
+    fix: () => ({
+      ok: true, committedSha: "abc",
+      revertedPaths: [{ path: "docs/x.md", reason: "docs/learnings/README path not touched by the reviewed commit range" }],
+    }),
+  }));
+  assert.equal(r.stopReason, "passed");
+  assert.notEqual(r.stopReason, "fixer_out_of_scope");
+  assert.deepEqual(r.rounds[0]!.revertedPaths, [{ path: "docs/x.md", reason: "docs/learnings/README path not touched by the reviewed commit range" }]);
+  assert.equal(r.rounds[0]!.committedSha, "abc");
+});
+
+test("#502 loop: fix { ok:true } with NO revertedPaths leaves the field undefined (no regression for the common case)", async () => {
+  const r = await runReviewLoop({}, deps({ fix: () => ({ ok: true, committedSha: "abc" }) }));
+  assert.equal(r.rounds[0]!.revertedPaths, undefined);
+});
+
+test("#502 note: reverted-path guidance renders as a parallel guidance section alongside a normal commit (partial revert survives)", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 2, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "deadbeef", remoteTrust: { kind: "trusted", remoteRef: "origin/main" },
+    },
+    {
+      stopReason: "passed", closeable: true,
+      rounds: [{
+        round: 1, verification: VERIFY_OK, verdict: "needs_fix", findings: ANCHORED,
+        fixAttempted: true, committedSha: "abc123",
+        revertedPaths: [{ path: "docs/out-of-range.md", reason: "docs/learnings/README path not touched by the reviewed commit range" }],
+      }],
+    },
+  );
+  assert.match(note, /fixer scope guard — reverted disallowed paths \(guidance; not applied\):/);
+  assert.match(note, /docs\/out-of-range\.md — docs\/learnings\/README path not touched by the reviewed commit range/);
+  assert.match(note, /committed: abc123/);
+});
+
+test("#502 note: header names the reviewed tip sha and, for local_only trust, lists local-only commits + next action", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d",
+      remoteTrust: { kind: "local_only", remoteRef: "origin/HEAD", localCommits: [{ sha: "abc1234", subject: "fix(review-loop): address 502 findings" }] },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /reviewed tip:\*\* `cafef00d`/);
+  assert.match(note, /NOT reachable from `origin\/HEAD`/);
+  assert.match(note, /abc1234 fix\(review-loop\): address 502 findings/);
+  assert.match(note, /push the branch and re-run/i);
+});
+
+test("#502 note: remote_unavailable trust renders a distinct not-closeable/remote-unavailable line", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d", remoteTrust: { kind: "remote_unavailable" },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /remote reachability:\*\* UNAVAILABLE/);
+});
+
+// FG-502: the headline "closeable" line must agree with the remote-trust gate
+// — outcome.closeable alone (reviewer pass AND verification green) doesn't
+// know about remote reachability, so a local-only/remote-unavailable tip must
+// never render "closeable: yes" even though the round-level outcome passed.
+test("FG-502 note: headline 'closeable' says 'no' for a local-only tip, even though outcome.closeable is true", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d",
+      remoteTrust: { kind: "local_only", remoteRef: "origin/HEAD", localCommits: [{ sha: "abc1234", subject: "fix" }] },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* no/);
+  assert.doesNotMatch(note, /\*\*closeable:\*\* yes/);
+});
+
+test("FG-502 note: headline 'closeable' says 'no' when the remote is unavailable, even though outcome.closeable is true", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d", remoteTrust: { kind: "remote_unavailable" },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* no/);
+  assert.doesNotMatch(note, /\*\*closeable:\*\* yes/);
+});
+
+test("FG-502 note: headline 'closeable' says 'yes' when outcome.closeable AND the tip is remote-trusted", () => {
+  const note = renderReviewLoopNote(
+    {
+      ticketId: "502", maxRounds: 1, range: { mode: "since", diffRange: "a..HEAD", shas: [], spansUnmatched: false },
+      reviewedTipSha: "cafef00d", remoteTrust: { kind: "trusted", remoteRef: "origin/HEAD" },
+    },
+    { stopReason: "passed", closeable: true, rounds: [] },
+  );
+  assert.match(note, /\*\*closeable:\*\* yes/);
 });
