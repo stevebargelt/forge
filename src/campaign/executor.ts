@@ -703,8 +703,12 @@ async function parkCampaignOnStartRunThrow(
     });
     // FG-516 (finding F1/B): same concurrent-manual-pause guard as
     // parkCampaignOnDriveThrow — parkCampaign only notifies when THIS park
-    // committed the pause, and is awaited before the rethrow below.
-    await parkCampaign(campaignId, itemId, "blocked");
+    // committed the pause, and is awaited before the rethrow below. The synthetic
+    // abandoned run row is inserted best-effort (see the startRun-throw catch), so
+    // when that insert failed the item has no run of its OWN — pass a campaign
+    // fallback run so notifyCampaignPause still emits (scoped to another item's
+    // run) instead of going silent, exactly like the other no-own-run parks.
+    await parkCampaign(campaignId, itemId, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }

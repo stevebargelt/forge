@@ -4,11 +4,23 @@
 // committed pause. The fix replaces the pattern with ONE boundary — parkCampaign —
 // that performs the CAS itself and notifies only when it committed. This test makes
 // the variant class UNREPRESENTABLE: it scans the executor source and asserts that
-//   (a) tryTransitionCampaign(campaignId, "running", "paused") is called ONLY inside
-//       the parkCampaign boundary, and
-//   (b) notifyCampaignPause is CALLED only inside parkCampaign.
+//   (a) notifyCampaignPause is CALLED only inside the parkCampaign boundary, and
+//   (b) any tryTransitionCampaign(… "running" … "paused" …) park CAS is called only
+//       inside that boundary.
 // A new hand-wired park site fails CI here before it can ship. Same spirit as the
 // test-tier subprocess/purity content guard (src/test-tiers.test.ts).
+//
+// ROBUSTNESS (FG-516 review round 2): the earlier guard matched a single-line literal
+// `tryTransitionCampaign(campaignId, "running", "paused")` and so was trivially evaded
+// by (i) `campaign.id` instead of the `campaignId` local, (ii) splitting the call over
+// multiple lines, or (iii) an aliased import of the CAS. This version is token-based:
+// it strips comments/strings so a mention in prose can't false-flag, extracts the
+// parkCampaign span by BALANCED BRACES (not a call-shape regex), matches the CAS call
+// across lines and independent of the first argument's spelling, follows import
+// aliases, and only cares that the running→paused string pair appears inside the call's
+// balanced parens. The paused→running RESUME transition (a different, legitimate
+// operation living outside parkCampaign) is deliberately NOT matched — order matters.
+// A negative self-test proves the matcher DOES catch the three bypasses above.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,53 +29,339 @@ import { fileURLToPath } from "node:url";
 
 const EXECUTOR_SRC = fileURLToPath(new URL("./executor.ts", import.meta.url));
 
-// The line range [start, end] of the `async function parkCampaign(` definition —
-// its body is the ONLY place the guarded calls may appear. parkCampaign is a
-// top-level function, so its closing brace sits at column 0.
-function parkCampaignRange(lines: string[]): { start: number; end: number } {
-  const start = lines.findIndex((l) => /async function parkCampaign\s*\(/.test(l));
-  assert.ok(start >= 0, "parkCampaign boundary function must exist in executor.ts");
-  const end = lines.findIndex((l, i) => i > start && l === "}");
-  assert.ok(end > start, "parkCampaign closing brace (column 0) must be found");
-  return { start, end };
-}
+// Two position-preserving projections of a source (same length & newlines, so byte
+// offsets and line numbers are shared):
+//   codeOnly   — comments AND string/template contents blanked (identifier scans,
+//                paren/brace balancing — nothing in a string or comment can interfere)
+//   noComments — comments blanked, strings KEPT (so a CAS call's "running"/"paused"
+//                argument literals are still readable)
+type Projection = { codeOnly: string; noComments: string };
 
-function isComment(line: string): boolean {
-  const t = line.trim();
-  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
-}
+// A stack-based tokenizer, robust to nested template literals (` … ${ … ` … ` … } … `)
+// and escapes — executor.ts uses both. A regex-only stripper mishandles those and can
+// silently corrupt the projections.
+function project(src: string): Projection {
+  const n = src.length;
+  const code: string[] = new Array(n);
+  const noC: string[] = new Array(n);
+  const blank = (ch: string): string => (ch === "\n" ? "\n" : " ");
+  const asCode = (i: number): void => {
+    code[i] = src[i]!;
+    noC[i] = src[i]!;
+  };
+  const asString = (i: number): void => {
+    code[i] = blank(src[i]!);
+    noC[i] = src[i]!;
+  };
+  const asComment = (i: number): void => {
+    code[i] = blank(src[i]!);
+    noC[i] = blank(src[i]!);
+  };
 
-test("FG-516: tryTransitionCampaign(running→paused) is called ONLY inside the parkCampaign boundary", () => {
-  const lines = readFileSync(EXECUTOR_SRC, "utf8").split("\n");
-  const { start, end } = parkCampaignRange(lines);
-  const offenders: string[] = [];
-  lines.forEach((line, i) => {
-    if (isComment(line)) return;
-    if (/tryTransitionCampaign\s*\(\s*campaignId\s*,\s*"running"\s*,\s*"paused"\s*\)/.test(line)) {
-      if (i < start || i > end) offenders.push(`executor.ts:${i + 1}: ${line.trim()}`);
+  // Frame stack. 'code' = ordinary code / a template-expr ${…} body; 'tmpl' = inside
+  // backticks. Template-expr bodies push a 'code' frame with a brace counter so the
+  // matching `}` pops back to the template.
+  type Frame = { type: "code" | "tmpl"; expr: boolean; depth: number };
+  const stack: Frame[] = [{ type: "code", expr: false, depth: 0 }];
+  let i = 0;
+  while (i < n) {
+    const top = stack[stack.length - 1]!;
+    const c = src[i]!;
+    const c2 = i + 1 < n ? src[i + 1]! : "";
+    if (top.type === "tmpl") {
+      if (c === "\\") {
+        asString(i);
+        if (i + 1 < n) asString(i + 1);
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        asString(i);
+        stack.pop();
+        i++;
+        continue;
+      }
+      if (c === "$" && c2 === "{") {
+        asString(i);
+        asString(i + 1);
+        stack.push({ type: "code", expr: true, depth: 0 });
+        i += 2;
+        continue;
+      }
+      asString(i);
+      i++;
+      continue;
     }
-  });
-  assert.deepEqual(
-    offenders,
-    [],
-    `Every running→paused transition must go through parkCampaign. Hand-wired sites:\n${offenders.join("\n")}`,
-  );
-});
+    // top.type === 'code'
+    if (c === "/" && c2 === "/") {
+      while (i < n && src[i] !== "\n") {
+        asComment(i);
+        i++;
+      }
+      continue;
+    }
+    if (c === "/" && c2 === "*") {
+      asComment(i);
+      asComment(i + 1);
+      i += 2;
+      while (i < n && !(src[i] === "*" && src[i + 1] === "/")) {
+        asComment(i);
+        i++;
+      }
+      if (i < n) {
+        asComment(i);
+        asComment(i + 1);
+        i += 2;
+      }
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      asString(i);
+      i++;
+      while (i < n && src[i] !== c) {
+        if (src[i] === "\\") {
+          asString(i);
+          if (i + 1 < n) asString(i + 1);
+          i += 2;
+          continue;
+        }
+        asString(i);
+        i++;
+      }
+      if (i < n) {
+        asString(i);
+        i++;
+      }
+      continue;
+    }
+    if (c === "`") {
+      asString(i);
+      stack.push({ type: "tmpl", expr: false, depth: 0 });
+      i++;
+      continue;
+    }
+    if (top.expr && c === "{") {
+      top.depth++;
+      asCode(i);
+      i++;
+      continue;
+    }
+    if (top.expr && c === "}") {
+      if (top.depth === 0) {
+        asString(i); // the closing `}` of a ${…} — template syntax
+        stack.pop();
+        i++;
+        continue;
+      }
+      top.depth--;
+      asCode(i);
+      i++;
+      continue;
+    }
+    asCode(i);
+    i++;
+  }
+  return { codeOnly: code.join(""), noComments: noC.join("") };
+}
+
+// Index of the matching close for the open bracket at `open`, balanced over `s`.
+function matchBracket(s: string, open: number, openCh: string, closeCh: string): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === openCh) depth++;
+    else if (s[i] === closeCh) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// The [start, end] byte span of the `async function parkCampaign(` definition, found
+// by balancing the parameter parens then the body braces — never by a call-shape
+// regex. Balances on codeOnly so a `{`/`}`/`(`/`)` inside a string or comment (or the
+// `opts?: { … }` parameter TYPE, which is real code and correctly balanced) can't
+// mislead it.
+function parkCampaignSpan(codeOnly: string): { start: number; end: number } {
+  const decl = /async\s+function\s+parkCampaign\s*\(/.exec(codeOnly);
+  assert.ok(decl, "parkCampaign boundary function must exist");
+  const start = decl.index;
+  const parenOpen = decl.index + decl[0].length - 1;
+  const parenClose = matchBracket(codeOnly, parenOpen, "(", ")");
+  assert.ok(parenClose > parenOpen, "parkCampaign parameter list must balance");
+  const bodyOpen = codeOnly.indexOf("{", parenClose + 1);
+  assert.ok(bodyOpen > parenClose, "parkCampaign body opening brace must be found");
+  const bodyClose = matchBracket(codeOnly, bodyOpen, "{", "}");
+  assert.ok(bodyClose > bodyOpen, "parkCampaign body must balance");
+  return { start, end: bodyClose };
+}
+
+function lineOf(src: string, offset: number): number {
+  let line = 1;
+  for (let i = 0; i < offset && i < src.length; i++) if (src[i] === "\n") line++;
+  return line;
+}
+
+function snippet(src: string, from: number, to: number): string {
+  return src.slice(from, to).replace(/\s+/g, " ").trim();
+}
+
+// Import aliases of `name`, e.g. `import { tryTransitionCampaign as ttc }`.
+function importAliases(codeOnly: string, name: string): string[] {
+  const re = new RegExp(name + "\\s+as\\s+([A-Za-z_$][\\w$]*)", "g");
+  const out: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(codeOnly)) !== null) out.push(m[1]!);
+  return out;
+}
+
+// CALL sites of `notifyCampaignPause` that fall OUTSIDE the parkCampaign span. The
+// function DECLARATION (`function notifyCampaignPause`) is excluded — it legitimately
+// lives at module scope; only CALLS are constrained to the boundary.
+function notifyCallOffenders(src: string): string[] {
+  const { codeOnly, noComments } = project(src);
+  const span = parkCampaignSpan(codeOnly);
+  const offenders: string[] = [];
+  const re = /\bnotifyCampaignPause\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(codeOnly)) !== null) {
+    const before = codeOnly.slice(Math.max(0, m.index - 24), m.index);
+    if (/\bfunction\s+$/.test(before)) continue; // the declaration, not a call
+    if (m.index < span.start || m.index > span.end) {
+      offenders.push(`executor.ts:${lineOf(src, m.index)}: ${snippet(noComments, m.index, m.index + 60)}`);
+    }
+  }
+  return offenders;
+}
+
+// tryTransitionCampaign park CAS calls — arg list contains "running" THEN "paused"
+// (the running→paused park; the reverse paused→running resume is intentionally not a
+// park and legitimately lives outside the boundary) — that fall OUTSIDE the span.
+// Matches across lines, ignores the first argument's spelling, and follows import
+// aliases of the CAS symbol.
+function parkCasOffenders(src: string): string[] {
+  const { codeOnly, noComments } = project(src);
+  const span = parkCampaignSpan(codeOnly);
+  const names = ["tryTransitionCampaign", ...importAliases(codeOnly, "tryTransitionCampaign")];
+  const offenders: string[] = [];
+  for (const name of names) {
+    const re = new RegExp("\\b" + name + "\\s*\\(", "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(codeOnly)) !== null) {
+      const parenOpen = m.index + m[0].length - 1;
+      const parenClose = matchBracket(codeOnly, parenOpen, "(", ")");
+      if (parenClose < 0) continue;
+      const args = noComments.slice(parenOpen + 1, parenClose);
+      if (!/"running"[\s\S]*?"paused"/.test(args) && !/'running'[\s\S]*?'paused'/.test(args)) continue;
+      if (m.index < span.start || m.index > span.end) {
+        offenders.push(`executor.ts:${lineOf(src, m.index)}: ${snippet(noComments, m.index, parenClose + 1)}`);
+      }
+    }
+  }
+  return offenders;
+}
 
 test("FG-516: notifyCampaignPause is CALLED only inside the parkCampaign boundary", () => {
-  const lines = readFileSync(EXECUTOR_SRC, "utf8").split("\n");
-  const { start, end } = parkCampaignRange(lines);
-  const offenders: string[] = [];
-  lines.forEach((line, i) => {
-    if (isComment(line)) return;
-    // A CALL — not the `async function notifyCampaignPause(` definition line.
-    if (/\bnotifyCampaignPause\s*\(/.test(line) && !/function\s+notifyCampaignPause/.test(line)) {
-      if (i < start || i > end) offenders.push(`executor.ts:${i + 1}: ${line.trim()}`);
-    }
-  });
+  const src = readFileSync(EXECUTOR_SRC, "utf8");
+  const offenders = notifyCallOffenders(src);
   assert.deepEqual(
     offenders,
     [],
     `notifyCampaignPause may only be called from parkCampaign. Direct call sites:\n${offenders.join("\n")}`,
   );
+});
+
+test("FG-516: the running→paused park CAS is called ONLY inside the parkCampaign boundary", () => {
+  const src = readFileSync(EXECUTOR_SRC, "utf8");
+  const offenders = parkCasOffenders(src);
+  assert.deepEqual(
+    offenders,
+    [],
+    `Every running→paused park transition must go through parkCampaign. Hand-wired sites:\n${offenders.join("\n")}`,
+  );
+});
+
+// Negative self-test: the matcher must FLAG the three bypasses the round-2 reviewer
+// listed — campaign.id, a multiline call, and an aliased import — and must NOT flag
+// the legitimate in-boundary calls or the paused→running resume. Fixture strings only;
+// no real code changes.
+test("FG-516 (guard self-test): the matcher catches campaign.id / multiline / aliased-import park bypasses", () => {
+  const fixture = [
+    'import { tryTransitionCampaign as ttc, tryTransitionCampaign } from "../store/campaigns.js";',
+    "",
+    "async function parkCampaign(campaignId, itemId, kind, opts) {",
+    // In-boundary calls — MUST NOT be flagged.
+    '  const committed = tryTransitionCampaign(campaignId, "running", "paused");',
+    "  if (committed) {",
+    '    await notifyCampaignPause(campaignId, itemId, kind);',
+    "  }",
+    "  return committed;",
+    "}",
+    "",
+    "async function sneakyDotId(campaign, itemId) {",
+    "  // bypass 1: campaign.id instead of the campaignId local",
+    '  const ok = tryTransitionCampaign(campaign.id, "running", "paused");',
+    '  if (ok) await notifyCampaignPause(campaign.id, itemId, "blocked");',
+    "}",
+    "",
+    "async function sneakyMultiline(cid) {",
+    "  // bypass 2: the CAS split across several lines",
+    "  tryTransitionCampaign(",
+    "    cid,",
+    '    "running",',
+    '    "paused",',
+    "  );",
+    "}",
+    "",
+    "async function sneakyAliased(anyId) {",
+    "  // bypass 3: the CAS reached through an aliased import",
+    '  return ttc(anyId, "running", "paused");',
+    "}",
+    "",
+    "function resumeSomewhere(id) {",
+    "  // legitimate paused→running resume — the REVERSE direction — must NOT be flagged",
+    '  return tryTransitionCampaign(id, "paused", "running");',
+    "}",
+  ].join("\n");
+
+  const cas = parkCasOffenders(fixture);
+  // Three park bypasses flagged; the in-boundary CAS and the paused→running resume are not.
+  assert.equal(cas.length, 3, `expected exactly the 3 park bypasses, got:\n${cas.join("\n")}`);
+  assert.ok(
+    cas.some((o) => /campaign\.id/.test(o)),
+    "the campaign.id bypass must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /tryTransitionCampaign\( cid/.test(o)),
+    "the multiline bypass must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /ttc\(anyId/.test(o)),
+    "the aliased-import bypass must be flagged",
+  );
+  assert.ok(
+    !cas.some((o) => /"paused", "running"/.test(o)),
+    "the paused→running resume must NOT be flagged",
+  );
+
+  const notify = notifyCallOffenders(fixture);
+  assert.equal(notify.length, 1, `expected the single out-of-boundary notify call, got:\n${notify.join("\n")}`);
+  assert.ok(/campaign\.id/.test(notify[0]!), "the out-of-boundary notifyCampaignPause call must be flagged");
+});
+
+// Sanity: a source whose ONLY park calls are inside the boundary yields no offenders —
+// proves the matcher does not false-positive on the legitimate shape.
+test("FG-516 (guard self-test): the matcher passes a clean in-boundary-only source", () => {
+  const clean = [
+    "async function parkCampaign(campaignId, itemId, kind, opts) {",
+    '  const committed = tryTransitionCampaign(campaignId, "running", "paused");',
+    '  if (committed) await notifyCampaignPause(campaignId, itemId, kind);',
+    "  return committed;",
+    "}",
+    "function resume(id) {",
+    '  return tryTransitionCampaign(id, "paused", "running");',
+    "}",
+  ].join("\n");
+  assert.deepEqual(parkCasOffenders(clean), []);
+  assert.deepEqual(notifyCallOffenders(clean), []);
 });

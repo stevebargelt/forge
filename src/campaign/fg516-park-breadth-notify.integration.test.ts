@@ -35,7 +35,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
 import { approveCampaign, getCampaign, listCampaignItems, addCampaignItem, updateCampaignItem } from "../store/campaigns.js";
-import { getRun } from "../store/runs.js";
+import { getRun, insertRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import { planCampaign } from "./planner.js";
 import type { ItemModeOverride } from "./planner.js";
@@ -514,4 +514,81 @@ test("FG-516: the no-runId resume-reattach park persists blockerKind + requested
   assert.equal(fetchCalls, 1, "exactly one provider push for the no-runId recovery park");
   assert.match(String(bm["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail the park recorded");
   assert.doesNotMatch(String(bm["body"]), /^campaign .* parked/, "body is NOT notifyCampaignPause's generic fallback");
+});
+
+// ── Shape 6 (F1 round 2): the startRun-throw park with a FAILED synthetic run row ──
+// A thrown startRun links the item to a best-effort synthetic 'abandoned' run row
+// for traceability — but that insert is best-effort and CAN fail (its catch in the
+// startRun-throw path is there precisely because it can). When it does, the item
+// has NO run of its own, so parkCampaignOnStartRunThrow used to call the boundary
+// WITHOUT a campaign fallback run: notifyCampaignPause rejected the dangling runId
+// and emitted nothing — a silent unattended park — even though an EARLIER item in
+// the campaign owned a real run. This pins the fix: the park now supplies
+// pickCampaignFallbackRunId, so the milestone lands on that fallback run, carrying
+// the startRun-threw drive-error context. Distinct from the zero-runs-anywhere
+// exemption (FG-517): here a valid campaign run exists to scope to.
+test("FG-516 (F1): a startRun-throw park whose synthetic run row failed to persist still pushes, scoped to a campaign fallback run", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign(); // the planned FG-917 item is the one whose startRun throws
+
+  // An EARLIER-created but LATER-ordered campaign item that owns a real, resolvable
+  // run — the campaign fallback anchor. It sits pending AFTER the failing item, so
+  // the drive loop never reaches it (the startRun throw rethrows first).
+  const anchorRunId = "run-fg516-startrun-anchor";
+  insertRun({
+    id: anchorRunId,
+    workflow: WORKFLOW_NAME,
+    title: "FG-922",
+    status: "active",
+    createdAt: "2026-01-01T00:00:00Z",
+    metadata: { campaignId, ticketId: "FG-922" },
+    projectDir,
+  });
+  const anchor = addCampaignItem({ campaignId, itemOrder: 100, ticketId: "FG-922" });
+  updateCampaignItem(anchor.id, { runId: anchorRunId });
+  assert.ok(getRun(anchorRunId), "the anchor item owns a real run to serve as the campaign fallback");
+
+  // Force the best-effort synthetic run insert to FAIL so the failing item genuinely
+  // has no run of its own — the exact shape the fix protects. A BEFORE INSERT trigger
+  // aborts any 'abandoned' run insert (the synthetic row's status); the real anchor
+  // run above was inserted 'active' before the trigger existed, so it is untouched.
+  db.exec(
+    "CREATE TRIGGER fg516_fail_synthetic_run BEFORE INSERT ON runs WHEN NEW.status = 'abandoned' BEGIN SELECT RAISE(ABORT, 'FG-516 test: simulated synthetic run persistence failure'); END;",
+  );
+
+  const throwingStartRun = (): { runId: string } => {
+    throw new Error(`startRun exploded dispatching ${TICKET_ID}`);
+  };
+
+  fetchCalls = 0;
+  await assert.rejects(
+    () =>
+      startCampaign(campaignId, {
+        dispatch: dispatchMustNotBeCalled,
+        startRunFn: throwingStartRun,
+        runNextFn: makeCappedRunNext(10),
+      }),
+    /paused after a drive error/,
+    "the startRun throw parks the item and rethrows the enriched next-action error",
+  );
+
+  const failing = listCampaignItems(campaignId).find((i) => i.ticketId === TICKET_ID)!;
+  assert.equal(failing.lifecycleStatus, "failed", "the startRun-throw item parks directly at its terminal shape");
+  assert.equal(failing.blockerKind, "infrastructure", "a startRun dispatch-time failure classifies as infrastructure");
+  assert.ok(!failing.runId || !getRun(failing.runId), "the failing item has NO resolvable run of its own (synthetic insert aborted)");
+  assert.equal(getCampaign(campaignId)?.status, "paused", "the campaign is durably paused");
+
+  // Without the campaign fallback, notifyCampaignPause rejects the dangling runId and
+  // emits nothing (the silent wedge). With the fix, the milestone lands on the
+  // campaign fallback run.
+  const milestones = pauseMilestones(anchorRunId).filter(
+    (p) => p["dedupeKey"] === `campaign-pause:${campaignId}:${TICKET_ID}`,
+  );
+  assert.equal(milestones.length, 1, "the startRun-throw park pushed exactly one milestone (not silent)");
+  const m = milestones[0]!;
+  assert.equal(m["kind"], "blocked", "a startRun-throw wedge is a `blocked` milestone");
+  assert.equal(m["dispatched"], true, "the push actually went out, scoped to the campaign fallback run");
+  assert.equal(fetchCalls, 1, "exactly one provider push for the startRun-throw park");
+  assert.match(String(m["body"]), /startRun threw/, "body carries the startRun-throw requestedHumanAction guidance");
+  assert.match(String(m["body"]), /blocker: infrastructure/, "body leads with the infrastructure blockerKind the park recorded");
 });
