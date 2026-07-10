@@ -48,7 +48,7 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeTask } from "./ready-queue.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
@@ -380,10 +380,14 @@ async function dispatchSingleStep(args: {
   // parentId===undefined primary, which would sever the rejectedTaskId lineage
   // and duplicate the phase's primary. A fanout/red child (parentId-tagged,
   // no marker) never matches isOnRejectRecoveryTask, so it's never picked up here.
+  //
+  // FG-507: an ad-hoc invoke row is a pending parentId===undefined row in phase
+  // `task` too, and on a workflow that declares a `task` step it would otherwise
+  // be reused here and run as that step. It is never this workflow's work.
   const phaseTasks = args.parentId === undefined ? tasksForRun(args.runId) : [];
   const existing = args.parentId === undefined
     ? phaseTasks.find(
-        (t) => t.phase === phase && t.status === "pending" && t.parentId === undefined
+        (t) => t.phase === phase && t.status === "pending" && t.parentId === undefined && !isAdHocInvokeTask(t)
       ) ?? phaseTasks.find(
         (t) => t.phase === phase && t.status === "pending" && isOnRejectRecoveryTask(t)
       )

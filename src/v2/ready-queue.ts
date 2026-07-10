@@ -30,9 +30,29 @@ export function isOnRejectRecoveryTask(task: Task): boolean {
   return task.parentId !== undefined && task.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
 }
 
+// FG-507: a row `forge invoke` minted — including the fresh row `forge retry`
+// mints to re-dispatch one through the invoke path — is dispatched directly and
+// never by the workflow runner. Its phase is always `task`, an id a workflow may
+// legally declare as a step, so PROVENANCE and not phase is what keeps it out of
+// the workflow's bookkeeping: the ready queue, the settle states, dispatch's
+// pending-primary reuse, and reconcile's orphaned-primary sweep.
+//
+// Without this, an attached invoke row in a `task`-declaring workflow is
+// indistinguishable from that step's primary. A concurrent `forge next` in the
+// window between retry's row insert and its direct dispatch would reuse the
+// pending row and run it as a pipeline step (worktree merge, gates, reds) —
+// exactly the semantics retry promised it would not get.
+//
+// Marker-less legacy rows can't be resolved here; retry refuses them up front
+// rather than guess (run-kind.ts's `legacy_ambiguous_phase`).
+export function isAdHocInvokeTask(task: Task): boolean {
+  return task.taskPackage.dispatchSource === "invoke";
+}
+
 export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
   const tasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
+    if (isAdHocInvokeTask(t)) continue;
     const arr = tasksByPhase.get(t.phase) ?? [];
     arr.push(t);
     tasksByPhase.set(t.phase, arr);
@@ -135,6 +155,11 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
   // task without that marker is a genuine fanout/red child and is ignored.
   const recoveryTasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
+    // An ad-hoc invoke row is not this workflow's work; it can neither complete
+    // a step nor keep one active. Skipped here for the same reason
+    // computeReadyQueue skips it — otherwise the two disagree on a `task`-step
+    // workflow: the queue says the step is ready, settledness says it's done.
+    if (isAdHocInvokeTask(t)) continue;
     if (t.parentId !== undefined) {
       if (!isOnRejectRecoveryTask(t)) continue; // red/fanout child — ignore
       const arr = recoveryTasksByPhase.get(t.phase) ?? [];

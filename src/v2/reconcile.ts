@@ -37,6 +37,7 @@ import { inferredResultFrom } from "./inferred-result.js";
 import type { OrphanEvidence, ContainerExitInfo, ContainerCausalEvidence } from "./failure-kind.js";
 import { parseDockerInspectState } from "./failure-kind.js";
 import { taskHasPipelineFinalize } from "./run-kind.js";
+import { isAdHocInvokeTask } from "./ready-queue.js";
 import { shouldRetainContainer } from "./docker-exec.js";
 
 export type ContainerAlive = (containerName: string) => boolean;
@@ -925,6 +926,10 @@ export function finalizeOrphanedPrimaries(runId: string): TaskReconcileChange[] 
   const primariesByPhase = new Map<string, { id: string; status: string }[]>();
   for (const t of tasksForRun(runId)) {
     if (t.parentId !== undefined) continue; // primaries only
+    // FG-507: an ad-hoc invoke row is never a workflow primary — on a workflow
+    // that declares a `task` step, sweeping it as a "duplicate" would fail the
+    // row `forge retry` is about to dispatch directly.
+    if (isAdHocInvokeTask(t)) continue;
     const arr = primariesByPhase.get(t.phase) ?? [];
     arr.push({ id: t.id, status: t.status });
     primariesByPhase.set(t.phase, arr);

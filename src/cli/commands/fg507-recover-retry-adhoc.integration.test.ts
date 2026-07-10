@@ -20,7 +20,7 @@ import { insertTask, getTask, tasksForRun } from "../../store/tasks.js";
 import { logEvent } from "../../store/events.js";
 import { taskDir } from "../../util/paths.js";
 import { failureKindForTask } from "../../v2/failure-kind.js";
-import { invoke, createInvokeRun, type DockerExecFn } from "../../v2/invoke.js";
+import { invoke, createInvokeRun, reactivateTerminalRun, type DockerExecFn } from "../../v2/invoke.js";
 import {
   retry,
   dispatchRetriedAdHocTask,
@@ -30,6 +30,7 @@ import {
 import { taskDispatchKind } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { computeReadyQueue } from "../../v2/ready-queue.js";
+import { runNext } from "../../v2/runNext.js";
 import { performInspect } from "./recover.js";
 import { performCancel } from "./cancel.js";
 import { retrySummaryLines } from "./retry.js";
@@ -345,9 +346,75 @@ test("FG-507 1c: a NEW invoke --run task on a workflow that owns a `task` step i
   assert.equal(getTask(out.newTask.id)!.status, "complete");
   assert.equal(getTask(out.newTask.id)!.taskPackage.dispatchSource, "invoke", "the retried row records its own provenance");
 
-  // And it never left a row for the ready queue to trip over.
+  // And it never left a row the ready queue could mistake for the `task` step.
+  // Both of the workflow's own steps are still unrun and still ready: neither the
+  // failed invoke row nor its completed retry is a primary of the `task` step.
   const ready = computeReadyQueue(loadWorkflow(TASK_STEP_WORKFLOW, { projectDir }), tasksForRun(run.id));
-  assert.deepEqual(ready.map((s) => s.id), ["build"], "the `task` step was never minted into the ready queue");
+  assert.deepEqual(ready.map((s) => s.id), ["task", "build"], "a complete ad-hoc row never stands in for the `task` step");
+});
+
+// ── 1c-race: THE PENDING WINDOW ─────────────────────────────────────────────
+// retry() inserts the new ad-hoc row `pending` and dispatches it directly; the
+// run lock covers the row write, not the container's lifetime. A `forge next`
+// landing in that window used to find a pending, parentId===undefined row in
+// phase `task`, reuse it as the `task` step's primary, and run the ad-hoc retry
+// through the pipeline path. Provenance — not phase — has to keep it out.
+test("FG-507 1c-race: a concurrent `forge next` in the pending window never adopts the ad-hoc retry row", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-taskstep-race", TASK_STEP_WORKFLOW, projectDir);
+
+  const r = await invoke({ agentRole: "engineer", task: "side quest", projectDir, runId: run.id, dockerExec: stubExec(undefined, 1) });
+  assert.equal(r.status, "failed");
+
+  const out = await retry(r.taskId);
+  assert.ok(out.adHoc, "fixture: the retry row is ad-hoc and awaits its own direct dispatch");
+  const retryRow = getTask(out.newTask.id)!;
+  assert.equal(retryRow.status, "pending");
+  assert.equal(retryRow.phase, "task");
+  assert.equal(retryRow.parentId, undefined, "fixture: it is a PRIMARY row, the exact shape dispatch reuse looks for");
+
+  // The window: dispatchRetriedAdHocTask brings the terminal run back to `active`
+  // (a run with a live task is not complete) and only then spawns the container.
+  // Between those two the retry row is pending on an active run — precisely when a
+  // concurrent `forge next` has a ready queue to walk. Reactivate exactly as the
+  // dispatch path does, then let `forge next` in.
+  reactivateTerminalRun(run.id, getRun(run.id)!.status, "retry");
+  assert.equal(getRun(run.id)!.status, "active", "fixture: `forge next` only walks an active run");
+
+  const dispatched: string[] = [];
+  const workflow = loadWorkflow(TASK_STEP_WORKFLOW, { projectDir });
+  await runNext({
+    runId: run.id,
+    workflow,
+    dockerExec: async (args) => {
+      const nameIdx = args.args.indexOf("--name");
+      dispatched.push((args.args[nameIdx + 1] ?? "").replace(/^forge-/, ""));
+      return stubExec({ status: "complete", files_modified: [] })(args);
+    },
+  });
+
+  assert.ok(dispatched.length > 0, "fixture: `forge next` really did dispatch this run's steps");
+  assert.ok(!dispatched.includes(out.newTask.id), "`forge next` must never spawn a container for the ad-hoc retry row");
+  assert.ok(dispatched.includes(r.taskId) === false, "nor for the failed invoke row it replaced");
+
+  // The `task` STEP ran — as its own fresh primary, not by adopting the retry row.
+  const taskPrimaries = tasksForRun(run.id).filter((t) => t.phase === "task" && t.parentId === undefined && !t.taskPackage.dispatchSource);
+  assert.equal(taskPrimaries.length, 1, "the `task` step minted exactly one primary of its own");
+  assert.equal(taskPrimaries[0]!.status, "complete");
+  assert.notEqual(taskPrimaries[0]!.id, out.newTask.id);
+
+  // And the retry row survived the wave untouched — still pending, still ad-hoc.
+  // reconcile's orphaned-duplicate-primary sweep (which `forge next` runs first)
+  // would otherwise have failed it out from under the retry, since the `task`
+  // step's own primary completed in this very wave.
+  const afterNext = getTask(out.newTask.id)!;
+  assert.equal(afterNext.status, "pending", "the ad-hoc retry row is not the `task` step's orphaned duplicate");
+  assert.equal(afterNext.taskPackage.dispatchSource, "invoke");
+
+  // Retry's own direct dispatch still lands, with invoke semantics, as promised.
+  const result = await dispatchRetriedAdHocTask(out.newTask, out.adHoc!, stubExec({ status: "complete" }));
+  assert.equal(result.status, "complete");
+  assert.equal(getTask(out.newTask.id)!.status, "complete");
 });
 
 // The mirror: owning a `task` step does NOT widen the ambiguity to other phases.
