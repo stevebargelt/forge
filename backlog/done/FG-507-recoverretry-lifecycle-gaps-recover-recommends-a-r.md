@@ -1,9 +1,11 @@
 ---
 id: FG-507
 type: story
-status: active
+status: done
 title: "recover/retry lifecycle gaps: recover recommends a retry that refuses status=running; retried ad-hoc invoke tasks are undispatchable"
 created: 2026-07-09
+closed: 2026-07-10
+closed_commit: "6120940"
 ---
 
 Two operational gaps hit live during the FG-502 run (2026-07-09) while recovering a killed fixer invoke (task-engineer-68c1cd, container SIGTERM'd exit 143, empty result.json):
