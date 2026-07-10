@@ -1228,9 +1228,20 @@ export async function driveRemainingItems(
       }
 
       if (!item.runId) {
-        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-        // FG-516 (finding F2): this item has no run of its own, so scope the pause
-        // milestone to a campaign fallback run instead of going silent.
+        // FG-516: a parked workflow item (awaiting_gate/blocked_by_red) with no run
+        // to reattach to is a campaign-machinery wedge (campaign_system). Persist
+        // blockerKind + requestedHumanAction BEFORE parking so notifyCampaignPause
+        // emits a real "blocker: … — …" body instead of the generic "parked <ticket>"
+        // fallback. Distinct from the FG-518 workflow-load deferral below; the FG-441
+        // reattach marker (unset blockerKind) doesn't apply here — that path is gated
+        // on item.runId, which is absent.
+        updateCampaignItem(item.id, {
+          blockerKind: "campaign_system",
+          requestedHumanAction: `campaign has no run to reattach for ${item.ticketId} (parked '${item.lifecycleStatus}' with no runId) — inspect the item, resolve it, then \`forge campaign resume ${campaignId}\`.`,
+        });
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus, blockerKind: "campaign_system" });
+        // This item has no run of its own, so scope the pause milestone to a
+        // campaign fallback run instead of going silent.
         await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }

@@ -465,3 +465,53 @@ test("FG-516 (F1): the in-flight/indeterminate park persists blockerKind + reque
   assert.match(String(m["body"]), /unexpected lifecycle status 'running'/, "body carries the requestedHumanAction guidance");
   assert.doesNotMatch(String(m["body"]), /^campaign .* parked/, "body is NOT notifyCampaignPause's generic fallback");
 });
+
+// ── Shape 5: the no-runId resume-reattach park RECORDS its own context ──
+// A parked workflow item (awaiting_gate/blocked_by_red) whose runId is unset reaches
+// the resume reattach's `!item.runId` branch. Like Shape 4 — but for the resume path,
+// not the in-flight/indeterminate one — this pins that the park itself persists
+// blockerKind + requestedHumanAction BEFORE notifying, so an item that arrives WITHOUT
+// them still gets a real "blocker: … — …" milestone body scoped to a campaign
+// fallback run, not notifyCampaignPause's generic "parked <ticket>" fallback.
+test("FG-516: the no-runId resume-reattach park persists blockerKind + requestedHumanAction itself, so a bare item still gets a context-carrying milestone", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign();
+
+  // Park the planned item at the human gate so the campaign owns ONE real,
+  // resolvable run — the fallback anchor the no-runId item scopes its milestone to.
+  const started = await startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(started.stopReason, "paused");
+  const anchor = listCampaignItems(campaignId)[0]!;
+  const anchorRunId = anchor.runId!;
+  assert.ok(getRun(anchorRunId), "the planned item owns a real run to serve as the campaign fallback");
+
+  // A SECOND item that iterates FIRST (lower order), parked awaiting_gate with NO
+  // runId and WITHOUT any context fields — the park must supply them.
+  const bare = addCampaignItem({ campaignId, itemOrder: -1, ticketId: "FG-919" });
+  updateCampaignItem(bare.id, { lifecycleStatus: "awaiting_gate" });
+  const seeded = listCampaignItems(campaignId).find((i) => i.id === bare.id)!;
+  assert.equal(seeded.runId, undefined, "the item has no run of its own");
+  assert.equal(seeded.blockerKind, undefined, "the item arrives WITHOUT a blockerKind");
+  assert.equal(seeded.requestedHumanAction, undefined, "the item arrives WITHOUT a requestedHumanAction");
+
+  fetchCalls = 0; // count only pushes from the resume park below
+  const resumed = await resumeCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(resumed.stopReason, "recovery_needed", "the no-runId item parks the campaign as recovery_needed");
+
+  // The park persisted the two context fields ON the item.
+  const parked = listCampaignItems(campaignId).find((i) => i.id === bare.id)!;
+  assert.equal(parked.blockerKind, "campaign_system", "the park recorded a campaign_system blockerKind");
+  assert.match(String(parked.requestedHumanAction), /no run to reattach|no runId/, "the park recorded actionable guidance naming the missing run");
+
+  // And the milestone body carries them — scoped to the campaign fallback run,
+  // NOT the generic "parked" fallback.
+  const milestones = pauseMilestones(anchorRunId).filter(
+    (p) => p["dedupeKey"] === `campaign-pause:${campaignId}:FG-919` && p["kind"] === "blocked",
+  );
+  assert.equal(milestones.length, 1, "the no-runId park pushed exactly one `blocked` milestone (not silent)");
+  const bm = milestones[0]!;
+  assert.equal(bm["dispatched"], true, "the push went out, scoped to the campaign fallback run");
+  assert.equal(fetchCalls, 1, "exactly one provider push for the no-runId recovery park");
+  assert.match(String(bm["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail the park recorded");
+  assert.doesNotMatch(String(bm["body"]), /^campaign .* parked/, "body is NOT notifyCampaignPause's generic fallback");
+});
