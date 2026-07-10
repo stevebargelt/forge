@@ -133,7 +133,30 @@ function hasCompletePrimary(tasks: Task[]): boolean {
 // rather than pending.
 type StepSettleState = "complete" | "active" | "blocked";
 
+// FG-507: a top-level ad-hoc row that has not reached a terminal status is a
+// live `forge invoke` container, dispatched outside the workflow entirely. No
+// step's settle state describes it — computeStepSettleStates below skips it, as
+// computeReadyQueue must — so settledness has to see it here or a concurrent
+// `forge next` / `forge gate` finalizes the run out from under a container that
+// is still writing its result. Terminal ad-hoc rows say nothing either way; the
+// steps' own states decide.
+//
+// Only settledness widens. Step classification and the ready queue stay blind
+// to these rows: they are run-level work, not workflow-step work, and admitting
+// them to either would run an ad-hoc row as a pipeline step (worktree merge,
+// gates, reds) — exactly what retry promised it would not get.
+function hasLiveAdHocInvokeTask(tasks: Task[]): boolean {
+  return tasks.some(
+    (t) =>
+      t.parentId === undefined &&
+      isAdHocInvokeTask(t) &&
+      t.status !== "complete" &&
+      t.status !== "failed",
+  );
+}
+
 export function isRunSettled(workflow: Workflow, tasks: Task[]): boolean {
+  if (hasLiveAdHocInvokeTask(tasks)) return false;
   const states = computeStepSettleStates(workflow, tasks);
   for (const state of states.values()) {
     if (state === "active") return false;
@@ -159,6 +182,8 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
     // a step nor keep one active. Skipped here for the same reason
     // computeReadyQueue skips it — otherwise the two disagree on a `task`-step
     // workflow: the queue says the step is ready, settledness says it's done.
+    // A LIVE one still blocks the run from settling, one level up, in
+    // isRunSettled — run-level work, not step-level work.
     if (isAdHocInvokeTask(t)) continue;
     if (t.parentId !== undefined) {
       if (!isOnRejectRecoveryTask(t)) continue; // red/fanout child — ignore

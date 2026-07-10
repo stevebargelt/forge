@@ -32,7 +32,13 @@ function mkTask(opts: {
   createdAt?: string;
   agentRole?: string;
   inputs?: TaskPackage["inputs"];
+  dispatchSource?: TaskPackage["dispatchSource"];
 }): Task {
+  const taskPackage: TaskPackage = {
+    ...STUB_TP,
+    ...(opts.inputs ? { inputs: opts.inputs } : {}),
+    ...(opts.dispatchSource ? { dispatchSource: opts.dispatchSource } : {}),
+  };
   return {
     id: opts.id,
     runId: "r1",
@@ -40,9 +46,14 @@ function mkTask(opts: {
     phase: opts.phase,
     agentRole: opts.agentRole ?? "test-agent",
     status: opts.status,
-    taskPackage: opts.inputs ? { ...STUB_TP, inputs: opts.inputs } : STUB_TP,
+    taskPackage,
     createdAt: opts.createdAt ?? "2026-05-13T00:00:00.000Z",
   };
+}
+
+/** A `forge invoke` row: phase `task`, recorded provenance, no parent. */
+function mkAdHocTask(id: string, status: Task["status"], parentId?: string): Task {
+  return mkTask({ id, phase: "task", status, dispatchSource: "invoke", ...(parentId ? { parentId } : {}) });
 }
 
 test("computeReadyQueue: step with no deps and no existing task is ready", () => {
@@ -471,4 +482,77 @@ test("isOnRejectRecoveryTask: true only for a parentId-tagged task carrying reje
 
   const primary = mkTask({ id: "t-primary", phase: "build", status: "pending" });
   assert.equal(isOnRejectRecoveryTask(primary), false, "a parentId===undefined primary is never a recovery task");
+});
+
+// ----- ad-hoc invoke rows vs settledness (FG-507) -----
+// A `forge invoke` row (including the fresh row `forge retry` mints to
+// re-dispatch one) is dispatched directly, never by the workflow runner. It is
+// invisible to the ready queue and to step classification — but a LIVE one is
+// real outstanding work on the run, so isRunSettled must see it. Otherwise a
+// concurrent `forge next` / `forge gate` finalizes the run while the ad-hoc
+// container is still writing its result.
+
+const ONE_STEP_WF = mkWorkflow([
+  { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+]);
+const COMPLETE_BUILD = mkTask({ id: "t-build", phase: "build", status: "complete" });
+
+test("isRunSettled: a PENDING top-level ad-hoc invoke row keeps the run unsettled", () => {
+  assert.equal(
+    isRunSettled(ONE_STEP_WF, [COMPLETE_BUILD, mkAdHocTask("t-adhoc", "pending")]),
+    false,
+    "a pending ad-hoc row is live run-level work — no other actor may finalize the run",
+  );
+});
+
+test("isRunSettled: a RUNNING top-level ad-hoc invoke row keeps the run unsettled", () => {
+  assert.equal(
+    isRunSettled(ONE_STEP_WF, [COMPLETE_BUILD, mkAdHocTask("t-adhoc", "running")]),
+    false,
+    "the direct invoke container is still executing — finalizing here loses its result",
+  );
+});
+
+test("isRunSettled: a TERMINAL ad-hoc invoke row leaves settledness to the workflow steps alone", () => {
+  for (const status of ["complete", "failed"] as const) {
+    assert.equal(
+      isRunSettled(ONE_STEP_WF, [COMPLETE_BUILD, mkAdHocTask("t-adhoc", status)]),
+      true,
+      `a ${status} ad-hoc row is done; the complete step decides ⇒ settled`,
+    );
+    assert.equal(
+      isRunSettled(ONE_STEP_WF, [mkTask({ id: "t-build", phase: "build", status: "running" }), mkAdHocTask("t-adhoc", status)]),
+      false,
+      `a ${status} ad-hoc row must not settle a run whose own step is still active`,
+    );
+  }
+});
+
+test("isRunSettled: only TOP-LEVEL ad-hoc rows block — a parented one is a fanout/red child", () => {
+  assert.equal(
+    isRunSettled(ONE_STEP_WF, [COMPLETE_BUILD, mkAdHocTask("t-child", "running", "t-build")]),
+    true,
+    "children are the parent's business; settledness only widens for parentId===undefined rows",
+  );
+});
+
+test("computeReadyQueue: a live ad-hoc row stays out of the projection, even on a workflow owning a `task` step", () => {
+  const wf = mkWorkflow([
+    { id: "task", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const adHoc = mkAdHocTask("t-adhoc", "pending");
+
+  // The phase collides with a real step id, so only the recorded provenance
+  // keeps the row out. `task` reads as never-dispatched, exactly as if the
+  // ad-hoc row weren't there — the runner must never adopt it as its primary.
+  assert.deepEqual(computeReadyQueue(wf, [adHoc]).map((s) => s.id), ["task"]);
+  assert.equal(isRunSettled(wf, [adHoc]), false, "the step is undispatched AND the ad-hoc row is live");
+
+  const dispatchedStep = mkTask({ id: "t-step", phase: "task", status: "complete" });
+  assert.deepEqual(computeReadyQueue(wf, [adHoc, dispatchedStep]), []);
+  assert.equal(
+    isRunSettled(wf, [adHoc, dispatchedStep]),
+    false,
+    "the step is complete but the ad-hoc row is still live ⇒ the run is not settled",
+  );
 });
