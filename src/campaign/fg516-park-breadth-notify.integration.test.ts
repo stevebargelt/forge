@@ -37,11 +37,12 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
-import { approveCampaign, getCampaign, listCampaignItems } from "../store/campaigns.js";
+import { approveCampaign, getCampaign, listCampaignItems, addCampaignItem, updateCampaignItem } from "../store/campaigns.js";
+import { getRun } from "../store/runs.js";
 import { eventsForRun } from "../store/events.js";
 import { planCampaign } from "./planner.js";
 import type { ItemModeOverride } from "./planner.js";
-import { startCampaign, setCampaignNotifyEmitterForTest } from "./executor.js";
+import { startCampaign, resumeCampaign, setCampaignNotifyEmitterForTest } from "./executor.js";
 import type { EmitMilestoneArgs, EmitMilestoneResult } from "../notify/milestone.js";
 import { runNext } from "../v2/runNext.js";
 import type { DockerExecFn, RunNextResult } from "../v2/runNext.js";
@@ -311,4 +312,53 @@ test("FG-516: a workflow-YAML-missing park fires a `blocked` milestone whose bod
   // prefix joined with the requestedHumanAction.
   assert.match(String(m["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail");
   assert.match(String(m["body"]), /workflow YAML missing or invalid/, "body carries the requestedHumanAction guidance");
+});
+
+// ── Shape 3 (finding F1): the dangling-runId recovery park (running→paused) ──
+// A resume reattach where the item's PERSISTED runId no longer resolves parks the
+// campaign as recovery_needed. This branch used to call notifyCampaignPause WITHOUT
+// the campaign fallback, so notifyCampaignPause rejected the stale runId and emitted
+// nothing — a silent wedge — even when another item in the campaign owned a real
+// run. This pins the fix: the park pushes, scoped to the campaign fallback run.
+test("FG-516 (F1): a recovery park whose persisted runId no longer resolves still pushes, scoped to a campaign fallback run", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign();
+
+  // Park the planned item at the human gate so the campaign owns ONE real,
+  // resolvable run — the fallback anchor the dangling item scopes its milestone to.
+  const started = await startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(started.stopReason, "paused");
+  const anchor = listCampaignItems(campaignId)[0]!;
+  const anchorRunId = anchor.runId!;
+  assert.ok(getRun(anchorRunId), "the planned item owns a real run to serve as the campaign fallback");
+
+  // A SECOND item that iterates FIRST (lower order) and is parked awaiting_gate
+  // WITH a blockerKind — so the resume reattach skips the FG-441/FG-485 evidence
+  // probe and reaches the getRun(item.runId) reattach — but whose persisted runId
+  // is genuinely dangling (the run row was lost).
+  const dangling = addCampaignItem({ campaignId, itemOrder: -1, ticketId: "FG-918" });
+  updateCampaignItem(dangling.id, {
+    lifecycleStatus: "awaiting_gate",
+    blockerKind: "campaign_system",
+    requestedHumanAction: "recover the lost run",
+    runId: "run-does-not-exist",
+  });
+  assert.equal(getRun("run-does-not-exist"), undefined, "the item's persisted runId is genuinely dangling");
+
+  fetchCalls = 0; // count only pushes from the resume park below
+  const resumed = await resumeCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(resumed.stopReason, "recovery_needed", "the dangling-runId item parks the campaign as recovery_needed");
+
+  // Without the campaign fallback, notifyCampaignPause rejects the stale runId and
+  // emits nothing (the silent wedge). With the fix, the milestone lands on the
+  // campaign fallback run.
+  const danglingMilestones = pauseMilestones(anchorRunId).filter(
+    (p) => p["dedupeKey"] === `campaign-pause:${campaignId}:FG-918`,
+  );
+  assert.equal(danglingMilestones.length, 1, "the dangling-runId recovery park pushed exactly one milestone (not silent)");
+  const m = danglingMilestones[0]!;
+  assert.equal(m["kind"], "blocked", "a recovery wedge is a `blocked` milestone");
+  assert.equal(m["dispatched"], true, "the push actually went out, scoped to the campaign fallback run");
+  assert.equal(fetchCalls, 1, "exactly one provider push for the dangling-runId recovery park");
+  assert.match(String(m["body"]), /blocker: campaign_system/, "body carries the blockerKind detail");
 });

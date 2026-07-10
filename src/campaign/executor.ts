@@ -1191,7 +1191,10 @@ async function driveRemainingItems(
       if (!runForItem) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
         tryTransitionCampaign(campaignId, "running", "paused");
-        await notifyCampaignPause(campaignId, item.id, "blocked");
+        // FG-516: the item's persisted runId no longer resolves, so scope the pause
+        // milestone to a campaign fallback run — without it notifyCampaignPause
+        // rejects the stale runId and this recovery park goes silent.
+        await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
         return { stopReason: "recovery_needed", itemRecords };
       }
       let workflowForItem: Workflow;
