@@ -615,7 +615,11 @@ async function driveWorkflowItem(
         status: "abandoned",
         createdAt: nowIso(),
       };
-      reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
+      try {
+        reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
+      } catch (err) {
+        parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+      }
       const updatedItem = getCampaignItem(itemId);
       const bk = updatedItem?.blockerKind;
       // campaign_system is a shared blocker — pause the campaign
@@ -681,12 +685,20 @@ async function driveWorkflowItem(
 
       if (gateType === "auto" || gateType === "none") {
         // Auto-advance: don't pause the campaign, continue the drive loop.
-        await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:auto)", {});
+        try {
+          await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:auto)", {});
+        } catch (err) {
+          parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+        }
       } else if (gateType === "verdict") {
         const taskVerdicts = verdictsForTask(awaitingTask.id);
         const agg = aggregateVerdicts(taskVerdicts);
         if (agg.verdict === "pass") {
-          await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, all reds passed)", {});
+          try {
+            await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, all reds passed)", {});
+          } catch (err) {
+            parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+          }
         } else if (agg.verdict === "fail") {
           updateCampaignItem(itemId, {
             lifecycleStatus: "blocked_by_red",
