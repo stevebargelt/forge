@@ -263,6 +263,8 @@ export async function gate(
             runId: task.runId,
             phase: targetStep.id,
             role: targetStep.agent ?? task.agentRole,
+            // FG-512: runner-minted on_reject recovery row — total dispatch provenance.
+            dispatchSource: "workflow",
             inputs: {
               rejectedRationale: rationale ?? "",
               rejectedTaskId: taskId,
@@ -343,6 +345,10 @@ export async function gate(
       const tp: TaskPackage = {
         ...task.taskPackage,
         taskId: newId,
+        // FG-512: runner-minted request-changes replacement row — stamp explicitly
+        // so provenance is total even when the rejected primary was a legacy
+        // marker-less row (the spread above would otherwise carry nothing).
+        dispatchSource: "workflow",
         composedSystemPrompt: "",
         inputs: {
           ...task.taskPackage.inputs,

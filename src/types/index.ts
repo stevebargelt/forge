@@ -25,13 +25,17 @@ export type TaskPackage = {
   artifact?: string;
   spec?: string;
   failureModes?: string[];
-  // FG-507: recorded at row creation by `forge invoke` (and by the ad-hoc rows
-  // `forge retry` re-dispatches). Deliberately NOT an `inputs` key — inputs are
+  // FG-507/FG-512: dispatch provenance recorded at row creation. `invoke` is
+  // stamped by `forge invoke` (and the ad-hoc rows `forge retry` re-dispatches);
+  // `workflow` is stamped by every runner-side creation site (runNext.ts primaries,
+  // reds, fanout parents/children, manual steps; gate.ts on_reject recovery and
+  // request-changes replacement rows). Deliberately NOT an `inputs` key — inputs are
   // rendered into the agent's task package, and this is control-plane provenance
-  // the agent must never see. Read by taskDispatchKind (src/v2/run-kind.ts),
-  // which otherwise has to INFER ad-hoc-ness from phase-vs-step-id structure and
-  // cannot distinguish an invoke task from a workflow whose step id is `task`.
-  dispatchSource?: "invoke";
+  // the agent must never see. Read by taskDispatchKind (src/v2/run-kind.ts), which
+  // otherwise has to INFER ad-hoc-ness from phase-vs-step-id structure and cannot
+  // distinguish an invoke task from a workflow whose step id is `task`. With FG-512
+  // this marker is TOTAL for new rows; only legacy pre-provenance rows are marker-less.
+  dispatchSource?: "invoke" | "workflow";
 };
 
 export type Finding = {

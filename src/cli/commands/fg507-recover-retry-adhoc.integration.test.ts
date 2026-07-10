@@ -398,7 +398,10 @@ test("FG-507 1c-race: a concurrent `forge next` in the pending window never adop
   assert.ok(dispatched.includes(r.taskId) === false, "nor for the failed invoke row it replaced");
 
   // The `task` STEP ran — as its own fresh primary, not by adopting the retry row.
-  const taskPrimaries = tasksForRun(run.id).filter((t) => t.phase === "task" && t.parentId === undefined && !t.taskPackage.dispatchSource);
+  // FG-512: the runner now stamps `dispatchSource: "workflow"` on that primary, so
+  // it is identified by the workflow marker rather than by the absence of one; the
+  // ad-hoc retry row (marker "invoke") is still excluded.
+  const taskPrimaries = tasksForRun(run.id).filter((t) => t.phase === "task" && t.parentId === undefined && t.taskPackage.dispatchSource === "workflow");
   assert.equal(taskPrimaries.length, 1, "the `task` step minted exactly one primary of its own");
   assert.equal(taskPrimaries[0]!.status, "complete");
   assert.notEqual(taskPrimaries[0]!.id, out.newTask.id);
