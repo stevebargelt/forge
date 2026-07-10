@@ -1,9 +1,11 @@
 ---
 id: FG-512
 type: story
-status: active
+status: done
 title: "runner-side dispatch provenance: stamp dispatchSource on workflow-step rows so taskDispatchKind rule (d) can be deleted"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: a9fe0e2
 ---
 
 Follow-up discovered during FG-507 (2026-07-10, review-loop run-review-loop-fg-507-17d35d round 2 + engineer resolution). FG-507 stamps taskPackage.dispatchSource: "invoke" on invoke-created rows, which decisively classifies ad-hoc tasks. The residual corner: a MARKER-LESS row with phase "task" on a workflow that legitimately owns a step id "task" is indistinguishable (legacy invoke --run row vs genuine runner-created step row), so taskDispatchKind rule (d) returns unknown/legacy_ambiguous_phase and forge retry refuses pre-write with an honest message. Consequence: a genuine workflow step literally named "task" cannot be retried. No shipped workflow under seeds/workflows/ declares a step id "task" (grep-verified 2026-07-10), so nothing is currently affected.
