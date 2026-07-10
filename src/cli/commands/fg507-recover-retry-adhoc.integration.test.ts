@@ -25,7 +25,7 @@ import {
   retry,
   dispatchRetriedAdHocTask,
   AdHocRedispatchUnavailableError,
-  RetryWorkflowUnloadableError,
+  RetryDispatchKindUnknownError,
 } from "../../v2/retry.js";
 import { taskDispatchKind } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
@@ -40,6 +40,10 @@ let prev: DatabaseInstance | null;
 const tmpDirs: string[] = [];
 
 const WORKFLOW_NAME = "fg507wf";
+// A workflow that legitimately declares a step id `task` — the exact collision
+// the recorded `dispatchSource` marker exists to resolve, since `task` is also
+// the phase every `forge invoke` row carries.
+const TASK_STEP_WORKFLOW = "fg507wftaskstep";
 
 function setupRuntimeStub(): void {
   const runtimePath = join(process.env["FORGE_HOME"]!, "runtimes", "claude.yml");
@@ -87,7 +91,46 @@ steps:
     gate: auto
 `,
   );
+  writeFileSync(
+    join(dir, ".forge", "workflows", `${TASK_STEP_WORKFLOW}.yml`),
+    `
+name: ${TASK_STEP_WORKFLOW}
+description: a workflow that legitimately owns a step id 'task'
+inputs: []
+steps:
+  - id: task
+    agent: engineer
+    gate: auto
+  - id: build
+    agent: engineer
+    gate: auto
+`,
+  );
   return dir;
+}
+
+function activeRun(id: string, workflow: string, projectDir: string): Run {
+  const run: Run = { id, workflow, title: "real workflow run", status: "active", createdAt: "2026-07-09T00:00:00Z", projectDir };
+  insertRun(run);
+  return run;
+}
+
+/** A marker-less row — what every task looked like before FG-507 recorded
+ *  dispatch provenance at creation. */
+function legacyFailedTask(id: string, run: Run, phase: string, inputs: Record<string, unknown>): Task {
+  const t: Task = {
+    id,
+    runId: run.id,
+    phase,
+    agentRole: "engineer",
+    status: "failed",
+    error: "boom",
+    taskPackage: { taskId: id, runId: run.id, phase, role: "engineer", inputs, composedSystemPrompt: "" },
+    createdAt: "2026-07-09T00:00:00Z",
+  };
+  insertTask(t);
+  logEvent("task.failed", { runId: run.id, taskId: id, payload: { failure_kind: "container_crash", error: "boom" } });
+  return t;
 }
 
 /** A policy-mode project: two profiles, `ambient` is every default, `pinned` is
@@ -236,6 +279,142 @@ test("FG-507: a plain invoke's package.md gains no previous-attempt section", as
   assert.equal(r.status, "complete");
   const pkg = readFileSync(join(taskDir(r.runId, r.taskId), "package.md"), "utf8");
   assert.doesNotMatch(pkg, /Previous attempt/);
+});
+
+// ── 1b. the dispatchSource marker is CONTROL-PLANE state, inert to the agent ──
+
+test("FG-507: the dispatchSource marker is recorded on the row and changes nothing the agent reads", async () => {
+  const projectDir = trackedProjectDir();
+  const r = await invoke({ agentRole: "engineer", task: "fresh work", projectDir, dockerExec: stubExec({ status: "complete" }) });
+  assert.equal(r.status, "complete");
+
+  const row = getTask(r.taskId)!;
+  assert.equal(row.taskPackage.dispatchSource, "invoke", "recorded at creation, and it survives the SQLite round-trip");
+  assert.deepEqual(row.taskPackage.inputs, { task: "fresh work" }, "NOT an inputs key — inputs flow into the rendered package");
+
+  // Byte-identical to the pre-marker rendering: no new section, no new line.
+  const pkg = readFileSync(join(taskDir(r.runId, r.taskId), "package.md"), "utf8");
+  assert.equal(
+    pkg,
+    [
+      `# Task ${r.taskId}`,
+      ``,
+      `Run: ${r.runId}`,
+      `Agent: engineer`,
+      ``,
+      `## Task`,
+      ``,
+      `fresh work`,
+      ``,
+      `## Output contract`,
+      ``,
+      `Write a single JSON object to /task/result.json. At minimum: {"status": "complete"|"failed", ...your role-specific output}.`,
+      ``,
+    ].join("\n"),
+  );
+  assert.doesNotMatch(pkg, /dispatchSource/);
+});
+
+// ── 1c. THE FINDING: a workflow that owns a step id `task` ───────────────────
+// Structural inference reads an invoke task's phase ("task") as that step and
+// calls it workflow_step; retry then mints a pending row + a `forge next` pointer,
+// and if the real step is complete/not-ready the row strands. Recorded provenance
+// answers decisively, with no workflow load at all.
+
+test("FG-507 1c: a NEW invoke --run task on a workflow that owns a `task` step is ad-hoc, and retry direct-dispatches it", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-taskstep", TASK_STEP_WORKFLOW, projectDir);
+
+  const r = await invoke({ agentRole: "engineer", task: "side quest", projectDir, runId: run.id, dockerExec: stubExec(undefined, 1) });
+  assert.equal(r.status, "failed");
+
+  const attached = getTask(r.taskId)!;
+  assert.equal(attached.phase, "task", "fixture: the invoke row's phase collides with a real step id");
+  assert.ok(
+    loadWorkflow(TASK_STEP_WORKFLOW, { projectDir }).steps.some((s) => s.id === "task"),
+    "fixture: the workflow really does declare that step",
+  );
+  assert.equal(taskDispatchKind(attached, run).kind, "adhoc", "the recorded marker wins over the phase/step-id collision");
+
+  const out = await retry(r.taskId);
+  assert.ok(out.adHoc, "ad-hoc → retry carries a dispatch plan instead of a `forge next` pointer");
+  assert.doesNotMatch(retrySummaryLines(r.taskId, out).join("\n"), /forge next/);
+
+  const result = await dispatchRetriedAdHocTask(out.newTask, out.adHoc!, stubExec({ status: "complete" }));
+  assert.equal(result.status, "complete");
+  assert.equal(getTask(out.newTask.id)!.status, "complete");
+  assert.equal(getTask(out.newTask.id)!.taskPackage.dispatchSource, "invoke", "the retried row records its own provenance");
+
+  // And it never left a row for the ready queue to trip over.
+  const ready = computeReadyQueue(loadWorkflow(TASK_STEP_WORKFLOW, { projectDir }), tasksForRun(run.id));
+  assert.deepEqual(ready.map((s) => s.id), ["build"], "the `task` step was never minted into the ready queue");
+});
+
+// The mirror: owning a `task` step does NOT widen the ambiguity to other phases.
+// A genuine, marker-less step of that same workflow keeps today's behavior exactly.
+test("FG-507 1c: a genuine workflow-step task on that same workflow keeps the pending-row + `forge next` behavior", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-taskstep-step", TASK_STEP_WORKFLOW, projectDir);
+  const failed = legacyFailedTask("task-build-ddd444", run, "build", { brief: "b" });
+
+  assert.equal(taskDispatchKind(failed, run).kind, "workflow_step");
+
+  const out = await retry(failed.id);
+  assert.equal(out.adHoc, undefined, "a real workflow step is never ad-hoc");
+  assert.equal(getTask(out.newTask.id)!.status, "pending");
+  assert.equal(getTask(out.newTask.id)!.taskPackage.dispatchSource, undefined, "and it is never stamped as invoke-dispatched");
+  assert.match(retrySummaryLines(failed.id, out).join("\n"), new RegExp(`forge next ${run.id}`));
+
+  const ready = computeReadyQueue(loadWorkflow(TASK_STEP_WORKFLOW, { projectDir }), tasksForRun(run.id));
+  assert.ok(ready.some((s) => s.id === "build"), "`forge next` picks the retried step up, exactly as before");
+});
+
+// ── 1d. the legacy corner the marker cannot reach ───────────────────────────
+// A marker-less row in phase `task`, on a workflow that owns a `task` step, is a
+// legacy invoke --run row and a genuine step at the same time as far as any
+// recorded fact goes. Fail closed rather than strand a row (or run a pipeline
+// step with invoke semantics).
+
+test("FG-507 1d: a marker-less `task` row on a workflow owning a `task` step refuses pre-write, naming the ambiguity", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-ambiguous", TASK_STEP_WORKFLOW, projectDir);
+  const legacy = legacyFailedTask("task-engineer-legacy2", run, "task", { task: "legacy side quest" });
+
+  const kind = taskDispatchKind(legacy, run);
+  assert.equal(kind.kind, "unknown");
+  assert.equal(kind.kind === "unknown" ? kind.reason : undefined, "legacy_ambiguous_phase");
+
+  await assert.rejects(
+    () => retry(legacy.id),
+    (e: unknown) => {
+      assert.ok(e instanceof RetryDispatchKindUnknownError, `expected RetryDispatchKindUnknownError, got ${e}`);
+      assert.equal(e.reason, "legacy_ambiguous_phase");
+      assert.match(e.message, /records no dispatch provenance \(a legacy pre-provenance row\)/);
+      assert.match(e.message, new RegExp(`workflow '${TASK_STEP_WORKFLOW}' owns a step whose id is 'task'`));
+      assert.match(e.message, /indistinguishable here/);
+      assert.match(e.message, /No pending task row was created/);
+      // Both recoveries, honestly stated.
+      assert.match(e.message, /forge cannot mint its pending replacement row without proving it is one/);
+      assert.match(e.message, new RegExp(`forge invoke engineer --run ${run.id}`));
+      assert.match(e.message, /--task 'legacy side quest'/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(tasksForRun(run.id).map((t) => t.id), [legacy.id], "no stranded pending row — refused before any write");
+});
+
+// A marker-less row in a phase invoke NEVER creates is not ambiguous at all.
+test("FG-507 1d: the ambiguity does not widen — a marker-less row in a non-`task` phase still classifies structurally", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-nonwiden", WORKFLOW_NAME, projectDir);
+
+  assert.equal(taskDispatchKind(legacyFailedTask("task-build-eee555", run, "build", {}), run).kind, "workflow_step");
+  assert.equal(
+    taskDispatchKind(legacyFailedTask("task-review-fff666", run, "review", {}), run).kind,
+    "adhoc",
+    "a phase no step declares is still decisively ad-hoc",
+  );
 });
 
 // ── 2. the ad-hoc discriminator ─────────────────────────────────────────────
@@ -393,56 +572,69 @@ test("FG-507 3: an ad-hoc retry that cannot dispatch refuses with a ready-to-run
   );
 });
 
-// A workflow that won't load means forge cannot tell a workflow step from an
-// invoke-attached row. Answering "not ad-hoc" there mints a pending row + a
-// `forge next` pointer that never fires — the exact stranding FG-507 removes.
-test("FG-507 3b: an invoke-attached task whose workflow YAML broke refuses pre-write, naming the load error and the invoke command", async () => {
+// A workflow that won't load means forge cannot tell a LEGACY (marker-less)
+// workflow-step row from a legacy invoke-attached one. Answering "not ad-hoc"
+// there mints a pending row + a `forge next` pointer that never fires — the exact
+// stranding FG-507 removes.
+test("FG-507 3b: a LEGACY invoke-attached task whose workflow YAML broke refuses pre-write, naming the load error and the invoke command", async () => {
   const projectDir = trackedProjectDir();
-  const run: Run = {
-    id: "run-fg507-broken",
-    workflow: WORKFLOW_NAME,
-    title: "real workflow run",
-    status: "active",
-    createdAt: "2026-07-09T00:00:00Z",
-    projectDir,
-  };
-  insertRun(run);
-
-  const r = await invoke({ agentRole: "engineer", task: "side quest", projectDir, runId: run.id, dockerExec: stubExec(undefined, 1) });
-  assert.equal(r.status, "failed");
+  const run = activeRun("run-fg507-broken", WORKFLOW_NAME, projectDir);
+  const legacy = legacyFailedTask("task-engineer-legacy3", run, "task", { task: "side quest" });
 
   const wfPath = join(projectDir, ".forge", "workflows", `${WORKFLOW_NAME}.yml`);
   writeFileSync(wfPath, "name: fg507wf\nsteps: [ unclosed\n");
-  assert.equal(taskDispatchKind(getTask(r.taskId)!, run).kind, "unknown", "fixture: the workflow no longer loads");
+  const kind = taskDispatchKind(legacy, run);
+  assert.equal(kind.kind, "unknown", "fixture: the workflow no longer loads");
+  assert.equal(kind.kind === "unknown" ? kind.reason : undefined, "workflow_unloadable");
 
   await assert.rejects(
-    () => retry(r.taskId),
+    () => retry(legacy.id),
     (e: unknown) => {
-      assert.ok(e instanceof RetryWorkflowUnloadableError, `expected RetryWorkflowUnloadableError, got ${e}`);
+      assert.ok(e instanceof RetryDispatchKindUnknownError, `expected RetryDispatchKindUnknownError, got ${e}`);
+      assert.equal(e.reason, "workflow_unloadable");
       assert.match(e.message, /YAML parse error/, "the refusal names the workflow-load error");
       assert.match(e.message, /No pending task row was created/);
       assert.match(e.message, new RegExp(`forge invoke engineer --run ${run.id}`), "ready-to-run direct re-dispatch");
       assert.match(e.message, new RegExp(`--project ${projectDir}`));
       assert.match(e.message, /--task 'side quest'/, "the recorded task text is handed back verbatim");
-      assert.match(e.message, new RegExp(`forge retry ${r.taskId}`), "and the restore-the-YAML path");
+      assert.match(e.message, new RegExp(`forge retry ${legacy.id}`), "and the restore-the-YAML path");
       return true;
     },
   );
 
   assert.deepEqual(
     tasksForRun(run.id).map((t) => t.id),
-    [r.taskId],
+    [legacy.id],
     "no stranded pending row — the refusal happened before any write",
   );
 
   // A missing workflow file is the same fail-closed answer, with its own load error.
   rmSync(wfPath);
-  await assert.rejects(() => retry(r.taskId), (e: unknown) => {
-    assert.ok(e instanceof RetryWorkflowUnloadableError);
+  await assert.rejects(() => retry(legacy.id), (e: unknown) => {
+    assert.ok(e instanceof RetryDispatchKindUnknownError);
     assert.match(e.message, /not found at/);
     return true;
   });
   assert.equal(tasksForRun(run.id).length, 1, "still no pending row");
+});
+
+// The complement, and the point of recording provenance: a row that SAYS it was
+// invoke-dispatched needs no workflow load to be classified, so a broken YAML
+// stops being a refusal at all — retry re-dispatches it directly.
+test("FG-507 3b: a marker-carrying invoke task retries through a broken workflow YAML — provenance needs no load", async () => {
+  const projectDir = trackedProjectDir();
+  const run = activeRun("run-fg507-broken-marked", WORKFLOW_NAME, projectDir);
+
+  const r = await invoke({ agentRole: "engineer", task: "side quest", projectDir, runId: run.id, dockerExec: stubExec(undefined, 1) });
+  assert.equal(r.status, "failed");
+
+  writeFileSync(join(projectDir, ".forge", "workflows", `${WORKFLOW_NAME}.yml`), "name: fg507wf\nsteps: [ unclosed\n");
+  assert.equal(taskDispatchKind(getTask(r.taskId)!, run).kind, "adhoc", "the recorded marker answers without loading the YAML");
+
+  const out = await retry(r.taskId);
+  assert.ok(out.adHoc);
+  const result = await dispatchRetriedAdHocTask(out.newTask, out.adHoc!, stubExec({ status: "complete" }));
+  assert.equal(result.status, "complete");
 });
 
 test("FG-507 3b: a genuine workflow-step task whose workflow YAML broke also refuses pre-write, with restore-then-retry guidance", async () => {
@@ -475,7 +667,8 @@ test("FG-507 3b: a genuine workflow-step task whose workflow YAML broke also ref
   await assert.rejects(
     () => retry(failed.id),
     (e: unknown) => {
-      assert.ok(e instanceof RetryWorkflowUnloadableError);
+      assert.ok(e instanceof RetryDispatchKindUnknownError);
+      assert.equal(e.reason, "workflow_unloadable");
       assert.match(e.message, /YAML parse error/);
       assert.match(e.message, /restore the workflow YAML/);
       assert.match(e.message, new RegExp(`re-run \`forge retry ${failed.id}\``), "retry is re-runnable once the YAML is back");

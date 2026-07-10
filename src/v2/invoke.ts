@@ -136,6 +136,11 @@ export async function invoke(args: InvokeArgs): Promise<InvokeResult> {
     phase: "task",
     role: args.agentRole,
     inputs: { task: args.task } as Record<string, unknown>,
+    // FG-507: dispatch provenance, recorded once at creation so `forge retry`
+    // never has to infer it. Both invoke shapes pass through here — the synthetic
+    // `invoke` run and `--run <real-workflow-run>`. renderInvokeTaskPackage reads
+    // only taskId/runId/role/inputs, so this stays inert in what the agent sees.
+    dispatchSource: "invoke",
     composedSystemPrompt: composeSystemPrompt({
       role: args.agentRole,
       workflow,

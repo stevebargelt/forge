@@ -25,6 +25,13 @@ export type TaskPackage = {
   artifact?: string;
   spec?: string;
   failureModes?: string[];
+  // FG-507: recorded at row creation by `forge invoke` (and by the ad-hoc rows
+  // `forge retry` re-dispatches). Deliberately NOT an `inputs` key — inputs are
+  // rendered into the agent's task package, and this is control-plane provenance
+  // the agent must never see. Read by taskDispatchKind (src/v2/run-kind.ts),
+  // which otherwise has to INFER ad-hoc-ness from phase-vs-step-id structure and
+  // cannot distinguish an invoke task from a workflow whose step id is `task`.
+  dispatchSource?: "invoke";
 };
 
 export type Finding = {

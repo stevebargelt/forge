@@ -116,22 +116,22 @@ export class AdHocRedispatchUnavailableError extends Error {
   }
 }
 
-// FG-507 (round 2): the workflow YAML behind a real run is gone or broken, so
-// forge cannot tell a workflow step (which `forge next` redispatches) from an
-// invoke-attached row (which it never will). Guessing "workflow step" is what
-// stranded rows in the first place, so refuse — before any write — and hand back
-// both recoveries, since only the operator knows which task this was.
-export class RetryWorkflowUnloadableError extends Error {
-  constructor(public taskId: string, public runId: string, public workflow: string, public loadError: string, manualActions: string[]) {
-    super(
-      `Task ${taskId} cannot be retried: run ${runId}'s workflow '${workflow}' does not load, so forge cannot tell whether ` +
-        `${taskId} is a step of that workflow (which \`forge next\` would redispatch) or an ad-hoc \`forge invoke\` task ` +
-        `(which \`forge next\` never dispatches, and which would strand as a pending row). ` +
-        `No pending task row was created (nothing to clean up).\n` +
-        `  workflow load error: ${loadError}\n` +
-        `Recover by whichever this task is:\n${manualActions.join("\n")}`,
-    );
-    this.name = "RetryWorkflowUnloadableError";
+// FG-507 (round 2): taskDispatchKind came back `unknown` — forge cannot tell a
+// workflow step (which `forge next` redispatches) from an invoke-attached row
+// (which it never will). Guessing "workflow step" is what stranded rows in the
+// first place, so refuse — before any write — and hand back both recoveries,
+// since only the operator knows which task this was. `reason` carries WHICH
+// unprovable state this is; the rendered message differs, the refusal doesn't.
+export class RetryDispatchKindUnknownError extends Error {
+  constructor(
+    public taskId: string,
+    public runId: string,
+    public workflow: string,
+    public reason: "workflow_unloadable" | "legacy_ambiguous_phase",
+    message: string,
+  ) {
+    super(message);
+    this.name = "RetryDispatchKindUnknownError";
   }
 }
 
@@ -155,17 +155,59 @@ function recordedDispatchFacts(task: Task, run: Run) {
   };
 }
 
+/** The `(b)` recovery, shared by both refusals: a ready-to-run invoke command when
+ *  the row recorded its task text, and an honest admission when it didn't. */
+function adHocRecoveryAction(task: Task, projectDir: string | undefined, taskText: string | undefined): string {
+  return taskText
+    ? `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly:\n        ${invokeCommandFor(task, projectDir, taskText)}`
+    : `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly with \`forge invoke ${task.agentRole} --run ${task.runId}\`; this row recorded no \`inputs.task\` text, so supply the original task yourself.`;
+}
+
 function refuseUnloadableWorkflow(task: Task, run: Run, loadError: string): never {
   const { projectDir, taskText } = recordedDispatchFacts(task, run);
   const actions = [
     `  (a) a workflow step — restore the workflow YAML, then re-run \`forge retry ${task.id}\`.`,
+    adHocRecoveryAction(task, projectDir, taskText),
   ];
-  actions.push(
-    taskText
-      ? `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly:\n        ${invokeCommandFor(task, projectDir, taskText)}`
-      : `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly with \`forge invoke ${task.agentRole} --run ${task.runId}\`; this row recorded no \`inputs.task\` text, so supply the original task yourself.`,
+  throw new RetryDispatchKindUnknownError(
+    task.id,
+    task.runId,
+    run.workflow,
+    "workflow_unloadable",
+    `Task ${task.id} cannot be retried: run ${task.runId}'s workflow '${run.workflow}' does not load, so forge cannot tell whether ` +
+      `${task.id} is a step of that workflow (which \`forge next\` would redispatch) or an ad-hoc \`forge invoke\` task ` +
+      `(which \`forge next\` never dispatches, and which would strand as a pending row). ` +
+      `No pending task row was created (nothing to clean up).\n` +
+      `  workflow load error: ${loadError}\n` +
+      `Recover by whichever this task is:\n${actions.join("\n")}`,
   );
-  throw new RetryWorkflowUnloadableError(task.id, task.runId, run.workflow, loadError, actions);
+}
+
+// The row predates FG-507's `dispatchSource` marker, and the run's workflow
+// legitimately owns a step whose id is `task` — the phase every `forge invoke`
+// row carries. Nothing recorded distinguishes the two, and both wrong guesses are
+// bad: "workflow step" strands a pending row, "ad-hoc" re-dispatches a pipeline
+// step with invoke semantics (no worktree merge, no gates, no reds). Refuse.
+function refuseAmbiguousLegacyPhase(task: Task, run: Run): never {
+  const { projectDir, taskText } = recordedDispatchFacts(task, run);
+  const actions = [
+    `  (a) a genuine \`${task.phase}\` step of workflow '${run.workflow}' — forge cannot mint its pending ` +
+      `replacement row without proving it is one. \`forge next ${task.runId}\` dispatches that run's ready queue, ` +
+      `but it will not pick this phase up while its only row is the failed primary; re-drive the step from a fresh run of '${run.workflow}'.`,
+    adHocRecoveryAction(task, projectDir, taskText),
+  ];
+  throw new RetryDispatchKindUnknownError(
+    task.id,
+    task.runId,
+    run.workflow,
+    "legacy_ambiguous_phase",
+    `Task ${task.id} cannot be retried: it records no dispatch provenance (a legacy pre-provenance row), and run ` +
+      `${task.runId}'s workflow '${run.workflow}' owns a step whose id is '${task.phase}' — the same phase every ` +
+      `\`forge invoke\` task carries. A legacy \`forge invoke --run\` row and a genuine '${task.phase}' step are ` +
+      `indistinguishable here, so forge cannot tell whether \`forge next\` would redispatch ${task.id} or never see it ` +
+      `(stranding it as a pending row). No pending task row was created (nothing to clean up).\n` +
+      `Recover by whichever this task is:\n${actions.join("\n")}`,
+  );
 }
 
 function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
@@ -276,7 +318,10 @@ export async function dispatchRetriedAdHocTask(
 function planRetryDispatch(task: Task, run: Run): AdHocDispatchPlan | undefined {
   const kind = taskDispatchKind(task, run);
   if (kind.kind === "workflow_step") return undefined;
-  if (kind.kind === "unknown") refuseUnloadableWorkflow(task, run, kind.loadError);
+  if (kind.kind === "unknown") {
+    if (kind.reason === "workflow_unloadable") refuseUnloadableWorkflow(task, run, kind.loadError);
+    refuseAmbiguousLegacyPhase(task, run);
+  }
   return planAdHocRedispatch(task, run);
 }
 
@@ -357,6 +402,10 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     taskPackage: {
       ...task.taskPackage,
       taskId: newId,
+      // FG-507: this row IS dispatched by invoke semantics (dispatchRetriedAdHocTask
+      // → dispatchInvokeTask), so record that, rather than leaving a retried legacy
+      // row marker-less and re-deciding it by inference on the next retry.
+      ...(adHoc ? { dispatchSource: "invoke" as const } : {}),
       // AWN-3: hand the agent the previous failure as context so the retry is
       // informed. Prose + tag only — never secrets (task.error is a summary,
       // failure_kind is a classifier label).
