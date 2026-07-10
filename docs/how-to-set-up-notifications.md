@@ -286,7 +286,7 @@ Beyond milestones the orchestrator declares, forge itself fires milestones for t
 - **`blocked`** — a genuine wedge that needs you to unblock it.
 - **`decision_needed`** — a park that awaits an operator call (e.g. a gate, or an item that outgrew its lane and needs re-approval).
 
-The body carries the campaign id, the ticket, the item's `blockerKind`, and the requested human action — e.g. `blocker: dependency — held on dependency FG-480 — resolve/complete FG-480, then forge campaign resume`. It is deduped per campaign+item (dedupe key `campaign-pause:<campaignId>:<ticketId>`), so re-parking the same item after a `forge campaign resume` does **not** re-push. An item with no run of its own scopes its milestone to another run in the same campaign.
+The provider **title** carries the campaign id and the ticket (`Campaign <id> paused — <ticket> needs attention`, surfaced as the ntfy title `forge: <kind> — …`); the **body** carries the item's `blockerKind` and the requested human action — e.g. `blocker: dependency — held on dependency FG-480 — resolve/complete FG-480, then forge campaign resume`. It is deduped per campaign+item (dedupe key `campaign-pause:<campaignId>:<ticketId>`), so re-parking the same item after a `forge campaign resume` does **not** re-push. An item with no run of its own scopes its milestone to another run in the same campaign.
 
 Two exemptions stay silent: an operator-initiated `forge campaign pause` (that's your own action, not a wedge), and — for now — a campaign in which *no* item ever produced a run (every item held before any run started); that residual corner is deferred to FG-517.
 
