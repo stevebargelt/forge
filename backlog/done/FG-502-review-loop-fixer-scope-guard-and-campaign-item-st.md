@@ -1,9 +1,11 @@
 ---
 id: FG-502
 type: story
-status: active
+status: done
 title: "review-loop fixer scope-guard and campaign item-state: in-diff docs revert whole fix rounds; out-of-band-shipped items stay failed/campaign_system; stranded local fixer commits"
 created: 2026-07-09
+closed: 2026-07-10
+closed_commit: 5010bb8
 ---
 
 Three related review-loop/campaign-runner frictions, each hit repeatedly in the 2026-07-09 autonomous campaign session (campaign-7a56519b2f3d; journal: notes/autonomous-session-2026-07-09.md):
