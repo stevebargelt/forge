@@ -1,9 +1,11 @@
 ---
 id: FG-509
 type: story
-status: active
+status: done
 title: "campaign drive loop: contain doGate/reconcileTerminalOutcome throws — park item recoverably, campaign running to paused (audit N-A)"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: 9e3a920
 ---
 
 Source: notes/forge-engineering-review-2026-07-09.md finding N-A (MEDIUM, verified) — the FG-490 dead-end re-opened on two edges. Top unattended-campaign blocker.
