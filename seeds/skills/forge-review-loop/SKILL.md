@@ -20,6 +20,12 @@ Host/orchestrator skill only. It documents a CLI command run from the terminal. 
 
 Check `--dry-run` first if you want to see the resolved plan (ticket, route, commit range, round count, stop conditions) before dispatching.
 
+## `closeable` also requires a trusted reviewed tip
+
+A reviewer pass plus green verification is not enough. Before printing its verdict the loop refreshes the branch's remote-tracking ref with a bounded fetch (`--no-tags`, 20s timeout, no credential prompt), then requires the reviewed tip to **be** the remote head — equality, not merely an ancestor of it. Anything else withholds `closeable` and exits non-zero, naming the condition and the commits involved: `local_only` (push and re-run), `remote_ahead` or `diverged` (pull/rebase and re-run), `remote_unavailable` (no remote-tracking ref resolves, or the fetch failed).
+
+Two consequences worth knowing before you reach for the loop: it needs working remote access, so **an offline run is never closeable by design** — a stale cached ref is never trusted; and a `closeable` verdict is a statement about the remote head, so it stays valid for a merge only until someone else pushes.
+
 ## Reviewer discipline — do not fork it here
 
 The loop's reviewer role and its rubric are owned elsewhere; this skill points to them rather than duplicating them:
