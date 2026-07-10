@@ -10,17 +10,24 @@
 // A new hand-wired park site fails CI here before it can ship. Same spirit as the
 // test-tier subprocess/purity content guard (src/test-tiers.test.ts).
 //
-// ROBUSTNESS (FG-516 review round 2): the earlier guard matched a single-line literal
+// ROBUSTNESS (FG-516 review rounds 2–3): the earlier guard matched a single-line literal
 // `tryTransitionCampaign(campaignId, "running", "paused")` and so was trivially evaded
 // by (i) `campaign.id` instead of the `campaignId` local, (ii) splitting the call over
-// multiple lines, or (iii) an aliased import of the CAS. This version is token-based:
-// it strips comments/strings so a mention in prose can't false-flag, extracts the
-// parkCampaign span by BALANCED BRACES (not a call-shape regex), matches the CAS call
-// across lines and independent of the first argument's spelling, follows import
-// aliases, and only cares that the running→paused string pair appears inside the call's
-// balanced parens. The paused→running RESUME transition (a different, legitimate
-// operation living outside parkCampaign) is deliberately NOT matched — order matters.
-// A negative self-test proves the matcher DOES catch the three bypasses above.
+// multiple lines, or (iii) an aliased import of the CAS. Round 3 closed a further hole:
+// a re-binding of the CAS through a namespace import (`import * as campaigns` →
+// `const ttc = campaigns.tryTransitionCampaign`), a bare value alias (`const ttc =
+// tryTransitionCampaign`), or a destructuring rename (`const { tryTransitionCampaign:
+// ttc } = campaigns`) hid the call behind a fresh identifier the base scan never saw.
+// (A DIRECT namespace member call `campaigns.tryTransitionCampaign(…)` was already
+// caught — the `\b` sits at the dot — but the alias BINDINGS were not.) This version is
+// token-based: it strips comments/strings so a mention in prose can't false-flag,
+// extracts the parkCampaign span by BALANCED BRACES (not a call-shape regex), matches
+// the CAS call across lines and independent of the first argument's spelling, follows
+// import aliases / namespace-member aliases / destructuring renames of the CAS symbol,
+// and only cares that the running→paused string pair appears inside the call's balanced
+// parens. The paused→running RESUME transition (a different, legitimate operation
+// living outside parkCampaign) is deliberately NOT matched — order matters. Negative
+// self-tests prove the matcher DOES catch every bypass above.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -206,13 +213,28 @@ function snippet(src: string, from: number, to: number): string {
   return src.slice(from, to).replace(/\s+/g, " ").trim();
 }
 
-// Import aliases of `name`, e.g. `import { tryTransitionCampaign as ttc }`.
-function importAliases(codeOnly: string, name: string): string[] {
-  const re = new RegExp(name + "\\s+as\\s+([A-Za-z_$][\\w$]*)", "g");
-  const out: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(codeOnly)) !== null) out.push(m[1]!);
-  return out;
+// Every local identifier that resolves to `name`, INCLUDING `name` itself. The
+// base-name scan already catches a direct member call `NS.name(…)` (the `\b` sits at
+// the dot), but a re-binding hides the call behind a fresh identifier the base scan
+// never sees. We enumerate those bindings:
+//   import { name as X }         → X   (import alias)
+//   const/let/var X = name       → X   (bare value alias)
+//   const/let/var X = NS.name    → X   (namespace-member value alias)
+//   const { name: X } = NS       → X   (destructuring rename)
+// The value-alias forms use a `(?!\s*\()` lookahead so a real CALL (`const c =
+// name(…)`, whose result is a value, not the function) is NOT mistaken for an alias.
+// Scans codeOnly so a mention inside a string/comment can't invent an alias.
+function resolvedNames(codeOnly: string, name: string): string[] {
+  const names = new Set<string>([name]);
+  const id = "[A-Za-z_$][\\w$]*";
+  const collect = (re: RegExp): void => {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(codeOnly)) !== null) names.add(m[1]!);
+  };
+  collect(new RegExp(name + "\\s+as\\s+(" + id + ")", "g"));
+  collect(new RegExp("(?:const|let|var)\\s+(" + id + ")\\s*=\\s*(?:" + id + "\\s*\\.\\s*)?" + name + "\\b(?!\\s*\\()", "g"));
+  collect(new RegExp("\\{[^{}]*\\b" + name + "\\s*:\\s*(" + id + ")", "g"));
+  return [...names];
 }
 
 // CALL sites of `notifyCampaignPause` that fall OUTSIDE the parkCampaign span. The
@@ -238,11 +260,11 @@ function notifyCallOffenders(src: string): string[] {
 // (the running→paused park; the reverse paused→running resume is intentionally not a
 // park and legitimately lives outside the boundary) — that fall OUTSIDE the span.
 // Matches across lines, ignores the first argument's spelling, and follows import
-// aliases of the CAS symbol.
+// aliases, namespace-member value aliases, and destructuring renames of the CAS symbol.
 function parkCasOffenders(src: string): string[] {
   const { codeOnly, noComments } = project(src);
   const span = parkCampaignSpan(codeOnly);
-  const names = ["tryTransitionCampaign", ...importAliases(codeOnly, "tryTransitionCampaign")];
+  const names = resolvedNames(codeOnly, "tryTransitionCampaign");
   const offenders: string[] = [];
   for (const name of names) {
     const re = new RegExp("\\b" + name + "\\s*\\(", "g");
@@ -281,13 +303,15 @@ test("FG-516: the running→paused park CAS is called ONLY inside the parkCampai
   );
 });
 
-// Negative self-test: the matcher must FLAG the three bypasses the round-2 reviewer
-// listed — campaign.id, a multiline call, and an aliased import — and must NOT flag
-// the legitimate in-boundary calls or the paused→running resume. Fixture strings only;
-// no real code changes.
+// Negative self-test: the matcher must FLAG every bypass reviewers listed — campaign.id,
+// a multiline call, an aliased import, a direct namespace member call, a namespace-member
+// value alias, a bare value alias, and a destructuring rename — and must NOT flag the
+// legitimate in-boundary calls or the paused→running resume. Fixture strings only; no
+// real code changes.
 test("FG-516 (guard self-test): the matcher catches campaign.id / multiline / aliased-import park bypasses", () => {
   const fixture = [
     'import { tryTransitionCampaign as ttc, tryTransitionCampaign } from "../store/campaigns.js";',
+    'import * as campaigns from "../store/campaigns.js";',
     "",
     "async function parkCampaign(campaignId, itemId, kind, opts) {",
     // In-boundary calls — MUST NOT be flagged.
@@ -318,6 +342,29 @@ test("FG-516 (guard self-test): the matcher catches campaign.id / multiline / al
     '  return ttc(anyId, "running", "paused");',
     "}",
     "",
+    "async function sneakyNamespaceCall(nsId) {",
+    "  // bypass 4: a direct namespace member call",
+    '  return campaigns.tryTransitionCampaign(nsId, "running", "paused");',
+    "}",
+    "",
+    "async function sneakyNamespaceAlias(naId) {",
+    "  // bypass 5: a value alias bound off the namespace member",
+    "  const nsAlias = campaigns.tryTransitionCampaign;",
+    '  return nsAlias(naId, "running", "paused");',
+    "}",
+    "",
+    "async function sneakyBareAlias(baId) {",
+    "  // bypass 6: a bare value alias of the imported symbol",
+    "  const bareAlias = tryTransitionCampaign;",
+    '  return bareAlias(baId, "running", "paused");',
+    "}",
+    "",
+    "async function sneakyDestructured(deId) {",
+    "  // bypass 7: a destructuring rename off the namespace",
+    "  const { tryTransitionCampaign: renamed } = campaigns;",
+    '  return renamed(deId, "running", "paused");',
+    "}",
+    "",
     "function resumeSomewhere(id) {",
     "  // legitimate paused→running resume — the REVERSE direction — must NOT be flagged",
     '  return tryTransitionCampaign(id, "paused", "running");',
@@ -325,8 +372,8 @@ test("FG-516 (guard self-test): the matcher catches campaign.id / multiline / al
   ].join("\n");
 
   const cas = parkCasOffenders(fixture);
-  // Three park bypasses flagged; the in-boundary CAS and the paused→running resume are not.
-  assert.equal(cas.length, 3, `expected exactly the 3 park bypasses, got:\n${cas.join("\n")}`);
+  // Seven park bypasses flagged; the in-boundary CAS and the paused→running resume are not.
+  assert.equal(cas.length, 7, `expected exactly the 7 park bypasses, got:\n${cas.join("\n")}`);
   assert.ok(
     cas.some((o) => /campaign\.id/.test(o)),
     "the campaign.id bypass must be flagged",
@@ -338,6 +385,22 @@ test("FG-516 (guard self-test): the matcher catches campaign.id / multiline / al
   assert.ok(
     cas.some((o) => /ttc\(anyId/.test(o)),
     "the aliased-import bypass must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /tryTransitionCampaign\(nsId/.test(o)),
+    "the direct namespace member call must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /nsAlias\(naId/.test(o)),
+    "the namespace-member value alias must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /bareAlias\(baId/.test(o)),
+    "the bare value alias must be flagged",
+  );
+  assert.ok(
+    cas.some((o) => /renamed\(deId/.test(o)),
+    "the destructuring rename must be flagged",
   );
   assert.ok(
     !cas.some((o) => /"paused", "running"/.test(o)),
