@@ -481,18 +481,26 @@ type RunNextFn = (args: { runId: string; workflow: Workflow }) => Promise<RunNex
 type StartRunFn = (args: StartRunArgs) => { runId: string };
 type LoadWorkflowFn = (name: string, ctx: LoadContext) => Workflow;
 
-// FG-490 (review F7): a thrown runNext drive-path error must never leave the
-// campaign stranded at 'running' with no way back but DB surgery — the same
-// dead end F6 reached via a stalled loop instead of an exception. This shape
-// has a REAL, ACTIVE run behind it (runNext only throws after startRun already
-// succeeded), so it parks the item at 'awaiting_gate' (the SAME recoverable
-// shape F2b's no-progress backstop uses below, so `campaign resume` reattaches
-// to this run instead of campaignBlocker refusing outright) and the campaign
-// at 'paused', durably records the failure, then rethrows the ORIGINAL error
-// (wrapped with next-action guidance via `cause`) so it still reaches the
-// CLI's top-level handler. If the park itself throws (e.g. a DB error), that
-// secondary failure is swallowed — the original drive error must always be
-// what propagates, never masked by a failure in the recovery path itself.
+// FG-490 (review F7), widened by FG-509: a thrown drive-path error must never
+// leave the campaign stranded at 'running' with no way back but DB surgery —
+// the same dead end F6 reached via a stalled loop instead of an exception.
+// All four callers — runNext, reconcileTerminalOutcome, and the two unattended
+// doGate auto-advances (gate:auto/none and gate:verdict-pass) — share the
+// property this park depends on: a run row already exists behind the item,
+// because every one of them is reached only after startRun succeeded. So the
+// item parks at 'awaiting_gate' (the SAME recoverable shape F2b's no-progress
+// backstop uses below, so `campaign resume` reattaches to this run instead of
+// campaignBlocker refusing outright) and the campaign at 'paused', the failure
+// is durably recorded, then the ORIGINAL error is rethrown (wrapped with
+// next-action guidance via `cause`) so it still reaches the CLI's top-level
+// handler. What resume DOES on reattach splits by caller: the three
+// active-run sites re-enter the drive loop via the liveness probe, while
+// reconcileTerminalOutcome's run is terminal or absent, so resume falls
+// through to the out-of-band evidence path and retries the same reconciliation
+// (see docs/concepts.md, "Drive-path catch-and-park"). If the park itself
+// throws (e.g. a DB error), that secondary failure is swallowed — the original
+// drive error must always be what propagates, never masked by a failure in the
+// recovery path itself.
 //
 // NOTE: a thrown startRun has no live run to reattach to — see the sibling
 // parkCampaignOnStartRunThrow below, which parks that shape directly at its
@@ -615,7 +623,11 @@ async function driveWorkflowItem(
         status: "abandoned",
         createdAt: nowIso(),
       };
-      reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
+      try {
+        reconcileTerminalOutcome(termRun, itemId, fns.projectDir);
+      } catch (err) {
+        parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+      }
       const updatedItem = getCampaignItem(itemId);
       const bk = updatedItem?.blockerKind;
       // campaign_system is a shared blocker — pause the campaign
@@ -681,12 +693,20 @@ async function driveWorkflowItem(
 
       if (gateType === "auto" || gateType === "none") {
         // Auto-advance: don't pause the campaign, continue the drive loop.
-        await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:auto)", {});
+        try {
+          await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:auto)", {});
+        } catch (err) {
+          parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+        }
       } else if (gateType === "verdict") {
         const taskVerdicts = verdictsForTask(awaitingTask.id);
         const agg = aggregateVerdicts(taskVerdicts);
         if (agg.verdict === "pass") {
-          await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, all reds passed)", {});
+          try {
+            await doGate(awaitingTask.id, "advance", "campaign: auto-advance (gate:verdict, all reds passed)", {});
+          } catch (err) {
+            parkCampaignOnDriveThrow(campaignId, itemId, ticketId, runId, err);
+          }
         } else if (agg.verdict === "fail") {
           updateCampaignItem(itemId, {
             lifecycleStatus: "blocked_by_red",
