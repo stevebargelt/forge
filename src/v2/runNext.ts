@@ -430,6 +430,8 @@ async function dispatchSingleStep(args: {
     phase,
     role: agentRole,
     inputs,
+    // FG-512: runner-minted row — total dispatch provenance (see taskDispatchKind).
+    dispatchSource: "workflow",
     composedSystemPrompt: composeSystemPrompt({
       role: agentRole,
       workflow: args.workflow,
@@ -982,6 +984,8 @@ async function runOneRed(args: {
     runId: args.runId,
     phase: args.step.id,
     role: args.red.agent,
+    // FG-512: runner-minted red row — total dispatch provenance.
+    dispatchSource: "workflow",
     inputs: {
       failureModes,
       ...(args.reviewerContextPacket ? { reviewerContextPacket: args.reviewerContextPacket } : {}),
@@ -1435,6 +1439,8 @@ async function dispatchFanoutStep(args: {
         runId: args.runId,
         phase: step.id,
         role: step.agent ?? "fanout",
+        // FG-512: runner-minted fanout parent row — total dispatch provenance.
+        dispatchSource: "workflow",
         inputs: {
           fanout: {
             from_upstream: fanout.from_upstream,
@@ -1796,6 +1802,8 @@ async function runFanoutChild(args: {
     phase: step.id,
     role: agentRole,
     inputs: childInputs,
+    // FG-512: runner-minted fanout child row — total dispatch provenance.
+    dispatchSource: "workflow",
     composedSystemPrompt: composeSystemPrompt({
       role: agentRole,
       workflow: args.workflow,
@@ -2526,6 +2534,8 @@ function dispatchManualStep(runId: string, step: Step): string {
     phase: step.id,
     role: "manual",
     inputs: {},
+    // FG-512: runner-minted manual-step row — total dispatch provenance.
+    dispatchSource: "workflow",
     composedSystemPrompt: "",
   };
   insertTask({
@@ -2598,6 +2608,9 @@ function emptyTaskPackage(taskId: string, runId: string, phase: string, role: st
     phase,
     role,
     inputs: {},
+    // FG-512: runner-minted rows (shipping-reviewer pre-fail red, fanout-parent
+    // failure row) — total dispatch provenance.
+    dispatchSource: "workflow",
     composedSystemPrompt: "",
   };
 }

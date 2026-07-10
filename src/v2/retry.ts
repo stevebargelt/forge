@@ -402,10 +402,14 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     taskPackage: {
       ...task.taskPackage,
       taskId: newId,
-      // FG-507: this row IS dispatched by invoke semantics (dispatchRetriedAdHocTask
-      // → dispatchInvokeTask), so record that, rather than leaving a retried legacy
-      // row marker-less and re-deciding it by inference on the next retry.
-      ...(adHoc ? { dispatchSource: "invoke" as const } : {}),
+      // FG-507/FG-512: stamp provenance UNCONDITIONALLY so a retried row is never
+      // re-decided by inference on the next retry. An ad-hoc row IS dispatched by
+      // invoke semantics (dispatchRetriedAdHocTask → dispatchInvokeTask), so it
+      // records `invoke`; every other row here is a `workflow_step` by construction
+      // (planRetryDispatch returns undefined only for that kind, and throws on
+      // `unknown`), so it records `workflow` — closing the gap where a marker-less
+      // legacy workflow row would otherwise mint a fresh marker-less row.
+      dispatchSource: adHoc ? ("invoke" as const) : ("workflow" as const),
       // AWN-3: hand the agent the previous failure as context so the retry is
       // informed. Prose + tag only — never secrets (task.error is a summary,
       // failure_kind is a classifier label).

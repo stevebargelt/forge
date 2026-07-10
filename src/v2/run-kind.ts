@@ -65,6 +65,11 @@ export type TaskDispatchKind =
 
 export function taskDispatchKind(task: Task, run: Run): TaskDispatchKind {
   if (task.taskPackage.dispatchSource === "invoke") return { kind: "adhoc" };
+  // FG-512: runner-created rows now stamp `workflow`, which classifies decisively
+  // as a workflow step — so rule (d)'s `legacy_ambiguous_phase` refusal below fires
+  // ONLY for marker-less legacy rows. A stamped `task`-phase row is no longer
+  // ambiguous: the marker says the runner minted it.
+  if (task.taskPackage.dispatchSource === "workflow") return { kind: "workflow_step" };
   if (!taskHasPipelineFinalize(run)) return { kind: "adhoc" };
   let workflow;
   try {
