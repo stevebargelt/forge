@@ -23,7 +23,7 @@ export function setDoneAuditMapForTest(map: Map<string, DoneAuditResult> | null)
 import { resolvePlan, sourceInputToPlannerInput, getItemPlanEntry } from "./planner.js";
 import type { PlanMode } from "./planner.js";
 import type { Campaign, CampaignItem } from "../types/index.js";
-import { campaignBlocker } from "./executor.js";
+import { campaignBlocker, probeCampaignSystemRetryEvidence } from "./executor.js";
 import { collectOutOfBandEvidence } from "./reconcile-outofband-collect.js";
 import { evaluateOutOfBandEvidence } from "./reconcile-outofband-evidence.js";
 import { collectReconcileEvidence } from "./reconcile-collect.js";
@@ -135,6 +135,12 @@ function hasUnresolvedAuthoritativeOutcome(projectDir: string, item: CampaignIte
 // for the per-item hint lines in show/report, so the two surfaces never drift.
 export function formatOutOfBandEligibleHint(ticketId: string): string {
   return `${ticketId} delivered out-of-band — eligible for evidence-gated completion via forge campaign reconcile`;
+}
+
+// FG-511: the retry counterpart to formatOutOfBandEligibleHint — shared by the
+// single top-level next-action line and the per-item hint lines in show/report.
+export function formatCampaignSystemRetryHint(campaignId: string, ticketId: string): string {
+  return `${ticketId}'s run failed on transient (auth/infrastructure) evidence and never shipped — eligible for an evidence-gated reset via \`forge campaign retry ${campaignId} ${ticketId}\`, then resume`;
 }
 
 function outOfBandCompletableAction(campaign: Campaign, item: CampaignItem): string | null {
@@ -299,6 +305,24 @@ function campaignSystemLaneEvidenceHint(campaign: Campaign, item: CampaignItem):
   return null;
 }
 
+// FG-511: a campaign_system item whose run never shipped — so neither reconcile
+// hint above applies — is still recoverable when the run's durable task evidence
+// proves the failure was transient. Calls retryCampaignItem's OWN probe (a
+// read-only evaluator) behind the same guards retryCampaignItem applies before
+// reaching it: paused campaign, failed/blocked lifecycle, campaign_system
+// blockerKind. Anything the probe refuses yields no hint, so the operator never
+// sees a `forge campaign retry` pointer for a retry that would refuse.
+// Un-memoized, matching campaignSystemLaneEvidenceHint — the probe reads the
+// store, it doesn't shell out to git.
+function campaignSystemRetryHint(campaign: Campaign, item: CampaignItem): string | null {
+  if (campaign.status !== "paused") return null;
+  if (item.blockerKind !== "campaign_system") return null;
+  if (!(item.lifecycleStatus === "failed" && item.outcome === "blocked")) return null;
+  return probeCampaignSystemRetryEvidence(campaign.id, item.ticketId, item.runId).ok
+    ? formatCampaignSystemRetryHint(campaign.id, item.ticketId)
+    : null;
+}
+
 // FG-444 fix: outOfBandCompletableAction shells out to git (via
 // collectOutOfBandEvidence/hasUnresolvedAuthoritativeOutcome) — memoize per
 // ticketId so a single assemble call evaluates each item at most once, even
@@ -318,6 +342,9 @@ function memoizeOutOfBandCompletableAction(): (campaign: Campaign, item: Campaig
 // (`outOfBand ?? reconcileHint ?? requestedHumanAction`) the awaiting_gate
 // gateParkedItem branch below already uses. Returns null when neither hint
 // applies, so callers fall through to the plain blockedItemGuidance text.
+// FG-511: the retry hint comes LAST — a campaign_system item that actually
+// shipped out-of-band must be completed from that evidence (reconcile), never
+// re-dispatched; only an item with no ship evidence at all reaches retry.
 function campaignSystemRecoverableAction(
   campaign: Campaign,
   item: CampaignItem,
@@ -327,7 +354,7 @@ function campaignSystemRecoverableAction(
   if (eligible) return eligible;
   const laneHint = campaignSystemLaneEvidenceHint(campaign, item);
   if (laneHint) return `run \`forge campaign reconcile\` to capture host verification for ${item.ticketId} and complete it`;
-  return null;
+  return campaignSystemRetryHint(campaign, item);
 }
 
 function computeNextShowAction(
@@ -540,6 +567,10 @@ export type ShowItemRow = {
   // blockerKind is 'campaign_system' that turns out to be delivered out-of-band,
   // using the same evidence bar as outOfBandEligible above.
   campaignSystemEligible: boolean;
+  // FG-511: per-item campaign_system RETRY eligibility — the disjoint case:
+  // the item never shipped, and its run's durable task evidence proves the
+  // failure was transient, so `forge campaign retry` (not reconcile) recovers it.
+  campaignSystemRetryEligible: boolean;
   // FG-442: policy-derived execution lane, per item.
   lane: string;
   laneRationale: string;
@@ -616,6 +647,7 @@ export function assembleCampaignShow(id: string): ShowResult | null {
         campaignSystemLaneEvidenceHint(campaign, i),
       outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
       campaignSystemEligible: getCampaignSystemCompletableHint(campaign, i) !== null,
+      campaignSystemRetryEligible: campaignSystemRetryHint(campaign, i) !== null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
       materialLaneAssumptions: planEntry.materialLaneAssumptions,
@@ -851,6 +883,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
         campaignSystemLaneEvidenceHint(campaign, i),
       outOfBandEligible: getOutOfBandCompletableAction(campaign, i) !== null,
       campaignSystemEligible: getCampaignSystemCompletableHint(campaign, i) !== null,
+      campaignSystemRetryEligible: campaignSystemRetryHint(campaign, i) !== null,
       reviewerResult: null,
       lane: planEntry.lane,
       laneRationale: planEntry.laneRationale,
@@ -943,6 +976,7 @@ export function renderCampaignReportHuman(result: ReportResult): string[] {
     if (item.hostVerificationReconcileHint) lines.push(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
     if (item.outOfBandEligible) lines.push(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
     if (item.campaignSystemEligible) lines.push(`    campaign-system-recoverable: ${formatOutOfBandEligibleHint(item.ticketId)}`);
+    if (item.campaignSystemRetryEligible) lines.push(`    campaign-system-retryable: ${formatCampaignSystemRetryHint(result.campaignId, item.ticketId)}`);
     // Execution mode and workflow traceability — the mechanism underlying the lane.
     if (item.executionMode === "invoke (escape hatch)") {
       lines.push(`    execution: invoke (escape hatch)${item.agentRole ? ` [role=${item.agentRole}]` : ""}`);

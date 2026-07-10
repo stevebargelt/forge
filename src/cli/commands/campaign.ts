@@ -7,7 +7,7 @@ import { classifyItemsForPlan } from "../../campaign/lane-classifier.js";
 import type { ClassifyTicketFn } from "../../campaign/lane-classifier.js";
 import { listCampaignItems, getCampaign, approveCampaign, tryTransitionCampaign } from "../../store/campaigns.js";
 import { startCampaign, resumeCampaign, escalateCampaignItemLane, hasUnresolvedLaneEscalation, retryCampaignItem } from "../../campaign/executor.js";
-import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, formatOutOfBandEligibleHint } from "../../campaign/report.js";
+import { assembleCampaignShow, assembleCampaignReport, renderCampaignReportHuman, formatOutOfBandEligibleHint, formatCampaignSystemRetryHint } from "../../campaign/report.js";
 import { reconcileCampaign } from "../../campaign/reconcile.js";
 import { describeMissingReason } from "../../campaign/reconcile-evidence.js";
 import { listTickets } from "../../backlog/structured.js";
@@ -803,6 +803,7 @@ export function registerCampaign(program: Command): void {
         if (item.hostVerificationReconcileHint) console.log(`    host-verification-status: ${item.hostVerificationReconcileHint}`);
         if (item.outOfBandEligible) console.log(`    out-of-band-eligible: ${formatOutOfBandEligibleHint(item.ticketId)}`);
         if (item.campaignSystemEligible) console.log(`    campaign-system-recoverable: ${formatOutOfBandEligibleHint(item.ticketId)}`);
+        if (item.campaignSystemRetryEligible) console.log(`    campaign-system-retryable: ${formatCampaignSystemRetryHint(result.campaignId, item.ticketId)}`);
         if (item.readiness && (item.readiness.outcome === "needs_refinement" || item.readiness.outcome === "blocked" || (item.outcome === "held" && item.blockerKind === "readiness"))) {
           console.log(`    readiness: ${item.readiness.outcome}`);
           if (item.readiness.gaps.length > 0) console.log(`    gaps: ${item.readiness.gaps.join("; ")}`);

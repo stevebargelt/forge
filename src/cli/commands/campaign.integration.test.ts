@@ -4473,6 +4473,139 @@ test("integ FG-489: `campaign retry` refuses a scope-blocked item and names the 
   assert.equal(item2After.blocker_kind, "lane_escalation");
 });
 
+// ── FG-511: `campaign retry` on a campaign_system item, through the real CLI ──
+//
+// The executor-level tests cover retryCampaignItem's evidence probe directly.
+// These pin the CLI contract the operator actually touches: exit code, the human
+// and --json stdout on acceptance, and the stderr refusal naming the
+// non-transient evidence — for the campaign_system shape specifically, whose
+// verdict depends on run/task rows the CLI process must read for itself.
+
+// Seeds the durable evidence the probe reads back: a paused campaign whose single
+// item is parked on the campaign_system placeholder, pointing at an abandoned run
+// with one failed primary task per kind (each with the task.failed event that
+// carries its failure_kind).
+function seedCampaignSystemItem(dbPath: string, campaignId: string, failureKinds: string[]): { itemId: string; runId: string } {
+  const db = new Database(dbPath);
+  db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+  const itemId = (db.prepare("SELECT id FROM campaign_items WHERE campaign_id = ? ORDER BY item_order ASC").get(campaignId) as { id: string }).id;
+  const runId = `run-${itemId}`;
+  const now = new Date().toISOString();
+
+  db.prepare("INSERT INTO runs (id, workflow, title, status, created_at, project_dir) VALUES (?, 'feature', ?, 'abandoned', ?, ?)").run(runId, "FG-101", now, projectDir);
+  failureKinds.forEach((kind, i) => {
+    const taskId = `${runId}-task-${i}`;
+    db.prepare(
+      "INSERT INTO tasks (id, run_id, phase, agent_role, status, task_package, created_at, error) VALUES (?, ?, 'implement', 'engineer', 'failed', '{}', ?, ?)"
+    ).run(taskId, runId, now, `seeded ${kind}`);
+    db.prepare("INSERT INTO events (run_id, task_id, event_type, payload, created_at) VALUES (?, ?, 'task.failed', ?, ?)").run(
+      runId,
+      taskId,
+      JSON.stringify({ failure_kind: kind, error: `seeded ${kind}` }),
+      now
+    );
+  });
+  db.prepare(
+    "UPDATE campaign_items SET lifecycle_status = 'failed', outcome = 'blocked', blocker_kind = 'campaign_system', run_id = ?, requested_human_action = 'run ended without a terminal outcome' WHERE id = ?"
+  ).run(runId, itemId);
+  db.close();
+  return { itemId, runId };
+}
+
+function planAndApprove(): string {
+  const planResult = runForge(["campaign", "plan", "--tickets", "FG-101", "--project", projectDir, "--mode", "sequential", "--json"]);
+  assert.equal(planResult.status, 0, `plan failed\nstderr: ${planResult.stderr}`);
+  const campaignId = (JSON.parse(planResult.stdout) as { campaignId: string }).campaignId;
+  const approveResult = runForge(["campaign", "approve", campaignId, "--rationale", "LGTM"]);
+  assert.equal(approveResult.status, 0, `approve failed\nstderr: ${approveResult.stderr}`);
+  return campaignId;
+}
+
+test("integ FG-511: real `campaign retry` accepts a campaign_system item on transient run evidence — human and --json stdout, audit event, item reset", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { itemId, runId } = seedCampaignSystemItem(dbPath, campaignId, ["idle_timeout"]);
+
+  // `campaign show` must point the operator at retry BEFORE they run it — the
+  // human line and the --json field both.
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.equal(showResult.status, 0, `show failed\nstderr: ${showResult.stderr}`);
+  assert.ok(
+    showResult.stdout.includes(`forge campaign retry ${campaignId} FG-101`),
+    `show must name the evidence-gated retry\nstdout: ${showResult.stdout}`
+  );
+  const showJson = JSON.parse(runForge(["campaign", "show", campaignId, "--json"]).stdout) as {
+    items: { campaignSystemRetryEligible: boolean }[];
+  };
+  assert.equal(showJson.items[0]!.campaignSystemRetryEligible, true, "the JSON surface must expose retry eligibility");
+
+  const humanResult = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.equal(humanResult.status, 0, `retry failed\nstdout: ${humanResult.stdout}\nstderr: ${humanResult.stderr}`);
+  assert.match(humanResult.stdout, /Reset FG-101 in campaign .* to pending\./);
+  assert.match(humanResult.stdout, new RegExp(`forge campaign resume ${campaignId}`));
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const item = dbAfter.prepare("SELECT lifecycle_status, outcome, blocker_kind, run_id FROM campaign_items WHERE id = ?").get(itemId) as {
+    lifecycle_status: string;
+    outcome: string | null;
+    blocker_kind: string | null;
+    run_id: string | null;
+  };
+  const auditEvents = dbAfter
+    .prepare("SELECT payload FROM events WHERE run_id = ? AND event_type = 'campaign_item.campaign_system_retried'")
+    .all(runId) as { payload: string }[];
+  dbAfter.close();
+
+  assert.equal(item.lifecycle_status, "pending", "retry must reset the item to pending");
+  assert.equal(item.blocker_kind, null, "retry must clear the campaign_system blockerKind");
+  assert.equal(item.run_id, null, "retry must clear the abandoned run's linkage");
+  assert.equal(auditEvents.length, 1, "acceptance must record exactly one campaign_system_retried audit event");
+  const evidence = (JSON.parse(auditEvents[0]!.payload) as { evidence: { failureKind: string; classified: string }[] }).evidence;
+  assert.deepEqual(evidence.map((e) => [e.failureKind, e.classified]), [["idle_timeout", "infrastructure"]]);
+
+  // The --json surface of a second, independent acceptance.
+  const campaignId2 = planAndApprove();
+  seedCampaignSystemItem(dbPath, campaignId2, ["idle_timeout"]);
+  const jsonResult = runForge(["campaign", "retry", campaignId2, "FG-101", "--json"]);
+  assert.equal(jsonResult.status, 0, `retry --json failed\nstderr: ${jsonResult.stderr}`);
+  assert.deepEqual(JSON.parse(jsonResult.stdout), { campaignId: campaignId2, ticketId: "FG-101", lifecycleStatus: "pending" });
+});
+
+test("integ FG-511: real `campaign retry` refuses a campaign_system item on non-transient run evidence, naming it — item unchanged, no audit event", () => {
+  const campaignId = planAndApprove();
+  const dbPath = join(forgeHome, "forge.db");
+  const { itemId, runId } = seedCampaignSystemItem(dbPath, campaignId, ["idle_timeout", "gate_rejected"]);
+
+  // The mirror surface must refuse too: no retry pointer for evidence retry rejects.
+  const showResult = runForge(["campaign", "show", campaignId]);
+  assert.ok(!showResult.stdout.includes("forge campaign retry"), `show must not name retry for mixed evidence\nstdout: ${showResult.stdout}`);
+  const showJson = JSON.parse(runForge(["campaign", "show", campaignId, "--json"]).stdout) as {
+    items: { campaignSystemRetryEligible: boolean }[];
+  };
+  assert.equal(showJson.items[0]!.campaignSystemRetryEligible, false);
+
+  const retryResult = runForge(["campaign", "retry", campaignId, "FG-101"]);
+  assert.notEqual(retryResult.status, 0, "mixed transient+scope evidence must refuse fail-closed");
+  assert.match(retryResult.stderr, new RegExp(`${runId}-task-1`), `refusal must name the non-transient task\nstderr: ${retryResult.stderr}`);
+  assert.match(retryResult.stderr, /gate_rejected/, "refusal must name the failure kind");
+  assert.match(retryResult.stderr, /'scope'/, "refusal must name the classification");
+
+  const dbAfter = new Database(dbPath, { readonly: true });
+  const item = dbAfter.prepare("SELECT lifecycle_status, blocker_kind, run_id FROM campaign_items WHERE id = ?").get(itemId) as {
+    lifecycle_status: string;
+    blocker_kind: string | null;
+    run_id: string | null;
+  };
+  const auditCount = (
+    dbAfter.prepare("SELECT COUNT(*) as n FROM events WHERE event_type = 'campaign_item.campaign_system_retried'").get() as { n: number }
+  ).n;
+  dbAfter.close();
+  assert.equal(item.lifecycle_status, "failed", "a refused retry must not mutate the item");
+  assert.equal(item.blocker_kind, "campaign_system");
+  assert.equal(item.run_id, runId, "a refused retry must not clear the run linkage");
+  assert.equal(auditCount, 0, "a refused retry must record no audit event");
+});
+
 // ── FG-442 review (PR #11 follow-up), Finding 2: paused-approve plan-hash scoping ──
 
 test("integ FG-442 Finding 2: campaign approve refuses a paused campaign parked at awaiting_gate with an unchanged plan_hash (campaign-922 shape)", () => {

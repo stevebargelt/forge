@@ -1900,7 +1900,11 @@ export type CampaignSystemRetryEvidence = { taskId: string; failureKind: string;
 // failed primary task provably classifies transient. Fail-closed in every branch:
 // missing run, complete run, no failed primary, or ANY non-transient/mixed
 // classification refuses and names what was missing or non-transient.
-function probeCampaignSystemRetryEvidence(
+//
+// Exported (read-only — it never writes) so report.ts's show/report preview can
+// gate its `forge campaign retry` guidance on the SAME evidence the write path
+// judges from, instead of mirroring the probe and drifting from it.
+export function probeCampaignSystemRetryEvidence(
   campaignId: string,
   ticketId: string,
   runId: string | undefined,
