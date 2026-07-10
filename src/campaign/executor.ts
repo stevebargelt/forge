@@ -66,6 +66,7 @@ import {
   resumeCampaignToRunning,
   setCampaignNotifyEmitterForTest,
 } from "./park.js";
+import type { ParkContext } from "./park.js";
 export { setCampaignNotifyEmitterForTest };
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
@@ -331,7 +332,7 @@ async function finalizeInvokeDispatch(
       outcome: "blocked",
       blockerKind: "lane_escalation",
     });
-    if (await parkCampaign(campaignId, item.id, "decision_needed")) {
+    if (await parkCampaign(campaignId, item.id, "decision_needed", { exemption: "item-carries-context" })) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -350,7 +351,7 @@ async function finalizeInvokeDispatch(
       continuePolicy: "hold_campaign",
     });
     itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
-    if (await parkCampaign(campaignId, item.id, "blocked")) {
+    if (await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" })) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -374,7 +375,7 @@ async function finalizeInvokeDispatch(
   itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
 
   if (shared) {
-    if (await parkCampaign(campaignId, item.id, "blocked")) {
+    if (await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" })) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -551,7 +552,7 @@ async function parkCampaignOnDriveThrow(
     // commits nothing, so it must NOT emit a fresh unattended-wedge push for a
     // pause it did not cause. Awaited before the rethrow below so the milestone is
     // settled before the CLI's process.exit(1).
-    await parkCampaign(campaignId, itemId, "blocked", { bodyBlockerKind: "drive_error" });
+    await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { bodyBlockerKind: "drive_error" });
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -609,7 +610,7 @@ async function parkCampaignOnStartRunThrow(
     // when that insert failed the item has no run of its OWN — pass a campaign
     // fallback run so notifyCampaignPause still emits (scoped to another item's
     // run) instead of going silent, exactly like the other no-own-run parks.
-    await parkCampaign(campaignId, itemId, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+    await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -671,7 +672,7 @@ async function driveWorkflowItem(
       const bk = updatedItem?.blockerKind;
       // campaign_system is a shared blocker — pause the campaign
       if (bk && isSharedBlocker(bk)) {
-        await parkCampaign(campaignId, itemId, "blocked");
+        await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
         return {
           outcome: "paused",
           itemRecord: {
@@ -708,7 +709,7 @@ async function driveWorkflowItem(
         blockerKind: "scope",
         requestedHumanAction: `workflow blocked by authoritative reviewer at step ${blockedRedTask.phase}`,
       });
-      await parkCampaign(campaignId, itemId, "blocked");
+      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
       return {
         outcome: "paused",
         itemRecord: {
@@ -753,7 +754,7 @@ async function driveWorkflowItem(
             blockerKind: "scope",
             requestedHumanAction: `workflow blocked by failing verdict at step ${step?.id ?? awaitingTask.phase}`,
           });
-          await parkCampaign(campaignId, itemId, "blocked");
+          await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
           parked = true;
           break;
         } else {
@@ -764,7 +765,7 @@ async function driveWorkflowItem(
             blockerKind: "campaign_system",
             requestedHumanAction: `workflow verdict inconclusive at step ${step?.id ?? awaitingTask.phase}`,
           });
-          await parkCampaign(campaignId, itemId, "blocked");
+          await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" });
           parked = true;
           break;
         }
@@ -780,7 +781,7 @@ async function driveWorkflowItem(
         // FG-516 (finding F2): a gate:human park persists no blockerKind by design
         // (that unset field marks the out-of-band reconcile shape), so compose a
         // body-only label — otherwise the pushed body carries no blocker kind at all.
-        await parkCampaign(campaignId, itemId, "decision_needed", { bodyBlockerKind: "human_gate" });
+        await parkCampaign(campaignId, itemId, "decision_needed", { exemption: "item-carries-context" }, { bodyBlockerKind: "human_gate" });
         parked = true;
         break;
       }
@@ -833,7 +834,7 @@ async function driveWorkflowItem(
       // FG-516 (finding F2): the no-progress backstop parks awaiting_gate with no
       // persisted blockerKind (same recoverable reattach shape), so compose a
       // body-only label so the pushed body still leads with a blocker kind.
-      await parkCampaign(campaignId, itemId, "blocked", { bodyBlockerKind: "no_progress" });
+      await parkCampaign(campaignId, itemId, "blocked", { exemption: "item-carries-context" }, { bodyBlockerKind: "no_progress" });
       const updatedItem = getCampaignItem(itemId);
       return {
         outcome: "recovery_needed",
@@ -1047,7 +1048,12 @@ export async function driveRemainingItems(
             // evidence_reconcile_refused for a live run). Route directly to the
             // same recovery_needed handling the shared block further down uses.
             itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-            await parkCampaign(campaignId, item.id, "blocked");
+            // FG-518: the resume liveness-probe workflow-load-failure park fires its
+            // milestone WITHOUT re-describing the load failure — the item is an
+            // out-of-band awaiting_gate row (no blockerKind), so the body retains its
+            // OLD gate action. Composing a truthful load-failure body here IS the
+            // FG-518 deliverable; deferred as a documented known-gap, not faked.
+            await parkCampaign(campaignId, item.id, "blocked", { exemption: "known-gap", ticket: "FG-518" });
             return { stopReason: "recovery_needed", itemRecords };
           }
           const liveTasks = tasksForRun(item.runId);
@@ -1147,7 +1153,7 @@ export async function driveRemainingItems(
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus, blockerKind: "campaign_system" });
         // This item has no run of its own, so scope the pause milestone to a
         // campaign fallback run instead of going silent.
-        await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+        await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
       const runForItem = preloadedRun ?? getRun(item.runId);
@@ -1168,7 +1174,7 @@ export async function driveRemainingItems(
           });
         }
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus, blockerKind: item.blockerKind ?? "campaign_system" });
-        await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+        await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
       let workflowForItem: Workflow;
@@ -1179,7 +1185,11 @@ export async function driveRemainingItems(
           workflowForItem = doLoadWorkflow(runForItem.workflow, { projectDir: opts.projectDir });
         } catch {
           itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-          await parkCampaign(campaignId, item.id, "blocked");
+          // FG-518: the reattach-path twin of the liveness-probe load-failure park
+          // above — same out-of-band awaiting_gate item, same deferred difficulty of
+          // composing a load-failure body over a row carrying a stale gate action.
+          // Deferred to FG-518 with its sibling as one coherent unit, not half-fixed.
+          await parkCampaign(campaignId, item.id, "blocked", { exemption: "known-gap", ticket: "FG-518" });
           return { stopReason: "recovery_needed", itemRecords };
         }
       }
@@ -1248,7 +1258,7 @@ export async function driveRemainingItems(
         lifecycleStatus: item.lifecycleStatus,
         blockerKind: "campaign_system",
       });
-      await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
+      await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
       return { stopReason: "recovery_needed", itemRecords };
     }
 
@@ -1394,7 +1404,7 @@ export async function driveRemainingItems(
           lifecycleStatus: "failed",
           outcome: "blocked",
         });
-        if (await parkCampaign(campaignId, item.id, "blocked")) {
+        if (await parkCampaign(campaignId, item.id, "blocked", { exemption: "item-carries-context" })) {
           return { stopReason: "paused", itemRecords };
         }
         const postLoadFail = getCampaign(campaignId);
@@ -1616,14 +1626,21 @@ export async function driveRemainingItems(
       });
       const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
 
+      // FG-516 (finding 1): the invoke-lane eligibility park below persists NO
+      // blockerKind (the item stays the out-of-band awaiting_gate reconcile shape
+      // reconcile.ts / report.ts / FG-483 all key off), so hand parkCampaign a
+      // composed context whose kind feeds the pushed BODY label only — without it the
+      // body carried no `blocker: <kind>` at all. human_decision is the honest kind:
+      // the automated evidence gate could not confirm the ship, a human must review
+      // and reconcile.
+      let laneParkContext: ParkContext = { exemption: "item-carries-context" };
       if (finalized.outcome === "parked") {
-        updateCampaignItem(item.id, {
-          lifecycleStatus: "awaiting_gate",
-          requestedHumanAction:
-            finalized.missing.length > 0
-              ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
-              : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`,
-        });
+        const parkAction =
+          finalized.missing.length > 0
+            ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+            : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
+        updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
+        laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
       }
 
       const runTasks = tasksForRun(runId);
@@ -1645,7 +1662,7 @@ export async function driveRemainingItems(
       });
 
       if (outcome !== "shipped") {
-        if (await parkCampaign(campaignId, item.id, "decision_needed")) {
+        if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
           return { stopReason: "paused", itemRecords };
         }
         const post = getCampaign(campaignId);
@@ -1715,14 +1732,17 @@ export async function driveRemainingItems(
       const finalized = finalizeInvokeLaneOutcome(campaignId, itemWithRunId, eligibility);
       const outcome: CampaignItemOutcome | undefined = finalized.outcome === "shipped" ? "shipped" : undefined;
 
+      // FG-516 (finding 2): same missing-blocker-label path as finding 1, on the
+      // docs_only/test_only/review_only/research_only invoke lanes — persist no
+      // blockerKind (out-of-band marker), feed the composed kind to the body label.
+      let laneParkContext: ParkContext = { exemption: "item-carries-context" };
       if (finalized.outcome === "parked") {
-        updateCampaignItem(item.id, {
-          lifecycleStatus: "awaiting_gate",
-          requestedHumanAction:
-            finalized.missing.length > 0
-              ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
-              : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`,
-        });
+        const parkAction =
+          finalized.missing.length > 0
+            ? `agent finished but evidence is incomplete for ${item.ticketId} (${finalized.missing.join(", ")}) — resolve and run \`forge campaign reconcile\`, or resolve manually`
+            : `agent finished and ${item.ticketId} looks shipped, but the campaign state changed mid-evaluation — run \`forge campaign resume\` or \`forge campaign reconcile\` to finalize`;
+        updateCampaignItem(item.id, { lifecycleStatus: "awaiting_gate", requestedHumanAction: parkAction });
+        laneParkContext = { blockerKind: "human_decision", requestedHumanAction: parkAction };
       }
 
       const runTasks = tasksForRun(runId);
@@ -1743,7 +1763,7 @@ export async function driveRemainingItems(
       });
 
       if (outcome !== "shipped") {
-        if (await parkCampaign(campaignId, item.id, "decision_needed")) {
+        if (await parkCampaign(campaignId, item.id, "decision_needed", laneParkContext)) {
           return { stopReason: "paused", itemRecords };
         }
         const post = getCampaign(campaignId);
@@ -1770,7 +1790,7 @@ export async function driveRemainingItems(
   // residual needs a campaign-scoped channel, deferred to FG-517.
   if (anyHeld) {
     const heldItemIds = [...new Set(itemRecords.filter((r) => r.outcome === "held").map((r) => r.itemId))];
-    if (await parkCampaign(campaignId, heldItemIds, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) })) {
+    if (await parkCampaign(campaignId, heldItemIds, "blocked", { exemption: "item-carries-context" }, { fallbackRunId: pickCampaignFallbackRunId(campaignId) })) {
       return { stopReason: "paused", itemRecords };
     }
     const finalCheck = getCampaign(campaignId);

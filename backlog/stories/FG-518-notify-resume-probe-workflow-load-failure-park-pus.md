@@ -13,3 +13,5 @@ Why deferred rather than fixed in FG-516 (disposition per the review-disposition
 Acceptance:
 - [ ] the resume-probe workflow-load-failure park updates the item (or composes at notify time) with a blockerKind and requestedHumanAction that name the workflow-load failure (workflow name + reason + "fix the workflow YAML, then forge campaign resume"), consistent with how the other load-failure park (driveWorkflowItem's YAML-missing site) reports it
 - [ ] regression test through the REAL resume path (liveness probe entering the load-failure branch) asserting the pushed milestone carries the load-failure context, not a stale gate action
+
+**Scope note (2026-07-10, FG-516 fixer audit):** this ticket covers BOTH structurally-identical workflow-load-failure parks — the resume liveness-probe site (executor.ts:~1056) AND its reattach-path twin (executor.ts:~1192). Both are marked `{ exemption: "known-gap", ticket: "FG-518" }` in the typed ParkContext at the call site; fixing one without the other would reintroduce the stale-context complaint on the twin.

@@ -5,10 +5,11 @@
 // completeCampaign / resumeCampaignToRunning are the two non-park lifecycle
 // transitions executor still needs, wrapped here so executor can drop the raw
 // tryTransitionCampaign import entirely.
-import { getCampaignItem, listCampaignItems, tryTransitionCampaign } from "../store/campaigns.js";
+import { getCampaignItem, listCampaignItems, tryTransitionCampaign, updateCampaignItem } from "../store/campaigns.js";
 import { getRun } from "../store/runs.js";
 import { emitMilestone } from "../notify/milestone.js";
 import type { MilestoneKind } from "../notify/milestone.js";
+import type { BlockerKind } from "../types/index.js";
 
 // FG-516: the milestone emitter notifyCampaignPause routes through. Injectable
 // (mirrors the done-audit override in executor) ONLY so a test can prove that an
@@ -92,6 +93,29 @@ async function notifyCampaignPause(
   }
 }
 
+// FG-516 (structural close of the park-payload class) — a park's blocker/action
+// context is REQUIRED and type-checked at the call site: a parkCampaign call that
+// supplies no composed context does not COMPILE. This closes the "pushed body
+// lacks the `blocker: <kind>` field" class the two invoke-lane findings hit, the
+// same way module isolation closed the "notify without a committed pause" class —
+// by construction, not by scanning call shapes.
+export type ParkContext =
+  // The caller hands parkCampaign fresh context. parkCampaign renders
+  // `blocker: <blockerKind>` in the pushed body and persists requestedHumanAction
+  // onto the item if it lacks one, so notifyCampaignPause's item-reading body
+  // composition works. It deliberately does NOT persist blockerKind onto the item:
+  // an awaiting_gate item with NO blockerKind is the out-of-band reconcile marker
+  // (reconcile.ts isOutOfBand / report.ts / FG-483's parked-item assertion all key
+  // off that absence), so the kind feeds the body label only, never the row.
+  | { blockerKind: BlockerKind; requestedHumanAction: string }
+  // The item row ALREADY carries what notifyCampaignPause needs — a persisted
+  // blockerKind (or an opts.bodyBlockerKind body-only label) plus a
+  // requestedHumanAction — so the body composes from the item exactly as today.
+  | { exemption: "item-carries-context" }
+  // A documented deferral where composing real context is out of scope. ONLY the
+  // FG-518 resume-probe workflow-load-failure park uses this.
+  | { exemption: "known-gap"; ticket: `FG-${number}` };
+
 // FG-516 (finding B) — THE park boundary. Every running→paused park goes through
 // here: it performs the CAS transition itself and notifies ONLY when the CAS
 // committed, then returns the CAS result so call sites keep their existing control
@@ -111,12 +135,24 @@ export async function parkCampaign(
   campaignId: string,
   itemId: string | string[],
   kind: MilestoneKind,
+  context: ParkContext,
   opts?: { fallbackRunId?: string; bodyBlockerKind?: string },
 ): Promise<boolean> {
   const committed = tryTransitionCampaign(campaignId, "running", "paused");
   if (committed) {
+    // The composed arm feeds its kind to the BODY label and persists its action
+    // if the item has none — never persisting blockerKind (see ParkContext).
+    const composed = "blockerKind" in context ? context : undefined;
     for (const id of Array.isArray(itemId) ? itemId : [itemId]) {
-      await notifyCampaignPause(campaignId, id, kind, opts?.fallbackRunId, opts?.bodyBlockerKind);
+      let bodyBlockerKind = opts?.bodyBlockerKind;
+      if (composed) {
+        const item = getCampaignItem(id);
+        if (item && !item.requestedHumanAction) {
+          updateCampaignItem(id, { requestedHumanAction: composed.requestedHumanAction });
+        }
+        bodyBlockerKind = composed.blockerKind;
+      }
+      await notifyCampaignPause(campaignId, id, kind, opts?.fallbackRunId, bodyBlockerKind);
     }
   }
   return committed;
