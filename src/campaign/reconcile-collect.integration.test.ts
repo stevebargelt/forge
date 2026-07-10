@@ -13,7 +13,8 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket } from "../backlog/structured.js";
 import { insertHostVerification, queryHostVerificationRows, queryHostVerificationRowsForGate } from "../store/host-verifications.js";
 import { logEvent, eventsForRun } from "../store/events.js";
-import { collectReconcileEvidence, collectAuthoritativeEvents, getRequiredHostGate, runAndRecordHostVerification } from "./reconcile-collect.js";
+import { collectReconcileEvidence, collectAuthoritativeEvents, getRequiredHostGate, runAndRecordHostVerification, resolveGateCoverage } from "./reconcile-collect.js";
+import { evaluateReconcileEvidence } from "./reconcile-evidence.js";
 import type { CiCheckStatus } from "../store/host-verifications.js";
 import type { CampaignItem } from "../types/index.js";
 
@@ -1175,4 +1176,106 @@ test("FG-487 runAndRecordHostVerification: CI-shortcut evidence (green required 
   const events = eventsForRun("run-487-f");
   assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_started").length, 0);
   assert.equal(events.filter((e) => e.eventType === "campaign_item.host_gate_finished").length, 0);
+});
+
+// ── FG-510: a covering row must match the required gate COMMAND, not just its
+// gate_name. `forge record-host-verification --gate <required gate>` lets an
+// operator write gate_name = the required gate while command is anything at
+// all; without the command-equality check below, such a row satisfied ship-gate
+// coverage in reconcile, the out-of-band lane, and done-audit alike.
+
+const SPOOF_COMMAND = "echo ok";
+
+function insertGateRow(opts: {
+  ticketId: string;
+  commitSha: string;
+  command: string;
+  exitCode: number;
+  recordedAt: string;
+}): void {
+  insertHostVerification({
+    ticketId: opts.ticketId,
+    projectDir,
+    commitSha: opts.commitSha,
+    gateName: "npm run test:all",
+    command: opts.command,
+    exitCode: opts.exitCode,
+    recordedAt: opts.recordedAt,
+  });
+}
+
+test("FG-510 resolveGateCoverage: a --gate-override row (gate_name matches, command differs) is NOT a covering row — verified stays null", () => {
+  const commit = makeCommit("spoofed-gate");
+  insertGateRow({ ticketId: "FG-510-SPOOF", commitSha: commit, command: SPOOF_COMMAND, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z" });
+
+  const coverage = resolveGateCoverage("FG-510-SPOOF", projectDir, "npm run test:all", commit, "main");
+  assert.deepEqual(
+    coverage,
+    { verified: null, detailRow: null, failureCount: 0 },
+    "a command-mismatched row is not covering at all — it neither passes nor counts as a covering failure"
+  );
+});
+
+test("FG-510 resolveGateCoverage: a canonical row (command equals the gate) still covers — verified true with a detail row", () => {
+  const commit = makeCommit("canonical-gate");
+  insertGateRow({ ticketId: "FG-510-CANON", commitSha: commit, command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z" });
+
+  const coverage = resolveGateCoverage("FG-510-CANON", projectDir, "npm run test:all", commit, "main");
+  assert.equal(coverage.verified, true);
+  assert.equal(coverage.detailRow?.command, "npm run test:all");
+  assert.equal(coverage.detailRow?.exitCode, 0);
+  assert.equal(coverage.failureCount, 0);
+});
+
+test("FG-510 resolveGateCoverage: a spoofed PASSING row never launders a canonical FAILING row — verified false", () => {
+  const commit = makeCommit("mixed-spoof");
+  insertGateRow({ ticketId: "FG-510-MIXED", commitSha: commit, command: "npm run test:all", exitCode: 1, recordedAt: "2026-01-01T00:00:00Z" });
+  insertGateRow({ ticketId: "FG-510-MIXED", commitSha: commit, command: SPOOF_COMMAND, exitCode: 0, recordedAt: "2026-01-02T00:00:00Z" });
+
+  const coverage = resolveGateCoverage("FG-510-MIXED", projectDir, "npm run test:all", commit, "main");
+  assert.equal(coverage.verified, false, "the canonical failure is the only covering row — the later spoofed pass must not outrank it");
+  assert.equal(coverage.detailRow?.exitCode, 1);
+  assert.equal(coverage.detailRow?.command, "npm run test:all");
+  assert.equal(coverage.failureCount, 1);
+});
+
+// Through the real reconcile path: an item whose every other fact is satisfied
+// must still refuse to ship on the strength of a spoofed row alone, naming the
+// missing verification evidence.
+
+function writeShippableTicket(commit: string): void {
+  writeTicket(projectDir, {
+    id: "FG-200",
+    type: "story",
+    status: "done",
+    closedCommit: commit,
+    title: "FG-510 reconcile path",
+    body: "",
+  });
+}
+
+function reconcileWithPassingReview(runId: string) {
+  logEvent("verdict.received", { runId, payload: { redRole: "shipping-reviewer", verdict: "pass", authority: "authoritative" } });
+  return evaluateReconcileEvidence(collectReconcileEvidence(projectDir, item({ runId })));
+}
+
+test("FG-510 reconcile path: a spoofed row does not ship the item — refusal names host_verification_not_recorded", () => {
+  const commit = makeCommit("reconcile-spoof");
+  writeShippableTicket(commit);
+  insertGateRow({ ticketId: "FG-200", commitSha: commit, command: SPOOF_COMMAND, exitCode: 0, recordedAt: "2026-01-01T00:00:00Z" });
+
+  const result = reconcileWithPassingReview("run-510-spoof");
+  assert.equal(result.eligible, false, "an `echo ok` row wearing the required gate's name must never ship a campaign item");
+  assert.deepEqual(result.missing, ["host_verification_not_recorded"]);
+});
+
+test("FG-510 reconcile path: the same item with a canonical row ships as before", () => {
+  const commit = makeCommit("reconcile-canonical");
+  writeShippableTicket(commit);
+  insertGateRow({ ticketId: "FG-200", commitSha: commit, command: "npm run test:all", exitCode: 0, recordedAt: "2026-01-01T00:00:00Z" });
+
+  const result = reconcileWithPassingReview("run-510-canonical");
+  assert.equal(result.eligible, true);
+  assert.deepEqual(result.missing, []);
+  assert.deepEqual(result.evidence.hostVerification, { recorded: true, passed: true });
 });

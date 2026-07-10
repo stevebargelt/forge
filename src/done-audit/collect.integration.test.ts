@@ -768,9 +768,12 @@ test("collect FG419: --command 'npm run test:all' without --gate satisfies requi
   assert.equal(input.verification.hostVerified, true, "hostVerified must be true — gate_name matches required gate");
 });
 
-test("collect FG419: explicit --gate override with different command satisfies required gate → hostVerified: true", () => {
-  // Operator explicitly overrides gate name: --command "npm test --workspaces" --gate "npm run test:all".
-  // The gate_name recorded is "npm run test:all" → matches required gate → satisfies host_verification.
+// FG-510 reverses this case. It previously asserted hostVerified: true — a
+// --gate override was treated as sufficient because coverage keyed on gate_name
+// alone. That IS the spoof: `--command "echo ok" --gate "npm run test:all"`
+// credited the required gate for a command that never ran it. resolveGateCoverage
+// now requires command equality, so an overridden row is not covering at all.
+test("collect FG-510: an explicit --gate override with a different command does NOT satisfy the required gate → hostVerified: null", () => {
   const commitSha = makeCommit("hv-explicit-gate");
 
   writeTicket(projectDir, {
@@ -799,8 +802,8 @@ test("collect FG419: explicit --gate override with different command satisfies r
 
   assert.equal(
     input.verification.hostVerified,
-    true,
-    "hostVerified must be true — explicit --gate override of 'npm run test:all' satisfies required gate"
+    null,
+    "hostVerified must be null — a row whose command never ran the required gate is not covering evidence, and fail-closed means unknown, not verified"
   );
 });
 
