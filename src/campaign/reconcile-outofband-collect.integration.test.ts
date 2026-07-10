@@ -636,6 +636,52 @@ test("FG-500 round 2: a ci-sourced passing row for the primary gate alone satisf
   );
 });
 
+// ── FG-510: a covering row's command must equal the gate it names. The
+// record-host-verification --gate override can write gate_name = the required
+// gate while command is anything — that row is inert for this lane too.
+
+test("FG-510: a --gate-labeled row whose command is NOT the required gate does not satisfy the host_verification lane, but a canonical row for the same commit does", () => {
+  commitFile("README.md", "root", "root");
+  const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-510 gate label spoof");
+  writeTicket(projectDir, { id: "FG-510", type: "story", status: "done", closedCommit: commit, title: "t", body: "" });
+  insertHostVerification({
+    ticketId: "FG-510",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "echo ok",
+    exitCode: 0,
+    recordedAt: "2026-01-01T00:00:00Z",
+  });
+
+  let result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-510" }));
+  assert.equal(
+    result.laneEvidence,
+    null,
+    "a row labeled with the required gate but recording a different command must not satisfy the lane"
+  );
+  const evaluation = evaluateOutOfBandEvidence(result);
+  assert.equal(evaluation.eligible, false);
+  assert.ok(evaluation.missing.includes("lane_evidence_missing"));
+
+  insertHostVerification({
+    ticketId: "FG-510",
+    projectDir,
+    commitSha: commit,
+    gateName: "npm run test:all",
+    command: "npm run test:all",
+    exitCode: 0,
+    recordedAt: "2026-01-02T00:00:00Z",
+  });
+
+  result = collectOutOfBandEvidence(projectDir, item({ ticketId: "FG-510" }));
+  assert.deepEqual(
+    result.laneEvidence,
+    { kind: "host_verification", recorded: true, allExitZero: true },
+    "a canonical row (command === gate_name) for the same commit still satisfies the lane"
+  );
+});
+
 test("FG-500 round 2 regression: a single-gate project (no test:extended) still satisfies the lane from one row, unchanged", () => {
   commitFile("README.md", "root", "root");
   const commit = commitFile("src/feature.ts", "export const x = 1;\n", "feat: FG-463 single-gate regression");
