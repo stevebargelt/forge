@@ -85,6 +85,40 @@ steps:
   return dir;
 }
 
+/** A policy-mode project: two profiles, `ambient` is every default, `pinned` is
+ *  reachable only via an explicit `--profile`. Both declare `runtime: claude` (the
+ *  #265 escape hatch) so they resolve onto the single stubbed runtime YAML rather
+ *  than the (provider, auth) binding table's claude-oauth/claude-apikey names. */
+function policyProjectDir(): string {
+  const dir = trackedProjectDir();
+  writeFileSync(
+    join(dir, ".forge", "model-policy.yml"),
+    `
+model_profiles:
+  ambient:
+    provider: anthropic
+    auth: api
+    runtime: claude
+    map:
+      default: { model: ambient-model, cost_tier: cheap }
+  pinned:
+    provider: anthropic
+    auth: api
+    runtime: claude
+    map:
+      default: { model: pinned-model, cost_tier: premium }
+defaults:
+  profile: ambient
+  activity: {}
+overrides:
+  agents:
+    engineer: ambient
+allowed_profiles: [ambient, pinned]
+`,
+  );
+  return dir;
+}
+
 function stubExec(result: unknown, exitCode = 0): DockerExecFn {
   return async ({ stdoutPath, stderrPath }) => {
     const dir = dirname(stdoutPath);
@@ -402,4 +436,67 @@ test("FG-507 4: a failed task's single retry recommendation is unchanged", () =>
   if (outcome.kind !== "inspect-task") return;
   assert.equal(outcome.task.recommendation, `forge retry ${t.id}  (no persisted work found — safe to re-dispatch from scratch)`);
   assert.deepEqual(outcome.task.recommendationCommands, [`forge retry ${t.id}`]);
+});
+
+// ── 5. an explicit --profile survives invoke → retry → re-dispatch ───────────
+
+test("FG-507 5: `invoke --profile` → retry re-dispatches on the SAME pinned profile, not the ambient default", async () => {
+  const projectDir = policyProjectDir();
+
+  const r = await invoke({
+    agentRole: "engineer",
+    task: "pinned work",
+    projectDir,
+    modelProfile: "pinned",
+    dockerExec: stubExec(undefined, 1),
+  });
+  assert.equal(r.status, "failed", "fixture: exit 1 with no result.json → container_crash");
+
+  // Fixture pin: invoke RECORDED the explicit profile and its provenance.
+  const manifest = JSON.parse(readFileSync(join(taskDir(r.runId, r.taskId), "manifest.json"), "utf8")) as {
+    model?: { profile: string; model: string; resolvedBy: string };
+  };
+  assert.equal(manifest.model?.profile, "pinned");
+  assert.equal(manifest.model?.resolvedBy, "cli.--profile");
+  assert.equal(getTask(r.taskId)!.agentModel, "pinned-model");
+
+  const out = await retry(r.taskId);
+  assert.ok(out.adHoc, "ad-hoc → retry carries the dispatch plan");
+
+  // THE REGRESSION: without replaying the recorded --profile, resolveModel would
+  // fall through to overrides.agents.engineer and silently retry on `ambient`.
+  assert.equal(out.adHoc!.resolution.profile, "pinned");
+  assert.equal(out.adHoc!.resolution.model, "pinned-model");
+  assert.equal(out.adHoc!.resolution.resolvedBy, "cli.--profile", "provenance survives, so a retry-of-a-retry stays pinned too");
+
+  const newRow = getTask(out.newTask.id)!;
+  assert.equal(newRow.resolvedProfile, "pinned", "the fresh row records the profile it will actually run under");
+  assert.equal(newRow.agentModel, "pinned-model");
+  assert.equal(newRow.resolvedBy, "cli.--profile");
+
+  const result = await dispatchRetriedAdHocTask(out.newTask, out.adHoc!, stubExec({ status: "complete" }));
+  assert.equal(result.status, "complete");
+
+  const redispatched = JSON.parse(readFileSync(join(taskDir(r.runId, out.newTask.id), "manifest.json"), "utf8")) as {
+    model?: { profile: string; model: string; resolvedBy: string };
+  };
+  assert.equal(redispatched.model?.profile, "pinned", "the re-dispatched container ran under the pinned profile");
+  assert.equal(redispatched.model?.model, "pinned-model");
+});
+
+// The mirror image: an ambient resolution is a POLICY rule, not an operator pin,
+// so it must re-evaluate against today's policy rather than being frozen at the
+// failed attempt's value.
+test("FG-507 5: a retry with no explicit --profile re-resolves through policy (no accidental pinning)", async () => {
+  const projectDir = policyProjectDir();
+
+  const r = await invoke({ agentRole: "engineer", task: "ambient work", projectDir, dockerExec: stubExec(undefined, 1) });
+  assert.equal(r.status, "failed");
+  assert.equal(getTask(r.taskId)!.resolvedBy, "overrides.agents.engineer");
+
+  const out = await retry(r.taskId);
+  assert.ok(out.adHoc);
+  assert.equal(out.adHoc!.resolution.profile, "ambient");
+  assert.equal(out.adHoc!.resolution.resolvedBy, "overrides.agents.engineer", "still a policy rule — never rewritten to cli.--profile");
+  assert.equal(getTask(out.newTask.id)!.agentModel, "ambient-model");
 });

@@ -1,11 +1,14 @@
 // forge retry — preserve the failed task as an audit record; create a new
-// task row that inherits the same phase/role/inputs and points back to the
-// failed task via parentId. The new task is `pending`; next forge-next
-// redispatches it.
+// task row that inherits the same phase/role/inputs. The new task is `pending`;
+// a workflow-step row is redispatched by forge-next, an ad-hoc row by retry
+// itself (FG-507, below).
 //
-// This mirrors gate.ts's `request-changes` shape (task → failed, new task
-// created with parentId pointing back). Audit trail is preserved on the
-// original row; retries form a walkable chain via parentId.
+// The new row is a PRIMARY (parentId unset) — NOT gate.ts's `request-changes`
+// shape, which does point a child back at its parent. runNext.dispatchStep only
+// reuses pending PRIMARY rows, so a parented retry would be skipped by the ready
+// queue and a fresh contextless task created in its place. Lineage is therefore
+// carried by inputs.previous_failure.failedTaskId and the task.retried event;
+// retry chains are walked through those, never through parentId.
 //
 // Scoped to failed tasks only. Rerun-on-complete is a different feature
 // (different semantics; what does "different" mean from same inputs?) and
@@ -161,12 +164,22 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
   // rebinds it from (provider, auth) anyway; in legacy mode it is loaded verbatim.
   const runtimeName = manifest?.runtime?.name;
 
+  // An explicit `forge invoke --profile <name>` is an operator decision about
+  // which model/provider/auth runs the work, not an incidental default. Re-resolving
+  // without it would silently retry on whatever profile the ambient policy picks now
+  // (an agent override, an activity default — including the profile of whatever
+  // review loop happens to be driving the retry). The manifest records the profile
+  // AND its provenance, so replay it only when the CLI flag was what won: every
+  // other resolvedBy is a policy rule that should re-evaluate against today's policy.
+  const model = manifest?.model;
+  const cliProfile = model?.resolvedBy === "cli.--profile" && model.profile ? model.profile : undefined;
+
   // Resolve model + compose the prompt HERE, before the row is inserted: both can
   // throw on a broken policy/agent dir, and a throw before insertTask means no row.
   const resolution = resolveModel({
     agentRole: task.agentRole,
     stepAlias: task.agentAlias,
-    cliProfile: undefined,
+    cliProfile,
     runtimeName: runtimeName ?? "claude",
     ctx: { projectDir },
   });
