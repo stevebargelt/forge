@@ -406,6 +406,64 @@ test("FG-516 (F1): a recovery park whose persisted runId no longer resolves stil
   assert.match(String(m["body"]), /blocker: campaign_system/, "body carries the blockerKind detail");
 });
 
+// ── Shape 3b (F1 round 2): the dangling-runId park RECORDS its own context ──
+// The real gate-then-lost-run shape Shape 3 masks: a NORMAL human-gate item is
+// parked awaiting_gate with NO persisted blockerKind (the FG-441 reattach marker),
+// so the resume reattach runs the FG-441/FG-485 evidence probe — which, with a
+// dangling run and no ship evidence, refuses and falls through to the
+// getRun(item.runId) reattach whose run row is absent. Unlike Shape 3 — which
+// pre-seeds blockerKind: "campaign_system" and so never proves the PARK sets it —
+// this pins that the `!runForItem` park itself persists blockerKind +
+// requestedHumanAction BEFORE notifying, so the milestone body carries a real
+// "blocker: … — …" instead of notifyCampaignPause's generic "parked <ticket>".
+test("FG-516 (F1): a dangling-runId park on a bare human-gate item persists blockerKind + requestedHumanAction itself, so it still gets a context-carrying milestone", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign();
+
+  // Park the planned item at the human gate so the campaign owns ONE real,
+  // resolvable run — the fallback anchor the dangling item scopes its milestone to.
+  const started = await startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(started.stopReason, "paused");
+  const anchor = listCampaignItems(campaignId)[0]!;
+  const anchorRunId = anchor.runId!;
+  assert.ok(getRun(anchorRunId), "the planned item owns a real run to serve as the campaign fallback");
+
+  // A SECOND item that iterates FIRST (lower order), parked awaiting_gate as a
+  // NORMAL human-gate item — NO blockerKind, NO context fields — whose persisted
+  // runId is genuinely dangling. The evidence probe fires (no blockerKind), finds
+  // no ship evidence, refuses, and falls through to the dangling-run reattach.
+  const dangling = addCampaignItem({ campaignId, itemOrder: -1, ticketId: "FG-920" });
+  updateCampaignItem(dangling.id, {
+    lifecycleStatus: "awaiting_gate",
+    runId: "run-does-not-exist",
+  });
+  const seeded = listCampaignItems(campaignId).find((i) => i.id === dangling.id)!;
+  assert.equal(seeded.blockerKind, undefined, "the item arrives WITHOUT a blockerKind (a normal human-gate item)");
+  assert.equal(seeded.requestedHumanAction, undefined, "the item arrives WITHOUT a requestedHumanAction");
+  assert.equal(getRun("run-does-not-exist"), undefined, "the item's persisted runId is genuinely dangling");
+
+  fetchCalls = 0; // count only pushes from the resume park below
+  const resumed = await resumeCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: makeCappedRunNext(10) });
+  assert.equal(resumed.stopReason, "recovery_needed", "the dangling-runId item parks the campaign as recovery_needed");
+
+  // The park persisted the two context fields ON the item — Shape 3 could not
+  // prove this because it pre-seeded them.
+  const parked = listCampaignItems(campaignId).find((i) => i.id === dangling.id)!;
+  assert.equal(parked.blockerKind, "campaign_system", "the park recorded a campaign_system blockerKind");
+  assert.match(String(parked.requestedHumanAction), /no longer resolves/, "the park recorded actionable guidance naming the lost run");
+
+  // And the milestone body carries them — NOT the generic "parked" fallback.
+  const milestones = pauseMilestones(anchorRunId).filter(
+    (p) => p["dedupeKey"] === `campaign-pause:${campaignId}:FG-920` && p["kind"] === "blocked",
+  );
+  assert.equal(milestones.length, 1, "the dangling-runId park pushed exactly one `blocked` milestone (not silent)");
+  const dm = milestones[0]!;
+  assert.equal(dm["dispatched"], true, "the push went out, scoped to the campaign fallback run");
+  assert.equal(fetchCalls, 1, "exactly one provider push for the dangling-runId recovery park");
+  assert.match(String(dm["body"]), /blocker: campaign_system/, "body leads with the blockerKind detail the park recorded");
+  assert.doesNotMatch(String(dm["body"]), /^campaign .* parked/, "body is NOT notifyCampaignPause's generic fallback");
+});
+
 // ── Shape 4 (F1 round 2): the in-flight/indeterminate park RECORDS its own context ──
 // The executor.ts:1269 park fires for an item whose lifecycle status slipped past
 // campaignBlocker (a future TaskStatus value, or a 'running'/'awaiting_red' item that

@@ -1251,10 +1251,22 @@ export async function driveRemainingItems(
       }
       const runForItem = preloadedRun ?? getRun(item.runId);
       if (!runForItem) {
-        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-        // FG-516: the item's persisted runId no longer resolves, so scope the pause
-        // milestone to a campaign fallback run — without it notifyCampaignPause
-        // rejects the stale runId and this recovery park goes silent.
+        // FG-516: the item's persisted runId no longer resolves. A normal
+        // human-gate item reaches here with NO persisted blockerKind (the FG-441
+        // reattach marker), so — like the other unattended parks — supply
+        // blockerKind + requestedHumanAction BEFORE notifying so notifyCampaignPause
+        // emits a real "blocker: … — …" body instead of its generic "parked
+        // <ticket>" fallback. An item that ALREADY carries a meaningful blockerKind
+        // (FG-428's 'scope' lane, etc.) keeps it untouched. Scope the milestone to a
+        // campaign fallback run; without it notifyCampaignPause rejects the stale
+        // runId and this recovery park goes silent.
+        if (!item.blockerKind) {
+          updateCampaignItem(item.id, {
+            blockerKind: "campaign_system",
+            requestedHumanAction: `campaign lost the run for ${item.ticketId} (persisted runId '${item.runId}' no longer resolves) — inspect the item, resolve it, then \`forge campaign resume ${campaignId}\`.`,
+          });
+        }
+        itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus, blockerKind: item.blockerKind ?? "campaign_system" });
         await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
