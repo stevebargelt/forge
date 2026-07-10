@@ -193,6 +193,9 @@ test("FG-516: a gate:human park fires exactly one milestone with the right kind,
   assert.equal(m["dispatched"], true, "the push actually went out (stub provider)");
   assert.match(String(m["title"]), new RegExp(TICKET_ID), "title names the parked ticket");
   assert.match(String(m["body"]), /Human gate required/, "body carries the park's requestedHumanAction guidance");
+  // FG-516 (finding F2): a gate:human park persists no blockerKind (the reconcile
+  // marker), but the body must still lead with a composed blocker kind per the docs.
+  assert.match(String(m["body"]), /blocker: human_gate/, "body leads with the composed gate blocker kind");
 });
 
 test("FG-516: re-parking the same campaign+item after resume does not push a second time (dedupe)", { timeout: 20000 }, async () => {

@@ -96,6 +96,7 @@ async function notifyCampaignPause(
   itemId: string,
   kind: MilestoneKind,
   fallbackRunId?: string,
+  bodyBlockerKind?: string,
 ): Promise<void> {
   try {
     const item = getCampaignItem(itemId);
@@ -110,7 +111,13 @@ async function notifyCampaignPause(
     // nothing to emit. getRun guards the emitMilestone "run not found" throw.
     if (!runId) return;
     const detail: string[] = [];
-    if (item.blockerKind) detail.push(`blocker: ${item.blockerKind}`);
+    // FG-516 (finding F2): the docs promise every campaign-park body leads with a
+    // blocker kind. Recoverable gate/drive parks deliberately persist NO blockerKind
+    // on the item (that unset field is the FG-441 reattach / reconcile marker, so we
+    // must not persist one), so the caller composes a body-only label for those
+    // shapes. Prefer the persisted kind when present; fall back to the composed one.
+    const blockerKind = item.blockerKind ?? bodyBlockerKind;
+    if (blockerKind) detail.push(`blocker: ${blockerKind}`);
     if (item.requestedHumanAction) detail.push(item.requestedHumanAction);
     await _campaignNotifyEmitter({
       runId,
@@ -606,8 +613,13 @@ async function parkCampaignOnDriveThrow(
       runId,
       payload: { campaignId, itemId, ticketId, error: message, decidedAt: nowIso() },
     });
-    tryTransitionCampaign(campaignId, "running", "paused");
-    await notifyCampaignPause(campaignId, itemId, "blocked");
+    // FG-516 (finding F1): gate the notify on the transition actually committing.
+    // A concurrent operator `forge campaign pause` (the one explicit exemption) can
+    // win the running→paused race first; this stale driver then commits nothing, so
+    // it must NOT emit a fresh unattended-wedge push for a pause it did not cause.
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      await notifyCampaignPause(campaignId, itemId, "blocked", undefined, "drive_error");
+    }
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -658,8 +670,11 @@ async function parkCampaignOnStartRunThrow(
       reason: message,
       requestedHumanAction: `startRun threw while dispatching ${ticketId} on run ${runId}: ${message}. Once the campaign is paused, run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume\`.`,
     });
-    tryTransitionCampaign(campaignId, "running", "paused");
-    await notifyCampaignPause(campaignId, itemId, "blocked");
+    // FG-516 (finding F1): same concurrent-manual-pause guard as
+    // parkCampaignOnDriveThrow — only notify when THIS park committed the pause.
+    if (tryTransitionCampaign(campaignId, "running", "paused")) {
+      await notifyCampaignPause(campaignId, itemId, "blocked");
+    }
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -832,7 +847,10 @@ async function driveWorkflowItem(
           requestedHumanAction: `Human gate required at step ${step?.id ?? awaitingTask.phase} in workflow ${currentRun.workflow}`,
         });
         tryTransitionCampaign(campaignId, "running", "paused");
-        await notifyCampaignPause(campaignId, itemId, "decision_needed");
+        // FG-516 (finding F2): a gate:human park persists no blockerKind by design
+        // (that unset field marks the out-of-band reconcile shape), so compose a
+        // body-only label — otherwise the pushed body carries no blocker kind at all.
+        await notifyCampaignPause(campaignId, itemId, "decision_needed", undefined, "human_gate");
         parked = true;
         break;
       }
@@ -883,7 +901,10 @@ async function driveWorkflowItem(
         requestedHumanAction: `drive loop made no progress on run ${runId}: it is active but nothing is dispatchable. Inspect the run's tasks (forge show ${runId}), resolve the blockage, then resume.`,
       });
       tryTransitionCampaign(campaignId, "running", "paused");
-      await notifyCampaignPause(campaignId, itemId, "blocked");
+      // FG-516 (finding F2): the no-progress backstop parks awaiting_gate with no
+      // persisted blockerKind (same recoverable reattach shape), so compose a
+      // body-only label so the pushed body still leads with a blocker kind.
+      await notifyCampaignPause(campaignId, itemId, "blocked", undefined, "no_progress");
       const updatedItem = getCampaignItem(itemId);
       return {
         outcome: "recovery_needed",

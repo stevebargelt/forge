@@ -237,6 +237,9 @@ test("FG-516: a drive-error park fires a `blocked` milestone carrying the drive-
   assert.match(String(m["title"]), new RegExp(TICKET_ID), "title names the parked ticket");
   assert.match(String(m["body"]), /drive loop threw/, "body carries the drive-error requestedHumanAction guidance");
   assert.match(String(m["body"]), new RegExp(BOOM.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "body carries the underlying error message");
+  // FG-516 (finding F2): a drive-error park persists no blockerKind (the recoverable
+  // reattach marker), but the body must still lead with a composed blocker kind.
+  assert.match(String(m["body"]), /blocker: drive_error/, "body leads with the composed drive-error blocker kind");
 });
 
 // ── Finding F1: the drive-error park now AWAITS the notify before rethrowing ──
@@ -275,6 +278,48 @@ test("FG-516 (F1): a drive-error park awaits the full (macrotask-yielding) notif
     [`campaign-pause:${campaignId}:${TICKET_ID}`],
     "the notify (incl. its macrotask hop) settled before the park rethrew — proves the awaited fix, not fire-and-forget",
   );
+});
+
+// ── Finding F1 (negative): a manual pause winning the transition suppresses the push ──
+// `forge campaign pause` is the one explicit exemption to the automatic running→paused
+// transition. If an operator's manual pause commits first, a drive error racing behind
+// it finds the campaign ALREADY paused — its own tryTransitionCampaign(running→paused)
+// changes nothing. Before the fix the park still fired a fresh unattended-wedge push for
+// a pause it did not cause; now the notify is gated on that transition committing, so a
+// stale driver that transitioned nothing stays silent. The item is still durably parked
+// and the original drive error still rethrows — only the spurious push is suppressed.
+test("FG-516 (F1): a drive-error park does NOT push when a concurrent manual pause already won the running→paused transition", { timeout: 20000 }, async () => {
+  enableStubProvider();
+  const campaignId = setupCampaign();
+
+  // Simulate the operator's `forge campaign pause` landing first: the injected
+  // runNext flips the campaign to 'paused' (the exempt manual transition) and THEN
+  // throws, so the drive-error park sees a campaign that is no longer 'running'.
+  const pauseThenThrow = async (): Promise<RunNextResult> => {
+    db.prepare("UPDATE campaigns SET status = 'paused' WHERE id = ?").run(campaignId);
+    throw new Error(BOOM);
+  };
+
+  await assert.rejects(
+    () => startCampaign(campaignId, { dispatch: dispatchMustNotBeCalled, runNextFn: pauseThenThrow }),
+    /paused after a drive error/,
+    "the drive throw still parks the item and rethrows the enriched next-action error",
+  );
+
+  const item = listCampaignItems(campaignId)[0]!;
+  assert.equal(item.lifecycleStatus, "awaiting_gate", "the item is still durably parked at the recoverable shape");
+  assert.equal(getCampaign(campaignId)?.status, "paused", "the campaign stays paused (from the manual pause)");
+  const runId = item.runId!;
+
+  await drainMicrotasks();
+  await drainMicrotasks();
+
+  assert.equal(
+    pauseMilestones(runId).length,
+    0,
+    "no campaign-pause milestone recorded — this stale driver committed no transition, so it must not notify",
+  );
+  assert.equal(fetchCalls, 0, "no provider push for a pause this driver did not cause");
 });
 
 // ── Shape 2: the workflow-YAML-missing park (AWAITED, carries a blockerKind) ──
