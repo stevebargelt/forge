@@ -125,12 +125,46 @@ async function notifyCampaignPause(
       title: `Campaign ${campaignId} paused — ${item.ticketId} needs attention`,
       body: detail.length > 0 ? detail.join(" — ") : `campaign ${campaignId} parked ${item.ticketId}`,
       dedupeKey: `campaign-pause:${campaignId}:${item.ticketId}`,
+      // FG-516 (finding A): the dedupe KEY is already campaign+item-stable, but the
+      // SCOPE must be global — `forge campaign retry` clears the item's runId, so a
+      // re-park lands on a NEW run and a run-scoped scan would re-notify the same
+      // campaign+item. Global scope suppresses the repeat across runs.
+      dedupeScope: "global",
     });
   } catch (err) {
     console.error(
       `FG-516: campaign pause notify failed (park unaffected): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+// FG-516 (finding B) — THE park boundary. Every running→paused park in this file
+// goes through here: it performs the CAS transition itself and notifies ONLY when
+// the CAS committed, then returns the CAS result so call sites keep their existing
+// control flow. This makes the "notify without a committed pause" wedge class
+// unrepresentable — a concurrent operator `forge campaign pause` (the documented
+// manual-pause exemption) that wins the CAS first leaves committed=false, so this
+// stale driver pushes nothing. The notify is awaited and never throws (see
+// notifyCampaignPause), so a throw-park helper can await it before rethrowing and
+// know the milestone is settled before control returns to the CLI. A structural
+// guard test (executor-park-boundary) asserts no site calls tryTransitionCampaign
+// (.., "running", "paused") or notifyCampaignPause directly outside this function.
+//
+// `itemId` accepts an array for the campaign-level held-items pause: one CAS,
+// then a milestone per held item (each de-duped independently by its own key).
+async function parkCampaign(
+  campaignId: string,
+  itemId: string | string[],
+  kind: MilestoneKind,
+  opts?: { fallbackRunId?: string; bodyBlockerKind?: string },
+): Promise<boolean> {
+  const committed = tryTransitionCampaign(campaignId, "running", "paused");
+  if (committed) {
+    for (const id of Array.isArray(itemId) ? itemId : [itemId]) {
+      await notifyCampaignPause(campaignId, id, kind, opts?.fallbackRunId, opts?.bodyBlockerKind);
+    }
+  }
+  return committed;
 }
 
 // Test-only override for done-audit evaluation in reconcileTerminalOutcome.
@@ -396,8 +430,7 @@ async function finalizeInvokeDispatch(
       outcome: "blocked",
       blockerKind: "lane_escalation",
     });
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      await notifyCampaignPause(campaignId, item.id, "decision_needed");
+    if (await parkCampaign(campaignId, item.id, "decision_needed")) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -416,8 +449,7 @@ async function finalizeInvokeDispatch(
       continuePolicy: "hold_campaign",
     });
     itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      await notifyCampaignPause(campaignId, item.id, "blocked");
+    if (await parkCampaign(campaignId, item.id, "blocked")) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -441,8 +473,7 @@ async function finalizeInvokeDispatch(
   itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId, lifecycleStatus: "failed", outcome: "blocked" });
 
   if (shared) {
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      await notifyCampaignPause(campaignId, item.id, "blocked");
+    if (await parkCampaign(campaignId, item.id, "blocked")) {
       return { stopReason: "paused", itemRecords };
     }
     const post = getCampaign(campaignId);
@@ -613,13 +644,13 @@ async function parkCampaignOnDriveThrow(
       runId,
       payload: { campaignId, itemId, ticketId, error: message, decidedAt: nowIso() },
     });
-    // FG-516 (finding F1): gate the notify on the transition actually committing.
-    // A concurrent operator `forge campaign pause` (the one explicit exemption) can
-    // win the running→paused race first; this stale driver then commits nothing, so
-    // it must NOT emit a fresh unattended-wedge push for a pause it did not cause.
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      await notifyCampaignPause(campaignId, itemId, "blocked", undefined, "drive_error");
-    }
+    // FG-516 (finding F1/B): parkCampaign gates the notify on the CAS actually
+    // committing. A concurrent operator `forge campaign pause` (the one explicit
+    // exemption) can win the running→paused race first; this stale driver then
+    // commits nothing, so it must NOT emit a fresh unattended-wedge push for a
+    // pause it did not cause. Awaited before the rethrow below so the milestone is
+    // settled before the CLI's process.exit(1).
+    await parkCampaign(campaignId, itemId, "blocked", { bodyBlockerKind: "drive_error" });
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -670,11 +701,10 @@ async function parkCampaignOnStartRunThrow(
       reason: message,
       requestedHumanAction: `startRun threw while dispatching ${ticketId} on run ${runId}: ${message}. Once the campaign is paused, run \`forge campaign retry ${campaignId} ${ticketId}\`, then \`forge campaign resume\`.`,
     });
-    // FG-516 (finding F1): same concurrent-manual-pause guard as
-    // parkCampaignOnDriveThrow — only notify when THIS park committed the pause.
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      await notifyCampaignPause(campaignId, itemId, "blocked");
-    }
+    // FG-516 (finding F1/B): same concurrent-manual-pause guard as
+    // parkCampaignOnDriveThrow — parkCampaign only notifies when THIS park
+    // committed the pause, and is awaited before the rethrow below.
+    await parkCampaign(campaignId, itemId, "blocked");
   } catch {
     // park failed — original drive error below still propagates unmasked.
   }
@@ -736,8 +766,7 @@ async function driveWorkflowItem(
       const bk = updatedItem?.blockerKind;
       // campaign_system is a shared blocker — pause the campaign
       if (bk && isSharedBlocker(bk)) {
-        tryTransitionCampaign(campaignId, "running", "paused");
-        await notifyCampaignPause(campaignId, itemId, "blocked");
+        await parkCampaign(campaignId, itemId, "blocked");
         return {
           outcome: "paused",
           itemRecord: {
@@ -774,8 +803,7 @@ async function driveWorkflowItem(
         blockerKind: "scope",
         requestedHumanAction: `workflow blocked by authoritative reviewer at step ${blockedRedTask.phase}`,
       });
-      tryTransitionCampaign(campaignId, "running", "paused");
-      await notifyCampaignPause(campaignId, itemId, "blocked");
+      await parkCampaign(campaignId, itemId, "blocked");
       return {
         outcome: "paused",
         itemRecord: {
@@ -820,8 +848,7 @@ async function driveWorkflowItem(
             blockerKind: "scope",
             requestedHumanAction: `workflow blocked by failing verdict at step ${step?.id ?? awaitingTask.phase}`,
           });
-          tryTransitionCampaign(campaignId, "running", "paused");
-          await notifyCampaignPause(campaignId, itemId, "blocked");
+          await parkCampaign(campaignId, itemId, "blocked");
           parked = true;
           break;
         } else {
@@ -832,8 +859,7 @@ async function driveWorkflowItem(
             blockerKind: "campaign_system",
             requestedHumanAction: `workflow verdict inconclusive at step ${step?.id ?? awaitingTask.phase}`,
           });
-          tryTransitionCampaign(campaignId, "running", "paused");
-          await notifyCampaignPause(campaignId, itemId, "blocked");
+          await parkCampaign(campaignId, itemId, "blocked");
           parked = true;
           break;
         }
@@ -846,11 +872,10 @@ async function driveWorkflowItem(
           lifecycleStatus: "awaiting_gate",
           requestedHumanAction: `Human gate required at step ${step?.id ?? awaitingTask.phase} in workflow ${currentRun.workflow}`,
         });
-        tryTransitionCampaign(campaignId, "running", "paused");
         // FG-516 (finding F2): a gate:human park persists no blockerKind by design
         // (that unset field marks the out-of-band reconcile shape), so compose a
         // body-only label — otherwise the pushed body carries no blocker kind at all.
-        await notifyCampaignPause(campaignId, itemId, "decision_needed", undefined, "human_gate");
+        await parkCampaign(campaignId, itemId, "decision_needed", { bodyBlockerKind: "human_gate" });
         parked = true;
         break;
       }
@@ -900,11 +925,10 @@ async function driveWorkflowItem(
         lifecycleStatus: "awaiting_gate",
         requestedHumanAction: `drive loop made no progress on run ${runId}: it is active but nothing is dispatchable. Inspect the run's tasks (forge show ${runId}), resolve the blockage, then resume.`,
       });
-      tryTransitionCampaign(campaignId, "running", "paused");
       // FG-516 (finding F2): the no-progress backstop parks awaiting_gate with no
       // persisted blockerKind (same recoverable reattach shape), so compose a
       // body-only label so the pushed body still leads with a blocker kind.
-      await notifyCampaignPause(campaignId, itemId, "blocked", undefined, "no_progress");
+      await parkCampaign(campaignId, itemId, "blocked", { bodyBlockerKind: "no_progress" });
       const updatedItem = getCampaignItem(itemId);
       return {
         outcome: "recovery_needed",
@@ -1118,8 +1142,7 @@ export async function driveRemainingItems(
             // evidence_reconcile_refused for a live run). Route directly to the
             // same recovery_needed handling the shared block further down uses.
             itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-            tryTransitionCampaign(campaignId, "running", "paused");
-            await notifyCampaignPause(campaignId, item.id, "blocked");
+            await parkCampaign(campaignId, item.id, "blocked");
             return { stopReason: "recovery_needed", itemRecords };
           }
           const liveTasks = tasksForRun(item.runId);
@@ -1206,20 +1229,18 @@ export async function driveRemainingItems(
 
       if (!item.runId) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-        tryTransitionCampaign(campaignId, "running", "paused");
         // FG-516 (finding F2): this item has no run of its own, so scope the pause
         // milestone to a campaign fallback run instead of going silent.
-        await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
+        await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
       const runForItem = preloadedRun ?? getRun(item.runId);
       if (!runForItem) {
         itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-        tryTransitionCampaign(campaignId, "running", "paused");
         // FG-516: the item's persisted runId no longer resolves, so scope the pause
         // milestone to a campaign fallback run — without it notifyCampaignPause
         // rejects the stale runId and this recovery park goes silent.
-        await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
+        await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
         return { stopReason: "recovery_needed", itemRecords };
       }
       let workflowForItem: Workflow;
@@ -1230,8 +1251,7 @@ export async function driveRemainingItems(
           workflowForItem = doLoadWorkflow(runForItem.workflow, { projectDir: opts.projectDir });
         } catch {
           itemRecords.push({ itemId: item.id, ticketId: item.ticketId, runId: item.runId, lifecycleStatus: item.lifecycleStatus });
-          tryTransitionCampaign(campaignId, "running", "paused");
-          await notifyCampaignPause(campaignId, item.id, "blocked");
+          await parkCampaign(campaignId, item.id, "blocked");
           return { stopReason: "recovery_needed", itemRecords };
         }
       }
@@ -1300,8 +1320,7 @@ export async function driveRemainingItems(
         lifecycleStatus: item.lifecycleStatus,
         blockerKind: "campaign_system",
       });
-      tryTransitionCampaign(campaignId, "running", "paused");
-      await notifyCampaignPause(campaignId, item.id, "blocked", pickCampaignFallbackRunId(campaignId));
+      await parkCampaign(campaignId, item.id, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) });
       return { stopReason: "recovery_needed", itemRecords };
     }
 
@@ -1447,8 +1466,7 @@ export async function driveRemainingItems(
           lifecycleStatus: "failed",
           outcome: "blocked",
         });
-        if (tryTransitionCampaign(campaignId, "running", "paused")) {
-          await notifyCampaignPause(campaignId, item.id, "blocked");
+        if (await parkCampaign(campaignId, item.id, "blocked")) {
           return { stopReason: "paused", itemRecords };
         }
         const postLoadFail = getCampaign(campaignId);
@@ -1699,8 +1717,7 @@ export async function driveRemainingItems(
       });
 
       if (outcome !== "shipped") {
-        if (tryTransitionCampaign(campaignId, "running", "paused")) {
-          await notifyCampaignPause(campaignId, item.id, "decision_needed");
+        if (await parkCampaign(campaignId, item.id, "decision_needed")) {
           return { stopReason: "paused", itemRecords };
         }
         const post = getCampaign(campaignId);
@@ -1798,8 +1815,7 @@ export async function driveRemainingItems(
       });
 
       if (outcome !== "shipped") {
-        if (tryTransitionCampaign(campaignId, "running", "paused")) {
-          await notifyCampaignPause(campaignId, item.id, "decision_needed");
+        if (await parkCampaign(campaignId, item.id, "decision_needed")) {
           return { stopReason: "paused", itemRecords };
         }
         const post = getCampaign(campaignId);
@@ -1825,12 +1841,8 @@ export async function driveRemainingItems(
   // ZERO runs at all (every item held from the start) still can't push — that
   // residual needs a campaign-scoped channel, deferred to FG-517.
   if (anyHeld) {
-    if (tryTransitionCampaign(campaignId, "running", "paused")) {
-      const fallbackRunId = pickCampaignFallbackRunId(campaignId);
-      const heldItemIds = new Set(itemRecords.filter((r) => r.outcome === "held").map((r) => r.itemId));
-      for (const heldItemId of heldItemIds) {
-        await notifyCampaignPause(campaignId, heldItemId, "blocked", fallbackRunId);
-      }
+    const heldItemIds = [...new Set(itemRecords.filter((r) => r.outcome === "held").map((r) => r.itemId))];
+    if (await parkCampaign(campaignId, heldItemIds, "blocked", { fallbackRunId: pickCampaignFallbackRunId(campaignId) })) {
       return { stopReason: "paused", itemRecords };
     }
     const finalCheck = getCampaign(campaignId);

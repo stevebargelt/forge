@@ -242,6 +242,26 @@ test("emitMilestone: a prior NON-dispatched same-key milestone does NOT dedupe",
   assert.equal(res.decision.send, true, "prior was never sent, so not a dup");
 });
 
+test("FG-516: dedupeScope 'global' suppresses a same-key milestone dispatched on a DIFFERENT run", async () => {
+  // A prior dispatched milestone under key 'gk' on run A.
+  const runA = mkRun("run-ms-globalA");
+  logEvent("orchestrator.milestone", { runId: runA.id, payload: { kind: "blocked", dedupeKey: "gk", dispatched: true } });
+  // The re-park lands on run B (the `forge campaign retry` cleared-runId shape).
+  const runB = mkRun("run-ms-globalB");
+  const res = await emitMilestone({ runId: runB.id, kind: "blocked", title: "re-park", dedupeKey: "gk", dedupeScope: "global" });
+  assert.equal(res.decision.send, false, "global scope finds the prior push on run A and suppresses");
+  assert.match(res.decision.reason, /dedupe/);
+});
+
+test("FG-516: default 'run' scope does NOT suppress across runs (byte-compatible with existing callers)", async () => {
+  const runA = mkRun("run-ms-runA");
+  logEvent("orchestrator.milestone", { runId: runA.id, payload: { kind: "blocked", dedupeKey: "rk", dispatched: true } });
+  const runB = mkRun("run-ms-runB");
+  // No dedupeScope → run-scoped scan of run B finds nothing → still sends.
+  const res = await emitMilestone({ runId: runB.id, kind: "blocked", title: "other run", dedupeKey: "rk" });
+  assert.equal(res.decision.send, true, "run scope only scans its own run, so a cross-run key is not a dup");
+});
+
 test("emitMilestone: unknown kind throws; missing run throws", async () => {
   const run = mkRun("run-ms-5");
   await assert.rejects(() => emitMilestone({ runId: run.id, kind: "bogus", title: "x" }), /unknown milestone kind/);
