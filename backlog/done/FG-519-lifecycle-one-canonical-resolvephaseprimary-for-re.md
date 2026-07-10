@@ -1,9 +1,11 @@
 ---
 id: FG-519
 type: story
-status: active
+status: done
 title: "lifecycle: one canonical resolvePhasePrimary for ready-queue, deriveUpstream, and fanout upstream — deriveUpstream currently hands downstream a failed orphan's undefined result"
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: 241cacf
 ---
 
 Review findings F14/F15 (queued 2026-07-10, item 4 of 4 in the sequential reliability queue); first consumer of FG-512's total dispatch provenance.
