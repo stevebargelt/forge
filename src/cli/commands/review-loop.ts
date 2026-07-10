@@ -271,29 +271,46 @@ export function computeInRangeDocsPaths(range: CommitRange, projectDir: string):
   return new Set(paths.filter((p) => DOCS_LEARNINGS_README_RE.test(p)));
 }
 
-// ── FG-502: reviewed-tip-vs-remote trust check ───────────────────────────────
+// ── FG-502: reviewed-tip-vs-remote trust check, tightened by FG-514 ──────────
 //
-// Resolve a LOCALLY CACHED remote-tracking ref, no implicit `git fetch` — see
-// resolveRemoteRef below for why the candidate order (`@{u}` before
-// `origin/HEAD`) differs from claude.ts's statusBanner ahead-of-origin
-// helper, which checks the opposite order for an unrelated purpose (an
-// ahead-count against the default branch, not a PR-tip reachability check).
-// The trust invariant here is exact reachability (`git merge-base
-// --is-ancestor <reviewedTipSha> <remoteRef>`), never an ahead-count
-// substitute — an ahead-count can't distinguish "these commits are pushed to
-// a different remote branch" from "these commits exist only locally".
+// Two invariants, both feeding the closeable verdict (and therefore merge
+// authorization), both fail-closed:
+//
+// 1. EQUALITY, not ancestry. The reviewed tip must BE the remote head: no
+//    commits in `<remoteRef>..<tip>` (local-only work the remote never saw)
+//    AND none in `<tip>..<remoteRef>` (commits the reviewer never saw). The
+//    original FG-502 check was one-directional (`merge-base --is-ancestor
+//    <tip> <remoteRef>`), so a remote strictly AHEAD of the reviewed tip still
+//    passed — closeable would authorize merging never-reviewed commits.
+//    An ahead-count is never a substitute for either direction: it can't
+//    distinguish "pushed to a different remote branch" from "local only".
+//
+// 2. The REAL remote head, not a stale cache. Before comparing, the single
+//    remote-tracking ref is refreshed with a bounded, quiet fetch of ONLY that
+//    ref (never `fetch --all`, never tags). A cached `@{u}` can lag reality
+//    arbitrarily, and comparing against it would trust a tip the remote has
+//    long since moved past. If that fetch fails (offline, no remote, auth),
+//    the outcome is remote_unavailable — never a silent comparison against the
+//    stale cache.
+//
+// The candidate order (`@{u}` before `origin/HEAD`) deliberately differs from
+// claude.ts's statusBanner ahead-of-origin helper, which checks the opposite
+// order for an unrelated purpose (an ahead-count against the default branch,
+// not a PR-head equality check).
 
-/** Resolve the locally cached remote-tracking ref for the current branch:
- *  the branch's configured upstream (`@{u}`) first, falling back to
- *  `origin/HEAD` only when no upstream is configured. The reachability
- *  invariant this feeds is "reachable from the remote tracking / PR head
- *  ref" — `origin/HEAD` virtually always resolves (it tracks the default
- *  branch, e.g. `origin/main`), so checking it first would compare a
- *  pre-merge feature-branch tip against main, where it can never be an
- *  ancestor — permanently unreachable even after pushing. `@{u}` names the
- *  actual ref the branch is (or will be) merged via, so it must be tried
- *  first. Never invokes `git fetch`; a ref that isn't already cached locally
- *  resolves to undefined rather than being fetched. */
+/** Bounded so a hung/prompting remote can never wedge the loop's final report. */
+const FETCH_TIMEOUT_MS = 20_000;
+
+/** Resolve the remote-tracking ref for the current branch: the branch's
+ *  configured upstream (`@{u}`) first, falling back to `origin/HEAD` only when
+ *  no upstream is configured. `origin/HEAD` virtually always resolves (it
+ *  tracks the default branch, e.g. `origin/main`), so checking it first would
+ *  compare a pre-merge feature-branch tip against main, where it can never be
+ *  equal — permanently untrusted even after pushing. `@{u}` names the actual
+ *  ref the branch is (or will be) merged via, so it must be tried first.
+ *  Resolution is against the local ref store; fetchRemoteRef then refreshes
+ *  whichever candidate won. A ref with no local entry at all resolves to
+ *  undefined (there is nothing to name as a fetch target). */
 function resolveRemoteRef(projectDir: string): string | undefined {
   for (const ref of ["@{u}", "origin/HEAD"]) {
     try {
@@ -306,38 +323,82 @@ function resolveRemoteRef(projectDir: string): string | undefined {
   return undefined;
 }
 
-/** Exact ancestry check — `git merge-base --is-ancestor` exit code, never an
- *  ahead-count arithmetic substitute. Any non-zero exit (including a
- *  genuinely malformed ref) is treated as "not an ancestor" — fail closed,
- *  since this feeds a closeable verdict and must never silently trust a
- *  local-only tip. */
-function isAncestor(sha: string, ref: string, projectDir: string): boolean {
+/** The (remote, single refspec) pair that refreshes exactly `remoteRef`. For
+ *  `@{u}` that's the branch's configured remote + merge ref; for the
+ *  `origin/HEAD` fallback it's origin's default branch. Throws if any of the
+ *  config/symbolic-ref lookups are missing — the caller treats that as a fetch
+ *  failure (fail closed), which is also what a non-symbolic `origin/HEAD`
+ *  lands on: there is no branch name to fetch, so the head can't be verified. */
+function fetchTarget(remoteRef: string, projectDir: string): { remote: string; refspec: string } {
+  if (remoteRef === "@{u}") {
+    const branch = git(["symbolic-ref", "--short", "HEAD"], projectDir).trim();
+    const remote = git(["config", `branch.${branch}.remote`], projectDir).trim();
+    const merge = git(["config", `branch.${branch}.merge`], projectDir).trim();
+    const dst = git(["rev-parse", "--symbolic-full-name", "@{u}"], projectDir).trim();
+    return { remote, refspec: `+${merge}:${dst}` };
+  }
+  const dst = git(["symbolic-ref", "refs/remotes/origin/HEAD"], projectDir).trim();
+  const branch = dst.replace(/^refs\/remotes\/origin\//, "");
+  return { remote: "origin", refspec: `+refs/heads/${branch}:${dst}` };
+}
+
+function fetchErrorText(err: unknown): string {
+  const e = err as { stderr?: Buffer | string; message?: string };
+  const stderr = e.stderr ? e.stderr.toString().trim() : "";
+  const first = (stderr || e.message || "git fetch failed").split("\n")[0] ?? "git fetch failed";
+  return first.slice(0, 200);
+}
+
+/** Refresh exactly `remoteRef` from its remote. Returns undefined on success,
+ *  or a one-line failure reason. `GIT_TERMINAL_PROMPT=0` keeps an auth-gated
+ *  remote from blocking on a credential prompt instead of failing. */
+function fetchRemoteRef(remoteRef: string, projectDir: string): string | undefined {
+  let target: { remote: string; refspec: string };
   try {
-    execFileSync("git", ["merge-base", "--is-ancestor", sha, ref], {
-      cwd: projectDir, stdio: ["ignore", "ignore", "ignore"],
+    target = fetchTarget(remoteRef, projectDir);
+  } catch (err) {
+    return fetchErrorText(err);
+  }
+  try {
+    execFileSync("git", ["fetch", "--quiet", "--no-tags", target.remote, target.refspec], {
+      cwd: projectDir, encoding: "utf8", timeout: FETCH_TIMEOUT_MS,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
-    return true;
-  } catch {
-    return false;
+    return undefined;
+  } catch (err) {
+    return fetchErrorText(err);
   }
 }
 
-/** Resolve the FG-502 reviewed-tip trust fact for the final report/closeable
- *  verdict. Three outcomes: trusted (remote ref resolves, tip is an
- *  ancestor); local_only (remote ref resolves, tip is NOT an ancestor — names
- *  the local-only commits); remote_unavailable (no resolvable remote-tracking
- *  ref at all — never silently treated as trusted). */
-export function resolveReviewedTipTrust(projectDir: string, reviewedTipSha: string): ReviewedTipTrust {
-  const remoteRef = resolveRemoteRef(projectDir);
-  if (!remoteRef) return { kind: "remote_unavailable" };
-  if (isAncestor(reviewedTipSha, remoteRef, projectDir)) return { kind: "trusted", remoteRef };
-  const localCommits = git(["log", "--format=%h %s", `${remoteRef}..${reviewedTipSha}`], projectDir)
+function commitsIn(range: string, projectDir: string): { sha: string; subject: string }[] {
+  return git(["log", "--format=%h %s", range], projectDir)
     .split("\n").map((l) => l.trim()).filter(Boolean)
     .map((line) => {
       const idx = line.indexOf(" ");
       return idx === -1 ? { sha: line, subject: "" } : { sha: line.slice(0, idx), subject: line.slice(idx + 1) };
     });
-  return { kind: "local_only", remoteRef, localCommits };
+}
+
+/** Resolve the reviewed-tip trust fact for the final report/closeable verdict.
+ *  Four outcomes: trusted (the tip IS the freshly-fetched remote head — both
+ *  directions empty); local_only (the tip carries commits the remote lacks);
+ *  remote_ahead (the remote head carries commits the reviewer never saw);
+ *  remote_unavailable (no resolvable remote-tracking ref, or the bounded fetch
+ *  failed so the real remote head is unknown). Only "trusted" permits
+ *  closeable — every other outcome, including a failed fetch over a cached
+ *  ref, withholds it. */
+export function resolveReviewedTipTrust(projectDir: string, reviewedTipSha: string): ReviewedTipTrust {
+  const remoteRef = resolveRemoteRef(projectDir);
+  if (!remoteRef) return { kind: "remote_unavailable" };
+  const fetchError = fetchRemoteRef(remoteRef, projectDir);
+  if (fetchError) return { kind: "remote_unavailable", remoteRef, fetchError };
+
+  const localCommits = commitsIn(`${remoteRef}..${reviewedTipSha}`, projectDir);
+  if (localCommits.length > 0) return { kind: "local_only", remoteRef, localCommits };
+  const unreviewedCommits = commitsIn(`${reviewedTipSha}..${remoteRef}`, projectDir);
+  if (unreviewedCommits.length > 0) return { kind: "remote_ahead", remoteRef, unreviewedCommits };
+  return { kind: "trusted", remoteRef };
 }
 
 /** Build the engine's deps from real invoke + host verification. `invokeFn` is
@@ -897,17 +958,35 @@ export function registerReviewLoop(program: Command, invokeFn?: InvokeFn): void 
 
       // FG-502: a closeable verdict must never print/emit for a local-only
       // tip — compose outcome.closeable (unchanged: reviewer pass AND
-      // verification green) with the remote-ancestry trust fact ONLY here.
+      // verification green) with the remote-trust fact ONLY here. FG-514: the
+      // trust fact is now equality against the freshly-fetched remote head, so
+      // remote_ahead and a failed fetch withhold closeable the same way.
       if (outcome.closeable && remoteTrust.kind === "trusted") {
         console.log(
           `\n✓ closeable — reviewer passed AND verification is green. Reviewed tip ${reviewedTipSha} ` +
-          `is reachable from ${remoteTrust.remoteRef}. Close with:  forge backlog close ${ticketId}`,
+          `is the head of ${remoteTrust.remoteRef}. Close with:  forge backlog close ${ticketId}`,
         );
       } else if (outcome.closeable && remoteTrust.kind === "local_only") {
         console.log(
           `\n✗ not closeable — reviewed tip ${reviewedTipSha} has local-only commit(s) not present on ` +
           `${remoteTrust.remoteRef}: ${remoteTrust.localCommits.map((c) => c.sha).join(", ")}. ` +
           `Push the branch and re-run \`forge review-loop\`, or re-evaluate before closing.`,
+        );
+        process.exitCode = 1;
+      } else if (outcome.closeable && remoteTrust.kind === "remote_ahead") {
+        console.log(
+          `\n✗ not closeable — remote-ahead: ${remoteTrust.remoteRef} carries commit(s) beyond reviewed tip ` +
+          `${reviewedTipSha}: ${remoteTrust.unreviewedCommits.map((c) => c.sha).join(", ")}. ` +
+          `The remote head was never reviewed. Pull/rebase onto ${remoteTrust.remoteRef} and re-run ` +
+          `\`forge review-loop\`, or re-evaluate before closing.`,
+        );
+        process.exitCode = 1;
+      } else if (outcome.closeable && remoteTrust.kind === "remote_unavailable" && remoteTrust.remoteRef) {
+        console.log(
+          `\n✗ not closeable — remote-unavailable: the remote head could not be verified (bounded fetch of ` +
+          `${remoteTrust.remoteRef} failed: ${remoteTrust.fetchError ?? "unknown error"}), and a stale cached ref ` +
+          `is never trusted, so reviewed tip ${reviewedTipSha} cannot be confirmed. Restore remote access and ` +
+          `re-run, or re-evaluate before closing.`,
         );
         process.exitCode = 1;
       } else if (outcome.closeable && remoteTrust.kind === "remote_unavailable") {
