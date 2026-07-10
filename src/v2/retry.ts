@@ -100,6 +100,7 @@ export type AdHocDispatchPlan = {
   resolution: ModelResolution;
   designDir?: string;
   authProfile?: string;
+  /** RECORDED only: absent when the task failed before dispatch wrote a manifest. */
   runtimeName?: string;
 };
 
@@ -181,16 +182,18 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
 
   // #176: an auth-profile invoke that silently re-dispatches WITHOUT the profile
   // lands the agent on an unauthenticated app and produces false "app broken"
-  // reports. The manifest records that a profile was requested but not which one;
-  // the name lives on the auth.profile_applied event.
+  // reports. `auth.profile_applied` is the DURABLE record of which profile ran, so
+  // it is consulted first and unconditionally — manifest.auth.profileRequested is
+  // only a dispatch-time intent flag, and a partial/pre-receipt manifest omits it
+  // entirely. The flag alone (requested, but the task died before auth applied)
+  // still refuses: the name was never recorded, so there is nothing to replay.
+  const applied = eventsForTask(task.id).find((e) => e.eventType === "auth.profile_applied");
+  const appliedProfile = (applied?.payload as { profile?: unknown } | undefined)?.profile;
   let authProfile: string | undefined;
-  if (manifest?.auth?.profileRequested) {
-    const applied = eventsForTask(task.id).find((e) => e.eventType === "auth.profile_applied");
-    const name = (applied?.payload as { profile?: unknown } | undefined)?.profile;
-    if (typeof name !== "string") {
-      refuse("it ran with an auth profile whose name was never recorded, and re-dispatching unauthenticated would silently change what the agent sees");
-    }
-    authProfile = name;
+  if (typeof appliedProfile === "string") {
+    authProfile = appliedProfile;
+  } else if (applied || manifest?.auth?.profileRequested) {
+    refuse("it ran with an auth profile whose name was never recorded, and re-dispatching unauthenticated would silently change what the agent sees");
   }
 
   // Reds get read-only project mounts as an OS-level invariant, not a preference
@@ -198,10 +201,18 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
   // no receipt, fall back to the same `red-` role discriminator runNext.ts uses.
   const readOnlyProject = receipt ? receipt.mountMode === "ro" : task.agentRole.startsWith("red-");
 
-  // The runtime the task actually ran under (FG-366: manifest.runtime.name is the
-  // RESOLVED concrete runtime, e.g. "claude-apikey"). In policy mode resolveModel
-  // rebinds it from (provider, auth) anyway; in legacy mode it is loaded verbatim.
-  const runtimeName = manifest?.runtime?.name;
+  // The runtime the task actually ran under (FG-366: manifest.runtime.name and the
+  // FG-350 receipt's runtime.name are the same RESOLVED concrete runtime, e.g.
+  // "claude-apikey" — either is a RECORDED fact). In policy mode resolveModel
+  // rebinds it from (provider, auth) anyway; in legacy mode it is loaded verbatim,
+  // so a manifest that proves the task dispatched but records neither name cannot
+  // be defaulted to "claude" without silently moving a codex/pi invoke's retry
+  // onto a different runtime. A task with NO manifest never reached dispatch (invoke
+  // writes it just before buildDockerArgs; auth/provider preflight fails earlier),
+  // so there is no runtime it ran under to preserve — that retry re-resolves exactly
+  // as a fresh `forge invoke` does, which is also all the refusal below could offer.
+  const runtimeName = manifest?.runtime?.name ?? manifest?.controlPlane?.runtime?.name;
+  if (manifest && !runtimeName) refuse("its manifest records no runtime — neither `runtime.name` nor the dispatch receipt's — so the runtime it ran under cannot be replayed, and defaulting to `claude` could silently re-dispatch it elsewhere");
 
   // An explicit `forge invoke --profile <name>` is an operator decision about
   // which model/provider/auth runs the work, not an incidental default. Re-resolving
@@ -219,7 +230,7 @@ function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
     agentRole: task.agentRole,
     stepAlias: task.agentAlias,
     cliProfile,
-    runtimeName: runtimeName ?? "claude",
+    runtimeName,
     ctx: { projectDir },
   });
   const { step, workflow } = invokeWorkflowShape(task.agentRole, task.agentAlias, runtimeName);

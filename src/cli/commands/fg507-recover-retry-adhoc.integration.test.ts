@@ -601,3 +601,120 @@ test("FG-507 5: a retry with no explicit --profile re-resolves through policy (n
   assert.equal(out.adHoc!.resolution.resolvedBy, "overrides.agents.engineer", "still a policy rule — never rewritten to cli.--profile");
   assert.equal(getTask(out.newTask.id)!.agentModel, "ambient-model");
 });
+
+// ── 6. partial manifests: recorded facts, never guesses ─────────────────────
+// A pre-receipt / pre-#292 invoke row can carry a manifest missing whole blocks.
+// The dispatch plan must read what WAS recorded (the auth.profile_applied event,
+// either runtime name) and refuse when a fact it needs was never recorded at all
+// — silently defaulting is how a retry lands unauthenticated or on the wrong runtime.
+
+/** A failed ad-hoc row whose manifest.json is exactly `manifest` (possibly partial). */
+function failedAdHocWithManifest(id: string, projectDir: string, manifest: unknown): Task {
+  const runId = createInvokeRun("engineer", projectDir, undefined, "partial manifest", undefined);
+  const t: Task = {
+    id,
+    runId,
+    phase: "task",
+    agentRole: "engineer",
+    status: "failed",
+    error: "boom",
+    taskPackage: { taskId: id, runId, phase: "task", role: "engineer", inputs: { task: "partial work" }, composedSystemPrompt: "" },
+    createdAt: "2026-07-09T00:00:00Z",
+  };
+  insertTask(t);
+  logEvent("task.failed", { runId, taskId: id, payload: { failure_kind: "container_crash", error: "boom" } });
+  const dir = taskDir(runId, id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+  return t;
+}
+
+test("FG-507 6: a recorded auth profile is replayed even when the manifest has no `auth` block", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p001", trackedProjectDir(), { runtime: { name: "claude" } });
+  logEvent("auth.profile_applied", { runId: t.runId, taskId: t.id, payload: { profile: "acme-staging", kind: "captured" } });
+
+  const out = await retry(t.id);
+  assert.ok(out.adHoc);
+  assert.equal(
+    out.adHoc!.authProfile,
+    "acme-staging",
+    "auth.profile_applied is the durable record — a missing manifest.auth flag must not drop it",
+  );
+});
+
+test("FG-507 6: a manifest that requested a profile whose name was never recorded refuses pre-write", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p002", trackedProjectDir(), { runtime: { name: "claude" }, auth: { profileRequested: true, stateMounted: false } });
+
+  await assert.rejects(() => retry(t.id), (e: unknown) => {
+    assert.ok(e instanceof AdHocRedispatchUnavailableError);
+    assert.match(e.message, /auth profile whose name was never recorded/);
+    assert.match(e.message, /No pending task row was created/);
+    return true;
+  });
+  assert.deepEqual(tasksForRun(t.runId).map((x) => x.id), [t.id], "no stranded pending row");
+});
+
+test("FG-507 6: an unauthenticated ad-hoc task (no flag, no event) still plans without a profile", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p003", trackedProjectDir(), { runtime: { name: "claude" }, auth: { profileRequested: false, stateMounted: false } });
+  const out = await retry(t.id);
+  assert.ok(out.adHoc);
+  assert.equal(out.adHoc!.authProfile, undefined);
+});
+
+// These projects carry no model-policy.yml, so resolveModel runs in LEGACY mode —
+// where `resolution.runtime` IS the runtime name it was handed, and is what selects
+// the runtime YAML at spawn. That's the field a silent `?? "claude"` corrupts.
+test("FG-507 6: a partial manifest's non-default runtime reaches the model resolution, not the `claude` default", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p004", trackedProjectDir(), { runtime: { name: "codex" } });
+
+  const out = await retry(t.id);
+  assert.ok(out.adHoc);
+  assert.equal(out.adHoc!.runtimeName, "codex", "the RECORDED runtime");
+  assert.equal(out.adHoc!.resolution.runtime, "codex", "and it is what the re-dispatch will actually run on");
+});
+
+test("FG-507 6: the FG-350 receipt's runtime.name is recovered when the manifest has no runtime block", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p005", trackedProjectDir(), { controlPlane: { runtime: { name: "codex" }, mountMode: "rw" } });
+
+  const out = await retry(t.id);
+  assert.ok(out.adHoc);
+  assert.equal(out.adHoc!.runtimeName, "codex");
+  assert.equal(out.adHoc!.resolution.runtime, "codex", "a legacy invoke on codex must never silently re-dispatch on claude");
+});
+
+test("FG-507 6: a manifest recording no runtime at all refuses pre-write rather than guessing claude", async () => {
+  const t = failedAdHocWithManifest("task-engineer-p006", trackedProjectDir(), { taskId: "x", runId: "y" });
+
+  await assert.rejects(() => retry(t.id), (e: unknown) => {
+    assert.ok(e instanceof AdHocRedispatchUnavailableError);
+    assert.match(e.message, /manifest records no runtime/);
+    assert.match(e.message, /No pending task row was created/);
+    assert.match(e.message, new RegExp(`forge invoke engineer --run ${t.runId}`));
+    assert.match(e.message, /--task 'partial work'/);
+    return true;
+  });
+  assert.deepEqual(tasksForRun(t.runId).map((x) => x.id), [t.id], "no stranded pending row");
+});
+
+// The runtime refusal above must NOT swallow the advertised "fix your auth, then
+// retry" flow. invoke writes the manifest just before buildDockerArgs, so an auth
+// or provider-preflight failure fails the task with NO manifest at all — nothing
+// dispatched, so there is no runtime it ran under, and the retry re-resolves like
+// a fresh invoke rather than refusing.
+test("FG-507 6: an ad-hoc task that failed before dispatch wrote a manifest still retries (no over-refusal)", async () => {
+  const projectDir = trackedProjectDir();
+  const runId = createInvokeRun("engineer", projectDir, undefined, "auth failed", undefined);
+  const id = "task-engineer-p007";
+  insertTask({
+    id, runId, phase: "task", agentRole: "engineer", status: "failed", error: "auth profile expired",
+    taskPackage: { taskId: id, runId, phase: "task", role: "engineer", inputs: { task: "partial work" }, composedSystemPrompt: "" },
+    createdAt: "2026-07-09T00:00:00Z",
+  });
+  logEvent("task.failed", { runId, taskId: id, payload: { failure_kind: "auth_expired", error: "auth profile expired" } });
+  assert.ok(!existsSync(join(taskDir(runId, id), "manifest.json")), "fixture: the task died before dispatch wrote a receipt");
+
+  const out = await retry(id);
+  assert.ok(out.adHoc, "retryable after the operator fixes auth — not refused for a runtime that was never recorded");
+  assert.equal(out.adHoc!.runtimeName, undefined, "nothing was recorded, so nothing is claimed as recorded");
+  assert.equal(out.adHoc!.resolution.runtime, "claude", "re-resolved exactly as a fresh `forge invoke` would");
+});
