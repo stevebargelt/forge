@@ -352,6 +352,92 @@ test("FG-512 AC5 (fanout parent + child): dispatchFanoutStep stamps `workflow` o
   }
 });
 
+// The two runner sites that mint a row through emptyTaskPackage and immediately
+// fail it — exercised through the REAL runner, not the helper in isolation.
+
+test("FG-512 AC5 (shipping-reviewer preflight-failure red): the pre-failed reviewer row is stamped `workflow` and classifies decisively", async () => {
+  const dir = projectDir();
+  const wf: Workflow = {
+    name: "fg512-shipping-preflight",
+    description: "step whose only red is shipping-reviewer, which pre-fails on missing context",
+    inputs: [],
+    steps: [
+      {
+        id: "build",
+        agent: "engineer",
+        gate: "auto",
+        manual: false,
+        depends_on: [],
+        runtime: "claude",
+        reds: [{ agent: "shipping-reviewer", authority: "specialist", gate_on_verdict: false }],
+      },
+    ],
+  };
+  // No ticketId in inputs/metadata → assembleReviewerContextPacket short-circuits
+  // with a required-missing backlogTicket, so the shipping-reviewer red pre-fails
+  // BEFORE any container dispatch. That is the emptyTaskPackage insert under test.
+  const { runId } = startRun({ workflow: wf, title: "fg512 shipping preflight", inputs: {}, projectDir: dir });
+
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", files_modified: [] }) });
+
+  const reviewer = tasksForRun(runId).find((t) => t.agentRole === "shipping-reviewer")!;
+  assert.ok(reviewer, "the pre-failed shipping-reviewer red row exists");
+  assert.equal(reviewer.status, "failed", "fixture: the reviewer pre-failed on missing required context");
+  assert.equal(
+    reviewer.taskPackage.dispatchSource,
+    "workflow",
+    "preflight-failure red row stamped via emptyTaskPackage (survives the SQLite round-trip)",
+  );
+  assert.equal(
+    taskDispatchKind(reviewer, getRun(runId)!).kind,
+    "workflow_step",
+    "the `workflow` marker classifies the pre-failed red decisively — no legacy ambiguity",
+  );
+});
+
+test("FG-512 AC5 (fanout parent, empty upstream): failFanoutParent stamps `workflow` on the failure parent row", async () => {
+  const dir = projectDir();
+  const wf: Workflow = {
+    name: "fg512-fanout-empty",
+    description: "seed yields an empty array → the fanout parent is minted only to fail",
+    inputs: [],
+    steps: [
+      { id: "seed", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+      {
+        id: "spread",
+        agent: "engineer",
+        gate: "auto",
+        manual: false,
+        depends_on: ["seed"],
+        runtime: "claude",
+        reds: [],
+        fanout: { from_upstream: { step: "seed", array_key: "items", input_key: "item" }, failure_mode: "continue" },
+      },
+    ],
+  };
+  const { runId } = startRun({ workflow: wf, title: "fg512 fanout empty", inputs: {}, projectDir: dir });
+
+  // Wave 1: seed completes with an EMPTY items array — nothing to fan out over.
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", items: [] }) });
+  // Wave 2: the fanout step dispatches, finds no upstream array, and mints the
+  // parent row through emptyTaskPackage solely to fail it — the path under test.
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+
+  const parent = tasksForRun(runId).find((t) => t.phase === "spread" && t.parentId === undefined)!;
+  assert.ok(parent, "the failed fanout parent row exists");
+  assert.equal(parent.status, "failed", "fixture: the parent failed on empty upstream");
+  assert.equal(
+    parent.taskPackage.dispatchSource,
+    "workflow",
+    "empty-upstream fanout parent stamped via emptyTaskPackage (survives the SQLite round-trip)",
+  );
+  assert.equal(
+    taskDispatchKind(parent, getRun(runId)!).kind,
+    "workflow_step",
+    "the `workflow` marker classifies the failure parent decisively",
+  );
+});
+
 test("FG-512 AC5 (on_reject recovery): gate reject stamps `workflow` on the recovery row", async () => {
   const dir = projectDir();
   const wfName = "fg512-onreject";
