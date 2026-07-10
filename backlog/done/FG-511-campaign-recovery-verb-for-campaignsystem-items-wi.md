@@ -1,9 +1,11 @@
 ---
 id: FG-511
 type: story
-status: active
+status: done
 title: campaign recovery verb for campaign_system items with durable transient auth/infrastructure evidence (audit N-B)
 created: 2026-07-10
+closed: 2026-07-10
+closed_commit: e9c981b
 ---
 
 Source: notes/forge-engineering-review-2026-07-09.md finding N-B (MEDIUM). Deliberately separate from FG-507 (operator constraint 2026-07-09: do NOT broaden FG-507 to cover campaign retry).
