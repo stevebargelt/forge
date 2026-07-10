@@ -12,6 +12,12 @@
 //    distinct campaign_item.campaign_system_reconciled event.
 //  - a missing-evidence shape of the identical item shape must be refused by BOTH surfaces:
 //    report shows no eligibility/hint, and reconcile refuses with zero mutation.
+//
+// FG-511 adds the disjoint third shape: a campaign_system item that never shipped, whose
+// run's durable task evidence proves the failure was transient. Reconcile can never
+// recover it (there is no ship evidence), so show/report must point the operator at
+// `forge campaign retry` — and that pointer must agree with retryCampaignItem's own
+// verdict on the identical fixture, in both directions.
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -24,10 +30,16 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { writeTicket, closeTicket } from "../backlog/structured.js";
 import { insertHostVerification } from "../store/host-verifications.js";
 import { approveCampaign, getCampaignItem, listCampaignItems } from "../store/campaigns.js";
+import { insertRun } from "../store/runs.js";
+import { insertTask } from "../store/tasks.js";
+import { failTask } from "../v2/failure-kind.js";
+import type { FailureKind } from "../v2/failure-kind.js";
+import { nowIso } from "../util/ids.js";
 import { planCampaign as _planCampaign } from "./planner.js";
 import type { PlannerInput, PlanMode } from "./planner.js";
 import { reconcileCampaign } from "./reconcile.js";
-import { assembleCampaignReport, assembleCampaignShow } from "./report.js";
+import { retryCampaignItem } from "./executor.js";
+import { assembleCampaignReport, assembleCampaignShow, renderCampaignReportHuman } from "./report.js";
 
 // Same wrapper reconcile.integration.test.ts uses: forces executionMode:'invoke' for
 // list-type campaigns so planning never tries to resolve a real dispatch.
@@ -118,6 +130,26 @@ function countEvents(): number {
   return (db.prepare("SELECT COUNT(*) as n FROM events").get() as { n: number }).n;
 }
 
+// FG-511: the durable run/task evidence retryCampaignItem's probe reads back —
+// an abandoned run with one failed primary task per kind, each carrying a real
+// task.failed event written by the production writer.
+function seedAbandonedRun(runId: string, failureKinds: FailureKind[]): void {
+  insertRun({ id: runId, workflow: "feature", title: runId, status: "abandoned", createdAt: nowIso(), projectDir });
+  failureKinds.forEach((kind, i) => {
+    const taskId = `${runId}-task-${i}`;
+    insertTask({
+      id: taskId,
+      runId,
+      phase: "implement",
+      agentRole: "engineer",
+      status: "pending",
+      taskPackage: { taskId, runId, phase: "implement", role: "engineer", inputs: {}, composedSystemPrompt: "" },
+      createdAt: nowIso(),
+    });
+    failTask(taskId, { runId, kind, error: `seeded ${kind}` });
+  });
+}
+
 test("parity: full out-of-band (docs-lane) evidence that report.ts previews as campaignSystemEligible actually reconciles via reconcileCampaign", () => {
   const ticketId = "FG-590";
   const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId);
@@ -197,6 +229,134 @@ test("parity: missing-evidence campaign_system shape (lane evidence absent) is r
 
   assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refusal");
   assert.equal(countEvents(), beforeEvents, "no audit event logged for a refused reconcile");
+});
+
+// ── FG-511: the non-shipped, transient campaign_system shape — retry, not reconcile ──
+
+test("parity: transient, non-shipped campaign_system evidence previews as retry-eligible in show/report, reconcile refuses it, and retryCampaignItem accepts", () => {
+  const ticketId = "FG-594";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId);
+  makeBaseCommit(`base-${ticketId}`);
+  // The overnight blip: an abandoned run whose only failed primary classifies
+  // infrastructure. The ticket is still active — nothing shipped, so reconcile
+  // has no ship evidence it could ever act on.
+  seedAbandonedRun(runId, ["idle_timeout"]);
+
+  // 1. show/report must point at retry — NOT at reconcile, and not at the
+  //    generic "resolve blocker … then resume" fall-through.
+  const show = assembleCampaignShow(campaignId)!;
+  assert.equal(show.items[0]!.campaignSystemRetryEligible, true, "transient run evidence must preview as retry-eligible");
+  assert.equal(show.items[0]!.campaignSystemEligible, false, "a never-shipped item is not reconcile-recoverable");
+  assert.ok(
+    show.nextAction.includes(`forge campaign retry ${campaignId} ${ticketId}`),
+    `next action must name the evidence-gated retry, got: ${show.nextAction}`
+  );
+  assert.ok(!show.nextAction.includes("resolve blocker"), `next action must not fall through to the generic blocker text, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaignId)!;
+  assert.equal(report.items[0]!.campaignSystemRetryEligible, true);
+  assert.ok(
+    report.nextOperatorAction.includes(`forge campaign retry ${campaignId} ${ticketId}`),
+    `report's next operator action must name retry, got: ${report.nextOperatorAction}`
+  );
+  assert.ok(
+    renderCampaignReportHuman(report).some((l) => l.includes("campaign-system-retryable")),
+    "the human report must render the per-item retry hint"
+  );
+
+  // 2. reconcile — the OTHER recovery verb — must refuse this shape with zero mutation.
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+  const reconciled = reconcileCampaign(campaignId);
+  assert.equal(reconciled.items[0]!.status, "refused", "a never-shipped item must never be reconciled to shipped");
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refused reconcile");
+  assert.equal(countEvents(), beforeEvents, "no audit event logged for a refused reconcile");
+
+  // 3. retryCampaignItem, given the SAME durable facts show/report previewed from, accepts.
+  const retried = retryCampaignItem(campaignId, ticketId);
+  assert.equal(retried.ok, true, `show/report previewed retry-eligible but retry refused: ${!retried.ok ? retried.reason : ""}`);
+
+  const item = getCampaignItem(itemId)!;
+  assert.equal(item.lifecycleStatus, "pending");
+  assert.equal(item.blockerKind, undefined);
+  assert.equal(item.runId, undefined);
+  const evRow = db
+    .prepare("SELECT event_type FROM events WHERE run_id = ? ORDER BY id DESC LIMIT 1")
+    .get(runId) as { event_type: string };
+  assert.equal(evRow.event_type, "campaign_item.campaign_system_retried");
+
+  // 4. No drift the other direction: a reset item is no longer retry-eligible.
+  assert.equal(assembleCampaignShow(campaignId)!.items[0]!.campaignSystemRetryEligible, false, "a reset item is no longer retry-eligible");
+});
+
+// FG-511 round 2: the two evidence trails can coexist on ONE item — an abandoned
+// run whose primary idled out (transient), and a ticket delivered out-of-band
+// anyway (ship evidence). Ship evidence wins in BOTH directions: the verb refuses
+// naming reconcile, and every surface points at reconcile rather than retry.
+test("parity: transient run evidence PLUS ship evidence points every surface at reconcile, and retryCampaignItem refuses naming it", () => {
+  const ticketId = "FG-596";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId);
+  makeBaseCommit(`base-${ticketId}`);
+  const commit = commitDocsFile(`docs/${ticketId}.md`, `docs for ${ticketId}`, `docs: ${ticketId}`);
+  closeTicket(projectDir, ticketId, commit);
+  // Transient evidence that WOULD license a retry on its own (the positive fixture
+  // above uses exactly this run shape).
+  seedAbandonedRun(runId, ["idle_timeout"]);
+
+  // 1. JSON surfaces: reconcile-recoverable, and NOT retry-eligible. The two
+  //    recovery flags must never both be set on one item.
+  const show = assembleCampaignShow(campaignId)!;
+  assert.equal(show.items[0]!.campaignSystemEligible, true, "delivered work stays reconcile-recoverable");
+  assert.equal(show.items[0]!.campaignSystemRetryEligible, false, "delivered work must never preview as retryable");
+  assert.ok(show.nextAction.includes("forge campaign reconcile"), `next action must name reconcile, got: ${show.nextAction}`);
+  assert.ok(!show.nextAction.includes("forge campaign retry"), `next action must not name retry for delivered work, got: ${show.nextAction}`);
+
+  const report = assembleCampaignReport(campaignId)!;
+  assert.equal(report.items[0]!.campaignSystemEligible, true);
+  assert.equal(report.items[0]!.campaignSystemRetryEligible, false);
+  assert.ok(report.nextOperatorAction.includes("forge campaign reconcile"), `report must name reconcile, got: ${report.nextOperatorAction}`);
+
+  // 2. Human surface: the per-item hint says recoverable, never retryable.
+  const human = renderCampaignReportHuman(report);
+  assert.ok(human.some((l) => l.includes("campaign-system-recoverable")), "the human report must render the reconcile hint");
+  assert.ok(
+    !human.some((l) => l.includes("campaign-system-retryable")),
+    `the human report must not render a retry hint for delivered work, got: ${human.filter((l) => l.includes("campaign-system")).join(" | ")}`
+  );
+
+  // 3. The verb agrees with the surfaces: refuse, name reconcile, mutate nothing.
+  const beforeItem = getCampaignItem(itemId)!;
+  const beforeEvents = countEvents();
+  const retried = retryCampaignItem(campaignId, ticketId);
+  assert.equal(retried.ok, false, "retry must never re-dispatch an item whose ticket is provably delivered");
+  if (!retried.ok) {
+    assert.match(retried.reason, /provably delivered/i);
+    assert.match(retried.reason, new RegExp(`forge campaign reconcile ${campaignId}`));
+  }
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refused retry");
+  assert.equal(countEvents(), beforeEvents, "no campaign_system_retried event may be logged for a refused retry");
+
+  // 4. And reconcile — the verb the surfaces named — actually ships it.
+  assert.equal(reconcileCampaign(campaignId).items[0]!.status, "shipped", "the named verb must be the one that works");
+});
+
+test("parity: non-transient campaign_system evidence previews as NOT retry-eligible and retryCampaignItem refuses it", () => {
+  const ticketId = "FG-595";
+  const { campaignId, itemId, runId } = setupCampaignSystemCampaign(ticketId);
+  makeBaseCommit(`base-${ticketId}`);
+  seedAbandonedRun(runId, ["model_error"]);
+
+  const show = assembleCampaignShow(campaignId)!;
+  assert.equal(show.items[0]!.campaignSystemRetryEligible, false, "a scope-classified failure must never preview as retry-eligible");
+  assert.ok(!show.nextAction.includes("forge campaign retry"), `next action must not name retry for non-transient evidence, got: ${show.nextAction}`);
+  assert.ok(show.nextAction.includes("resolve blocker"), `next action must fall through to the generic blocker text, got: ${show.nextAction}`);
+  assert.equal(assembleCampaignReport(campaignId)!.items[0]!.campaignSystemRetryEligible, false);
+
+  const beforeItem = getCampaignItem(itemId)!;
+  const result = retryCampaignItem(campaignId, ticketId);
+  assert.equal(result.ok, false, "show/report previewed no retry eligibility but retry accepted it anyway");
+  if (!result.ok) assert.match(result.reason, /model_error/);
+  assert.deepEqual(getCampaignItem(itemId)!, beforeItem, "campaign_items row must be byte-identical after a refused retry");
 });
 
 // FG-502 round-2: the fourth producer — driveWorkflowItem's inconclusive-verdict

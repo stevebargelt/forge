@@ -85,6 +85,15 @@ export type EventType =
   // out-of-band via a re-routed lane" apart from "recovered from a campaign-system
   // salvage/gap/fallback failure that turned out to be already-shipped."
   | "campaign_item.campaign_system_reconciled"
+  // FG-511: `forge campaign retry` reset a failed/blockerKind='campaign_system'
+  // item back to pending after proving, from the underlying run's durable task
+  // evidence, that EVERY failed primary task classified transient (auth or
+  // infrastructure). Distinct from campaign_item.campaign_system_reconciled —
+  // that event ships an item whose work turned out to be already delivered; this
+  // one re-drives an item whose run was abandoned by a transient blip and never
+  // finished. Payload: { campaignId, itemId, ticketId, runId, evidence:
+  // [{ taskId, failureKind, classified }], decidedAt }.
+  | "campaign_item.campaign_system_retried"
   // FG-441 red-review fix: `campaign resume`'s manually-driven awaiting_gate
   // reconcile branch found evidence incomplete and refused to ship, re-parking
   // the item. Durable counterpart to the console.error refusal message — under
