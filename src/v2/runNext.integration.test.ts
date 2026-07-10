@@ -2023,6 +2023,21 @@ test("runNext after retry: the RETRIED task is dispatched (not a fresh one) and 
   const { logEvent } = await import("../store/events.js");
 
   ensureRuntime();
+  // Unlike runNext, retry gets only the run row and must load the workflow BY NAME
+  // to tell a workflow step from an ad-hoc invoke row — and refuses when it can't
+  // (FG-507). Every real run's workflow came off disk, so put LINEAR_WORKFLOW there.
+  mkdirSync(join(process.env.FORGE_HOME!, "workflows"), { recursive: true });
+  writeFileSync(
+    join(process.env.FORGE_HOME!, "workflows", "test-linear.yml"),
+    `name: test-linear
+description: two-step linear test
+inputs:
+  - { name: brief, required: true, type: text }
+steps:
+  - { id: first, agent: test-agent, gate: auto }
+  - { id: second, agent: test-agent, gate: auto, depends_on: [first] }
+`,
+  );
   const { runId } = startRun({ workflow: LINEAR_WORKFLOW, title: "retry e2e", inputs: { brief: "x" }, projectDir: "/tmp/test-project" });
 
   // A failed primary task for the "first" step (as if its first attempt failed).

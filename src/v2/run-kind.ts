@@ -28,23 +28,33 @@ export function taskHasPipelineFinalize(run: Run): boolean {
 // walks workflow steps), so a pending ad-hoc row strands forever waiting for a
 // `forge next` that will never see it.
 //
-// Two shapes, both covered:
+// Two ad-hoc shapes, both covered:
 //   (a) a synthetic single-task invoke run (run.workflow === "invoke", or an
-//       "invoke_chain" run from a campaign quick lane) — no workflow YAML exists;
+//       "invoke_chain" run from a campaign quick lane) — no workflow YAML exists,
+//       so the answer is decisive without a load attempt;
 //   (b) `forge invoke --run <real-workflow-run>`, which attaches a phase="task"
 //       row to a run whose workflow has no such step.
 //
 // Keyed on the workflow's actual step ids, never on phase === "task" alone — a
-// real workflow may legitimately declare a step called "task". A workflow that
-// won't load can't be reasoned about, so we answer "not ad-hoc" and leave the
-// caller on its existing (ready-queue) path rather than guessing.
-export function isAdHocTask(task: Task, run: Run): boolean {
-  if (!taskHasPipelineFinalize(run)) return true;
+// real workflow may legitimately declare a step called "task".
+//
+// The third state is the point of the union: a workflow that won't load leaves
+// (b) UNPROVABLE. Collapsing that into "workflow step" is what stranded rows —
+// retry would mint a pending task and point at a `forge next` that never sees
+// it. `unknown` is not a value any caller may silently coerce; it forces the
+// decision (today: refuse before writing — see retry.ts).
+export type TaskDispatchKind =
+  | { kind: "adhoc" }
+  | { kind: "workflow_step" }
+  | { kind: "unknown"; loadError: string };
+
+export function taskDispatchKind(task: Task, run: Run): TaskDispatchKind {
+  if (!taskHasPipelineFinalize(run)) return { kind: "adhoc" };
   let workflow;
   try {
     workflow = loadWorkflow(run.workflow, run.projectDir ? { projectDir: run.projectDir } : {});
-  } catch {
-    return false;
+  } catch (e) {
+    return { kind: "unknown", loadError: (e as Error).message };
   }
-  return !workflow.steps.some((s) => s.id === task.phase);
+  return workflow.steps.some((s) => s.id === task.phase) ? { kind: "workflow_step" } : { kind: "adhoc" };
 }

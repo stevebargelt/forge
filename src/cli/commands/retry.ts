@@ -5,6 +5,7 @@ import {
   RetryNotAllowedError,
   FanoutChildRetryError,
   AdHocRedispatchUnavailableError,
+  RetryWorkflowUnloadableError,
   type RetryOutcome,
 } from "../../v2/retry.js";
 import { ensureForgeDirs } from "../../util/paths.js";
@@ -75,7 +76,11 @@ export function registerRetry(program: Command): void {
           process.exitCode = 1;
           return;
         }
-        if (e instanceof FanoutChildRetryError || e instanceof AdHocRedispatchUnavailableError) {
+        if (
+          e instanceof FanoutChildRetryError ||
+          e instanceof AdHocRedispatchUnavailableError ||
+          e instanceof RetryWorkflowUnloadableError
+        ) {
           console.error(`forge retry: ${e.message}`);
           process.exitCode = 1;
           return;

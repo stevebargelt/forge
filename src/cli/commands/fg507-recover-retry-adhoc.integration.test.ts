@@ -21,8 +21,13 @@ import { logEvent } from "../../store/events.js";
 import { taskDir } from "../../util/paths.js";
 import { failureKindForTask } from "../../v2/failure-kind.js";
 import { invoke, createInvokeRun, type DockerExecFn } from "../../v2/invoke.js";
-import { retry, dispatchRetriedAdHocTask, AdHocRedispatchUnavailableError } from "../../v2/retry.js";
-import { isAdHocTask } from "../../v2/run-kind.js";
+import {
+  retry,
+  dispatchRetriedAdHocTask,
+  AdHocRedispatchUnavailableError,
+  RetryWorkflowUnloadableError,
+} from "../../v2/retry.js";
+import { taskDispatchKind } from "../../v2/run-kind.js";
 import { loadWorkflow } from "../../v2/loader.js";
 import { computeReadyQueue } from "../../v2/ready-queue.js";
 import { performInspect } from "./recover.js";
@@ -268,7 +273,7 @@ test("FG-507 2b: an invoke task attached to a REAL workflow run via --run is ad-
   assert.equal(r.status, "failed");
   const attached = getTask(r.taskId)!;
   assert.equal(attached.phase, "task");
-  assert.ok(isAdHocTask(attached, run), "phase 'task' is not among the workflow's step ids");
+  assert.equal(taskDispatchKind(attached, run).kind, "adhoc", "phase 'task' is not among the workflow's step ids");
 
   const out = await retry(r.taskId);
   assert.ok(out.adHoc, "attached invoke task → ad-hoc");
@@ -386,6 +391,102 @@ test("FG-507 3: an ad-hoc retry that cannot dispatch refuses with a ready-to-run
     [legacy.id],
     "no stranded pending row — the refusal happened before any write",
   );
+});
+
+// A workflow that won't load means forge cannot tell a workflow step from an
+// invoke-attached row. Answering "not ad-hoc" there mints a pending row + a
+// `forge next` pointer that never fires — the exact stranding FG-507 removes.
+test("FG-507 3b: an invoke-attached task whose workflow YAML broke refuses pre-write, naming the load error and the invoke command", async () => {
+  const projectDir = trackedProjectDir();
+  const run: Run = {
+    id: "run-fg507-broken",
+    workflow: WORKFLOW_NAME,
+    title: "real workflow run",
+    status: "active",
+    createdAt: "2026-07-09T00:00:00Z",
+    projectDir,
+  };
+  insertRun(run);
+
+  const r = await invoke({ agentRole: "engineer", task: "side quest", projectDir, runId: run.id, dockerExec: stubExec(undefined, 1) });
+  assert.equal(r.status, "failed");
+
+  const wfPath = join(projectDir, ".forge", "workflows", `${WORKFLOW_NAME}.yml`);
+  writeFileSync(wfPath, "name: fg507wf\nsteps: [ unclosed\n");
+  assert.equal(taskDispatchKind(getTask(r.taskId)!, run).kind, "unknown", "fixture: the workflow no longer loads");
+
+  await assert.rejects(
+    () => retry(r.taskId),
+    (e: unknown) => {
+      assert.ok(e instanceof RetryWorkflowUnloadableError, `expected RetryWorkflowUnloadableError, got ${e}`);
+      assert.match(e.message, /YAML parse error/, "the refusal names the workflow-load error");
+      assert.match(e.message, /No pending task row was created/);
+      assert.match(e.message, new RegExp(`forge invoke engineer --run ${run.id}`), "ready-to-run direct re-dispatch");
+      assert.match(e.message, new RegExp(`--project ${projectDir}`));
+      assert.match(e.message, /--task 'side quest'/, "the recorded task text is handed back verbatim");
+      assert.match(e.message, new RegExp(`forge retry ${r.taskId}`), "and the restore-the-YAML path");
+      return true;
+    },
+  );
+
+  assert.deepEqual(
+    tasksForRun(run.id).map((t) => t.id),
+    [r.taskId],
+    "no stranded pending row — the refusal happened before any write",
+  );
+
+  // A missing workflow file is the same fail-closed answer, with its own load error.
+  rmSync(wfPath);
+  await assert.rejects(() => retry(r.taskId), (e: unknown) => {
+    assert.ok(e instanceof RetryWorkflowUnloadableError);
+    assert.match(e.message, /not found at/);
+    return true;
+  });
+  assert.equal(tasksForRun(run.id).length, 1, "still no pending row");
+});
+
+test("FG-507 3b: a genuine workflow-step task whose workflow YAML broke also refuses pre-write, with restore-then-retry guidance", async () => {
+  const projectDir = trackedProjectDir();
+  const run: Run = {
+    id: "run-fg507-broken-step",
+    workflow: WORKFLOW_NAME,
+    title: "real workflow run",
+    status: "active",
+    createdAt: "2026-07-09T00:00:00Z",
+    projectDir,
+  };
+  insertRun(run);
+
+  const failed: Task = {
+    id: "task-build-ccc333",
+    runId: run.id,
+    phase: "build",
+    agentRole: "engineer",
+    status: "failed",
+    error: "boom",
+    taskPackage: { taskId: "task-build-ccc333", runId: run.id, phase: "build", role: "engineer", inputs: { brief: "b" }, composedSystemPrompt: "PROMPT" },
+    createdAt: "2026-07-09T00:00:00Z",
+  };
+  insertTask(failed);
+  logEvent("task.failed", { runId: run.id, taskId: failed.id, payload: { failure_kind: "container_crash", error: "boom" } });
+
+  writeFileSync(join(projectDir, ".forge", "workflows", `${WORKFLOW_NAME}.yml`), "name: fg507wf\nsteps: [ unclosed\n");
+
+  await assert.rejects(
+    () => retry(failed.id),
+    (e: unknown) => {
+      assert.ok(e instanceof RetryWorkflowUnloadableError);
+      assert.match(e.message, /YAML parse error/);
+      assert.match(e.message, /restore the workflow YAML/);
+      assert.match(e.message, new RegExp(`re-run \`forge retry ${failed.id}\``), "retry is re-runnable once the YAML is back");
+      assert.match(e.message, /No pending task row was created/);
+      // No inputs.task text on a workflow step: don't render a fake ready-to-run command.
+      assert.doesNotMatch(e.message, /the original task text — this row never recorded it/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(tasksForRun(run.id).map((t) => t.id), [failed.id], "no pending row for the broken-workflow step either");
 });
 
 // ── 4. recover's recommendation ─────────────────────────────────────────────

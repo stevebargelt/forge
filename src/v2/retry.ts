@@ -24,7 +24,7 @@ import { newTaskId, nowIso } from "../util/ids.js";
 import { taskDir } from "../util/paths.js";
 import { failureKindForTask } from "./failure-kind.js";
 import { retryPolicy, type RetryDisposition } from "./retry-policy.js";
-import { isAdHocTask } from "./run-kind.js";
+import { taskDispatchKind } from "./run-kind.js";
 import { readTaskManifest } from "./task-manifest.js";
 import { composeSystemPrompt } from "./compose.js";
 import { resolveModel, taskModelFields, type ModelResolution } from "./model-resolution.js";
@@ -115,6 +115,25 @@ export class AdHocRedispatchUnavailableError extends Error {
   }
 }
 
+// FG-507 (round 2): the workflow YAML behind a real run is gone or broken, so
+// forge cannot tell a workflow step (which `forge next` redispatches) from an
+// invoke-attached row (which it never will). Guessing "workflow step" is what
+// stranded rows in the first place, so refuse — before any write — and hand back
+// both recoveries, since only the operator knows which task this was.
+export class RetryWorkflowUnloadableError extends Error {
+  constructor(public taskId: string, public runId: string, public workflow: string, public loadError: string, manualActions: string[]) {
+    super(
+      `Task ${taskId} cannot be retried: run ${runId}'s workflow '${workflow}' does not load, so forge cannot tell whether ` +
+        `${taskId} is a step of that workflow (which \`forge next\` would redispatch) or an ad-hoc \`forge invoke\` task ` +
+        `(which \`forge next\` never dispatches, and which would strand as a pending row). ` +
+        `No pending task row was created (nothing to clean up).\n` +
+        `  workflow load error: ${loadError}\n` +
+        `Recover by whichever this task is:\n${manualActions.join("\n")}`,
+    );
+    this.name = "RetryWorkflowUnloadableError";
+  }
+}
+
 function invokeCommandFor(task: Task, projectDir: string | undefined, taskText: string | undefined): string {
   const parts = [`forge invoke ${task.agentRole}`, `--run ${task.runId}`];
   if (projectDir) parts.push(`--project ${projectDir}`);
@@ -122,15 +141,35 @@ function invokeCommandFor(task: Task, projectDir: string | undefined, taskText: 
   return parts.join(" ");
 }
 
+/** The dispatch facts recoverable from RECORDED state (the FG-350 receipt + the
+ *  task's own row), shared by the re-dispatch plan and both refusal paths — so a
+ *  refusal always names the same projectDir/task text the plan would have used. */
+function recordedDispatchFacts(task: Task, run: Run) {
+  const manifest = readTaskManifest(taskDir(task.runId, task.id));
+  const raw = task.taskPackage.inputs["task"];
+  return {
+    manifest,
+    projectDir: manifest?.controlPlane?.projectDir ?? run.projectDir,
+    taskText: typeof raw === "string" && raw.length > 0 ? raw : undefined,
+  };
+}
+
+function refuseUnloadableWorkflow(task: Task, run: Run, loadError: string): never {
+  const { projectDir, taskText } = recordedDispatchFacts(task, run);
+  const actions = [
+    `  (a) a workflow step — restore the workflow YAML, then re-run \`forge retry ${task.id}\`.`,
+  ];
+  actions.push(
+    taskText
+      ? `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly:\n        ${invokeCommandFor(task, projectDir, taskText)}`
+      : `  (b) an ad-hoc \`forge invoke --run ${task.runId}\` task — re-dispatch it directly with \`forge invoke ${task.agentRole} --run ${task.runId}\`; this row recorded no \`inputs.task\` text, so supply the original task yourself.`,
+  );
+  throw new RetryWorkflowUnloadableError(task.id, task.runId, run.workflow, loadError, actions);
+}
+
 function planAdHocRedispatch(task: Task, run: Run): AdHocDispatchPlan {
-  const dir = taskDir(task.runId, task.id);
-  const manifest = readTaskManifest(dir);
+  const { manifest, projectDir, taskText } = recordedDispatchFacts(task, run);
   const receipt = manifest?.controlPlane;
-
-  const rawTaskText = task.taskPackage.inputs["task"];
-  const taskText = typeof rawTaskText === "string" && rawTaskText.length > 0 ? rawTaskText : undefined;
-
-  const projectDir = receipt?.projectDir ?? run.projectDir;
   // Annotated on the const, not just the arrow, so TS narrows past every call.
   const refuse: (reason: string) => never = (reason) => {
     throw new AdHocRedispatchUnavailableError(task.id, task.runId, reason, invokeCommandFor(task, projectDir, taskText));
@@ -222,6 +261,14 @@ export async function dispatchRetriedAdHocTask(
   });
 }
 
+/** undefined => workflow step: leave the new pending row to the ready queue. */
+function planRetryDispatch(task: Task, run: Run): AdHocDispatchPlan | undefined {
+  const kind = taskDispatchKind(task, run);
+  if (kind.kind === "workflow_step") return undefined;
+  if (kind.kind === "unknown") refuseUnloadableWorkflow(task, run, kind.loadError);
+  return planAdHocRedispatch(task, run);
+}
+
 /** Is `task` a fanout child? True iff it has a parent, that parent shares its
  *  phase (fanout children run in the SAME phase as their synthetic parent —
  *  gate.ts's reject->on_reject children land in a DIFFERENT phase, the on_reject
@@ -270,15 +317,17 @@ export async function retry(taskId: string, opts?: { force?: boolean }): Promise
     throw new RetryNotAllowedError(taskId, disposition);
   }
 
-  // FG-507: plan the ad-hoc re-dispatch BEFORE any write. planAdHocRedispatch
-  // refuses (throws) when the dispatch facts can't be recovered, so the refusal
-  // path never inserts the pending row it couldn't have dispatched.
+  // FG-507: decide ad-hoc vs workflow-step, and plan the ad-hoc re-dispatch,
+  // BEFORE any write. Both refusals (dispatch facts unrecoverable; the workflow
+  // that would answer the question won't load) throw here, so neither ever
+  // inserts the pending row it could not have dispatched. This is the ONE place
+  // taskDispatchKind's `unknown` is interpreted.
   const run = getRun(task.runId);
-  const adHoc = run && isAdHocTask(task, run) ? planAdHocRedispatch(task, run) : undefined;
+  const adHoc = run ? planRetryDispatch(task, run) : undefined;
 
   // Build a fresh task row — same phase/role/inputs/agentAlias/agentModel, NEW id
   // (so it gets a fresh task dir: no reuse of the failed attempt's result.json or
-  // staged auth-state). parentId points back to the failed one for lineage.
+  // staged auth-state). parentId is left undefined — see the PRIMARY note below.
   // composedSystemPrompt is cleared (re-composed at dispatch). status pending.
   const newId = newTaskId(task.phase);
   const newTask: Task = {
