@@ -306,6 +306,48 @@ test("computeReadyQueue: [complete + failed-newer] phase closes and satisfies do
   assert.deepEqual(ready.map((s) => s.id), ["verify"], "build must not be re-admitted; verify becomes ready off the complete row");
 });
 
+// FG-528: a terminally-failed primary must stay failed. Its still-pending red /
+// fanout child is not an attempt at the step, so it must not re-admit the phase:
+// dispatchSingleStep would find no pending primary and no recovery, mint a fresh
+// primary, and silently rerun a terminal failure.
+test("computeReadyQueue: failed primary + pending red child does NOT re-admit the phase (FG-528)", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude",
+      reds: [{ agent: "shipping-reviewer", authority: "authoritative", gate_on_verdict: true }] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-1", phase: "build", status: "failed" }),
+    mkTask({ id: "build-red", phase: "build", parentId: "build-1", status: "pending", agentRole: "shipping-reviewer" }),
+  ];
+  assert.deepEqual(computeReadyQueue(wf, tasks).map((s) => s.id), []);
+});
+
+test("computeReadyQueue: failed primary + pending fanout child does NOT re-admit the phase (FG-528)", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-1", phase: "build", status: "failed" }),
+    mkTask({ id: "build-child", phase: "build", parentId: "build-1", status: "pending" }),
+  ];
+  assert.deepEqual(computeReadyQueue(wf, tasks).map((s) => s.id), []);
+});
+
+// The counterpart the FG-528 filter must NOT break: a pending on_reject recovery
+// IS an attempt at the phase (FG-476), so it still re-admits — even alongside the
+// failed primary that rejected it.
+test("computeReadyQueue: failed primary + pending on_reject recovery IS ready (FG-476 preserved)", () => {
+  const wf = mkWorkflow([
+    { id: "build", agent: "engineer", gate: "auto", manual: false, depends_on: [], runtime: "claude", reds: [] },
+  ]);
+  const tasks = [
+    mkTask({ id: "build-1", phase: "build", status: "failed" }),
+    mkTask({ id: "build-recover", phase: "build", parentId: "build-1", status: "pending",
+      inputs: { rejectedTaskId: "build-1" } }),
+  ];
+  assert.deepEqual(computeReadyQueue(wf, tasks).map((s) => s.id), ["build"]);
+});
+
 // ----- isRunSettled (FG-475) -----
 // The shared "is this run done, permanently unreachable steps included" check.
 // computeReadyQueue only answers "is this ONE step dispatchable right now" — it

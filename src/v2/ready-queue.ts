@@ -98,11 +98,20 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
     );
     if (resolvePhasePrimary(existing, step.id) !== undefined && !hasLiveRecovery) continue;
 
-    // No complete primary. If a task row exists but none is pending, the step is
-    // in progress or terminally failed-without-retry — not ready. A pending row
-    // (fresh dispatch, or a gate request-changes / retry replacement) means the
-    // step still needs dispatch, so fall through to the deps check.
-    if (existing.length > 0 && !existing.some((t) => t.status === "pending")) continue;
+    // No complete primary. Only the phase's own ATTEMPT rows answer "does this
+    // step still need dispatch": the classifier's primary kinds and an on_reject
+    // recovery. A red/fanout child is not an attempt — counting one (FG-528) let
+    // a terminally-failed primary with a still-pending red child fall through as
+    // ready, and dispatchSingleStep, finding no pending primary and no recovery,
+    // minted a fresh primary and silently reran a terminal failure.
+    //
+    // Among the attempts: none pending ⇒ in progress or terminally
+    // failed-without-retry, not ready. A pending one (fresh dispatch, a gate
+    // request-changes / retry replacement, or a live recovery) ⇒ deps check.
+    const attempts = existing.filter(
+      (t) => isWorkflowPrimaryRow(kindOf(t)) || kindOf(t) === "on_reject_recovery",
+    );
+    if (attempts.length > 0 && !attempts.some((t) => t.status === "pending")) continue;
 
     // Deps: a dependency phase is satisfied when it has a COMPLETE primary —
     // resolvePhasePrimary (FG-519) returns the latest-complete parent-less row,
