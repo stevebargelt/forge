@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Build the agent-dev-worker image. Re-run after editing the Dockerfile.
+# Build the agent-dev-worker image. Re-run after editing any build input: the
+# Dockerfile or any file it COPYs (forge-test.sh, agent-entrypoint.sh). Editing
+# one of those leaves the built image stale even though the Dockerfile is
+# untouched; `forge doctor` flags this.
 #
 # Behind a corporate TLS proxy (Zscaler, etc.): set FORGE_CA_BUNDLE to a PEM file
 # containing your corporate root cert(s). Defaults to ~/root.pem if present.
