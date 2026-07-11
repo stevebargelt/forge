@@ -19,6 +19,13 @@
 
 import type { Workflow, Step } from "./schema.js";
 import type { Task } from "../types/index.js";
+import {
+  classifyTaskLineage,
+  isAdHocInvokeRow,
+  isOnRejectRecoveryRow,
+  isWorkflowPrimaryRow,
+  type LineageKind,
+} from "./lifecycle-evaluator.js";
 
 const COMPLETE_LIKE: ReadonlySet<string> = new Set(["complete"]);
 
@@ -26,8 +33,12 @@ const COMPLETE_LIKE: ReadonlySet<string> = new Set(["complete"]);
 // the rejected task (lineage, not fanout) AND carrying the explicit marker
 // gate.ts stamps on every recovery task's inputs. A parentId-tagged task
 // WITHOUT the marker is a genuine fanout/red child, never a recovery task.
+//
+// FG-477: the rule itself now lives in the lineage classifier (rule 3, the one
+// rule that needs neither the workflow nor the row's phase siblings). This name
+// stays for gate.ts and runNext.ts, which hold a single row and no workflow.
 export function isOnRejectRecoveryTask(task: Task): boolean {
-  return task.parentId !== undefined && task.taskPackage.inputs?.["rejectedTaskId"] !== undefined;
+  return isOnRejectRecoveryRow(task);
 }
 
 // FG-507: a row `forge invoke` minted — including the fresh row `forge retry`
@@ -46,13 +57,16 @@ export function isOnRejectRecoveryTask(task: Task): boolean {
 // Marker-less legacy rows can't be resolved here; retry refuses them up front
 // rather than guess (run-kind.ts's `legacy_ambiguous_phase`).
 export function isAdHocInvokeTask(task: Task): boolean {
-  return task.taskPackage.dispatchSource === "invoke";
+  return isAdHocInvokeRow(task);
 }
 
 export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
+  const kinds = classifyTaskLineage(workflow, tasks);
+  const kindOf = (t: Task): LineageKind => kinds.get(t.id)!;
+
   const tasksByPhase = new Map<string, Task[]>();
   for (const t of tasks) {
-    if (isAdHocInvokeTask(t)) continue;
+    if (kindOf(t) === "adhoc_invoke") continue;
     const arr = tasksByPhase.get(t.phase) ?? [];
     arr.push(t);
     tasksByPhase.set(t.phase, arr);
@@ -80,15 +94,24 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
     // A fanout/red child (parentId-tagged, no marker) does NOT qualify — this
     // must never broaden to "any parentId-tagged task re-admits the phase".
     const hasLiveRecovery = existing.some(
-      (t) => t.status === "pending" && isOnRejectRecoveryTask(t),
+      (t) => t.status === "pending" && kindOf(t) === "on_reject_recovery",
     );
     if (resolvePhasePrimary(existing, step.id) !== undefined && !hasLiveRecovery) continue;
 
-    // No complete primary. If a task row exists but none is pending, the step is
-    // in progress or terminally failed-without-retry — not ready. A pending row
-    // (fresh dispatch, or a gate request-changes / retry replacement) means the
-    // step still needs dispatch, so fall through to the deps check.
-    if (existing.length > 0 && !existing.some((t) => t.status === "pending")) continue;
+    // No complete primary. Only the phase's own ATTEMPT rows answer "does this
+    // step still need dispatch": the classifier's primary kinds and an on_reject
+    // recovery. A red/fanout child is not an attempt — counting one (FG-528) let
+    // a terminally-failed primary with a still-pending red child fall through as
+    // ready, and dispatchSingleStep, finding no pending primary and no recovery,
+    // minted a fresh primary and silently reran a terminal failure.
+    //
+    // Among the attempts: none pending ⇒ in progress or terminally
+    // failed-without-retry, not ready. A pending one (fresh dispatch, a gate
+    // request-changes / retry replacement, or a live recovery) ⇒ deps check.
+    const attempts = existing.filter(
+      (t) => isWorkflowPrimaryRow(kindOf(t)) || kindOf(t) === "on_reject_recovery",
+    );
+    if (attempts.length > 0 && !attempts.some((t) => t.status === "pending")) continue;
 
     // Deps: a dependency phase is satisfied when it has a COMPLETE primary —
     // resolvePhasePrimary (FG-519) returns the latest-complete parent-less row,
@@ -110,9 +133,11 @@ export function computeReadyQueue(workflow: Workflow, tasks: Task[]): Step[] {
   return ready;
 }
 
-// True when at least one primary (non-child) task in the set is complete.
+// True when at least one row in the set is complete. The set is always a phase's
+// classifier-derived primary rows (isWorkflowPrimaryRow), so the old inline
+// `parentId === undefined` guard here is now the classifier's job.
 function hasCompletePrimary(tasks: Task[]): boolean {
-  return tasks.some((t) => t.parentId === undefined && COMPLETE_LIKE.has(t.status));
+  return tasks.some((t) => COMPLETE_LIKE.has(t.status));
 }
 
 // FG-519: the one canonical phase-primary resolution rule, shared by the three
@@ -126,6 +151,14 @@ function hasCompletePrimary(tasks: Task[]): boolean {
 // result.json is missing. Callers own the INPUT filtering (e.g. computeReadyQueue
 // drops ad-hoc invoke rows before calling); this canonicalizes only the SELECTION
 // rule over whatever row universe it is handed.
+//
+// FG-477: deliberately NOT classifier-driven. Its `parentId === undefined` test is
+// rule 1/2's precondition (the classifier's primary + retry_replacement rows are
+// exactly the parent-less ones), but the classifier needs the workflow, and
+// threading one in here would ALSO apply the classifier's ad-hoc exclusion to
+// callers that pass an unfiltered row set (deriveUpstream, runNext's fanout
+// upstream read) — narrowing their row universe. That is a behavior change, not a
+// refactor, so it stays out of this slice (migration-freeze).
 export function resolvePhasePrimary(tasks: Task[], phase: string): Task | undefined {
   return tasks
     .filter((t) => t.phase === phase && t.parentId === undefined && COMPLETE_LIKE.has(t.status))
@@ -198,6 +231,7 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
   // branch): only a recovery task carries `rejectedTaskId`. A parentId-tagged
   // task without that marker is a genuine fanout/red child and is ignored.
   const recoveryTasksByPhase = new Map<string, Task[]>();
+  const kinds = classifyTaskLineage(workflow, tasks);
   for (const t of tasks) {
     // An ad-hoc invoke row is not this workflow's work; it can neither complete
     // a step nor keep one active. Skipped here for the same reason
@@ -205,14 +239,15 @@ function computeStepSettleStates(workflow: Workflow, tasks: Task[]): Map<string,
     // workflow: the queue says the step is ready, settledness says it's done.
     // A LIVE one still blocks the run from settling, one level up, in
     // isRunSettled — run-level work, not step-level work.
-    if (isAdHocInvokeTask(t)) continue;
-    if (t.parentId !== undefined) {
-      if (!isOnRejectRecoveryTask(t)) continue; // red/fanout child — ignore
+    const kind = kinds.get(t.id)!;
+    if (kind === "adhoc_invoke") continue;
+    if (kind === "on_reject_recovery") {
       const arr = recoveryTasksByPhase.get(t.phase) ?? [];
       arr.push(t);
       recoveryTasksByPhase.set(t.phase, arr);
       continue;
     }
+    if (!isWorkflowPrimaryRow(kind)) continue; // red/fanout child — ignore
     const arr = tasksByPhase.get(t.phase) ?? [];
     arr.push(t);
     tasksByPhase.set(t.phase, arr);

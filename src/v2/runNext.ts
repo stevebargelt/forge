@@ -48,7 +48,8 @@ import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
 import { logEvent } from "../store/events.js";
 import { taskDir, integrationWorktreeDir } from "../util/paths.js";
-import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeTask, resolvePhasePrimary } from "./ready-queue.js";
+import { computeReadyQueue, isRunSettled, resolvePhasePrimary } from "./ready-queue.js";
+import { classifyTaskLineage, isWorkflowPrimaryRow } from "./lifecycle-evaluator.js";
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
@@ -386,12 +387,19 @@ async function dispatchSingleStep(args: {
   // FG-507: an ad-hoc invoke row is a pending parentId===undefined row in phase
   // `task` too, and on a workflow that declares a `task` step it would otherwise
   // be reused here and run as that step. It is never this workflow's work.
+  //
+  // FG-477: both matches are KIND questions, so both go through the lineage
+  // classifier. `isWorkflowPrimaryRow` is exactly the old
+  // `parentId === undefined && !isAdHocInvokeTask(t)` pair (primary +
+  // retry_replacement + the marker-less legacy row consumers already counted),
+  // and `on_reject_recovery` is exactly isOnRejectRecoveryTask.
   const phaseTasks = args.parentId === undefined ? tasksForRun(args.runId) : [];
+  const kinds = classifyTaskLineage(args.workflow, phaseTasks);
   const existing = args.parentId === undefined
     ? phaseTasks.find(
-        (t) => t.phase === phase && t.status === "pending" && t.parentId === undefined && !isAdHocInvokeTask(t)
+        (t) => t.phase === phase && t.status === "pending" && isWorkflowPrimaryRow(kinds.get(t.id)!)
       ) ?? phaseTasks.find(
-        (t) => t.phase === phase && t.status === "pending" && isOnRejectRecoveryTask(t)
+        (t) => t.phase === phase && t.status === "pending" && kinds.get(t.id) === "on_reject_recovery"
       )
     : undefined;
   const taskId = existing?.id ?? newTaskId(phase);
