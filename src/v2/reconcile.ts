@@ -441,8 +441,10 @@ export function reconcileRun(
           // FG-463: status write + its paired audit events commit atomically. A
           // SQLITE_BUSY on any statement rolls the whole group back (the FG-459
           // outer catch swallows the throw; a later idempotent pass re-applies it).
+          crashPoint("reconcile:before-fail-provisioning-phase-crash");
           getDb().transaction(() => {
             markTaskFailed(t.id, error);
+            crashPoint("reconcile:inside-fail-provisioning-phase-crash-txn");
             logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "verification_environment_unavailable", error, evidence } });
             logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "provisioning_phase_crash", evidence } });
           })();

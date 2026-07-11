@@ -3,6 +3,9 @@
 // `crashPoint(name)` is a named probe placed BETWEEN adjacent writes in the
 // finalize sequences (runNext.ts's post-container path, gate.ts's decision
 // writes, reconcile.ts's own writes) — the windows where a real crash bites.
+// One probe sits PRE-container instead (runNext.ts's markTaskRunning → container
+// launch span): FG-533's wedge lives there, and the matrix must be able to kill
+// in it to keep the repro live.
 // The crash-matrix suite installs a hook that throws at one named point, then
 // drives reconcile + runNext to a fixpoint in a fresh pass and asserts the
 // lifecycle invariants held through recovery.

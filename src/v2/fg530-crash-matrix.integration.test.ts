@@ -41,7 +41,7 @@ import { makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertTask, tasksForRun, getTask, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { insertVerdict, verdictsForRun, verdictsForTask } from "../store/verdicts.js";
 import { gatesForRun } from "../store/gates.js";
-import { eventsForRun, eventsForTask } from "../store/events.js";
+import { eventsForRun, eventsForTask, logEvent } from "../store/events.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { taskDir } from "../util/paths.js";
 import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
@@ -61,9 +61,12 @@ import type { Task, TaskStatus } from "../types/index.js";
 // ── kill-point registry ───────────────────────────────────────────────────────
 //
 // Walked off the production write sequences, not hand-picked:
-//   dispatch  — dispatchSingleStep's post-container sequence (result ingestion →
-//               validation-contract hold → awaiting_red → verdict inserts →
-//               blocked_by_red → finalizePrimary → event appends)
+//   dispatch  — runContainer's PRE-container span (markTaskRunning + task.started,
+//               then minutes of image pull / auth staging / provisioning before
+//               container.started — FG-533's wedge), then dispatchSingleStep's
+//               post-container sequence (result ingestion → validation-contract
+//               hold → awaiting_red → verdict inserts → blocked_by_red →
+//               finalizePrimary → event appends)
 //   gate      — gate.ts's decision writes (advance, reject + on_reject recovery
 //               mint OR dedup onto an existing recovery row, request-changes
 //               replacement mint OR dedup onto an existing pending primary)
@@ -72,8 +75,12 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               COMPLETION path on an invoke-like run (result on disk, or one
 //               recovered from stdout — the only reconcile writes that END a
 //               lifecycle rather than landing it fail-safe), the FG-455 Mode A
-//               backfill of a complete-but-resultless row, and BOTH arms of the
-//               fanout-parent recovery (all children complete, or a partial wave)
+//               backfill of a complete-but-resultless row, BOTH arms of the
+//               fanout-parent recovery (all children complete, or a partial wave),
+//               and the FG-437 mid-provisioning landing (a DISTINCT evidence base —
+//               container.provision_started with no provision_succeeded — reached
+//               BEFORE the container-liveness gate, so no other reconcile cell
+//               covers it)
 //
 // A `reconcile` cell is a crash WHILE RECOVERING from a crash: reconcile's writes
 // only have anything to act on once a task is already stranded, so the driver
@@ -81,9 +88,11 @@ import type { Task, TaskStatus } from "../types/index.js";
 // shape it must strand DEPENDS on the write being killed — a stranded primary for
 // the failPipelineUnfinalized landing and for the invoke-like completion, a
 // stranded primary with NO result.json for the stdout-recovered completion, a
-// COMPLETE row whose result was lost for the backfill, and a stranded fanout PARENT
+// COMPLETE row whose result was lost for the backfill, a stranded fanout PARENT
 // for either fanout arm (reconcile skips parents in the per-task loop: they never
-// get a container). Scenario.strand owns that; see runCrashPhase.
+// get a container), and a task stranded MID-PROVISIONING (running, a
+// container.provision_started event, no provision_succeeded, no container.started)
+// for the FG-437 landing. Scenario.strand owns that; see runCrashPhase.
 //
 // The write-surface guard in fg530-probe-inertness.test.ts is what keeps this
 // registry honest going forward: every state-write in the three covered files must
@@ -93,6 +102,7 @@ type Surface = "dispatch" | "gate" | "reconcile";
 type KillPoint = { point: string; surface: Surface };
 
 const KILL_POINTS: KillPoint[] = [
+  { point: "runContainer:after-mark-running-before-container-launch", surface: "dispatch" },
   { point: "dispatchSingleStep:after-result-ingest", surface: "dispatch" },
   { point: "dispatchSingleStep:before-validation-contract", surface: "dispatch" },
   { point: "holdIfValidationContractFails:between-hold-status-and-event", surface: "dispatch" },
@@ -139,6 +149,8 @@ const KILL_POINTS: KillPoint[] = [
   { point: "reconcile:inside-fail-fanout-parent-unfinalized-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-fanout-wave-orphaned", surface: "reconcile" },
   { point: "reconcile:inside-fail-fanout-wave-orphaned-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-provisioning-phase-crash", surface: "reconcile" },
+  { point: "reconcile:inside-fail-provisioning-phase-crash-txn", surface: "reconcile" },
 ];
 
 // Every probe that actually fired, across every cell in the file. Asserted
@@ -805,7 +817,54 @@ const SCENARIOS: Scenario[] = [
       db.prepare("UPDATE tasks SET result = NULL WHERE id = ?").run(t.id);
     },
   },
+  {
+    // The FG-437 mid-provisioning recovery — reconcile's one landing reached BEFORE
+    // the container-liveness gate, on a DISTINCT evidence base: a task `running` with
+    // a container.provision_started event, no provision_succeeded, and no
+    // container.started. The container-gone cells cannot vouch for it (they all sit
+    // past the `if (!hasContainerStarted) continue` gate this branch precedes).
+    name: "provisioning-crash",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      // Crash in the REAL pre-container window (the FG-533 probe): the row is `running`,
+      // task.started is appended, and no container ever started. That is half the shape
+      // reconcile's provisioning branch keys on.
+      const fired = await crashAt("runContainer:after-mark-running-before-container-launch", () =>
+        sc.drive(runId, sc.workflow, exec),
+      );
+      assert.ok(fired, "the pre-container kill must fire for this strand to build the mid-provisioning shape");
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
+      assert.equal(t.status, "running", "the pre-container crash leaves the row `running`");
+
+      // The other half: the provisioner's own durable event. The matrix's fake docker
+      // layer never provisions (no lockfile, no cache plan), so the event a real
+      // dependency-provisioning pass would have appended between task.started and
+      // container.started is appended here, with the containerName + cacheKey payload
+      // FG-437's recovery reads. Appending an event is not a lifecycle write — it builds
+      // the evidence base, which is what a fixture is for.
+      logEvent("container.provision_started", {
+        runId,
+        taskId: t.id,
+        payload: {
+          containerName: `forge-provision-${PROVISION_CACHE_KEY}`,
+          cacheKey: PROVISION_CACHE_KEY,
+          phase: "dependency_provisioning",
+        },
+      });
+    },
+  },
 ];
+
+/** The lockfile hash a real provision plan would carry. Any stable string does —
+ *  reconcile's branch only requires containerName + cacheKey to be present, and the
+ *  matrix's containerAlive fake reports every container gone. */
+const PROVISION_CACHE_KEY = "fg530-lockfile-hash";
 
 function primaryOf(runId: string, phase: string): Task | undefined {
   return tasksForRun(runId).find((t) => t.phase === phase && isPhasePrimaryRow(t));
@@ -1140,9 +1199,17 @@ function checkNoPermanentWedge(runId: string, workflow: Workflow): Violation[] {
     if (ready.has(t.phase)) continue;
     if (t.status === "awaiting_gate" || t.status === "blocked_by_red") continue; // `forge gate <id> ...`
     if (t.status === "running") {
+      // Whether container.started landed is the discriminator, not colour: it is the
+      // event BOTH sweeps gate on, so a `running` row without it is unsweepable BY
+      // CONSTRUCTION (FG-533) while one WITH it means the container-gone sweep itself
+      // failed — a different, unknown bug. Naming it here is what lets the FG-533 pin
+      // below match the first without absorbing the second.
+      const started = eventsForTask(t.id).some((e) => e.eventType === "container.started");
       v.push({
         invariant: name,
-        detail: `task ${t.id} (${t.phase}) is still 'running' at fixpoint — reconcile did not sweep it and no pass will`,
+        detail:
+          `task ${t.id} (${t.phase}) is still 'running' at fixpoint — reconcile did not sweep it and no pass will ` +
+          `[container.started seen: ${started ? "yes" : "no"}]`,
       });
       continue;
     }
@@ -1200,7 +1267,14 @@ function capturePersistedWork(runId: string): PersistedWork {
   const worktrees: PersistedWorktree[] = [];
   for (const t of tasksForRun(runId)) {
     const p = join(taskDir(runId, t.id), "result.json");
-    if (existsSync(p)) results.push({ taskId: t.id, resultPath: p, bytes: readFileSync(p, "utf8") });
+    // An EMPTY result.json is not persisted work: runContainer writes a zero-byte
+    // placeholder into the task dir BEFORE the container launches (so the mount has
+    // the file to write into). A pre-container crash therefore always leaves one, and
+    // counting it as work would make every recovery that fails such a task read as a
+    // discard — the invariant would fire on a task whose agent never ran and produced
+    // nothing to lose. Work is what the CONTAINER wrote, which is never empty.
+    const bytes = existsSync(p) ? readFileSync(p, "utf8") : "";
+    if (bytes.trim().length > 0) results.push({ taskId: t.id, resultPath: p, bytes });
     if (t.worktreePath && existsSync(t.worktreePath)) {
       worktrees.push({ taskId: t.id, worktreePath: t.worktreePath });
     }
@@ -1297,13 +1371,16 @@ function formatViolations(vs: Violation[]): string {
 // ── known failures: REAL bugs this harness found on HEAD ───────────────────────
 //
 // FG-530's scope guard is explicit — a kill point that exposes a real bug gets
-// FILED, not fixed here. Both are pinned below as `todo` tests with minimal
-// repros; the matrix tolerates exactly these two signatures and nothing else, so
+// FILED, not fixed here. Each is pinned below as a `todo` test with a minimal
+// repro; the matrix tolerates exactly these three signatures and nothing else, so
 // the suite stays green while any NEW invariant break still fails loudly.
 //
 // Deliberately signature-matched rather than listed by cell name: a hardcoded
 // list of ~24 (scenario, kill point) pairs would silently absorb a different bug
-// that happened to land in one of those cells.
+// that happened to land in one of those cells. The signatures are correspondingly
+// narrow — FG-533's names the MISSING container.started event, not merely a
+// `running` task, so a container-gone sweep that started failing would not hide
+// behind it.
 
 type KnownFailure = { id: string; invariant: string; match: RegExp; summary: string };
 
@@ -1330,6 +1407,18 @@ const KNOWN_FAILURES: KnownFailure[] = [
       "it stays an audit record'), which makes the asymmetry look unintended. Not crash-specific: a clean `forge gate " +
       "<id> reject` discards it. result.json survives on disk, so the work is recoverable, but the row the operator " +
       "surfaces read loses the rejected artifact.",
+  },
+  {
+    id: "FG-533",
+    invariant: "2-no-permanent-wedge",
+    match: /is still 'running' at fixpoint .*\[container\.started seen: no\]/,
+    summary:
+      "runContainer marks the task `running` and appends task.started BEFORE the container launches; the span that follows " +
+      "(image pull, auth staging, dependency provisioning) is minutes long. A crash inside it leaves a `running` task with " +
+      "NO container.started — and container.started is exactly the event both rescue paths gate on (reconcile.ts's per-task " +
+      "loop, `if (!hasContainerStarted) continue`, and src/ops/reconcile-candidate.ts's SQL), while `forge retry` refuses " +
+      "any status but failed. Permanent wedge, same family as FG-530-A. Filed as FG-533; the pin flips to a passing " +
+      "assertion when its recovery path lands.",
   },
 ];
 
@@ -1759,7 +1848,46 @@ test(
   },
 );
 
-test("FG-530: both known HEAD bugs still reproduce in the matrix — a pin that stops firing is a pin that has silently rotted", () => {
+test(
+  "FG-533 [KNOWN FAILURE — real bug on HEAD, filed not fixed]: a crash in the PRE-container window (markTaskRunning + task.started, then minutes of image pull / auth staging / provisioning before container.started) wedges the task at `running` permanently — reconcile's per-task loop and ops' reconcile-candidate SQL both gate on container.started, and `forge retry` refuses a non-failed task",
+  { todo: "FG-533 — real pre-container crash-window wedge; scope guard says pin the repro, don't fix it in this ticket" },
+  async () => {
+    ensureRuntime();
+    writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+    const projectDir = makeTmpDir();
+    const exec = makeExec({ redVerdict: "pass" });
+    const { runId } = startRun({ workflow: PLAIN_WF, title: "fg533 pre-container wedge repro", inputs: {}, projectDir });
+
+    const fired = await crashAt("runContainer:after-mark-running-before-container-launch", () =>
+      runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }),
+    );
+    assert.ok(fired, "the kill must fire for this repro to mean anything");
+
+    const primary = primaryOf(runId, "build")!;
+    assert.equal(primary.status, "running", "the crash leaves the primary `running`");
+    assert.equal(
+      eventsForTask(primary.id).some((e) => e.eventType === "container.started"),
+      false,
+      "and with NO container.started — the event every rescue path keys on",
+    );
+
+    await recoverToFixpoint(runId, PLAIN_WF, exec);
+
+    // The bug: recovery converges to a fixpoint that is a WEDGE.
+    assert.equal(
+      primaryOf(runId, "build")!.status,
+      "running",
+      "recovery leaves it `running` — reconcile skips it for want of a container.started event",
+    );
+    assert.deepEqual(
+      checkNoPermanentWedge(runId, PLAIN_WF),
+      [],
+      "INVARIANT 2: a task stranded in the pre-container window has no enabled transition and no operator verb",
+    );
+  },
+);
+
+test("FG-530: every known HEAD bug still reproduces in the matrix — a pin that stops firing is a pin that has silently rotted", () => {
   assert.deepEqual(
     KNOWN_FAILURES.filter((k) => !KNOWN_HIT.has(k.id)).map((k) => k.id),
     [],

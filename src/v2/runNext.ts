@@ -2116,6 +2116,12 @@ async function runContainer(args: {
 
   markTaskRunning(args.taskId);
   logEvent("task.started", { runId: args.runId, taskId: args.taskId });
+  // FG-533: the pre-container window. Everything from here to the container.started
+  // append below (image pull, auth staging, dependency provisioning — minutes) runs
+  // with the task already `running` and no container.started event, which is the
+  // signal BOTH sweeps gate on. A crash in this span is a permanent wedge; the
+  // matrix pins it as a known failure until FG-533 lands the recovery path.
+  crashPoint("runContainer:after-mark-running-before-container-launch");
 
   let runtime: Runtime;
   let runtimeSource: "host" | "project" = "host";

@@ -867,46 +867,14 @@ const ALLOWLIST: Allow[] = [
     reason: "the task.failed / task.reconciled pair inside that same single transaction — see markTaskFailed above; the group commits or rolls back whole.",
   },
 
-  // ── deliberately deferred: genuine crash windows, no scenario reaches them ──
-  // Each of these IS a distinct recovery decision worth a matrix cell. None is
-  // reachable from the matrix's scenario set, and a registered-but-unreachable
-  // kill point FAILS the matrix's own coverage + invariant-3 tests by design — so
-  // probing them means BUILDING the fixture, not just planting a probe. Deferred
-  // with the fixture each needs named. The ratchet test below keeps this list from
-  // quietly growing.
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "markTaskFailed",
-    near: "provisioning_phase_crash",
-    gap: true,
-    reason:
-      "GAP — the FG-437 mid-provisioning recovery: a DISTINCT evidence base (container.provision_started with no " +
-      "container.started) reached BEFORE the container-liveness gate, so the probed container-gone landing does not cover " +
-      "it. Needs a fixture that strands a task mid-provisioning (a provision_started event + a dead provisioner container); " +
-      "the matrix's fake docker layer never provisions.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "logEvent",
-    near: "provisioning_phase_crash",
-    gap: true,
-    reason: "GAP — the task.failed / task.reconciled pair of the mid-provisioning recovery above; same missing fixture.",
-  },
-  {
-    file: "v2/runNext.ts",
-    fn: "runContainer",
-    call: "markTaskRunning",
-    gap: true,
-    reason:
-      "GAP — and the most interesting one this guard found. markTaskRunning fires BEFORE container.started is logged, and " +
-      "that span covers the image pull, auth staging and dependency provisioning (minutes). A crash inside it leaves a task " +
-      "`running` with NO container.started — and both sweeps that could rescue it gate on exactly that event " +
-      "(reconcile.ts's per-task loop, and src/ops/reconcile-candidate.ts's SQL), while `forge retry` refuses a non-failed " +
-      "task. That is a permanent wedge of the same family as FG-530-A. Not probed here only because this ticket's scope " +
-      "limits production edits to reconcile.ts; it wants its own ticket, and it is a BUG, not a benign window.",
-  },
+  // ── no deferred gaps ────────────────────────────────────────────────────────
+  // The three that used to live here are all probed now, each with a fixture that
+  // actually reaches it: the FG-437 mid-provisioning landing's two boundaries
+  // (reconcile:{before,inside}-fail-provisioning-phase-crash, driven by the
+  // `provisioning-crash` scenario), and runContainer's pre-container window
+  // (runContainer:after-mark-running-before-container-launch), which is FG-533 and
+  // is pinned in the matrix as a known-failure cell rather than fixed here. The
+  // ratchet below is at ZERO and stays there.
 ];
 
 // ── the guard ─────────────────────────────────────────────────────────────────
@@ -1040,8 +1008,10 @@ test("FG-530 write-surface [detection power]: the classifier FLAGS an unprobed w
 
 /** Deferred crash windows, ratcheted. Deferring a write is legitimate — probing it
  *  means building the fixture that reaches it, and that can be its own ticket — but
- *  it must be a VISIBLE act. This number only goes down. */
-const DEFERRED_GAPS = 3;
+ *  it must be a VISIBLE act. This number only goes down, and it is now at ZERO:
+ *  every write boundary in the three covered files is either probed and exercised by
+ *  a matrix cell, or exempt with a written reason. */
+const DEFERRED_GAPS = 0;
 
 test("FG-530 write-surface: the deliberately-deferred crash windows are exactly the ones already accounted for — deferring a NEW one must be a reviewed decision, not an allowlist line nobody reads", () => {
   const gaps = ALLOWLIST.filter((a) => a.gap);

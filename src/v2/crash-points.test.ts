@@ -65,6 +65,7 @@ test("FG-530 (a) content guard: the hook module reads no env and does no I/O —
 // each of these actually fires); listed here so inertness is proven for the
 // real names, not a synthetic one.
 const PROBE_NAMES = [
+  "runContainer:after-mark-running-before-container-launch",
   "dispatchSingleStep:after-result-ingest",
   "dispatchSingleStep:before-validation-contract",
   "holdIfValidationContractFails:between-hold-status-and-event",
@@ -111,6 +112,8 @@ const PROBE_NAMES = [
   "reconcile:inside-fail-fanout-parent-unfinalized-txn",
   "reconcile:before-fail-fanout-wave-orphaned",
   "reconcile:inside-fail-fanout-wave-orphaned-txn",
+  "reconcile:before-fail-provisioning-phase-crash",
+  "reconcile:inside-fail-provisioning-phase-crash-txn",
 ];
 
 test("FG-530 (b) runtime inertness: with NO hook installed, every probe name is a silent no-op", () => {
