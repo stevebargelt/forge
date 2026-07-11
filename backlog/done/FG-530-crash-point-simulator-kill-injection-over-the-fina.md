@@ -1,9 +1,11 @@
 ---
 id: FG-530
 type: story
-status: active
+status: done
 title: "crash-point simulator: kill-injection over the finalize path, reconcile to fixpoint, assert lifecycle invariants"
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: fbbc1d5
 ---
 
 ## Problem
@@ -47,3 +49,16 @@ Filed 2026-07-11 as Item 5 (stretch) of the operator-directed reliability queue.
 
 The operator ruled: build the coverage, do not narrow. Shipped on PR #103 since then: zero-gap write-surface guard (DEFERRED_GAPS = 0 — every state-write in runNext/gate/reconcile probed or argued non-window with machine-checked reasons); mid-provisioning + container-gone-variant + fanout awaiting_red/blocked_by_red reconcile/dispatch windows all probed with reachable fixtures; the reconcile crash model fixed (CrashInjected can no longer be swallowed by never-throw guards); lossless SELECT-* fixpoint snapshots (invariant 5 names the moved column); kill-vs-smoke cell semantics named per cell with whole-registry kill guarantees; a worktree-tier lane (shared fg530-harness.ts) asserting real-worktree survival at 14 worktree-touching kill points, with invariant 4 strengthened to file-level snapshots; FOUR known-failure pins = the filed bugs FG-531 (single-step + fanout-parent variants), FG-532, FG-533. Concrete worktree-leak evidence recorded in FG-356.
 
+
+
+## Close evidence (2026-07-11, PR #103, merge fbbc1d5)
+
+AC walk:
+- **Kill-point enumeration covers the three write surfaces; each exercised**: 60+ registered kill points across dispatchSingleStep/dispatchFanoutStep/finalizePrimary/runContainer, every gate decision branch (advance incl. fanout re-entry, reject + dedup arms, request-changes + dedup), and every reconcile transaction (pipeline-unfinalized, fanout-parent recovery both arms, mid-provisioning, container-gone variants, empty-result backfill, invoke-like completion). The write⇒probed content guard ends at ZERO deferred gaps: every state-write in the three files is probed or argued non-window with machine-checked reasons. Kill-vs-smoke cell semantics named per cell; whole-registry kill guarantee (coverage test + throw-by-name).
+- **Five invariant assertions per cell, all pass on HEAD**: matrix 940 integration cells + 129-test worktree lane, green with exactly the known-failure todos. Invariant 4 upgraded to file-level worktree snapshots and exercised over REAL git worktrees (14 worktree-touching kill points); invariant 5 upgraded to lossless SELECT-* snapshots naming the moved column.
+- **Meta-AC**: the pre-FG-427/FG-482 blocked_by_red two-write dance seeded as a fixture and flagged; plus detection-power fixtures proving each of the five checkers catches a hand-written violation (with passing controls), the fixpoint cap fails loudly, and the reconcile crash model cannot be swallowed by never-throw guards.
+- **Wired into test:extended**: matrix + detection in the integration tier, the worktree lane in the worktree tier — both inside CI's test-extended job (evidence reused by the loop at the exact tip).
+- **Zero production behavior change**: only inert probe callsites (bare-literal args content-guarded; production may import only crashPoint; the shared harness is test-support with an import ban guard).
+- **Real bugs FILED, not fixed**: FG-531 (awaiting_red wedge, single-step + fanout-parent variants — 2 pinned cells), FG-532 (gate reject discards the rejected result), FG-533 (pre-container running wedge) — four known-failure cells total, each flipping to a passing assertion when its ticket lands. Worktree-leak evidence recorded in FG-356.
+
+Gates: review-loop closeable (run-review-loop-fg-530-1815ec; tip 96b9ede = remote head; CI test + test-extended evidence reused at that sha). The operator's 2026-07-11 ruling (build the coverage, do not narrow) is fully implemented. Docs impact: **updated** — docs/how-to-testing.md (crash-matrix conventions, three-list lockstep, kill-vs-smoke semantics, known-failure pins incl. FG-533).
