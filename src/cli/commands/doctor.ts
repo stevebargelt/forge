@@ -7,7 +7,7 @@
 
 import type { Command } from "commander";
 import { execFileSync } from "node:child_process";
-import { existsSync, statSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { FORGE_HOME, ROUTING_POLICY_PATH } from "../../util/paths.js";
@@ -30,6 +30,39 @@ const MODEL_POLICY_PATH = join(FORGE_HOME, "model-policy.yml");
 
 function forgeRepoDir(): string {
   return process.env.FORGE_REPO_DIR ? resolve(process.env.FORGE_REPO_DIR) : join(homedir(), "code", "forge");
+}
+
+// The image bakes in more than the Dockerfile: it COPYs forge-test.sh and
+// agent-entrypoint.sh from the build context, so editing one leaves the built
+// image stale while the Dockerfile's own mtime is unchanged. Compare the image
+// against the newest of the Dockerfile AND every file it COPYs.
+export function newestBuildInputMtime(repoDir: string): number | undefined {
+  const dockerDir = join(repoDir, "docker");
+  const dockerfile = join(dockerDir, "agent-dev-worker.Dockerfile");
+  let newest: number | undefined;
+  const consider = (path: string): void => {
+    try {
+      const ms = statSync(path).mtimeMs;
+      if (newest === undefined || ms > newest) newest = ms;
+    } catch {
+      // a build input we can't stat (optional cert, glob source) can't prove staleness
+    }
+  };
+
+  consider(dockerfile);
+  let body: string;
+  try {
+    body = readFileSync(dockerfile, "utf8");
+  } catch {
+    return newest;
+  }
+  for (const line of body.split("\n")) {
+    const m = /^\s*COPY\s+(.+)$/i.exec(line);
+    if (!m || /--from=/i.test(m[1]!)) continue;
+    const args = m[1]!.trim().split(/\s+/).filter((a) => !a.startsWith("--"));
+    for (const src of args.slice(0, -1)) consider(join(dockerDir, src));
+  }
+  return newest;
 }
 
 function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir: string) => number | undefined): ImageInputs {
@@ -79,16 +112,9 @@ function inspectImage(name: string, repoDirOverride?: string, mtimeProbe?: (dir:
     }
   }
 
-  let dockerfileMtimeMs: number | undefined;
-  try {
-    const repoDir = repoDirOverride ?? forgeRepoDir();
-    dockerfileMtimeMs = mtimeProbe
-      ? mtimeProbe(repoDir)
-      : statSync(join(repoDir, "docker", "agent-dev-worker.Dockerfile")).mtimeMs;
-  } catch {
-    dockerfileMtimeMs = undefined;
-  }
-  return { name, present, createdMs, dockerfileMtimeMs, ...(dockerError ? { dockerError } : {}) };
+  const repoDir = repoDirOverride ?? forgeRepoDir();
+  const buildInputMtimeMs = mtimeProbe ? mtimeProbe(repoDir) : newestBuildInputMtime(repoDir);
+  return { name, present, createdMs, buildInputMtimeMs, ...(dockerError ? { dockerError } : {}) };
 }
 
 // command -> runtime names that need it. Collects from workspace seeds
@@ -226,8 +252,8 @@ function gatherRouting(): ReleaseInputs["routing"] {
 export type DoctorProbes = {
   inspectImage?: (name: string) => ImageInputs;
   probeClisInImage?: CliProbe;
-  /** Override Dockerfile mtime lookup — lets tests verify the repo dir is forwarded correctly without needing a real Dockerfile. */
-  dockerfileMtime?: (repoDir: string) => number | undefined;
+  /** Override the build-input mtime lookup — lets tests verify the repo dir is forwarded correctly without needing a real build context. */
+  buildInputMtime?: (repoDir: string) => number | undefined;
 };
 
 export function gatherReleaseInputs(
@@ -237,7 +263,7 @@ export function gatherReleaseInputs(
 ): ReleaseInputs {
   const image = probes.inspectImage
     ? probes.inspectImage(imageName)
-    : inspectImage(imageName, ctx.forgeRepoDir, probes.dockerfileMtime);
+    : inspectImage(imageName, ctx.forgeRepoDir, probes.buildInputMtime);
   return {
     image,
     clis: gatherClis(image, probes.probeClisInImage ?? probeClisInImage, ctx),
