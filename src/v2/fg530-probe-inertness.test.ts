@@ -45,7 +45,23 @@ const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 const HOOK_MODULE = "v2/crash-points.ts";
 const MATRIX = "v2/fg530-crash-matrix.integration.test.ts";
+/** The second lane: the same harness driven with worktree mode ARMED, over real git
+ *  worktrees holding real agent work — where invariant 4's worktree half has teeth
+ *  (the matrix cannot create a worktree; preflightWorktreeGate hard-fails on Linux). */
+const WORKTREE_LANE = "v2/fg530-crash-worktree.worktree.test.ts";
 const ENGINEER_GUARD = "v2/crash-points.test.ts";
+/** The shared crash harness. It holds the kill-point registry and the crash driver
+ *  for BOTH lanes (the integration-tier matrix and the worktree-tier lane), so it is
+ *  where the registry is now read from — and, being the driver, it is the one file
+ *  outside a *.test.ts that legitimately touches setCrashHookForTest.
+ *
+ *  It carries no `.test.ts` suffix (it registers no tests; it is imported BY the
+ *  suites), which would otherwise make the guards below read it as production and
+ *  fail — correctly, because a production file reaching the hook's setter is exactly
+ *  the escape they exist to prevent. The carve-out is therefore narrow and paid for:
+ *  ONE named file, excluded from the production set, and pinned by its own test below
+ *  that no production file may import it. */
+const HARNESS = "v2/fg530-harness.ts";
 
 /** The production files that carry probes. Asserted to be exhaustive below — a
  *  probe planted in a FOURTH production file is itself a finding. */
@@ -61,8 +77,20 @@ function gatherProductionFiles(dir: string, root: string): string[] {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...gatherProductionFiles(full, root));
     else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-      out.push(relative(root, full));
+      const rel = relative(root, full);
+      if (rel === HARNESS) continue; // test support, not production — see HARNESS
+      out.push(rel);
     }
+  }
+  return out;
+}
+
+function gatherTestFiles(dir: string, root: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...gatherTestFiles(full, root));
+    else if (entry.isFile() && entry.name.endsWith(".test.ts")) out.push(relative(root, full));
   }
   return out;
 }
@@ -88,12 +116,13 @@ function productionProbeNames(): Set<string> {
   return names;
 }
 
-/** Pull the registry the matrix iterates straight out of its source. Read as
- *  TEXT on purpose: importing the matrix would register every one of its cells. */
+/** Pull the registry BOTH lanes iterate straight out of the shared harness. Read as
+ *  TEXT on purpose: the harness is what the matrix imports, and reading source keeps
+ *  this guard independent of the module graph it is auditing. */
 function registryNames(): Set<string> {
-  const src = read(MATRIX);
-  const block = src.match(/const KILL_POINTS: KillPoint\[\] = \[([\s\S]*?)\n\];/);
-  assert.ok(block, "could not locate the KILL_POINTS registry in the matrix — did it get renamed?");
+  const src = read(HARNESS);
+  const block = src.match(/export const KILL_POINTS: KillPoint\[\] = \[([\s\S]*?)\n\];/);
+  assert.ok(block, "could not locate the KILL_POINTS registry in the harness — did it get renamed?");
   return new Set([...(block[1] ?? "").matchAll(/point:\s*"([^"]+)"/g)].map((m) => m[1] as string));
 }
 
@@ -158,6 +187,34 @@ test("FG-530 inertness: production imports the PROBE and nothing else — only a
     offenders,
     [],
     `production may import ONLY crashPoint; importing the setter is how the injection escapes the test suite:\n${offenders.join("\n")}`,
+  );
+});
+
+test("FG-530 inertness: the shared harness — the ONE non-test file allowed to arm the hook — is imported by TESTS ONLY, so the carve-out above cannot become the escape it exists to prevent", () => {
+  // fg530-harness.ts holds the crash driver, so it necessarily calls
+  // setCrashHookForTest, and the production-set guards above skip it by name. That
+  // exemption is only safe while nothing shippable can reach it: the moment a
+  // production file imports the harness, production has a path to the hook's setter
+  // — transitively, and past every check in this file.
+  const importers = gatherProductionFiles(SRC_ROOT, SRC_ROOT).filter((rel) =>
+    /from\s*"[^"]*fg530-harness\.js"/.test(read(rel)),
+  );
+  assert.deepEqual(
+    importers,
+    [],
+    `these NON-TEST files import the crash harness, which arms the injection hook:\n  ${importers.join("\n  ")}\n` +
+      "The harness is test support. If a production file needs something in it, move that thing out — do not widen the exemption.",
+  );
+
+  // And it must actually be reachable from the suites that claim it, or the two
+  // lanes are not sharing the machinery this file's registry check assumes they are.
+  const lanes = gatherTestFiles(SRC_ROOT, SRC_ROOT).filter((rel) =>
+    /from\s*"\.\/fg530-harness\.js"/.test(read(rel)),
+  );
+  assert.deepEqual(
+    lanes.sort(),
+    ["v2/fg530-crash-matrix.integration.test.ts", "v2/fg530-crash-worktree.worktree.test.ts"],
+    "both FG-530 lanes must drive the SHARED harness — a lane with its own copy of the driver/registry/checkers is a lane that drifts",
   );
 });
 
@@ -252,7 +309,7 @@ test("FG-530 registry completeness: every probe in PRODUCTION is in the matrix's
     [],
     "These probes exist in runNext/gate/reconcile but NO matrix cell kills at them — the crash window is uncovered\n" +
       "and the matrix's own coverage test cannot see it (it only checks registry ⊆ fired, not production ⊆ registry).\n" +
-      "Add them to KILL_POINTS in fg530-crash-matrix.integration.test.ts:\n  " +
+      "Add them to KILL_POINTS in fg530-harness.ts:\n  " +
       missing.join("\n  "),
   );
 
@@ -302,6 +359,35 @@ test("FG-530 tier placement: the crash matrix is an INTEGRATION-tier file and is
   assert.ok(
     extended.includes("test:integration"),
     `test:extended is the CI tier that must actually run the matrix, got: ${extended}`,
+  );
+});
+
+test("FG-530 tier placement: the worktree lane is a WORKTREE-tier file — it creates real git worktrees and must not run in the fast tier", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+
+  assert.ok(
+    WORKTREE_LANE.endsWith(".worktree.test.ts"),
+    "the worktree lane forks real `git worktree` subprocesses and must carry the .worktree suffix",
+  );
+
+  const unit = pkg.scripts["test:unit"] ?? "";
+  assert.ok(
+    unit.includes("-not -name '*.worktree.test.ts'"),
+    `test:unit must exclude *.worktree.test.ts, got: ${unit}`,
+  );
+
+  const worktree = pkg.scripts["test:worktree"] ?? "";
+  assert.ok(
+    worktree.includes("'*.worktree.test.ts'"),
+    `test:worktree must select *.worktree.test.ts, got: ${worktree}`,
+  );
+
+  const extended = pkg.scripts["test:extended"] ?? "";
+  assert.ok(
+    extended.includes("test:worktree"),
+    `test:extended is the CI tier that must actually run the worktree lane, got: ${extended}`,
   );
 });
 

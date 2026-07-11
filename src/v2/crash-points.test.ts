@@ -20,6 +20,13 @@ import { crashPoint, setCrashHookForTest } from "./crash-points.js";
 
 const SRC_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const HOOK_MODULE = "v2/crash-points.ts";
+/** The shared crash driver, imported by BOTH FG-530 lanes (the integration-tier
+ *  matrix and the worktree-tier lane). It is test support that happens to carry no
+ *  `.test.ts` suffix — it registers no tests — so it must be named here rather than
+ *  read as production. The exemption is kept honest in fg530-probe-inertness.test.ts:
+ *  a test there fails if any NON-TEST file imports it, which is the only way this
+ *  carve-out could hand production a path to the setter. */
+const HARNESS = "v2/fg530-harness.ts";
 
 function gatherSourceFiles(dir: string, root: string): string[] {
   const results: string[] = [];
@@ -28,7 +35,9 @@ function gatherSourceFiles(dir: string, root: string): string[] {
     if (entry.isDirectory()) {
       results.push(...gatherSourceFiles(full, root));
     } else if (entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
-      results.push(relative(root, full));
+      const rel = relative(root, full);
+      if (rel === HARNESS) continue;
+      results.push(rel);
     }
   }
   return results;

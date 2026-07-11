@@ -21,3 +21,8 @@ created: 2026-06-22
 - Idempotent across repeated reconciles. forge-test green.
 
 Refs: src/v2/reconcile.ts:65-96, FG-351, FG-352.
+
+
+## Concrete leak evidence from the FG-530 crash matrix (2026-07-11)
+
+The worktree-tier crash lane (src/v2/fg530-crash-worktree.worktree.test.ts) demonstrated the leak precisely: killing at finalizePrimary:between-complete-status-and-event writes the terminal `complete` status but dies before removeWorktreeIfSafe — recovery sees a terminal task, nothing sweeps the leftover worktree, and the tree + its branch leak permanently, one per such crash. Deliberately NOT pinned as an invariant violation there (a leak is the opposite failure from a discard); this ticket owns the reaper. When implementing, flip that scenario into a positive cleanup assertion in the lane.
