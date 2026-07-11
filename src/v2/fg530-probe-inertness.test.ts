@@ -13,7 +13,8 @@
 //       a bare string literal, checked in the SOURCE, not at runtime.
 //   (2) NO RESIDUAL STATE — `setCrashHookForTest` must REPLACE, never stack. A
 //       hook that survives its scenario would fire inside the next one and turn
-//       the matrix's 90 cells into cross-talk.
+//       the matrix's cells (every KILL_POINTS entry × every scenario) into
+//       cross-talk.
 //   (3) REGISTRY LOCKSTEP — the matrix can only kill at points it knows about.
 //       A probe added to production but not to the registry is a write boundary
 //       with ZERO crash coverage, and nothing in the matrix would say so: its
@@ -81,7 +82,7 @@ function productionProbeNames(): Set<string> {
 }
 
 /** Pull the registry the matrix iterates straight out of its source. Read as
- *  TEXT on purpose: importing the matrix would register its 90 cells. */
+ *  TEXT on purpose: importing the matrix would register every one of its cells. */
 function registryNames(): Set<string> {
   const src = read(MATRIX);
   const block = src.match(/const KILL_POINTS: KillPoint\[\] = \[([\s\S]*?)\n\];/);

@@ -92,6 +92,23 @@ If you're unsure whether a fixture helper's `execFileSync("git", ...)` call coun
 
 Colocate the file next to the module it tests (`src/foo/bar.ts` → `src/foo/bar.test.ts`). Ticket-scoped regression files live under `src/v2/` and follow the same suffix rule.
 
+## Crash-point probes and the crash matrix (FG-530)
+
+`src/v2/crash-points.ts` exports `crashPoint("<name>")` — a test-only kill-injection probe planted between adjacent writes in the finalize sequences (`src/v2/runNext.ts`, `src/v2/gate.ts`, `src/v2/reconcile.ts`). With no hook installed it is one undefined field read and an optional call that never fires, so it is inert in production; only a `*.test.ts` file may reach `setCrashHookForTest`. `src/v2/fg530-crash-matrix.integration.test.ts` arms the hook at one named point per cell, drives the real runner over a fake docker layer until it throws mid-sequence, then reconciles to a fixpoint with the hook disarmed and asserts five named lifecycle invariants (no complete without evidence, no permanent wedge, abandoned never overwritten, persisted work never discarded, fixpoint idempotent).
+
+**Adding a probe means updating three lists, not one.** A `crashPoint()` callsite in production must also be registered in:
+
+- `KILL_POINTS` in `src/v2/fg530-crash-matrix.integration.test.ts` — the registry the matrix iterates. A probe with no entry here is a write boundary no cell ever kills at.
+- `PROBE_NAMES` in `src/v2/crash-points.test.ts` — the list inertness is proven against.
+
+`src/v2/fg530-probe-inertness.test.ts` (unit tier) asserts those two sets and the probe names production actually carries are **one set**, in both directions, by reading the sources as text. Add a probe without registering it and that lockstep test fails loudly; delete a probe without dropping its registry entry and it fails the other way. The same file pins the surrounding rules: probes may exist only in the three known write-boundary files, production may import `crashPoint` and never the setter, and the matrix's own coverage test requires every registered kill point to have fired in at least one cell.
+
+**Probe arguments must be bare string literals.** `crashPoint("gate:before-decision-write")`, never `crashPoint(someExpression)`. A computed argument is evaluated on *every* production call, hook or no hook — cost, and a throw risk, on the finalize path. This is content-guarded against the source, since a hook-unset runtime check cannot see it.
+
+**The matrix is integration tier.** It drives a real DB and a real temp filesystem, so it carries the `.integration.test.ts` suffix and runs under `npm run test:integration` / `npm run test:extended` — i.e. in CI's required `test-extended` check, never in the fast unit tier. The probe-inertness file asserts that tier placement against `package.json`'s scripts directly, so the matrix cannot drift back into the unit tier.
+
+**Known-failure cells are pinned, not muted.** FG-530's scope guard is that a kill point exposing a real bug gets *filed*, not fixed in the same ticket. Such a cell is pinned in `KNOWN_FAILURES` by invariant name + a regex over the violation detail (a signature, not a `(scenario, kill point)` pair — a pair-list would silently absorb a different bug landing in the same cell), and gets a `todo`-marked minimal repro test alongside it, so the suite stays green while any *new* invariant break still fails. Every pin has a filed ticket: the `awaiting_red` crash-window wedge (`FG-530-A`) is FG-531, and `forge gate <id> reject` NULLing the rejected task's result (`FG-530-B`) is FG-532. A rot check asserts every known-failure signature is still hit by at least one cell — a pin that stops firing means either the bug was fixed or the scenario stopped reaching it. When the bug is fixed, its `todo` starts passing (node reports it), which is the prompt to delete the pin and flip the repro into a plain passing assertion.
+
 ## Timing data and classification history
 
 `docs/test-suite-timing-fg495.md` has the full per-file/per-tier timing measurements behind FG-495's tiering decision, plus a file → old-tier → new-tier → reason table for every test relocated out of the unit tier when the content guard was extended.
