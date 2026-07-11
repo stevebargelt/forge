@@ -1,9 +1,11 @@
 ---
 id: FG-529
 type: story
-status: active
+status: done
 title: "FG-477 slice 1: task-lineage classifier + classification-only consumer migrations (ready-queue, dispatchSingleStep, finalizeOrphanedPrimaries) + FG-528 readiness fix"
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: 86c0552
 ---
 
 ## What this ticket is
@@ -28,3 +30,16 @@ The dispatch ticket for FG-477's slice 1, filed per FG-477's own next-step note 
 ## Notes
 
 Filed 2026-07-11. Parent: FG-477 (body records the slice). Deferred siblings: FG-527, FG-528 (fixed here — close against this PR's evidence).
+
+
+## Close evidence (2026-07-11, PR #102, merge 86c0552)
+
+AC walk:
+- **classifyTaskLineage pure/total**: src/v2/lifecycle-evaluator.ts:110-179; seeded-generator totality (every row shape → exactly one kind, exhaustive switch, no default reachable, all 7 kinds reached) + input-order insensitivity — lifecycle-evaluator.test.ts:254-490.
+- **Decision-table units incl. priority collisions**: lifecycle-evaluator.test.ts:110-250 (self-referencing on_reject, recovery-phase = red-phase, fanout-parent first row vs retry, FG-507 adhoc shape, impossible parented+invoke row pinning rule-0 priority).
+- **Frozen-legacy parity per migrated consumer**: verbatim legacy predicates as fixtures, ~3000 seeded sets on the dispatchSingleStep hot path — lifecycle-evaluator.test.ts:483-590.
+- **Flow-level suite through the real runner**: fg477-lineage-flow.integration.test.ts (11 tests: recovery pickup, replacement reuse, FG-507 non-adoption + legacy counterpart, orphan sweep sparing children, mixed-run settle parity with shipping-reviewer-named reds, identical-createdAt tie, cross-phase rejectedTaskId).
+- **FG-528 shapes pinned**: ready-queue.test.ts — failed-primary+red-child / +fanout-child NOT ready, +pending-recovery ready (FG-476 preserved).
+- **Non-goals recorded with owners**: FG-527 (retry/dispatchFanoutStep, pinned disagreement tests), FG-477 slice 7 (campaign executor), resolvePhasePrimary (in-file rationale).
+
+Gates: review-loop closeable (run-review-loop-fg-529-f33b7f; tip 4cfefbf = remote head; two earlier rounds' only findings were orchestrator-owned backlog staleness, fixed directly); CI green at the merged tip (test + test-extended, both runs). Docs impact: **none** (engineer + test-engineer docs_impact_check concur; internal refactor under migration freeze, flow observables byte-identical — the FG-528 fix's operator-visible effect is documented in FG-528 itself and the in-code comment).

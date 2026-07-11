@@ -1,9 +1,11 @@
 ---
 id: FG-528
 type: story
-status: active
+status: done
 title: ready-queue re-admits a phase with a terminally-failed primary while a non-primary child is pending — dispatchSingleStep mints a fresh primary and re-runs the step
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: 86c0552
 ---
 
 ## Problem
