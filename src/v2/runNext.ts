@@ -43,6 +43,7 @@ import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./fai
 import { captureUsageForTask } from "../store/model-calls.js";
 import { insertVerdict, verdictsForTask } from "../store/verdicts.js";
 import { getDb } from "../store/db.js";
+import { crashPoint } from "./crash-points.js";
 import { assembleReviewerContextPacket } from "./reviewer-context-packet.js";
 import { validateVerdict } from "./validate-findings.js";
 import { gradeFindings } from "./review-quality.js";
@@ -596,6 +597,7 @@ async function dispatchSingleStep(args: {
   }
 
   const result = dispatchResult.result;
+  crashPoint("dispatchSingleStep:after-result-ingest");
   // FG-492 review: runContainer deliberately left the reap/retain decision to
   // us — a valid result doesn't mean the STEP succeeds; persistence, merge,
   // the integration gate, reds, and a human gate can still fail/pause it
@@ -667,6 +669,7 @@ async function dispatchSingleStep(args: {
   // task at blocked_by_red, which says nothing about the missing tests_run and
   // takes a --force to clear. A result that doesn't meet the contract isn't
   // worth spending reds on either.
+  crashPoint("dispatchSingleStep:before-validation-contract");
   const contractHold = holdIfValidationContractFails(taskId, args.runId, result);
   if (contractHold) {
     finalizeContainerRetention(containerName, false);
@@ -677,8 +680,11 @@ async function dispatchSingleStep(args: {
   // Aggregate verdicts then set primary status per policy.
   if (step.reds.length > 0) {
     // Per FORGE-DEC-017: blue is done, reds are about to run.
+    crashPoint("dispatchSingleStep:before-awaiting-red");
     setTaskStatus(taskId, "awaiting_red");
+    crashPoint("dispatchSingleStep:between-awaiting-red-status-and-event");
     logEvent("task.awaiting_red", { runId: args.runId, taskId });
+    crashPoint("dispatchSingleStep:after-awaiting-red");
 
     const aggregate = await dispatchReds({
       runId: args.runId,
@@ -703,12 +709,15 @@ async function dispatchSingleStep(args: {
       // lost a race (task no longer awaiting_red), report its actual status
       // rather than logging/notifying a transition that didn't happen.
       let blockedByRedApplied = false;
+      crashPoint("dispatchSingleStep:before-blocked-by-red");
       getDb().transaction(() => {
         blockedByRedApplied = markTaskBlockedByRed(taskId, result);
+        crashPoint("dispatchSingleStep:inside-blocked-by-red-txn");
         if (blockedByRedApplied) {
           logEvent("task.blocked_by_red", { runId: args.runId, taskId });
         }
       })();
+      crashPoint("dispatchSingleStep:after-blocked-by-red");
       // FG-492 review: blocked_by_red (whether applied here or lost to a
       // concurrent transition) is never "complete" — retain either way.
       finalizeContainerRetention(containerName, false);
@@ -765,6 +774,7 @@ function holdIfValidationContractFails(taskId: string, runId: string, result: un
     if (!markTaskHeldForGate(taskId, result)) {
       return getTask(taskId)?.status ?? "failed";
     }
+    crashPoint("holdIfValidationContractFails:between-hold-status-and-event");
     logEvent("task.awaiting_gate", {
       runId,
       taskId,
@@ -791,6 +801,7 @@ function finalizePrimary(
   gate: Step["gate"],
   result: unknown,
 ): string {
+  crashPoint("finalizePrimary:before-status-write");
   switch (gate) {
     case "auto":
     case "none":
@@ -800,10 +811,12 @@ function finalizePrimary(
       if (!markTaskComplete(taskId, result)) {
         return getTask(taskId)?.status ?? "failed";
       }
+      crashPoint("finalizePrimary:between-complete-status-and-event");
       logEvent("task.completed", { runId, taskId });
       return "complete";
     case "human":
       markTaskAwaitingGate(taskId, result);
+      crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
       return "awaiting_gate";
@@ -812,6 +825,7 @@ function finalizePrimary(
       // only when all reds passed (or none authoritative-failed). Aggregate
       // outcome is the orchestrator's call; pause for it.
       markTaskAwaitingGate(taskId, result);
+      crashPoint("finalizePrimary:between-awaiting-gate-status-and-event");
       logEvent("task.awaiting_gate", { runId, taskId });
       notifyGateAwaiting(taskId);
       return "awaiting_gate";
@@ -978,6 +992,7 @@ async function dispatchReds(args: {
     // Atomic: both writes must succeed together so a crash cannot leave the
     // verdicts table with a row that has no matching events-table entry —
     // FG-427 makes the events table the sole source for outcome derivation.
+    crashPoint("dispatchReds:before-verdict-insert");
     getDb().transaction(() => {
       insertVerdict({
         id: newVerdictId(),
@@ -993,12 +1008,14 @@ async function dispatchReds(args: {
         // re-check applies the same blocking rule dispatch applies below.
         gateOnVerdict: r.red.gate_on_verdict,
       });
+      crashPoint("dispatchReds:inside-verdict-insert-txn");
       logEvent("verdict.received", {
         runId: args.runId,
         taskId: args.primaryTaskId,
         payload: { redRole: r.red.agent, verdict: finalVerdict.verdict, authority: r.red.authority },
       });
     })();
+    crashPoint("dispatchReds:after-verdict-insert");
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
     // FG-523: same predicate aggregateVerdicts applies to the persisted row.
     if (verdictBlocksGate({
@@ -1687,8 +1704,11 @@ async function dispatchFanoutStep(args: {
   // build phase's authoritative reds never dispatched and the verdict gate had no
   // verdicts to resolve (forge-site bug). Mirror dispatchSingleStep's reds block.
   if (step.reds.length > 0) {
+    crashPoint("dispatchFanoutStep:before-awaiting-red");
     setTaskStatus(parentId, "awaiting_red");
+    crashPoint("dispatchFanoutStep:between-awaiting-red-status-and-event");
     logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
+    crashPoint("dispatchFanoutStep:after-awaiting-red");
 
     const aggregate = await dispatchReds({
       runId: args.runId,
@@ -1711,12 +1731,15 @@ async function dispatchFanoutStep(args: {
       // lost a race (task no longer awaiting_red), report its actual status
       // rather than logging/notifying a transition that didn't happen.
       let blockedByRedApplied = false;
+      crashPoint("dispatchFanoutStep:before-blocked-by-red");
       getDb().transaction(() => {
         blockedByRedApplied = markTaskBlockedByRed(parentId, parentResult);
+        crashPoint("dispatchFanoutStep:inside-blocked-by-red-txn");
         if (blockedByRedApplied) {
           logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
         }
       })();
+      crashPoint("dispatchFanoutStep:after-blocked-by-red");
       if (!blockedByRedApplied) {
         return getTask(parentId)?.status ?? "failed";
       }
@@ -2099,6 +2122,12 @@ async function runContainer(args: {
 
   markTaskRunning(args.taskId);
   logEvent("task.started", { runId: args.runId, taskId: args.taskId });
+  // FG-533: the pre-container window. Everything from here to the container.started
+  // append below (image pull, auth staging, dependency provisioning — minutes) runs
+  // with the task already `running` and no container.started event, which is the
+  // signal BOTH sweeps gate on. A crash in this span is a permanent wedge; the
+  // matrix pins it as a known failure until FG-533 lands the recovery path.
+  crashPoint("runContainer:after-mark-running-before-container-launch");
 
   let runtime: Runtime;
   let runtimeSource: "host" | "project" = "host";
