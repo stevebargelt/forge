@@ -499,14 +499,6 @@ function writeSitesIn(rel: string, src: string, calls: Set<string>): WriteSite[]
 
 type Allow = { file: string; fn: string; call: string; near?: string; reason: string; gap?: true };
 
-const RECONCILE_TXN_SHAPE =
-  "identical single FG-463 transaction to the PROBED failPipelineUnfinalized landing (markTaskFailed + task.failed + " +
-  "task.reconciled, one getDb().transaction), reached from the same container-gone evidence in the same pass — only the " +
-  "failure_kind and error text differ. Its two boundaries (before the txn, inside it) ARE the boundaries the " +
-  "reconcile:{before,inside}-fail-pipeline-unfinalized cells kill at; a crash rolls the group back whole and the next " +
-  "idempotent pass re-derives the identical decision from the identical evidence. Probing each variant would register " +
-  "the same two boundaries again under a different name.";
-
 const ALLOWLIST: Allow[] = [
   // ── runNext.ts: the PRE-container dispatch path ─────────────────────────────
   // FG-530's covered surface is runNext's POST-container finalize path — the
@@ -816,12 +808,6 @@ const ALLOWLIST: Allow[] = [
   },
 
   // ── reconcile.ts ───────────────────────────────────────────────────────────
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "markTaskFailed", near: "container_oom_killed", reason: RECONCILE_TXN_SHAPE },
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "logEvent", near: "container_oom_killed", reason: RECONCILE_TXN_SHAPE },
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "markTaskFailed", near: "container_gone_worktree_dirty", reason: RECONCILE_TXN_SHAPE },
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "logEvent", near: "container_gone_worktree_dirty", reason: RECONCILE_TXN_SHAPE },
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "markTaskFailed", near: "container_gone_no_result", reason: RECONCILE_TXN_SHAPE },
-  { file: "v2/reconcile.ts", fn: "reconcileRun", call: "logEvent", near: "container_gone_no_result", reason: RECONCILE_TXN_SHAPE },
   {
     file: "v2/reconcile.ts",
     fn: "reconcileRun",

@@ -32,6 +32,7 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -74,10 +75,15 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               landing (what a crashed PIPELINE step recovers into), its own
 //               COMPLETION path on an invoke-like run (result on disk, or one
 //               recovered from stdout — the only reconcile writes that END a
-//               lifecycle rather than landing it fail-safe), the FG-455 Mode A
-//               backfill of a complete-but-resultless row, BOTH arms of the
-//               fanout-parent recovery (all children complete, or a partial wave),
-//               and the FG-437 mid-provisioning landing (a DISTINCT evidence base —
+//               lifecycle rather than landing it fail-safe), the three
+//               no-recoverable-result failure landings the container-gone sweep
+//               chooses between (oom_killed, orphaned_work_may_persist,
+//               orphaned — each a distinct evidence base and branch, so each is
+//               killed in its own cell rather than vouched for by transactional
+//               similarity to the others), the FG-455 Mode A backfill of a
+//               complete-but-resultless row, BOTH arms of the fanout-parent
+//               recovery (all children complete, or a partial wave), and the
+//               FG-437 mid-provisioning landing (a DISTINCT evidence base —
 //               container.provision_started with no provision_succeeded — reached
 //               BEFORE the container-liveness gate, so no other reconcile cell
 //               covers it)
@@ -88,6 +94,8 @@ import type { Task, TaskStatus } from "../types/index.js";
 // shape it must strand DEPENDS on the write being killed — a stranded primary for
 // the failPipelineUnfinalized landing and for the invoke-like completion, a
 // stranded primary with NO result.json for the stdout-recovered completion, a
+// stranded primary with NO recoverable result at all (plus, per landing, a
+// docker-reported OOM kill or a dirty worktree) for the three failure landings, a
 // COMPLETE row whose result was lost for the backfill, a stranded fanout PARENT
 // for either fanout arm (reconcile skips parents in the per-task loop: they never
 // get a container), and a task stranded MID-PROVISIONING (running, a
@@ -139,6 +147,12 @@ const KILL_POINTS: KillPoint[] = [
   { point: "gate:after-branch", surface: "gate" },
   { point: "reconcile:before-fail-pipeline-unfinalized", surface: "reconcile" },
   { point: "reconcile:inside-fail-pipeline-unfinalized-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-oom-killed", surface: "reconcile" },
+  { point: "reconcile:inside-fail-oom-killed-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-orphaned-work-may-persist", surface: "reconcile" },
+  { point: "reconcile:inside-fail-orphaned-work-may-persist-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-orphaned-no-result", surface: "reconcile" },
+  { point: "reconcile:inside-fail-orphaned-no-result-txn", surface: "reconcile" },
   { point: "reconcile:before-complete-invoke-like", surface: "reconcile" },
   { point: "reconcile:inside-complete-invoke-like-txn", surface: "reconcile" },
   { point: "reconcile:before-complete-invoke-like-from-stdout", surface: "reconcile" },
@@ -175,6 +189,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setCrashHookForTest(undefined); // never leak an armed hook into the next test
+  exitInfoFake = DOCKER_KNOWS_NOTHING;
   setDbForTest(prev as DatabaseInstance);
   db.close();
   if (savedApiKey === undefined) delete process.env["ANTHROPIC_API_KEY"];
@@ -345,6 +360,9 @@ type Scenario = {
    *  Defaults to strandMidFinalize, a primary stranded mid-finalize. A recovery
    *  that acts on a different stranded shape needs its own. */
   strand?: (sc: Scenario, runId: string, exec: DockerExecFn) => Promise<void>;
+  /** What `docker inspect` reports for the dead container. Defaults to "nothing
+   *  known" — only the OOM landing needs docker to have witnessed the kill. */
+  exitInfo?: ExitInfoFake;
 };
 
 // (1) plain single-step workflow with an implementer primary, auto gate.
@@ -798,6 +816,51 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    // The container-gone sweep's three NO-RECOVERABLE-RESULT landings, one scenario
+    // each. They share a stranded shape (a `running` primary, container gone, no
+    // result.json, nothing inferable from stdout) and differ only in the evidence
+    // reconcile then reads — which is the whole point: the branch it picks, the
+    // failure_kind it persists, and the operator verb it names are all decided by
+    // that evidence, so each landing is killed in its own transaction rather than
+    // vouched for by the shape of a sibling's.
+    //
+    // (a) docker witnessed an OOM kill.
+    name: "container-gone-oom",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    exitInfo: () => ({ oomKilled: true, exitCode: 137 }),
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: strandWithNoRecoverableResult,
+  },
+  {
+    // (b) docker knows nothing, but the work path is DIRTY — files may have landed.
+    name: "container-gone-worktree-dirty",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      await strandWithNoRecoverableResult(sc, runId, exec);
+      dirtyWorkPath(runId);
+    },
+  },
+  {
+    // (c) docker knows nothing and nothing was persisted: the ordinary orphan.
+    name: "container-gone-no-result",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: strandWithNoRecoverableResult,
+  },
+  {
     name: "backfill-complete-empty-result",
     workflow: PLAIN_WF,
     yaml: PLAIN_YAML,
@@ -910,14 +973,42 @@ class CrashInjected extends Error {
   }
 }
 
+/** The dead process reaching for the store AFTER the kill. A subclass so the
+ *  driver swallows it exactly like the kill itself — it IS the kill, just observed
+ *  one call later. */
+class DeadProcessStoreAccess extends CrashInjected {
+  constructor(point: string) {
+    super(point);
+    this.message = `FG-530: the process died at ${point} — it cannot touch the store again`;
+  }
+}
+
+/** A DB handle a dead process holds: every access throws. Throwing a THROW is the
+ *  only faithful model of the kill, because the code under test is allowed to catch.
+ *
+ *  reconcile.ts's FG-459 guards deliberately swallow any throw from one task's
+ *  writes and keep sweeping — the right production contract (a SQLITE_BUSY must not
+ *  abort the pass), and fatal to the crash model if the injected throw is all we do:
+ *  a "dead" process would go on reconciling, finalizing, and completing state that a
+ *  real crash could never have written, and the fresh recovery pass would start from
+ *  a world the crash never produced. So the hook ALSO takes the store away. The
+ *  guards may still catch the throw; they cannot make the dead process write. */
+function deadDb(point: string): DatabaseInstance {
+  return new Proxy({} as DatabaseInstance, {
+    get() {
+      throw new DeadProcessStoreAccess(point);
+    },
+  });
+}
+
 /** Arm the hook at ONE point, run `fn`, swallow only OUR injected crash.
  *  Any other throw is a real failure and propagates.
  *
- *  reconcile.ts's FG-459 never-throw guards swallow the injected crash
- *  internally (that is the production contract: a DB throw reconciling one task
- *  must not abort the pass). The crash still did its job — the surrounding
- *  transaction rolled back, so that write group did not land — and `fired`
- *  records it, so a reconcile cell is exercised even though nothing escapes. */
+ *  At the probe the process DIES: the store is replaced with `deadDb` and the throw
+ *  goes up. Whatever catches it (reconcile's FG-459 guards; a runNext/gate handler)
+ *  can no longer read or write a row, so no state mutates after the kill and the
+ *  fresh pass in step 3 starts from exactly the world the crash left behind. The real
+ *  DB is restored when the crashed call unwinds. */
 async function crashAt(
   point: string,
   fn: () => Promise<unknown> | unknown,
@@ -926,14 +1017,13 @@ async function crashAt(
   let fired = false;
   setCrashHookForTest((p) => {
     if (p !== point) return;
-    // onFire runs at the INSTANT of death, before the throw — the only moment the
-    // pre-kill world is observable. Once only: reconcile's FG-459 guards swallow
-    // the throw and keep sweeping, so the same probe can fire again on a later
-    // task, and that second firing is already post-rollback.
+    // onFire runs at the INSTANT of death — before the store is taken away, the only
+    // moment the pre-kill world is observable. Once only: the process dies here.
     if (!fired) {
       fired = true;
       onFire?.();
     }
+    setDbForTest(deadDb(p));
     throw new CrashInjected(p);
   });
   try {
@@ -942,19 +1032,26 @@ async function crashAt(
     if (!(e instanceof CrashInjected)) throw e;
   } finally {
     setCrashHookForTest(undefined);
+    setDbForTest(db); // the crashed process is gone; the fresh pass gets a live store
   }
   if (fired) FIRED.add(point);
   return fired;
 }
 
+/** docker's answer to `inspect` for the dead container, per scenario. Default: it
+ *  knows nothing. Set from the scenario in runCrashPhase so the recovery passes
+ *  (which reconcile the SAME dead world) see the same answer the crash pass did. */
+type ExitInfoFake = () => { exitCode?: number; oomKilled?: boolean };
+const DOCKER_KNOWS_NOTHING: ExitInfoFake = () => ({});
+let exitInfoFake: ExitInfoFake = DOCKER_KNOWS_NOTHING;
+
 const RECONCILE_FAKES = [
   () => false, // containerAlive: the crashed process's containers are gone
   () => "not_found" as const, // reapContainer
-  () => ({}), // containerExitInfo: docker knows nothing
 ] as const;
 
 function reconcile(runId: string): void {
-  reconcileRun(runId, RECONCILE_FAKES[0], RECONCILE_FAKES[1], RECONCILE_FAKES[2]);
+  reconcileRun(runId, RECONCILE_FAKES[0], RECONCILE_FAKES[1], exitInfoFake);
 }
 
 /** Strand a task mid-finalize the way a real crash does: the container ran and
@@ -966,6 +1063,31 @@ async function strandMidFinalize(sc: Scenario, runId: string, exec: DockerExecFn
 }
 
 const strandFor = (sc: Scenario): NonNullable<Scenario["strand"]> => sc.strand ?? strandMidFinalize;
+
+/** Strand a task the way the container-gone sweep's three failure landings need it:
+ *  `running`, container gone, and NOTHING recoverable. The container ran (so
+ *  container.started is on the record and the sweep looks at the task at all), but
+ *  the result never survived — result.json is removed, and the stub runtime declares
+ *  no log_format, so the FG-337 stdout synthesizer has nothing to infer from either.
+ *  Which of the three landings reconcile then chooses is decided purely by the
+ *  evidence the scenario adds on top (docker's OOM verdict, a dirty work path). */
+async function strandWithNoRecoverableResult(sc: Scenario, runId: string, exec: DockerExecFn): Promise<void> {
+  await strandMidFinalize(sc, runId, exec);
+  const t = primaryOf(runId, "build");
+  assert.ok(t, "the primary must exist for this strand to mean anything");
+  rmSync(join(taskDir(runId, t.id), "result.json"), { force: true });
+}
+
+/** Make `git status --porcelain` report changed files at the task's work path — the
+ *  evidence that separates orphaned_work_may_persist from a plain orphan. The run's
+ *  projectDir IS that path here (no dedicated worktree: worktree mode is macOS-only
+ *  and off in the matrix), which is the `project_dir_shared` source reconcile records. */
+function dirtyWorkPath(runId: string): void {
+  const dir = getRun(runId)?.projectDir;
+  assert.ok(dir, "the run must have a projectDir to dirty");
+  execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "ignore" });
+  writeFileSync(join(dir, "work-the-agent-may-have-persisted.txt"), "uncommitted");
+}
 
 /** `persistedPreKill` is measured INSIDE the crash hook — the state of the world
  *  at the instant the process died, which is what invariant 4 is about. Capturing
@@ -986,6 +1108,8 @@ async function runCrashPhase(
   const measure = (): void => {
     atKill = capturePersistedWork(runId);
   };
+
+  exitInfoFake = sc.exitInfo ?? DOCKER_KNOWS_NOTHING;
 
   let fired: boolean;
   if (kp.surface === "reconcile") {
@@ -1486,6 +1610,67 @@ for (const sc of SCENARIOS) {
     });
   }
 }
+
+// ── the crash model itself: a kill must actually END the pass ──────────────────
+//
+// Every reconcile cell above rests on one assumption: the fresh recovery pass starts
+// from the world the CRASH left, not from a world the dead process kept building. On
+// the reconcile surface that assumption is not free. reconcile.ts's FG-459 guards
+// swallow any throw from one task's writes and keep sweeping — correct in production
+// (a SQLITE_BUSY must not abort the pass), and fatal to the crash model if the hook
+// only throws: reconcile would catch the "death" and go on to finalize the run's
+// other tasks, so recoverToFixpoint would be handed state a real crash could never
+// have produced, and every reconcile cell would be testing the wrong precondition.
+//
+// crashAt takes the store away at the probe for exactly this reason. This test is
+// what proves it: two tasks stranded in the identical shape, killed at the write for
+// the first. The second must be exactly as the crash left it.
+
+test("FG-530 crash model: a kill inside reconcile ENDS the pass — the FG-459 guards may catch the throw, but the dead process must not write again", async () => {
+  ensureRuntime();
+  const sc = SCENARIOS[0]!; // plain: strandMidFinalize leaves a `running` primary with its result on disk
+  writeWorkflowYaml(sc.workflow.name, sc.yaml);
+  const projectDir = makeTmpDir();
+  const exec = makeExec(sc.exec);
+  const { runId } = startRun({ workflow: sc.workflow, title: "fg530 crash model", inputs: {}, projectDir });
+
+  await strandMidFinalize(sc, runId, exec);
+
+  // A SECOND task stranded in the same shape — same landing, same transaction, later
+  // in reconcile's sweep. It is the witness: reconcile only ever reaches it by
+  // continuing PAST the kill.
+  const second = newTaskId("verify");
+  insertTask({
+    id: second,
+    runId,
+    phase: "verify",
+    agentRole: "engineer",
+    status: "running",
+    taskPackage: { taskId: second, runId, phase: "verify", role: "engineer", dispatchSource: "workflow", inputs: {}, composedSystemPrompt: "" },
+    createdAt: nowIso(),
+  });
+  logEvent("container.started", { runId, taskId: second, payload: { containerName: `forge-${second}` } });
+  const secondDir = taskDir(runId, second);
+  mkdirSync(secondDir, { recursive: true });
+  writeFileSync(join(secondDir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, files_modified: [] }));
+
+  const atCrash = snapshot(runId);
+  const fired = await crashAt("reconcile:before-fail-pipeline-unfinalized", () => reconcile(runId));
+  assert.ok(fired, "the kill must land on the first stranded task's write");
+
+  assert.equal(
+    snapshot(runId),
+    atCrash,
+    "a crashed reconcile pass committed state: the injected death was caught by the FG-459 guards and the pass kept " +
+      "writing. Every reconcile cell's recovery pass would then start from a world no crash could produce.",
+  );
+  assert.equal(getTask(second)?.status, "running", "the witness task must be untouched — reconcile never reached it");
+  assert.deepEqual(
+    eventsForTask(second).map((e) => e.eventType),
+    ["container.started"],
+    "the witness task must carry no reconcile event: the dead process cannot log one",
+  );
+});
 
 // ── invariant 3, at every kill point: the cancel race ──────────────────────────
 //

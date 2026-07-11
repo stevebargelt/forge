@@ -637,8 +637,10 @@ export function reconcileRun(
               `work may have persisted. Inspect the diff, verify it, then ${workMayPersistAdvice(t.id)}.`
             : " (reconciled after crash)");
         const containerEvidence = toContainerCausalEvidence(evidence);
+        crashPoint("reconcile:before-fail-oom-killed");
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
+          crashPoint("reconcile:inside-fail-oom-killed-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "oom_killed", error, evidence, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_oom_killed", evidence, containerEvidence } });
         })();
@@ -651,8 +653,10 @@ export function reconcileRun(
             : "") +
           `work may have persisted. Inspect the diff, verify it, then ${workMayPersistAdvice(t.id)}.`;
         const containerEvidence = toContainerCausalEvidence(evidence);
+        crashPoint("reconcile:before-fail-orphaned-work-may-persist");
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
+          crashPoint("reconcile:inside-fail-orphaned-work-may-persist-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned_work_may_persist", error, evidence, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_worktree_dirty", evidence, containerEvidence } });
         })();
@@ -660,8 +664,10 @@ export function reconcileRun(
       } else {
         const error = "orphaned: container gone with no result (reconciled after crash)";
         const containerEvidence = toContainerCausalEvidence(evidence);
+        crashPoint("reconcile:before-fail-orphaned-no-result");
         getDb().transaction(() => { // FG-463: fail write + its events atomic
           markTaskFailed(t.id, error);
+          crashPoint("reconcile:inside-fail-orphaned-no-result-txn");
           logEvent("task.failed", { runId, taskId: t.id, payload: { failure_kind: "orphaned", error, containerEvidence } });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "failed", reason: "container_gone_no_result", evidence, containerEvidence } });
         })();
