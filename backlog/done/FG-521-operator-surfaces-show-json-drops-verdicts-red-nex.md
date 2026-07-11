@@ -1,9 +1,11 @@
 ---
 id: FG-521
 type: story
-status: active
+status: done
 title: "operator surfaces: show --json drops verdicts, red next-command is unrunnable, campaign show contradicts report on done-audit gaps"
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: 55db9f7
 ---
 
 ## Problem
@@ -29,3 +31,17 @@ Four operator-surface read-side defects (review findings F20 + F10 + one dashboa
 ## Notes
 
 Filed 2026-07-10 as Item 2 of the operator-directed reliability queue (review findings F20 + F10 + dashboard one-liner). All read-side: no state machine, gate, or write-path changes.
+
+
+## Close evidence (2026-07-10, PR #100, merge 55db9f7)
+
+AC walk:
+- **(a)** show --json verdicts array: src/cli/commands/show.ts:803-810; additive-JSON test (show.test.ts) asserts task/events/diagnostic unreshaped alongside the new key; contract-shape test (fg521-verdict-surfaces.test.ts) enforces field parity with the human renderer by reconstruction.
+- **(b)** redTaskId on human verdict lines: show.ts:940-950; CLI test regex-matches rendered lines; copy-pasteability test EXTRACTS the id from the rendered output and proves `forge show <extracted-id>` resolves to the red task. Human-output assertions per house rule.
+- **(c)** show/report agreement: shared doneAuditGapAction()/buildDoneAuditMap() in src/campaign/report.ts — one machine, two projections. fg521-show-report-agreement.integration.test.ts drives the real CLI on a completed-campaign-with-gaps fixture and asserts the rendered Next action / Next operator action lines carry the same gap text; no-gap direction + FG-444 cost guard (map built only for complete campaigns, proven by a logging git shim) in fg521-doneaudit-cost-guard.integration.test.ts.
+- **(d)** phantom status: removed from dashboard/src/queries.ts + shell.ts; round-1 red caught the literal token in the new dashboard test file itself — fixer moved the by-name guard to src/dashboard-phantom-status.test.ts (greps dashboard/src, outside the boundary), so the AC holds by construction; in-flight parity test over every real TaskStatus pins identical query behavior.
+- All (b)/(c) assertions are on human-rendered output. 22 new tests total, mutation-checked (each fix reverted → matching suite red).
+
+Gates: review-loop closeable (run-review-loop-fg-521-40c2a2; reviewed tip 8938f7d = remote head); CI green at tip (test + test-extended), evidence reused. Docs impact: **updated** — docs/concepts.md next-action enumeration + agreement invariant (documentation-maintainer, same run). Note: dashboard server code changed — a running dashboard needs a restart to pick it up.
+
+Follow-up filed (adjacent scope): FG-522 (forge status human verdict line omits redTaskId).
