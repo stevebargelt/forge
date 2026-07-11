@@ -1,9 +1,11 @@
 ---
 id: FG-523
 type: story
-status: active
+status: done
 title: enforce the tests_run contract at ingestion; persist gate_on_verdict so dispatch and gate share one blocking rule
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: 283d7c0
 ---
 
 ## Problem
@@ -36,3 +38,20 @@ F16 adds a column to a shared-DB table (`verdicts`): the migration fires machine
 ## Notes
 
 Filed 2026-07-10 as Item 3 of the operator-directed reliability queue (review findings F19 + F16). FG-516 lesson applies: enforce by construction (one owning site / shared rule), not per-site patches.
+
+
+## Close evidence (2026-07-10, PR #101, merge 283d7c0)
+
+AC walk:
+- **F19 negative**: complete-without-tests_run (and zero/string/negative tests_run, empty/whitespace waiver) → held awaiting_gate with named reason, proven to GATE the run over a second dispatch wave + empty ready queue (fg523-validation-contract / fg523-enforcement-negative-space integration tests); reason rendered in forge show human output (`gate hold:`) + diagnostic.gateHold (assert both, human first).
+- **F19 parity**: tests_run>0 advances unchanged; non-empty no_validation_reason waiver advances + records a validation_waiver decision event (same suites).
+- **F19 non-implementer parity**: test-engineer and a red complete without tests_run, unheld.
+- **F16**: gate_on_verdict persisted at verdict insert; shared verdictBlocksGate predicate is the single rule for dispatch AND aggregateVerdicts; both-directions parity on a mixed three-verdict set differing in one bit (fg523-gate-recheck-parity); a false-flag authoritative fail no longer blocks the gate re-check.
+- **F16 legacy/migration**: real pre-change DB built on disk, opened through production getDb — column lands, zero data loss, legacy rows read NULL and BLOCK (fail closed), idempotent (fg523-verdicts-migration). Live host DB verified post-merge: PRAGMA shows the column.
+- **Real ingestion path**: all enforcement tests drive runNext/dispatchReds; review round 1 caught enforcement ordering (ran after red dispatch → could land blocked_by_red instead of the validation hold) — fixed (9a2e8c4) with a real-path regression for the missing-tests_run + authoritative-fail interleave.
+
+Gates: review-loop closeable (run-review-loop-fg-523-eaca2b; tip a280f8e = remote head); CI green at tip (test + test-extended), evidence reused. Stress rule n/a (not a concurrency fix; the hold write is CAS'd and tested). Docs impact: **updated** — docs/concepts.md (new Validation contract section + verdict rule), SCHEMA-CONTRACT.md (column + events + implementer contract), how-to-new-agent/how-to-new-workflow/how-to-new-feature (incl. fixing pre-existing gateOnVerdict/redConfig field-name drift the review flagged), all 5 implementer seeds (no_validation_reason waiver documented).
+
+Schema flag honored: additive/nullable/no-default column; ~/.forge/forge.db backed up pre-work (backup-pre-fg523-20260710-213303); PR body carries the callout.
+
+Follow-ups filed (new scope, not this ticket's AC): FG-524 (fanout children bypass), FG-525 (invoke gating design call), FG-526 (model:/activity: docs drift).
