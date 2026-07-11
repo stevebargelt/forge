@@ -24,4 +24,5 @@ Permanent wedge, same family as FG-531 (awaiting_red crash window). Found by FG-
 
 ## Notes
 
-Filed 2026-07-11 from the FG-530 write-surface guard's GAP entry + operator review finding 1. Siblings: FG-531, FG-532 (same crash-window family). NOTE: an earlier same-day filing of this ticket briefly collided with sticky number FG-530 because the crash-simulator's ticket file lived only on PR #103's branch — corrected by landing FG-530's file on main and re-filing; concrete evidence for FG-496 (DB-backed backlog).
+Filed 2026-07-11 from the FG-530 write-surface guard + operator review finding 1. Siblings: FG-531, FG-532 (same crash-window family). NOTE: an earlier same-day filing of this ticket briefly collided with sticky number FG-530 because the crash-simulator's ticket file lived only on PR #103's branch — corrected by landing FG-530's file on main and re-filing; concrete evidence for FG-496 (DB-backed backlog).
+
