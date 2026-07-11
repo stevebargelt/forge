@@ -38,19 +38,44 @@ interface Fixture {
   base: string;
 }
 
-// A stub npm: logs every invocation, materialises a loadable `tsx` on install so the
-// script's `node --import tsx` probe passes the way a real install would, and — for
-// `npm run <script>` — actually EXECUTES the fixture's script from the scratch cwd.
-// That last part is what makes "the rerun tests the edited source" an observable fact:
-// the fixture's tier command reads src/a.ts out of the scratch and prints it, so a
-// stale mirror shows up as stale stdout rather than only as a file the test re-reads.
+// A stub npm: logs every invocation, and stands in for the three things the real one
+// does that the script depends on.
+//   install/ci — materialises EVERY declared dependency as a loadable ESM package, so
+//     `node --import tsx` passes the way a real install would and the tree comes out
+//     complete. Modelling the whole manifest (not just tsx) is what lets a test remove
+//     one dep and have the repair genuinely put it back.
+//   ls — the whole-tree integrity probe: exit 1 if any declared dep is absent from
+//     node_modules, the way `npm ls --all` reports missing packages.
+//   run <script> — actually EXECUTES the fixture's script from the scratch cwd. That is
+//     what makes "the rerun tests the edited source" an observable fact: the fixture's
+//     tier command reads src/a.ts out of the scratch and prints it, so a stale mirror
+//     shows up as stale stdout rather than only as a file the test re-reads.
 const STUB_NPM = `#!/usr/bin/env bash
 echo "npm $*" >> "$NPM_LOG"
 if [[ "$1" == "ci" || "$1" == "install" ]]; then
-  mkdir -p node_modules/tsx
-  printf '%s' '{"name":"tsx","version":"0.0.0","type":"module","exports":"./index.js"}' > node_modules/tsx/package.json
-  : > node_modules/tsx/index.js
-  exit 0
+  exec node -e '
+const fs = require("fs");
+const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+for (const name of Object.keys({ ...p.dependencies, ...p.devDependencies })) {
+  fs.mkdirSync("node_modules/" + name, { recursive: true });
+  fs.writeFileSync(
+    "node_modules/" + name + "/package.json",
+    JSON.stringify({ name, version: "0.0.0", type: "module", exports: "./index.js" })
+  );
+  fs.writeFileSync("node_modules/" + name + "/index.js", "");
+}'
+fi
+if [[ "$1" == "ls" ]]; then
+  exec node -e '
+const fs = require("fs");
+const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+const missing = Object.keys({ ...p.dependencies, ...p.devDependencies }).filter(
+  (n) => !fs.existsSync("node_modules/" + n + "/package.json")
+);
+if (missing.length) {
+  console.error("npm ERR! missing: " + missing.join(", "));
+  process.exit(1);
+}'
 fi
 if [[ "$1" == "run" ]]; then
   cmd=$(node -e 'const p = JSON.parse(require("fs").readFileSync("package.json", "utf8")); process.stdout.write((p.scripts || {})[process.argv[1]] || "")' "$2")
@@ -74,11 +99,15 @@ function makeFixture(): Fixture {
   mkdirSync(join(src, "src"), { recursive: true });
   mkdirSync(bin);
 
+  // `zod` is here to be deleted: a declared dep that is NOT tsx and NOT better-sqlite3,
+  // so its absence is invisible to every load probe the script had before the whole-tree
+  // one — the reviewer's hole.
   writeFileSync(
     join(src, "package.json"),
     JSON.stringify({
       name: "fixture",
       scripts: { "test:unit": "./src/run-tests.sh" },
+      dependencies: { zod: "*" },
       devDependencies: { tsx: "*" },
     })
   );
@@ -185,6 +214,15 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
       );
       assert.ok(elapsed < 10_000, `no-change re-sync should be fast, took ${elapsed}ms`);
       assert.match(r.stderr, /re-synced source/, "the sync must say what it did");
+      // The integrity probe is the one npm call a healthy run is allowed to make, and
+      // it may only make it once. Measured against forge's real 67-package scratch it
+      // costs 0.15s (npm's own boot floor is 0.04s); probing twice, or reinstalling,
+      // is what would put the fast path back on the clock.
+      assert.equal(
+        npmCalls(f).slice(callsBefore).filter((c) => c.startsWith("npm ls")).length,
+        1,
+        "a healthy scratch must be probed exactly once per run"
+      );
     });
 
     await t.test("an empty node_modules is repaired, not run against", () => {
@@ -222,6 +260,33 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
         "a package.json change must invalidate the scratch's node_modules"
       );
       assert.match(r.stderr, /package\.json\/package-lock\.json changed/, "must say why");
+    });
+
+    await t.test("a scratch missing ONE declared dep is repaired, not run against", () => {
+      // The residual hole: every trigger the script had before this one is satisfied —
+      // node_modules is non-empty, the package/lock fingerprint is current, tsx loads —
+      // and yet a dependency is gone. Without a whole-tree probe this scratch reaches
+      // the runner and the tests die ERR_MODULE_NOT_FOUND: exactly the environment fault
+      // reported as red tests that FG-520 exists to kill.
+      rmSync(join(f.work, "node_modules", "zod"), { recursive: true, force: true });
+      assert.ok(
+        existsSync(join(f.work, "node_modules", "tsx")),
+        "tsx must still be there — otherwise the old tsx probe would catch this and the test proves nothing"
+      );
+      const callsBefore = npmCalls(f).length;
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 0, `the repair must fix it and run the tier, got ${r.status}: ${r.stderr}`);
+      assert.ok(
+        npmCalls(f).slice(callsBefore).some((c) => c.startsWith("npm ci")),
+        "a missing dependency must trigger a reinstall"
+      );
+      assert.match(r.stderr, /node_modules is incomplete/, "the repair must say WHY it is installing");
+      assert.ok(existsSync(join(f.work, "node_modules", "zod")), "and the missing dep must be back");
+      assert.ok(
+        npmCalls(f).includes("npm run test:unit"),
+        "with the tree repaired, the tier must still run"
+      );
     });
   } finally {
     rmSync(f.base, { recursive: true, force: true });
@@ -436,6 +501,38 @@ exit 0`
       assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
       assert.match(r.stderr, /gyp ERR! build error/);
       assert.ok(!npmCalls(f).includes("npm run test:unit"));
+    } finally {
+      rmSync(f.base, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("an install that leaves the tree incomplete exits 2 with FATAL", () => {
+    const f = makeFixture();
+    try {
+      // An npm whose `ci` reports success but materialises only tsx — the fixture also
+      // declares zod. The runner-specific probes are all happy; the tree is still short a
+      // package. A scratch that cannot be repaired must never reach the runner.
+      stubNpm(
+        f,
+        `if [[ "$1" == "ci" ]]; then
+  mkdir -p node_modules/tsx
+  printf '%s' '{"name":"tsx","version":"0.0.0","type":"module","exports":"./index.js"}' > node_modules/tsx/package.json
+  : > node_modules/tsx/index.js
+  exit 0
+fi
+if [[ "$1" == "ls" ]]; then echo "npm ERR! missing: zod@*" >&2; exit 1; fi
+exit 0`
+      );
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 2, `an unrepairable tree must exit 2, got ${r.status}`);
+      assert.match(r.stderr, /still incomplete after installing/);
+      assert.match(r.stderr, /ENVIRONMENT failure, not a test failure/);
+      assert.match(r.stderr, /npm ERR! missing: zod/, "npm's own account of what is missing must survive");
+      assert.ok(
+        !npmCalls(f).includes("npm run test:unit"),
+        "the tier must never run against a scratch whose tree is incomplete"
+      );
     } finally {
       rmSync(f.base, { recursive: true, force: true });
     }

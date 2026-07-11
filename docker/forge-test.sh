@@ -198,6 +198,24 @@ _sqlite_loads() {
   node -e "require('better-sqlite3')" >/dev/null 2>&1
 }
 
+# Whole-tree integrity. The tsx and better-sqlite3 probes only prove THOSE TWO load:
+# a scratch with both intact but some other package missing or gutted sails past them,
+# and the tests die ERR_MODULE_NOT_FOUND — the environment fault reported as red tests
+# that this ticket exists to kill. `npm ls` walks the tree npm ci would produce and
+# exits non-zero on anything missing or version-invalid.
+#
+# --all is load-bearing, not thoroughness for its own sake: plain `npm ls` validates
+# only depth 0 and exits 0 with a transitive dependency deleted (measured — delete
+# node_modules/bindings, a dep of better-sqlite3: `npm ls` says 0, `npm ls --all` says
+# 1). Dev deps stay IN scope (no --omit=dev) because tsx, the runner itself, is one.
+#
+# Cost, measured on forge's healthy 67-package scratch: 0.15s, against an npm boot
+# floor of 0.04s. That is inside the noise of a tier run, so it runs every invocation
+# rather than being traded for a cheaper partial check.
+_deps_tree_intact() {
+  [[ ! -f package.json ]] || npm ls --all >/dev/null 2>&1
+}
+
 _node_modules_is_empty() {
   [[ ! -d node_modules ]] || [[ -z "$(ls -A node_modules 2>/dev/null)" ]]
 }
@@ -230,6 +248,8 @@ _ensure_deps() {
     reason="package.json/package-lock.json changed since these node_modules were installed"
   elif _declares_dep tsx && ! _tsx_loads; then
     reason="the 'tsx' runner does not load from $WORK_DIR/node_modules"
+  elif ! _deps_tree_intact; then
+    reason="$WORK_DIR/node_modules is incomplete — \`npm ls --all\` reports missing or invalid packages"
   fi
 
   if [[ -n "$reason" ]]; then
@@ -264,6 +284,16 @@ _ensure_deps() {
       echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
       exit 2
     fi
+  fi
+
+  # Last gate before the runner gets the scratch. Only after a repair: if no reason
+  # fired above, the chain already proved the tree intact and re-probing would just
+  # pay npm ls twice on the healthy fast path.
+  if [[ -n "$reason" ]] && ! _deps_tree_intact; then
+    echo "forge-test: FATAL: $WORK_DIR/node_modules is still incomplete after installing — the packages below are missing or invalid:" >&2
+    npm ls --all >&2 || true
+    echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
+    exit 2
   fi
 }
 
