@@ -50,6 +50,7 @@ const LIFTED = [
   // harness machinery
   "capturePersistedWork",
   "recoverToFixpoint",
+  "snapshot",
   "FIXPOINT_CAP",
   "PLAIN_WF",
   "PLAIN_YAML",
@@ -437,6 +438,113 @@ test("FG-530 detection [invariant 5] CONTROL: a genuinely settled run is CLEAN �
     [],
     "once settled, another full pass must change nothing",
   );
+});
+
+/** The projection the fixpoint snapshot used BEFORE the lossless rewrite: a
+ *  handful of status-shaped columns plus counts. Reproduced verbatim so the test
+ *  below can prove what it was blind to — the blindness is the bug, and a
+ *  regression back to a projection must be visible as a test failure, not as a
+ *  quietly weaker assertion. */
+function lossyLegacySnapshot(runId: string): string {
+  const q = (sql: string): unknown[] => db.prepare(sql).all(runId);
+  return JSON.stringify({
+    runStatus: db.prepare("SELECT status FROM runs WHERE id = ?").get(runId),
+    tasks: q(
+      "SELECT id, phase, status, parent_id, result IS NOT NULL AS has_result FROM tasks WHERE run_id = ? ORDER BY id",
+    ),
+    verdicts: q(
+      "SELECT v.id, v.task_id, v.verdict, v.authority FROM verdicts v JOIN tasks t ON t.id = v.task_id WHERE t.run_id = ? ORDER BY v.id",
+    ),
+    gates: q(
+      "SELECT g.id, g.task_id, g.decision FROM gates g JOIN tasks t ON t.id = g.task_id WHERE t.run_id = ? ORDER BY g.id",
+    ),
+    eventCount: db.prepare("SELECT COUNT(*) AS c FROM events WHERE run_id = ?").get(runId),
+  });
+}
+
+test("FG-530 detection [invariant 5]: a pass that mutates ONLY a previously-invisible field (the persisted result body) is FLAGGED — the fixpoint snapshot is lossless, not a status projection", async () => {
+  const runId = newRun(H.PLAIN_WF, H.PLAIN_YAML, "inv5 invisible write");
+  const exec = H.makeExec({ redVerdict: "pass" });
+  await H.recoverToFixpoint(runId, H.PLAIN_WF, exec);
+
+  const settled = db.prepare("SELECT id, status FROM tasks WHERE run_id = ?").all(runId) as {
+    id: string;
+    status: string;
+  }[];
+  assert.ok(settled.length > 0, "precondition: the settled run has at least one task to mutate");
+
+  // The write under test: rewrite the result BODY of a settled task. Status, row
+  // count, verdict/gate rows, run status and event count are all untouched — the
+  // recovery pass has silently rewritten the artifact that justifies a completion.
+  const target = settled[0]!.id;
+  const original = (db.prepare("SELECT result FROM tasks WHERE id = ?").get(target) as { result: string }).result;
+  const tampered = JSON.stringify({ status: "complete", tests_run: 999, files_modified: ["tampered.ts"] });
+  const rewriteResultBody = async (): Promise<void> => {
+    db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(tampered, target);
+  };
+
+  // First: prove the OLD snapshot could not see it. If this ever stops holding,
+  // the fixture has drifted and the detection below no longer proves anything.
+  const legacyBefore = lossyLegacySnapshot(runId);
+  const richBefore = JSON.stringify(H.snapshot(runId));
+  await rewriteResultBody();
+  assert.equal(
+    lossyLegacySnapshot(runId),
+    legacyBefore,
+    "fixture precondition: the pre-fix projection (status + counts) is BLIND to a result-body rewrite — that blindness is the bug under test",
+  );
+  assert.notEqual(
+    JSON.stringify(H.snapshot(runId)),
+    richBefore,
+    "the lossless snapshot must see the result-body rewrite the projection missed",
+  );
+
+  // Rewind, so the checker's pass performs the write itself rather than repeating
+  // one already applied (which would be a genuine no-op and prove nothing).
+  db.prepare("UPDATE tasks SET result = ? WHERE id = ?").run(original, target);
+  assert.equal(JSON.stringify(H.snapshot(runId)), richBefore, "rewound to the settled state");
+
+  // Now end-to-end through the checker: a pass whose only write is that rewrite
+  // must NOT read as an idempotent fixpoint.
+  const vs: Violation[] = await H.checkFixpointIdempotent(runId, H.PLAIN_WF, exec, rewriteResultBody);
+
+  assert.ok(
+    vs.some(
+      (v) =>
+        v.invariant === "5-fixpoint-idempotent" && /CHANGED state/.test(v.detail) && /\.result:/.test(v.detail),
+    ),
+    `a pass that rewrites persisted result content must be flagged, and the violation must NAME the column that moved, got:\n${details(vs)}`,
+  );
+});
+
+test("FG-530 detection [invariant 5]: the fixpoint snapshot covers every column of tasks/verdicts/gates — a projection would go stale the day a column is added", async () => {
+  const runId = newRun(H.RED_WF, H.RED_YAML, "inv5 full fidelity");
+  const exec = H.makeExec({ redVerdict: "pass" });
+  await H.recoverToFixpoint(runId, H.RED_WF, exec);
+
+  const snap = H.snapshot(runId) as {
+    tasks: Record<string, unknown>[];
+    verdicts: Record<string, unknown>[];
+    gates: Record<string, unknown>[];
+  };
+  assert.ok(snap.tasks.length > 0 && snap.verdicts.length > 0, "precondition: the settled red run has tasks + verdicts");
+
+  const columns = (table: string): string[] =>
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+
+  for (const [table, rows] of [
+    ["tasks", snap.tasks],
+    ["verdicts", snap.verdicts],
+    ["gates", snap.gates],
+  ] as const) {
+    if (rows.length === 0) continue; // gates: none on an auto-gated run
+    const missing = columns(table).filter((c) => !(c in rows[0]!));
+    assert.deepEqual(
+      missing,
+      [],
+      `the snapshot dropped ${table} column(s) ${missing.join(", ")} — a recovery pass could write them and still read as a no-op`,
+    );
+  }
 });
 
 /** A chain longer than the cap: each pass can only advance one step, so the run

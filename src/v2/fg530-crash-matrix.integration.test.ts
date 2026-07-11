@@ -38,10 +38,9 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
-import { makeInMemoryDb, setDbForTest } from "../store/db.js";
+import { getDb, makeInMemoryDb, setDbForTest } from "../store/db.js";
 import { insertTask, tasksForRun, getTask, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { insertVerdict, verdictsForRun, verdictsForTask } from "../store/verdicts.js";
-import { gatesForRun } from "../store/gates.js";
 import { eventsForRun, eventsForTask, logEvent } from "../store/events.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { taskDir } from "../util/paths.js";
@@ -1123,47 +1122,112 @@ async function runCrashPhase(
 
 // ── state snapshot + fixpoint ─────────────────────────────────────────────────
 
-/** Everything a recovery pass could legitimately change. Two identical
- *  snapshots ⇒ the pass was a no-op ⇒ fixpoint. Events are included by COUNT:
- *  a pass that re-logs an event without changing status is still a state
- *  change (and an unbounded-event-growth bug), so it must not read as a
- *  fixpoint. */
-function snapshot(runId: string): string {
-  const tasks = tasksForRun(runId)
-    .map((t) => ({
-      id: t.id,
-      phase: t.phase,
-      status: t.status,
-      parentId: t.parentId ?? null,
-      hasResult: t.result !== undefined && t.result !== null,
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  const verdicts = verdictsForRun(runId)
-    .map((v) => ({ id: v.id, taskId: v.taskId, verdict: v.verdict, authority: v.authority }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  const gates = gatesForRun(runId)
-    .map((g) => ({ id: g.id, taskId: g.taskId, decision: g.decision }))
-    .sort((a, b) => a.id.localeCompare(b.id));
-  return JSON.stringify({
-    runStatus: getRun(runId)?.status ?? "missing",
+/** Everything a recovery pass could write, at FULL row fidelity. Two identical
+ *  snapshots ⇒ the pass was a no-op ⇒ fixpoint.
+ *
+ *  It reads `SELECT *` over the real tables rather than projecting named fields:
+ *  a projection only sees what someone remembered to list, so a pass that
+ *  rewrote a result body, a task_package's inputs, a worktree path or a
+ *  started_at could read as a "no-op" and the fixpoint assertion would vouch for
+ *  a write it never looked at. With `SELECT *` a new column is covered the day
+ *  it is added, by default rather than by remembering.
+ *
+ *  Column values are compared as SQLite returns them — raw TEXT, not parsed and
+ *  re-normalized. That is deliberately the strict end: a row rewritten with the
+ *  same logical JSON but different key order IS a write, and a write must fail
+ *  the no-op assertion. NOTHING is excluded for the same reason — a timestamp
+ *  column that ticks is the very evidence the pass wrote.
+ *
+ *  Events are per-owner (task id, or `<run>` for run-level rows) COUNT + TAIL:
+ *  the count catches a pass that re-logs an event without changing a status
+ *  (a state change, and an unbounded-event-growth bug), the tail names what it
+ *  logged so the failure is diagnosable without a second run. */
+type Row = Record<string, unknown>;
+type Snapshot = {
+  run: Row | null;
+  tasks: Row[];
+  verdicts: Row[];
+  gates: Row[];
+  events: Record<string, { count: number; tail: Row[] }>;
+};
+
+const EVENT_TAIL = 5;
+
+function sqlRows(sql: string, ...params: unknown[]): Row[] {
+  return getDb().prepare(sql).all(...params) as Row[];
+}
+
+function snapshot(runId: string): Snapshot {
+  const tasks = sqlRows("SELECT * FROM tasks WHERE run_id = ? ORDER BY id", runId);
+  const events: Snapshot["events"] = {};
+  for (const e of sqlRows(
+    `SELECT * FROM events
+      WHERE run_id = ? OR task_id IN (SELECT id FROM tasks WHERE run_id = ?)
+      ORDER BY id`,
+    runId,
+    runId,
+  )) {
+    const owner = (e["task_id"] as string | null) ?? "<run>";
+    const bucket = (events[owner] ??= { count: 0, tail: [] });
+    bucket.count += 1;
+    bucket.tail.push(e);
+    if (bucket.tail.length > EVENT_TAIL) bucket.tail.shift();
+  }
+  return {
+    run: sqlRows("SELECT * FROM runs WHERE id = ?", runId)[0] ?? null,
     tasks,
-    verdicts,
-    gates,
-    eventCount: eventsForRun(runId).length,
-  });
+    verdicts: sqlRows(
+      "SELECT v.* FROM verdicts v JOIN tasks t ON t.id = v.task_id WHERE t.run_id = ? ORDER BY v.id",
+      runId,
+    ),
+    gates: sqlRows("SELECT g.* FROM gates g JOIN tasks t ON t.id = g.task_id WHERE t.run_id = ? ORDER BY g.id", runId),
+    events,
+  };
+}
+
+const snapshotKey = (s: Snapshot): string => JSON.stringify(s);
+
+/** Deep diff, so a violation names the COLUMN that moved (`tasks[0].result`)
+ *  rather than dumping two walls of JSON at the reader. */
+function diffSnapshots(before: Snapshot, after: Snapshot): string[] {
+  const out: string[] = [];
+  const trunc = (v: unknown): string => {
+    const s = JSON.stringify(v) ?? "undefined";
+    return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+  };
+  const isObj = (v: unknown): v is Row => typeof v === "object" && v !== null && !Array.isArray(v);
+  const walk = (a: unknown, b: unknown, path: string): void => {
+    if (JSON.stringify(a) === JSON.stringify(b)) return;
+    if (isObj(a) && isObj(b)) {
+      for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) walk(a[k], b[k], `${path}.${k}`);
+      return;
+    }
+    if (Array.isArray(a) && Array.isArray(b)) {
+      for (let i = 0; i < Math.max(a.length, b.length); i++) walk(a[i], b[i], `${path}[${i}]`);
+      return;
+    }
+    out.push(`${path}: ${trunc(a)} → ${trunc(b)}`);
+  };
+  walk(before, after, "");
+  return out;
 }
 
 const FIXPOINT_CAP = 12;
+
+/** One recovery pass: what a fresh `forge next` after a crash actually does. */
+async function recoveryPass(runId: string, workflow: Workflow, exec: DockerExecFn): Promise<void> {
+  reconcile(runId);
+  await runNext({ runId, workflow, dockerExec: exec });
+}
 
 /** Invariant 5's driver: reconcile + runNext until nothing changes. Fails on
  *  the cap rather than looping — a recovery that never converges is the wedge
  *  this whole harness exists to catch. */
 async function recoverToFixpoint(runId: string, workflow: Workflow, exec: DockerExecFn): Promise<number> {
-  let before = snapshot(runId);
+  let before = snapshotKey(snapshot(runId));
   for (let pass = 1; pass <= FIXPOINT_CAP; pass++) {
-    reconcile(runId);
-    await runNext({ runId, workflow, dockerExec: exec });
-    const after = snapshot(runId);
+    await recoveryPass(runId, workflow, exec);
+    const after = snapshotKey(snapshot(runId));
     if (after === before) return pass;
     before = after;
   }
@@ -1457,17 +1521,31 @@ function checkPersistedWorkNeverDiscarded(pre: PersistedWork): Violation[] {
   return v;
 }
 
-/** INVARIANT 5 — fixpoint is idempotent: one more full pass changes nothing. */
-async function checkFixpointIdempotent(runId: string, workflow: Workflow, exec: DockerExecFn): Promise<Violation[]> {
+/** INVARIANT 5 — fixpoint is idempotent: one more full pass changes nothing.
+ *
+ *  `pass` is the recovery pass under test and defaults to the real one; every
+ *  matrix cell uses that default. The detection suite substitutes a pass that
+ *  writes ONE persisted field, which is how the SNAPSHOT's fidelity gets proven
+ *  rather than assumed — a checker whose snapshot cannot see a write cannot
+ *  honestly report "no-op", and that is precisely what it used to do. */
+async function checkFixpointIdempotent(
+  runId: string,
+  workflow: Workflow,
+  exec: DockerExecFn,
+  pass: (runId: string, workflow: Workflow, exec: DockerExecFn) => Promise<void> = recoveryPass,
+): Promise<Violation[]> {
   const before = snapshot(runId);
-  reconcile(runId);
-  await runNext({ runId, workflow, dockerExec: exec });
+  await pass(runId, workflow, exec);
   const after = snapshot(runId);
-  if (before === after) return [];
+  if (snapshotKey(before) === snapshotKey(after)) return [];
   return [
     {
       invariant: "5-fixpoint-idempotent",
-      detail: `a second reconcile+runNext pass after fixpoint CHANGED state.\nbefore: ${before}\nafter:  ${after}`,
+      detail:
+        `a second reconcile+runNext pass after fixpoint CHANGED state:\n` +
+        diffSnapshots(before, after)
+          .map((d) => `    ${d}`)
+          .join("\n"),
     },
   ];
 }
@@ -1654,12 +1732,12 @@ test("FG-530 crash model: a kill inside reconcile ENDS the pass — the FG-459 g
   mkdirSync(secondDir, { recursive: true });
   writeFileSync(join(secondDir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, files_modified: [] }));
 
-  const atCrash = snapshot(runId);
+  const atCrash = snapshotKey(snapshot(runId));
   const fired = await crashAt("reconcile:before-fail-pipeline-unfinalized", () => reconcile(runId));
   assert.ok(fired, "the kill must land on the first stranded task's write");
 
   assert.equal(
-    snapshot(runId),
+    snapshotKey(snapshot(runId)),
     atCrash,
     "a crashed reconcile pass committed state: the injected death was caught by the FG-459 guards and the pass kept " +
       "writing. Every reconcile cell's recovery pass would then start from a world no crash could produce.",
