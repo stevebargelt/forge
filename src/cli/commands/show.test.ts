@@ -9,6 +9,7 @@ import type { Database as DatabaseInstance } from "better-sqlite3";
 import { makeInMemoryDb, setDbForTest } from "../../store/db.js";
 import { insertRun } from "../../store/runs.js";
 import { insertTask } from "../../store/tasks.js";
+import { insertVerdict } from "../../store/verdicts.js";
 import { logEvent } from "../../store/events.js";
 import type { Event } from "../../store/events.js";
 import {
@@ -1349,6 +1350,104 @@ test("CLI: `forge show <id> --diagnostic` marks a fanout parent's derived failur
     assert.match(out, /n\/a — this is a fanout parent/);
     assert.match(out, /not from a killed agent/);
     assert.match(out, /fanout wave: 1\/3 children completed/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+// ─── FG-521: verdicts on both operator surfaces ──────────────────────────────
+
+function insertBlockedTaskWithVerdicts(taskId: string): void {
+  insertTask(makeTask(taskId, { status: "blocked_by_red" }));
+  insertTask(makeTask(`${taskId}-red-wide`, { agentRole: "red-wide", phase: "red" }));
+  insertTask(makeTask(`${taskId}-red-security`, { agentRole: "red-security", phase: "red" }));
+  insertVerdict({
+    id: `v-${taskId}-1`,
+    taskId,
+    redTaskId: `${taskId}-red-wide`,
+    redRole: "red-wide",
+    verdict: "fail",
+    confidence: 0.85,
+    authority: "authoritative",
+    findings: [{ severity: "high", summary: "unguarded write path", evidence: "src/x.ts:12", hypothesis: "lost update" }],
+    createdAt: "2026-07-11T10:05:00Z",
+  });
+  insertVerdict({
+    id: `v-${taskId}-2`,
+    taskId,
+    redTaskId: `${taskId}-red-security`,
+    redRole: "red-security",
+    verdict: "pass",
+    confidence: 0.7,
+    authority: "specialist",
+    findings: [],
+    createdAt: "2026-07-11T10:06:00Z",
+  });
+}
+
+test("CLI: `forge show <id>` prints each verdict's redTaskId — the id the suggested `forge show <redTaskId>` next-command needs", async () => {
+  const taskId = "task-verdict-human";
+  insertBlockedTaskWithVerdicts(taskId);
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId], { from: "user" });
+
+    const out = lines.join("\n");
+    assert.match(out, /- red-wide \(authoritative\): fail \(0\.85\) — task-verdict-human-red-wide/);
+    assert.match(out, /- red-security \(specialist\): pass \(0\.70\) — task-verdict-human-red-security/);
+    // The next-command tells the operator to paste a redTaskId — it must appear above.
+    assert.match(out, /forge show <redTaskId>/);
+    assert.match(out, /\[high\] unguarded write path/);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("CLI: `forge show <id> --json` includes the verdicts array — additively, alongside task/events/diagnostic", async () => {
+  const taskId = "task-verdict-json";
+  insertBlockedTaskWithVerdicts(taskId);
+
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", taskId, "--json"], { from: "user" });
+
+    const parsed = JSON.parse(lines.join("\n")) as Record<string, unknown>;
+    // Additive: nothing existing is renamed, removed, or reshaped.
+    assert.ok("task" in parsed, "task key must still be present");
+    assert.ok("events" in parsed, "events key must still be present");
+    assert.ok("diagnostic" in parsed, "diagnostic key must still be present");
+
+    const verdicts = parsed.verdicts as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(verdicts), "verdicts must be an array");
+    assert.equal(verdicts.length, 2);
+    // The SAME data the human path renders: redRole, authority, verdict, confidence,
+    // findings — plus the redTaskId the next-command needs.
+    assert.equal(verdicts[0]!.redRole, "red-wide");
+    assert.equal(verdicts[0]!.authority, "authoritative");
+    assert.equal(verdicts[0]!.verdict, "fail");
+    assert.equal(verdicts[0]!.confidence, 0.85);
+    assert.equal(verdicts[0]!.redTaskId, `${taskId}-red-wide`);
+    assert.equal((verdicts[0]!.findings as unknown[]).length, 1);
+    assert.equal(verdicts[1]!.redTaskId, `${taskId}-red-security`);
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test("CLI: `forge show <id> --json` emits an empty verdicts array for a task with no verdicts", async () => {
+  const lines = captureConsoleLog();
+  try {
+    const program = new Command();
+    registerShow(program);
+    await program.parseAsync(["show", "task-show-1", "--json"], { from: "user" });
+
+    const parsed = JSON.parse(lines.join("\n")) as Record<string, unknown>;
+    assert.deepEqual(parsed.verdicts, []);
   } finally {
     mock.restoreAll();
   }

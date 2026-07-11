@@ -803,6 +803,10 @@ export function registerShow(program: Command): void {
               {
                 task,
                 events,
+                // FG-521: the same verdicts the human path renders below —
+                // an orchestrator consuming --json could not see red verdicts
+                // at all until this key existed.
+                verdicts,
                 diagnostic: {
                   containerName: `forge-${task.id}`,
                   runtime: runtimeMeta ?? null,
@@ -936,8 +940,11 @@ export function registerShow(program: Command): void {
           console.log("");
           console.log("Verdicts:");
           for (const v of verdicts) {
+            // FG-521: the redTaskId is what the red_blocked / blocked_by_red
+            // next-command (`forge show <redTaskId>`) tells the operator to
+            // paste — print it here or that command is unrunnable.
             console.log(
-              `  - ${v.redRole} (${v.authority}): ${v.verdict} (${v.confidence.toFixed(2)})`,
+              `  - ${v.redRole} (${v.authority}): ${v.verdict} (${v.confidence.toFixed(2)}) — ${v.redTaskId}`,
             );
             for (const f of v.findings) {
               console.log(`      [${f.severity}] ${f.summary}`);

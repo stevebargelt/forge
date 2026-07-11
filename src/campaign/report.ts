@@ -361,9 +361,48 @@ function campaignSystemRecoverableAction(
   return campaignSystemRetryHint(campaign, item);
 }
 
+// FG-521: the ONE derivation of the done-audit-gap next-action for a complete
+// campaign. `campaign show` used to return "complete — none" unconditionally
+// while `campaign report` consulted the doneAuditMap — two parallel machines
+// over the same data, so a completed campaign with unresolved gaps contradicted
+// itself across the two surfaces. Both now project this; neither re-filters.
+// Returns null when no shipped item has an unresolved audit gap.
+function doneAuditGapAction(items: CampaignItem[], doneAuditMap: Map<string, DoneAuditResult>): string | null {
+  const unauditedShipped = items.filter(
+    (i) => i.outcome === "shipped" && doneAuditMap.get(i.ticketId)?.outcome !== "pass"
+  );
+  if (unauditedShipped.length === 0) return null;
+  const actions = unauditedShipped
+    .map((i) => doneAuditMap.get(i.ticketId)?.requestedAction ?? `re-audit ${i.ticketId}`)
+    .join("; ");
+  return `shipped items have unresolved done-audit gaps — ${actions}`;
+}
+
+// FG-521: the done-audit map both assemble paths derive their gap answer from.
+// Best-effort per item, exactly as assembleCampaignReport built it inline before;
+// tests may inject an override. Each assemble call builds it at most once (the
+// same one-evaluation-per-assemble discipline as memoizeOutOfBandCompletableAction),
+// and collectDoneAuditInput shells out to git per item — so assembleCampaignShow
+// only builds it for the one status whose next-action consults it (complete).
+function buildDoneAuditMap(campaign: Campaign, items: CampaignItem[]): Map<string, DoneAuditResult> {
+  if (_testDoneAuditMapOverride !== null) return _testDoneAuditMapOverride;
+  const map = new Map<string, DoneAuditResult>();
+  if (campaign.projectDir && existsSync(campaign.projectDir)) {
+    for (const item of items) {
+      try {
+        map.set(item.ticketId, evaluateDoneAudit(collectDoneAuditInput(campaign.projectDir, item)));
+      } catch {
+        // leave entry absent (→ doneAuditState: null for this item)
+      }
+    }
+  }
+  return map;
+}
+
 function computeNextShowAction(
   campaign: Campaign,
   items: CampaignItem[],
+  doneAuditMap: Map<string, DoneAuditResult>,
   getOutOfBandCompletableAction: (campaign: Campaign, item: CampaignItem) => string | null,
   getCampaignSystemCompletableHint: (campaign: Campaign, item: CampaignItem) => string | null
 ): string {
@@ -372,7 +411,7 @@ function computeNextShowAction(
     if (inf && inf.lifecycleStatus !== "running") return recoveryNeededAction(campaign.id, inf);
     return "running";
   }
-  if (campaign.status === "complete") return "complete — none";
+  if (campaign.status === "complete") return doneAuditGapAction(items, doneAuditMap) ?? "complete — none";
   if (campaign.status === "failed") return "failed — investigate";
   if (campaign.status === "abandoned") return "abandoned — none";
 
@@ -484,20 +523,9 @@ function computeNextOperatorAction(
   }
   if (campaign.status === "complete") {
     if (verdict === "all_shipped") return "none — campaign complete (all items shipped)";
-    // Surface done-audit gaps for shipped items that didn't pass audit
-    const unauditedShipped = items.filter(
-      (i) => i.outcome === "shipped" && doneAuditMap.get(i.ticketId)?.outcome !== "pass"
-    );
-    if (unauditedShipped.length > 0) {
-      const actions = unauditedShipped
-        .map((i) => {
-          const audit = doneAuditMap.get(i.ticketId);
-          return audit?.requestedAction ?? `re-audit ${i.ticketId}`;
-        })
-        .filter(Boolean)
-        .join("; ");
-      return `shipped items have unresolved done-audit gaps — ${actions}`;
-    }
+    // FG-521: shared with computeNextShowAction — see doneAuditGapAction.
+    const gapAction = doneAuditGapAction(items, doneAuditMap);
+    if (gapAction) return gapAction;
     return "review blocked/failed/skipped items";
   }
   if (campaign.status === "failed") return "investigate failure and re-plan or abandon";
@@ -658,7 +686,17 @@ export function assembleCampaignShow(id: string): ShowResult | null {
     };
   });
 
-  const nextAction = computeNextShowAction(campaign, items, getOutOfBandCompletableAction, getCampaignSystemCompletableHint);
+  // FG-521: show's complete-campaign next-action is a projection of report's
+  // done-audit-gap derivation, so the two surfaces can never contradict each
+  // other. Only a complete campaign's next-action consults the map, and
+  // building it shells out to git per item (collectDoneAuditInput) — so don't
+  // pay that cost on every `campaign show` of a running/paused campaign.
+  const doneAuditMap =
+    campaign.status === "complete"
+      ? buildDoneAuditMap(campaign, items)
+      : new Map<string, DoneAuditResult>();
+
+  const nextAction = computeNextShowAction(campaign, items, doneAuditMap, getOutOfBandCompletableAction, getCampaignSystemCompletableHint);
 
   return {
     campaignId: campaign.id,
@@ -774,22 +812,7 @@ export function assembleCampaignReport(id: string): ReportResult | null {
   }
 
   // Build done-audit map (best-effort, per item). Tests may inject an override map.
-  let doneAuditMap: Map<string, DoneAuditResult>;
-  if (_testDoneAuditMapOverride !== null) {
-    doneAuditMap = _testDoneAuditMapOverride;
-  } else {
-    doneAuditMap = new Map<string, DoneAuditResult>();
-    if (campaign.projectDir && existsSync(campaign.projectDir)) {
-      for (const item of items) {
-        try {
-          const auditInput = collectDoneAuditInput(campaign.projectDir, item);
-          doneAuditMap.set(item.ticketId, evaluateDoneAudit(auditInput));
-        } catch {
-          // leave entry absent (→ doneAuditState: null for this item)
-        }
-      }
-    }
-  }
+  const doneAuditMap = buildDoneAuditMap(campaign, items);
 
   const safetyToContinue = computeSafety(campaign, items);
   const verdict = computeVerdict(campaign, items, doneAuditMap);
