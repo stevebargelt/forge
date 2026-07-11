@@ -78,9 +78,27 @@ A decision point at the end of a phase. Three kinds: `human` (waits for `forge g
 
 Example: the `frame` phase has a `human` gate. After framer completes, the run parks at `awaiting_gate` until `forge gate task-frame-f68eb8 advance` runs.
 
+A task can also park at `awaiting_gate` without the phase declaring a gate at all — see [Validation contract](#validation-contract) below.
+
+## Validation contract
+
+The rule that an implementer does not get to *claim* success without evidence of validation — [invariant 11](invariants.md) ("agents are fallible workers, not the trust boundary") made mechanical, enforced by the runner rather than by the seed prose alone.
+
+When a workflow **primary** task in one of the implementer roles — `engineer`, `frontend-specialist`, `backend-specialist`, `security-advisor`, `agentic-platform-builder` — returns `status: "complete"` with a missing or zero `tests_run`, the runner does not advance it. It parks the task at `awaiting_gate` with a named hold reason, whatever the phase's gate would otherwise have done (including `gate: auto`). The one escape is an explicit waiver: a `no_validation_reason` field carrying a non-empty string. A waived result advances normally, and forge records a `task.decision` event with `kind: "validation_waiver"` so the waiver is durable on the record rather than invisible.
+
+The direction is deliberately fail-safe: over-holding is recoverable, a silent advance is not. Recover a held task with the ordinary gate verbs — `forge gate <task-id> --advance` (accept it anyway; the gate row is the human decision record) or `--reject`.
+
+Enforcement is at the single ingestion point where a primary's final status is written, so no other path (`forge retry`, reconcile) can slip a held result through. Two paths are deliberately **not** covered today: ad-hoc `forge invoke` completions (FG-525) and fanout implementer *children* (FG-524), which finalize outside the primary path. Reds, `test-engineer`, `documentation-maintainer`, research roles, `manual-qa`, `architecture-advisor`, `tech-lead`, and `prompt-author` are not subject to the contract at all — it is a claim-of-validated-code rule, not a general completeness rule.
+
+Operators see a held task as a `gate hold: <reason>` line in `forge show <task-id>`, and as `diagnostic.gateHold` under `--json` (null unless held with a named reason).
+
+Example: an engineer task returns `{"status": "complete", "files_modified": ["src/foo.ts"]}` with no `tests_run`. It parks at `awaiting_gate` with `validation contract: engineer returned status=complete with no tests_run and no no_validation_reason waiver — held for a gate decision`.
+
 ## Verdict
 
-A red agent's output. Schema: `{verdict: "pass" | "fail" | "inconclusive", confidence, findings, notes}`. Recorded in the `verdicts` table. Verdicts inform but only block the gate when the red has `authority: "authoritative"` and the phase has `gateOnVerdict: true`.
+A red agent's output. Schema: `{verdict: "pass" | "fail" | "inconclusive", confidence, findings, notes}`. Recorded in the `verdicts` table. Verdicts inform but only block the gate when the red is `authority: "authoritative"` **and** its `gate_on_verdict` is not `false`.
+
+The red's `gate_on_verdict` config is captured on the verdict row at insert time, so the two places that decide "does this verdict block?" — red dispatch (from the in-hand red config) and the later gate re-check (`aggregateVerdicts`, from the persisted rows) — read the same fact and cannot drift. An authoritative `fail` from a red configured `gate_on_verdict: false` is recorded but blocks neither. Legacy rows written before the column existed read back `NULL` and block, which fails closed: only an explicit `false` opts a fail out of blocking.
 
 Example: at `investigate`, the narrow red against task-inv-004 returned `{verdict: "fail", confidence: 0.85, findings: [...]}` and surfaced the cost-tracking weakness.
 

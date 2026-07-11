@@ -201,7 +201,7 @@ test("fg354 (dispatch-1): FORGE_WORKTREES=1 → file in worktree satisfies persi
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "result.json"),
-      JSON.stringify({ status: "complete", files_modified: ["changed.ts"] }),
+      JSON.stringify({ status: "complete", tests_run: 1, files_modified: ["changed.ts"] }),
     );
     writeFileSync(stdoutPath, "stub stdout");
     writeFileSync(stderrPath, "");
@@ -282,7 +282,7 @@ test("fg354 (dispatch-2): FORGE_WORKTREES=1 → file only in projectDir (not wor
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "result.json"),
-      JSON.stringify({ status: "complete", files_modified: ["changed.ts"] }),
+      JSON.stringify({ status: "complete", tests_run: 1, files_modified: ["changed.ts"] }),
     );
     writeFileSync(stdoutPath, "stub stdout");
     writeFileSync(stderrPath, "");
@@ -369,7 +369,7 @@ test("fg354 (dispatch-3): FORGE_WORKTREES unset → file in projectDir satisfies
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "result.json"),
-      JSON.stringify({ status: "complete", files_modified: ["changed.ts"] }),
+      JSON.stringify({ status: "complete", tests_run: 1, files_modified: ["changed.ts"] }),
     );
     writeFileSync(stdoutPath, "stub stdout");
     writeFileSync(stderrPath, "");
@@ -434,7 +434,7 @@ test("fg491 (dispatch-4): FORGE_WORKTREES=1 → annotated files_modified referen
     writeFileSync(
       join(dir, "result.json"),
       JSON.stringify({
-        status: "complete",
+        status: "complete", tests_run: 1,
         files_modified: ["changed.ts:1-5 — annotated claim, PR-review style"],
       }),
     );
@@ -493,7 +493,7 @@ test("fg491 (reopened, dispatch-5): FORGE_WORKTREES=1 → prose-only claim whose
     writeFileSync(
       join(dir, "result.json"),
       JSON.stringify({
-        status: "complete",
+        status: "complete", tests_run: 1,
         files_modified: ["README.md updated the real file elsewhere"],
       }),
     );

@@ -389,7 +389,7 @@ test("FG-507 1c-race: a concurrent `forge next` in the pending window never adop
     dockerExec: async (args) => {
       const nameIdx = args.args.indexOf("--name");
       dispatched.push((args.args[nameIdx + 1] ?? "").replace(/^forge-/, ""));
-      return stubExec({ status: "complete", files_modified: [] })(args);
+      return stubExec({ status: "complete", tests_run: 1, files_modified: [] })(args);
     },
   });
 

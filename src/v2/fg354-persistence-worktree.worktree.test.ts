@@ -56,7 +56,7 @@ test("FG-354: no worktreePath → checkResultPersistence uses projectDir (existi
       const dir = dirname(stdoutPath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "result.json"), JSON.stringify({
-        status: "complete",
+        status: "complete", tests_run: 1,
         files_modified: ["changed.ts"],
       }));
       writeFileSync(stdoutPath, "stub");
@@ -90,7 +90,7 @@ test("FG-354: worktreePath set → file in worktreePath satisfies persistence ch
       const taskId = taskIdFromStdoutPath(stdoutPath);
       setTaskWorktreePath(taskId, worktreeDir);
       writeFileSync(join(dir, "result.json"), JSON.stringify({
-        status: "complete",
+        status: "complete", tests_run: 1,
         files_modified: ["changed.ts"],
       }));
       writeFileSync(stdoutPath, "stub");
@@ -123,7 +123,7 @@ test("FG-354: worktreePath set → file only in projectDir fails persistence che
       const taskId = taskIdFromStdoutPath(stdoutPath);
       setTaskWorktreePath(taskId, worktreeDir);
       writeFileSync(join(dir, "result.json"), JSON.stringify({
-        status: "complete",
+        status: "complete", tests_run: 1,
         files_modified: ["changed.ts"],
       }));
       writeFileSync(stdoutPath, "stub");
@@ -151,7 +151,7 @@ test("FG-354: no worktreePath set + no files_modified → passes safely (existin
     const stubExec: DockerExecFn = async ({ stdoutPath, stderrPath }) => {
       const dir = dirname(stdoutPath);
       if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1 }));
       writeFileSync(stdoutPath, "stub");
       writeFileSync(stderrPath, "");
       return 0;

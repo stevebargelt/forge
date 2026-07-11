@@ -368,7 +368,7 @@ function makeCleanMergeExec(fileName: string): DockerExecFn {
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: [fileName] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: [fileName] });
     return 0;
   };
 }
@@ -620,18 +620,18 @@ test("fg357 (5): fanout post-reds seam — red passes, merge to HEAD clean, merg
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Authoritative red passes — the post-reds merge-to-HEAD path runs next.
       writeTaskResult(stdoutPath, { status: "complete", verdict: "pass", confidence: 1.0, findings: [] });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -710,15 +710,15 @@ test("fg357 (6): fanout no-reds seam — merge to HEAD clean, merged tree fails 
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -785,7 +785,7 @@ test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD cle
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -806,19 +806,19 @@ test("fg357 (7): fanout re-entry seam — forced gate advance, merge to HEAD cle
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Authoritative fail → parent blocked_by_red after wave 2.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else {
       wave3ExecCount++;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -929,15 +929,15 @@ test("fg357 (8): fanout pass case — merge to HEAD clean, merged tree passes te
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1016,15 +1016,15 @@ test("fg424 (10): fanout no-reds seam — test:unit killed by signal → failure
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };

@@ -282,7 +282,7 @@ test("integ lifecycle task.awaiting_gate: gate:human step emits task.awaiting_ga
   const wave = await runNext({
     runId,
     workflow: HUMAN_GATE_WORKFLOW,
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   assert.deepEqual(wave.awaitingGate, ["review"], "step must be in awaitingGate");
@@ -329,7 +329,7 @@ test("integ lifecycle container.started + container.exited: emitted in order on 
   await runNext({
     runId,
     workflow: SINGLE_STEP_WORKFLOW,
-    dockerExec: makeStubExec({ status: "complete" }, 0),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }, 0),
   });
 
   const tasks = tasksForRun(runId);
@@ -398,7 +398,7 @@ test("integ lifecycle task.created + task.completed: primary step brackets its l
   await runNext({
     runId,
     workflow: SINGLE_STEP_WORKFLOW,
-    dockerExec: makeStubExec({ status: "complete" }, 0),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }, 0),
   });
 
   const primary = tasksForRun(runId).find((t) => t.phase === "work" && t.parentId === undefined)!;
@@ -540,7 +540,7 @@ test("integ lifecycle auth.profile_applied: emitted with payload {profile} only 
   await runNext({
     runId,
     workflow: wf,
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   const tasks = tasksForRun(runId);

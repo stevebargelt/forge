@@ -54,7 +54,7 @@ afterEach(() => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function makeStubExec(resultJson: unknown = { status: "complete" }, exitCode = 0): DockerExecFn {
+function makeStubExec(resultJson: unknown = { status: "complete", tests_run: 1 }, exitCode = 0): DockerExecFn {
   return async ({ stdoutPath, stderrPath }) => {
     const dir = dirname(stdoutPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -151,7 +151,7 @@ test("integ manifest dispatch: invoke writes manifest.json with full correct sha
     agentRole: "engineer",
     task: "do the thing",
     projectDir: "/tmp/integ-manifest-project",
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   assert.equal(r.status, "complete");
@@ -210,7 +210,7 @@ test("integ manifest secrets: invoke WITH staging auth profile → auth block is
     projectDir: "/tmp/integ-manifest-project",
     authProfile: "integ-staging-auth-profile",
     runtimeName: "claude-bt-integ",
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   assert.equal(r.status, "complete", "invoke with valid staging auth profile must succeed");
@@ -272,7 +272,7 @@ test("integ manifest secrets: invoke WITHOUT auth profile → auth block is EXAC
     agentRole: "engineer",
     task: "no auth needed here",
     projectDir: "/tmp/integ-manifest-project",
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   assert.equal(r.status, "complete");
@@ -305,7 +305,7 @@ test("integ manifest show: task WITH manifest.json → listPresentArtifacts uses
     agentRole: "engineer",
     task: "build artifact index",
     projectDir: "/tmp/integ-manifest-project",
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   assert.equal(r.status, "complete");
@@ -350,7 +350,7 @@ test("integ manifest show: task WITHOUT manifest.json (older task) → listPrese
     agentRole: "engineer",
     task: "simulate older task with no manifest",
     projectDir: "/tmp/integ-manifest-project",
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   const dir = taskDir(r.runId, r.taskId);
@@ -398,7 +398,7 @@ test("integ manifest pipeline: runNext dispatch writes manifest.json → correct
   await runNext({
     runId,
     workflow: ONE_STEP_WF,
-    dockerExec: makeStubExec({ status: "complete" }),
+    dockerExec: makeStubExec({ status: "complete", tests_run: 1 }),
   });
 
   const tasks = tasksForRun(runId);

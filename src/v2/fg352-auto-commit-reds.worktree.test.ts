@@ -241,7 +241,7 @@ test("fg352 (8): agent already committed work — auto-commit no-op, merge still
       stdio: "ignore",
     });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["agent-pre-committed.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["agent-pre-committed.ts"] });
     return 0;
   };
 
@@ -311,7 +311,7 @@ test("fg352 (9): worktree has no changes — Already-up-to-date merge, task comp
 
   const stubExec: DockerExecFn = async ({ args, stdoutPath, stderrPath }) => {
     // Agent writes NO files — the worktree branch is identical to main.
-    writeTaskResult(stdoutPath, { status: "complete" });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     writeFileSync(stderrPath, "");
     return 0;
   };
@@ -398,7 +398,7 @@ test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds 
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "primary output"], { cwd: worktreePath!, stdio: "ignore" });
 
-      writeTaskResult(stdoutPath, { status: "complete", files_modified: ["merge-before-reds.ts"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["merge-before-reds.ts"] });
     } else {
       // Red agent (call 2): the merge has already happened at this point.
       // Verify the merged file is visible in run.projectDir (not just the worktree).
@@ -406,7 +406,7 @@ test("fg352 (10): merge runs before reds; proven-merged cleanup only after reds 
 
       // Return a passing verdict so the primary reaches the complete path.
       writeTaskResult(stdoutPath, {
-        status: "complete",
+        status: "complete", tests_run: 1,
         verdict: "pass",
         confidence: 1,
         findings: [],

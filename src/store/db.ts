@@ -134,6 +134,15 @@ export function applyMigrations(db: DatabaseInstance): void {
   if (!haveHostVerifications.has("ci_url")) {
     db.exec(`ALTER TABLE host_verifications ADD COLUMN ci_url TEXT`);
   }
+
+  // FG-523 (F16): gate_on_verdict on verdicts. Additive + nullable, NO default —
+  // existing rows keep reading back NULL, which aggregateVerdicts treats as
+  // "blocks" (fail closed), exactly as before the column existed.
+  const verdictsCols = db.prepare(`PRAGMA table_info(verdicts)`).all() as { name: string }[];
+  const haveVerdicts = new Set(verdictsCols.map((r) => r.name));
+  if (!haveVerdicts.has("gate_on_verdict")) {
+    db.exec(`ALTER TABLE verdicts ADD COLUMN gate_on_verdict INTEGER`);
+  }
 }
 
 // Separate caches for readonly vs writable handles. The earlier single-cache

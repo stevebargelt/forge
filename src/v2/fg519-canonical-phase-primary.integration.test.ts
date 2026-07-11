@@ -81,7 +81,7 @@ function makeRoutingExec(routes: PrefixResult[], invoked: string[]): DockerExecF
     writeFileSync(stderrPath, "");
     writeFileSync(
       join(dir, "result.json"),
-      JSON.stringify(route ? route.result : { status: "complete" }),
+      JSON.stringify(route ? route.result : { status: "complete", tests_run: 1 }),
     );
     return 0;
   };
@@ -142,8 +142,8 @@ test("FG-519 E2E: after a real duplicate-primary heal ([complete older, failed n
   const invoked: string[] = [];
   const exec = makeRoutingExec(
     [
-      { prefix: "task-build-", result: { status: "complete", buildMarker: BUILD_MARKER, plan: ["s1", "s2"] } },
-      { prefix: "task-verify-", result: { status: "complete" } },
+      { prefix: "task-build-", result: { status: "complete", tests_run: 1, buildMarker: BUILD_MARKER, plan: ["s1", "s2"] } },
+      { prefix: "task-verify-", result: { status: "complete", tests_run: 1 } },
     ],
     invoked,
   );
@@ -304,7 +304,7 @@ test("FG-519 regression: a live pending on_reject recovery task in a [complete +
   );
 
   const invoked: string[] = [];
-  const exec = makeRoutingExec([{ prefix: "task-", result: { status: "complete" } }], invoked);
+  const exec = makeRoutingExec([{ prefix: "task-", result: { status: "complete", tests_run: 1 } }], invoked);
   await runNext({ runId, workflow: INVESTIGATE_AUDIT_WF, dockerExec: exec });
 
   // The carve-out: despite investigate having a COMPLETE primary, the live recovery

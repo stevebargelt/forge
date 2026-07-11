@@ -37,7 +37,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -52,6 +52,8 @@ import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeT
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
+import { verdictBlocksGate } from "./gate.js";
+import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
@@ -699,7 +701,7 @@ async function dispatchSingleStep(args: {
       return "blocked_by_red";
     }
     // No authoritative fail — proceed to normal gate semantics.
-    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result);
+    const statusAfterReds = finalizePrimary(taskId, args.runId, step.gate, result, { enforceValidationContract: true });
     // FG-492 review: reap only on the real "complete" outcome — gate=human/
     // verdict returns "awaiting_gate" (paused, not failed, but not done
     // either), and a lost CAS race reports the task's actual terminal status.
@@ -713,7 +715,7 @@ async function dispatchSingleStep(args: {
     return statusAfterReds;
   }
 
-  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result);
+  const finalStatus = finalizePrimary(taskId, args.runId, step.gate, result, { enforceValidationContract: true });
   // FG-492 review: same reap-only-on-complete rule as the reds branch above.
   // FG-503: same reap_failed durability rule too — see reapContainerAndReportFailure.
   reapContainerAndReportFailure(containerName, finalStatus === "complete", args.runId, taskId);
@@ -726,7 +728,45 @@ async function dispatchSingleStep(args: {
 }
 
 // Final status write for a primary task (no reds path, or reds passed).
-function finalizePrimary(taskId: string, runId: string, gate: Step["gate"], result: unknown): string {
+//
+// FG-523 (F19): the single ingestion point for a primary's final status, and so
+// the single site that enforces the validation contract. `enforceValidationContract`
+// is false only for a fanout PARENT: its result is a synthetic aggregate
+// ({status, children}) that never carries tests_run — the agent results live on
+// the children, which are not primaries and finalize through markTaskComplete.
+function finalizePrimary(
+  taskId: string,
+  runId: string,
+  gate: Step["gate"],
+  result: unknown,
+  opts: { enforceValidationContract: boolean },
+): string {
+  if (opts.enforceValidationContract) {
+    const role = getTask(taskId)?.agentRole ?? "";
+    const contract = evaluateValidationContract({ role, result });
+    if (contract.held) {
+      // Fail-safe: hold for a gate decision rather than advance. CAS'd so a
+      // concurrent cancel that already failed the task isn't resurrected.
+      if (!markTaskHeldForGate(taskId, result)) {
+        return getTask(taskId)?.status ?? "failed";
+      }
+      logEvent("task.awaiting_gate", {
+        runId,
+        taskId,
+        payload: { kind: "validation_contract", reason: contract.reason },
+      });
+      notifyGateAwaiting(taskId);
+      return "awaiting_gate";
+    }
+    if (contract.waiver !== undefined) {
+      // The waiver advances the task, but it must leave a record.
+      logEvent("task.decision", {
+        runId,
+        taskId,
+        payload: { kind: "validation_waiver", reason: contract.waiver },
+      });
+    }
+  }
   switch (gate) {
     case "auto":
     case "none":
@@ -925,6 +965,9 @@ async function dispatchReds(args: {
         authority: r.red.authority as RedAuthority,
         findings: finalVerdict.findings,
         createdAt: nowIso(),
+        // FG-523 (F16): persist the in-hand red config so the later gate
+        // re-check applies the same blocking rule dispatch applies below.
+        gateOnVerdict: r.red.gate_on_verdict,
       });
       logEvent("verdict.received", {
         runId: args.runId,
@@ -933,7 +976,12 @@ async function dispatchReds(args: {
       });
     })();
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
-    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && finalVerdict.verdict === "fail") {
+    // FG-523: same predicate aggregateVerdicts applies to the persisted row.
+    if (verdictBlocksGate({
+      verdict: finalVerdict.verdict,
+      authority: r.red.authority as RedAuthority,
+      gateOnVerdict: r.red.gate_on_verdict,
+    })) {
       authoritativeFail = true;
     }
     // FG-420: authoritative shipping-reviewer inconclusive (needs_human / unrecognized) also blocks.
@@ -1697,7 +1745,7 @@ async function dispatchFanoutStep(args: {
       }
       cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
     }
-    return finalizePrimary(parentId, args.runId, step.gate, parentResult);
+    return finalizePrimary(parentId, args.runId, step.gate, parentResult, { enforceValidationContract: false });
   }
 
   // No reds path: merge integration to HEAD directly before finalizing.
@@ -1744,7 +1792,7 @@ async function dispatchFanoutStep(args: {
     cleanupIntegrationWorktree(args.projectDir, args.runId, parentId);
   }
 
-  return finalizePrimary(parentId, args.runId, step.gate, parentResult);
+  return finalizePrimary(parentId, args.runId, step.gate, parentResult, { enforceValidationContract: false });
 }
 
 type ChildOutcome = {

@@ -506,6 +506,20 @@ export function deriveNextCommandForTask(
   return "—";
 }
 
+/** FG-523: the named reason a task is parked at a gate. The runner records it on
+ *  the task.awaiting_gate event (payload.reason) when a primary implementer's
+ *  result fails the validation contract; an ordinary human/verdict gate carries
+ *  no reason and renders nothing. Latest event wins — a task can be re-held. */
+export function gateHoldReason(events: Event[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (!e || e.eventType !== "task.awaiting_gate") continue;
+    const reason = (e.payload as Record<string, unknown> | null)?.["reason"];
+    return typeof reason === "string" && reason.trim() !== "" ? reason : null;
+  }
+  return null;
+}
+
 /** FG-455: the operator-facing recovery message for an orphaned_work_may_persist
  *  or (FG-455 p4) oom_killed task — task id, task dir, worktree path, changed
  *  files, and what to do next. Shared rendering for `forge show`, `forge
@@ -759,6 +773,9 @@ export function registerShow(program: Command): void {
         // child outcomes, so container evidence is structurally n/a here, not a
         // gap to report as missing.
         const isFanoutParentFailure = fanoutWaveEvidence !== undefined;
+        // FG-523: named hold reason for a task parked at a gate (validation
+        // contract). Null for an ordinary human/verdict gate.
+        const holdReason = task.status === "awaiting_gate" ? gateHoldReason(events) : null;
         const containerCausalEvidence = getContainerCausalEvidenceFromEvents(events);
         const containerEvidenceSummary = isFanoutParentFailure
           ? "n/a — this is a fanout parent with no agent container of its own; its failure is derived from its children's outcomes, not from a killed agent."
@@ -812,6 +829,7 @@ export function registerShow(program: Command): void {
                   runtime: runtimeMeta ?? null,
                   reconcileCandidate: reconcileReason, // #298: null unless running + container gone
                   failureKind: failureKind ?? null,
+                  gateHold: holdReason, // FG-523: null unless held with a named reason
                   orphanRecovery: orphanEvidence
                     ? { evidence: orphanEvidence, message: orphanRecoveryMessage(task.runId, task.id, orphanEvidence, failureKind ?? "orphaned_work_may_persist", taskIsInvokeRun) }
                     : null,
@@ -872,6 +890,7 @@ export function registerShow(program: Command): void {
           console.log(`  reconcile: CANDIDATE (${reconcileReason}) — DB says running but the container is gone; run \`forge show --reconcile ${task.id}\` to finalize`);
         }
         if (failureKind) console.log(`  failure:   ${failureKind}`);
+        if (holdReason) console.log(`  gate hold: ${holdReason}`);
         // FG-455: don't let this collapse into a generic "failed" — the worktree
         // may hold real, unreviewed work.
         if (orphanEvidence) {

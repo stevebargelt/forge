@@ -229,7 +229,7 @@ test("fg352 (1): FORGE_WORKTREES unset → no merge attempted, task completes no
     // No git or merge operations — standard stub.
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1 }));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
     return 0;
@@ -285,7 +285,7 @@ test("fg352 (2): successful worktree task fast-forwards changes into run.project
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["output.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["output.ts"] });
     writeFileSync(stderrPath, "");
     return 0;
   };
@@ -340,12 +340,12 @@ test("fg352 (3): downstream sequential step sees previous step's merged changes"
       writeFileSync(join(worktreePath!, "output.ts"), "export const x = 1;\n");
       execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "step1 output"], { cwd: worktreePath!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete", files_modified: ["output.ts"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["output.ts"] });
     } else {
       // Step 2 (verify): check that output.ts from step 1 is visible in the worktree.
       // Step 2's worktree was created from projectDir HEAD, which has step 1's merged commit.
       step2SawOutputTs = existsSync(join(worktreePath!, "output.ts"));
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -407,7 +407,7 @@ test("fg352 (4): merge failure leaves task failed with failure_kind merge_confli
     execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "main diverge"], { cwd: repo, stdio: "ignore" });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["task.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     return 0;
   };
 
@@ -466,7 +466,7 @@ test("fg352 (5): merge failure retains worktree directory and task branch", asyn
     execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "diverge main"], { cwd: repo, stdio: "ignore" });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["task.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     return 0;
   };
 
@@ -532,7 +532,7 @@ test("fg352 (6): successful merge removes worktree directory and task branch", a
     execFileSync("git", ["add", "."], { cwd: worktreePath!, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "task output"], { cwd: worktreePath!, stdio: "ignore" });
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["cleanup-test.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["cleanup-test.ts"] });
     return 0;
   };
 
@@ -617,11 +617,11 @@ test("fg352 (7): no downstream step dispatched after merge failure", async () =>
       execFileSync("git", ["add", "."], { cwd: repo, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "diverge main"], { cwd: repo, stdio: "ignore" });
 
-      writeTaskResult(stdoutPath, { status: "complete", files_modified: ["task.ts"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["task.ts"] });
     } else {
       // Should never reach here.
       step2Dispatched = true;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -686,7 +686,7 @@ test("fg352 (11): auto-commit fails with changes present — ok:false, task fail
     // worktree for mergeWorktreeBranch's auto-commit to discover and attempt.
     writeFileSync(join(worktreePath!, "agent-output.ts"), "export const result = 42;\n");
 
-    writeTaskResult(stdoutPath, { status: "complete", files_modified: ["agent-output.ts"] });
+    writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, files_modified: ["agent-output.ts"] });
     return 0;
   };
 

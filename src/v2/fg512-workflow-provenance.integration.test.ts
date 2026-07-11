@@ -207,7 +207,7 @@ test("FG-512 AC1: a `task`-step row dispatched by the real runner carries `workf
   updateRunStatus(runId, "active");
   const ready = computeReadyQueue(TASK_STEP_WF_OBJ, tasksForRun(runId));
   assert.deepEqual(ready.map((s) => s.id), ["task"], "the ready queue admits the retried step");
-  const wave = await runNext({ runId, workflow: TASK_STEP_WF_OBJ, dockerExec: completeExec({ status: "complete" }) });
+  const wave = await runNext({ runId, workflow: TASK_STEP_WF_OBJ, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
   assert.deepEqual(wave.completedSteps, ["task"], "the retried `task` step re-dispatched and completed");
   assert.equal(getTask(out.newTask.id)!.status, "complete");
 });
@@ -264,12 +264,12 @@ test("FG-512 AC5 (primary + manual): runNext stamps `workflow` on primary and ma
   };
   const { runId } = startRun({ workflow: wf, title: "fg512 primary", inputs: {}, projectDir: dir });
 
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
   const primary = tasksForRun(runId).find((t) => t.phase === "build")!;
   assert.equal(primary.taskPackage.dispatchSource, "workflow", "primary row stamped");
   assert.equal(taskDispatchKind(primary, getRun(runId)!).kind, "workflow_step");
 
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
   const manual = tasksForRun(runId).find((t) => t.phase === "signoff")!;
   assert.equal(manual.agentRole, "manual");
   assert.equal(manual.taskPackage.dispatchSource, "workflow", "manual-step row stamped");
@@ -301,7 +301,7 @@ test("FG-512 AC5 (red): dispatchReds stamps `workflow` on the red row", async ()
     const id = taskIdFromArgs(args);
     const result = id.includes("red-")
       ? { status: "complete", verdict: "pass", confidence: 0.9, findings: [] }
-      : { status: "complete", files_modified: [] };
+      : { status: "complete", tests_run: 1, files_modified: [] };
     writeFileSync(join(dir2, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
@@ -337,9 +337,9 @@ test("FG-512 AC5 (fanout parent + child): dispatchFanoutStep stamps `workflow` o
   const { runId } = startRun({ workflow: wf, title: "fg512 fanout", inputs: {}, projectDir: dir });
 
   // Wave 1: seed produces a two-element array.
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", items: ["a", "b"] }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: ["a", "b"] }) });
   // Wave 2: fanout parent + two children.
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
 
   const parent = tasksForRun(runId).find((t) => t.phase === "spread" && t.parentId === undefined)!;
   assert.ok(parent, "the fanout parent row exists");
@@ -378,7 +378,7 @@ test("FG-512 AC5 (shipping-reviewer preflight-failure red): the pre-failed revie
   // BEFORE any container dispatch. That is the emptyTaskPackage insert under test.
   const { runId } = startRun({ workflow: wf, title: "fg512 shipping preflight", inputs: {}, projectDir: dir });
 
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", files_modified: [] }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, files_modified: [] }) });
 
   const reviewer = tasksForRun(runId).find((t) => t.agentRole === "shipping-reviewer")!;
   assert.ok(reviewer, "the pre-failed shipping-reviewer red row exists");
@@ -418,10 +418,10 @@ test("FG-512 AC5 (fanout parent, empty upstream): failFanoutParent stamps `workf
   const { runId } = startRun({ workflow: wf, title: "fg512 fanout empty", inputs: {}, projectDir: dir });
 
   // Wave 1: seed completes with an EMPTY items array — nothing to fan out over.
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", items: [] }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: [] }) });
   // Wave 2: the fanout step dispatches, finds no upstream array, and mints the
   // parent row through emptyTaskPackage solely to fail it — the path under test.
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
 
   const parent = tasksForRun(runId).find((t) => t.phase === "spread" && t.parentId === undefined)!;
   assert.ok(parent, "the failed fanout parent row exists");

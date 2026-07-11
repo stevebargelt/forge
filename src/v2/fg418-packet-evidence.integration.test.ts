@@ -258,7 +258,7 @@ test(
           decidedBy: "human",
         });
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: ["src/feature.ts", "src/utils.ts"],
           commitSha: "deadcafe",
           diff_summary: "implemented feature",
@@ -371,14 +371,14 @@ test(
       } else if (taskId.startsWith("task-build-0-")) {
         // Fanout child 0: files from the first implementation step.
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: ["src/module-a.ts"],
           commitSha: "sha-child-0",
         };
       } else if (taskId.startsWith("task-build-1-")) {
         // Fanout child 1: files from the second implementation step.
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: ["src/module-b.ts"],
           commitSha: "sha-child-1",
         };
@@ -513,7 +513,7 @@ test(
           decidedBy: "human",
         });
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: ["src/impl.ts"],
           commitSha: "abc418",
         };
@@ -612,7 +612,7 @@ test(
       if (taskId.startsWith("task-build-")) {
         mkdirSync(join(projectDir, "src"), { recursive: true });
         writeFileSync(join(projectDir, "src", "advisory-test.ts"), "// stub");
-        result = { status: "complete", files_modified: ["src/advisory-test.ts"] };
+        result = { status: "complete", tests_run: 1, files_modified: ["src/advisory-test.ts"] };
       } else {
         // Shipping-reviewer returns needs_fix → mapShippingReviewerVerdict maps to fail.
         // With advisory config (specialist, gate_on_verdict: false), this must NOT block.
@@ -723,7 +723,7 @@ test(
         mkdirSync(join(projectDir, "src"), { recursive: true });
         writeFileSync(join(projectDir, "src", "guardrail-test.ts"), "// stub");
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: ["src/guardrail-test.ts"],
           commitSha: "guardrailsha",
         };

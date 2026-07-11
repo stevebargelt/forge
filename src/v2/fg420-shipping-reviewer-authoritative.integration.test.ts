@@ -200,7 +200,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = {
           status: "complete",
@@ -274,7 +274,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // Valid deferrals: both description and followUpTicketId present.
         // covered_by_deferral bypasses the done-audit guardrail backstop.
@@ -353,7 +353,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = {
           status: "complete",
@@ -434,7 +434,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = {
           status: "complete",
@@ -519,7 +519,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = {
           status: "complete",
@@ -600,7 +600,7 @@ test(
 
       if (taskId.startsWith("task-build-")) {
         // Primary engineer task succeeds normally.
-        writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", files_modified: [], commitSha: "deadbeef" }));
+        writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" }));
         writeFileSync(stdoutPath, "");
         writeFileSync(stderrPath, "");
         return 0;
@@ -686,7 +686,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // needs_human → inconclusive → FG-420 blocks
         result = {
@@ -758,7 +758,7 @@ test(
       mkdirSync(dir, { recursive: true });
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = { status: "complete", verdict: "needs_human", confidence: 0.5, findings: [] };
       }
@@ -824,7 +824,7 @@ test(
       mkdirSync(dir, { recursive: true });
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = { status: "complete", verdict: "needs_human", confidence: 0.5, findings: [] };
       }

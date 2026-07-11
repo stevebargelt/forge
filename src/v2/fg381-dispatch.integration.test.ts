@@ -269,7 +269,7 @@ test(
           decidedBy: "human",
         });
         result = {
-          status: "complete",
+          status: "complete", tests_run: 1,
           files_modified: [],
           commitSha: "deadbeef",
         };
@@ -368,7 +368,7 @@ test(
       // Only the primary engineer should reach this stub.
       writeFileSync(
         join(dir, "result.json"),
-        JSON.stringify({ status: "complete", files_modified: [] }),
+        JSON.stringify({ status: "complete", tests_run: 1, files_modified: [] }),
       );
       writeFileSync(stdoutPath, "");
       writeFileSync(stderrPath, "");
@@ -473,7 +473,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [] };
+        result = { status: "complete", tests_run: 1, files_modified: [] };
       } else {
         result = { status: "complete", verdict: "pass", confidence: 0.9, findings: [] };
       }
@@ -543,7 +543,7 @@ test(
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, "result.json"),
-        JSON.stringify({ status: "complete", files_modified: [] }),
+        JSON.stringify({ status: "complete", tests_run: 1, files_modified: [] }),
       );
       writeFileSync(stdoutPath, "");
       writeFileSync(stderrPath, "");
@@ -639,7 +639,7 @@ test(
           decidedAt: new Date().toISOString(),
           decidedBy: "human",
         });
-        result = { status: "complete", files_modified: [], commitSha: "cafebabe" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "cafebabe" };
       } else {
         // doneAuditDisposition needed: FG-555 is status:active so doneAudit.outcome=fail; without it FG-384 backstop downgrades ship→fail.
         result = { status: "complete", verdict: "ship", doneAuditDisposition: "accepted_exception: contrast-case test fixture", confidence: 0.95, findings: [] };
