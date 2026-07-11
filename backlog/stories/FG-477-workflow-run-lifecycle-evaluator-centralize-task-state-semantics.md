@@ -142,3 +142,16 @@ Design artifact produced per the four shaping constraints (pure derivation / lin
 ## Slice-7 addendum (2026-07-07, FG-485 closeout)
 
 FG-485 (merge dc7d725) added one more executor.ts call site for slice 7 to absorb: the liveness-first probe ahead of evaluateInvokeLaneEligibility in driveRemainingItems' awaiting_gate reattach branch. It deliberately reuses the pure primitives (computeReadyQueue + taskHasPipelineFinalize + the existing getRun/status check) and invents no new lineage/state vocabulary, per this ticket's migration-freeze guidance — when the evaluator lands, redirect that probe to the evaluator's run-liveness/dispatchability derivation.
+
+
+## Slice 1 SHIPPED (2026-07-10, autonomous session — classifier + 3 classification-only consumer migrations)
+
+`src/v2/lifecycle-evaluator.ts` landed: `classifyTaskLineage(workflow, tasks)` — pure, total, exhaustive 7-kind union (`primary | retry_replacement | on_reject_recovery | red_review | fanout_child | adhoc_invoke | legacy_ambiguous_invoke`), decision table per the architecture pass with provenance (dispatchSource, FG-512) checked before lineage. Seeded-generator totality + order-insensitivity properties; frozen-legacy parity oracles per migrated consumer.
+
+Consumers migrated (classification only, byte-identical decisions): ready-queue.ts (wrappers preserved for gate.ts imports), runNext.ts dispatchSingleStep pending-row reuse (the architecture's top-risk hot path — ~3000-set parity), reconcile.ts finalizeOrphanedPrimaries.
+
+Deferred WITH pinned disagreement tests → **FG-527**: retry.ts fanoutParentOf and runNext dispatchFanoutStep — the legacy `red-` prefix heuristic misclassifies shipping-reviewer reds (blocks their retry), and dispatchFanoutStep lacks the FG-507 ad-hoc exclusion; the classifier is right, so migrating is a deliberate behavior change owned by that ticket. resolvePhasePrimary deliberately NOT absorbed yet (in-file reason at ready-queue.ts:145-152: threading the workflow would narrow unfiltered-caller row universes — a behavior change for deriveUpstream/fanout-upstream).
+
+**Design note for slice 5 (verdict aggregation fold-in):** the architecture artifact's shape ("gate_on_verdict always read from workflow config, never persisted on VerdictRow") is SUPERSEDED by FG-523 (merge 283d7c0), which persisted gate_on_verdict on verdict rows per operator direction — dispatch and aggregateVerdicts already share one predicate (verdictBlocksGate) reading the persisted flag, NULL fail-closed. Slice 5 should absorb that predicate as-is, not re-derive from config.
+
+Remaining slices: 2-of-4 dispatchFanoutStep sites (FG-527), gate.ts isFanoutParent, campaign terminal-outcome derivations, recover.ts, aggregation fold-in, and the run/step-state evaluator proper.
