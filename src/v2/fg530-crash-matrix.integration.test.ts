@@ -6,12 +6,27 @@
 // For every (scenario × kill point) cell:
 //
 //   1. arm the crash hook at ONE named write boundary (src/v2/crash-points.ts),
-//   2. drive the real runner (startRun → runNext → gate) over a fake docker
-//      layer until the hook throws mid-sequence — a process death, not a caught
-//      error: nothing after the kill point writes,
+//   2. drive the real runner (startRun → runNext → gate) over a fake docker layer.
+//      If the scenario reaches that boundary the hook throws mid-sequence — a
+//      process death, not a caught error: nothing after the kill point writes.
+//      If it does NOT, the drive runs to its natural end and the cell degenerates
+//      to a SMOKE case over a clean run (see below),
 //   3. in a FRESH pass with the hook disarmed, run reconcileRun + runNext
 //      repeatedly until FIXPOINT (no state change between passes; capped),
 //   4. assert the five lifecycle invariants over the post-recovery DB state.
+//
+// A cell is NOT a promise that its scenario dies at its kill point. No scenario
+// reaches every write boundary (a plain auto-gate run never touches a reject
+// window), so the cross product is deliberately ragged: each cell is a KILL cell
+// where its scenario reaches the armed boundary and a non-kill SMOKE cell where it
+// does not — and the invariants must hold either way, so the smoke cells still
+// assert something real. Each cell reports which it was via t.diagnostic.
+//
+// The per-point kill guarantee lives in two whole-registry tests, NOT in the cell
+// titles: the coverage test at the bottom of this file fails unless every registered
+// kill point actually fired in at least one matrix cell, and the invariant-3 cancel
+// race runs each kill point in the first scenario that reaches it, throwing by name
+// when none does. A probe that nothing can kill at is therefore loud, not silent.
 //
 // The kill-point axis is the coverage; the scenario set is deliberately small.
 // Kill points sit BETWEEN adjacent writes in a sequence (that's where a crash
@@ -1653,7 +1668,7 @@ function partitionKnown(vs: Violation[]): { unexpected: Violation[]; known: Know
 
 for (const sc of SCENARIOS) {
   for (const kp of KILL_POINTS) {
-    test(`FG-530 matrix [${sc.name}] kill @ ${kp.point}`, async () => {
+    test(`FG-530 matrix [${sc.name}] hook armed @ ${kp.point}`, async (t) => {
       ensureRuntime();
       writeWorkflowYaml(sc.workflow.name, sc.yaml);
       const projectDir = makeTmpDir();
@@ -1666,12 +1681,17 @@ for (const sc of SCENARIOS) {
         projectDir,
       });
 
-      // 1–2. Drive to the kill point, measuring the persisted work AT the kill.
-      // A cell whose scenario never reaches this boundary simply runs to its
-      // natural end — the invariants must hold there too, so the cell still
-      // asserts something; the registry-coverage test at the end is what proves
-      // no kill point is unreachable everywhere.
-      const { persistedPreKill } = await runCrashPhase(sc, runId, exec, kp);
+      // 1–2. Drive with the hook armed, measuring the persisted work AT the kill.
+      // Whether this cell is a KILL cell or a non-kill SMOKE cell is a property of
+      // the (scenario, kill point) pair, not something the cell gets to assert: no
+      // scenario reaches every boundary. The invariants must hold on both, and the
+      // per-point kill requirement is enforced whole-registry (coverage test below).
+      const { fired, persistedPreKill } = await runCrashPhase(sc, runId, exec, kp);
+      t.diagnostic(
+        fired
+          ? `KILL cell: the scenario died at ${kp.point}`
+          : `SMOKE cell: this scenario never reaches ${kp.point} — the drive ran to its natural end`,
+      );
 
       const wasAbandoned = getRun(runId)?.status === "abandoned";
 
@@ -2205,6 +2225,11 @@ test("FG-530: every known HEAD bug still reproduces in the matrix — a pin that
 });
 
 // ── coverage: every registered kill point must actually be reachable ───────────
+//
+// This is where the matrix's per-point kill requirement is enforced. An individual
+// cell cannot carry it — a scenario reaches only the boundaries its own workflow and
+// operator moves walk through — so the guarantee is stated over the whole registry:
+// every point is killed at SOMEWHERE. Ragged cells, exhaustive points.
 
 test("FG-530 coverage: every kill point in the registry FIRED in at least one matrix cell — an unreachable probe is a production edit with no coverage", () => {
   const unfired = KILL_POINTS.filter((kp) => !FIRED.has(kp.point)).map((kp) => kp.point);
