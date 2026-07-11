@@ -20,7 +20,7 @@ This runs four steps in sequence:
 
 Output is compact — one line per step plus any orphan-warnings from the seeds install. After the steps complete, a read-only release check runs automatically — it verifies the agent image, in-image runtime CLIs, auth credentials, policies, and seed drift (installed `~/.forge` seeds vs the running code), surfacing any problems before the next dispatch. Run `forge doctor` for the full report.
 
-> `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after pulling Dockerfile changes (e.g. a new Codex CLI), add `--rebuild-image`. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
+> `forge upgrade` does **not** rebuild the agent Docker image or run provider login by default. To rebuild after pulling changes to any of the image's **build inputs** — the Dockerfile *or* any file it `COPY`s (today `docker/forge-test.sh` and `docker/agent-entrypoint.sh`) — add `--rebuild-image`. The release check at the end of upgrade compares the image against the newest of those inputs, so it flags a stale image even when the Dockerfile itself is untouched. Auth credentials (`codex login` / `forge auth login`) are per-machine; run `forge doctor` after upgrade to verify auth and policy readiness (#229).
 
 ## Useful flags
 
@@ -77,7 +77,8 @@ cd ~/code/forge
 git pull --ff-only
 npm install
 FORCE=1 ./scripts/install-seeds.sh
-bash docker/build.sh                # rebuild the agent image (only if the Dockerfile changed)
+bash docker/build.sh                # rebuild the agent image (only if a build input changed:
+                                    # the Dockerfile or a script it COPYs)
 cd ~/code/<your-project>
 forge init                          # only if this project has the orchestrator block
 forge doctor                        # release check: image, runtime CLIs, auth, policies, seed drift
@@ -87,7 +88,7 @@ This mirrors `forge upgrade` step-for-step, plus the two things the command make
 
 ## What the upgrade does NOT do
 
-- **Does not rebuild the agent Docker image by default.** If `docker/agent-dev-worker.Dockerfile` changed, pass `--rebuild-image` to handle it in the same command (`forge upgrade --rebuild-image`), or run `./docker/build.sh` separately. Forge will keep using the old image until you rebuild — usually fine, but watch for breakage if the image picked up something load-bearing (e.g. a new tool in PATH).
+- **Does not rebuild the agent Docker image by default.** If any of the image's build inputs changed, pass `--rebuild-image` to handle it in the same command (`forge upgrade --rebuild-image`), or run `./docker/build.sh` separately. A build input is `docker/agent-dev-worker.Dockerfile` **or any file the Dockerfile `COPY`s** — currently `docker/forge-test.sh` (the in-image test wrapper) and `docker/agent-entrypoint.sh`. Editing one of those scripts leaves the built image stale even though the Dockerfile's own mtime never moved, which is exactly the case that used to slip through. Forge will keep using the old image until you rebuild — usually fine, but watch for breakage if the image picked up something load-bearing (e.g. a new tool in PATH, or a changed test-wrapper exit contract). `forge doctor` (and the release check at the end of `forge upgrade`) compares the image's build timestamp against the newest of all build inputs and reports `STALE` when it's behind.
 - **Does not touch the SQLite DB.** Schema migrations (rare) happen at next forge invocation when the DB opens. No upgrade-time action needed.
 - **Does not refresh other projects' CLAUDE.md.** Only the cwd's, and only if the block exists. See "Updating multiple projects" above.
 - **Does not restart any running orchestrator sessions.** If a Claude Code session has the orchestrator block loaded, it stays on the old template until restart. Restart the session to pick up new orchestrator behavior.

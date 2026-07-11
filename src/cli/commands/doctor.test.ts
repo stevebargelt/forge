@@ -7,10 +7,10 @@
 
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, type DoctorProbes } from "./doctor.js";
+import { gatherPolicy, gatherProfileAuth, gatherReleaseInputs, newestBuildInputMtime, type DoctorProbes } from "./doctor.js";
 import { buildReleaseReport, type ImageInputs } from "../../v2/release-doctor.js";
 
 // proj-default is the reachable default; proj-optin is defined but only
@@ -45,7 +45,7 @@ function writeProjectPolicy(body = PROJECT_POLICY): void {
 }
 
 const fakeImage = (over: Partial<ImageInputs> = {}): DoctorProbes => ({
-  inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, dockerfileMtimeMs: 1000, ...over }),
+  inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, buildInputMtimeMs: 1000, ...over }),
   probeClisInImage: () => ({}), // no runtimes in the temp FORGE_HOME → empty
 });
 
@@ -142,7 +142,7 @@ test("#229 project-local runtime CLI is probed: policy profile.runtime drives th
 
   const probedCommands: string[] = [];
   const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
-    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, dockerfileMtimeMs: 1000 }),
+    inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: 5000, buildInputMtimeMs: 1000 }),
     probeClisInImage: (_image, commands) => { probedCommands.push(...commands); return {}; },
   });
 
@@ -165,13 +165,68 @@ test("#229 gatherReleaseInputs: injected docker probe controls the image check (
   assert.equal(report.ok, false);
 });
 
-test("#229 gatherReleaseInputs: ctx.forgeRepoDir is forwarded to the Dockerfile mtime check", () => {
-  // Use the dockerfileMtime sub-probe to verify the repo dir is forwarded correctly
+test("#229 gatherReleaseInputs: ctx.forgeRepoDir is forwarded to the build-input mtime check", () => {
+  // Use the buildInputMtime sub-probe to verify the repo dir is forwarded correctly
   // (avoids real docker + real filesystem — both can vary across environments).
   let capturedDir: string | undefined;
   gatherReleaseInputs("nonexistent-image-for-test-xyz", { projectDir, forgeRepoDir: "/custom/forge-repo" }, {
     probeClisInImage: () => ({}),
-    dockerfileMtime: (dir) => { capturedDir = dir; return 9999; },
+    buildInputMtime: (dir) => { capturedDir = dir; return 9999; },
   });
   assert.equal(capturedDir, "/custom/forge-repo");
+});
+
+// FG-520: the wrapper the image bakes in (forge-test.sh) is COPYed by the Dockerfile.
+// Staleness measured off the Dockerfile alone would call an image with the OLD
+// wrapper "current", so the rebuild acceptance couldn't be enforced.
+function writeBuildContext(repoDir: string, files: Record<string, number>): void {
+  const dockerDir = join(repoDir, "docker");
+  mkdirSync(dockerDir, { recursive: true });
+  writeFileSync(join(dockerDir, "agent-dev-worker.Dockerfile"), [
+    "FROM node:22",
+    "COPY corp-root.pem /usr/local/share/ca-certificates/corp-root.crt",
+    "COPY forge-test.sh /usr/local/bin/forge-test",
+    "COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint",
+  ].join("\n"));
+  for (const [name, mtimeMs] of Object.entries(files)) {
+    const p = join(dockerDir, name);
+    writeFileSync(p, "#!/bin/sh\n");
+    utimesSync(p, mtimeMs / 1000, mtimeMs / 1000);
+  }
+}
+
+test("FG-520 newestBuildInputMtime: a COPYed script newer than the Dockerfile drives staleness", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
+  try {
+    const dockerfileMs = Date.now() - 100_000;
+    writeBuildContext(repoDir, { "forge-test.sh": dockerfileMs + 50_000, "agent-entrypoint.sh": dockerfileMs - 10_000 });
+    utimesSync(join(repoDir, "docker", "agent-dev-worker.Dockerfile"), dockerfileMs / 1000, dockerfileMs / 1000);
+
+    const newest = newestBuildInputMtime(repoDir);
+    assert.ok(newest !== undefined);
+    assert.ok(newest > dockerfileMs, "forge-test.sh's mtime must win over the older Dockerfile");
+
+    // an image built between the two → STALE, which the Dockerfile-only check missed
+    const inputs = gatherReleaseInputs("agent-dev-worker:latest", { projectDir }, {
+      inspectImage: () => ({ name: "agent-dev-worker:latest", present: true, createdMs: dockerfileMs + 10_000, buildInputMtimeMs: newest }),
+      probeClisInImage: () => ({}),
+    });
+    const check = buildReleaseReport(inputs).checks.find((c) => c.name.includes("image"))!;
+    assert.equal(check.status, "warn");
+    assert.match(check.detail, /STALE/);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("FG-520 newestBuildInputMtime: a COPY source that doesn't exist is skipped, not fatal", () => {
+  const repoDir = mkdtempSync(join(tmpdir(), "forge-doctor-repo-"));
+  try {
+    // corp-root.pem is generated at build time and absent from the repo
+    writeBuildContext(repoDir, { "forge-test.sh": Date.now() - 5_000, "agent-entrypoint.sh": Date.now() - 5_000 });
+    assert.ok(newestBuildInputMtime(repoDir) !== undefined);
+    assert.equal(newestBuildInputMtime(join(repoDir, "no-such-repo")), undefined);
+  } finally {
+    rmSync(repoDir, { recursive: true, force: true });
+  }
 });

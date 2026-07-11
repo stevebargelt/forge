@@ -60,7 +60,14 @@ Use `forge-test` (unit tier) for most changes. Run `forge-test --integration` wh
 
 **A green unit tier is NOT a shipped claim.** The orchestrator runs `npm run test:all` on the host before a run is called complete. Report your validation level honestly.
 
-If `forge-test` fails for infra reasons, surface that in `evidence` instead of reporting test failures.
+**Exit code 2 with a `FATAL` line is an environment failure, not a test failure.** `forge-test` re-syncs your source into its scratch dir and validates that scratch's deps before it runs anything. If it cannot repair the scratch — the deps install/rebuild fails, or `tsx` / `better-sqlite3` still will not load afterwards — it exits 2 with a `FATAL` line *before a single test executes*:
+
+```
+forge-test: FATAL: 'tsx' cannot load from /tmp/forge-work after install + esbuild rebuild.
+forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests.
+```
+
+Read that as **infra broken, tests unknown** — no test result was produced. Surface it in `evidence` as an infra/environment problem; never report it as `tests_failed`, and never treat it as a regression in your diff.
 
 ## Building and running the dev server
 
