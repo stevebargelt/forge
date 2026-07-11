@@ -25,6 +25,7 @@
 import type { GateDecision, RedAuthority, Task, TaskPackage, VerdictRow } from "../types/index.js";
 import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
 import { getDb } from "../store/db.js";
+import { crashPoint } from "./crash-points.js";
 import { verdictsForTask } from "../store/verdicts.js";
 import { insertGate } from "../store/gates.js";
 import { getRun } from "../store/runs.js";
@@ -139,6 +140,7 @@ export async function gate(
   // Atomic: both writes must succeed together so a crash cannot leave the
   // gates table with a row that has no matching events-table entry —
   // FG-427 makes the events table the sole source for outcome derivation.
+  crashPoint("gate:before-decision-write");
   getDb().transaction(() => {
     insertGate({
       id: newGateId(),
@@ -148,12 +150,14 @@ export async function gate(
       decidedAt: nowIso(),
       decidedBy: opts.decidedBy ?? "steven",
     });
+    crashPoint("gate:inside-decision-write-txn");
     logEvent("gate.decided", {
       runId: run.id,
       taskId,
       payload: { decision, rationale, force: opts.force ?? false },
     });
   })();
+  crashPoint("gate:after-decision-write");
 
   let nextTasks: Task[] = [];
 
@@ -174,7 +178,9 @@ export async function gate(
     }
     // Non-fanout or non-blocked advance: unchanged.
     markTaskComplete(taskId, task.result);
+    crashPoint("gate:advance:between-complete-status-and-event");
     logEvent("task.completed", { runId: run.id, taskId });
+    crashPoint("gate:advance:after-complete-write");
 
     // FG-492 final round: this task paused at a human/verdict gate with its
     // container retained per the outcome-keyed policy (awaiting_gate is not
@@ -219,12 +225,14 @@ export async function gate(
     // a rejected task terminally failed with no recovery task and no audit
     // trail — mirrors the fanout re-entry transaction below and dispatchReds'
     // verdict-insert transaction in runNext.ts.
+    crashPoint("gate:reject:before-fail-write");
     getDb().transaction(() => {
       failTask(taskId, {
         runId: run.id,
         kind: classify({ source: "gate_rejected" }),
         error: rationale ?? "rejected by gate",
       });
+      crashPoint("gate:reject:inside-txn-between-fail-and-recovery-mint");
 
       if (step.on_reject) {
         const targetStep = findStep(workflow, step.on_reject);
@@ -295,6 +303,7 @@ export async function gate(
             createdAt: nowIso(),
           };
           insertTask(newTask);
+          crashPoint("gate:reject:inside-txn-between-recovery-mint-and-event");
           logEvent("task.created", {
             runId: run.id,
             taskId: newId,
@@ -304,6 +313,7 @@ export async function gate(
         }
       }
     })();
+    crashPoint("gate:reject:after-recovery-mint");
     // A rejected gate with no on_reject leaves this step terminally failed with
     // no replacement task — parity with the advance branch's finalizeRunIfDone
     // call. Without this, a gate-rejected step whose failure makes every
@@ -323,12 +333,14 @@ export async function gate(
       );
     }
     // Fail the old task, preserving its result so it stays an audit record.
+    crashPoint("gate:request-changes:before-fail-write");
     failTask(taskId, {
       runId: run.id,
       kind: classify({ source: "gate_rejected" }),
       error: "request-changes; superseded",
       result: task.result,
     });
+    crashPoint("gate:request-changes:between-fail-and-replacement-mint");
 
     // Dedup: if a pending replacement primary already exists for this phase,
     // update its requestedChanges instead of creating a second pending primary.
@@ -380,6 +392,7 @@ export async function gate(
         createdAt: nowIso(),
       };
       insertTask(newTask);
+      crashPoint("gate:request-changes:between-replacement-mint-and-event");
       logEvent("task.created", {
         runId: run.id,
         taskId: newId,
@@ -388,6 +401,7 @@ export async function gate(
       nextTasks = [newTask];
     }
   }
+  crashPoint("gate:after-branch");
 
   return { task: getTask(taskId)!, nextTasks };
 }

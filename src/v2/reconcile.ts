@@ -27,6 +27,7 @@ import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { tasksForRun, markTaskComplete, markTaskFailed, backfillTaskResult } from "../store/tasks.js";
 import { logEvent, eventsForTask } from "../store/events.js";
+import { crashPoint } from "./crash-points.js";
 import { getDb } from "../store/db.js";
 import { taskDir } from "../util/paths.js";
 import { cleanupStagedAuth } from "./auth-state.js";
@@ -338,8 +339,10 @@ export function reconcileRun(
       "orphaned_needs_finalize: container finished with a usable result, but the forge process died before this pipeline step's host-side finalize (worktree merge → integration gate → reds → gates) could run — the step cannot be trusted complete. " +
       `The result is preserved (result.json + this task's row); inspect with \`forge show ${taskId}\`, then re-dispatch through the real finalize path with \`forge retry ${taskId} --force\`.`;
     const containerEvidence = toContainerCausalEvidence(evidence);
+    crashPoint("reconcile:before-fail-pipeline-unfinalized");
     getDb().transaction(() => { // FG-463: fail write + its events atomic
       markTaskFailed(taskId, error, result);
+      crashPoint("reconcile:inside-fail-pipeline-unfinalized-txn");
       logEvent("task.failed", { runId, taskId, payload: { failure_kind: "orphaned_needs_finalize", error, evidence, containerEvidence } });
       logEvent("task.reconciled", { runId, taskId, payload: { from: "running", to: "failed", reason: "container_gone_pipeline_unfinalized", evidence, containerEvidence } });
     })();
