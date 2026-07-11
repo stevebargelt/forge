@@ -844,8 +844,10 @@ export function reconcileRun(
       const error =
         `fanout parent unfinalized: all ${children.length} children completed, but the parent's own merge/integration-gate/reds sequence never ran ` +
         `(the process died before it started) — inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
+      crashPoint("reconcile:before-fail-fanout-parent-unfinalized");
       getDb().transaction(() => { // FG-463: fail write + its events atomic
         markTaskFailed(parent.id, error, parentResult);
+        crashPoint("reconcile:inside-fail-fanout-parent-unfinalized-txn");
         logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
         logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_unfinalized", childSummary: { total: children.length, complete: completeChildren.length } } });
       })();

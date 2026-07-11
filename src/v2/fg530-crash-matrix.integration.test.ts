@@ -38,7 +38,7 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertTask, tasksForRun, getTask, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, tasksForRun, getTask, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { insertVerdict, verdictsForRun, verdictsForTask } from "../store/verdicts.js";
 import { gatesForRun } from "../store/gates.js";
 import { eventsForRun, eventsForTask } from "../store/events.js";
@@ -68,12 +68,21 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               mint OR dedup onto an existing recovery row, request-changes
 //               replacement mint OR dedup onto an existing pending primary)
 //   reconcile — reconcile.ts's own writes (the FG-479 failPipelineUnfinalized
-//               landing, which is what a crashed pipeline step recovers INTO)
+//               landing, which is what a crashed pipeline step recovers INTO, and
+//               the fanout-parent recovery, which is what a crashed WAVE recovers
+//               into — a different stranded shape, hence its own strand below)
 //
 // A `reconcile` cell is a crash WHILE RECOVERING from a crash: reconcile's writes
-// only have anything to act on once a task is already stranded mid-finalize, so
-// the driver strands one first (hook off), then arms the hook for the recovery
-// reconcile. See runCrashPhase.
+// only have anything to act on once a task is already stranded, so the driver
+// strands one first (hook off), then arms the hook for the recovery reconcile. The
+// shape it must strand DEPENDS on the write being killed — a stranded primary for
+// the failPipelineUnfinalized landing, a stranded fanout PARENT for the
+// fanout-parent recovery (reconcile skips parents in the per-task loop: they never
+// get a container). Scenario.strand owns that; see runCrashPhase.
+//
+// The write-surface guard in fg530-probe-inertness.test.ts is what keeps this
+// registry honest going forward: every state-write in the three covered files must
+// carry a probe registered here, or an allowlist entry with a written reason.
 
 type Surface = "dispatch" | "gate" | "reconcile";
 type KillPoint = { point: string; surface: Surface };
@@ -115,6 +124,8 @@ const KILL_POINTS: KillPoint[] = [
   { point: "gate:after-branch", surface: "gate" },
   { point: "reconcile:before-fail-pipeline-unfinalized", surface: "reconcile" },
   { point: "reconcile:inside-fail-pipeline-unfinalized-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-fanout-parent-unfinalized", surface: "reconcile" },
+  { point: "reconcile:inside-fail-fanout-parent-unfinalized-txn", surface: "reconcile" },
 ];
 
 // Every probe that actually fired, across every cell in the file. Asserted
@@ -276,6 +287,11 @@ type Scenario = {
    *  Each call is crash-able: the hook throws from inside whichever write
    *  boundary it targets, and nothing after it runs. */
   drive: (runId: string, workflow: Workflow, exec: DockerExecFn) => Promise<void>;
+  /** Put the run in the state a `reconcile` kill point exists to recover FROM
+   *  (hook off — this is the FIRST crash; the reconcile cell is the second).
+   *  Defaults to strandMidFinalize, a primary stranded mid-finalize. A recovery
+   *  that acts on a different stranded shape needs its own. */
+  strand?: (sc: Scenario, runId: string, exec: DockerExecFn) => Promise<void>;
 };
 
 // (1) plain single-step workflow with an implementer primary, auto gate.
@@ -464,6 +480,49 @@ steps:
         gate_on_verdict: true
 `;
 
+// (5) the same fanout with NO red — the shape reconcile's fanout-parent recovery
+//     actually acts on. dispatchFanoutStep holds the parent at `running` from
+//     markTaskRunning until its own merge/finalize sequence lands; a crash in that
+//     span leaves a `running` parent whose children are already terminal, and the
+//     per-task loop can never sweep it (a parent gets no container, so it has no
+//     container.started event — the gate that loop turns on). It is the ONLY state
+//     the fanout-parent recovery acts on. Reds are deliberately absent: a parent
+//     that reached its reds has already left `running` for awaiting_red, so a
+//     `running` parent never has red children — including them here would build a
+//     state production cannot reach.
+const FANOUT_NO_RED_WF: Workflow = {
+  name: "fg530-fanout-no-red",
+  description: "FG-530: fanout step with an auto gate — the fanout-parent recovery shape",
+  inputs: [],
+  steps: [
+    step("plan"),
+    step("build", {
+      depends_on: ["plan"],
+      fanout: { from_upstream: { step: "plan", array_key: "units", input_key: "unit" }, failure_mode: "fail-phase" },
+    }),
+  ],
+};
+const FANOUT_NO_RED_YAML = `name: fg530-fanout-no-red
+description: FG-530 fanout no red
+inputs: []
+steps:
+  - id: plan
+    agent: engineer
+    gate: auto
+    runtime: ${RUNTIME}
+  - id: build
+    agent: engineer
+    gate: auto
+    runtime: ${RUNTIME}
+    depends_on: [plan]
+    fanout:
+      from_upstream:
+        step: plan
+        array_key: units
+        input_key: unit
+      failure_mode: fail-phase
+`;
+
 const SCENARIOS: Scenario[] = [
   {
     name: "plain",
@@ -556,6 +615,30 @@ const SCENARIOS: Scenario[] = [
         await gate(parent.id, "advance", "override the fanout red for the crash matrix", { force: true });
       }
       await runNext({ runId, workflow, dockerExec: exec }); // gateForced re-entry finalizes the parent
+    },
+  },
+  {
+    name: "fanout-parent-orphaned",
+    workflow: FANOUT_NO_RED_WF,
+    yaml: FANOUT_NO_RED_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec }); // plan → complete
+      await runNext({ runId, workflow, dockerExec: exec }); // wave: children complete, parent finalizes
+    },
+    strand: async (sc, runId, exec) => {
+      await sc.drive(runId, sc.workflow, exec);
+      const parent = primaryOf(runId, "build");
+      assert.ok(parent, "the fanout parent must exist for this strand to mean anything");
+      // The wave ran for real — children dispatched, completed, and the runner
+      // wrote the parent's aggregate. Now put the parent back where a crash inside
+      // dispatchFanoutStep's own finalize span leaves it: `running`, children already
+      // terminal. That span (markTaskRunning → merge → gate → finalizePrimary,
+      // runNext.ts) carries no probe of its own — FG-530 scopes production probes to
+      // reconcile.ts — so the state is reconstructed here rather than crashed into.
+      // It is the exact precondition of the fanout-parent recovery, and nothing else
+      // in the run is touched.
+      setTaskStatus(parent.id, "running");
     },
   },
 ];
@@ -659,6 +742,8 @@ async function strandMidFinalize(sc: Scenario, runId: string, exec: DockerExecFn
   await crashAt("dispatchSingleStep:after-result-ingest", () => sc.drive(runId, sc.workflow, exec));
 }
 
+const strandFor = (sc: Scenario): NonNullable<Scenario["strand"]> => sc.strand ?? strandMidFinalize;
+
 /** `persistedPreKill` is measured INSIDE the crash hook — the state of the world
  *  at the instant the process died, which is what invariant 4 is about. Capturing
  *  it after the driver returns (as v1 did) would miss any result or worktree the
@@ -681,7 +766,7 @@ async function runCrashPhase(
 
   let fired: boolean;
   if (kp.surface === "reconcile") {
-    await strandMidFinalize(sc, runId, exec);
+    await strandFor(sc)(sc, runId, exec);
     fired = await crashAt(kp.point, () => reconcile(runId), measure);
   } else {
     fired = await crashAt(kp.point, () => sc.drive(runId, sc.workflow, exec), measure);
@@ -829,7 +914,20 @@ function checkNoCompleteWithoutEvidence(runId: string, workflow: Workflow): Viol
       }
     }
 
-    const contract = evaluateValidationContract({ role: t.agentRole, result: t.result });
+    // The contract binds the shapes production actually gates: single-step
+    // primaries. A fanout PARENT is exempt, mirroring the FG-523 carve-out at
+    // holdIfValidationContractFails (runNext.ts) — the parent runs no container,
+    // and its result is a synthetic {status, children} aggregate that never
+    // carries tests_run. Holding it here would make the checker stricter than the
+    // contract it audits, and would flag every healthy wave. The real agent
+    // results live on the CHILDREN, which are ungated today (they finalize via
+    // markTaskComplete, not finalizePrimary) — a known gap, FG-524. They fall out
+    // of this loop anyway: a child has a parentId, so isPhasePrimaryRow skips it.
+    // When FG-524 lands, the child rows are what this invariant should grow to.
+    const isFanoutParent = st.fanout !== undefined;
+    const contract = isFanoutParent
+      ? ({ held: false } as const)
+      : evaluateValidationContract({ role: t.agentRole, result: t.result });
     if (contract.held && !hasValidationWaiver(t.id) && !hasForcedGateAdvance(t.id)) {
       v.push({
         invariant: name,

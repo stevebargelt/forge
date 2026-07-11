@@ -101,6 +101,8 @@ const PROBE_NAMES = [
   "gate:after-branch",
   "reconcile:before-fail-pipeline-unfinalized",
   "reconcile:inside-fail-pipeline-unfinalized-txn",
+  "reconcile:before-fail-fanout-parent-unfinalized",
+  "reconcile:inside-fail-fanout-parent-unfinalized-txn",
 ];
 
 test("FG-530 (b) runtime inertness: with NO hook installed, every probe name is a silent no-op", () => {
