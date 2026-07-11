@@ -11,6 +11,13 @@
 # container's overlay layer), rebuild better-sqlite3 there, and run the
 # tests from /tmp/forge-work — leaving the host's node_modules untouched.
 #
+# FG-520: the scratch is re-synced from $SRC_DIR on EVERY invocation (source in,
+# deletions propagated, node_modules preserved) and its deps are validated before
+# anything runs. The old copy-once guard tested the first snapshot forever, so an
+# agent that edited source and re-ran got a green against stale code; and a scratch
+# whose node_modules came up empty (the mount is an empty volume) failed every test
+# with ERR_MODULE_NOT_FOUND: 'tsx' — an environment fault masquerading as red tests.
+#
 # Usage:
 #   forge-test                        # unit tier (test:unit if present, else npm test)
 #   forge-test --unit                 # npm run test:unit
@@ -29,13 +36,17 @@
 # FORGE_TEST_PRINT_CMD=1: resolve which command would run, print it to stdout,
 # and exit 0 WITHOUT copying/rebuilding/running. Used by tests to verify
 # selection logic without the container scratch setup.
-# FORGE_SRC_DIR: override the project root checked for package.json scripts
-# (default: /project). Only meaningful with FORGE_TEST_PRINT_CMD=1.
+# FORGE_SRC_DIR / FORGE_WORK_DIR: override the project root and the scratch dir
+# (defaults: /project, /tmp/forge-work). The container never sets them; they exist
+# so the sync/repair logic can be driven against temp dirs from a host-side test.
 
 set -euo pipefail
 
-WORK_DIR="/tmp/forge-work"
 SRC_DIR="${FORGE_SRC_DIR:-/project}"
+WORK_DIR="${FORGE_WORK_DIR:-/tmp/forge-work}"
+# Sibling of the scratch, not inside it — the sync's delete pass removes anything
+# in the scratch that has no source counterpart, which would include this marker.
+DEPS_MARKER="${WORK_DIR%/}.deps"
 
 # Returns 0 if the named npm script exists in the given package.json file.
 _pkg_has_script() {
@@ -73,25 +84,171 @@ if [[ "${FORGE_TEST_PRINT_CMD:-}" == "1" ]]; then
 fi
 
 if [[ ! -d "$SRC_DIR" ]]; then
-  echo "forge-test: /project not mounted; nothing to test" >&2
+  echo "forge-test: $SRC_DIR not mounted; nothing to test" >&2
   exit 2
 fi
 
-# First-time setup: copy + rebuild. Idempotent — subsequent invocations
-# inside the same container reuse the work dir without rebuilding.
+# ── SOURCE RE-SYNC (FG-520) ─────────────────────────────────────────────────
+# Mirror SRC_DIR into WORK_DIR: copy files whose size or mtime differs, delete
+# scratch paths whose source is gone, leave everything else alone. Skipped at
+# every depth: node_modules (the scratch owns its own, natively built — copying
+# the host's back over it is the mismatch this script exists to avoid), .git
+# (history is not test input; see the cold-copy note below) and .terraform
+# (hundreds of MB of provider binaries). rsync is not in the agent image, and a
+# tar pipe would rewrite every file each run; node is already a hard dependency
+# of this script and does the whole mirror in one process, subsecond.
+_sync_sources() {
+  node -e '
+const fs = require("fs"), path = require("path");
+const [src, dst] = process.argv.slice(1);
+const SKIP = new Set(["node_modules", ".git", ".terraform"]);
+let copied = 0, deleted = 0;
+
+const clear = (p) => fs.rmSync(p, { recursive: true, force: true });
+
+function mirror(rel) {
+  const s = path.join(src, rel), d = path.join(dst, rel);
+  const from = fs.readdirSync(s, { withFileTypes: true }).filter((e) => !SKIP.has(e.name));
+  const keep = new Set(from.map((e) => e.name));
+  for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+    if (SKIP.has(e.name) || keep.has(e.name)) continue;
+    clear(path.join(d, e.name));
+    deleted++;
+  }
+  for (const e of from) {
+    const sp = path.join(s, e.name), dp = path.join(d, e.name);
+    let ds = null;
+    try { ds = fs.lstatSync(dp); } catch {}
+    if (e.isDirectory()) {
+      if (ds && !ds.isDirectory()) clear(dp);
+      if (!ds || !ds.isDirectory()) fs.mkdirSync(dp);
+      mirror(path.join(rel, e.name));
+    } else if (e.isSymbolicLink()) {
+      if (ds) clear(dp);
+      fs.symlinkSync(fs.readlinkSync(sp), dp);
+      copied++;
+    } else if (e.isFile()) {
+      const ss = fs.statSync(sp);
+      if (ds && !ds.isFile()) { clear(dp); ds = null; }
+      if (ds && ds.size === ss.size && ds.mtimeMs === ss.mtimeMs) continue;
+      fs.copyFileSync(sp, dp);
+      fs.utimesSync(dp, ss.atime, ss.mtime);
+      copied++;
+    }
+  }
+}
+mirror(".");
+process.stderr.write(`forge-test: re-synced source from ${src} — ${copied} file(s) updated, ${deleted} stale path(s) deleted\n`);
+' "$SRC_DIR" "$WORK_DIR"
+}
+
+# sha1 of the files npm ci is a function of. Compared against DEPS_MARKER so a
+# dependency bump in source forces a reinstall in the scratch. node, not md5sum,
+# so this works unchanged when the test drives the script on a macOS host.
+_deps_fingerprint() {
+  node -e '
+const fs = require("fs"), crypto = require("crypto");
+const h = crypto.createHash("sha1");
+for (const f of ["package.json", "package-lock.json"]) {
+  try { h.update(fs.readFileSync(f)); } catch { h.update("absent"); }
+}
+process.stdout.write(h.digest("hex"));
+'
+}
+
+# Returns 0 if ./package.json declares the named package as a (dev)dependency.
+# The deps probes below are gated on this: a project that does not use tsx or
+# better-sqlite3 must not be dragged through an install because they don't load.
+_declares_dep() {
+  node -e '
+const fs = require("fs");
+try {
+  const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
+  const deps = Object.assign({}, p.dependencies, p.devDependencies);
+  process.exit(deps[process.argv[1]] ? 0 : 1);
+} catch { process.exit(1); }
+' "$1" 2>/dev/null
+}
+
+# The exact load path `npm test` takes (node --import tsx). Catches both a missing
+# local tsx (ERR_MODULE_NOT_FOUND) and an esbuild whose platform binary never got
+# fetched — npm's ignore-scripts default has blocked that one before.
+_tsx_loads() {
+  node --import tsx -e "" >/dev/null 2>&1
+}
+
+# Requiring better-sqlite3 dlopens its native binding, so this fails loudly on a
+# .node built for the host's platform rather than this container's.
+_sqlite_loads() {
+  node -e "require('better-sqlite3')" >/dev/null 2>&1
+}
+
+_node_modules_is_empty() {
+  [[ ! -d node_modules ]] || [[ -z "$(ls -A node_modules 2>/dev/null)" ]]
+}
+
+# Every invocation: prove the scratch can actually load the deps the tests need,
+# and repair it if it can't. Loud on stderr about what it is doing and why — a
+# silent broken scratch is how ERR_MODULE_NOT_FOUND gets reported as failing tests.
+_ensure_deps() {
+  local reason=""
+  if _node_modules_is_empty; then
+    reason="$WORK_DIR/node_modules is missing or empty (the /project mount usually carries none)"
+  elif [[ "$(_deps_fingerprint)" != "$(cat "$DEPS_MARKER" 2>/dev/null)" ]]; then
+    reason="package.json/package-lock.json changed since these node_modules were installed"
+  elif _declares_dep tsx && ! _tsx_loads; then
+    reason="the 'tsx' runner does not load from $WORK_DIR/node_modules"
+  fi
+
+  if [[ -n "$reason" ]]; then
+    echo "forge-test: installing deps in $WORK_DIR — $reason" >&2
+    echo "forge-test: this must succeed before any test result is trustworthy; installing now (first run in a container takes a minute)" >&2
+    if [[ -f package-lock.json ]]; then
+      npm ci >&2
+    else
+      npm install >&2
+    fi
+    _deps_fingerprint > "$DEPS_MARKER"
+    echo "forge-test: deps installed" >&2
+  fi
+
+  if _declares_dep tsx && ! _tsx_loads; then
+    echo "forge-test: 'tsx' still will not load — rebuilding esbuild's platform binary (npm's ignore-scripts default blocks it)" >&2
+    npm rebuild esbuild >&2 || true
+    if ! _tsx_loads; then
+      echo "forge-test: FATAL: 'tsx' cannot load from $WORK_DIR after install + esbuild rebuild." >&2
+      echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
+      exit 2
+    fi
+  fi
+
+  if _declares_dep better-sqlite3 && ! _sqlite_loads; then
+    echo "forge-test: better-sqlite3's native binding will not load — rebuilding it from source for this container" >&2
+    # --build-from-source forces a native compile rather than reusing a prebuilt
+    # .node from another platform. The image ships build-essential + python3.
+    npm rebuild better-sqlite3 --build-from-source >&2
+    if ! _sqlite_loads; then
+      echo "forge-test: FATAL: better-sqlite3 will not load after a from-source rebuild." >&2
+      echo "forge-test: this is an ENVIRONMENT failure, not a test failure — do not report it as red tests." >&2
+      exit 2
+    fi
+  fi
+}
+
 if [[ ! -d "$WORK_DIR" ]]; then
   echo "forge-test: setting up writable scratch at $WORK_DIR" >&2
-  cp -r "$SRC_DIR" "$WORK_DIR"
-  cd "$WORK_DIR"
-  echo "forge-test: rebuilding better-sqlite3 for this container's platform" >&2
-  # --build-from-source forces a native compile rather than reusing the
-  # host's prebuilt .node. The container image ships build-essential +
-  # python3 so this Just Works.
-  npm rebuild better-sqlite3 --build-from-source >/dev/null 2>&1
-  echo "forge-test: setup complete" >&2
-else
-  cd "$WORK_DIR"
+  mkdir -p "$WORK_DIR"
+  # Once, cold: the scratch is a git repo like the source is, so any test whose
+  # code walks up from cwd looking for one still finds it. The per-run sync skips
+  # .git — nothing under test reads history, and it is the biggest dir in the tree.
+  if [[ -d "$SRC_DIR/.git" ]]; then
+    cp -r "$SRC_DIR/.git" "$WORK_DIR/.git"
+  fi
 fi
+
+_sync_sources
+cd "$WORK_DIR"
+_ensure_deps
 
 # Returns 0 if the named npm script exists in ./package.json (work dir).
 _has_script() {
