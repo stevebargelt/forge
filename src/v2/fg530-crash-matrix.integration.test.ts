@@ -66,7 +66,10 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               container.started — FG-533's wedge), then dispatchSingleStep's
 //               post-container sequence (result ingestion → validation-contract
 //               hold → awaiting_red → verdict inserts → blocked_by_red →
-//               finalizePrimary → event appends)
+//               finalizePrimary → event appends), and dispatchFanoutStep's own
+//               awaiting_red transition — the fanout PARENT's copy of that window,
+//               a separate callsite over a row no container ever ran, so the
+//               single-step cells cannot vouch for it
 //   gate      — gate.ts's decision writes (advance, reject + on_reject recovery
 //               mint OR dedup onto an existing recovery row, request-changes
 //               replacement mint OR dedup onto an existing pending primary)
@@ -122,6 +125,9 @@ const KILL_POINTS: KillPoint[] = [
   { point: "dispatchSingleStep:before-blocked-by-red", surface: "dispatch" },
   { point: "dispatchSingleStep:inside-blocked-by-red-txn", surface: "dispatch" },
   { point: "dispatchSingleStep:after-blocked-by-red", surface: "dispatch" },
+  { point: "dispatchFanoutStep:before-awaiting-red", surface: "dispatch" },
+  { point: "dispatchFanoutStep:between-awaiting-red-status-and-event", surface: "dispatch" },
+  { point: "dispatchFanoutStep:after-awaiting-red", surface: "dispatch" },
   { point: "finalizePrimary:before-status-write", surface: "dispatch" },
   { point: "finalizePrimary:between-complete-status-and-event", surface: "dispatch" },
   { point: "finalizePrimary:between-awaiting-gate-status-and-event", surface: "dispatch" },
@@ -1593,7 +1599,9 @@ const KNOWN_FAILURES: KnownFailure[] = [
     match: /is non-terminal \('awaiting_red'\)/,
     summary:
       "a crash in the window between the awaiting_red status write and the reds' terminal write wedges the task at " +
-      "awaiting_red FOREVER: reconcile only sweeps `running` rows, computeReadyQueue treats awaiting_red as live work " +
+      "awaiting_red FOREVER — on BOTH callsites that make it (dispatchSingleStep's primary and dispatchFanoutStep's " +
+      "fanout parent, each with its own probe trio and its own matrix cells): reconcile only sweeps `running` rows, " +
+      "computeReadyQueue treats awaiting_red as live work " +
       "(so the phase is never re-admitted and the run never settles), `forge gate` refuses any status but " +
       "awaiting_gate/blocked_by_red, and `forge retry` refuses any status but failed. advise.ts tells the operator to " +
       "'wait for reds to finish' — reds that died with the crashed process.",
@@ -2077,6 +2085,44 @@ test(
       checkNoPermanentWedge(runId, RED_WF),
       [],
       "INVARIANT 2: an awaiting_red task orphaned by a crash has no enabled transition and no operator verb",
+    );
+  },
+);
+
+test(
+  "FG-530-A [KNOWN FAILURE — the fanout PARENT's copy of the same window]: a crash between dispatchFanoutStep's awaiting_red status write and its reds' terminal write wedges the parent at awaiting_red with dead red children — the wave's completed children are stranded behind it",
+  { todo: "same FG-530-A wedge, second callsite (dispatchFanoutStep); scope guard says pin the repro, don't fix it in this ticket" },
+  async () => {
+    ensureRuntime();
+    writeWorkflowYaml(FANOUT_WF.name, FANOUT_YAML);
+    const projectDir = makeTmpDir();
+    const exec = makeExec({ redVerdict: "fail" });
+    const { runId } = startRun({ workflow: FANOUT_WF, title: "fg530-A fanout wedge repro", inputs: {}, projectDir });
+
+    await runNext({ runId, workflow: FANOUT_WF, dockerExec: exec }); // plan → complete
+    const fired = await crashAt("dispatchFanoutStep:after-awaiting-red", () =>
+      runNext({ runId, workflow: FANOUT_WF, dockerExec: exec }),
+    );
+    assert.ok(fired, "the kill must fire for this repro to mean anything");
+
+    const parent = primaryOf(runId, "build")!;
+    assert.equal(parent.status, "awaiting_red", "the crash leaves the fanout parent at awaiting_red");
+    assert.ok(
+      tasksForRun(runId).some((t) => t.parentId === parent.id && t.status === "complete"),
+      "and its wave's children already terminal — the work the wedge strands",
+    );
+
+    await recoverToFixpoint(runId, FANOUT_WF, exec);
+
+    assert.equal(
+      primaryOf(runId, "build")!.status,
+      "awaiting_red",
+      "recovery leaves the parent at awaiting_red — reconcile's fanout-parent recovery only acts on `running` parents",
+    );
+    assert.deepEqual(
+      checkNoPermanentWedge(runId, FANOUT_WF),
+      [],
+      "INVARIANT 2: a fanout parent orphaned at awaiting_red has no enabled transition and no operator verb",
     );
   },
 );

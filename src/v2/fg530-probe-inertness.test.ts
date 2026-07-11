@@ -743,19 +743,9 @@ const ALLOWLIST: Allow[] = [
     call: "logEvent",
     reason:
       "integration.worktree_created / integration.child_merged / integration.merged_to_head are audit appends about git " +
-      "state, and task.created / task.awaiting_red / task.completed / task.blocked_by_red sit against the status writes " +
-      "below, which carry their own reasons. None of these events is read to decide a transition.",
-  },
-  {
-    file: "v2/runNext.ts",
-    fn: "dispatchFanoutStep",
-    call: "setTaskStatus",
-    near: "awaiting_red",
-    reason:
-      "moves the parent to awaiting_red before its reds dispatch. A crash in that window strands the parent at awaiting_red " +
-      "with dead reds — the SAME wedge already pinned as known failure FG-530-A on the dispatchSingleStep path " +
-      "(dispatchSingleStep:{before,between,after}-awaiting-red), with a live repro in the matrix. Probing the fanout copy " +
-      "would register a second name for a bug that is already filed and reproduced, not cover a new one.",
+      "state, and task.created / task.completed / task.blocked_by_red sit against the status writes below, which carry " +
+      "their own reasons. None of these events is read to decide a transition. (task.awaiting_red is NOT among them: it " +
+      "sits inside the probed dispatchFanoutStep:{before,between,after}-awaiting-red sequence.)",
   },
   {
     file: "v2/runNext.ts",

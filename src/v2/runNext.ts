@@ -1704,8 +1704,11 @@ async function dispatchFanoutStep(args: {
   // build phase's authoritative reds never dispatched and the verdict gate had no
   // verdicts to resolve (forge-site bug). Mirror dispatchSingleStep's reds block.
   if (step.reds.length > 0) {
+    crashPoint("dispatchFanoutStep:before-awaiting-red");
     setTaskStatus(parentId, "awaiting_red");
+    crashPoint("dispatchFanoutStep:between-awaiting-red-status-and-event");
     logEvent("task.awaiting_red", { runId: args.runId, taskId: parentId });
+    crashPoint("dispatchFanoutStep:after-awaiting-red");
 
     const aggregate = await dispatchReds({
       runId: args.runId,
