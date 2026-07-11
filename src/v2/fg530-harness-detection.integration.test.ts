@@ -13,10 +13,10 @@
 // named error, not spin forever or quietly report success.
 //
 // HOW IT REACHES THE CHECKERS. They are module-private to the matrix, and the
-// matrix registers 90 top-level tests on import — importing it directly would
-// re-run the whole suite inside this file. So we mechanically derive a scratch
-// copy at test time: `node:test`'s test/beforeEach/afterEach are replaced with
-// no-ops (the 90 registrations become dead calls) and the checkers are exported.
+// matrix registers one test per (scenario × kill point) on import — importing it
+// directly would re-run the whole suite inside this file. So we mechanically derive
+// a scratch copy at test time: `node:test`'s test/beforeEach/afterEach are replaced
+// with no-ops (every registration becomes a dead call) and the checkers are exported.
 // The bodies are the ENGINEER'S, byte-for-byte — if a checker changes, this file
 // exercises the changed one. The copy lives in a temp dir (never in src/), with
 // relative imports rewritten to absolute, so it cannot pollute typecheck or the
@@ -94,7 +94,7 @@ function buildScratchModule(): string {
 
   let out = src.replace(
     testImport,
-    // The 90 top-level test() registrations become no-ops; the module body
+    // The top-level test() registrations become no-ops; the module body
     // (registry, workflows, checkers) still evaluates exactly as written.
     [
       "const test = (..._a: unknown[]): void => {};",
@@ -253,7 +253,11 @@ test("FG-530 detection [invariant 1]: a `complete` primary whose step declares a
   const vs: Violation[] = H.checkNoCompleteWithoutEvidence(runId, H.RED_WF);
 
   assert.ok(
-    vs.some((v) => v.invariant === "1-no-complete-without-evidence-chain" && /NO verdict row exists/.test(v.detail)),
+    vs.some(
+      (v) =>
+        v.invariant === "1-no-complete-without-evidence-chain" &&
+        /verdict rows are MISSING for \[red-security \(0\/1 verdict rows\)\]/.test(v.detail),
+    ),
     `a step with an authoritative gating red that completed with zero verdicts must be flagged, got:\n${details(vs)}`,
   );
 });
@@ -352,7 +356,7 @@ test("FG-530 detection [invariant 4]: a result.json DELETED during recovery is F
   const runId = newRun(H.PLAIN_WF, H.PLAIN_YAML, "inv4 deleted");
   const p = seedPersisted(runId, "t-del", "complete", true);
   const pre = H.capturePersistedWork(runId);
-  assert.equal(pre.length, 1, "precondition: the harness captured the persisted result before the kill");
+  assert.equal(pre.results.length, 1, "precondition: the harness captured the persisted result before the kill");
 
   rmSync(p, { force: true });
 

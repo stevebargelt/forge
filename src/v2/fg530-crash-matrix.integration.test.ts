@@ -38,13 +38,13 @@ import { tmpdir } from "node:os";
 import type { Database as DatabaseInstance } from "better-sqlite3";
 
 import { makeInMemoryDb, setDbForTest } from "../store/db.js";
-import { insertTask, tasksForRun, getTask } from "../store/tasks.js";
+import { insertTask, tasksForRun, getTask, setTaskWorktreePath } from "../store/tasks.js";
 import { insertVerdict, verdictsForRun, verdictsForTask } from "../store/verdicts.js";
 import { gatesForRun } from "../store/gates.js";
 import { eventsForRun, eventsForTask } from "../store/events.js";
 import { getRun, updateRunStatus } from "../store/runs.js";
 import { taskDir } from "../util/paths.js";
-import { newVerdictId } from "../util/ids.js";
+import { newTaskId, newVerdictId, nowIso } from "../util/ids.js";
 
 import { crashPoint, setCrashHookForTest } from "./crash-points.js";
 import { runNext, type DockerExecFn } from "./runNext.js";
@@ -65,7 +65,8 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               validation-contract hold → awaiting_red → verdict inserts →
 //               blocked_by_red → finalizePrimary → event appends)
 //   gate      — gate.ts's decision writes (advance, reject + on_reject recovery
-//               mint, request-changes replacement mint)
+//               mint OR dedup onto an existing recovery row, request-changes
+//               replacement mint OR dedup onto an existing pending primary)
 //   reconcile — reconcile.ts's own writes (the FG-479 failPipelineUnfinalized
 //               landing, which is what a crashed pipeline step recovers INTO)
 //
@@ -105,9 +106,12 @@ const KILL_POINTS: KillPoint[] = [
   { point: "gate:reject:inside-txn-between-fail-and-recovery-mint", surface: "gate" },
   { point: "gate:reject:inside-txn-between-recovery-mint-and-event", surface: "gate" },
   { point: "gate:reject:after-recovery-mint", surface: "gate" },
+  { point: "gate:reject:dedup:inside-txn-between-inputs-and-lineage", surface: "gate" },
+  { point: "gate:reject:dedup:inside-txn-between-lineage-and-event", surface: "gate" },
   { point: "gate:request-changes:before-fail-write", surface: "gate" },
   { point: "gate:request-changes:between-fail-and-replacement-mint", surface: "gate" },
   { point: "gate:request-changes:between-replacement-mint-and-event", surface: "gate" },
+  { point: "gate:request-changes:dedup:between-inputs-and-event", surface: "gate" },
   { point: "gate:after-branch", surface: "gate" },
   { point: "reconcile:before-fail-pipeline-unfinalized", surface: "reconcile" },
   { point: "reconcile:inside-fail-pipeline-unfinalized-txn", surface: "reconcile" },
@@ -344,6 +348,78 @@ steps:
     on_reject: build
 `;
 
+// (3b) two human-gated reviews, both with `on_reject: build`. Rejecting the first
+//      MINTS the on_reject recovery row in build; rejecting the second DEDUPS onto
+//      that live pending row (FG-476) — the only path that reaches gate.ts's
+//      existing-recovery write sequence (inputs → parent lineage → event), which
+//      the mint-only scenarios never exercised.
+const REJECT_DEDUP_WF: Workflow = {
+  name: "fg530-reject-dedup",
+  description: "FG-530: two human gates rejecting into the same on_reject target",
+  inputs: [],
+  steps: [
+    step("build"),
+    step("review1", { agent: "reviewer", gate: "human", depends_on: ["build"], on_reject: "build" }),
+    step("review2", { agent: "reviewer", gate: "human", depends_on: ["build"], on_reject: "build" }),
+  ],
+};
+const REJECT_DEDUP_YAML = `name: fg530-reject-dedup
+description: FG-530 reject dedup
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: auto
+    runtime: ${RUNTIME}
+  - id: review1
+    agent: reviewer
+    gate: human
+    runtime: ${RUNTIME}
+    depends_on: [build]
+    on_reject: build
+  - id: review2
+    agent: reviewer
+    gate: human
+    runtime: ${RUNTIME}
+    depends_on: [build]
+    on_reject: build
+`;
+
+// (3c) a step declaring TWO authoritative gating reds. Not a matrix scenario —
+//      it backs the invariant-1 evidence-chain test below, which needs a REAL
+//      runner-written multi-red verdict set (not a hand-seeded one) to prove the
+//      per-red check discriminates a complete evidence chain from a partial one.
+const TWO_RED_WF: Workflow = {
+  name: "fg530-two-reds",
+  description: "FG-530: primary behind TWO authoritative gating reds",
+  inputs: [],
+  steps: [
+    step("build", {
+      gate: "verdict",
+      reds: [
+        { agent: "red-security", authority: "authoritative", gate_on_verdict: true },
+        { agent: "red-wide", authority: "authoritative", gate_on_verdict: true },
+      ],
+    }),
+  ],
+};
+const TWO_RED_YAML = `name: fg530-two-reds
+description: FG-530 two reds
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: verdict
+    runtime: ${RUNTIME}
+    reds:
+      - agent: red-security
+        authority: authoritative
+        gate_on_verdict: true
+      - agent: red-wide
+        authority: authoritative
+        gate_on_verdict: true
+`;
+
 // (4) fanout behind an authoritative red — the ONLY path to gate.ts's blocked-
 //     fanout advance branch (FG-353 re-entry): the red blocks the fanout PARENT,
 //     the operator force-advances, and gate atomically writes gateForced into the
@@ -426,33 +502,45 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    // Both on_reject write sequences: review1's reject MINTS the recovery row,
+    // review2's reject DEDUPS onto it.
     name: "gate-reject-on_reject",
+    workflow: REJECT_DEDUP_WF,
+    yaml: REJECT_DEDUP_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec }); // build → complete
+      await runNext({ runId, workflow, dockerExec: exec }); // review1 + review2 → awaiting_gate
+      const r1 = awaitingGatePrimary(runId, "review1");
+      if (r1) await gate(r1.id, "reject", "needs another build pass"); // mint
+      const r2 = awaitingGatePrimary(runId, "review2");
+      if (r2) await gate(r2.id, "reject", "the second rejection lands on the same recovery row"); // dedup
+      await runNext({ runId, workflow, dockerExec: exec }); // recovery row dispatches
+    },
+  },
+  {
+    // Both request-changes write sequences: the first MINTS the replacement
+    // primary, the second DEDUPS onto a pending one. The dedup guard exists for
+    // a leftover pending primary it did not itself mint (a duplicate/concurrent
+    // gate call, or `forge retry`'s parallel primary) — no single-threaded call
+    // sequence produces two live primaries, so that row is seeded directly, the
+    // same way FG-364's dedup test reaches this branch.
+    name: "gate-request-changes",
     workflow: REJECT_WF,
     yaml: REJECT_YAML,
     exec: { redVerdict: "pass" },
     drive: async (runId, workflow, exec) => {
       await runNext({ runId, workflow, dockerExec: exec }); // build → complete
       await runNext({ runId, workflow, dockerExec: exec }); // review → awaiting_gate
-      const review = primaryOf(runId, "review");
-      if (review && review.status === "awaiting_gate") {
-        await gate(review.id, "reject", "needs another build pass");
+      const review = awaitingGatePrimary(runId, "review");
+      if (review) await gate(review.id, "request-changes", "revise the review"); // mint
+      await runNext({ runId, workflow, dockerExec: exec }); // replacement dispatches → awaiting_gate
+      const replacement = awaitingGatePrimary(runId, "review");
+      if (replacement) {
+        seedLeftoverPendingPrimary(runId, "review", "reviewer");
+        await gate(replacement.id, "request-changes", "revise again — onto the pending primary"); // dedup
       }
-      await runNext({ runId, workflow, dockerExec: exec }); // recovery row dispatches
-    },
-  },
-  {
-    name: "gate-request-changes",
-    workflow: REJECT_WF,
-    yaml: REJECT_YAML,
-    exec: { redVerdict: "pass" },
-    drive: async (runId, workflow, exec) => {
-      await runNext({ runId, workflow, dockerExec: exec });
-      await runNext({ runId, workflow, dockerExec: exec });
-      const review = primaryOf(runId, "review");
-      if (review && review.status === "awaiting_gate") {
-        await gate(review.id, "request-changes", "revise the review");
-      }
-      await runNext({ runId, workflow, dockerExec: exec });
+      await runNext({ runId, workflow, dockerExec: exec }); // the dedup'd pending row dispatches
     },
   },
   {
@@ -476,6 +564,38 @@ function primaryOf(runId: string, phase: string): Task | undefined {
   return tasksForRun(runId).find((t) => t.phase === phase && isPhasePrimaryRow(t));
 }
 
+/** A phase can hold several primary rows once a gate has failed one and minted a
+ *  replacement, so the gate-driving scenarios must name the one actually AT a
+ *  gate — primaryOf() would hand back the failed original. */
+function awaitingGatePrimary(runId: string, phase: string): Task | undefined {
+  return tasksForRun(runId).find(
+    (t) => t.phase === phase && isPhasePrimaryRow(t) && t.status === "awaiting_gate",
+  );
+}
+
+/** The pending primary gate.ts's request-changes dedup exists to find: one it did
+ *  not mint itself. */
+function seedLeftoverPendingPrimary(runId: string, phase: string, role: string): void {
+  const id = newTaskId(phase);
+  insertTask({
+    id,
+    runId,
+    phase,
+    agentRole: role,
+    status: "pending",
+    taskPackage: {
+      taskId: id,
+      runId,
+      phase,
+      role,
+      dispatchSource: "workflow",
+      inputs: { requestedChanges: "an earlier rationale that the dedup must supersede" },
+      composedSystemPrompt: "",
+    },
+    createdAt: nowIso(),
+  });
+}
+
 // ── the crash driver ──────────────────────────────────────────────────────────
 
 class CrashInjected extends Error {
@@ -492,11 +612,22 @@ class CrashInjected extends Error {
  *  must not abort the pass). The crash still did its job — the surrounding
  *  transaction rolled back, so that write group did not land — and `fired`
  *  records it, so a reconcile cell is exercised even though nothing escapes. */
-async function crashAt(point: string, fn: () => Promise<unknown> | unknown): Promise<boolean> {
+async function crashAt(
+  point: string,
+  fn: () => Promise<unknown> | unknown,
+  onFire?: () => void,
+): Promise<boolean> {
   let fired = false;
   setCrashHookForTest((p) => {
     if (p !== point) return;
-    fired = true;
+    // onFire runs at the INSTANT of death, before the throw — the only moment the
+    // pre-kill world is observable. Once only: reconcile's FG-459 guards swallow
+    // the throw and keep sweeping, so the same probe can fire again on a later
+    // task, and that second firing is already post-rollback.
+    if (!fired) {
+      fired = true;
+      onFire?.();
+    }
     throw new CrashInjected(p);
   });
   try {
@@ -528,12 +659,34 @@ async function strandMidFinalize(sc: Scenario, runId: string, exec: DockerExecFn
   await crashAt("dispatchSingleStep:after-result-ingest", () => sc.drive(runId, sc.workflow, exec));
 }
 
-async function runCrashPhase(sc: Scenario, runId: string, exec: DockerExecFn, kp: KillPoint): Promise<boolean> {
+/** `persistedPreKill` is measured INSIDE the crash hook — the state of the world
+ *  at the instant the process died, which is what invariant 4 is about. Capturing
+ *  it after the driver returns (as v1 did) would miss any result or worktree the
+ *  injected sequence discarded on its way down: the baseline would already be the
+ *  post-discard state, and the invariant could never see it.
+ *
+ *  A cell whose scenario never reaches its kill point runs to its natural end; the
+ *  post-drive state is then the only baseline there is, and the invariant still
+ *  holds recovery to it. */
+async function runCrashPhase(
+  sc: Scenario,
+  runId: string,
+  exec: DockerExecFn,
+  kp: KillPoint,
+): Promise<{ fired: boolean; persistedPreKill: PersistedWork }> {
+  let atKill: PersistedWork | undefined;
+  const measure = (): void => {
+    atKill = capturePersistedWork(runId);
+  };
+
+  let fired: boolean;
   if (kp.surface === "reconcile") {
     await strandMidFinalize(sc, runId, exec);
-    return crashAt(kp.point, () => reconcile(runId));
+    fired = await crashAt(kp.point, () => reconcile(runId), measure);
+  } else {
+    fired = await crashAt(kp.point, () => sc.drive(runId, sc.workflow, exec), measure);
   }
-  return crashAt(kp.point, () => sc.drive(runId, sc.workflow, exec));
+  return { fired, persistedPreKill: atKill ?? capturePersistedWork(runId) };
 }
 
 // ── state snapshot + fixpoint ─────────────────────────────────────────────────
@@ -651,14 +804,29 @@ function checkNoCompleteWithoutEvidence(runId: string, workflow: Workflow): Viol
       });
     }
 
+    // Per-role, per-count — not "are there ANY verdicts". A step declaring two
+    // gating reds that completes carrying one passing verdict has lost half its
+    // evidence chain, and a bare emptiness test reads that as fine.
     const gatingReds = st.reds.filter((r) => r.authority === "authoritative" && r.gate_on_verdict !== false);
-    if (gatingReds.length > 0 && verdicts.length === 0 && !hasForcedGateAdvance(t.id)) {
-      v.push({
-        invariant: name,
-        detail:
-          `task ${t.id} (${t.phase}) is complete but its step declares ${gatingReds.length} gating red(s) ` +
-          `[${gatingReds.map((r) => r.agent).join(", ")}] and NO verdict row exists — completed without the red evidence`,
-      });
+    if (gatingReds.length > 0 && !hasForcedGateAdvance(t.id)) {
+      const landed = new Map<string, number>();
+      for (const row of verdicts) landed.set(row.redRole, (landed.get(row.redRole) ?? 0) + 1);
+      const declared = new Map<string, number>();
+      for (const r of gatingReds) declared.set(r.agent, (declared.get(r.agent) ?? 0) + 1);
+
+      const short = [...declared]
+        .filter(([role, want]) => (landed.get(role) ?? 0) < want)
+        .map(([role, want]) => `${role} (${landed.get(role) ?? 0}/${want} verdict rows)`);
+
+      if (short.length > 0) {
+        v.push({
+          invariant: name,
+          detail:
+            `task ${t.id} (${t.phase}) is complete but its step declares ${gatingReds.length} gating red(s) ` +
+            `[${gatingReds.map((r) => r.agent).join(", ")}] and the verdict rows are MISSING for [${short.join(", ")}] — ` +
+            `completed without the red evidence`,
+        });
+      }
     }
 
     const contract = evaluateValidationContract({ role: t.agentRole, result: t.result });
@@ -749,28 +917,50 @@ function checkAbandonedNeverOverwritten(runId: string, wasAbandoned: boolean): V
   ];
 }
 
-type PersistedWork = { taskId: string; resultPath: string; bytes: string };
+type PersistedResult = { taskId: string; resultPath: string; bytes: string };
+type PersistedWorktree = { taskId: string; worktreePath: string };
+/** The two things an agent leaves on disk: its result.json and, in worktree mode,
+ *  the git worktree it worked in. Both are the crashed step's evidence, and both
+ *  are what FG-352's no-discard rule keeps around after a failure. */
+type PersistedWork = { results: PersistedResult[]; worktrees: PersistedWorktree[] };
 
-/** Snapshot the work the containers actually persisted, BEFORE the kill. */
-function capturePersistedWork(runId: string): PersistedWork[] {
-  const out: PersistedWork[] = [];
+/** Snapshot the work the containers actually persisted. Call it AT the kill (see
+ *  runCrashPhase) — a snapshot taken after the injected sequence unwinds cannot
+ *  tell "never existed" from "existed and was discarded".
+ *
+ *  Worktrees are only ever populated when worktree mode is armed
+ *  (FORGE_WORKTREES=1) AND preflightWorktreeGate passes — it is macOS-only, so on
+ *  Linux/CI the matrix cells carry none and this half of invariant 4 is inert
+ *  there. Its detection power is proven directly instead, by the worktree-discard
+ *  test below. */
+function capturePersistedWork(runId: string): PersistedWork {
+  const results: PersistedResult[] = [];
+  const worktrees: PersistedWorktree[] = [];
   for (const t of tasksForRun(runId)) {
     const p = join(taskDir(runId, t.id), "result.json");
-    if (!existsSync(p)) continue;
-    out.push({ taskId: t.id, resultPath: p, bytes: readFileSync(p, "utf8") });
+    if (existsSync(p)) results.push({ taskId: t.id, resultPath: p, bytes: readFileSync(p, "utf8") });
+    if (t.worktreePath && existsSync(t.worktreePath)) {
+      worktrees.push({ taskId: t.id, worktreePath: t.worktreePath });
+    }
   }
-  return out;
+  return { results, worktrees };
 }
+
+const NO_PERSISTED_WORK: PersistedWork = { results: [], worktrees: [] };
 
 /** INVARIANT 4 — persisted work is never discarded.
  *  A result.json that existed before the kill must (a) still exist byte-identical
  *  after recovery, and (b) still be REFERENCED by its task row once that row is
  *  terminal — reconcile's failPipelineUnfinalized preserves the result onto the
- *  row precisely so a crashed step's work is inspectable, not silently dropped. */
-function checkPersistedWorkNeverDiscarded(pre: PersistedWork[]): Violation[] {
+ *  row precisely so a crashed step's work is inspectable, not silently dropped.
+ *  A worktree that existed before the kill must survive too, unless its task went
+ *  on to COMPLETE: removeWorktreeIfSafe is only ever called on a proven-merged
+ *  worktree, so a crashed or failed step losing its worktree is the work-discard
+ *  this invariant is named for. */
+function checkPersistedWorkNeverDiscarded(pre: PersistedWork): Violation[] {
   const v: Violation[] = [];
   const name = "4-persisted-work-never-discarded";
-  for (const w of pre) {
+  for (const w of pre.results) {
     if (!existsSync(w.resultPath)) {
       v.push({ invariant: name, detail: `result.json for task ${w.taskId} existed before the kill and is GONE after recovery (${w.resultPath})` });
       continue;
@@ -792,6 +982,17 @@ function checkPersistedWorkNeverDiscarded(pre: PersistedWork[]): Violation[] {
           `the work is orphaned on disk with nothing pointing at it`,
       });
     }
+  }
+  for (const w of pre.worktrees) {
+    if (existsSync(w.worktreePath)) continue;
+    const t = getTask(w.taskId);
+    if (t?.status === "complete") continue; // proven-merged cleanup — the one sanctioned removal
+    v.push({
+      invariant: name,
+      detail:
+        `the worktree for task ${w.taskId} existed before the kill and is GONE after recovery (${w.worktreePath}), ` +
+        `while the task is '${t?.status ?? "missing"}' — an unmerged step's worktree is its only copy of the work`,
+    });
   }
   return v;
 }
@@ -815,7 +1016,7 @@ async function checkAllInvariants(args: {
   runId: string;
   workflow: Workflow;
   exec: DockerExecFn;
-  persistedPreKill: PersistedWork[];
+  persistedPreKill: PersistedWork;
   wasAbandoned: boolean;
 }): Promise<Violation[]> {
   return [
@@ -904,13 +1105,13 @@ for (const sc of SCENARIOS) {
         projectDir,
       });
 
-      // 1–2. Drive to the kill point. A cell whose scenario never reaches this
-      // boundary simply runs to its natural end — the invariants must hold
-      // there too, so the cell still asserts something; the registry-coverage
-      // test at the end is what proves no kill point is unreachable everywhere.
-      await runCrashPhase(sc, runId, exec, kp);
+      // 1–2. Drive to the kill point, measuring the persisted work AT the kill.
+      // A cell whose scenario never reaches this boundary simply runs to its
+      // natural end — the invariants must hold there too, so the cell still
+      // asserts something; the registry-coverage test at the end is what proves
+      // no kill point is unreachable everywhere.
+      const { persistedPreKill } = await runCrashPhase(sc, runId, exec, kp);
 
-      const persistedPreKill = capturePersistedWork(runId);
       const wasAbandoned = getRun(runId)?.status === "abandoned";
 
       // 3. FRESH pass, hook disarmed: reconcile + runNext to fixpoint.
@@ -950,7 +1151,7 @@ for (const sc of SCENARIOS) {
 
 async function crashInFirstReachingScenario(
   kp: KillPoint,
-): Promise<{ sc: Scenario; runId: string; exec: DockerExecFn }> {
+): Promise<{ sc: Scenario; runId: string; exec: DockerExecFn; persistedPreKill: PersistedWork }> {
   for (const sc of SCENARIOS) {
     writeWorkflowYaml(sc.workflow.name, sc.yaml);
     const projectDir = makeTmpDir();
@@ -961,7 +1162,8 @@ async function crashInFirstReachingScenario(
       inputs: {},
       projectDir,
     });
-    if (await runCrashPhase(sc, runId, exec, kp)) return { sc, runId, exec };
+    const { fired, persistedPreKill } = await runCrashPhase(sc, runId, exec, kp);
+    if (fired) return { sc, runId, exec, persistedPreKill };
   }
   throw new Error(
     `no scenario reaches kill point ${kp.point}, so invariant 3 cannot be exercised there — add a scenario (the registry-coverage test names the same gap)`,
@@ -971,11 +1173,10 @@ async function crashInFirstReachingScenario(
 for (const kp of KILL_POINTS) {
   test(`FG-530 invariant 3 [cancel race] kill @ ${kp.point}: a \`forge cancel\` that lands while the runner is crashed must never be resurrected by recovery`, async () => {
     ensureRuntime();
-    const { sc, runId, exec } = await crashInFirstReachingScenario(kp);
+    const { sc, runId, exec, persistedPreKill } = await crashInFirstReachingScenario(kp);
 
     updateRunStatus(runId, "abandoned"); // the operator cancels before recovery runs
 
-    const persistedPreKill = capturePersistedWork(runId);
     await recoverToFixpoint(runId, sc.workflow, exec);
 
     assert.equal(getRun(runId)!.status, "abandoned", "recovery must leave the abandoned run abandoned");
@@ -1134,6 +1335,96 @@ test("FG-530 META-AC control: the SAME fixture with the status write applied (bl
     [],
     "blocked_by_red carries a named operator verb, so it is not a permanent wedge",
   );
+});
+
+// ── invariant 1: the evidence chain is per-red, not "any verdict at all" ───────
+
+test("FG-530 invariant 1 [multi-red, real path]: a step declaring TWO gating reds that completes carrying only ONE verdict row is FLAGGED — a surviving passing verdict must not stand in for the red that never wrote one", async () => {
+  ensureRuntime();
+  writeWorkflowYaml(TWO_RED_WF.name, TWO_RED_YAML);
+  const projectDir = makeTmpDir();
+  const exec = makeExec({ redVerdict: "pass" });
+  const { runId } = startRun({ workflow: TWO_RED_WF, title: "fg530 two-red evidence chain", inputs: {}, projectDir });
+
+  await runNext({ runId, workflow: TWO_RED_WF, dockerExec: exec });
+
+  // Real path, real writes: both reds pass, the operator advances the verdict
+  // gate (no force — the verdicts are clean), and the primary completes with a
+  // full evidence chain. This is the control — the checker must be quiet here.
+  const primary = primaryOf(runId, "build")!;
+  assert.equal(primary.status, "awaiting_gate", "a passing verdict gate parks the primary for the operator");
+  await gate(primary.id, "advance", "both reds passed");
+  assert.equal(getTask(primary.id)!.status, "complete");
+
+  const rows = verdictsForTask(primary.id);
+  assert.deepEqual(
+    rows.map((r) => r.redRole).sort(),
+    ["red-security", "red-wide"],
+    "the runner wrote one verdict row per declared gating red",
+  );
+  assert.deepEqual(
+    checkNoCompleteWithoutEvidence(runId, TWO_RED_WF),
+    [],
+    "a complete evidence chain must not be flagged",
+  );
+
+  // Now lose exactly ONE of the two verdict writes — the crash shape between two
+  // reds' inserts. The task still carries a passing verdict, so an emptiness test
+  // (`verdicts.length === 0`) reads this as fine; the per-red check must not.
+  const lost = rows.find((r) => r.redRole === "red-wide")!;
+  db.prepare("DELETE FROM verdicts WHERE id = ?").run(lost.id);
+
+  const violations = checkNoCompleteWithoutEvidence(runId, TWO_RED_WF);
+  assert.equal(violations.length, 1, "the harness MUST detect the half-written evidence chain");
+  assert.equal(violations[0]!.invariant, "1-no-complete-without-evidence-chain");
+  assert.match(
+    violations[0]!.detail,
+    /MISSING for \[red-wide \(0\/1 verdict rows\)\]/,
+    "the violation must name the red whose verdict never landed, not just report a count",
+  );
+});
+
+// ── invariant 4: the snapshot covers worktrees, not just result.json ───────────
+
+test("FG-530 invariant 4 [worktree discard]: a worktree that existed at the kill and is GONE after recovery on a NON-complete task is flagged; the same removal on a complete (proven-merged) task is not", () => {
+  ensureRuntime();
+  writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
+  const projectDir = makeTmpDir();
+  const { runId } = startRun({ workflow: PLAIN_WF, title: "fg530 worktree discard", inputs: {}, projectDir });
+
+  // Worktree mode is macOS-only (preflightWorktreeGate), so no Linux matrix cell
+  // can produce a real worktree — the checker's teeth are proven here instead.
+  const mk = (id: string, status: TaskStatus): string => {
+    insertTask({
+      id,
+      runId,
+      phase: "build",
+      agentRole: "engineer",
+      status,
+      taskPackage: { taskId: id, runId, phase: "build", role: "engineer", dispatchSource: "workflow", inputs: {}, composedSystemPrompt: "" },
+      createdAt: nowIso(),
+    });
+    const wt = makeTmpDir();
+    setTaskWorktreePath(id, wt);
+    return wt;
+  };
+  const crashedWt = mk("task-build-crashed", "failed");
+  const mergedWt = mk("task-build-merged", "complete");
+
+  const pre = capturePersistedWork(runId);
+  assert.deepEqual(
+    pre.worktrees.map((w) => w.worktreePath).sort(),
+    [crashedWt, mergedWt].sort(),
+    "the pre-kill snapshot must SEE worktrees — capturing result.json alone cannot detect a discarded one",
+  );
+
+  rmSync(crashedWt, { recursive: true, force: true });
+  rmSync(mergedWt, { recursive: true, force: true });
+
+  const violations = checkPersistedWorkNeverDiscarded(pre);
+  assert.equal(violations.length, 1, "exactly the failed task's worktree is a discard; the merged one's removal is sanctioned");
+  assert.equal(violations[0]!.invariant, "4-persisted-work-never-discarded");
+  assert.match(violations[0]!.detail, /worktree for task task-build-crashed .* is GONE after recovery/);
 });
 
 // ── the two REAL bugs this harness found on HEAD (filed, not fixed) ────────────

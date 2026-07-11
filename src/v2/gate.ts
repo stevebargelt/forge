@@ -260,10 +260,12 @@ export async function gate(
             rejectedRationale: rationale ?? "",
             rejectedTaskId: taskId,
           });
+          crashPoint("gate:reject:dedup:inside-txn-between-inputs-and-lineage");
           // Keep the durable parentId column aligned with the inputs above —
           // the dedup exists to carry the newer rationale, so lineage must
           // follow the newer reject too, not stay pinned to the first rejector.
           setTaskParentId(existingRecovery.id, taskId);
+          crashPoint("gate:reject:dedup:inside-txn-between-lineage-and-event");
           const updatedRecovery = getTask(existingRecovery.id);
           if (!updatedRecovery) {
             throw new Error(
@@ -355,6 +357,7 @@ export async function gate(
 
     if (existingPending) {
       updateTaskPackageInputs(existingPending.id, { requestedChanges: rationale ?? "" });
+      crashPoint("gate:request-changes:dedup:between-inputs-and-event");
       const updatedPending = getTask(existingPending.id);
       if (!updatedPending) {
         throw new Error(
