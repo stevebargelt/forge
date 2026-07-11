@@ -1,9 +1,11 @@
 ---
 id: FG-534
 type: story
-status: active
+status: done
 title: "forge-test mirror: mtime skip-predicate is dead code (sub-ms precision) — decide content-hash vs always-copy; naive mtime rounding would reintroduce the FG-520 false-green"
 created: 2026-07-11
+closed: 2026-07-11
+closed_commit: c30bcff
 ---
 
 ## Problem (two coupled findings from the FG-520 live-smoke verification)
@@ -22,3 +24,8 @@ A guard test already exists (fg520-forge-test-resync.integration.test.ts, same-s
 ## Notes
 
 Filed 2026-07-11 from the FG-520 test-engineer findings F1+F2 (run-fg-520-forge-test-resync-ffa2df). Low priority — current behavior is safe and fast enough.
+
+
+## Close evidence (2026-07-11, resolved inside FG-520's review — PR #104, merge c30bcff)
+
+The premise (size+mtime predicate, dead fast-path) was superseded during FG-520's own review: the mirror now compares BYTE EQUALITY (with a mode-bit check), which is AC option (a) implemented — unchanged files genuinely skip, a same-size/same-mtime edit propagates (the F2 hazard is structurally gone), and the guard test (same-size-edit-must-propagate) plus the chmod-propagation and unchanged-skip tests pin it. The FG-520 review-loop's final round confirmed this ticket's description no longer matched shipped code — closing as resolved-by-FG-520 rather than editing the AC after the fact.
