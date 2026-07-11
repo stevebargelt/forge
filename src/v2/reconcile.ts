@@ -542,8 +542,10 @@ export function reconcileRun(
         // markTaskComplete no-op (already complete concurrently) rolls back to
         // nothing logged. A SQLITE_BUSY rolls the whole group back for a later pass.
         const containerEvidence = toContainerCausalEvidence(evidence);
+        crashPoint("reconcile:before-complete-invoke-like");
         const completed = getDb().transaction(() => {
           if (!markTaskComplete(t.id, result)) return false;
+          crashPoint("reconcile:inside-complete-invoke-like-txn");
           logEvent("task.completed", { runId, taskId: t.id });
           logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_present", evidence, containerEvidence } });
           return true;
@@ -607,8 +609,10 @@ export function reconcileRun(
           // FG-463: complete write + its events atomic (the result.json write above
           // is best-effort and deliberately stays OUTSIDE the transaction).
           const containerEvidence = toContainerCausalEvidence(evidence);
+          crashPoint("reconcile:before-complete-invoke-like-from-stdout");
           const completed = getDb().transaction(() => {
             if (!markTaskComplete(t.id, inferred)) return false;
+            crashPoint("reconcile:inside-complete-invoke-like-from-stdout-txn");
             logEvent("task.completed", { runId, taskId: t.id });
             logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "running", to: "complete", reason: "container_gone_result_recovered_from_stdout", evidence, containerEvidence } });
             return true;
@@ -772,8 +776,10 @@ export function reconcileRun(
       } catch {
         evidence.resultWriteFailed = true;
       }
+      crashPoint("reconcile:before-backfill-complete-empty-result");
       const backfilled = getDb().transaction(() => {
         if (!backfillTaskResult(t.id, recovered)) return false; // result written concurrently since our read — no-op
+        crashPoint("reconcile:inside-backfill-complete-empty-result-txn");
         logEvent("task.reconciled", { runId, taskId: t.id, payload: { from: "complete", to: "complete", reason: "complete_empty_result_backfilled", evidence } });
         return true;
       })();
@@ -856,8 +862,10 @@ export function reconcileRun(
       const error =
         `fanout wave orphaned: ${completeChildren.length}/${children.length} children complete, the rest failed or never finished — ` +
         `inspect with \`forge show ${parent.id}\` and re-drive the wave with \`forge recover ${parent.id} --re-drive\`.`;
+      crashPoint("reconcile:before-fail-fanout-wave-orphaned");
       getDb().transaction(() => { // FG-463: fail write + its events atomic
         markTaskFailed(parent.id, error, parentResult);
+        crashPoint("reconcile:inside-fail-fanout-wave-orphaned-txn");
         logEvent("task.failed", { runId, taskId: parent.id, payload: { failure_kind: "fanout_wave_orphaned", error, childSummary: { total: children.length, complete: completeChildren.length } } });
         logEvent("task.reconciled", { runId, taskId: parent.id, payload: { from: "running", to: "failed", reason: "fanout_wave_orphaned", childSummary: { total: children.length, complete: completeChildren.length } } });
       })();

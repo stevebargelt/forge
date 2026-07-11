@@ -289,7 +289,7 @@ test("FG-530 tier placement: the crash matrix is an INTEGRATION-tier file and is
   const unit = pkg.scripts["test:unit"] ?? "";
   assert.ok(
     unit.includes("-not -name '*.integration.test.ts'"),
-    `test:unit must exclude *.integration.test.ts, or the 90-cell matrix would run in the fast tier, got: ${unit}`,
+    `test:unit must exclude *.integration.test.ts, or the whole crash matrix would run in the fast tier, got: ${unit}`,
   );
 
   const integration = pkg.scripts["test:integration"] ?? "";
@@ -851,25 +851,6 @@ const ALLOWLIST: Allow[] = [
   },
   {
     file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "markTaskFailed",
-    near: "fanout_wave_orphaned",
-    reason:
-      "the SIBLING ARM of the fanout-parent recovery whose other arm this ticket probes " +
-      "(reconcile:{before,inside}-fail-fanout-parent-unfinalized). Same if/else, same evidence base (a `running` parent with " +
-      "terminal children), same single FG-463 transaction, same three writes, and the same failure_kind on task.failed — the " +
-      "arms differ only in the aggregate's status field and the operator-facing message. Its two boundaries ARE the two the " +
-      "probed arm's cells kill at.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "logEvent",
-    near: "fanout_wave_orphaned",
-    reason: "the task.failed / task.reconciled pair inside that same sibling-arm transaction — see markTaskFailed above; the group commits or rolls back whole.",
-  },
-  {
-    file: "v2/reconcile.ts",
     fn: "finalizeOrphanedPrimaries",
     call: "markTaskFailed",
     near: "orphaned_duplicate_primary",
@@ -912,51 +893,6 @@ const ALLOWLIST: Allow[] = [
     near: "provisioning_phase_crash",
     gap: true,
     reason: "GAP — the task.failed / task.reconciled pair of the mid-provisioning recovery above; same missing fixture.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "markTaskComplete",
-    gap: true,
-    reason:
-      "GAP — reconcile COMPLETES a task (container gone with a usable result, or one recovered from stdout) on an " +
-      "invoke-like run. Unlike every probed reconcile write, this one ends a lifecycle rather than landing it fail-safe, so " +
-      "invariant 1's evidence chain is genuinely at stake. Unreachable today: every matrix scenario is a pipeline workflow, " +
-      "where taskHasPipelineFinalize sends both branches to failPipelineUnfinalized instead. Needs an invoke-kind run scenario.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "logEvent",
-    near: "container_gone_result_present",
-    gap: true,
-    reason: "GAP — the task.completed / task.reconciled pair of the invoke-run completion above; same missing scenario.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "logEvent",
-    near: "container_gone_result_recovered_from_stdout",
-    gap: true,
-    reason: "GAP — the task.completed / task.reconciled pair of the stdout-recovered completion above; same missing scenario.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "backfillTaskResult",
-    gap: true,
-    reason:
-      "GAP — the FG-455 Mode A backfill: a task already `complete` with an EMPTY result gets one written back. Its own pass, " +
-      "its own evidence base (a complete row + a result on disk), so no probed write covers it. Needs a fixture that produces " +
-      "a complete-but-resultless row; no matrix scenario does.",
-  },
-  {
-    file: "v2/reconcile.ts",
-    fn: "reconcileRun",
-    call: "logEvent",
-    near: "complete_empty_result_backfilled",
-    gap: true,
-    reason: "GAP — the task.reconciled event of the backfill above; same missing fixture.",
   },
   {
     file: "v2/runNext.ts",
@@ -1105,7 +1041,7 @@ test("FG-530 write-surface [detection power]: the classifier FLAGS an unprobed w
 /** Deferred crash windows, ratcheted. Deferring a write is legitimate — probing it
  *  means building the fixture that reaches it, and that can be its own ticket — but
  *  it must be a VISIBLE act. This number only goes down. */
-const DEFERRED_GAPS = 8;
+const DEFERRED_GAPS = 3;
 
 test("FG-530 write-surface: the deliberately-deferred crash windows are exactly the ones already accounted for — deferring a NEW one must be a reviewed decision, not an allowlist line nobody reads", () => {
   const gaps = ALLOWLIST.filter((a) => a.gap);

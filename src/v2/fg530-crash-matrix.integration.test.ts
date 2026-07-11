@@ -67,17 +67,22 @@ import type { Task, TaskStatus } from "../types/index.js";
 //   gate      — gate.ts's decision writes (advance, reject + on_reject recovery
 //               mint OR dedup onto an existing recovery row, request-changes
 //               replacement mint OR dedup onto an existing pending primary)
-//   reconcile — reconcile.ts's own writes (the FG-479 failPipelineUnfinalized
-//               landing, which is what a crashed pipeline step recovers INTO, and
-//               the fanout-parent recovery, which is what a crashed WAVE recovers
-//               into — a different stranded shape, hence its own strand below)
+//   reconcile — reconcile.ts's own writes: the FG-479 failPipelineUnfinalized
+//               landing (what a crashed PIPELINE step recovers into), its own
+//               COMPLETION path on an invoke-like run (result on disk, or one
+//               recovered from stdout — the only reconcile writes that END a
+//               lifecycle rather than landing it fail-safe), the FG-455 Mode A
+//               backfill of a complete-but-resultless row, and BOTH arms of the
+//               fanout-parent recovery (all children complete, or a partial wave)
 //
 // A `reconcile` cell is a crash WHILE RECOVERING from a crash: reconcile's writes
 // only have anything to act on once a task is already stranded, so the driver
 // strands one first (hook off), then arms the hook for the recovery reconcile. The
 // shape it must strand DEPENDS on the write being killed — a stranded primary for
-// the failPipelineUnfinalized landing, a stranded fanout PARENT for the
-// fanout-parent recovery (reconcile skips parents in the per-task loop: they never
+// the failPipelineUnfinalized landing and for the invoke-like completion, a
+// stranded primary with NO result.json for the stdout-recovered completion, a
+// COMPLETE row whose result was lost for the backfill, and a stranded fanout PARENT
+// for either fanout arm (reconcile skips parents in the per-task loop: they never
 // get a container). Scenario.strand owns that; see runCrashPhase.
 //
 // The write-surface guard in fg530-probe-inertness.test.ts is what keeps this
@@ -124,8 +129,16 @@ const KILL_POINTS: KillPoint[] = [
   { point: "gate:after-branch", surface: "gate" },
   { point: "reconcile:before-fail-pipeline-unfinalized", surface: "reconcile" },
   { point: "reconcile:inside-fail-pipeline-unfinalized-txn", surface: "reconcile" },
+  { point: "reconcile:before-complete-invoke-like", surface: "reconcile" },
+  { point: "reconcile:inside-complete-invoke-like-txn", surface: "reconcile" },
+  { point: "reconcile:before-complete-invoke-like-from-stdout", surface: "reconcile" },
+  { point: "reconcile:inside-complete-invoke-like-from-stdout-txn", surface: "reconcile" },
+  { point: "reconcile:before-backfill-complete-empty-result", surface: "reconcile" },
+  { point: "reconcile:inside-backfill-complete-empty-result-txn", surface: "reconcile" },
   { point: "reconcile:before-fail-fanout-parent-unfinalized", surface: "reconcile" },
   { point: "reconcile:inside-fail-fanout-parent-unfinalized-txn", surface: "reconcile" },
+  { point: "reconcile:before-fail-fanout-wave-orphaned", surface: "reconcile" },
+  { point: "reconcile:inside-fail-fanout-wave-orphaned-txn", surface: "reconcile" },
 ];
 
 // Every probe that actually fired, across every cell in the file. Asserted
@@ -171,15 +184,16 @@ function makeTmpDir(): string {
 }
 
 const RUNTIME = "fg530-runtime";
+/** reconcile's stdout-recovery (FG-455 → FG-337 inferredResultFrom) only fires for a
+ *  runtime whose log_format the provider-failure analyzer can read a final assistant
+ *  message out of — today that is pi-jsonl. Without a pi-format runtime there is no
+ *  path to the stdout-recovered completion write at all. */
+const PI_RUNTIME = "fg530-pi-runtime";
 
-function ensureRuntime(): void {
-  const runtimePath = join(process.env["FORGE_HOME"]!, "runtimes", `${RUNTIME}.yml`);
-  mkdirSync(dirname(runtimePath), { recursive: true });
-  writeFileSync(
-    runtimePath,
-    `name: ${RUNTIME}
+function runtimeYaml(name: string, metadata: string): string {
+  return `name: ${name}
 description: FG-530 crash-matrix stub runtime
-image: test-image:latest
+${metadata}image: test-image:latest
 models:
   default: test-model
 auth:
@@ -195,7 +209,16 @@ container:
   name: "forge-\${TASK_ID}"
 result:
   file: /task/result.json
-`,
+`;
+}
+
+function ensureRuntime(): void {
+  const dir = join(process.env["FORGE_HOME"]!, "runtimes");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${RUNTIME}.yml`), runtimeYaml(RUNTIME, ""));
+  writeFileSync(
+    join(dir, `${PI_RUNTIME}.yml`),
+    runtimeYaml(PI_RUNTIME, "runtime_kind: pi\nlog_format: pi-jsonl\n"),
   );
 }
 
@@ -212,7 +235,19 @@ type ExecOpts = {
   /** Omit tests_run from the primary's result so it FAILS the FG-523 validation
    *  contract — the only way to reach holdIfValidationContractFails's hold write. */
   primaryFailsContract?: boolean;
+  /** Write NO result.json and leave a pi-jsonl narrative on stdout instead — the
+   *  shape reconcile's stdout-recovered completion is built to recover from. */
+  narrativeStdoutOnly?: boolean;
 };
+
+/** A clean pi run whose agent honored nothing but its own narrative: agent_end with
+ *  a final assistant message and no result.json. analyzePiFailure reads the message
+ *  out as finalAssistantText, which inferredResultFrom turns into a result for a
+ *  narrative role. */
+const PI_NARRATIVE_STDOUT = JSON.stringify({
+  type: "agent_end",
+  messages: [{ role: "assistant", content: "FG-530 fixture: the research narrative this run produced" }],
+});
 
 /** Fake docker layer. Primaries return an implementer-shaped result that (by
  *  default) SATISFIES the validation contract, so the contract hold is not the
@@ -227,6 +262,12 @@ function makeExec(opts: ExecOpts): DockerExecFn {
     const taskId = (nameIdx >= 0 ? (args[nameIdx + 1] ?? "") : "").replace(/^forge-/, "");
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
+
+    if (opts.narrativeStdoutOnly) {
+      writeFileSync(stdoutPath, PI_NARRATIVE_STDOUT);
+      writeFileSync(stderrPath, "");
+      return 0;
+    }
 
     const isRed = taskId.includes("red") || taskId.includes("reviewer");
     // The fanout scenario's upstream step: its result carries the array the
@@ -523,6 +564,51 @@ steps:
       failure_mode: fail-phase
 `;
 
+// (6) an INVOKE-kind run. The ONLY shape in which reconcile COMPLETES a task rather
+//     than landing it fail-safe: run-kind.ts says `invoke` / `invoke_chain` runs have
+//     no host-side finalize, so a usable result IS the end of the task's lifecycle.
+//     Every other scenario here is a pipeline, where the identical evidence sends
+//     reconcile to failPipelineUnfinalized instead — which is exactly why reconcile's
+//     own completion writes had no cell until this scenario. They are the reconcile
+//     writes invariant 1 has the most at stake in: a completion, not a failure.
+const INVOKE_WF: Workflow = {
+  name: "invoke",
+  description: "FG-530: an invoke-kind run — the one kind reconcile may complete",
+  inputs: [],
+  steps: [step("build")],
+};
+const INVOKE_YAML = `name: invoke
+description: FG-530 invoke
+inputs: []
+steps:
+  - id: build
+    agent: engineer
+    gate: auto
+    runtime: ${RUNTIME}
+`;
+
+// (7) the second no-finalize run kind (`invoke_chain`, a campaign quick lane — FG-486),
+//     with a NARRATIVE role on a pi-format runtime whose agent wrote no result.json at
+//     all. Reconcile then completes from a result recovered out of stdout (FG-455 →
+//     FG-337 inferredResultFrom) — a SECOND completion write, with a different evidence
+//     base (nothing on disk to read) and its own transaction. The result-present arm's
+//     cells cannot vouch for it.
+const INVOKE_STDOUT_WF: Workflow = {
+  name: "invoke_chain",
+  description: "FG-530: an invoke_chain run whose narrative agent left only stdout",
+  inputs: [],
+  steps: [step("build", { agent: "research-specialist", runtime: PI_RUNTIME })],
+};
+const INVOKE_STDOUT_YAML = `name: invoke_chain
+description: FG-530 invoke chain
+inputs: []
+steps:
+  - id: build
+    agent: research-specialist
+    gate: auto
+    runtime: ${PI_RUNTIME}
+`;
+
 const SCENARIOS: Scenario[] = [
   {
     name: "plain",
@@ -639,6 +725,84 @@ const SCENARIOS: Scenario[] = [
       // It is the exact precondition of the fanout-parent recovery, and nothing else
       // in the run is touched.
       setTaskStatus(parent.id, "running");
+    },
+  },
+  {
+    // The fanout-parent recovery's OTHER arm. A wave in which not every child made
+    // it is a different recovery decision — a `partial` aggregate, a different
+    // operator message — reached through its own transaction, and the all-complete
+    // strand above can never produce it.
+    name: "fanout-parent-partial",
+    workflow: FANOUT_NO_RED_WF,
+    yaml: FANOUT_NO_RED_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec }); // plan → complete
+      await runNext({ runId, workflow, dockerExec: exec }); // wave: children complete, parent finalizes
+    },
+    strand: async (sc, runId, exec) => {
+      await sc.drive(runId, sc.workflow, exec);
+      const parent = primaryOf(runId, "build");
+      assert.ok(parent, "the fanout parent must exist for this strand to mean anything");
+      const children = tasksForRun(runId).filter((c) => c.parentId === parent.id);
+      assert.ok(children.length > 0, "the wave must have dispatched a child to fail");
+      // Same reconstruction as fanout-parent-orphaned above (and the same reason it
+      // is reconstructed rather than crashed into), with one child left FAILED: the
+      // wave that partly died, whose parent never got to finalize.
+      setTaskStatus(children[0]!.id, "failed");
+      setTaskStatus(parent.id, "running");
+    },
+  },
+  {
+    name: "invoke-reconcile-completes",
+    workflow: INVOKE_WF,
+    yaml: INVOKE_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    // strandMidFinalize is exactly right here: a `running` task whose container is
+    // gone with a usable result.json. On a PIPELINE that lands failPipelineUnfinalized;
+    // on this run kind it is reconcile's completion write.
+  },
+  {
+    name: "invoke-reconcile-completes-from-stdout",
+    workflow: INVOKE_STDOUT_WF,
+    yaml: INVOKE_STDOUT_YAML,
+    exec: { redVerdict: "pass", narrativeStdoutOnly: true },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      await strandMidFinalize(sc, runId, exec);
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
+      // The container wrote no result.json — the file on disk is the copy runNext's
+      // own FG-337 ingest synthesized from this stdout, moments before the kill. The
+      // crash being modelled lands EARLIER than that write: the container exited, the
+      // host died, and the captured stdout is all that survived. Remove it so reconcile
+      // faces the state its stdout-recovery exists for.
+      rmSync(join(taskDir(runId, t.id), "result.json"), { force: true });
+    },
+  },
+  {
+    name: "backfill-complete-empty-result",
+    workflow: PLAIN_WF,
+    yaml: PLAIN_YAML,
+    exec: { redVerdict: "pass" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec });
+    },
+    strand: async (sc, runId, exec) => {
+      await sc.drive(runId, sc.workflow, exec); // build completes: result on the row AND on disk
+      const t = primaryOf(runId, "build");
+      assert.ok(t, "the primary must exist for this strand to mean anything");
+      // FG-455 Mode A: a detached wrapper killed after the row went `complete` but
+      // before the structured result reached it. The ROW's result is the only casualty
+      // — result.json survives, and is what the backfill pass reads back. Nothing in
+      // production nulls a result (no store accessor does, deliberately), so the row is
+      // edited directly here; it is the only way to build the state.
+      db.prepare("UPDATE tasks SET result = NULL WHERE id = ?").run(t.id);
     },
   },
 ];

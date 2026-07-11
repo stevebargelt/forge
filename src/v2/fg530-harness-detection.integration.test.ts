@@ -1,7 +1,7 @@
 // FG-530 independent verification (integration tier): does the crash harness
 // actually DETECT what it claims to?
 //
-// The matrix's 90 cells are green. Green is only evidence if the checkers can go
+// Every cell of the matrix is green. Green is only evidence if the checkers can go
 // red — and the engineer proved that for exactly ONE shape (the two-write dance,
 // via invariant 1). The other four invariants have never been shown to fail on a
 // state that violates them, so nothing yet distinguishes "the runner is correct"
