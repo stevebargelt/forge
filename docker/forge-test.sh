@@ -134,8 +134,19 @@ function mirror(rel) {
       // A bind-mounted /project can report coarse (whole-second) or host-clock mtimes,
       // so a same-size edit can land with the mtime the scratch already has — and a
       // stat-only predicate would skip it, which is exactly the false green FG-520 kills.
-      if (ds && ds.size === ss.size && fs.readFileSync(dp).equals(fs.readFileSync(sp))) continue;
+      if (ds && ds.size === ss.size && fs.readFileSync(dp).equals(fs.readFileSync(sp))) {
+        // Same bytes still means a stale scratch if the mode moved: chmod +x on a
+        // helper or test script changes whether it RUNS, and a content-only predicate
+        // would keep grading the agent against the old permissions.
+        if ((ds.mode & 0o777) !== (ss.mode & 0o777)) {
+          fs.chmodSync(dp, ss.mode & 0o777);
+          copied++;
+        }
+        continue;
+      }
       fs.copyFileSync(sp, dp);
+      // copyFileSync into an EXISTING file keeps the old mode on it.
+      fs.chmodSync(dp, ss.mode & 0o777);
       fs.utimesSync(dp, ss.atime, ss.mtime);
       copied++;
     }

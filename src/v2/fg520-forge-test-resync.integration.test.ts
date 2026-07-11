@@ -38,16 +38,33 @@ interface Fixture {
   base: string;
 }
 
-// A stub npm: logs every invocation, and materialises a loadable `tsx` on install
-// so the script's `node --import tsx` probe passes the way a real install would.
+// A stub npm: logs every invocation, materialises a loadable `tsx` on install so the
+// script's `node --import tsx` probe passes the way a real install would, and — for
+// `npm run <script>` — actually EXECUTES the fixture's script from the scratch cwd.
+// That last part is what makes "the rerun tests the edited source" an observable fact:
+// the fixture's tier command reads src/a.ts out of the scratch and prints it, so a
+// stale mirror shows up as stale stdout rather than only as a file the test re-reads.
 const STUB_NPM = `#!/usr/bin/env bash
 echo "npm $*" >> "$NPM_LOG"
-if [[ "\$1" == "ci" || "\$1" == "install" ]]; then
+if [[ "$1" == "ci" || "$1" == "install" ]]; then
   mkdir -p node_modules/tsx
   printf '%s' '{"name":"tsx","version":"0.0.0","type":"module","exports":"./index.js"}' > node_modules/tsx/package.json
   : > node_modules/tsx/index.js
+  exit 0
+fi
+if [[ "$1" == "run" ]]; then
+  cmd=$(node -e 'const p = JSON.parse(require("fs").readFileSync("package.json", "utf8")); process.stdout.write((p.scripts || {})[process.argv[1]] || "")' "$2")
+  [[ -n "$cmd" ]] || exit 1
+  exec bash -c "$cmd"
 fi
 exit 0
+`;
+
+// The fixture's tier command. Executed by the stub npm from inside the scratch, it
+// reports the source it actually ran against — and it must be executable to run at
+// all, which is what makes a mode-only edit observable end to end.
+const RUN_TESTS_SH = `#!/usr/bin/env bash
+echo "RAN-AGAINST: $(cat src/a.ts)"
 `;
 
 function makeFixture(): Fixture {
@@ -61,13 +78,15 @@ function makeFixture(): Fixture {
     join(src, "package.json"),
     JSON.stringify({
       name: "fixture",
-      scripts: { "test:unit": "echo ran" },
+      scripts: { "test:unit": "./src/run-tests.sh" },
       devDependencies: { tsx: "*" },
     })
   );
   writeFileSync(join(src, "package-lock.json"), "{}");
   writeFileSync(join(src, "src", "a.ts"), "export const a = 1;\n");
   writeFileSync(join(src, "src", "doomed.ts"), "export const doomed = true;\n");
+  writeFileSync(join(src, "src", "run-tests.sh"), RUN_TESTS_SH);
+  chmodSync(join(src, "src", "run-tests.sh"), 0o755);
 
   writeFileSync(join(bin, "npm"), STUB_NPM);
   chmodSync(join(bin, "npm"), 0o755);
@@ -110,6 +129,7 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
         "the tier UX must be unchanged — no args still runs test:unit"
       );
       assert.equal(readFileSync(join(f.work, "src", "a.ts"), "utf8"), "export const a = 1;\n");
+      assert.match(r.stdout, /RAN-AGAINST: export const a = 1;/, "the tier must actually execute");
     });
 
     await t.test("an edited source file is what the NEXT run tests", () => {
@@ -120,6 +140,13 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
         readFileSync(join(f.work, "src", "a.ts"), "utf8"),
         "export const a = 2; // edited\n",
         "the scratch must hold the EDITED source — this is the false-green the ticket is about"
+      );
+      // The end-to-end half: the tier command RAN and saw the edit. A copied file the
+      // test re-reads itself proves the mirror; this proves the runner.
+      assert.match(
+        r.stdout,
+        /RAN-AGAINST: export const a = 2; \/\/ edited/,
+        "the executed tier must observe the edited source, not the first snapshot"
       );
     });
 
@@ -281,6 +308,36 @@ test("FG-520: the mirror handles the tree-shape edits an agent actually makes", 
         true,
         "the delete pass must take the dead directory and nothing else"
       );
+    });
+
+    await t.test("a chmod-only change propagates — same bytes, different mode", () => {
+      // The other half of a stale scratch: an agent flips a helper/test script's
+      // executable bit and re-runs. The bytes are identical, so a content-only skip
+      // predicate leaves the OLD mode in the scratch and the rerun is graded against a
+      // materially different runnable input than the one in source.
+      const helper = join(f.src, "src", "run-tests.sh");
+      const scratchHelper = join(f.work, "src", "run-tests.sh");
+      const bytes = readFileSync(helper);
+
+      chmodSync(helper, 0o644);
+      const deExecuted = runForgeTest(f);
+      assert.deepEqual(readFileSync(helper), bytes, "the fixture must change ONLY the mode");
+      assert.equal(
+        statSync(scratchHelper).mode & 0o777,
+        0o644,
+        "a mode change must reach the scratch even when the content matches"
+      );
+      assert.notEqual(
+        deExecuted.status,
+        0,
+        "a de-executed runner must actually fail the run — a stale executable copy would pass"
+      );
+
+      chmodSync(helper, 0o755);
+      const restored = runForgeTest(f);
+      assert.equal(statSync(scratchHelper).mode & 0o777, 0o755, "and the mode must come back");
+      assert.equal(restored.status, 0, restored.stderr);
+      assert.match(restored.stdout, /RAN-AGAINST:/, "the re-executable runner must run again");
     });
   } finally {
     rmSync(f.base, { recursive: true, force: true });
