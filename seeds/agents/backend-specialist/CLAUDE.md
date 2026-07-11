@@ -64,7 +64,7 @@ forge-test --integration               # CLI-spawn / real filesystem / real DB t
 forge-test src/path/specific.test.ts    # a single file
 ```
 
-`forge-test` copies `/project` to a scratch dir, rebuilds native modules for the container, runs the tests. First invocation per container takes ~30-60s.
+`forge-test` runs the tests from a scratch copy of `/project`, with native modules rebuilt for the container. Every invocation re-syncs your source edits (and deletions) into that scratch and validates its deps first, so a re-run always tests the code you just wrote. First invocation per container takes ~30-60s (the install); later runs are near-instant.
 
 After each plan step, run `forge-test` (unit tier) for most changes. For backend work, run `forge-test --integration` when your change touches CLI-spawn, real filesystem, or real DB boundaries — integration tests that exercise transaction boundaries and migration paths require it.
 

@@ -21,6 +21,7 @@ import {
   rmSync,
   statSync,
   chmodSync,
+  utimesSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -206,10 +207,10 @@ test("FG-520: the mirror handles the tree-shape edits an agent actually makes", 
     runForgeTest(f); // cold: populate the scratch
 
     await t.test("a same-size content edit still propagates", () => {
-      // The mirror's skip predicate is (size equal AND mtime equal). Size alone is
-      // not a safe signal — a one-character fix ("=== 1" -> "=== 2", a flipped
-      // boolean) keeps the byte count identical. If anyone ever relaxes the
-      // predicate to size-only, this is the false green FG-520 exists to kill.
+      // The mirror's skip predicate is content equality. Size alone is not a safe
+      // signal — a one-character fix ("=== 1" -> "=== 2", a flipped boolean) keeps
+      // the byte count identical. If anyone ever relaxes the predicate to size-only,
+      // this is the false green FG-520 exists to kill.
       const a = join(f.src, "src", "a.ts");
       const before = statSync(a).size;
       writeFileSync(a, "export const a = 9;\n");
@@ -221,6 +222,34 @@ test("FG-520: the mirror handles the tree-shape edits an agent actually makes", 
         readFileSync(join(f.work, "src", "a.ts"), "utf8"),
         "export const a = 9;\n",
         "a same-size edit must reach the scratch — size is not a content check"
+      );
+    });
+
+    await t.test("a same-size edit that PRESERVES mtime still propagates", () => {
+      // The stat-only trap: a bind-mounted /project can hand back coarse or
+      // host-clock mtimes, so an edit can carry the same size AND the same mtime the
+      // scratch already recorded. Under a (size && mtime) predicate the mirror skips
+      // it and the agent is graded against stale source. Content is the only signal
+      // that survives an unreliable clock.
+      const a = join(f.src, "src", "a.ts");
+      const s = statSync(a);
+      writeFileSync(a, "export const a = 7;\n");
+      utimesSync(a, s.atime, s.mtime);
+
+      const after = statSync(a);
+      assert.equal(after.size, s.size, "fixture must hold size constant");
+      assert.equal(
+        after.mtimeMs,
+        statSync(join(f.work, "src", "a.ts")).mtimeMs,
+        "the edited source must carry the mtime the scratch copy already has — otherwise this proves nothing"
+      );
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        readFileSync(join(f.work, "src", "a.ts"), "utf8"),
+        "export const a = 7;\n",
+        "same size + same mtime + different bytes must still reach the scratch"
       );
     });
 

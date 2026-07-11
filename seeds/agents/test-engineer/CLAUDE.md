@@ -112,7 +112,7 @@ forge-test src/path/specific.test.ts    # a single file
 forge-test src/path/*.test.ts           # a glob
 ```
 
-`forge-test` copies `/project` to `/tmp/forge-work`, rebuilds native modules for the container, then runs tests. First invocation takes ~30-60s; subsequent runs reuse the work dir.
+`forge-test` runs the tests from a scratch copy of `/project` at `/tmp/forge-work`, with native modules rebuilt for the container. **Every invocation re-syncs your source edits (and deletions) into the scratch and validates its deps first** — so a newly written or edited test file is picked up on the next run. The first run in a container takes ~30-60s (the install); later runs are near-instant unless dependencies actually changed.
 
 After writing your tests, run them via the appropriate tier: `forge-test` (unit tier) for pure in-memory tests; `forge-test --integration` for integration tests; `forge-test --worktree` for worktree tests. **Do not submit tests you haven't run.** A test file that fails on first run is worse than no test — it wastes everyone's time.
 

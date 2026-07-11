@@ -89,7 +89,7 @@ if [[ ! -d "$SRC_DIR" ]]; then
 fi
 
 # ── SOURCE RE-SYNC (FG-520) ─────────────────────────────────────────────────
-# Mirror SRC_DIR into WORK_DIR: copy files whose size or mtime differs, delete
+# Mirror SRC_DIR into WORK_DIR: copy files whose CONTENT differs, delete
 # scratch paths whose source is gone, leave everything else alone. Skipped at
 # every depth: node_modules (the scratch owns its own, natively built — copying
 # the host's back over it is the mismatch this script exists to avoid), .git
@@ -130,7 +130,11 @@ function mirror(rel) {
     } else if (e.isFile()) {
       const ss = fs.statSync(sp);
       if (ds && !ds.isFile()) { clear(dp); ds = null; }
-      if (ds && ds.size === ss.size && ds.mtimeMs === ss.mtimeMs) continue;
+      // Content, not stat metadata: mtime is not a trustworthy change signal here.
+      // A bind-mounted /project can report coarse (whole-second) or host-clock mtimes,
+      // so a same-size edit can land with the mtime the scratch already has — and a
+      // stat-only predicate would skip it, which is exactly the false green FG-520 kills.
+      if (ds && ds.size === ss.size && fs.readFileSync(dp).equals(fs.readFileSync(sp))) continue;
       fs.copyFileSync(sp, dp);
       fs.utimesSync(dp, ss.atime, ss.mtime);
       copied++;
