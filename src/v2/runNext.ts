@@ -1731,12 +1731,15 @@ async function dispatchFanoutStep(args: {
       // lost a race (task no longer awaiting_red), report its actual status
       // rather than logging/notifying a transition that didn't happen.
       let blockedByRedApplied = false;
+      crashPoint("dispatchFanoutStep:before-blocked-by-red");
       getDb().transaction(() => {
         blockedByRedApplied = markTaskBlockedByRed(parentId, parentResult);
+        crashPoint("dispatchFanoutStep:inside-blocked-by-red-txn");
         if (blockedByRedApplied) {
           logEvent("task.blocked_by_red", { runId: args.runId, taskId: parentId });
         }
       })();
+      crashPoint("dispatchFanoutStep:after-blocked-by-red");
       if (!blockedByRedApplied) {
         return getTask(parentId)?.status ?? "failed";
       }

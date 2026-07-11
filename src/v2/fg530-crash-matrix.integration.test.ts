@@ -82,9 +82,11 @@ import type { Task, TaskStatus } from "../types/index.js";
 //               post-container sequence (result ingestion → validation-contract
 //               hold → awaiting_red → verdict inserts → blocked_by_red →
 //               finalizePrimary → event appends), and dispatchFanoutStep's own
-//               awaiting_red transition — the fanout PARENT's copy of that window,
-//               a separate callsite over a row no container ever ran, so the
-//               single-step cells cannot vouch for it
+//               awaiting_red and blocked_by_red transitions — the fanout PARENT's
+//               copy of those windows, separate callsites over a row no container
+//               ever ran (and, for blocked_by_red, a separate FG-482 transaction
+//               with its own ordering and CAS), so the single-step cells cannot
+//               vouch for them
 //   gate      — gate.ts's decision writes (advance, reject + on_reject recovery
 //               mint OR dedup onto an existing recovery row, request-changes
 //               replacement mint OR dedup onto an existing pending primary)
@@ -143,6 +145,9 @@ const KILL_POINTS: KillPoint[] = [
   { point: "dispatchFanoutStep:before-awaiting-red", surface: "dispatch" },
   { point: "dispatchFanoutStep:between-awaiting-red-status-and-event", surface: "dispatch" },
   { point: "dispatchFanoutStep:after-awaiting-red", surface: "dispatch" },
+  { point: "dispatchFanoutStep:before-blocked-by-red", surface: "dispatch" },
+  { point: "dispatchFanoutStep:inside-blocked-by-red-txn", surface: "dispatch" },
+  { point: "dispatchFanoutStep:after-blocked-by-red", surface: "dispatch" },
   { point: "finalizePrimary:before-status-write", surface: "dispatch" },
   { point: "finalizePrimary:between-complete-status-and-event", surface: "dispatch" },
   { point: "finalizePrimary:between-awaiting-gate-status-and-event", surface: "dispatch" },

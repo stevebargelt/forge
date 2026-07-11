@@ -743,18 +743,10 @@ const ALLOWLIST: Allow[] = [
     call: "logEvent",
     reason:
       "integration.worktree_created / integration.child_merged / integration.merged_to_head are audit appends about git " +
-      "state, and task.created / task.completed / task.blocked_by_red sit against the status writes below, which carry " +
-      "their own reasons. None of these events is read to decide a transition. (task.awaiting_red is NOT among them: it " +
-      "sits inside the probed dispatchFanoutStep:{before,between,after}-awaiting-red sequence.)",
-  },
-  {
-    file: "v2/runNext.ts",
-    fn: "dispatchFanoutStep",
-    call: "markTaskBlockedByRed",
-    reason:
-      "the parent's blocked_by_red write — the same FG-482 CAS'd getDb().transaction as dispatchSingleStep's, whose two " +
-      "boundaries are probed (dispatchSingleStep:{before,inside,after}-blocked-by-red). Same statement, same rollback " +
-      "semantics, same recovery: a crash rolls the group back and the parent stays awaiting_red.",
+      "state, and task.created / task.completed sit against the status writes below, which carry their own reasons. None " +
+      "of these events is read to decide a transition. (task.awaiting_red and task.blocked_by_red are NOT among them: they " +
+      "sit inside the probed dispatchFanoutStep:{before,between,after}-awaiting-red and " +
+      "dispatchFanoutStep:{before,inside,after}-blocked-by-red sequences.)",
   },
   {
     file: "v2/runNext.ts",
