@@ -98,6 +98,9 @@ const KILL_POINTS: KillPoint[] = [
   { point: "gate:after-decision-write", surface: "gate" },
   { point: "gate:advance:between-complete-status-and-event", surface: "gate" },
   { point: "gate:advance:after-complete-write", surface: "gate" },
+  { point: "gate:advance:fanout-reentry:before-reentry-write", surface: "gate" },
+  { point: "gate:advance:fanout-reentry:inside-reentry-write-txn", surface: "gate" },
+  { point: "gate:advance:fanout-reentry:after-reentry-write", surface: "gate" },
   { point: "gate:reject:before-fail-write", surface: "gate" },
   { point: "gate:reject:inside-txn-between-fail-and-recovery-mint", surface: "gate" },
   { point: "gate:reject:inside-txn-between-recovery-mint-and-event", surface: "gate" },
@@ -211,6 +214,9 @@ function makeExec(opts: ExecOpts): DockerExecFn {
     mkdirSync(dir, { recursive: true });
 
     const isRed = taskId.includes("red") || taskId.includes("reviewer");
+    // The fanout scenario's upstream step: its result carries the array the
+    // fanout step reads (`from_upstream.array_key`). One element ⇒ one child.
+    const isFanoutUpstream = taskId.startsWith("task-plan-");
     const result = isRed
       ? {
           status: "complete",
@@ -231,7 +237,9 @@ function makeExec(opts: ExecOpts): DockerExecFn {
         }
       : opts.primaryFailsContract
         ? { status: "complete", files_modified: [] }
-        : { status: "complete", tests_run: 1, files_modified: [] };
+        : isFanoutUpstream
+          ? { status: "complete", tests_run: 1, files_modified: [], units: ["alpha"] }
+          : { status: "complete", tests_run: 1, files_modified: [] };
 
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "stub stdout");
@@ -336,6 +344,50 @@ steps:
     on_reject: build
 `;
 
+// (4) fanout behind an authoritative red — the ONLY path to gate.ts's blocked-
+//     fanout advance branch (FG-353 re-entry): the red blocks the fanout PARENT,
+//     the operator force-advances, and gate atomically writes gateForced into the
+//     parent's task-package inputs + flips it to pending so dispatchFanoutStep
+//     re-enters. That write surface has its own kill points.
+const FANOUT_WF: Workflow = {
+  name: "fg530-fanout",
+  description: "FG-530: fanout step behind an authoritative red, force-advanced",
+  inputs: [],
+  steps: [
+    step("plan"),
+    step("build", {
+      gate: "verdict",
+      depends_on: ["plan"],
+      fanout: { from_upstream: { step: "plan", array_key: "units", input_key: "unit" }, failure_mode: "fail-phase" },
+      reds: [{ agent: "red-security", authority: "authoritative", gate_on_verdict: true }],
+    }),
+  ],
+};
+const FANOUT_YAML = `name: fg530-fanout
+description: FG-530 fanout
+inputs: []
+steps:
+  - id: plan
+    agent: engineer
+    gate: auto
+    runtime: ${RUNTIME}
+  - id: build
+    agent: engineer
+    gate: verdict
+    runtime: ${RUNTIME}
+    depends_on: [plan]
+    fanout:
+      from_upstream:
+        step: plan
+        array_key: units
+        input_key: unit
+      failure_mode: fail-phase
+    reds:
+      - agent: red-security
+        authority: authoritative
+        gate_on_verdict: true
+`;
+
 const SCENARIOS: Scenario[] = [
   {
     name: "plain",
@@ -401,6 +453,21 @@ const SCENARIOS: Scenario[] = [
         await gate(review.id, "request-changes", "revise the review");
       }
       await runNext({ runId, workflow, dockerExec: exec });
+    },
+  },
+  {
+    name: "fanout-red-blocks",
+    workflow: FANOUT_WF,
+    yaml: FANOUT_YAML,
+    exec: { redVerdict: "fail" },
+    drive: async (runId, workflow, exec) => {
+      await runNext({ runId, workflow, dockerExec: exec }); // plan → complete
+      await runNext({ runId, workflow, dockerExec: exec }); // fanout children + red → parent blocked_by_red
+      const parent = primaryOf(runId, "build");
+      if (parent && parent.status === "blocked_by_red") {
+        await gate(parent.id, "advance", "override the fanout red for the crash matrix", { force: true });
+      }
+      await runNext({ runId, workflow, dockerExec: exec }); // gateForced re-entry finalizes the parent
     },
   },
 ];
@@ -868,35 +935,65 @@ for (const sc of SCENARIOS) {
   }
 }
 
-// ── invariant 3 needs an abandoned run to have teeth ──────────────────────────
+// ── invariant 3, at every kill point: the cancel race ──────────────────────────
+//
+// The matrix cells above never cancel, so `wasAbandoned` is false for all of them
+// and checkAbandonedNeverOverwritten returns immediately — invariant 3 only has
+// teeth when a `forge cancel` lands WHILE the runner is dead. So run that race at
+// EVERY kill window, not just one: the resurrection bug is a property of the
+// recovery path, and each crash window leaves recovery a different state to
+// resurrect from.
+//
+// Each cell picks the first scenario that actually reaches its kill point (not
+// every scenario reaches every one — that's what the registry-coverage test at the
+// end is for), crashes there, cancels, then recovers to fixpoint.
 
-test("FG-530 invariant 3: a `forge cancel` that lands WHILE the runner is crashed must never be resurrected to complete by recovery", async () => {
-  ensureRuntime();
-  writeWorkflowYaml(PLAIN_WF.name, PLAIN_YAML);
-  const projectDir = makeTmpDir();
-  const exec = makeExec({ redVerdict: "pass" });
-  const { runId } = startRun({ workflow: PLAIN_WF, title: "fg530 cancel race", inputs: {}, projectDir });
-
-  // Crash mid-finalize, then the operator cancels the run before recovery runs.
-  const fired = await crashAt("dispatchSingleStep:after-result-ingest", () =>
-    runNext({ runId, workflow: PLAIN_WF, dockerExec: exec }),
+async function crashInFirstReachingScenario(
+  kp: KillPoint,
+): Promise<{ sc: Scenario; runId: string; exec: DockerExecFn }> {
+  for (const sc of SCENARIOS) {
+    writeWorkflowYaml(sc.workflow.name, sc.yaml);
+    const projectDir = makeTmpDir();
+    const exec = makeExec(sc.exec);
+    const { runId } = startRun({
+      workflow: sc.workflow,
+      title: `fg530 cancel race ${sc.name} @ ${kp.point}`,
+      inputs: {},
+      projectDir,
+    });
+    if (await runCrashPhase(sc, runId, exec, kp)) return { sc, runId, exec };
+  }
+  throw new Error(
+    `no scenario reaches kill point ${kp.point}, so invariant 3 cannot be exercised there — add a scenario (the registry-coverage test names the same gap)`,
   );
-  assert.ok(fired, "the kill must actually fire — otherwise this test proves nothing");
-  updateRunStatus(runId, "abandoned");
+}
 
-  const persistedPreKill = capturePersistedWork(runId);
-  await recoverToFixpoint(runId, PLAIN_WF, exec);
+for (const kp of KILL_POINTS) {
+  test(`FG-530 invariant 3 [cancel race] kill @ ${kp.point}: a \`forge cancel\` that lands while the runner is crashed must never be resurrected by recovery`, async () => {
+    ensureRuntime();
+    const { sc, runId, exec } = await crashInFirstReachingScenario(kp);
 
-  assert.equal(getRun(runId)!.status, "abandoned", "recovery must leave the abandoned run abandoned");
-  const violations = await checkAllInvariants({
-    runId,
-    workflow: PLAIN_WF,
-    exec,
-    persistedPreKill,
-    wasAbandoned: true,
+    updateRunStatus(runId, "abandoned"); // the operator cancels before recovery runs
+
+    const persistedPreKill = capturePersistedWork(runId);
+    await recoverToFixpoint(runId, sc.workflow, exec);
+
+    assert.equal(getRun(runId)!.status, "abandoned", "recovery must leave the abandoned run abandoned");
+    const violations = await checkAllInvariants({
+      runId,
+      workflow: sc.workflow,
+      exec,
+      persistedPreKill,
+      wasAbandoned: true,
+    });
+    const { unexpected } = partitionKnown(violations);
+    assert.deepEqual(
+      unexpected,
+      [],
+      `cancel racing a crash @ ${kp.point} (scenario '${sc.name}') violated lifecycle invariants:\n${formatViolations(unexpected)}`,
+    );
   });
-  assert.deepEqual(violations, [], `abandoned-run recovery violated invariants:\n${formatViolations(violations)}`);
-});
+}
 
 // ── inertness at FLOW level (the other half of the scope guard) ────────────────
 

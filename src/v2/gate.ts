@@ -170,10 +170,13 @@ export async function gate(
       // transition to pending so the runner picks it up.
       // Atomic: both writes must succeed together so a crash cannot leave
       // the task in blocked_by_red with gateForced:true set (wedged).
+      crashPoint("gate:advance:fanout-reentry:before-reentry-write");
       getDb().transaction(() => {
         updateTaskPackageInputs(taskId, { ...task.taskPackage.inputs, gateForced: true });
+        crashPoint("gate:advance:fanout-reentry:inside-reentry-write-txn");
         setTaskStatus(taskId, "pending");
       })();
+      crashPoint("gate:advance:fanout-reentry:after-reentry-write");
       return { task: getTask(taskId)!, nextTasks: [] };
     }
     // Non-fanout or non-blocked advance: unchanged.
