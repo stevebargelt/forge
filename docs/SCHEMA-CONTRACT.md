@@ -46,6 +46,7 @@ Columns the dashboard reads:
 - `authority` — string, one of `triage | specialist | authoritative`
 - `findings` — JSON string (array of `{severity, summary, evidence, hypothesis}`)
 - `created_at` — ISO 8601
+- `gate_on_verdict` — nullable integer (`1` / `0`), the red's `gate_on_verdict` config captured at verdict-insert time. Additive and nullable with no default: rows written before the column existed read back `NULL`. A verdict blocks the gate when `verdict = fail` AND `authority = authoritative` AND `gate_on_verdict` is not `0` — so a legacy `NULL` blocks (fail closed), and only an explicit `0` opts a fail out of blocking. Persisting it is what lets red dispatch (in-hand config) and the later gate re-check (persisted rows) apply one blocking rule instead of two.
 
 ### `gates` table
 
@@ -94,6 +95,13 @@ Emitted by `forge campaign reconcile`'s (or the drive-time equivalent's) write p
 - `campaign_item.campaign_system_retried` — FG-511: `forge campaign retry` reset a `blockerKind:'campaign_system'`, `lifecycleStatus:'failed'`, `outcome:'blocked'` item back to `pending` after proving two things from durable evidence — that the ticket was **not** already delivered, and that **every** failed primary task of the underlying run classified transient (`auth` or `infrastructure`) via `failureKindForTask`/`classifyFailureKind`. Payload: `{ campaignId, itemId, ticketId, runId, evidence: [{ taskId, failureKind, classified }], decidedAt }` — one `evidence` row per failed primary task, recording exactly which durable evidence licensed the retry. The events-table `run_id` column is set to the item's pre-reset `runId`, which is always present for this event. The probe refuses fail-closed, in this order, when the campaign has no stored project directory (so delivery cannot be re-derived at all), when the ticket is provably delivered (closed, closing commit reachable on the base branch, lane evidence satisfied, no unresolved authoritative objection on its own run — refusal names `forge campaign reconcile`), when there is no linked run, when the run is absent from the store, when the run reached `complete`, when no failed primary task was recorded, or when any failed primary classifies non-transient. Logged inside the same transaction as the CAS-guarded reset, so a concurrent unpause that no-ops the reset logs no event either — the same atomicity `campaign_item.campaign_system_reconciled` uses.
 
   Distinct from `campaign_item.campaign_system_reconciled`: that event **ships** an item whose work turned out to be already delivered out-of-band; this one **re-drives** an item whose run was abandoned by a transient blip and never finished. The two can never both apply to the same item, and not by convention: retry's probe tests ship eligibility through `evaluateCampaignSystemShipEligibility` — the same out-of-band composition reconcile ships shape 3 on, minus reconcile's host-verification capture — and refuses the moment it holds, so a delivered item is reconciled rather than re-dispatched. Retry on `auth`/`infrastructure` logs no event at all — that `blockerKind` already is the classification, so there is no derived evidence to record. There is no corresponding `*_retry_refused` event; retry refusals are returned to the CLI, not persisted.
+
+#### Validation-contract events
+
+FG-523. Two task-scoped events carry the outcome of the [validation contract](concepts.md#validation-contract) — the rule that an implementer primary may not return `status: "complete"` without either a positive `tests_run` or a `no_validation_reason` waiver. No schema/column change accompanies them; they are ordinary `events` rows.
+
+- `task.awaiting_gate` — already emitted whenever a task parks at a gate, but a **validation hold** adds a payload: `{ kind: "validation_contract", reason }`, where `reason` names the role and what was observed (e.g. `tests_run=0`). An ordinary human/verdict gate emits the event with no payload reason. `forge show <task-id>` reads the latest such event to render its `gate hold:` line and the `diagnostic.gateHold` JSON field — a task can be re-held, so latest wins, and an absent/empty `reason` renders nothing.
+- `task.decision` — payload `{ kind: "validation_waiver", reason }`, emitted when a complete-without-`tests_run` result **advanced** on its `no_validation_reason` waiver. The waived result is the one case where the contract lets an unvalidated completion through, so the waiver is recorded rather than left implicit.
 
 ### `campaigns` / `campaign_items` tables
 
@@ -213,9 +221,15 @@ These aren't enforced by forge — they're conventions in agent seeds. The dashb
   "diff_summary": "...",
   "files_modified": ["src/..."],
   "discipline": "frontend|backend|infosec|platform",
+  "tests_run": 12,
+  "tests_passed": 12,
+  "tests_failed": 0,
+  "no_validation_reason": "...",
   "notes": "..."
 }
 ```
+
+These five roles are the implementer roles, and their results are the ones the **validation contract** is enforced against (see [Validation contract](concepts.md#validation-contract)). A `status: "complete"` result from one of them, running as a workflow primary, must carry a numeric `tests_run` greater than zero — or a non-empty `no_validation_reason` string, the explicit waiver for a complete result with no validation path. Neither one, and the runner parks the task at `awaiting_gate` with a named hold reason instead of advancing it; a waived result advances and records a `task.decision` event with `kind: "validation_waiver"`. `no_validation_reason` is otherwise omitted.
 
 ### `test-engineer`
 

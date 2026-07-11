@@ -53,7 +53,7 @@ Output: `{steps: [{id, summary, files, acceptance}]}`. No reds. Gate: `human`.
 
 Output: `{steps_completed, diff_summary, files_modified}`. The engineer (or discipline specialist) edits files inside the container; the host project directory is mounted `rw`.
 
-Reds include wide/narrow/frontend/backend/security specialists — all **authoritative authority + `gateOnVerdict: true`**. If any returns `fail`, the task is set to `blocked_by_red` and the run halts. The plain `feature` workflow's `build` phase additionally includes a **shipping-reviewer** red (see "Workflows with a shipping-reviewer red require a backlog ticket" above); `feature-ui-design-needed` (used in the example above) and `feature-ui-design-provided` do not carry one. Where present, shipping-reviewer needs the run's ticket — without it, it pre-fails and blocks the gate too. To override:
+Reds include wide/narrow/frontend/backend/security specialists — all **`authority: authoritative` + `gate_on_verdict: true`**. If any returns `fail`, the task is set to `blocked_by_red` and the run halts. The plain `feature` workflow's `build` phase additionally includes a **shipping-reviewer** red (see "Workflows with a shipping-reviewer red require a backlog ticket" above); `feature-ui-design-needed` (used in the example above) and `feature-ui-design-provided` do not carry one. Where present, shipping-reviewer needs the run's ticket — without it, it pre-fails and blocks the gate too. To override:
 
 ```bash
 forge gate task-build-<suffix> advance --force --rationale "specific reason for overriding the red"

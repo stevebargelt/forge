@@ -53,7 +53,13 @@ CREATE TABLE IF NOT EXISTS verdicts (
   confidence      REAL NOT NULL,
   authority       TEXT NOT NULL,
   findings        TEXT NOT NULL,
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  -- FG-523 (F16): the red's gate_on_verdict config, captured at verdict-insert
+  -- time. Dispatch blocks on the in-hand config; the later gate re-check
+  -- (aggregateVerdicts) reads rows — without this column the two sites derive
+  -- blocking from different data. Nullable: legacy rows read back NULL and
+  -- fail closed (treated as true), preserving pre-migration behavior.
+  gate_on_verdict INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_verdicts_task ON verdicts(task_id);
 

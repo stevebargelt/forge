@@ -22,7 +22,7 @@
 //
 // blocked_by_red also requires --force to advance.
 
-import type { GateDecision, Task, TaskPackage, VerdictRow } from "../types/index.js";
+import type { GateDecision, RedAuthority, Task, TaskPackage, VerdictRow } from "../types/index.js";
 import { getTask, setTaskStatus, setTaskParentId, insertTask, markTaskComplete, updateTaskPackageInputs } from "../store/tasks.js";
 import { getDb } from "../store/db.js";
 import { verdictsForTask } from "../store/verdicts.js";
@@ -49,10 +49,22 @@ export type AggregatedVerdict = {
   specialistFails: VerdictRow[];
 };
 
+// FG-523 (F16): the ONE rule for "does this verdict block the gate?", applied by
+// both consumers — dispatch (runNext, from the in-hand red config) and this
+// module's gate re-check (from the persisted row). gate_on_verdict is nullable
+// on the row: a legacy verdict written before the column existed reads back
+// null/undefined and blocks, preserving pre-migration behavior (fail closed).
+// Only an explicit `false` opts a fail out of blocking.
+export function verdictBlocksGate(v: {
+  verdict: VerdictRow["verdict"];
+  authority: RedAuthority;
+  gateOnVerdict?: boolean | null;
+}): boolean {
+  return v.verdict === "fail" && v.authority === "authoritative" && v.gateOnVerdict !== false;
+}
+
 export function aggregateVerdicts(verdicts: VerdictRow[]): AggregatedVerdict {
-  const authoritativeFails = verdicts.filter(
-    (v) => v.verdict === "fail" && v.authority === "authoritative",
-  );
+  const authoritativeFails = verdicts.filter(verdictBlocksGate);
   const specialistFails = verdicts.filter(
     (v) => v.verdict === "fail" && v.authority === "specialist",
   );

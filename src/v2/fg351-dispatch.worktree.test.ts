@@ -171,7 +171,7 @@ function makeCapturingExec(capture: ExecCapture): DockerExecFn {
     capture.args = [...args];
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1 }));
     writeFileSync(stdoutPath, "stub stdout");
     writeFileSync(stderrPath, "");
     return 0;

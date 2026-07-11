@@ -75,6 +75,8 @@ steps:
 
 `gate: human` pauses and waits for `forge gate <task-id> advance`. `gate: verdict` resolves automatically from the reds panel — no human stop unless the verdict closes the gate (blocked) or the human chooses to intervene.
 
+Whatever gate you declare, a step whose agent is an implementer role can still park at `awaiting_gate` on a validation hold: a `status: "complete"` result with no `tests_run` and no `no_validation_reason` waiver is held rather than advanced, including under `gate: auto`. Design for it — it is a normal outcome of an under-validated implementer step, recovered with `forge gate <task-id> --advance | --reject`. See [Validation contract](concepts.md#validation-contract).
+
 Two fields on each red determine its effect on the gate:
 
 | field | value | effect on gate |
@@ -85,6 +87,8 @@ Two fields on each red determine its effect on the gate:
 | `gate_on_verdict` | `false` | verdict is recorded but does not block |
 
 In the `audit` step: `red-security` and `red-wide` are `authority: authoritative, gate_on_verdict: true` — a fail from either blocks the gate and the task enters `blocked_by_red`. `red-narrow` is `authority: specialist, gate_on_verdict: false` — it can fail without blocking; its findings annotate the task view for the human to consider.
+
+Both fields take effect only in combination: a verdict blocks when it is a `fail` from an `authority: authoritative` red whose `gate_on_verdict` is not `false`. The red's `gate_on_verdict` is captured on the verdict row when the verdict is written, so red dispatch and the later gate re-check apply that one rule to the same recorded fact rather than each deriving it from their own data (see [Verdict](concepts.md#verdict)).
 
 When blocked, the human can force-advance anyway: `forge gate <task-id> advance --force --rationale "..."`.
 

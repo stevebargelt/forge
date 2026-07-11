@@ -191,7 +191,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // shipping-reviewer returns ship over an active (unresolved) done-audit
         result = {
@@ -279,7 +279,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // deferral is missing followUpTicketId — invalid
         result = {
@@ -367,7 +367,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // shipping-reviewer ships with an accepted exception — guardrail sees
         // accepted_exception disposition so isExcepted=true and ship stays pass.
@@ -449,7 +449,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         result = {
           status: "complete",
@@ -536,7 +536,7 @@ test(
 
       let result: unknown;
       if (taskId.startsWith("task-build-")) {
-        result = { status: "complete", files_modified: [], commitSha: "deadbeef" };
+        result = { status: "complete", tests_run: 1, files_modified: [], commitSha: "deadbeef" };
       } else {
         // All reviewer findings are malformed: severity present but summary absent.
         // gradeFindings will reject every one of them. The unconditional synthetic

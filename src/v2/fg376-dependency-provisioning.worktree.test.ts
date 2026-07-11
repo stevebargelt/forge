@@ -198,7 +198,7 @@ function makeTwoPhaseExec(calls: Call[]): DockerExecFn {
     writeFileSync(stdoutPath, kind === "provisioner" ? "" : "stub stdout");
     writeFileSync(stderrPath, "");
     if (kind === "agent") {
-      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1 }));
     }
     return 0;
   };
@@ -243,7 +243,10 @@ function makeMultiCapturingExec(calls: Call[]): DockerExecFn {
     writeFileSync(stdoutPath, kind === "provisioner" ? "" : "stub stdout");
     writeFileSync(stderrPath, "");
     if (kind === "agent") {
-      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", verdict: "pass", confidence: 0.9, findings: [] }));
+      // tests_run satisfies the FG-523 validation contract for the primary
+      // (engineer) result; the verdict fields are what the red returns. One
+      // canned result serves both containers in this exec.
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 1, verdict: "pass", confidence: 0.9, findings: [] }));
     }
     return 0;
   };

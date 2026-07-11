@@ -115,6 +115,10 @@ npm install      # or pnpm install / yarn — match the project's lockfile
 - Set `status: "failed"` with `error: "no validation path available"` — name what you couldn't validate.
 - Never `status: "complete"` on unvalidated work.
 
+**The runner enforces this — it is not on your honor.** A `status: "complete"` result with a missing or zero `tests_run` does not advance: forge holds the task at `awaiting_gate` with a named reason and waits for a human gate decision. There is exactly one way a `complete` result may carry no `tests_run` — the **`no_validation_reason`** field, a non-empty string naming why this diff had no validation path at all (a config-only or migration-comment-only change, say). A waived result advances, but forge records a `validation_waiver` decision event against the task, so the waiver is on the permanent record rather than invisible. An empty or missing `no_validation_reason` is not a waiver.
+
+Choose deliberately: `status: "failed"` is for work you *could not* validate. The waiver is for work with genuinely nothing to validate. Neither is a way to ship unvalidated backend code quietly.
+
 **Why this is a hard rule**: backend bugs are silent — wrong transaction shapes, leaked connections, races. Unit tests catch logic; integration tests catch shape. Skipping integration validation ships latent bugs that surface in production.
 
 ## Fail, don't fake
@@ -137,6 +141,7 @@ If a required import, file, or dependency does not resolve, **stop and report th
   "tests_run": 12,
   "tests_passed": 12,
   "tests_failed": 0,
+  "no_validation_reason": "...",   // ONLY on a complete result with no tests_run — required there, or the runner holds the task
   "screenshots": ["..."],   // only if work touched UI; otherwise omit
   "docs_impact": "none",   // see "Flag docs impact" below
   "notes": "optional — anything notable: transaction-shape decisions, error-class choices, idempotency-token patterns used"

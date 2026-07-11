@@ -171,7 +171,7 @@ test("FG-491 (invoke): partial presence — one annotated claim resolves to a re
   try {
     touch(projectDir, "src/present.ts");
     const agentResult = {
-      status: "complete",
+      status: "complete", tests_run: 1,
       files_modified: ["src/present.ts:1-5 — landed fine", "src/absent.ts:9-10 — never landed"],
     };
 
@@ -203,7 +203,7 @@ test("FG-491 (reopened, invoke): complete + prose-only files_modified whose firs
   try {
     touch(projectDir, "README.md");
     const agentResult = {
-      status: "complete",
+      status: "complete", tests_run: 1,
       files_modified: ["README.md updated the real file elsewhere"],
     };
 
@@ -241,7 +241,7 @@ test("FG-491 (reopened, invoke): prose claim alongside a real existing path clai
   try {
     touch(projectDir, "src/real.ts");
     const agentResult = {
-      status: "complete",
+      status: "complete", tests_run: 1,
       files_modified: ["README.md updated the real file elsewhere", "src/real.ts"],
     };
 

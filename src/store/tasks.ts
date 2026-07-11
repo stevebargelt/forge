@@ -201,6 +201,21 @@ export function markTaskAwaitingGate(id: string, result: unknown): void {
     .run(JSON.stringify(result), id);
 }
 
+// FG-523: compare-and-set variant of markTaskAwaitingGate for the validation-
+// contract hold. The hold fires on the gate: auto/none path too, where a
+// concurrent `forge cancel` may already have marked the task failed — the
+// unconditional write above would resurrect it (the AWN-2 race markTaskComplete
+// guards against). Returns true iff this call held the task.
+export function markTaskHeldForGate(id: string, result: unknown): boolean {
+  const info = getDb()
+    .prepare(
+      `UPDATE tasks SET status = 'awaiting_gate', result = ?, completed_at = NULL, error = NULL
+       WHERE id = ? AND status NOT IN ('complete', 'failed')`
+    )
+    .run(JSON.stringify(result), id);
+  return info.changes === 1;
+}
+
 export function updateTaskPackageInputs(id: string, inputs: Record<string, unknown>): void {
   const task = getTask(id);
   if (!task) return;

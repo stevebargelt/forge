@@ -37,7 +37,7 @@ import { tasksForRun } from "../store/tasks.js";
 import { getRun } from "../store/runs.js";
 import { finalizeRunIfSettled } from "./run-finalize.js";
 import { notifyOnTaskBlockedByRed, notifyOnGateAwaiting } from "../notify/trigger.js";
-import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
+import { insertTask, getTask, markTaskRunning, markTaskComplete, markTaskAwaitingGate, markTaskHeldForGate, markTaskBlockedByRed, markTaskFailed, setTaskStatus, setTaskWorktreePath } from "../store/tasks.js";
 import { failTask, classify, ORPHAN_EVIDENCE_KINDS } from "./failure-kind.js";
 import type { FailureKind, OrphanEvidence, ContainerCausalEvidence } from "./failure-kind.js";
 import { captureUsageForTask } from "../store/model-calls.js";
@@ -52,6 +52,8 @@ import { computeReadyQueue, isRunSettled, isOnRejectRecoveryTask, isAdHocInvokeT
 import { finalizeOrphanedPrimaries, attachedExitEvidence } from "./reconcile.js";
 import { checkResultPersistence, persistenceErrorMessage } from "./persistence-check.js";
 import { runIntegrationGate } from "./integration-gate.js";
+import { verdictBlocksGate } from "./gate.js";
+import { evaluateValidationContract } from "./validation-contract.js";
 import { deriveUpstream } from "./inputs.js";
 import { composeSystemPrompt } from "./compose.js";
 import { filterConstraints, loadAllConstraints } from "./constraints.js";
@@ -651,6 +653,18 @@ async function dispatchSingleStep(args: {
     }
   }
 
+  // FG-523 (F19): the validation contract is evaluated BEFORE reds dispatch.
+  // A primary that fails it must land the NAMED validation hold — evaluating it
+  // after the reds would let an authoritative red fail win the race and park the
+  // task at blocked_by_red, which says nothing about the missing tests_run and
+  // takes a --force to clear. A result that doesn't meet the contract isn't
+  // worth spending reds on either.
+  const contractHold = holdIfValidationContractFails(taskId, args.runId, result);
+  if (contractHold) {
+    finalizeContainerRetention(containerName, false);
+    return contractHold;
+  }
+
   // Reds: spawn after primary completes. Each red is a child task.
   // Aggregate verdicts then set primary status per policy.
   if (step.reds.length > 0) {
@@ -725,8 +739,50 @@ async function dispatchSingleStep(args: {
   return finalStatus;
 }
 
+// FG-523 (F19): enforce the validation contract on a workflow primary's result,
+// BEFORE anything else can claim the task's outcome (reds dispatch, the gate).
+// Returns the task's status when the result is held (or when a concurrent cancel
+// won the CAS), and null when the result may proceed.
+//
+// Only the primary path calls this. A fanout PARENT is exempt: its result is a
+// synthetic aggregate ({status, children}) that never carries tests_run — the
+// agent results live on the children, which are not primaries and finalize
+// through markTaskComplete.
+function holdIfValidationContractFails(taskId: string, runId: string, result: unknown): string | null {
+  const role = getTask(taskId)?.agentRole ?? "";
+  const contract = evaluateValidationContract({ role, result });
+  if (contract.held) {
+    // Fail-safe: hold for a gate decision rather than advance. CAS'd so a
+    // concurrent cancel that already failed the task isn't resurrected.
+    if (!markTaskHeldForGate(taskId, result)) {
+      return getTask(taskId)?.status ?? "failed";
+    }
+    logEvent("task.awaiting_gate", {
+      runId,
+      taskId,
+      payload: { kind: "validation_contract", reason: contract.reason },
+    });
+    notifyGateAwaiting(taskId);
+    return "awaiting_gate";
+  }
+  if (contract.waiver !== undefined) {
+    // The waiver advances the task, but it must leave a record.
+    logEvent("task.decision", {
+      runId,
+      taskId,
+      payload: { kind: "validation_waiver", reason: contract.waiver },
+    });
+  }
+  return null;
+}
+
 // Final status write for a primary task (no reds path, or reds passed).
-function finalizePrimary(taskId: string, runId: string, gate: Step["gate"], result: unknown): string {
+function finalizePrimary(
+  taskId: string,
+  runId: string,
+  gate: Step["gate"],
+  result: unknown,
+): string {
   switch (gate) {
     case "auto":
     case "none":
@@ -925,6 +981,9 @@ async function dispatchReds(args: {
         authority: r.red.authority as RedAuthority,
         findings: finalVerdict.findings,
         createdAt: nowIso(),
+        // FG-523 (F16): persist the in-hand red config so the later gate
+        // re-check applies the same blocking rule dispatch applies below.
+        gateOnVerdict: r.red.gate_on_verdict,
       });
       logEvent("verdict.received", {
         runId: args.runId,
@@ -933,7 +992,12 @@ async function dispatchReds(args: {
       });
     })();
     // Gate on the GRADED verdict — a fail emptied by grading no longer blocks.
-    if (r.red.authority === "authoritative" && r.red.gate_on_verdict && finalVerdict.verdict === "fail") {
+    // FG-523: same predicate aggregateVerdicts applies to the persisted row.
+    if (verdictBlocksGate({
+      verdict: finalVerdict.verdict,
+      authority: r.red.authority as RedAuthority,
+      gateOnVerdict: r.red.gate_on_verdict,
+    })) {
       authoritativeFail = true;
     }
     // FG-420: authoritative shipping-reviewer inconclusive (needs_human / unrecognized) also blocks.

@@ -34,7 +34,8 @@ function makeStubExec(): DockerExecFn {
   return async ({ stdoutPath, stderrPath }) => {
     const dir = dirname(stdoutPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete" }));
+    // tests_run: the implementer primary is held before reds dispatch without it (FG-523).
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ status: "complete", tests_run: 4, tests_passed: 4 }));
     writeFileSync(stdoutPath, "{}");
     writeFileSync(stderrPath, "");
     return 0;

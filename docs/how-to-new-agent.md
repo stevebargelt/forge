@@ -81,5 +81,15 @@ Watch `~/.forge/runs/<run-id>/<task-id>/CLAUDE.md` to confirm the composed promp
 ## Notes
 
 - The agent's `model` (e.g. `"spec-writer"`, `"fast-orchestrator"`) is a logical alias resolved by LiteLLM. You don't pin a real model name in the workflow file — change the alias mapping in your LiteLLM config, the workflow re-routes automatically.
-- For an authoritative red role, set `redConfig.authority: "authoritative"` and `gateOnVerdict: true`. A `fail` verdict from that red will set the blue task to `blocked_by_red`.
+- For an authoritative red role, add an entry under the step's `reds:` list in the workflow YAML with `authority: authoritative` and `gate_on_verdict: true`. A `fail` verdict from that red will set the blue task to `blocked_by_red`.
+
+  ```yaml
+  reds:
+    - agent: red-security
+      activity: fast-orchestrator
+      authority: authoritative     # or: specialist
+      gate_on_verdict: true        # default: true
+  ```
+
+- The [validation contract](concepts.md#validation-contract) — hold a `status: "complete"` result that carries no `tests_run` and no `no_validation_reason` waiver — applies to a fixed set of implementer roles (`engineer`, `frontend-specialist`, `backend-specialist`, `security-advisor`, `agentic-platform-builder`). A new code-writing role you add here is **not** covered by it: the role set lives in `src/v2/validation-contract.ts` and extending it is a code change, not a seed/config change. Your seed's own validation discipline is the only thing holding the line until then.
 - Constraint files at `~/.forge/constraints/` filter into the agent's prompt by `roles:`, `workflows:`, and `phases:` frontmatter. To make a new constraint apply to your role, list `security-reviewer` in `roles:`. Add `tags: [<tag>]` to scope a constraint to runs created with `forge new --tag <tag>` — useful for project-specific constraints that should not fire on every project's runs.

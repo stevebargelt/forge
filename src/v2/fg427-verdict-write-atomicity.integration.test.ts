@@ -133,7 +133,7 @@ function makeExec(): DockerExecFn {
     mkdirSync(dir, { recursive: true });
 
     const result = taskId.startsWith("task-build-")
-      ? { status: "complete", files_modified: [] }
+      ? { status: "complete", tests_run: 1, files_modified: [] }
       : { status: "complete", verdict: "pass", confidence: 0.9, findings: [] };
 
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));

@@ -179,7 +179,7 @@ function makeSingleStepExec(): DockerExecFn {
     const taskId = taskIdFromDockerArgs(args);
     const dir = dirname(stdoutPath);
     mkdirSync(dir, { recursive: true });
-    const result = taskId.startsWith("task-red-build-") ? FAIL_VERDICT : { status: "complete", files_modified: [] };
+    const result = taskId.startsWith("task-red-build-") ? FAIL_VERDICT : { status: "complete", files_modified: [], tests_run: 4, tests_passed: 4 };
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
@@ -226,7 +226,7 @@ function makeSingleStepExecWithConcurrentCancel(runId: string): DockerExecFn {
       const primary = tasksForRun(runId).find((t) => t.agentRole === "engineer" && t.parentId === undefined);
       if (primary) setTaskStatus(primary.id, "failed");
     }
-    const result = taskId.startsWith("task-red-build-") ? FAIL_VERDICT : { status: "complete", files_modified: [] };
+    const result = taskId.startsWith("task-red-build-") ? FAIL_VERDICT : { status: "complete", files_modified: [], tests_run: 4, tests_passed: 4 };
     writeFileSync(join(dir, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");

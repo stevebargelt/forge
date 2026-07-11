@@ -481,9 +481,9 @@ test("fg353 (1): FORGE_WORKTREES unset => fanout completes without integration b
     const taskId = extractTaskId(args);
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -539,19 +539,19 @@ test("fg353 (2): child branches merged into integration branch in index order", 
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       // Child 0: write child0.ts (leave uncommitted for auto-commit by mergeChildIntoIntegration).
       assert.ok(projectMount, "child 0 must have /project mount");
       writeFileSync(join(projectMount!, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       // Child 1: write child1.ts.
       assert.ok(projectMount, "child 1 must have /project mount");
       writeFileSync(join(projectMount!, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -640,18 +640,18 @@ test("fg353 (3): fan-out red /project mount is the integration worktree, not pro
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red passes — no blocking.
       writeTaskResult(stdoutPath, { status: "complete", verdict: "pass", confidence: 1.0, findings: [] });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -724,23 +724,23 @@ test("fg353 (4): child merge conflict => merge_conflict on parent, reds never di
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       assert.ok(projectMount, "child 0 must have /project mount");
       // Child 0: write and commit shared.ts with content A.
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child0: shared.ts = A"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       // Child 1: write and commit shared.ts with content B (conflicts with A).
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child1: shared.ts = B"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -807,17 +807,17 @@ test("fg353 (5): successful gate path merges integration branch into run.project
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       writeTaskResult(stdoutPath, { status: "complete", verdict: "pass", confidence: 1.0, findings: [] });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -875,15 +875,15 @@ test("fg353 (6): cleanup removes proven-merged child/integration worktrees; conf
     const projectMount = findProjectMountHost(args);
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const x = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const y = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -928,21 +928,21 @@ test("fg353 (6): cleanup removes proven-merged child/integration worktrees; conf
     const projectMount = findProjectMountHost(args);
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       assert.ok(projectMount, "child 0 must have /project mount");
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child0: conflict"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child1: conflict"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1003,7 +1003,7 @@ test("fg353 (7): re-entry after forced gate advance — no reintegration, no red
   // The fail verdict includes a finding that survives validateVerdict and gradeFindings
   // so it triggers authoritativeFail = true on the fanout parent.
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -1024,19 +1024,19 @@ test("fg353 (7): re-entry after forced gate advance — no reintegration, no red
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red returns authoritative fail → parent will be blocked_by_red.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else {
       wave3ExecCount++;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1176,7 +1176,7 @@ test("fg353 (8): integration worktree create throws => parent FAILED, not wedged
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-") || taskId.startsWith("task-build-1-")) {
       if (projectMount) {
         const filename = taskId.startsWith("task-build-0-") ? "child0.ts" : "child1.ts";
@@ -1196,9 +1196,9 @@ test("fg353 (8): integration worktree create throws => parent FAILED, not wedged
         }
         childrenRan = true;
       }
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1263,19 +1263,19 @@ test("fg353 (10): failed child worktree retained on partial success — no-disca
 
     if (taskId.startsWith("task-source-")) {
       // Return 3 items so we get 3 fanout children.
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b", "item-c"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b", "item-c"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       // Child 1 fails — non-zero exit code, no result.json written.
       // Its worktree must be RETAINED after the parent completes.
       return 1;
     } else if (taskId.startsWith("task-build-2-")) {
       if (projectMount) writeFileSync(join(projectMount, "child2.ts"), "export const child2 = 2;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1358,7 +1358,7 @@ test("fg353 (11): forced re-entry in worktree mode with integration branch absen
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -1376,17 +1376,17 @@ test("fg353 (11): forced re-entry in worktree mode with integration branch absen
     const projectMount = findProjectMountHost(args);
     writeFileSync(stderrPath, "");
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1487,7 +1487,7 @@ test("fg353 (9): missing/malformed result.json on forced re-entry => parent FAIL
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -1506,18 +1506,18 @@ test("fg353 (9): missing/malformed result.json on forced re-entry => parent FAIL
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red returns authoritative fail → parent will be blocked_by_red.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1619,23 +1619,23 @@ test("fg353 (12): merge --abort leaves integration worktree in clean non-MERGING
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       assert.ok(projectMount, "child 0 must have /project mount");
       // Child 0 commits shared.ts = 'A' on its branch.
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'A';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child0: shared = A"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       assert.ok(projectMount, "child 1 must have /project mount");
       // Child 1 commits shared.ts = 'B' (will conflict with child 0 in integration).
       writeFileSync(join(projectMount!, "shared.ts"), "export const shared = 'B';\n");
       execFileSync("git", ["add", "."], { cwd: projectMount!, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "child1: shared = B"], { cwd: projectMount!, stdio: "ignore" });
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1739,7 +1739,7 @@ test("fg353 (13): forced re-entry HEAD-merge failure => parent FAILED with merge
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -1758,18 +1758,18 @@ test("fg353 (13): forced re-entry HEAD-merge failure => parent FAILED with merge
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red returns authoritative fail → parent will be blocked_by_red.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else {
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -1920,7 +1920,7 @@ test("fg353 (14): forced re-entry on gate:verdict fanout — parent COMPLETE not
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -1942,22 +1942,22 @@ test("fg353 (14): forced re-entry on gate:verdict fanout — parent COMPLETE not
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red returns authoritative fail → parent will be blocked_by_red.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else if (taskId.startsWith("task-downstream-")) {
       downstreamDispatched = true;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
       wave3ExecCount++;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };
@@ -2089,7 +2089,7 @@ test("fg353 (15): forced re-entry on gate:human fanout — parent COMPLETE not a
   });
 
   const FAIL_VERDICT = {
-    status: "complete",
+    status: "complete", tests_run: 1,
     verdict: "fail",
     confidence: 0.9,
     findings: [
@@ -2111,22 +2111,22 @@ test("fg353 (15): forced re-entry on gate:human fanout — parent COMPLETE not a
     writeFileSync(stderrPath, "");
 
     if (taskId.startsWith("task-source-")) {
-      writeTaskResult(stdoutPath, { status: "complete", items: ["item-a", "item-b"] });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1, items: ["item-a", "item-b"] });
     } else if (taskId.startsWith("task-build-0-")) {
       if (projectMount) writeFileSync(join(projectMount, "child0.ts"), "export const child0 = 0;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-build-1-")) {
       if (projectMount) writeFileSync(join(projectMount, "child1.ts"), "export const child1 = 1;\n");
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else if (taskId.startsWith("task-red-build-")) {
       // Red returns authoritative fail → parent will be blocked_by_red.
       writeTaskResult(stdoutPath, FAIL_VERDICT);
     } else if (taskId.startsWith("task-downstream-")) {
       downstreamDispatched = true;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     } else {
       wave3ExecCount++;
-      writeTaskResult(stdoutPath, { status: "complete" });
+      writeTaskResult(stdoutPath, { status: "complete", tests_run: 1 });
     }
     return 0;
   };

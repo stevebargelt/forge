@@ -153,6 +153,10 @@ export type VerdictRow = {
   authority: RedAuthority;
   findings: Finding[];
   createdAt: string;
+  // FG-523 (F16): the red's gate_on_verdict config as of dispatch. null (or
+  // absent, on a row read before the column existed) means "unknown" and blocks
+  // — see verdictBlocksGate in v2/gate.ts, the one rule both sites apply.
+  gateOnVerdict?: boolean | null;
 };
 
 // Ops intelligence substrate (#250). The shared, consumer-neutral contract for a

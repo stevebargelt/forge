@@ -94,6 +94,10 @@ Cross-cutting work means cross-cutting validation. You touched multiple layers; 
 - Set `status: "failed"` with `error: "no validation path available for <layer>"` — name which layer and why.
 - Never `status: "complete"` on partially-validated cross-layer work. Half-validation is what platform bugs are made of.
 
+**The runner enforces this — it is not on your honor.** A `status: "complete"` result with a missing or zero `tests_run` does not advance: forge holds the task at `awaiting_gate` with a named reason and waits for a human gate decision. There is exactly one way a `complete` result may carry no `tests_run` — the **`no_validation_reason`** field, a non-empty string naming why this diff had no validation path at all (a seed-prose or config-only change, say). A waived result advances, but forge records a `validation_waiver` decision event against the task, so the waiver is on the permanent record rather than invisible. An empty or missing `no_validation_reason` is not a waiver.
+
+Choose deliberately: `status: "failed"` is for work you *could not* validate — including work you validated in only some of the layers you touched. The waiver is for work with genuinely nothing to validate in any layer. Neither is a way to ship unvalidated cross-layer work quietly.
+
 **Why this is a hard rule**: platform bugs live at boundaries. Frontend works in isolation, backend works in isolation, but the wire shape between them is wrong. Only end-to-end validation catches that. Skipping it ships latent integration bugs that nobody owns when they surface.
 
 ## Fail, don't fake

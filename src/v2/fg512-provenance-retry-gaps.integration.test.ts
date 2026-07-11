@@ -192,7 +192,7 @@ test("FG-512 gap1 (red): retrying a runner-stamped RED row routes through the wo
     const id = taskIdFromArgs(args);
     const result = id.includes("red-")
       ? { status: "complete", verdict: "pass", confidence: 0.9, findings: [] }
-      : { status: "complete", files_modified: [] };
+      : { status: "complete", tests_run: 1, files_modified: [] };
     writeFileSync(join(d2, "result.json"), JSON.stringify(result));
     writeFileSync(stdoutPath, "");
     writeFileSync(stderrPath, "");
@@ -240,8 +240,8 @@ test("FG-512 gap1 (fanout child): retry stays REFUSED regardless of provenance; 
     ],
   };
   const { runId } = startRun({ workflow: wf, title: "fg512g fanout", inputs: {}, projectDir: dir });
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", items: ["a", "b"] }) });
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: ["a", "b"] }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
 
   const parent = tasksForRun(runId).find((t) => t.phase === "spread" && t.parentId === undefined)!;
   const child = tasksForRun(runId).find((t) => t.parentId === parent.id)!;
@@ -293,8 +293,8 @@ test("FG-512 gap1 (fanout parent): a fanout-wave-orphaned parent stays non-retry
     ],
   };
   const { runId } = startRun({ workflow: wf, title: "fg512g fanout parent", inputs: {}, projectDir: dir });
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", items: ["a", "b"] }) });
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1, items: ["a", "b"] }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
 
   const parent = tasksForRun(runId).find((t) => t.phase === "spread" && t.parentId === undefined)!;
   assert.equal(parent.taskPackage.dispatchSource, "workflow", "fixture: the fanout parent is stamped");
@@ -441,7 +441,7 @@ steps:
   const legacy = legacyFailedTask("task-legacy-invoke", run, "task", { task: "a legacy side quest" });
 
   // The runner now mints a stamped `build` primary in the SAME run.
-  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete" }) });
+  await runNext({ runId, workflow: wf, dockerExec: completeExec({ status: "complete", tests_run: 1 }) });
   const stamped = tasksForRun(runId).find((t) => t.phase === "build" && t.parentId === undefined)!;
   assert.equal(stamped.taskPackage.dispatchSource, "workflow", "fixture: the runner row is stamped");
 

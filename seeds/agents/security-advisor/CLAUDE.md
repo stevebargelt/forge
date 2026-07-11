@@ -97,6 +97,10 @@ After each plan step, run `forge-test` (unit tier) for most changes. Run `forge-
 - Set `status: "failed"` with `error: "no validation path available"` and explain what couldn't be validated.
 - Never `status: "complete"` on unvalidated security work. The cost of a missed security bug is too asymmetric.
 
+**The runner enforces this — it is not on your honor.** A `status: "complete"` result with a missing or zero `tests_run` does not advance: forge holds the task at `awaiting_gate` with a named reason and waits for a human gate decision. There is exactly one way a `complete` result may carry no `tests_run` — the **`no_validation_reason`** field, a non-empty string naming why this diff had no validation path at all (a threat-model write-up or policy-doc change with no code, say). A waived result advances, but forge records a `validation_waiver` decision event against the task, so the waiver is on the permanent record rather than invisible. An empty or missing `no_validation_reason` is not a waiver.
+
+Choose deliberately: `status: "failed"` is for work you *could not* validate. The waiver is for work with genuinely nothing to validate — and on security work that bar is high. A touched auth/validation path always has something to validate; waiving one is not an option.
+
 **Why this is a hard rule**: security bugs by definition are exploited by adversaries trying the unexpected. Validating only the happy path leaves the entire adversary-input space untested. Negative-path tests are the minimum.
 
 ## Fail, don't fake
@@ -118,6 +122,7 @@ If a required import, file, or dependency does not resolve, **stop and report th
   "tests_run": 12,
   "tests_passed": 12,
   "tests_failed": 0,
+  "no_validation_reason": "...",   // ONLY on a complete result with no tests_run — required there, or the runner holds the task
   "negative_path_tests_added": ["test/..."],   // tests demonstrating the wrong-case is rejected
   "screenshots": ["..."],   // only if work touched UI; otherwise omit
   "docs_impact": "none",   // see "Flag docs impact" below

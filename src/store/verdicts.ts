@@ -11,6 +11,7 @@ type Row = {
   authority: string;
   findings: string;
   created_at: string;
+  gate_on_verdict: number | null;
 };
 
 function rowToVerdict(row: Row): VerdictRow {
@@ -24,14 +25,17 @@ function rowToVerdict(row: Row): VerdictRow {
     authority: row.authority as RedAuthority,
     findings: JSON.parse(row.findings) as Finding[],
     createdAt: row.created_at,
+    // FG-523: legacy rows (pre-migration) read back NULL — kept as null, not
+    // coerced to a boolean, so verdictBlocksGate can apply the fail-closed rule.
+    gateOnVerdict: row.gate_on_verdict === null ? null : row.gate_on_verdict === 1,
   };
 }
 
 export function insertVerdict(v: VerdictRow): void {
   getDb()
     .prepare(
-      `INSERT INTO verdicts (id, task_id, red_task_id, red_role, verdict, confidence, authority, findings, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO verdicts (id, task_id, red_task_id, red_role, verdict, confidence, authority, findings, created_at, gate_on_verdict)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       v.id,
@@ -42,7 +46,8 @@ export function insertVerdict(v: VerdictRow): void {
       v.confidence,
       v.authority,
       JSON.stringify(v.findings),
-      v.createdAt
+      v.createdAt,
+      v.gateOnVerdict === undefined || v.gateOnVerdict === null ? null : v.gateOnVerdict ? 1 : 0
     );
 }
 
