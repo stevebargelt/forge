@@ -193,7 +193,6 @@ section.feed { margin-top: 24px; }
 .badge.status-failed, .badge.status-fail { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 .badge.status-awaiting_gate { background: rgba(250, 204, 21, 0.15); color: var(--warn); }
 .badge.status-awaiting_red { background: rgba(96, 165, 250, 0.15); color: var(--info); }
-.badge.status-awaiting_human_input { background: rgba(192, 132, 252, 0.15); color: var(--magenta); }
 .badge.status-blocked_by_red { background: rgba(248, 113, 113, 0.15); color: var(--err); }
 .badge.status-running { background: rgba(96, 165, 250, 0.15); color: var(--info); }
 .badge.status-pending { background: rgba(154, 154, 163, 0.15); color: var(--fg-dim); }

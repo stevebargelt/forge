@@ -147,7 +147,7 @@ export type InFlightEntry = {
   reconcile: { classification: ReconcileClassification; reason: ReconcileReason } | null;
 };
 
-/** Tasks currently running, awaiting gate, awaiting red, or awaiting human input.
+/** Tasks currently running, awaiting gate, awaiting red, or blocked by red.
  *  Includes both primary tasks and red children.
  *
  *  Running tasks are additionally classified against container liveness (#290):
@@ -163,7 +163,7 @@ export function inFlight(projectDir?: string, probe?: LivenessProbe): InFlightEn
            r.title, r.workflow, r.project_dir
     FROM tasks t
     JOIN runs r ON r.id = t.run_id
-    WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'awaiting_human_input', 'blocked_by_red')
+    WHERE t.status IN ('running', 'awaiting_gate', 'awaiting_red', 'blocked_by_red')
       AND r.status = 'active'
       ${where}
     ORDER BY t.started_at DESC NULLS LAST, t.created_at DESC
