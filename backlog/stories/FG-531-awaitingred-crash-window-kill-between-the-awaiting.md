@@ -18,6 +18,11 @@ Pinned as a known-failure matrix cell in src/v2/fg530-crash-matrix.integration.t
 - The FG-530-A matrix cell flips from todo/known-failure to a passing invariant assertion.
 - No new status value without an ADR (house rule).
 
+## Fanout-parent variant (2026-07-11, FG-530 matrix)
+
+The same window exists on the fanout path: a crash between dispatchFanoutStep's awaiting_red status write and its reds' terminal write wedges the PARENT at awaiting_red with dead red children — the wave's completed children are stranded behind it. Pinned as a second FG-530-A known-failure cell. The fix must cover both the single-step and fanout-parent shapes (flip both cells).
+
 ## Notes
 
 Filed 2026-07-11 from the FG-530 crash matrix. Relates: FG-477 (lifecycle evaluator), FG-479 (orphaned_needs_finalize precedent for preserved-work recovery kinds).
+
