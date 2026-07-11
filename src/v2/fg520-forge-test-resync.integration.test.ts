@@ -200,6 +200,64 @@ test("FG-520: forge-test re-syncs source and repairs a broken scratch on every r
   }
 });
 
+test("FG-520: the mirror handles the tree-shape edits an agent actually makes", async (t) => {
+  const f = makeFixture();
+  try {
+    runForgeTest(f); // cold: populate the scratch
+
+    await t.test("a same-size content edit still propagates", () => {
+      // The mirror's skip predicate is (size equal AND mtime equal). Size alone is
+      // not a safe signal — a one-character fix ("=== 1" -> "=== 2", a flipped
+      // boolean) keeps the byte count identical. If anyone ever relaxes the
+      // predicate to size-only, this is the false green FG-520 exists to kill.
+      const a = join(f.src, "src", "a.ts");
+      const before = statSync(a).size;
+      writeFileSync(a, "export const a = 9;\n");
+      assert.equal(statSync(a).size, before, "fixture must actually hold size constant");
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        readFileSync(join(f.work, "src", "a.ts"), "utf8"),
+        "export const a = 9;\n",
+        "a same-size edit must reach the scratch — size is not a content check"
+      );
+    });
+
+    await t.test("a new file in a NEW directory is created, parent dirs and all", () => {
+      mkdirSync(join(f.src, "src", "deep", "nested"), { recursive: true });
+      writeFileSync(join(f.src, "src", "deep", "nested", "new.ts"), "export const n = 1;\n");
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        readFileSync(join(f.work, "src", "deep", "nested", "new.ts"), "utf8"),
+        "export const n = 1;\n",
+        "a brand-new test file in a brand-new dir must be runnable on the next invocation"
+      );
+    });
+
+    await t.test("deleting a whole directory removes it from the scratch", () => {
+      rmSync(join(f.src, "src", "deep"), { recursive: true });
+
+      const r = runForgeTest(f);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        existsSync(join(f.work, "src", "deep")),
+        false,
+        "a deleted directory must not survive — its tests would keep running forever"
+      );
+      assert.equal(
+        existsSync(join(f.work, "src", "a.ts")),
+        true,
+        "the delete pass must take the dead directory and nothing else"
+      );
+    });
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
 test("FG-520: a scratch that cannot load tsx fails as an ENVIRONMENT error, not red tests", () => {
   const f = makeFixture();
   try {
